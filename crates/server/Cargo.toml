@@ -1,0 +1,47 @@
+[package]
+name = "wareboxes-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Wareboxes WMS HTTP API (Axum + SQLx, PostgreSQL)"
+
+[lib]
+name = "wareboxes_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wareboxes-server"
+path = "src/main.rs"
+
+[dependencies]
+wareboxes-core = { workspace = true }
+wareboxes-barcodes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+axum = { version = "0.7", features = ["macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sqlx = { version = "0.7", default-features = false, features = [
+    "runtime-tokio",
+    "macros",
+    "postgres",
+    "chrono",
+    "migrate",
+] }
+async-trait = "0.1"
+argon2 = "0.5"
+rand = "0.8"
+dotenvy = "0.15"
+validator = { version = "0.18", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+url = "2"
