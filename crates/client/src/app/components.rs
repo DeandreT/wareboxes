@@ -89,52 +89,93 @@ impl WareboxesApp {
                     state.highlighted = matches.len().saturating_sub(1);
                 }
 
+                let mut popup_response = None;
                 if state.open {
                     let width = response.rect.width().max(230.0);
-                    egui::Frame::popup(ui.style())
-                        .inner_margin(egui::Margin::symmetric(4.0, 4.0))
-                        .show(ui, |ui| {
-                            ui.set_min_width(width);
-                            if options.is_empty() {
-                                ui.add_sized(
-                                    [width, 24.0],
-                                    egui::Label::new(
-                                        egui::RichText::new("No options loaded").weak(),
-                                    ),
-                                );
-                                return;
-                            }
+                    let area = egui::Area::new(ui.id().with("picker_popup"))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(egui::pos2(
+                            response.rect.left(),
+                            response.rect.bottom() + 3.0,
+                        ))
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style())
+                                .inner_margin(egui::Margin::symmetric(4.0, 4.0))
+                                .show(ui, |ui| {
+                                    ui.set_width(width);
+                                    let clip_rect = ui.max_rect();
+                                    ui.set_clip_rect(clip_rect);
+                                    if options.is_empty() {
+                                        ui.add_sized(
+                                            [width, 24.0],
+                                            egui::Label::new(
+                                                egui::RichText::new("No options loaded").weak(),
+                                            ),
+                                        );
+                                        return;
+                                    }
 
-                            for (idx, (option_id, label)) in matches.iter().enumerate() {
-                                let highlighted = idx == state.highlighted;
-                                let fill = highlighted.then(|| {
-                                    if ui.visuals().dark_mode {
-                                        egui::Color32::from_rgb(54, 74, 105)
-                                    } else {
-                                        egui::Color32::from_rgb(225, 236, 251)
+                                    for (idx, (option_id, label)) in matches.iter().enumerate() {
+                                        let highlighted = idx == state.highlighted;
+                                        let fill = highlighted.then(|| {
+                                            if ui.visuals().dark_mode {
+                                                egui::Color32::from_rgb(54, 74, 105)
+                                            } else {
+                                                egui::Color32::from_rgb(225, 236, 251)
+                                            }
+                                        });
+                                        let row = ui
+                                            .allocate_ui_with_layout(
+                                                egui::vec2(width, 24.0),
+                                                egui::Layout::left_to_right(egui::Align::Center),
+                                                |ui| {
+                                                    if let Some(fill) = fill {
+                                                        ui.painter().rect_filled(
+                                                            ui.max_rect(),
+                                                            egui::Rounding::same(3.0),
+                                                            fill,
+                                                        );
+                                                    }
+                                                    ui.add_sized(
+                                                        [width, 24.0],
+                                                        egui::Label::new(label)
+                                                            .truncate(true)
+                                                            .sense(egui::Sense::click()),
+                                                    )
+                                                },
+                                            )
+                                            .inner;
+                                        if row
+                                            .on_hover_text(label)
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                            .clicked()
+                                        {
+                                            *draft = label.clone();
+                                            selected = Some(*option_id);
+                                            state.open = false;
+                                        }
+                                    }
+                                    if matches.is_empty() {
+                                        ui.add_sized(
+                                            [width, 24.0],
+                                            egui::Label::new(
+                                                egui::RichText::new("No matches").weak(),
+                                            ),
+                                        );
                                     }
                                 });
-                                let mut button = egui::Button::new(label).frame(false).wrap(false);
-                                if let Some(fill) = fill {
-                                    button = button.fill(fill);
-                                }
-                                if ui
-                                    .add_sized([width, 24.0], button)
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    .clicked()
-                                {
-                                    *draft = label.clone();
-                                    selected = Some(*option_id);
-                                    state.open = false;
-                                }
-                            }
-                            if matches.is_empty() {
-                                ui.add_sized(
-                                    [width, 24.0],
-                                    egui::Label::new(egui::RichText::new("No matches").weak()),
-                                );
-                            }
                         });
+                    popup_response = Some(area.response);
+                }
+
+                if state.open
+                    && ui.input(|input| input.pointer.any_pressed())
+                    && !response.contains_pointer()
+                    && !popup_response
+                        .as_ref()
+                        .is_some_and(egui::Response::contains_pointer)
+                {
+                    state.open = false;
                 }
             });
             ui.data_mut(|data| data.insert_temp(state_id, state));
@@ -224,18 +265,112 @@ impl WareboxesApp {
             .locations
             .iter()
             .map(|location| {
-                let name = location
-                    .name
+                let scan_code = location
+                    .barcode
                     .as_deref()
-                    .or(location.barcode.as_deref())
+                    .or(location.name.as_deref())
                     .unwrap_or("Unnamed location");
                 let warehouse = location
                     .warehouse_name
                     .clone()
                     .unwrap_or_else(|| self.warehouse_label(location.warehouse_id));
-                (location.id, format!("{name} - {warehouse}"))
+                (location.id, format!("{scan_code} - {warehouse}"))
             })
             .collect()
+    }
+
+    pub(super) fn location_label(&self, id: i64) -> String {
+        self.data
+            .locations
+            .iter()
+            .find(|location| location.id == id)
+            .map(|location| {
+                location
+                    .barcode
+                    .clone()
+                    .or_else(|| location.name.clone())
+                    .unwrap_or_else(|| format!("Location {}", location.id))
+            })
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    pub(super) fn location_hover_text(&self, id: i64) -> String {
+        self.data
+            .locations
+            .iter()
+            .find(|location| location.id == id)
+            .map(|location| {
+                let name = location.name.as_deref().unwrap_or("Unnamed location");
+                let barcode = location.barcode.as_deref().unwrap_or("No scan code");
+                let warehouse = location
+                    .warehouse_name
+                    .clone()
+                    .unwrap_or_else(|| self.warehouse_label(location.warehouse_id));
+                format!("{name}\nScan code: {barcode}\nWarehouse: {warehouse}")
+            })
+            .unwrap_or_else(|| format!("Location {id}"))
+    }
+
+    pub(super) fn location_label_ui(&self, ui: &mut egui::Ui, id: i64) {
+        ui.label(self.location_label(id))
+            .on_hover_text(self.location_hover_text(id));
+    }
+
+    pub(super) fn item_id_for_batch(&self, batch_id: i64) -> Option<i64> {
+        self.data
+            .item_batches
+            .iter()
+            .find(|batch| batch.id == batch_id)
+            .map(|batch| batch.item_id)
+    }
+
+    pub(super) fn inventory_source_options_for_item(&self, item_id: i64) -> Vec<(i64, String)> {
+        let mut options = self
+            .data
+            .inventory_balances
+            .iter()
+            .filter(|balance| balance.deleted.is_none())
+            .filter(|balance| balance.license_plate_id.is_none())
+            .filter(|balance| balance.qty_on_hand - balance.qty_reserved > 0)
+            .filter(|balance| self.item_id_for_batch(balance.item_batch_id) == Some(item_id))
+            .map(|balance| {
+                let available = balance.qty_on_hand - balance.qty_reserved;
+                (
+                    balance.id,
+                    format!(
+                        "{} - {} available - {} - {}",
+                        self.location_label(balance.location_id),
+                        available,
+                        Self::inventory_status_label(balance.status),
+                        self.item_batch_label(balance.item_batch_id),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        options.sort_by(|a, b| a.1.cmp(&b.1));
+        options
+    }
+
+    pub(super) fn item_batch_label(&self, id: i64) -> String {
+        self.data
+            .item_batches
+            .iter()
+            .find(|batch| batch.id == id)
+            .map(|batch| {
+                let lot = batch
+                    .lot
+                    .as_deref()
+                    .filter(|lot| !lot.trim().is_empty())
+                    .map(|lot| format!(" lot {lot}"))
+                    .unwrap_or_default();
+                format!(
+                    "{} batch {}{}",
+                    self.item_label(batch.item_id),
+                    batch.id,
+                    lot
+                )
+            })
+            .unwrap_or_else(|| format!("Batch {id}"))
     }
 
     pub(super) fn load_matches_filters(
@@ -762,6 +897,54 @@ impl WareboxesApp {
             LoadStatus::Rejected => "Rejected",
             LoadStatus::Closed => "Closed",
             LoadStatus::Cancelled => "Cancelled",
+        }
+    }
+
+    pub(super) fn inventory_status_label(
+        status: wareboxes_core::models::InventoryStatus,
+    ) -> &'static str {
+        match status {
+            wareboxes_core::models::InventoryStatus::Available => "Available",
+            wareboxes_core::models::InventoryStatus::Hold => "Hold",
+            wareboxes_core::models::InventoryStatus::Damaged => "Damaged",
+            wareboxes_core::models::InventoryStatus::Quarantine => "Quarantine",
+        }
+    }
+
+    pub(super) fn inventory_status_color(
+        ui: &egui::Ui,
+        status: wareboxes_core::models::InventoryStatus,
+    ) -> egui::Color32 {
+        let dark = ui.visuals().dark_mode;
+        match status {
+            wareboxes_core::models::InventoryStatus::Available => {
+                if dark {
+                    egui::Color32::from_rgb(84, 214, 142)
+                } else {
+                    egui::Color32::from_rgb(28, 137, 80)
+                }
+            }
+            wareboxes_core::models::InventoryStatus::Hold => {
+                if dark {
+                    egui::Color32::from_rgb(250, 203, 91)
+                } else {
+                    egui::Color32::from_rgb(174, 111, 24)
+                }
+            }
+            wareboxes_core::models::InventoryStatus::Damaged => {
+                if dark {
+                    egui::Color32::from_rgb(255, 126, 114)
+                } else {
+                    egui::Color32::from_rgb(187, 56, 48)
+                }
+            }
+            wareboxes_core::models::InventoryStatus::Quarantine => {
+                if dark {
+                    egui::Color32::from_rgb(112, 188, 255)
+                } else {
+                    egui::Color32::from_rgb(34, 113, 185)
+                }
+            }
         }
     }
 

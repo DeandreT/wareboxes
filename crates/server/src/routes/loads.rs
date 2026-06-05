@@ -227,7 +227,7 @@ pub async fn delete(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::loads::set_load_deleted(&state.db, body.load_id, true).await?,
+        repo::loads::set_load_deleted(&state.db, user.user.id, body.load_id, true).await?,
     ))
 }
 
@@ -239,7 +239,7 @@ pub async fn restore(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::loads::set_load_deleted(&state.db, body.load_id, false).await?,
+        repo::loads::set_load_deleted(&state.db, user.user.id, body.load_id, false).await?,
     ))
 }
 
@@ -324,6 +324,7 @@ pub async fn add_file(
     validate(&body)?;
     let id = repo::loads::add_file(
         &state.db,
+        user.user.id,
         body.load_id,
         &body.original_name,
         &body.name,
@@ -343,6 +344,6 @@ pub async fn delete_file(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::loads::delete_file(&state.db, body.file_id).await?,
+        repo::loads::delete_file(&state.db, user.user.id, body.file_id).await?,
     ))
 }

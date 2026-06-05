@@ -134,6 +134,10 @@ pub fn app(state: AppState) -> Router {
         .route("/inventory/receive", post(inventory::receive))
         .route("/inventory/movements", get(inventory::list_movements))
         .route("/inventory/movements/add", post(inventory::move_stock))
+        .route(
+            "/inventory/movements/split",
+            post(inventory::split_move_stock),
+        )
         .route("/inventory/reservations", get(inventory::list_reservations))
         .route("/inventory/reservations/add", post(inventory::reserve))
         .route(

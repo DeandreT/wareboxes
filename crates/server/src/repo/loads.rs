@@ -12,7 +12,7 @@ use wareboxes_core::models::{
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
-use crate::repo::{license_plates, orders};
+use crate::repo::{inventory, license_plates, orders};
 
 fn parse_load_status(s: &str) -> AppResult<LoadStatus> {
     LoadStatus::parse(s)
@@ -598,12 +598,29 @@ pub async fn update_load(
     Ok(res.rows_affected() > 0)
 }
 
-pub async fn set_load_deleted(db: &Db, id: i64, deleted: bool) -> AppResult<bool> {
+pub async fn set_load_deleted(db: &Db, user_id: i64, id: i64, deleted: bool) -> AppResult<bool> {
+    let mut tx = db.begin().await?;
     let res = sqlx::query("UPDATE loads SET deleted = $1 WHERE id = $2")
         .bind(if deleted { Some(now_iso()) } else { None })
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    if res.rows_affected() > 0 {
+        insert_activity_tx(
+            &mut tx,
+            id,
+            Some(user_id),
+            if deleted { "deleted" } else { "restored" },
+            Some(if deleted {
+                "load deleted"
+            } else {
+                "load restored"
+            }),
+            None,
+        )
+        .await?;
+    }
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -857,6 +874,8 @@ pub async fn receive_line(
         .fetch_one(&mut *tx)
         .await?;
 
+        inventory::ensure_location_accepts_batch_tx(&mut tx, to_location_id, batch_id).await?;
+
         let warehouse_id: i64 = sqlx::query_scalar(
             "SELECT warehouse_id FROM locations WHERE id = $1 AND deleted IS NULL AND active AND receivable",
         )
@@ -1010,6 +1029,7 @@ async fn insert_activity_tx(
 /// written to disk by the route handler; this stores the metadata row.
 pub async fn add_file(
     db: &Db,
+    user_id: i64,
     load_id: i64,
     original_name: &str,
     stored_name: &str,
@@ -1017,6 +1037,7 @@ pub async fn add_file(
     content_type: Option<&str>,
     category: LoadFileCategory,
 ) -> AppResult<i64> {
+    let mut tx = db.begin().await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO load_files (created, load_id, original_name, name, path, content_type, category) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
@@ -1027,8 +1048,22 @@ pub async fn add_file(
     .bind(path)
     .bind(content_type)
     .bind(category.as_str())
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    insert_activity_tx(
+        &mut tx,
+        load_id,
+        Some(user_id),
+        "file_added",
+        Some(original_name),
+        Some(&format!(
+            r#"{{"file_id":{},"category":"{}"}}"#,
+            id,
+            category.as_str()
+        )),
+    )
+    .await?;
+    tx.commit().await?;
     Ok(id)
 }
 
@@ -1042,11 +1077,34 @@ pub async fn get_file(db: &Db, file_id: i64) -> AppResult<Option<LoadFile>> {
     row.as_ref().map(map_file).transpose()
 }
 
-pub async fn delete_file(db: &Db, file_id: i64) -> AppResult<bool> {
+pub async fn delete_file(db: &Db, user_id: i64, file_id: i64) -> AppResult<bool> {
+    let mut tx = db.begin().await?;
+    let load_id: Option<i64> =
+        sqlx::query_scalar("SELECT load_id FROM load_files WHERE id = $1 AND deleted IS NULL")
+            .bind(file_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten();
+    let Some(load_id) = load_id else {
+        return Ok(false);
+    };
+
     let res = sqlx::query("UPDATE load_files SET deleted = $1 WHERE id = $2")
         .bind(now_iso())
         .bind(file_id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    if res.rows_affected() > 0 {
+        insert_activity_tx(
+            &mut tx,
+            load_id,
+            Some(user_id),
+            "file_deleted",
+            Some(&format!("load file {file_id}")),
+            None,
+        )
+        .await?;
+    }
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }

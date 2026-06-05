@@ -5,6 +5,7 @@ use wareboxes_core::models::{InventoryStatus, LicensePlate, LicensePlateContent}
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
+use crate::repo::inventory;
 
 fn parse_inventory_status(s: &str) -> AppResult<InventoryStatus> {
     InventoryStatus::parse(s)
@@ -212,7 +213,7 @@ pub async fn move_license_plate(
 
     let content_rows = sqlx::query(
         r#"
-        SELECT id, location_id, item_batch_id, status, qty_on_hand
+        SELECT id, location_id, item_batch_id, status, qty_on_hand, qty_reserved
         FROM inventory_balances
         WHERE license_plate_id = $1
           AND deleted IS NULL
@@ -243,6 +244,48 @@ pub async fn move_license_plate(
         return Err(AppError::bad_request(
             "source and destination locations must differ",
         ));
+    }
+    for row in &content_rows {
+        let qty_reserved: i64 = row.try_get("qty_reserved")?;
+        if qty_reserved > 0 {
+            return Err(AppError::conflict(
+                "cannot move a license plate that contains reserved inventory",
+            ));
+        }
+    }
+
+    let mixed_content: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT a.id
+        FROM inventory_balances a
+        INNER JOIN inventory_balances b ON b.license_plate_id = a.license_plate_id AND b.id > a.id
+        INNER JOIN item_batches batch_a ON batch_a.id = a.item_batch_id
+        INNER JOIN item_batches batch_b ON batch_b.id = b.item_batch_id
+        WHERE a.license_plate_id = $1
+          AND a.deleted IS NULL
+          AND b.deleted IS NULL
+          AND a.qty_on_hand > 0
+          AND b.qty_on_hand > 0
+          AND batch_a.item_id = batch_b.item_id
+          AND (
+              batch_a.lot IS DISTINCT FROM batch_b.lot
+              OR batch_a.expiration IS DISTINCT FROM batch_b.expiration
+          )
+        LIMIT 1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if mixed_content.is_some() {
+        return Err(AppError::conflict(
+            "license plate contains this item with multiple lots or expirations",
+        ));
+    }
+
+    for row in &content_rows {
+        let item_batch_id: i64 = row.try_get("item_batch_id")?;
+        inventory::ensure_location_accepts_batch_tx(&mut tx, to_location_id, item_batch_id).await?;
     }
 
     sqlx::query(

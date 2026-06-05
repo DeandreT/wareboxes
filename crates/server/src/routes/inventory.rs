@@ -2,7 +2,7 @@ use axum::extract::{Query, State};
 use axum::Json;
 use wareboxes_core::dto::{
     AddItemBatch, ItemBatchIdRequest, MoveInventory, ReceiveInventory, ReservationIdRequest,
-    ReserveInventory,
+    ReserveInventory, SplitMoveInventory,
 };
 use wareboxes_core::models::{InventoryBalance, InventoryReservation, ItemBatch, Movement};
 
@@ -131,6 +131,32 @@ pub async fn move_stock(
     Ok(Json(id))
 }
 
+pub async fn split_move_stock(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Json(body): Json<SplitMoveInventory>,
+) -> AppResult<Json<Vec<i64>>> {
+    user.require_permission(&state.db, PERM).await?;
+    validate(&body)?;
+    let destinations = body
+        .destinations
+        .iter()
+        .map(|destination| (destination.to_location_id, destination.qty))
+        .collect::<Vec<_>>();
+    let ids = repo::inventory::split_move_inventory(
+        &state.db,
+        user.user.id,
+        body.from_inventory_balance_id,
+        &destinations,
+        body.reason.as_deref(),
+        body.reference_type.as_deref(),
+        body.reference_id,
+        body.idempotency_key.as_deref(),
+    )
+    .await?;
+    Ok(Json(ids))
+}
+
 pub async fn list_reservations(
     State(state): State<AppState>,
     user: CurrentUser,
@@ -154,8 +180,7 @@ pub async fn reserve(
         user.user.id,
         body.order_id,
         body.order_item_id,
-        body.item_batch_id,
-        body.location_id,
+        body.inventory_balance_id,
         body.qty,
     )
     .await?;

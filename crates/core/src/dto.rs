@@ -638,14 +638,33 @@ pub struct MoveInventory {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct SplitMoveInventoryDestination {
+    #[validate(range(min = 1, message = "Invalid destination location ID"))]
+    pub to_location_id: i64,
+    #[validate(range(min = 1, message = "Quantity must be positive"))]
+    pub qty: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct SplitMoveInventory {
+    #[validate(range(min = 1, message = "Invalid source inventory balance ID"))]
+    pub from_inventory_balance_id: i64,
+    #[validate(length(min = 1, message = "At least one destination is required"))]
+    #[validate(nested)]
+    pub destinations: Vec<SplitMoveInventoryDestination>,
+    pub reason: Option<String>,
+    pub reference_type: Option<String>,
+    pub reference_id: Option<i64>,
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct ReserveInventory {
     #[validate(range(min = 1, message = "Invalid order ID"))]
     pub order_id: i64,
     pub order_item_id: Option<i64>,
-    #[validate(range(min = 1, message = "Invalid item batch ID"))]
-    pub item_batch_id: i64,
-    #[validate(range(min = 1, message = "Invalid location ID"))]
-    pub location_id: i64,
+    #[validate(range(min = 1, message = "Invalid inventory balance ID"))]
+    pub inventory_balance_id: i64,
     #[validate(range(min = 1, message = "Quantity must be positive"))]
     pub qty: i64,
 }

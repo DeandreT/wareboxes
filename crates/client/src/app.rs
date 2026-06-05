@@ -20,9 +20,9 @@ use egui_extras::{Column, TableBuilder};
 use serde_json::{json, Value};
 use wareboxes_core::dto::{SessionUser, SummaryCount};
 use wareboxes_core::models::{
-    Account, AuditWave, Employee, Item, ItemBatch, LicensePlate, Load, LoadFileCategory, LoadLine,
-    LoadLineStatus, LoadNote, LoadStatus, LoadType, Location, Movement, Order, OrderStatus,
-    Permission, Role, User, Warehouse,
+    Account, AuditWave, Employee, InventoryBalance, Item, ItemBatch, LicensePlate, Load,
+    LoadFileCategory, LoadLine, LoadLineStatus, LoadNote, LoadStatus, LoadType, Location, Movement,
+    Order, OrderStatus, Permission, Role, User, Warehouse,
 };
 
 use crate::api::{ApiClient, ApiEvent, Screen};
@@ -118,6 +118,7 @@ struct Data {
     locations: Vec<Location>,
     loads: Vec<Load>,
     item_batches: Vec<ItemBatch>,
+    inventory_balances: Vec<InventoryBalance>,
     movements: Vec<Movement>,
     license_plates: Vec<LicensePlate>,
     license_plate_lookup: Option<LicensePlate>,
@@ -198,8 +199,10 @@ impl WareboxesApp {
         }
         match s {
             Screen::Inventory => {
+                self.api.get_inventory_balances();
                 self.api.get_movements();
                 self.api.get_list(Screen::Items);
+                self.api.get_list(Screen::Locations);
             }
             Screen::Locations => {
                 self.api.get_list(Screen::Warehouses);
@@ -483,6 +486,7 @@ impl WareboxesApp {
                     }
                 }
                 ApiEvent::ItemBatches(b) => self.data.item_batches = b,
+                ApiEvent::InventoryBalances(b) => self.data.inventory_balances = b,
                 ApiEvent::Movements(m) => self.data.movements = m,
                 ApiEvent::LicensePlates(lp) => self.data.license_plates = lp,
                 ApiEvent::LicensePlateLookup(lp) => self.data.license_plate_lookup = lp,
