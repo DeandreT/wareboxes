@@ -73,6 +73,7 @@ fn map_reservation(row: &sqlx::postgres::PgRow) -> AppResult<InventoryReservatio
         deleted: row.try_get("deleted")?,
         order_id: row.try_get("order_id")?,
         order_item_id: row.try_get("order_item_id")?,
+        inventory_balance_id: row.try_get("inventory_balance_id")?,
         item_batch_id: row.try_get("item_batch_id")?,
         location_id: row.try_get("location_id")?,
         qty: row.try_get("qty")?,
@@ -312,7 +313,7 @@ async fn reserved_by_order_ids(db: &Db, order_ids: &[i64]) -> AppResult<HashMap<
 async fn reservations_for_order(db: &Db, order_id: i64) -> AppResult<Vec<InventoryReservation>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, created, modified, deleted, order_id, order_item_id, item_batch_id, location_id, qty, status
+        SELECT id, created, modified, deleted, order_id, order_item_id, inventory_balance_id, item_batch_id, location_id, qty, status
         FROM inventory_reservations
         WHERE deleted IS NULL
           AND order_id = $1
@@ -788,10 +789,12 @@ pub async fn add_order(db: &Db, o: &NewOrder) -> AppResult<bool> {
     )
     .await?;
 
-    sqlx::query(
+    let mut tx = db.begin().await?;
+    let order_id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO orders (order_key, created, rush, status, address_id, ship_by, account_id)
         VALUES ($1, $2, $3, 'open', $4, $5, $6)
+        RETURNING id
         "#,
     )
     .bind(&o.order_key)
@@ -800,9 +803,27 @@ pub async fn add_order(db: &Db, o: &NewOrder) -> AppResult<bool> {
     .bind(address_id)
     .bind(o.ship_by)
     .bind(o.account_id)
-    .execute(db)
+    .fetch_one(&mut *tx)
     .await?;
+    insert_order_activity_tx(&mut tx, order_id, "created order").await?;
+    tx.commit().await?;
     Ok(true)
+}
+
+async fn insert_order_activity_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    order_id: i64,
+    action: &str,
+) -> AppResult<i64> {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO order_activity (created, order_id, action) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(now_iso())
+    .bind(order_id)
+    .bind(action)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(id)
 }
 
 pub async fn update_order(db: &Db, u: &OrderUpdate) -> AppResult<bool> {
@@ -847,6 +868,7 @@ pub async fn update_order(db: &Db, u: &OrderUpdate) -> AppResult<bool> {
           AND status IN {MUTABLE}
         "#
     );
+    let mut tx = db.begin().await?;
     let res = sqlx::query(&sql)
         .bind(u.order_key.as_deref())
         .bind(u.status.map(|s| s.as_str()))
@@ -858,8 +880,16 @@ pub async fn update_order(db: &Db, u: &OrderUpdate) -> AppResult<bool> {
         .bind(u.account_id)
         .bind(new_address_id)
         .bind(u.order_id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    if res.rows_affected() > 0 {
+        let action = u
+            .status
+            .map(|status| format!("updated order status to {status}"))
+            .unwrap_or_else(|| "updated order".to_owned());
+        insert_order_activity_tx(&mut tx, u.order_id, &action).await?;
+    }
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -873,18 +903,28 @@ pub async fn delete_order(db: &Db, id: i64) -> AppResult<bool> {
           AND confirmed IS NULL
         "#
     );
+    let mut tx = db.begin().await?;
     let res = sqlx::query(&sql)
         .bind(now_iso())
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    if res.rows_affected() > 0 {
+        insert_order_activity_tx(&mut tx, id, "deleted order").await?;
+    }
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
 pub async fn restore_order(db: &Db, id: i64) -> AppResult<bool> {
+    let mut tx = db.begin().await?;
     let res = sqlx::query("UPDATE orders SET deleted = NULL WHERE id = $1")
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    if res.rows_affected() > 0 {
+        insert_order_activity_tx(&mut tx, id, "restored order").await?;
+    }
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }

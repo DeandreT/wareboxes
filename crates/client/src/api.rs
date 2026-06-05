@@ -8,8 +8,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use wareboxes_core::dto::{ErrorResponse, OrderPage, SessionUser, UserSettings};
 use wareboxes_core::models::{
-    Account, AuditWave, Employee, Item, ItemBatch, LicensePlate, Load, Location, Movement, Order,
-    Permission, Role, User, Warehouse,
+    Account, AuditWave, Employee, InventoryBalance, Item, ItemBatch, LicensePlate, Load, Location,
+    Movement, Order, Permission, Role, User, Warehouse,
 };
 
 #[derive(Debug)]
@@ -32,6 +32,7 @@ pub enum ApiEvent {
     },
     LoadDetail(Load),
     ItemBatches(Vec<ItemBatch>),
+    InventoryBalances(Vec<InventoryBalance>),
     Movements(Vec<Movement>),
     LicensePlates(Vec<LicensePlate>),
     LicensePlateLookup(Option<LicensePlate>),
@@ -235,6 +236,11 @@ impl ApiClient {
     pub fn get_movements(&self) {
         let req = ehttp::Request::get(self.url("/api/inventory/movements"));
         self.send::<Vec<Movement>, _>(req, ApiEvent::Movements);
+    }
+
+    pub fn get_inventory_balances(&self) {
+        let req = ehttp::Request::get(self.url("/api/inventory/balances"));
+        self.send::<Vec<InventoryBalance>, _>(req, ApiEvent::InventoryBalances);
     }
 
     pub fn get_orders_page(

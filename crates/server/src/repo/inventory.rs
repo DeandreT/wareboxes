@@ -84,11 +84,63 @@ fn map_reservation(row: &sqlx::postgres::PgRow) -> AppResult<InventoryReservatio
         deleted: row.try_get("deleted")?,
         order_id: row.try_get("order_id")?,
         order_item_id: row.try_get::<Option<i64>, _>("order_item_id")?,
+        inventory_balance_id: row.try_get("inventory_balance_id")?,
         item_batch_id: row.try_get("item_batch_id")?,
         location_id: row.try_get("location_id")?,
         qty: row.try_get("qty")?,
         status: parse_reservation_status(row.try_get::<String, _>("status")?.as_str())?,
     })
+}
+
+pub(crate) async fn ensure_location_accepts_batch_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    location_id: i64,
+    item_batch_id: i64,
+) -> AppResult<()> {
+    let incoming_item_id: i64 =
+        sqlx::query_scalar("SELECT item_id FROM item_batches WHERE id = $1 AND deleted IS NULL")
+            .bind(item_batch_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "inventory-location-item:{location_id}:{incoming_item_id}"
+        ))
+        .execute(&mut **tx)
+        .await?;
+
+    let conflict: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT ib.id
+        FROM inventory_balances ib
+        INNER JOIN item_batches existing_batch ON existing_batch.id = ib.item_batch_id
+        INNER JOIN item_batches incoming_batch ON incoming_batch.id = $2
+        WHERE ib.location_id = $1
+          AND ib.deleted IS NULL
+          AND ib.qty_on_hand > 0
+          AND ib.item_batch_id <> $2
+          AND existing_batch.item_id = $3
+          AND (
+              existing_batch.lot IS DISTINCT FROM incoming_batch.lot
+              OR existing_batch.expiration IS DISTINCT FROM incoming_batch.expiration
+          )
+        LIMIT 1
+        FOR UPDATE OF ib
+        "#,
+    )
+    .bind(location_id)
+    .bind(item_batch_id)
+    .bind(incoming_item_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    if conflict.is_some() {
+        return Err(AppError::conflict(
+            "location already contains this item with a different lot or expiration",
+        ));
+    }
+
+    Ok(())
 }
 
 pub async fn get_item_batches(db: &Db, show_deleted: bool) -> AppResult<Vec<ItemBatch>> {
@@ -185,9 +237,9 @@ pub async fn get_movements(db: &Db) -> AppResult<Vec<Movement>> {
 
 pub async fn get_reservations(db: &Db, show_deleted: bool) -> AppResult<Vec<InventoryReservation>> {
     let sql = if show_deleted {
-        "SELECT id, created, modified, deleted, order_id, order_item_id, item_batch_id, location_id, qty, status FROM inventory_reservations ORDER BY id"
+        "SELECT id, created, modified, deleted, order_id, order_item_id, inventory_balance_id, item_batch_id, location_id, qty, status FROM inventory_reservations ORDER BY id"
     } else {
-        "SELECT id, created, modified, deleted, order_id, order_item_id, item_batch_id, location_id, qty, status FROM inventory_reservations WHERE deleted IS NULL ORDER BY id"
+        "SELECT id, created, modified, deleted, order_id, order_item_id, inventory_balance_id, item_batch_id, location_id, qty, status FROM inventory_reservations WHERE deleted IS NULL ORDER BY id"
     };
     let rows = sqlx::query(sql).fetch_all(db).await?;
     rows.iter().map(map_reservation).collect()
@@ -219,6 +271,8 @@ pub async fn receive_inventory(
     .bind(to_location_id)
     .fetch_one(&mut *tx)
     .await?;
+
+    ensure_location_accepts_batch_tx(&mut tx, to_location_id, item_batch_id).await?;
 
     sqlx::query(
         r#"
@@ -294,6 +348,8 @@ pub async fn move_inventory(
     let now = now_iso();
     let mut tx = db.begin().await?;
 
+    ensure_location_accepts_batch_tx(&mut tx, to_location_id, item_batch_id).await?;
+
     let res = sqlx::query(
         r#"
         UPDATE inventory_balances
@@ -301,6 +357,7 @@ pub async fn move_inventory(
         WHERE location_id = $3
           AND item_batch_id = $4
           AND status = $5
+          AND license_plate_id IS NULL
           AND deleted IS NULL
           AND qty_on_hand - qty_reserved >= $6
         "#,
@@ -374,13 +431,175 @@ pub async fn move_inventory(
     Ok(movement_id)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn split_move_inventory(
+    db: &Db,
+    user_id: i64,
+    from_inventory_balance_id: i64,
+    destinations: &[(i64, i64)],
+    reason: Option<&str>,
+    reference_type: Option<&str>,
+    reference_id: Option<i64>,
+    idempotency_key: Option<&str>,
+) -> AppResult<Vec<i64>> {
+    if destinations.is_empty() {
+        return Err(AppError::bad_request(
+            "at least one destination is required",
+        ));
+    }
+
+    let mut destination_ids = std::collections::BTreeSet::new();
+    let mut total_qty = 0_i64;
+    for (to_location_id, qty) in destinations {
+        if *to_location_id <= 0 {
+            return Err(AppError::bad_request("destination location is required"));
+        }
+        if *qty <= 0 {
+            return Err(AppError::bad_request("quantity must be positive"));
+        }
+        if !destination_ids.insert(*to_location_id) {
+            return Err(AppError::bad_request(
+                "destination locations must be unique",
+            ));
+        }
+        total_qty = total_qty
+            .checked_add(*qty)
+            .ok_or_else(|| AppError::bad_request("move quantity is too large"))?;
+    }
+
+    let now = now_iso();
+    let mut tx = db.begin().await?;
+
+    let Some(source) = sqlx::query(
+        r#"
+        SELECT id, warehouse_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved
+        FROM inventory_balances
+        WHERE id = $1 AND deleted IS NULL
+        FOR UPDATE
+        "#,
+    )
+    .bind(from_inventory_balance_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Err(AppError::conflict("source inventory balance was not found"));
+    };
+
+    let from_location_id: i64 = source.try_get("location_id")?;
+    let license_plate_id: Option<i64> = source.try_get("license_plate_id")?;
+    let item_batch_id: i64 = source.try_get("item_batch_id")?;
+    let status: String = source.try_get("status")?;
+    let qty_on_hand: i64 = source.try_get("qty_on_hand")?;
+    let qty_reserved: i64 = source.try_get("qty_reserved")?;
+    if license_plate_id.is_some() {
+        return Err(AppError::conflict(
+            "use the License Plates panel to move license-plated stock",
+        ));
+    }
+    if destinations
+        .iter()
+        .any(|(to_location_id, _)| *to_location_id == from_location_id)
+    {
+        return Err(AppError::bad_request(
+            "source and destination locations must differ",
+        ));
+    }
+    if qty_on_hand - qty_reserved < total_qty {
+        return Err(AppError::conflict(
+            "insufficient available inventory at source location",
+        ));
+    }
+
+    let res = sqlx::query(
+        r#"
+        UPDATE inventory_balances
+        SET qty_on_hand = qty_on_hand - $1, modified = $2
+        WHERE id = $3
+          AND license_plate_id IS NULL
+          AND deleted IS NULL
+          AND qty_on_hand - qty_reserved >= $4
+        "#,
+    )
+    .bind(total_qty)
+    .bind(&now)
+    .bind(from_inventory_balance_id)
+    .bind(total_qty)
+    .execute(&mut *tx)
+    .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::conflict(
+            "insufficient available inventory at source location",
+        ));
+    }
+
+    let mut movement_ids = Vec::with_capacity(destinations.len());
+    for (idx, (to_location_id, qty)) in destinations.iter().enumerate() {
+        let warehouse_id: i64 = sqlx::query_scalar(
+            "SELECT warehouse_id FROM locations WHERE id = $1 AND deleted IS NULL AND active",
+        )
+        .bind(*to_location_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        ensure_location_accepts_batch_tx(&mut tx, *to_location_id, item_batch_id).await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO inventory_balances
+                (created, modified, warehouse_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved)
+            VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, 0)
+            ON CONFLICT (location_id, item_batch_id, status) WHERE license_plate_id IS NULL DO UPDATE
+            SET qty_on_hand = inventory_balances.qty_on_hand + excluded.qty_on_hand,
+                modified = excluded.modified,
+                deleted = NULL
+            "#,
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(warehouse_id)
+        .bind(*to_location_id)
+        .bind(item_batch_id)
+        .bind(&status)
+        .bind(*qty)
+        .execute(&mut *tx)
+        .await?;
+
+        let movement_key = idempotency_key.map(|key| format!("{key}:{idx}:{to_location_id}"));
+        let movement_id: i64 = sqlx::query_scalar(
+            r#"
+            INSERT INTO stock_movements
+                (created, user_id, item_batch_id, license_plate_id, from_location_id, to_location_id, qty, movement_type,
+                 status, reason, reference_type, reference_id, idempotency_key)
+            VALUES ($1, $2, $3, NULL, $4, $5, $6, 'move', $7, $8, $9, $10, $11)
+            RETURNING id
+            "#,
+        )
+        .bind(&now)
+        .bind(user_id)
+        .bind(item_batch_id)
+        .bind(from_location_id)
+        .bind(*to_location_id)
+        .bind(*qty)
+        .bind(&status)
+        .bind(reason)
+        .bind(reference_type)
+        .bind(reference_id)
+        .bind(movement_key.as_deref())
+        .fetch_one(&mut *tx)
+        .await?;
+        movement_ids.push(movement_id);
+    }
+
+    tx.commit().await?;
+    Ok(movement_ids)
+}
+
 pub async fn reserve_inventory(
     db: &Db,
     user_id: i64,
     order_id: i64,
     order_item_id: Option<i64>,
-    item_batch_id: i64,
-    location_id: i64,
+    inventory_balance_id: i64,
     qty: i64,
 ) -> AppResult<i64> {
     if qty <= 0 {
@@ -389,21 +608,48 @@ pub async fn reserve_inventory(
     let now = now_iso();
     let mut tx = db.begin().await?;
 
+    let Some(balance_row) = sqlx::query(
+        r#"
+        SELECT id, item_batch_id, location_id, license_plate_id, qty_on_hand, qty_reserved
+        FROM inventory_balances
+        WHERE id = $1
+          AND status = 'available'
+          AND deleted IS NULL
+        FOR UPDATE
+        "#,
+    )
+    .bind(inventory_balance_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Err(AppError::conflict(
+            "insufficient available inventory to reserve",
+        ));
+    };
+    let resolved_balance_id: i64 = balance_row.try_get("id")?;
+    let resolved_item_batch_id: i64 = balance_row.try_get("item_batch_id")?;
+    let resolved_location_id: i64 = balance_row.try_get("location_id")?;
+    let resolved_license_plate_id: Option<i64> = balance_row.try_get("license_plate_id")?;
+    let qty_on_hand: i64 = balance_row.try_get("qty_on_hand")?;
+    let qty_reserved: i64 = balance_row.try_get("qty_reserved")?;
+
+    if qty_on_hand - qty_reserved < qty {
+        return Err(AppError::conflict(
+            "insufficient available inventory to reserve",
+        ));
+    }
+
     let res = sqlx::query(
         r#"
         UPDATE inventory_balances
         SET qty_reserved = qty_reserved + $1, modified = $2
-        WHERE location_id = $3
-          AND item_batch_id = $4
-          AND status = 'available'
-          AND deleted IS NULL
-          AND qty_on_hand - qty_reserved >= $5
+        WHERE id = $3
+          AND qty_on_hand - qty_reserved >= $4
         "#,
     )
     .bind(qty)
     .bind(&now)
-    .bind(location_id)
-    .bind(item_batch_id)
+    .bind(resolved_balance_id)
     .bind(qty)
     .execute(&mut *tx)
     .await?;
@@ -416,8 +662,8 @@ pub async fn reserve_inventory(
     let reservation_id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO inventory_reservations
-            (created, modified, order_id, order_item_id, item_batch_id, location_id, qty, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'reserved')
+            (created, modified, order_id, order_item_id, inventory_balance_id, item_batch_id, location_id, qty, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'reserved')
         RETURNING id
         "#,
     )
@@ -425,8 +671,9 @@ pub async fn reserve_inventory(
     .bind(&now)
     .bind(order_id)
     .bind(order_item_id)
-    .bind(item_batch_id)
-    .bind(location_id)
+    .bind(resolved_balance_id)
+    .bind(resolved_item_batch_id)
+    .bind(resolved_location_id)
     .bind(qty)
     .fetch_one(&mut *tx)
     .await?;
@@ -436,13 +683,14 @@ pub async fn reserve_inventory(
         INSERT INTO stock_movements
             (created, user_id, item_batch_id, license_plate_id, from_location_id, to_location_id, qty, movement_type,
              status, reason, reference_type, reference_id, idempotency_key)
-        VALUES ($1, $2, $3, NULL, $4, NULL, $5, 'reserve', 'available', 'order reservation', 'order', $6, NULL)
+        VALUES ($1, $2, $3, $4, $5, NULL, $6, 'reserve', 'available', 'order reservation', 'order', $7, NULL)
         "#,
     )
     .bind(&now)
     .bind(user_id)
-    .bind(item_batch_id)
-    .bind(location_id)
+    .bind(resolved_item_batch_id)
+    .bind(resolved_license_plate_id)
+    .bind(resolved_location_id)
     .bind(qty)
     .bind(order_id)
     .execute(&mut *tx)
@@ -457,7 +705,7 @@ pub async fn cancel_reservation(db: &Db, reservation_id: i64) -> AppResult<bool>
     let mut tx = db.begin().await?;
     let row = sqlx::query(
         r#"
-        SELECT item_batch_id, location_id, qty
+        SELECT inventory_balance_id, qty
         FROM inventory_reservations
         WHERE id = $1 AND deleted IS NULL AND status = 'reserved'
         "#,
@@ -469,21 +717,19 @@ pub async fn cancel_reservation(db: &Db, reservation_id: i64) -> AppResult<bool>
     let Some(row) = row else {
         return Ok(false);
     };
-    let item_batch_id: i64 = row.try_get("item_batch_id")?;
-    let location_id: i64 = row.try_get("location_id")?;
+    let inventory_balance_id: i64 = row.try_get("inventory_balance_id")?;
     let qty: i64 = row.try_get("qty")?;
 
     sqlx::query(
         r#"
         UPDATE inventory_balances
         SET qty_reserved = qty_reserved - $1, modified = $2
-        WHERE location_id = $3 AND item_batch_id = $4 AND status = 'available' AND qty_reserved >= $5
+        WHERE id = $3 AND qty_reserved >= $4
         "#,
     )
     .bind(qty)
     .bind(&now)
-    .bind(location_id)
-    .bind(item_batch_id)
+    .bind(inventory_balance_id)
     .bind(qty)
     .execute(&mut *tx)
     .await?;

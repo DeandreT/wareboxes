@@ -386,6 +386,7 @@ pub struct InventoryReservation {
     pub deleted: Option<Timestamp>,
     pub order_id: i64,
     pub order_item_id: Option<i64>,
+    pub inventory_balance_id: i64,
     pub item_batch_id: i64,
     pub location_id: i64,
     pub qty: i64,

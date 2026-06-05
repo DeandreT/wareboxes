@@ -460,7 +460,7 @@ impl WareboxesApp {
                                         ui.label(reservation.item_batch_id.to_string());
                                     });
                                     row.col(|ui| {
-                                        ui.label(reservation.location_id.to_string());
+                                        self.location_label_ui(ui, reservation.location_id);
                                     });
                                     row.col(|ui| {
                                         ui.label(reservation.qty.to_string());
@@ -1243,7 +1243,7 @@ impl WareboxesApp {
             .column(Column::initial(100.0))
             .column(Column::auto().at_least(90.0))
             .header(26.0, |mut h| {
-                for label in ["ID", "Warehouse", "Name", "Type", "Actions"] {
+                for label in ["ID", "Warehouse", "Scan Code", "Type", "Actions"] {
                     h.col(|ui| {
                         ui.strong(label);
                     });
@@ -1263,7 +1263,7 @@ impl WareboxesApp {
                             );
                         });
                         row.col(|ui| {
-                            ui.label(loc.name.clone().unwrap_or_default());
+                            self.location_label_ui(ui, loc.id);
                         });
                         row.col(|ui| {
                             ui.label(&loc.r#type);

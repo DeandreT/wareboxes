@@ -459,6 +459,132 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
 }
 
 #[tokio::test]
+async fn order_and_load_mutations_write_activity_history() {
+    let db = setup().await;
+
+    repo::orders::add_order(&db, &new_order("ACT-ORDER", None))
+        .await
+        .unwrap();
+    let order_id = repo::orders::get_orders(&db).await.unwrap()[0].id;
+    let update = OrderUpdate {
+        order_id,
+        order_key: None,
+        status: Some(OrderStatus::Held),
+        rush: None,
+        confirmed: None,
+        closed: None,
+        ship_by: None,
+        wave_id: None,
+        account_id: None,
+        line1: None,
+        line2: None,
+        city: None,
+        state: None,
+        postal_code: None,
+        country: None,
+    };
+    assert!(repo::orders::update_order(&db, &update).await.unwrap());
+    assert!(repo::orders::delete_order(&db, order_id).await.unwrap());
+    assert!(repo::orders::restore_order(&db, order_id).await.unwrap());
+
+    let order_actions = sqlx::query_scalar::<_, String>(
+        "SELECT action FROM order_activity WHERE order_id = $1 ORDER BY id",
+    )
+    .bind(order_id)
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    assert_eq!(
+        order_actions,
+        vec![
+            "created order",
+            "updated order status to held",
+            "deleted order",
+            "restored order",
+        ]
+    );
+
+    let user = auth::register_user(&db, "activity@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let warehouse = repo::warehouses::add_warehouse(&db, "Activity DC")
+        .await
+        .unwrap();
+    let account = repo::accounts::add_account(&db, "Activity Account", "activity@test")
+        .await
+        .unwrap();
+    let load_id = repo::loads::add_load(
+        &db,
+        user.id,
+        warehouse,
+        account,
+        LoadType::Inbound,
+        Some("ACT-LOAD"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(repo::loads::update_load(
+        &db,
+        user.id,
+        load_id,
+        Some(LoadStatus::Arrived),
+        None,
+        None,
+        Some("INV-ACT"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap());
+    let note_id = repo::loads::add_note(&db, user.id, load_id, "activity note")
+        .await
+        .unwrap();
+    assert!(
+        repo::loads::set_load_note_deleted(&db, user.id, note_id, true)
+            .await
+            .unwrap()
+    );
+    assert!(repo::loads::set_load_deleted(&db, user.id, load_id, true)
+        .await
+        .unwrap());
+
+    let load_actions = sqlx::query_scalar::<_, String>(
+        "SELECT action FROM load_activity WHERE load_id = $1 ORDER BY id",
+    )
+    .bind(load_id)
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    assert_eq!(
+        load_actions,
+        vec![
+            "created",
+            "updated",
+            "note_added",
+            "note_deleted",
+            "deleted"
+        ]
+    );
+}
+
+#[tokio::test]
 async fn barcode_uniqueness_allows_same_item_different_type_only() {
     let db = setup().await;
 
@@ -635,7 +761,7 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
         .unwrap();
     let order_id = repo::orders::get_orders(&db).await.unwrap()[0].id;
     let reservation =
-        repo::inventory::reserve_inventory(&db, user.id, order_id, None, batch, pick_face, 20)
+        repo::inventory::reserve_inventory(&db, user.id, order_id, None, pick_balance.id, 20)
             .await
             .unwrap();
     let balances = repo::inventory::get_balances(&db, false).await.unwrap();
@@ -645,6 +771,9 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
         .unwrap();
     assert_eq!(pick_balance.qty_on_hand, 30);
     assert_eq!(pick_balance.qty_reserved, 20);
+    let reservations = repo::inventory::get_reservations(&db, false).await.unwrap();
+    assert_eq!(reservations.len(), 1);
+    assert_eq!(reservations[0].inventory_balance_id, pick_balance.id);
 
     let err = repo::inventory::move_inventory(
         &db, user.id, batch, pick_face, receiving, 11, None, None, None, None, None,
@@ -663,6 +792,72 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
         .unwrap();
     assert_eq!(pick_balance.qty_reserved, 0);
 
+    let split_a = repo::locations::add_location(
+        &db,
+        warehouse,
+        None,
+        Some("A-01-02"),
+        Some("Aisle 1 Bin 2"),
+        "bin",
+        true,
+        true,
+        false,
+    )
+    .await
+    .unwrap();
+    let split_b = repo::locations::add_location(
+        &db,
+        warehouse,
+        None,
+        Some("A-01-03"),
+        Some("Aisle 1 Bin 3"),
+        "bin",
+        true,
+        true,
+        false,
+    )
+    .await
+    .unwrap();
+    let receiving_balance = balances
+        .iter()
+        .find(|b| b.location_id == receiving && b.item_batch_id == batch)
+        .unwrap();
+    let split_moves = repo::inventory::split_move_inventory(
+        &db,
+        user.id,
+        receiving_balance.id,
+        &[(split_a, 4), (split_b, 6)],
+        Some("split putaway"),
+        None,
+        None,
+        Some("split-putaway-1"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(split_moves.len(), 2);
+    let balances = repo::inventory::get_balances(&db, false).await.unwrap();
+    let receiving_balance = balances
+        .iter()
+        .find(|b| b.location_id == receiving && b.item_batch_id == batch)
+        .unwrap();
+    assert_eq!(receiving_balance.qty_on_hand, 60);
+    assert_eq!(
+        balances
+            .iter()
+            .find(|b| b.location_id == split_a && b.item_batch_id == batch)
+            .unwrap()
+            .qty_on_hand,
+        4
+    );
+    assert_eq!(
+        balances
+            .iter()
+            .find(|b| b.location_id == split_b && b.item_batch_id == batch)
+            .unwrap()
+            .qty_on_hand,
+        6
+    );
+
     let movements = repo::inventory::get_movements(&db).await.unwrap();
     assert!(movements.iter().any(|m| {
         m.movement_type == MovementType::Receive
@@ -676,6 +871,101 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
     assert!(movements
         .iter()
         .any(|m| m.movement_type == MovementType::Reserve && m.reference_id == Some(order_id)));
+}
+
+#[tokio::test]
+async fn inventory_rejects_mixed_lot_or_expiration_in_same_location() {
+    let db = setup().await;
+
+    let user = auth::register_user(&db, "lot-guard@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let warehouse = repo::warehouses::add_warehouse(&db, "Lot Guard DC")
+        .await
+        .unwrap();
+    let receiving = repo::locations::add_location(
+        &db,
+        warehouse,
+        None,
+        Some("LG-RCV"),
+        Some("Lot Guard Receiving"),
+        "dock",
+        true,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    let reserve = repo::locations::add_location(
+        &db,
+        warehouse,
+        None,
+        Some("LG-RSV"),
+        Some("Lot Guard Reserve"),
+        "rack",
+        true,
+        true,
+        false,
+    )
+    .await
+    .unwrap();
+    let item = repo::items::add_item(
+        &db,
+        "Lot Guard Item",
+        None,
+        "case",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let lot_a = repo::inventory::add_item_batch(&db, item, None, Some("LOT-A"), None, None)
+        .await
+        .unwrap();
+    let lot_b = repo::inventory::add_item_batch(&db, item, None, Some("LOT-B"), None, None)
+        .await
+        .unwrap();
+    let exp_a =
+        repo::inventory::add_item_batch(&db, item, None, Some("LOT-A"), None, Some(db::now_iso()))
+            .await
+            .unwrap();
+
+    repo::inventory::receive_inventory(
+        &db, user.id, lot_a, receiving, 10, None, None, None, None, None,
+    )
+    .await
+    .unwrap();
+
+    let err = repo::inventory::receive_inventory(
+        &db, user.id, lot_b, receiving, 5, None, None, None, None, None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
+
+    let err = repo::inventory::receive_inventory(
+        &db, user.id, exp_a, receiving, 5, None, None, None, None, None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
+
+    repo::inventory::receive_inventory(
+        &db, user.id, lot_b, reserve, 5, None, None, None, None, None,
+    )
+    .await
+    .unwrap();
+
+    let err = repo::inventory::move_inventory(
+        &db, user.id, lot_b, reserve, receiving, 1, None, None, None, None, None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
 }
 
 #[tokio::test]
@@ -845,6 +1135,78 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     assert_eq!(balances.len(), 1);
     assert_eq!(balances[0].location_id, dock);
     assert_eq!(balances[0].qty_on_hand, 8);
+
+    let mixed_lot_load = repo::loads::add_load(
+        &db,
+        user.id,
+        warehouse,
+        account,
+        wareboxes_core::models::LoadType::Inbound,
+        Some("BOL-MIXED"),
+        None,
+        None,
+        None,
+        None,
+        Some(dock),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let mixed_lot_line = repo::loads::add_line(
+        &db,
+        user.id,
+        mixed_lot_load,
+        item,
+        None,
+        1,
+        Some("LOT-OTHER"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(repo::loads::update_load(
+        &db,
+        user.id,
+        mixed_lot_load,
+        Some(LoadStatus::Arrived),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap());
+    let err = repo::loads::receive_line(
+        &db,
+        user.id,
+        mixed_lot_line,
+        dock,
+        1,
+        0,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("mixed lot"),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
 
     assert!(repo::loads::update_load(
         &db,
@@ -1044,6 +1406,42 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         .unwrap();
     assert_eq!(moved.location_id, Some(reserve));
     assert_eq!(moved.contents[0].location_id, reserve);
+
+    let acc = repo::accounts::add_account(&db, "LP Customer", "lp-customer@test.com")
+        .await
+        .unwrap();
+    repo::orders::add_order(&db, &new_order("LP-RES-1", Some(acc)))
+        .await
+        .unwrap();
+    let order_id = repo::orders::get_orders(&db)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|o| o.order_key == "LP-RES-1")
+        .unwrap()
+        .id;
+    repo::inventory::reserve_inventory(
+        &db,
+        user.id,
+        order_id,
+        None,
+        moved.contents[0].inventory_balance_id,
+        1,
+    )
+    .await
+    .unwrap();
+
+    let err = repo::license_plates::move_license_plate(
+        &db,
+        user.id,
+        plate.id,
+        dock,
+        Some("reserved putback"),
+        Some("lp-move-reserved"),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
 
     let err = repo::license_plates::set_license_plate_deleted(&db, plate.id, true)
         .await
