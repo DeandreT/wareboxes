@@ -286,6 +286,17 @@ pub struct Item {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ItemPackLink {
+    pub id: i64,
+    pub created: Timestamp,
+    pub deleted: Option<Timestamp>,
+    pub master_item_id: i64,
+    pub single_item_id: i64,
+    pub inner_qty: i64,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Sku {
     pub id: i64,
     pub created: Timestamp,
@@ -867,4 +878,207 @@ pub struct AuditLocationCount {
     pub on_hand: i64,
     pub count: i64,
     pub approval_status: String,
+}
+
+// ---------------------------------------------------------------------------
+// Work tasks
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkTaskType {
+    CycleCountItemLocation,
+    CycleCountLocation,
+    BreakMasterPack,
+    UnpackCancelledOrder,
+}
+
+impl WorkTaskType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkTaskType::CycleCountItemLocation => "cycle_count_item_location",
+            WorkTaskType::CycleCountLocation => "cycle_count_location",
+            WorkTaskType::BreakMasterPack => "break_master_pack",
+            WorkTaskType::UnpackCancelledOrder => "unpack_cancelled_order",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "cycle_count_item_location" => WorkTaskType::CycleCountItemLocation,
+            "cycle_count_location" => WorkTaskType::CycleCountLocation,
+            "break_master_pack" => WorkTaskType::BreakMasterPack,
+            "unpack_cancelled_order" => WorkTaskType::UnpackCancelledOrder,
+            _ => return None,
+        })
+    }
+}
+
+impl_status_display!(WorkTaskType);
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkTaskStatus {
+    Open,
+    Assigned,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+impl WorkTaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkTaskStatus::Open => "open",
+            WorkTaskStatus::Assigned => "assigned",
+            WorkTaskStatus::InProgress => "in_progress",
+            WorkTaskStatus::Completed => "completed",
+            WorkTaskStatus::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "open" => WorkTaskStatus::Open,
+            "assigned" => WorkTaskStatus::Assigned,
+            "in_progress" => WorkTaskStatus::InProgress,
+            "completed" => WorkTaskStatus::Completed,
+            "cancelled" => WorkTaskStatus::Cancelled,
+            _ => return None,
+        })
+    }
+}
+
+impl_status_display!(WorkTaskStatus);
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkTaskProgressAction {
+    #[default]
+    Progress,
+    Unpacked,
+    Missing,
+    Damaged,
+}
+
+impl WorkTaskProgressAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WorkTaskProgressAction::Progress => "progress",
+            WorkTaskProgressAction::Unpacked => "unpacked",
+            WorkTaskProgressAction::Missing => "missing",
+            WorkTaskProgressAction::Damaged => "damaged",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "progress" => WorkTaskProgressAction::Progress,
+            "unpacked" => WorkTaskProgressAction::Unpacked,
+            "missing" => WorkTaskProgressAction::Missing,
+            "damaged" => WorkTaskProgressAction::Damaged,
+            _ => return None,
+        })
+    }
+}
+
+impl_status_display!(WorkTaskProgressAction);
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkTask {
+    pub id: i64,
+    pub created: Timestamp,
+    pub modified: Option<Timestamp>,
+    pub deleted: Option<Timestamp>,
+    pub task_type: WorkTaskType,
+    pub status: WorkTaskStatus,
+    pub required_permission: String,
+    pub priority: i64,
+    pub title: String,
+    pub instructions: Option<String>,
+    pub assigned_user_id: Option<i64>,
+    pub created_by: Option<i64>,
+    pub completed_by: Option<i64>,
+    pub scheduled_for: Option<Timestamp>,
+    pub due_at: Option<Timestamp>,
+    pub started_at: Option<Timestamp>,
+    pub lease_expires_at: Option<Timestamp>,
+    pub task_timeout_seconds: i64,
+    pub last_released_at: Option<Timestamp>,
+    pub release_count: i64,
+    pub completed_at: Option<Timestamp>,
+    pub metadata_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CycleCountItemLocationTask {
+    pub task_id: i64,
+    pub warehouse_id: i64,
+    pub location_id: i64,
+    pub item_id: i64,
+    pub inventory_balance_id: Option<i64>,
+    pub order_id: Option<i64>,
+    pub order_item_id: Option<i64>,
+    pub source: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CycleCountLocationTask {
+    pub task_id: i64,
+    pub warehouse_id: i64,
+    pub location_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BreakMasterPackTask {
+    pub task_id: i64,
+    pub warehouse_id: i64,
+    pub location_id: i64,
+    pub master_item_id: i64,
+    pub single_item_id: i64,
+    pub master_qty: i64,
+    pub master_qty_completed: i64,
+    pub inner_qty_snapshot: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnpackCancelledOrderTask {
+    pub task_id: i64,
+    pub order_id: i64,
+    #[serde(default)]
+    pub lines: Vec<UnpackCancelledOrderTaskLine>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnpackCancelledOrderTaskLine {
+    pub id: i64,
+    pub task_id: i64,
+    pub order_item_id: Option<i64>,
+    pub item_id: i64,
+    pub item_batch_id: Option<i64>,
+    pub inventory_balance_id: Option<i64>,
+    pub license_plate_id: Option<i64>,
+    pub source_location_id: Option<i64>,
+    pub destination_location_id: Option<i64>,
+    pub expected_qty: i64,
+    pub unpacked_qty: i64,
+    pub missing_qty: i64,
+    pub damaged_qty: i64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkTaskProgress {
+    pub id: i64,
+    pub created: Timestamp,
+    pub task_id: i64,
+    pub task_line_id: Option<i64>,
+    pub user_id: Option<i64>,
+    pub action: String,
+    pub qty_delta: Option<i64>,
+    pub from_location_id: Option<i64>,
+    pub to_location_id: Option<i64>,
+    pub note: Option<String>,
+    pub metadata_json: Option<String>,
 }

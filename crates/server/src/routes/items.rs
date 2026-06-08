@@ -1,9 +1,10 @@
 use axum::extract::{Query, State};
 use axum::Json;
 use wareboxes_core::dto::{
-    AddBarcode, AddItem, AddSku, BarcodeIdRequest, ItemIdRequest, ItemUpdate,
+    AddBarcode, AddItem, AddItemPackLink, AddSku, BarcodeIdRequest, ItemIdRequest,
+    ItemPackLinkIdRequest, ItemUpdate,
 };
-use wareboxes_core::models::Item;
+use wareboxes_core::models::{Item, ItemPackLink};
 
 use crate::auth::CurrentUser;
 use crate::error::{AppError, AppResult};
@@ -43,6 +44,17 @@ pub async fn list(
     user.require_permission(&state.db, PERM).await?;
     Ok(Json(
         repo::items::get_items(&state.db, q.show_deleted).await?,
+    ))
+}
+
+pub async fn list_pack_links(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Query(q): Query<ShowDeleted>,
+) -> AppResult<Json<Vec<ItemPackLink>>> {
+    user.require_permission(&state.db, PERM).await?;
+    Ok(Json(
+        repo::items::get_item_pack_links(&state.db, q.show_deleted).await?,
     ))
 }
 
@@ -112,6 +124,36 @@ pub async fn restore(
     validate(&body)?;
     Ok(Json(
         repo::items::set_item_deleted(&state.db, body.item_id, false).await?,
+    ))
+}
+
+pub async fn add_pack_link(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Json(body): Json<AddItemPackLink>,
+) -> AppResult<Json<i64>> {
+    user.require_permission(&state.db, PERM).await?;
+    validate(&body)?;
+    let id = repo::items::add_item_pack_link(
+        &state.db,
+        body.master_item_id,
+        body.single_item_id,
+        body.inner_qty,
+        body.notes.as_deref(),
+    )
+    .await?;
+    Ok(Json(id))
+}
+
+pub async fn delete_pack_link(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Json(body): Json<ItemPackLinkIdRequest>,
+) -> AppResult<Json<bool>> {
+    user.require_permission(&state.db, PERM).await?;
+    validate(&body)?;
+    Ok(Json(
+        repo::items::set_item_pack_link_deleted(&state.db, body.item_pack_link_id, true).await?,
     ))
 }
 

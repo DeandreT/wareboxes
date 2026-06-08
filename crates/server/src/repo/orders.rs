@@ -13,7 +13,7 @@ use wareboxes_core::models::{
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
-use crate::repo::address;
+use crate::repo::{address, tasks};
 
 const MUTABLE: &str = "('cancelled', 'held', 'open', 'void')";
 
@@ -827,6 +827,14 @@ async fn insert_order_activity_tx(
 }
 
 pub async fn update_order(db: &Db, u: &OrderUpdate) -> AppResult<bool> {
+    update_order_inner(db, u, None).await
+}
+
+pub async fn update_order_by_user(db: &Db, u: &OrderUpdate, user_id: i64) -> AppResult<bool> {
+    update_order_inner(db, u, Some(user_id)).await
+}
+
+async fn update_order_inner(db: &Db, u: &OrderUpdate, user_id: Option<i64>) -> AppResult<bool> {
     let has_address = u.line1.is_some()
         || u.line2.is_some()
         || u.city.is_some()
@@ -889,8 +897,22 @@ pub async fn update_order(db: &Db, u: &OrderUpdate) -> AppResult<bool> {
             .unwrap_or_else(|| "updated order".to_owned());
         insert_order_activity_tx(&mut tx, u.order_id, &action).await?;
     }
+    let changed = res.rows_affected() > 0;
     tx.commit().await?;
-    Ok(res.rows_affected() > 0)
+    if changed && matches!(u.status, Some(OrderStatus::Cancelled)) {
+        tasks::create_unpack_cancelled_order_task(
+            db,
+            user_id,
+            u.order_id,
+            None,
+            None,
+            None,
+            None,
+            Some("Unpack inventory allocated to this cancelled order".to_owned()),
+        )
+        .await?;
+    }
+    Ok(changed)
 }
 
 pub async fn delete_order(db: &Db, id: i64) -> AppResult<bool> {

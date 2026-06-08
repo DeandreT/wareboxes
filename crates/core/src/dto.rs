@@ -287,6 +287,23 @@ pub struct ItemIdRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct AddItemPackLink {
+    #[validate(range(min = 1, message = "Invalid master item ID"))]
+    pub master_item_id: i64,
+    #[validate(range(min = 1, message = "Invalid single item ID"))]
+    pub single_item_id: i64,
+    #[validate(range(min = 2, message = "Inner quantity must be at least 2"))]
+    pub inner_qty: i64,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct ItemPackLinkIdRequest {
+    #[validate(range(min = 1, message = "Invalid item pack link ID"))]
+    pub item_pack_link_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct AddSku {
     #[validate(range(min = 1, message = "Invalid item ID"))]
     pub item_id: i64,
@@ -583,6 +600,109 @@ pub struct AuditWaveUpdate {
 pub struct AuditWaveIdRequest {
     #[validate(range(min = 1, message = "Invalid audit wave ID"))]
     pub audit_wave_id: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Work tasks
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct WorkTaskIdRequest {
+    #[validate(range(min = 1, message = "Invalid task ID"))]
+    pub task_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate, Default)]
+pub struct StartNextWorkTask {
+    pub task_type: Option<crate::models::WorkTaskType>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct AssignWorkTask {
+    #[validate(range(min = 1, message = "Invalid task ID"))]
+    pub task_id: i64,
+    #[validate(range(min = 1, message = "Invalid user ID"))]
+    pub assigned_user_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct RecordWorkTaskProgress {
+    #[validate(range(min = 1, message = "Invalid task ID"))]
+    pub task_id: i64,
+    #[validate(range(min = 1, message = "Invalid task line ID"))]
+    pub task_line_id: Option<i64>,
+    #[serde(default)]
+    pub action: crate::models::WorkTaskProgressAction,
+    #[validate(range(min = 1, message = "Quantity must be positive"))]
+    pub qty_completed: i64,
+    #[validate(range(min = 1, message = "Invalid from location ID"))]
+    pub from_location_id: Option<i64>,
+    #[validate(range(min = 1, message = "Invalid to location ID"))]
+    pub to_location_id: Option<i64>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct CompleteWorkTask {
+    #[validate(range(min = 1, message = "Invalid task ID"))]
+    pub task_id: i64,
+    #[validate(range(min = 1, message = "Quantity must be positive"))]
+    pub qty_completed: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct CreateItemLocationCycleCountTask {
+    #[validate(range(min = 1, message = "Invalid location ID"))]
+    pub location_id: i64,
+    #[validate(range(min = 1, message = "Invalid item ID"))]
+    pub item_id: i64,
+    pub source: Option<String>,
+    pub order_id: Option<i64>,
+    pub order_item_id: Option<i64>,
+    pub inventory_balance_id: Option<i64>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct CreateLocationCycleCountTask {
+    #[validate(range(min = 1, message = "Invalid location ID"))]
+    pub location_id: i64,
+    #[validate(range(min = 0, message = "Priority must be zero or greater"))]
+    pub priority: Option<i64>,
+    pub assigned_user_id: Option<i64>,
+    pub scheduled_for: Option<Timestamp>,
+    pub due_at: Option<Timestamp>,
+    pub instructions: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct CreateBreakMasterPackTask {
+    #[validate(range(min = 1, message = "Invalid master item ID"))]
+    pub master_item_id: i64,
+    #[validate(range(min = 1, message = "Invalid single item ID"))]
+    pub single_item_id: i64,
+    #[validate(range(min = 1, message = "Invalid location ID"))]
+    pub location_id: i64,
+    #[validate(range(min = 1, message = "Quantity must be positive"))]
+    pub qty: i64,
+    #[validate(range(min = 0, message = "Priority must be zero or greater"))]
+    pub priority: Option<i64>,
+    pub assigned_user_id: Option<i64>,
+    pub scheduled_for: Option<Timestamp>,
+    pub due_at: Option<Timestamp>,
+    pub instructions: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct CreateUnpackCancelledOrderTask {
+    #[validate(range(min = 1, message = "Invalid order ID"))]
+    pub order_id: i64,
+    #[validate(range(min = 0, message = "Priority must be zero or greater"))]
+    pub priority: Option<i64>,
+    pub assigned_user_id: Option<i64>,
+    pub scheduled_for: Option<Timestamp>,
+    pub due_at: Option<Timestamp>,
+    pub instructions: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
