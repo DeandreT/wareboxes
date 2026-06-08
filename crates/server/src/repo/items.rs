@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 
 use sqlx::Row;
-use wareboxes_core::models::{Barcode, Item, Sku};
+use wareboxes_core::models::{Barcode, Item, ItemPackLink, Sku};
 
 use crate::db::{now_iso, Db};
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
 fn map_item(row: &sqlx::postgres::PgRow) -> AppResult<Item> {
     Ok(Item {
@@ -94,6 +94,74 @@ pub async fn active_item_exists(db: &Db, id: i64) -> AppResult<bool> {
             .fetch_one(db)
             .await?;
     Ok(exists)
+}
+
+fn map_item_pack_link(row: &sqlx::postgres::PgRow) -> AppResult<ItemPackLink> {
+    Ok(ItemPackLink {
+        id: row.try_get("id")?,
+        created: row.try_get("created")?,
+        deleted: row.try_get("deleted")?,
+        master_item_id: row.try_get("master_item_id")?,
+        single_item_id: row.try_get("single_item_id")?,
+        inner_qty: row.try_get("inner_qty")?,
+        notes: row.try_get("notes")?,
+    })
+}
+
+pub async fn get_item_pack_links(db: &Db, show_deleted: bool) -> AppResult<Vec<ItemPackLink>> {
+    let sql = if show_deleted {
+        "SELECT id, created, deleted, master_item_id, single_item_id, inner_qty, notes FROM item_pack_links ORDER BY id"
+    } else {
+        "SELECT id, created, deleted, master_item_id, single_item_id, inner_qty, notes FROM item_pack_links WHERE deleted IS NULL ORDER BY id"
+    };
+    let rows = sqlx::query(sql).fetch_all(db).await?;
+    rows.iter().map(map_item_pack_link).collect()
+}
+
+pub async fn add_item_pack_link(
+    db: &Db,
+    master_item_id: i64,
+    single_item_id: i64,
+    inner_qty: i64,
+    notes: Option<&str>,
+) -> AppResult<i64> {
+    if master_item_id == single_item_id {
+        return Err(AppError::bad_request(
+            "master item and single item must differ",
+        ));
+    }
+    if inner_qty <= 1 {
+        return Err(AppError::bad_request("inner quantity must be at least 2"));
+    }
+    if !active_item_exists(db, master_item_id).await?
+        || !active_item_exists(db, single_item_id).await?
+    {
+        return Err(AppError::bad_request("item not found"));
+    }
+    let id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO item_pack_links (created, master_item_id, single_item_id, inner_qty, notes)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id
+        "#,
+    )
+    .bind(now_iso())
+    .bind(master_item_id)
+    .bind(single_item_id)
+    .bind(inner_qty)
+    .bind(notes)
+    .fetch_one(db)
+    .await?;
+    Ok(id)
+}
+
+pub async fn set_item_pack_link_deleted(db: &Db, id: i64, deleted: bool) -> AppResult<bool> {
+    let res = sqlx::query("UPDATE item_pack_links SET deleted = $1 WHERE id = $2")
+        .bind(if deleted { Some(now_iso()) } else { None })
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(res.rows_affected() > 0)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -20,6 +20,7 @@ pub mod locations;
 pub mod orders;
 pub mod permissions;
 pub mod roles;
+pub mod tasks;
 pub mod users;
 pub mod warehouses;
 
@@ -83,6 +84,9 @@ pub fn app(state: AppState) -> Router {
         .route("/items/update", post(items::update))
         .route("/items/delete", post(items::delete))
         .route("/items/restore", post(items::restore))
+        .route("/items/pack-links", get(items::list_pack_links))
+        .route("/items/pack-links/add", post(items::add_pack_link))
+        .route("/items/pack-links/delete", post(items::delete_pack_link))
         .route("/items/skus/add", post(items::add_sku))
         .route("/items/barcodes/add", post(items::add_barcode))
         .route("/items/barcodes/delete", post(items::delete_barcode))
@@ -144,6 +148,36 @@ pub fn app(state: AppState) -> Router {
             "/inventory/reservations/cancel",
             post(inventory::cancel_reservation),
         )
+        // Work tasks
+        .route("/tasks", get(tasks::list))
+        .route(
+            "/tasks/cycle-counts/item-location/add",
+            post(tasks::create_item_location_cycle_count),
+        )
+        .route(
+            "/tasks/cycle-counts/location/add",
+            post(tasks::create_location_cycle_count),
+        )
+        .route(
+            "/tasks/break-master-packs/add",
+            post(tasks::create_break_master_pack),
+        )
+        .route(
+            "/tasks/unpack-cancelled-orders/add",
+            post(tasks::create_unpack_cancelled_order),
+        )
+        .route(
+            "/tasks/unpack-cancelled-orders/lines",
+            get(tasks::list_unpack_cancelled_order_lines),
+        )
+        .route("/tasks/assign", post(tasks::assign))
+        .route("/tasks/start-next", post(tasks::start_next))
+        .route("/tasks/start", post(tasks::start))
+        .route("/tasks/progress", post(tasks::progress))
+        .route("/tasks/complete", post(tasks::complete))
+        .route("/tasks/abort", post(tasks::abort))
+        .route("/tasks/release-expired", post(tasks::release_expired))
+        .route("/tasks/cancel", post(tasks::cancel))
         // Admin operations
         .route("/employees", get(employees::list))
         .route("/employees/add", post(employees::add))

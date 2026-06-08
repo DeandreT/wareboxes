@@ -15,5 +15,6 @@ pub mod orders;
 pub mod permissions;
 pub mod roles;
 pub mod settings;
+pub mod tasks;
 pub mod users;
 pub mod warehouses;

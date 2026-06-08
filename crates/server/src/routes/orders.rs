@@ -67,7 +67,7 @@ pub async fn update(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::orders::update_order(&state.db, &body).await?;
+    let ok = repo::orders::update_order_by_user(&state.db, &body, user.user.id).await?;
     Ok(Json(ok))
 }
 
