@@ -1,6 +1,40 @@
 use super::*;
 
 impl WareboxesApp {
+    const ICON_FONT: &'static str = "lucide";
+
+    pub(super) fn install_fonts(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        let fallback_fonts = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        fonts.font_data.insert(
+            Self::ICON_FONT.to_owned(),
+            egui::FontData::from_static(lucide_icons::LUCIDE_FONT_BYTES),
+        );
+        let icon_family = fonts
+            .families
+            .entry(egui::FontFamily::Name(Self::ICON_FONT.into()))
+            .or_default();
+        icon_family.push(Self::ICON_FONT.to_owned());
+        icon_family.extend(fallback_fonts);
+        ctx.set_fonts(fonts);
+    }
+
+    pub(super) fn icon(icon: Icon) -> egui::RichText {
+        egui::RichText::new(icon.unicode().to_string()).font(egui::FontId::new(
+            16.0,
+            egui::FontFamily::Name(Self::ICON_FONT.into()),
+        ))
+    }
+
+    pub(super) fn icon_button(ui: &mut egui::Ui, icon: Icon, tooltip: &str) -> egui::Response {
+        ui.add_sized([30.0, 30.0], egui::Button::new(Self::icon(icon)))
+            .on_hover_text(tooltip)
+    }
+
     pub(super) fn theme_style(light_mode: bool) -> egui::Style {
         use egui::{Color32, FontFamily, FontId, Rounding, Stroke, TextStyle};
 
@@ -67,7 +101,7 @@ impl WareboxesApp {
             visuals.widgets.hovered.bg_fill = Color32::from_rgb(224, 239, 234);
             visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(224, 239, 234);
             visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, accent);
-            visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
+            visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, text);
             visuals.widgets.active.bg_fill = accent;
             visuals.widgets.active.weak_bg_fill = accent;
             visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, accent);
@@ -104,8 +138,8 @@ impl WareboxesApp {
             visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(42, 67, 59);
             visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, accent);
             visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
-            visuals.widgets.active.bg_fill = Color32::from_rgb(30, 112, 91);
-            visuals.widgets.active.weak_bg_fill = Color32::from_rgb(30, 112, 91);
+            visuals.widgets.active.bg_fill = Color32::from_rgb(30, 80, 68);
+            visuals.widgets.active.weak_bg_fill = Color32::from_rgb(30, 80, 68);
             visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, accent);
             visuals.widgets.open = visuals.widgets.active;
             visuals.text_cursor = Stroke::new(2.0_f32, accent);

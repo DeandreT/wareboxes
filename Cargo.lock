@@ -1941,6 +1941,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
+name = "lucide-icons"
+version = "1.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "029a7582875d762cacb18cb1255779e8efb2fc78081a4fc1ddc65b49b4d42aa0"
+
+[[package]]
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3835,6 +3841,7 @@ dependencies = [
  "egui_extras",
  "ehttp",
  "env_logger",
+ "lucide-icons",
  "serde",
  "serde_json",
  "uuid",

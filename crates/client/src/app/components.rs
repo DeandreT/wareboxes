@@ -7,6 +7,91 @@ struct PickerState {
 }
 
 impl WareboxesApp {
+    pub(super) fn empty_state(ui: &mut egui::Ui, icon: Icon, label: &str) {
+        ui.add_space(36.0);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                Self::icon(icon)
+                    .size(22.0)
+                    .color(ui.visuals().weak_text_color()),
+            );
+            ui.add_space(4.0);
+            ui.weak(label);
+        });
+    }
+
+    pub(super) fn pagination_footer(
+        ui: &mut egui::Ui,
+        noun: &str,
+        offset: i64,
+        page_size: i64,
+        shown: usize,
+        total: i64,
+        page_sizes: &[i64],
+    ) -> PaginationAction {
+        let page_start = if total == 0 { 0 } else { offset + 1 };
+        let page_end = (offset + shown as i64).min(total);
+        let mut action = PaginationAction::None;
+
+        ui.horizontal(|ui| {
+            ui.weak(format!("{page_start}-{page_end} of {total} {noun}"));
+            ui.separator();
+            ui.weak("Rows");
+            let mut selected_size = page_size;
+            egui::ComboBox::from_id_source(("page_size", noun))
+                .selected_text(selected_size.to_string())
+                .width(72.0)
+                .show_ui(ui, |ui| {
+                    for size in page_sizes {
+                        ui.selectable_value(&mut selected_size, *size, size.to_string());
+                    }
+                });
+            if selected_size != page_size {
+                action = PaginationAction::PageSize(selected_size);
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let can_next = offset + page_size < total;
+                if ui
+                    .add_enabled(
+                        can_next,
+                        egui::Button::new(Self::icon(Icon::ChevronRight))
+                            .min_size(egui::vec2(30.0, 30.0)),
+                    )
+                    .on_hover_text("Next page")
+                    .clicked()
+                {
+                    action = PaginationAction::Next;
+                }
+                let can_previous = offset > 0;
+                if ui
+                    .add_enabled(
+                        can_previous,
+                        egui::Button::new(Self::icon(Icon::ChevronLeft))
+                            .min_size(egui::vec2(30.0, 30.0)),
+                    )
+                    .on_hover_text("Previous page")
+                    .clicked()
+                {
+                    action = PaginationAction::Previous;
+                }
+                let page = if total == 0 {
+                    0
+                } else {
+                    offset / page_size.max(1) + 1
+                };
+                let pages = if total == 0 {
+                    0
+                } else {
+                    (total + page_size.max(1) - 1) / page_size.max(1)
+                };
+                ui.weak(format!("Page {page} of {pages}"));
+            });
+        });
+
+        action
+    }
+
     pub(super) fn entity_picker(
         ui: &mut egui::Ui,
         id: impl std::hash::Hash,
