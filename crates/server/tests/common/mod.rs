@@ -164,9 +164,10 @@ impl Fixture {
             .unwrap()
     }
 
-    pub async fn location(&self, warehouse_id: i64, scan_code: &str) -> i64 {
+    pub async fn location(&self, tenant_id: TenantId, warehouse_id: i64, scan_code: &str) -> i64 {
         repo::locations::add_location(
             &self.db,
+            tenant_id,
             warehouse_id,
             None,
             Some(scan_code),

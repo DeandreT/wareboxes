@@ -265,3 +265,129 @@ async fn owner_and_facility_master_data_is_tenant_scoped() {
     assert_eq!(accounts[0].id, second_account);
     assert_eq!(accounts[0].tenant_id, second_tenant);
 }
+
+#[tokio::test]
+async fn locations_are_tenant_scoped_for_repositories_and_routes() {
+    let db = setup().await;
+    let operator = auth::register_user(&db, "locations@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let other = auth::register_user(&db, "locations-other@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let first_tenant = tenant_for_user(&db, operator.id).await;
+    let second_tenant = tenant_for_user(&db, other.id).await;
+    let first_warehouse = repo::warehouses::add_warehouse(&db, first_tenant, "Shared Facility")
+        .await
+        .unwrap();
+    let second_warehouse = repo::warehouses::add_warehouse(&db, second_tenant, "Shared Facility")
+        .await
+        .unwrap();
+
+    let first_location = repo::locations::add_location(
+        &db,
+        first_tenant,
+        first_warehouse,
+        None,
+        Some("SHARED-BIN"),
+        Some("First Tenant Bin"),
+        "bin",
+        true,
+        true,
+        false,
+    )
+    .await
+    .unwrap();
+    let second_location = repo::locations::add_location(
+        &db,
+        second_tenant,
+        second_warehouse,
+        None,
+        Some("SHARED-BIN"),
+        Some("Second Tenant Bin"),
+        "bin",
+        true,
+        true,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let first_locations = repo::locations::get_locations(&db, first_tenant, false)
+        .await
+        .unwrap();
+    assert_eq!(first_locations.len(), 1);
+    assert_eq!(first_locations[0].id, first_location);
+    assert_eq!(first_locations[0].tenant_id, first_tenant);
+    assert!(
+        !repo::locations::active_location_exists(&db, first_tenant, second_location)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        repo::locations::location_active_state(&db, first_tenant, second_location)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(!repo::locations::update_location(
+        &db,
+        first_tenant,
+        second_location,
+        None,
+        Some("CROSS-TENANT"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap());
+    assert!(
+        !repo::locations::set_location_deleted(&db, first_tenant, second_location, true)
+            .await
+            .unwrap()
+    );
+
+    sqlx::query(
+        "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
+    )
+    .bind(second_tenant.get())
+    .bind(operator.id)
+    .execute(&db)
+    .await
+    .unwrap();
+    let permission = repo::permissions::add_permission(&db, "wms", Some("WMS"))
+        .await
+        .unwrap();
+    let role = repo::roles::add_role(&db, "location-wms", Some("Location WMS"))
+        .await
+        .unwrap();
+    repo::roles::add_role_permission(&db, role, permission)
+        .await
+        .unwrap();
+    repo::roles::add_role_to_user(&db, operator.id, role)
+        .await
+        .unwrap();
+    let token = auth::create_session(&db, operator.id).await.unwrap();
+    let app = routes::app(AppState::new(db));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/locations")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(TENANT_ID_HEADER, second_tenant.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+    let locations: Vec<wareboxes_core::models::Location> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].id, second_location);
+    assert_eq!(locations[0].tenant_id, second_tenant);
+}

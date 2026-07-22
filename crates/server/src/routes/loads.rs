@@ -170,7 +170,9 @@ pub async fn add(
         return Err(AppError::bad_request("Account not found"));
     }
     if let Some(location_id) = body.dock_door_location_id {
-        match repo::locations::location_active_state(&state.db, location_id).await? {
+        match repo::locations::location_active_state(&state.db, user.tenant.tenant_id, location_id)
+            .await?
+        {
             None => return Err(AppError::bad_request("Dock door location not found")),
             Some(false) => return Err(AppError::bad_request("Dock door location is inactive")),
             Some(true) => {}

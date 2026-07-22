@@ -30,6 +30,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
         .unwrap();
     let freezer = repo::locations::add_location(
         &db,
+        tenant_id,
         warehouse,
         None,
         Some("FRZ-01"),
@@ -43,6 +44,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     .unwrap();
     let shelf = repo::locations::add_location(
         &db,
+        tenant_id,
         warehouse,
         None,
         Some("SHF-01"),

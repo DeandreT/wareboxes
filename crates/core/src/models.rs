@@ -363,9 +363,10 @@ pub struct Barcode {
 // Locations (app/utils/types/db/locations.ts)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Location {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub warehouse_id: i64,
