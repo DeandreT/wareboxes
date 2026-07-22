@@ -165,13 +165,14 @@ impl WareboxesApp {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let (tx, rx) = channel();
         let api = ApiClient::new(default_base_url(), tx, cc.egui_ctx.clone());
-        let forms = Forms {
+        let mut forms = Forms {
             base_url: api.base_url.clone(),
             o_country: "US".to_owned(),
             new_packaging_unit: "each".to_owned(),
             new_type: "inbound".to_owned(),
             ..Default::default()
         };
+        prefill_demo_login(&mut forms);
         Self {
             api,
             rx,
@@ -534,10 +535,29 @@ fn default_base_url() -> String {
 
 #[cfg(target_arch = "wasm32")]
 fn default_base_url() -> String {
-    web_sys::window()
-        .and_then(|window| window.location().origin().ok())
-        .filter(|origin| !origin.is_empty() && origin != "null")
+    option_env!("WAREBOXES_API_URL")
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            web_sys::window()
+                .and_then(|window| window.location().origin().ok())
+                .filter(|origin| !origin.is_empty() && origin != "null")
+        })
         .unwrap_or_else(|| LOCAL_BASE_URL.to_owned())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn prefill_demo_login(_forms: &mut Forms) {}
+
+#[cfg(target_arch = "wasm32")]
+fn prefill_demo_login(forms: &mut Forms) {
+    if let Some(email) = option_env!("WAREBOXES_DEMO_EMAIL") {
+        forms.email = email.to_owned();
+    }
+    if let Some(password) = option_env!("WAREBOXES_DEMO_PASSWORD") {
+        forms.password = password.to_owned();
+    }
 }
 
 impl eframe::App for WareboxesApp {
@@ -584,9 +604,12 @@ impl WareboxesApp {
                 ui.heading("Wareboxes WMS");
                 ui.add_space(20.0);
                 egui::Grid::new("login").num_columns(2).show(ui, |ui| {
-                    ui.label("Server URL");
-                    ui.text_edit_singleline(&mut self.forms.base_url);
-                    ui.end_row();
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        ui.label("Server URL");
+                        ui.text_edit_singleline(&mut self.forms.base_url);
+                        ui.end_row();
+                    }
                     ui.label("Email");
                     ui.text_edit_singleline(&mut self.forms.email);
                     ui.end_row();
