@@ -5,7 +5,7 @@ use wareboxes_core::dto::{
     AddLoad, AddLoadFile, AddLoadLine, AddLoadNote, ArriveLoad, LoadFileIdRequest, LoadIdRequest,
     LoadNoteIdRequest, LoadUpdate, ReceiveInboundLine, ReceiveLoadLine,
 };
-use wareboxes_core::models::{Load, LoadFileCategory, LoadStatus, LoadType};
+use wareboxes_core::models::{Load, LoadFileCategory, LoadStatus, LoadType, ReceiveLoadLineResult};
 
 use crate::auth::{CurrentTenant, CurrentUser};
 use crate::error::{AppError, AppResult};
@@ -123,14 +123,15 @@ pub async fn mobile_arrive(
 
 pub async fn mobile_receive_line(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Path(load_line_id): Path<i64>,
     Json(body): Json<ReceiveInboundLine>,
-) -> AppResult<Json<i64>> {
+) -> AppResult<Json<ReceiveLoadLineResult>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     let id = repo::loads::receive_line(
         &state.db,
+        user.tenant.tenant_id,
         user.user.id,
         load_line_id,
         body.to_location_id,
@@ -143,6 +144,7 @@ pub async fn mobile_receive_line(
         body.serial.as_deref(),
         body.expiration,
         body.reason.as_deref(),
+        &body.idempotency_key,
     )
     .await?;
     Ok(Json(id))
@@ -301,13 +303,14 @@ pub async fn add_line(
 
 pub async fn receive_line(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<ReceiveLoadLine>,
-) -> AppResult<Json<i64>> {
+) -> AppResult<Json<ReceiveLoadLineResult>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     let id = repo::loads::receive_line(
         &state.db,
+        user.tenant.tenant_id,
         user.user.id,
         body.load_line_id,
         body.to_location_id,
@@ -320,6 +323,7 @@ pub async fn receive_line(
         body.serial.as_deref(),
         body.expiration,
         body.reason.as_deref(),
+        &body.idempotency_key,
     )
     .await?;
     Ok(Json(id))

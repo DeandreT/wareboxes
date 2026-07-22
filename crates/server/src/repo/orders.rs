@@ -10,6 +10,7 @@ use wareboxes_core::models::{
     InventoryReservation, Order, OrderActivity, OrderItem, OrderStatus, OrderTrackingNumber,
     ReservationStatus,
 };
+use wareboxes_domain::{InventoryOwnerId, TenantId};
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
@@ -68,12 +69,17 @@ fn map_reservation(row: &sqlx::postgres::PgRow) -> AppResult<InventoryReservatio
     })?;
     Ok(InventoryReservation {
         id: row.try_get("id")?,
+        tenant_id: TenantId::new(row.try_get("tenant_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        inventory_owner_id: InventoryOwnerId::new(row.try_get("inventory_owner_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
         created: row.try_get("created")?,
         modified: row.try_get("modified")?,
         deleted: row.try_get("deleted")?,
         order_id: row.try_get("order_id")?,
         order_item_id: row.try_get("order_item_id")?,
         inventory_balance_id: row.try_get("inventory_balance_id")?,
+        facility_id: row.try_get("facility_id")?,
         item_batch_id: row.try_get("item_batch_id")?,
         location_id: row.try_get("location_id")?,
         qty: row.try_get("qty")?,
@@ -313,7 +319,9 @@ async fn reserved_by_order_ids(db: &Db, order_ids: &[i64]) -> AppResult<HashMap<
 async fn reservations_for_order(db: &Db, order_id: i64) -> AppResult<Vec<InventoryReservation>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, created, modified, deleted, order_id, order_item_id, inventory_balance_id, item_batch_id, location_id, qty, status
+        SELECT id, tenant_id, inventory_owner_id, created, modified, deleted,
+               order_id, order_item_id, inventory_balance_id, facility_id,
+               item_batch_id, location_id, qty, status
         FROM inventory_reservations
         WHERE deleted IS NULL
           AND order_id = $1

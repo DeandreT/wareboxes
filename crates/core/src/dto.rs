@@ -412,6 +412,8 @@ pub struct EmployeeIdRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct AddLicensePlate {
+    #[validate(range(min = 1, message = "Invalid inventory owner ID"))]
+    pub inventory_owner_id: i64,
     pub barcode: Option<String>,
 }
 
@@ -435,7 +437,8 @@ pub struct MoveLicensePlate {
     #[validate(range(min = 1, message = "Invalid destination location ID"))]
     pub to_location_id: i64,
     pub reason: Option<String>,
-    pub idempotency_key: Option<String>,
+    #[validate(length(min = 1, max = 200, message = "Idempotency key is required"))]
+    pub idempotency_key: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -539,6 +542,8 @@ pub struct ReceiveLoadLine {
     pub serial: Option<String>,
     pub expiration: Option<Timestamp>,
     pub reason: Option<String>,
+    #[validate(length(min = 1, max = 200, message = "Idempotency key is required"))]
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -557,6 +562,8 @@ pub struct ReceiveInboundLine {
     pub serial: Option<String>,
     pub expiration: Option<Timestamp>,
     pub reason: Option<String>,
+    #[validate(length(min = 1, max = 200, message = "Idempotency key is required"))]
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -713,6 +720,8 @@ pub struct CreateUnpackCancelledOrderTask {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct AddItemBatch {
+    #[validate(range(min = 1, message = "Invalid inventory owner ID"))]
+    pub inventory_owner_id: i64,
     #[validate(range(min = 1, message = "Invalid item ID"))]
     pub item_id: i64,
     pub load_id: Option<i64>,
@@ -739,7 +748,8 @@ pub struct ReceiveInventory {
     pub reason: Option<String>,
     pub reference_type: Option<String>,
     pub reference_id: Option<i64>,
-    pub idempotency_key: Option<String>,
+    #[validate(length(min = 1, max = 200, message = "Idempotency key is required"))]
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -756,7 +766,8 @@ pub struct MoveInventory {
     pub reason: Option<String>,
     pub reference_type: Option<String>,
     pub reference_id: Option<i64>,
-    pub idempotency_key: Option<String>,
+    #[validate(length(min = 1, max = 200, message = "Idempotency key is required"))]
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -777,7 +788,8 @@ pub struct SplitMoveInventory {
     pub reason: Option<String>,
     pub reference_type: Option<String>,
     pub reference_id: Option<i64>,
-    pub idempotency_key: Option<String>,
+    #[validate(length(min = 1, max = 200, message = "Idempotency key is required"))]
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]

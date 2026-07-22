@@ -99,6 +99,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
 
     let err = repo::loads::receive_line(
         &db,
+        tenant_id,
         user.id,
         line,
         dock,
@@ -111,6 +112,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         None,
         None,
         Some("too much"),
+        "receive-too-much",
     )
     .await
     .unwrap_err();
@@ -140,8 +142,9 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     .await
     .unwrap());
 
-    let movement = repo::loads::receive_line(
+    let receipt = repo::loads::receive_line(
         &db,
+        tenant_id,
         user.id,
         line,
         dock,
@@ -154,10 +157,32 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         None,
         None,
         Some("normal receipt"),
+        "receive-normal",
     )
     .await
     .unwrap();
-    assert!(movement > 0);
+    assert!(receipt.inventory_transaction_id.is_some());
+
+    let replay = repo::loads::receive_line(
+        &db,
+        tenant_id,
+        user.id,
+        line,
+        dock,
+        8,
+        2,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("normal receipt"),
+        "receive-normal",
+    )
+    .await
+    .unwrap();
+    assert_eq!(replay, receipt);
 
     let loads = repo::loads::get_loads(&db, false, false).await.unwrap();
     let load_row = loads.iter().find(|l| l.id == load).unwrap();
@@ -172,7 +197,9 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         .iter()
         .any(|a| a.action == "line_received"));
 
-    let balances = repo::inventory::get_balances(&db, false).await.unwrap();
+    let balances = repo::inventory::get_balances(&db, tenant_id, false)
+        .await
+        .unwrap();
     assert_eq!(balances.len(), 1);
     assert_eq!(balances[0].location_id, dock);
     assert_eq!(balances[0].qty_on_hand, 8);
@@ -232,6 +259,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     .unwrap());
     let err = repo::loads::receive_line(
         &db,
+        tenant_id,
         user.id,
         mixed_lot_line,
         dock,
@@ -244,6 +272,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         None,
         None,
         Some("mixed lot"),
+        "receive-mixed-lot",
     )
     .await
     .unwrap_err();
@@ -280,6 +309,122 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         .unwrap();
     assert_eq!(closed.status, LoadStatus::Closed);
     assert_eq!(closed.closed_by, Some(user.id));
+}
+
+#[tokio::test]
+async fn concurrent_load_receipts_preserve_every_accepted_quantity() {
+    let fixture = Fixture::new().await;
+    let user = fixture.user("concurrent-receiver@test.com").await;
+    let tenant_id = tenant_for_user(&fixture.db, user.id).await;
+    let facility = fixture.facility(tenant_id, "Concurrent Inbound DC").await;
+    let dock = repo::locations::add_location(
+        &fixture.db,
+        tenant_id,
+        facility,
+        None,
+        Some("CONCURRENT-DOCK"),
+        Some("Concurrent Dock"),
+        "dock",
+        true,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    let inventory_owner = fixture.inventory_owner(tenant_id, "Concurrent Owner").await;
+    let item = fixture.item(tenant_id, "Concurrent Cases", "case").await;
+    let load = repo::loads::add_load(
+        &fixture.db,
+        user.id,
+        facility,
+        inventory_owner,
+        LoadType::Inbound,
+        Some("CONCURRENT-RECEIPT"),
+        None,
+        None,
+        None,
+        None,
+        Some(dock),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let line = repo::loads::add_line(&fixture.db, user.id, load, item, None, 10, None, None, None)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE loads SET status = 'arrived' WHERE id = $1")
+        .bind(load)
+        .execute(&fixture.db)
+        .await
+        .unwrap();
+
+    let receipt_a = repo::loads::receive_line(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        line,
+        dock,
+        5,
+        0,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("concurrent receipt"),
+        "concurrent-receipt-a",
+    );
+    let receipt_b = repo::loads::receive_line(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        line,
+        dock,
+        5,
+        0,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("concurrent receipt"),
+        "concurrent-receipt-b",
+    );
+    let (receipt_a, receipt_b) = tokio::join!(receipt_a, receipt_b);
+    let receipt_a = receipt_a.unwrap();
+    let receipt_b = receipt_b.unwrap();
+    assert_ne!(
+        receipt_a.inventory_transaction_id,
+        receipt_b.inventory_transaction_id
+    );
+
+    let load = repo::loads::get_load(&fixture.db, load, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(load.status, LoadStatus::Received);
+    assert_eq!(load.lines[0].received_qty, 10);
+
+    let balances = repo::inventory::get_balances(&fixture.db, tenant_id, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        balances
+            .iter()
+            .filter(|balance| balance.item_id == item)
+            .map(|balance| balance.qty_on_hand)
+            .sum::<i64>(),
+        10
+    );
+    assert!(
+        repo::inventory::get_reconciliation_issues(&fixture.db, tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -386,8 +531,9 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     .await
     .unwrap());
 
-    let movement = repo::loads::receive_line(
+    let receipt = repo::loads::receive_line(
         &db,
+        tenant_id,
         user.id,
         line,
         dock,
@@ -400,10 +546,11 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         None,
         None,
         Some("short on truck"),
+        "receive-short",
     )
     .await
     .unwrap();
-    assert!(movement > 0);
+    assert!(receipt.inventory_transaction_id.is_some());
 
     let load_row = repo::loads::get_loads(&db, false, false)
         .await
@@ -419,7 +566,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     assert_eq!(load_row.lines[0].missing_confirmed_by, Some(user.id));
     assert!(load_row.lines[0].missing_confirmed_at.is_some());
 
-    let plates = repo::license_plates::get_license_plates(&db, false)
+    let plates = repo::license_plates::get_license_plates(&db, tenant_id, false)
         .await
         .unwrap();
     assert_eq!(plates.len(), 1);
@@ -430,13 +577,16 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     assert_eq!(plate.contents[0].location_id, dock);
     assert_eq!(plate.contents[0].qty_on_hand, 5);
 
-    let balances = repo::inventory::get_balances(&db, false).await.unwrap();
+    let balances = repo::inventory::get_balances(&db, tenant_id, false)
+        .await
+        .unwrap();
     assert_eq!(balances.len(), 1);
     assert_eq!(balances[0].license_plate_id, Some(plate.id));
     assert_eq!(balances[0].qty_on_hand, 5);
 
-    assert!(repo::license_plates::move_license_plate(
+    let plate_move_transaction = repo::license_plates::move_license_plate(
         &db,
+        tenant_id,
         user.id,
         plate.id,
         reserve,
@@ -444,24 +594,30 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         Some("lp-move-1"),
     )
     .await
-    .unwrap());
+    .unwrap();
+    assert!(plate_move_transaction > 0);
 
-    let moved = repo::license_plates::get_license_plate_by_barcode(&db, "LP-0001")
+    let replayed_plate_move = repo::license_plates::move_license_plate(
+        &db,
+        tenant_id,
+        user.id,
+        plate.id,
+        reserve,
+        Some("putaway"),
+        Some("lp-move-1"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replayed_plate_move, plate_move_transaction);
+
+    let moved = repo::license_plates::get_license_plate_by_barcode(&db, tenant_id, "LP-0001")
         .await
         .unwrap()
         .unwrap();
     assert_eq!(moved.location_id, Some(reserve));
     assert_eq!(moved.contents[0].location_id, reserve);
 
-    let acc = repo::inventory_owners::add_inventory_owner(
-        &db,
-        tenant_id,
-        "LP Reserve Customer",
-        "lp-customer@test.com",
-    )
-    .await
-    .unwrap();
-    repo::orders::add_order(&db, &new_order("LP-RES-1", Some(acc)))
+    repo::orders::add_order(&db, &new_order("LP-RES-1", Some(inventory_owner)))
         .await
         .unwrap();
     let order_id = repo::orders::get_orders(&db)
@@ -473,7 +629,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         .id;
     repo::inventory::reserve_inventory(
         &db,
-        user.id,
+        tenant_id,
         order_id,
         None,
         moved.contents[0].inventory_balance_id,
@@ -484,6 +640,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
 
     let err = repo::license_plates::move_license_plate(
         &db,
+        tenant_id,
         user.id,
         plate.id,
         dock,
@@ -494,7 +651,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     .unwrap_err();
     assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
 
-    let err = repo::license_plates::set_license_plate_deleted(&db, plate.id, true)
+    let err = repo::license_plates::set_license_plate_deleted(&db, tenant_id, plate.id, true)
         .await
         .unwrap_err();
     assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));

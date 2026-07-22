@@ -49,7 +49,7 @@ impl WareboxesApp {
             ("location", "By Location"),
             ("facility", "By Facility"),
             ("item", "By Item"),
-            ("movements", "Movements"),
+            ("journal", "Journal"),
         ];
         if !inventory_tabs.iter().any(|(value, _)| *value == tab) {
             tab = "actions".to_owned();
@@ -67,7 +67,7 @@ impl WareboxesApp {
             "location" => self.inventory_location_summary_tab(ui),
             "facility" => self.inventory_facility_summary_tab(ui),
             "item" => self.inventory_item_summary_tab(ui),
-            "movements" => self.inventory_movements_tab(ui),
+            "journal" => self.inventory_journal_tab(ui),
             _ => self.inventory_actions_tab(ui),
         }
     }
@@ -76,10 +76,18 @@ impl WareboxesApp {
         ui.collapsing("New item batch", |ui| {
             let item_options = self.item_options();
             let load_options = self.load_options();
+            let inventory_owner_options = self.inventory_owner_options();
             ui.horizontal_wrapped(|ui| {
+                let inventory_owner_key = "inventory:new:inventory_owner_id".to_owned();
                 let item_key = "inventory:new:item_id".to_owned();
                 let load_key = "inventory:new:load_id".to_owned();
                 let lot_key = "inventory:new:lot".to_owned();
+                let mut inventory_owner_id = self
+                    .forms
+                    .drafts
+                    .get(&inventory_owner_key)
+                    .cloned()
+                    .unwrap_or_default();
                 let mut item_id = self
                     .forms
                     .drafts
@@ -93,6 +101,14 @@ impl WareboxesApp {
                     .cloned()
                     .unwrap_or_default();
                 let mut lot = self.forms.drafts.get(&lot_key).cloned().unwrap_or_default();
+                ui.label("Inventory owner");
+                let selected_inventory_owner_id = Self::entity_picker(
+                    ui,
+                    "inventory_new_inventory_owner",
+                    &mut inventory_owner_id,
+                    &inventory_owner_options,
+                    "Search inventory owner",
+                );
                 ui.label("Item");
                 let selected_item_id = Self::entity_picker(
                     ui,
@@ -112,17 +128,27 @@ impl WareboxesApp {
                 ui.label("Lot");
                 ui.text_edit_singleline(&mut lot);
                 if ui.button("Create").clicked() {
-                    if let Some(iid) = selected_item_id {
+                    if let (Some(inventory_owner_id), Some(item_id)) =
+                        (selected_inventory_owner_id, selected_item_id)
+                    {
                         self.api.action(
                             "/api/inventory/batches/add",
-                            json!({"item_id": iid, "load_id": selected_load_id, "lot": lot}),
+                            json!({
+                                "inventory_owner_id": inventory_owner_id,
+                                "item_id": item_id,
+                                "load_id": selected_load_id,
+                                "lot": lot
+                            }),
                             Screen::Inventory,
                             "Batch created",
                         );
                     } else {
-                        self.toast("Choose an item", true, self.now);
+                        self.toast("Choose an inventory owner and item", true, self.now);
                     }
                 }
+                self.forms
+                    .drafts
+                    .insert(inventory_owner_key, inventory_owner_id);
                 self.forms.drafts.insert(item_key, item_id);
                 self.forms.drafts.insert(load_key, load_id);
                 self.forms.drafts.insert(lot_key, lot);
@@ -558,9 +584,10 @@ impl WareboxesApp {
                                             "from_inventory_balance_id": balance.id,
                                             "destinations": destinations,
                                             "reason": reason.trim(),
+                                            "idempotency_key": uuid::Uuid::new_v4().to_string(),
                                         });
                                         self.api.action(
-                                            "/api/inventory/movements/split",
+                                            "/api/inventory/moves/split",
                                             body,
                                             Screen::Inventory,
                                             "Inventory moved",
@@ -869,43 +896,70 @@ impl WareboxesApp {
             });
     }
 
-    fn inventory_movements_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Movements");
-        for movement in &self.data.movements {
-            ui.label(format!(
-                "#{} {} batch {}: {} -> {}, qty {}",
-                movement.id,
-                movement.movement_type,
-                movement.item_batch_id,
-                movement
-                    .from_location_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "external".to_owned()),
-                movement
-                    .to_location_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "external".to_owned()),
-                movement.qty
+    fn inventory_journal_tab(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Inventory Journal");
+        for transaction in &self.data.inventory_transactions {
+            ui.strong(format!(
+                "#{} {} | owner {} | {}",
+                transaction.id,
+                transaction.transaction_type,
+                transaction.inventory_owner_id,
+                transaction.operation
             ));
+            for entry in &transaction.entries {
+                ui.label(format!(
+                    "  {:+} {} item {} | batch {} | location {} | {}",
+                    entry.quantity_delta,
+                    entry.uom,
+                    entry.item_id,
+                    entry.item_batch_id,
+                    entry.location_id,
+                    entry.status
+                ));
+            }
         }
     }
 
     // ---- License Plates -------------------------------------------------
     pub(super) fn license_plates_screen(&mut self, ui: &mut egui::Ui) {
         ui.collapsing("New license plate", |ui| {
-            ui.horizontal(|ui| {
+            let owner_options = self.inventory_owner_options();
+            let owner_key = "license_plate:new:inventory_owner_id".to_owned();
+            let mut owner_id = self
+                .forms
+                .drafts
+                .get(&owner_key)
+                .cloned()
+                .unwrap_or_default();
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Inventory owner");
+                let selected_owner_id = Self::entity_picker(
+                    ui,
+                    "license_plate_new_owner",
+                    &mut owner_id,
+                    &owner_options,
+                    "Search inventory owner",
+                );
                 ui.label("Barcode");
                 ui.text_edit_singleline(&mut self.forms.new_barcode);
                 if ui.button("Create").clicked() {
-                    self.api.action(
-                        "/api/license-plates/add",
-                        json!({"barcode": self.forms.new_barcode}),
-                        Screen::LicensePlates,
-                        "License plate created",
-                    );
-                    self.forms.new_barcode.clear();
+                    if let Some(inventory_owner_id) = selected_owner_id {
+                        self.api.action(
+                            "/api/license-plates/add",
+                            json!({
+                                "inventory_owner_id": inventory_owner_id,
+                                "barcode": self.forms.new_barcode
+                            }),
+                            Screen::LicensePlates,
+                            "License plate created",
+                        );
+                        self.forms.new_barcode.clear();
+                    } else {
+                        self.toast("Choose an inventory owner", true, self.now);
+                    }
                 }
             });
+            self.forms.drafts.insert(owner_key, owner_id);
         });
         ui.separator();
 
@@ -1028,6 +1082,7 @@ impl WareboxesApp {
                                         "license_plate_id": lp.id,
                                         "to_location_id": to_location_id,
                                         "reason": reason.clone(),
+                                        "idempotency_key": uuid::Uuid::new_v4().to_string(),
                                     }),
                                     Screen::LicensePlates,
                                     "License plate moved",

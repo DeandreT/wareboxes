@@ -8,8 +8,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use wareboxes_core::dto::{ErrorResponse, OrderPage, SessionUser, UserSettings};
 use wareboxes_core::models::{
-    AuditWave, Employee, Facility, InventoryBalance, InventoryOwner, Item, ItemBatch, LicensePlate,
-    Load, Location, Movement, Order, Permission, Role, User,
+    AuditWave, Employee, Facility, InventoryBalance, InventoryOwner, InventoryTransaction, Item,
+    ItemBatch, LicensePlate, Load, Location, Order, Permission, Role, User,
 };
 use wareboxes_domain::TenantId;
 
@@ -34,7 +34,7 @@ pub enum ApiEvent {
     LoadDetail(Load),
     ItemBatches(Vec<ItemBatch>),
     InventoryBalances(Vec<InventoryBalance>),
-    Movements(Vec<Movement>),
+    InventoryTransactions(Vec<InventoryTransaction>),
     LicensePlates(Vec<LicensePlate>),
     LicensePlateLookup(Option<LicensePlate>),
     Employees(Vec<Employee>),
@@ -241,9 +241,9 @@ impl ApiClient {
         }
     }
 
-    pub fn get_movements(&self) {
-        let req = ehttp::Request::get(self.url("/api/inventory/movements"));
-        self.send::<Vec<Movement>, _>(req, ApiEvent::Movements);
+    pub fn get_inventory_transactions(&self) {
+        let req = ehttp::Request::get(self.url("/api/inventory/transactions"));
+        self.send::<Vec<InventoryTransaction>, _>(req, ApiEvent::InventoryTransactions);
     }
 
     pub fn get_inventory_balances(&self) {

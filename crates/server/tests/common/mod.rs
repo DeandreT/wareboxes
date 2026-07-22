@@ -8,8 +8,8 @@ use url::Url;
 
 pub use wareboxes_core::dto::{NewOrder, OrderUpdate};
 pub use wareboxes_core::models::{
-    LoadLineStatus, LoadStatus, LoadType, MovementType, OrderStatus, WorkTaskProgressAction,
-    WorkTaskStatus, WorkTaskType,
+    InventoryTransactionType, LoadLineStatus, LoadStatus, LoadType, OrderStatus,
+    WorkTaskProgressAction, WorkTaskStatus, WorkTaskType,
 };
 pub use wareboxes_core::CoreError;
 pub use wareboxes_domain::TenantId;
