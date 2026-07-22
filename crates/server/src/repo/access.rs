@@ -116,6 +116,36 @@ pub async fn item_batch_owner(
         .transpose()
 }
 
+pub async fn license_plate_dimensions(
+    db: &Db,
+    access: &TenantAccess,
+    license_plate_id: i64,
+    include_deleted: bool,
+) -> AppResult<Option<OperationalDimensions>> {
+    let scope = ScopeBindings::for_access(access);
+    let row = sqlx::query(
+        r#"
+        SELECT facility_id, inventory_owner_id
+        FROM license_plates
+        WHERE tenant_id = $1
+          AND id = $2
+          AND ($3 OR deleted IS NULL)
+          AND ($4 OR facility_id = ANY($5))
+          AND ($6 OR inventory_owner_id = ANY($7))
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(license_plate_id)
+    .bind(include_deleted)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .fetch_optional(db)
+    .await?;
+    row.as_ref().map(dimensions_from_row).transpose()
+}
+
 pub async fn inventory_balance_dimensions(
     db: &Db,
     access: &TenantAccess,

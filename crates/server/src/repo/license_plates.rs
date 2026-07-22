@@ -2,12 +2,13 @@
 
 use sqlx::Row;
 use wareboxes_core::models::{
-    InventoryStatus, InventoryTransactionType, LicensePlate, LicensePlateContent,
+    InventoryStatus, InventoryTransactionType, LicensePlate, LicensePlateContent, TenantAccess,
 };
 use wareboxes_domain::{InventoryOwnerId, TenantId};
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
+use crate::repo::access::ScopeBindings;
 use crate::repo::inventory;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
 
@@ -26,6 +27,7 @@ fn map(row: &sqlx::postgres::PgRow) -> AppResult<LicensePlate> {
         created: row.try_get("created")?,
         deleted: row.try_get("deleted")?,
         barcode: row.try_get("barcode")?,
+        facility_id: row.try_get("facility_id")?,
         location_id: row.try_get("location_id")?,
         dims_id: row.try_get("dims_id")?,
         contents: Vec::new(),
@@ -87,16 +89,42 @@ pub async fn get_license_plates(
     tenant_id: TenantId,
     show_deleted: bool,
 ) -> AppResult<Vec<LicensePlate>> {
+    get_license_plates_with_scope(db, tenant_id, &ScopeBindings::unrestricted(), show_deleted).await
+}
+
+pub async fn get_license_plates_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    show_deleted: bool,
+) -> AppResult<Vec<LicensePlate>> {
+    let scope = ScopeBindings::for_access(access);
+    get_license_plates_with_scope(db, access.tenant_id, &scope, show_deleted).await
+}
+
+async fn get_license_plates_with_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    scope: &ScopeBindings,
+    show_deleted: bool,
+) -> AppResult<Vec<LicensePlate>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, tenant_id, inventory_owner_id, created, deleted, barcode, location_id, dims_id
+        SELECT id, tenant_id, inventory_owner_id, created, deleted, barcode,
+               facility_id, location_id, dims_id
         FROM license_plates
-        WHERE tenant_id = $1 AND ($2 OR deleted IS NULL)
+        WHERE tenant_id = $1
+          AND ($2 OR deleted IS NULL)
+          AND ($3 OR facility_id = ANY($4))
+          AND ($5 OR inventory_owner_id = ANY($6))
         ORDER BY id
         "#,
     )
     .bind(tenant_id.get())
     .bind(show_deleted)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
     .fetch_all(db)
     .await?;
     let mut plates = rows.iter().map(map).collect::<AppResult<Vec<_>>>()?;
@@ -113,13 +141,46 @@ pub async fn get_license_plate_by_barcode(
     tenant_id: TenantId,
     barcode: &str,
 ) -> AppResult<Option<LicensePlate>> {
+    get_license_plate_by_barcode_with_scope(db, tenant_id, &ScopeBindings::unrestricted(), barcode)
+        .await
+}
+
+pub async fn get_license_plate_by_barcode_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    barcode: &str,
+) -> AppResult<Option<LicensePlate>> {
+    let scope = ScopeBindings::for_access(access);
+    get_license_plate_by_barcode_with_scope(db, access.tenant_id, &scope, barcode).await
+}
+
+async fn get_license_plate_by_barcode_with_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    scope: &ScopeBindings,
+    barcode: &str,
+) -> AppResult<Option<LicensePlate>> {
     let Some(row) = sqlx::query(
-        "SELECT id, tenant_id, inventory_owner_id, created, deleted, barcode, location_id, dims_id FROM license_plates WHERE tenant_id = $1 AND barcode = $2 AND deleted IS NULL",
+        r#"
+        SELECT id, tenant_id, inventory_owner_id, created, deleted, barcode,
+               facility_id, location_id, dims_id
+        FROM license_plates
+        WHERE tenant_id = $1
+          AND barcode = $2
+          AND deleted IS NULL
+          AND ($3 OR facility_id = ANY($4))
+          AND ($5 OR inventory_owner_id = ANY($6))
+        "#,
     )
     .bind(tenant_id.get())
     .bind(barcode)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
     .fetch_optional(db)
-    .await? else {
+    .await?
+    else {
         return Ok(None);
     };
     let mut plate = map(&row)?;
@@ -132,15 +193,17 @@ pub async fn add_license_plate(
     db: &Db,
     tenant_id: TenantId,
     inventory_owner_id: i64,
+    facility_id: i64,
     barcode: Option<&str>,
 ) -> AppResult<i64> {
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO license_plates (tenant_id, inventory_owner_id, created, barcode) VALUES ($1, $2, $3, $4) RETURNING id",
+        "INSERT INTO license_plates (tenant_id, inventory_owner_id, created, barcode, facility_id) VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
     .bind(tenant_id.get())
     .bind(inventory_owner_id)
     .bind(now_iso())
     .bind(barcode)
+    .bind(facility_id)
     .fetch_one(db)
     .await?;
     Ok(id)
@@ -154,50 +217,106 @@ pub async fn find_or_create_license_plate_tx(
     license_plate_id: Option<i64>,
     location_id: i64,
 ) -> AppResult<Option<i64>> {
-    let now = now_iso();
-    let id = match (license_plate_id, barcode) {
-        (Some(id), _) => id,
+    if license_plate_id.is_none() && barcode.is_none() {
+        return Ok(None);
+    }
+    let facility_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT facility_id
+        FROM locations
+        WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL AND active
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(location_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::bad_request("license plate location was not found or is inactive"))?;
+
+    let (id, plate_owner_id, plate_facility_id, current_location) = match (
+        license_plate_id,
+        barcode,
+    ) {
+        (Some(id), _) => {
+            let row = sqlx::query(
+                r#"
+                SELECT id, inventory_owner_id, facility_id, location_id
+                FROM license_plates
+                WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL
+                FOR UPDATE
+                "#,
+            )
+            .bind(tenant_id.get())
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| AppError::not_found("license plate"))?;
+            (
+                row.try_get("id")?,
+                row.try_get("inventory_owner_id")?,
+                row.try_get("facility_id")?,
+                row.try_get("location_id")?,
+            )
+        }
         (None, Some(barcode)) => {
             if barcode.trim().is_empty() {
                 return Err(AppError::bad_request(
                     "license plate barcode cannot be blank",
                 ));
             }
-            if let Some(id) = sqlx::query_scalar::<_, i64>(
-                "SELECT id FROM license_plates WHERE tenant_id = $1 AND inventory_owner_id = $2 AND barcode = $3 AND deleted IS NULL",
+            if let Some(row) = sqlx::query(
+                r#"
+                SELECT id, inventory_owner_id, facility_id, location_id,
+                       deleted IS NOT NULL AS is_deleted
+                FROM license_plates
+                WHERE tenant_id = $1 AND barcode = $2
+                FOR UPDATE
+                "#,
             )
             .bind(tenant_id.get())
-            .bind(inventory_owner_id)
             .bind(barcode)
             .fetch_optional(&mut **tx)
             .await?
             {
-                id
+                if row.try_get::<bool, _>("is_deleted")? {
+                    return Err(AppError::conflict(
+                        "license plate barcode belongs to a deleted license plate",
+                    ));
+                }
+                (
+                    row.try_get("id")?,
+                    row.try_get("inventory_owner_id")?,
+                    row.try_get("facility_id")?,
+                    row.try_get("location_id")?,
+                )
             } else {
-                sqlx::query_scalar::<_, i64>(
-                    "INSERT INTO license_plates (tenant_id, inventory_owner_id, created, barcode, location_id) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+                let id = sqlx::query_scalar::<_, i64>(
+                    "INSERT INTO license_plates (tenant_id, inventory_owner_id, created, barcode, facility_id, location_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
                 )
                 .bind(tenant_id.get())
                 .bind(inventory_owner_id)
-                .bind(now)
+                .bind(now_iso())
                 .bind(barcode)
+                .bind(facility_id)
                 .bind(location_id)
                 .fetch_one(&mut **tx)
-                .await?
+                .await?;
+                (id, inventory_owner_id, facility_id, Some(location_id))
             }
         }
         (None, None) => return Ok(None),
     };
 
-    let current_location = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT location_id FROM license_plates WHERE tenant_id = $1 AND inventory_owner_id = $2 AND id = $3 AND deleted IS NULL FOR UPDATE",
-    )
-    .bind(tenant_id.get())
-    .bind(inventory_owner_id)
-    .bind(id)
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or_else(|| AppError::not_found("license plate"))?;
+    if plate_owner_id != inventory_owner_id {
+        return Err(AppError::conflict(
+            "license plate belongs to a different inventory owner",
+        ));
+    }
+    if plate_facility_id != facility_id {
+        return Err(AppError::conflict(
+            "license plate belongs to a different facility; use an inventory transfer workflow",
+        ));
+    }
     if let Some(current_location) = current_location {
         if current_location != location_id {
             return Err(AppError::conflict(
@@ -260,7 +379,7 @@ pub async fn move_license_plate(
     }
 
     let plate = sqlx::query(
-        "SELECT inventory_owner_id, location_id FROM license_plates WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL FOR UPDATE",
+        "SELECT inventory_owner_id, facility_id, location_id FROM license_plates WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL FOR UPDATE",
     )
     .bind(tenant_id.get())
     .bind(id)
@@ -268,6 +387,7 @@ pub async fn move_license_plate(
     .await?
     .ok_or_else(|| AppError::not_found("license plate"))?;
     let inventory_owner_id: i64 = plate.try_get("inventory_owner_id")?;
+    let plate_facility_id: i64 = plate.try_get("facility_id")?;
     let plate_location: Option<i64> = plate.try_get("location_id")?;
 
     let transaction_id = match inventory_journal::begin_transaction(
@@ -303,6 +423,11 @@ pub async fn move_license_plate(
     .bind(to_location_id)
     .fetch_one(&mut *tx)
     .await?;
+    if plate_facility_id != destination_facility_id {
+        return Err(AppError::conflict(
+            "license plate moves cannot cross facilities; use an inventory transfer workflow",
+        ));
+    }
 
     let content_rows = sqlx::query(
         r#"
@@ -348,6 +473,11 @@ pub async fn move_license_plate(
         ));
     }
     let source_facility_id: i64 = content_rows[0].try_get("facility_id")?;
+    if source_facility_id != plate_facility_id {
+        return Err(AppError::internal(
+            "license plate inventory does not match its facility",
+        ));
+    }
     if source_facility_id != destination_facility_id {
         return Err(AppError::conflict(
             "inventory moves cannot cross facilities; use an inventory transfer workflow",

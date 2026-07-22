@@ -924,11 +924,19 @@ impl WareboxesApp {
     pub(super) fn license_plates_screen(&mut self, ui: &mut egui::Ui) {
         ui.collapsing("New license plate", |ui| {
             let owner_options = self.inventory_owner_options();
+            let facility_options = self.facility_options();
             let owner_key = "license_plate:new:inventory_owner_id".to_owned();
+            let facility_key = "license_plate:new:facility_id".to_owned();
             let mut owner_id = self
                 .forms
                 .drafts
                 .get(&owner_key)
+                .cloned()
+                .unwrap_or_default();
+            let mut facility_id = self
+                .forms
+                .drafts
+                .get(&facility_key)
                 .cloned()
                 .unwrap_or_default();
             ui.horizontal_wrapped(|ui| {
@@ -940,14 +948,25 @@ impl WareboxesApp {
                     &owner_options,
                     "Search inventory owner",
                 );
+                ui.label("Facility");
+                let selected_facility_id = Self::entity_picker(
+                    ui,
+                    "license_plate_new_facility",
+                    &mut facility_id,
+                    &facility_options,
+                    "Search facility",
+                );
                 ui.label("Barcode");
                 ui.text_edit_singleline(&mut self.forms.new_barcode);
                 if ui.button("Create").clicked() {
-                    if let Some(inventory_owner_id) = selected_owner_id {
+                    if let (Some(inventory_owner_id), Some(facility_id)) =
+                        (selected_owner_id, selected_facility_id)
+                    {
                         self.api.action(
                             "/api/license-plates/add",
                             json!({
                                 "inventory_owner_id": inventory_owner_id,
+                                "facility_id": facility_id,
                                 "barcode": self.forms.new_barcode
                             }),
                             Screen::LicensePlates,
@@ -955,11 +974,12 @@ impl WareboxesApp {
                         );
                         self.forms.new_barcode.clear();
                     } else {
-                        self.toast("Choose an inventory owner", true, self.now);
+                        self.toast("Choose an inventory owner and facility", true, self.now);
                     }
                 }
             });
             self.forms.drafts.insert(owner_key, owner_id);
+            self.forms.drafts.insert(facility_key, facility_id);
         });
         ui.separator();
 
@@ -1017,9 +1037,10 @@ impl WareboxesApp {
                 ui.group(|ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.strong(format!(
-                            "#{} {}",
+                            "#{} {} | facility {}",
                             lp.id,
-                            lp.barcode.clone().unwrap_or_default()
+                            lp.barcode.clone().unwrap_or_default(),
+                            lp.facility_id,
                         ));
                         ui.label("location");
                         if let Some(location_id) = lp.location_id {

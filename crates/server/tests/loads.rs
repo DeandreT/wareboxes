@@ -912,6 +912,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     assert_eq!(plates.len(), 1);
     let plate = &plates[0];
     assert_eq!(plate.barcode.as_deref(), Some("LP-0001"));
+    assert_eq!(plate.facility_id, facility);
     assert_eq!(plate.location_id, Some(dock));
     assert_eq!(plate.contents.len(), 1);
     assert_eq!(plate.contents[0].location_id, dock);

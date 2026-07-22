@@ -426,6 +426,8 @@ pub struct EmployeeIdRequest {
 pub struct AddLicensePlate {
     #[validate(range(min = 1, message = "Invalid inventory owner ID"))]
     pub inventory_owner_id: i64,
+    #[validate(range(min = 1, message = "Invalid facility ID"))]
+    pub facility_id: i64,
     pub barcode: Option<String>,
 }
 
