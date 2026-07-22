@@ -68,6 +68,3 @@ rustup target add wasm32-unknown-unknown
 scripts/build-site.sh
 python3 -m http.server 4173 --directory _site
 ```
-
-Pushes to `main` that change the site or client deploy through the GitHub Pages
-workflow.
