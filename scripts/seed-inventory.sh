@@ -188,10 +188,12 @@ BEGIN
     plate := NULL;
     IF i % 8 = 0 THEN
       INSERT INTO license_plates
-          (tenant_id, inventory_owner_id, created, barcode, location_id)
-      VALUES (tenant, owner, now(), 'WB-SEED-LP-' || position_no, location)
+          (tenant_id, inventory_owner_id, created, barcode, facility_id, location_id)
+      VALUES (tenant, owner, now(), 'WB-SEED-LP-' || position_no, facility, location)
       ON CONFLICT (tenant_id, barcode) DO UPDATE
-      SET deleted = NULL, location_id = EXCLUDED.location_id
+      SET deleted = NULL,
+          facility_id = EXCLUDED.facility_id,
+          location_id = EXCLUDED.location_id
       RETURNING id INTO plate;
     END IF;
 

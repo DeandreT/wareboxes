@@ -658,6 +658,7 @@ pub struct LicensePlate {
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub barcode: Option<String>,
+    pub facility_id: i64,
     pub location_id: Option<i64>,
     pub dims_id: Option<i64>,
     #[serde(default)]

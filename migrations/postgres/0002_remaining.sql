@@ -257,15 +257,20 @@ CREATE TABLE license_plates (
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     barcode TEXT,
+    facility_id BIGINT NOT NULL,
     location_id BIGINT,
     dims_id BIGINT REFERENCES dims(id),
     UNIQUE (tenant_id, id),
     UNIQUE (tenant_id, inventory_owner_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, id),
     UNIQUE (tenant_id, barcode),
     FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
-    FOREIGN KEY (tenant_id, location_id) REFERENCES locations(tenant_id, id)
+    FOREIGN KEY (tenant_id, facility_id) REFERENCES facilities(tenant_id, id),
+    FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES locations(tenant_id, facility_id, id)
 );
-CREATE INDEX idx_license_plates_location_id ON license_plates(location_id) WHERE deleted IS NULL;
+CREATE INDEX idx_license_plates_facility_location
+    ON license_plates(tenant_id, facility_id, location_id)
+    WHERE deleted IS NULL;
 
 CREATE TABLE inventory_balances (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -292,7 +297,7 @@ CREATE TABLE inventory_balances (
     UNIQUE (tenant_id, inventory_owner_id, id),
     FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
     FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES locations(tenant_id, facility_id, id),
-    FOREIGN KEY (tenant_id, inventory_owner_id, license_plate_id) REFERENCES license_plates(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES license_plates(tenant_id, inventory_owner_id, facility_id, id),
     FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES item_batches(tenant_id, inventory_owner_id, id),
     FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id)
 );
@@ -371,7 +376,7 @@ CREATE TABLE inventory_entries (
     FOREIGN KEY (tenant_id, inventory_owner_id, transaction_id) REFERENCES inventory_transactions(tenant_id, inventory_owner_id, id),
     FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES item_batches(tenant_id, inventory_owner_id, id),
     FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES locations(tenant_id, facility_id, id),
-    FOREIGN KEY (tenant_id, inventory_owner_id, license_plate_id) REFERENCES license_plates(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES license_plates(tenant_id, inventory_owner_id, facility_id, id),
     FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id),
     CHECK (quantity_delta <> 0),
     CHECK (status IN ('available', 'hold', 'damaged', 'quarantine')),
