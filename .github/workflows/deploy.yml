@@ -15,6 +15,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  WAREBOXES_API_URL: https://api.88-198-229-62.sslip.io
+  WAREBOXES_DEMO_EMAIL: demo@wareboxes.app
+  WAREBOXES_DEMO_PASSWORD: wareboxes-demo
 
 jobs:
   deploy:
