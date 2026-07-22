@@ -217,6 +217,7 @@ CREATE TABLE order_items (
     item_id BIGINT NOT NULL,
     order_id BIGINT NOT NULL,
     item_batch_id BIGINT,
+    UNIQUE (tenant_id, id),
     UNIQUE (tenant_id, inventory_owner_id, id),
     FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES orders(tenant_id, inventory_owner_id, id)
 );
