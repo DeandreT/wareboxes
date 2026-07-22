@@ -18,18 +18,6 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     let assignee = auth::register_user(&db, "task-worker@test.com", "supersecret", None, None)
         .await
         .unwrap();
-    let wms_perm = repo::permissions::add_permission(&db, "wms", Some("WMS"))
-        .await
-        .unwrap();
-    let wms_role = repo::roles::add_role(&db, "task-wms", Some("task worker"))
-        .await
-        .unwrap();
-    repo::roles::add_role_permission(&db, wms_role, wms_perm)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(&db, assignee.id, wms_role)
-        .await
-        .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
     sqlx::query(
         "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
@@ -39,6 +27,18 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     .execute(&db)
     .await
     .unwrap();
+    let wms_perm = repo::permissions::add_permission(&db, tenant_id, "wms", Some("WMS"))
+        .await
+        .unwrap();
+    let wms_role = repo::roles::add_role(&db, tenant_id, "task-wms", Some("task worker"))
+        .await
+        .unwrap();
+    repo::roles::add_role_permission(&db, tenant_id, wms_role, wms_perm)
+        .await
+        .unwrap();
+    repo::roles::add_role_to_user(&db, tenant_id, assignee.id, wms_role)
+        .await
+        .unwrap();
     let facility = repo::facilities::add_facility(&db, tenant_id, "Task DC")
         .await
         .unwrap();
@@ -544,15 +544,14 @@ async fn task_queue_is_tenant_isolated_and_claims_once() {
 
     let worker_a = fixture.user("task-scope-worker-a@test.com").await;
     let worker_b = fixture.user("task-scope-worker-b@test.com").await;
-    let role_id: i64 =
-        sqlx::query_scalar("SELECT id FROM roles WHERE name = 'task-scope-operator@test.com-wms'")
-            .fetch_one(&fixture.db)
-            .await
-            .unwrap();
+    let role_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM roles WHERE tenant_id = $1 AND name = 'task-scope-operator@test.com-wms'",
+    )
+    .bind(tenant_a.get())
+    .fetch_one(&fixture.db)
+    .await
+    .unwrap();
     for worker in [&worker_a, &worker_b] {
-        repo::roles::add_role_to_user(&fixture.db, worker.id, role_id)
-            .await
-            .unwrap();
         sqlx::query(
             "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
         )
@@ -561,6 +560,9 @@ async fn task_queue_is_tenant_isolated_and_claims_once() {
         .execute(&fixture.db)
         .await
         .unwrap();
+        repo::roles::add_role_to_user(&fixture.db, tenant_a, worker.id, role_id)
+            .await
+            .unwrap();
     }
 
     let first_db = fixture.db.clone();
@@ -645,6 +647,25 @@ async fn task_queue_is_tenant_isolated_and_claims_once() {
     .await
     .unwrap();
     assert_eq!(cancellation_events, 1);
+
+    let tenant_b_permission =
+        repo::permissions::add_permission(&fixture.db, tenant_b, "wms", Some("WMS"))
+            .await
+            .unwrap();
+    let tenant_b_role = repo::roles::add_role(
+        &fixture.db,
+        tenant_b,
+        "task-scope-operator@test.com-wms",
+        Some("WMS worker"),
+    )
+    .await
+    .unwrap();
+    repo::roles::add_role_permission(&fixture.db, tenant_b, tenant_b_role, tenant_b_permission)
+        .await
+        .unwrap();
+    repo::roles::add_role_to_user(&fixture.db, tenant_b, operator.id, tenant_b_role)
+        .await
+        .unwrap();
 
     let token = auth::create_session(&fixture.db, operator.id)
         .await

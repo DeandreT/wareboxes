@@ -6,7 +6,7 @@ use wareboxes_core::dto::{
 };
 use wareboxes_core::models::Role;
 
-use crate::auth::CurrentUser;
+use crate::auth::CurrentTenant;
 use crate::error::AppResult;
 use crate::repo;
 use crate::routes::validate;
@@ -24,34 +24,47 @@ pub struct RoleQuery {
 
 pub async fn list(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Query(q): Query<RoleQuery>,
 ) -> AppResult<Json<Vec<Role>>> {
     user.require_permission(&state.db, PERM).await?;
-    let roles = repo::roles::get_roles(&state.db, q.show_deleted, q.show_self).await?;
+    let roles = repo::roles::get_roles(
+        &state.db,
+        user.tenant.tenant_id,
+        q.show_deleted,
+        q.show_self,
+    )
+    .await?;
     Ok(Json(roles))
 }
 
 pub async fn add(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddRole>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let id = repo::roles::add_role(&state.db, &body.name, body.description.as_deref()).await?;
+    let id = repo::roles::add_role(
+        &state.db,
+        user.tenant.tenant_id,
+        &body.name,
+        body.description.as_deref(),
+    )
+    .await?;
     Ok(Json(id))
 }
 
 pub async fn update(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<UpdateRole>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     let ok = repo::roles::update_role(
         &state.db,
+        user.tenant.tenant_id,
         body.role_id,
         body.name.as_deref(),
         body.description.as_deref(),
@@ -62,68 +75,88 @@ pub async fn update(
 
 pub async fn delete(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<RoleIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::roles::set_role_deleted(&state.db, body.role_id, true).await?;
+    let ok =
+        repo::roles::set_role_deleted(&state.db, user.tenant.tenant_id, body.role_id, true).await?;
     Ok(Json(ok))
 }
 
 pub async fn restore(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<RoleIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::roles::set_role_deleted(&state.db, body.role_id, false).await?;
+    let ok = repo::roles::set_role_deleted(&state.db, user.tenant.tenant_id, body.role_id, false)
+        .await?;
     Ok(Json(ok))
 }
 
 pub async fn add_child(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddDeleteChildRole>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok =
-        repo::roles::add_role_relationship(&state.db, body.role_id, body.child_role_id).await?;
+    let ok = repo::roles::add_role_relationship(
+        &state.db,
+        user.tenant.tenant_id,
+        body.role_id,
+        body.child_role_id,
+    )
+    .await?;
     Ok(Json(ok))
 }
 
 pub async fn remove_child(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddDeleteChildRole>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::roles::delete_role_relationship(&state.db, body.child_role_id).await?;
+    let ok =
+        repo::roles::delete_role_relationship(&state.db, user.tenant.tenant_id, body.child_role_id)
+            .await?;
     Ok(Json(ok))
 }
 
 pub async fn add_permission(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddDeleteRolePermission>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::roles::add_role_permission(&state.db, body.role_id, body.permission_id).await?;
+    let ok = repo::roles::add_role_permission(
+        &state.db,
+        user.tenant.tenant_id,
+        body.role_id,
+        body.permission_id,
+    )
+    .await?;
     Ok(Json(ok))
 }
 
 pub async fn remove_permission(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddDeleteRolePermission>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok =
-        repo::roles::delete_role_permission(&state.db, body.role_id, body.permission_id).await?;
+    let ok = repo::roles::delete_role_permission(
+        &state.db,
+        user.tenant.tenant_id,
+        body.role_id,
+        body.permission_id,
+    )
+    .await?;
     Ok(Json(ok))
 }

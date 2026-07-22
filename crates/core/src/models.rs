@@ -102,6 +102,7 @@ pub struct Role {
     pub name: String,
     pub description: Option<String>,
     pub parent_id: Option<i64>,
+    pub self_user_id: Option<i64>,
     #[serde(default)]
     pub parent_roles: Vec<Role>,
     #[serde(default)]
@@ -116,7 +117,7 @@ impl Role {
     pub const SELF_ROLE_DESCRIPTION: &'static str = "Self role";
 
     pub fn is_self_role(&self) -> bool {
-        self.description.as_deref() == Some(Self::SELF_ROLE_DESCRIPTION)
+        self.self_user_id.is_some()
     }
 }
 

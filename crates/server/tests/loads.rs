@@ -469,6 +469,24 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
     .execute(&fixture.db)
     .await
     .unwrap();
+    let tenant_b_permission =
+        repo::permissions::add_permission(&fixture.db, tenant_b, "wms", Some("WMS"))
+            .await
+            .unwrap();
+    let tenant_b_role = repo::roles::add_role(
+        &fixture.db,
+        tenant_b,
+        "load-scope-operator@test.com-wms",
+        Some("WMS worker"),
+    )
+    .await
+    .unwrap();
+    repo::roles::add_role_permission(&fixture.db, tenant_b, tenant_b_role, tenant_b_permission)
+        .await
+        .unwrap();
+    repo::roles::add_role_to_user(&fixture.db, tenant_b, operator.id, tenant_b_role)
+        .await
+        .unwrap();
 
     let facility = fixture.facility(tenant_a, "Scoped Load Facility").await;
     let dock = repo::locations::add_location(

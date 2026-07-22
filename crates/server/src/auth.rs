@@ -98,24 +98,6 @@ pub struct CurrentUser {
     pub user: User,
 }
 
-impl CurrentUser {
-    pub async fn require_permission(&self, db: &Db, permission: &str) -> AppResult<()> {
-        if permissions::user_has_permission(db, self.user.id, permission).await? {
-            Ok(())
-        } else {
-            Err(AppError::forbidden())
-        }
-    }
-
-    pub async fn require_any_permission(&self, db: &Db, perms: &[&str]) -> AppResult<()> {
-        if permissions::user_has_any_permission(db, self.user.id, perms).await? {
-            Ok(())
-        } else {
-            Err(AppError::forbidden())
-        }
-    }
-}
-
 #[async_trait::async_trait]
 impl FromRequestParts<AppState> for CurrentUser {
     type Rejection = AppError;
@@ -140,8 +122,6 @@ impl FromRequestParts<AppState> for CurrentUser {
             .await?
             .ok_or_else(AppError::unauthorized)?;
 
-        permissions::ensure_self_role(&state.db, user.id, &user.email).await?;
-
         Ok(CurrentUser { user })
     }
 }
@@ -157,7 +137,9 @@ pub struct CurrentTenant {
 
 impl CurrentTenant {
     pub async fn require_permission(&self, db: &Db, permission: &str) -> AppResult<()> {
-        if permissions::user_has_permission(db, self.user.id, permission).await? {
+        if permissions::user_has_permission(db, self.tenant.tenant_id, self.user.id, permission)
+            .await?
+        {
             Ok(())
         } else {
             Err(AppError::forbidden())
@@ -165,7 +147,9 @@ impl CurrentTenant {
     }
 
     pub async fn require_any_permission(&self, db: &Db, perms: &[&str]) -> AppResult<()> {
-        if permissions::user_has_any_permission(db, self.user.id, perms).await? {
+        if permissions::user_has_any_permission(db, self.tenant.tenant_id, self.user.id, perms)
+            .await?
+        {
             Ok(())
         } else {
             Err(AppError::forbidden())
@@ -195,11 +179,17 @@ impl FromRequestParts<AppState> for CurrentTenant {
         let tenant = repo::tenants::access_for_user(&state.db, current_user.user.id, tenant_id)
             .await?
             .ok_or_else(AppError::forbidden)?;
+        permissions::ensure_self_role(
+            &state.db,
+            tenant.tenant_id,
+            current_user.user.id,
+            &current_user.user.email,
+        )
+        .await?;
+        let user =
+            repo::users::enrich_for_tenant(&state.db, tenant.tenant_id, current_user.user).await?;
 
-        Ok(Self {
-            user: current_user.user,
-            tenant,
-        })
+        Ok(Self { user, tenant })
     }
 }
 
@@ -238,12 +228,13 @@ pub async fn register_user(
     .execute(db)
     .await?;
 
-    permissions::ensure_self_role(db, user_id, email).await?;
-    repo::tenants::ensure_default_for_user(db, user_id, email).await?;
+    let tenant_id = repo::tenants::ensure_default_for_user(db, user_id, email).await?;
+    permissions::ensure_self_role(db, tenant_id, user_id, email).await?;
 
-    repo::users::get_user_by_id(db, user_id, true)
+    let user = repo::users::get_user_by_id(db, user_id, true)
         .await?
-        .ok_or_else(|| AppError::internal("user vanished after creation"))
+        .ok_or_else(|| AppError::internal("user vanished after creation"))?;
+    repo::users::enrich_for_tenant(db, tenant_id, user).await
 }
 
 pub async fn verify_credentials(db: &Db, email: &str, password: &str) -> AppResult<Option<User>> {

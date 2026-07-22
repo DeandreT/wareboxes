@@ -56,7 +56,8 @@ pub async fn get(
 ) -> AppResult<Json<Option<Load>>> {
     user.require_permission(&state.db, PERM).await?;
     let show_deleted_notes =
-        permissions::user_has_permission(&state.db, user.user.id, "admin").await?;
+        permissions::user_has_permission(&state.db, user.tenant.tenant_id, user.user.id, "admin")
+            .await?;
     Ok(Json(
         repo::loads::get_load(
             &state.db,

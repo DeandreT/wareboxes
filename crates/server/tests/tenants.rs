@@ -243,16 +243,21 @@ async fn owner_and_facility_master_data_is_tenant_scoped() {
     .execute(&db)
     .await
     .unwrap();
-    let permission = repo::permissions::add_permission(&db, "admin", Some("Admin"))
+    let permission = repo::permissions::add_permission(&db, second_tenant, "admin", Some("Admin"))
         .await
         .unwrap();
-    let role = repo::roles::add_role(&db, "master-data-admin", Some("Master data admin"))
+    let role = repo::roles::add_role(
+        &db,
+        second_tenant,
+        "master-data-admin",
+        Some("Master data admin"),
+    )
+    .await
+    .unwrap();
+    repo::roles::add_role_permission(&db, second_tenant, role, permission)
         .await
         .unwrap();
-    repo::roles::add_role_permission(&db, role, permission)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(&db, operator.id, role)
+    repo::roles::add_role_to_user(&db, second_tenant, operator.id, role)
         .await
         .unwrap();
     let token = auth::create_session(&db, operator.id).await.unwrap();
@@ -370,16 +375,16 @@ async fn locations_are_tenant_scoped_for_repositories_and_routes() {
     .execute(&db)
     .await
     .unwrap();
-    let permission = repo::permissions::add_permission(&db, "wms", Some("WMS"))
+    let permission = repo::permissions::add_permission(&db, second_tenant, "wms", Some("WMS"))
         .await
         .unwrap();
-    let role = repo::roles::add_role(&db, "location-wms", Some("Location WMS"))
+    let role = repo::roles::add_role(&db, second_tenant, "location-wms", Some("Location WMS"))
         .await
         .unwrap();
-    repo::roles::add_role_permission(&db, role, permission)
+    repo::roles::add_role_permission(&db, second_tenant, role, permission)
         .await
         .unwrap();
-    repo::roles::add_role_to_user(&db, operator.id, role)
+    repo::roles::add_role_to_user(&db, second_tenant, operator.id, role)
         .await
         .unwrap();
     let token = auth::create_session(&db, operator.id).await.unwrap();
@@ -532,16 +537,16 @@ async fn item_catalog_is_tenant_scoped_for_repositories_and_routes() {
     .execute(&db)
     .await
     .unwrap();
-    let permission = repo::permissions::add_permission(&db, "wms", Some("WMS"))
+    let permission = repo::permissions::add_permission(&db, second_tenant, "wms", Some("WMS"))
         .await
         .unwrap();
-    let role = repo::roles::add_role(&db, "catalog-wms", Some("Catalog WMS"))
+    let role = repo::roles::add_role(&db, second_tenant, "catalog-wms", Some("Catalog WMS"))
         .await
         .unwrap();
-    repo::roles::add_role_permission(&db, role, permission)
+    repo::roles::add_role_permission(&db, second_tenant, role, permission)
         .await
         .unwrap();
-    repo::roles::add_role_to_user(&db, operator.id, role)
+    repo::roles::add_role_to_user(&db, second_tenant, operator.id, role)
         .await
         .unwrap();
     let token = auth::create_session(&db, operator.id).await.unwrap();

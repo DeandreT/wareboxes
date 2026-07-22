@@ -182,16 +182,40 @@ async fn order_aggregate_is_isolated_by_selected_tenant() {
     .await
     .unwrap();
 
-    let permission = repo::permissions::add_permission(&fixture.db, "orders", Some("Orders"))
+    let permission =
+        repo::permissions::add_permission(&fixture.db, tenant_a, "orders", Some("Orders"))
+            .await
+            .unwrap();
+    let role = repo::roles::add_role(
+        &fixture.db,
+        tenant_a,
+        "order-scope-role",
+        Some("Order scope tests"),
+    )
+    .await
+    .unwrap();
+    repo::roles::add_role_permission(&fixture.db, tenant_a, role, permission)
         .await
         .unwrap();
-    let role = repo::roles::add_role(&fixture.db, "order-scope-role", Some("Order scope tests"))
+    repo::roles::add_role_to_user(&fixture.db, tenant_a, operator.id, role)
         .await
         .unwrap();
-    repo::roles::add_role_permission(&fixture.db, role, permission)
+    let permission_b =
+        repo::permissions::add_permission(&fixture.db, tenant_b, "orders", Some("Orders"))
+            .await
+            .unwrap();
+    let role_b = repo::roles::add_role(
+        &fixture.db,
+        tenant_b,
+        "order-scope-role",
+        Some("Order scope tests"),
+    )
+    .await
+    .unwrap();
+    repo::roles::add_role_permission(&fixture.db, tenant_b, role_b, permission_b)
         .await
         .unwrap();
-    repo::roles::add_role_to_user(&fixture.db, operator.id, role)
+    repo::roles::add_role_to_user(&fixture.db, tenant_b, operator.id, role_b)
         .await
         .unwrap();
 
