@@ -1,6 +1,11 @@
 mod common;
 
+use axum::body::{to_bytes, Body};
+use axum::http::{header, Request, StatusCode};
 use common::*;
+use tower::ServiceExt;
+use wareboxes_server::auth::TENANT_ID_HEADER;
+use wareboxes_server::{routes, state::AppState};
 
 #[tokio::test]
 async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
@@ -43,6 +48,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
 
     let load = repo::loads::add_load(
         &db,
+        tenant_id,
         user.id,
         facility,
         inventory_owner,
@@ -60,6 +66,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     .unwrap();
     let line = repo::loads::add_line(
         &db,
+        tenant_id,
         user.id,
         load,
         item,
@@ -74,6 +81,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
 
     let err = repo::loads::update_load(
         &db,
+        tenant_id,
         user.id,
         load,
         Some(LoadStatus::Closed),
@@ -120,6 +128,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
 
     assert!(repo::loads::update_load(
         &db,
+        tenant_id,
         user.id,
         load,
         Some(LoadStatus::Arrived),
@@ -184,7 +193,9 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     .unwrap();
     assert_eq!(replay, receipt);
 
-    let loads = repo::loads::get_loads(&db, false, false).await.unwrap();
+    let loads = repo::loads::get_loads(&db, tenant_id, false, false)
+        .await
+        .unwrap();
     let load_row = loads.iter().find(|l| l.id == load).unwrap();
     assert_eq!(load_row.status, LoadStatus::Received);
     assert!(load_row.receive_completed);
@@ -206,6 +217,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
 
     let mixed_lot_load = repo::loads::add_load(
         &db,
+        tenant_id,
         user.id,
         facility,
         inventory_owner,
@@ -223,6 +235,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     .unwrap();
     let mixed_lot_line = repo::loads::add_line(
         &db,
+        tenant_id,
         user.id,
         mixed_lot_load,
         item,
@@ -236,6 +249,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     .unwrap();
     assert!(repo::loads::update_load(
         &db,
+        tenant_id,
         user.id,
         mixed_lot_load,
         Some(LoadStatus::Arrived),
@@ -280,6 +294,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
 
     assert!(repo::loads::update_load(
         &db,
+        tenant_id,
         user.id,
         load,
         Some(LoadStatus::Closed),
@@ -301,7 +316,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     )
     .await
     .unwrap());
-    let closed = repo::loads::get_loads(&db, false, false)
+    let closed = repo::loads::get_loads(&db, tenant_id, false, false)
         .await
         .unwrap()
         .into_iter()
@@ -335,6 +350,7 @@ async fn concurrent_load_receipts_preserve_every_accepted_quantity() {
     let item = fixture.item(tenant_id, "Concurrent Cases", "case").await;
     let load = repo::loads::add_load(
         &fixture.db,
+        tenant_id,
         user.id,
         facility,
         inventory_owner,
@@ -350,9 +366,20 @@ async fn concurrent_load_receipts_preserve_every_accepted_quantity() {
     )
     .await
     .unwrap();
-    let line = repo::loads::add_line(&fixture.db, user.id, load, item, None, 10, None, None, None)
-        .await
-        .unwrap();
+    let line = repo::loads::add_line(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        load,
+        item,
+        None,
+        10,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     sqlx::query("UPDATE loads SET status = 'arrived' WHERE id = $1")
         .bind(load)
         .execute(&fixture.db)
@@ -401,7 +428,7 @@ async fn concurrent_load_receipts_preserve_every_accepted_quantity() {
         receipt_b.inventory_transaction_id
     );
 
-    let load = repo::loads::get_load(&fixture.db, load, false)
+    let load = repo::loads::get_load(&fixture.db, tenant_id, load, false)
         .await
         .unwrap()
         .unwrap();
@@ -425,6 +452,295 @@ async fn concurrent_load_receipts_preserve_every_accepted_quantity() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn load_aggregate_is_isolated_by_selected_tenant() {
+    let fixture = Fixture::new().await;
+    let operator = fixture.wms_user("load-scope-operator@test.com").await;
+    let tenant_a = tenant_for_user(&fixture.db, operator.id).await;
+    let second_user = fixture.user("load-scope-second@test.com").await;
+    let tenant_b = tenant_for_user(&fixture.db, second_user.id).await;
+    sqlx::query(
+        "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
+    )
+    .bind(tenant_b.get())
+    .bind(operator.id)
+    .execute(&fixture.db)
+    .await
+    .unwrap();
+
+    let facility = fixture.facility(tenant_a, "Scoped Load Facility").await;
+    let dock = repo::locations::add_location(
+        &fixture.db,
+        tenant_a,
+        facility,
+        None,
+        Some("SCOPED-LOAD-DOCK"),
+        Some("Scoped Load Dock"),
+        "dock",
+        true,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    let owner = fixture.inventory_owner(tenant_a, "Scoped Load Owner").await;
+    let item = fixture.item(tenant_a, "Scoped Load Item", "case").await;
+    let load_id = repo::loads::add_load(
+        &fixture.db,
+        tenant_a,
+        operator.id,
+        facility,
+        owner,
+        LoadType::Inbound,
+        Some("SCOPED-LOAD"),
+        None,
+        None,
+        None,
+        None,
+        Some(dock),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let line_id = repo::loads::add_line(
+        &fixture.db,
+        tenant_a,
+        operator.id,
+        load_id,
+        item,
+        None,
+        4,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let note_id =
+        repo::loads::add_note(&fixture.db, tenant_a, operator.id, load_id, "tenant A note")
+            .await
+            .unwrap();
+    let file_id = repo::loads::add_file(
+        &fixture.db,
+        tenant_a,
+        operator.id,
+        load_id,
+        "scope.txt",
+        "scope.txt",
+        "/tmp/scope.txt",
+        Some("text/plain"),
+        wareboxes_core::models::LoadFileCategory::General,
+    )
+    .await
+    .unwrap();
+    let tenant_a_order = fixture.order("SCOPED-LOAD-ORDER-A", Some(owner)).await;
+    sqlx::query(
+        "INSERT INTO load_orders (tenant_id, created, load_id, order_id) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(tenant_a.get())
+    .bind(db::now_iso())
+    .bind(load_id)
+    .bind(tenant_a_order)
+    .execute(&fixture.db)
+    .await
+    .unwrap();
+    let tenant_b_owner = fixture
+        .inventory_owner(tenant_b, "Other Tenant Owner")
+        .await;
+    let tenant_b_order = fixture
+        .order("SCOPED-LOAD-ORDER-B", Some(tenant_b_owner))
+        .await;
+    assert!(sqlx::query(
+        "INSERT INTO load_orders (tenant_id, created, load_id, order_id) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(tenant_a.get())
+    .bind(db::now_iso())
+    .bind(load_id)
+    .bind(tenant_b_order)
+    .execute(&fixture.db)
+    .await
+    .is_err());
+
+    assert!(repo::loads::get_loads(&fixture.db, tenant_b, true, true)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo::loads::get_load(&fixture.db, tenant_b, load_id, true)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        !repo::loads::active_load_exists(&fixture.db, tenant_b, load_id)
+            .await
+            .unwrap()
+    );
+    assert!(!repo::loads::update_load(
+        &fixture.db,
+        tenant_b,
+        operator.id,
+        load_id,
+        None,
+        None,
+        Some("cross-tenant update"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap());
+    assert!(
+        !repo::loads::set_load_deleted(&fixture.db, tenant_b, operator.id, load_id, true,)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo::loads::set_load_note_deleted(&fixture.db, tenant_b, operator.id, note_id, true,)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo::loads::delete_file(&fixture.db, tenant_b, operator.id, file_id)
+            .await
+            .unwrap()
+    );
+    assert!(repo::loads::get_file(&fixture.db, tenant_b, file_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(repo::loads::add_note(
+        &fixture.db,
+        tenant_b,
+        operator.id,
+        load_id,
+        "cross-tenant note",
+    )
+    .await
+    .is_err());
+    assert!(repo::loads::add_line(
+        &fixture.db,
+        tenant_b,
+        operator.id,
+        load_id,
+        item,
+        None,
+        1,
+        None,
+        None,
+        None,
+    )
+    .await
+    .is_err());
+    assert!(repo::loads::receive_line(
+        &fixture.db,
+        tenant_b,
+        operator.id,
+        line_id,
+        dock,
+        1,
+        0,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some("cross-tenant receipt"),
+        "cross-tenant-receipt",
+    )
+    .await
+    .is_err());
+
+    let scoped_load = repo::loads::get_load(&fixture.db, tenant_a, load_id, true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(scoped_load.tenant_id, tenant_a);
+    assert_eq!(scoped_load.reference_number.as_deref(), Some("SCOPED-LOAD"));
+    assert!(scoped_load
+        .notes
+        .iter()
+        .all(|note| note.tenant_id == tenant_a));
+    assert!(scoped_load
+        .files
+        .iter()
+        .all(|file| file.tenant_id == tenant_a));
+    assert!(scoped_load
+        .lines
+        .iter()
+        .all(|line| line.tenant_id == tenant_a));
+    assert!(scoped_load
+        .activity
+        .iter()
+        .all(|event| event.tenant_id == tenant_a));
+    assert_eq!(scoped_load.orders.len(), 1);
+    assert_eq!(scoped_load.orders[0].id, tenant_a_order);
+
+    let token = auth::create_session(&fixture.db, operator.id)
+        .await
+        .unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/loads/{load_id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/loads/{load_id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(TENANT_ID_HEADER, tenant_b.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::Value::Null
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/loads/{load_id}"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(TENANT_ID_HEADER, tenant_a.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let route_load = serde_json::from_slice::<Option<wareboxes_core::models::Load>>(&body)
+        .unwrap()
+        .unwrap();
+    assert_eq!(route_load.tenant_id, tenant_a);
 }
 
 #[tokio::test]
@@ -488,6 +804,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
 
     let load = repo::loads::add_load(
         &db,
+        tenant_id,
         user.id,
         facility,
         inventory_owner,
@@ -503,12 +820,15 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     )
     .await
     .unwrap();
-    let line = repo::loads::add_line(&db, user.id, load, item, None, 12, None, None, None)
-        .await
-        .unwrap();
+    let line = repo::loads::add_line(
+        &db, tenant_id, user.id, load, item, None, 12, None, None, None,
+    )
+    .await
+    .unwrap();
 
     assert!(repo::loads::update_load(
         &db,
+        tenant_id,
         user.id,
         load,
         Some(LoadStatus::Arrived),
@@ -552,7 +872,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     .unwrap();
     assert!(receipt.inventory_transaction_id.is_some());
 
-    let load_row = repo::loads::get_loads(&db, false, false)
+    let load_row = repo::loads::get_loads(&db, tenant_id, false, false)
         .await
         .unwrap()
         .into_iter()

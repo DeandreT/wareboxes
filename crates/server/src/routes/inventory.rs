@@ -49,7 +49,7 @@ pub async fn add_batch(
         return Err(AppError::bad_request("Inventory owner not found"));
     }
     if let Some(load_id) = body.load_id {
-        if !repo::loads::active_load_exists(&state.db, load_id).await? {
+        if !repo::loads::active_load_exists(&state.db, user.tenant.tenant_id, load_id).await? {
             return Err(AppError::bad_request("Load not found"));
         }
     }

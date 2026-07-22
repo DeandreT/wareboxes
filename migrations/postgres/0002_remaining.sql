@@ -66,6 +66,8 @@ CREATE TABLE skus (
     name TEXT NOT NULL,
     item_id BIGINT NOT NULL,
     notes TEXT,
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, item_id, id),
     UNIQUE (tenant_id, item_id, name),
     FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id) ON DELETE CASCADE
 );
@@ -96,10 +98,11 @@ CREATE TABLE inventory_owner_items (
 
 CREATE TABLE loads (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    facility_id BIGINT NOT NULL REFERENCES facilities(id),
-    inventory_owner_id BIGINT NOT NULL REFERENCES inventory_owners(id),
+    facility_id BIGINT NOT NULL,
+    inventory_owner_id BIGINT NOT NULL,
     status TEXT NOT NULL DEFAULT 'planned',
     type TEXT NOT NULL,
     reference_number TEXT,
@@ -107,7 +110,7 @@ CREATE TABLE loads (
     carrier TEXT,
     trailer_number TEXT,
     seal_number TEXT,
-    dock_door_location_id BIGINT REFERENCES locations(id),
+    dock_door_location_id BIGINT,
     expected_time TIMESTAMPTZ,
     appointment_time TIMESTAMPTZ,
     actual_time TIMESTAMPTZ,
@@ -118,54 +121,90 @@ CREATE TABLE loads (
     closed TIMESTAMPTZ,
     checked_in_by BIGINT REFERENCES users(id),
     closed_by BIGINT REFERENCES users(id),
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, facility_id) REFERENCES facilities(tenant_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, facility_id, dock_door_location_id) REFERENCES locations(tenant_id, facility_id, id),
     CHECK (status IN ('planned', 'scheduled', 'arrived', 'receiving', 'received', 'rejected', 'closed', 'cancelled')),
     CHECK (type IN ('inbound', 'outbound'))
 );
-CREATE INDEX idx_loads_status ON loads(status);
-CREATE INDEX idx_loads_dock_door ON loads(dock_door_location_id);
-CREATE INDEX idx_loads_active_work ON loads(facility_id, inventory_owner_id, status, appointment_time)
+CREATE INDEX idx_loads_status ON loads(tenant_id, status);
+CREATE INDEX idx_loads_dock_door ON loads(tenant_id, dock_door_location_id);
+CREATE INDEX idx_loads_active_work ON loads(tenant_id, facility_id, inventory_owner_id, status, appointment_time)
     WHERE deleted IS NULL AND status NOT IN ('closed', 'cancelled');
 
 CREATE TABLE load_orders (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    load_id BIGINT REFERENCES loads(id),
-    order_id BIGINT NOT NULL REFERENCES orders(id)
+    load_id BIGINT NOT NULL,
+    order_id BIGINT NOT NULL REFERENCES orders(id),
+    FOREIGN KEY (tenant_id, load_id) REFERENCES loads(tenant_id, id)
 );
-CREATE INDEX idx_load_orders_load_id ON load_orders(load_id);
-CREATE INDEX idx_load_orders_order_id ON load_orders(order_id);
+CREATE INDEX idx_load_orders_load_id ON load_orders(tenant_id, load_id);
+CREATE INDEX idx_load_orders_order_id ON load_orders(tenant_id, order_id);
+
+CREATE OR REPLACE FUNCTION load_order_matches_owner_scope()
+RETURNS trigger AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM loads load
+        INNER JOIN orders customer_order
+            ON customer_order.id = NEW.order_id
+           AND customer_order.inventory_owner_id = load.inventory_owner_id
+        WHERE load.tenant_id = NEW.tenant_id
+          AND load.id = NEW.load_id
+    ) THEN
+        RAISE EXCEPTION 'load and order must share the same tenant and inventory owner'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER load_orders_match_owner_scope
+    BEFORE INSERT OR UPDATE OF tenant_id, load_id, order_id ON load_orders
+    FOR EACH ROW EXECUTE FUNCTION load_order_matches_owner_scope();
 
 CREATE TABLE load_notes (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    load_id BIGINT REFERENCES loads(id),
-    note TEXT NOT NULL
+    load_id BIGINT NOT NULL,
+    note TEXT NOT NULL,
+    FOREIGN KEY (tenant_id, load_id) REFERENCES loads(tenant_id, id)
 );
-CREATE INDEX idx_load_notes_load_id ON load_notes(load_id) WHERE deleted IS NULL;
+CREATE INDEX idx_load_notes_load_id ON load_notes(tenant_id, load_id) WHERE deleted IS NULL;
 
 CREATE TABLE load_files (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    load_id BIGINT REFERENCES loads(id),
+    load_id BIGINT NOT NULL,
     original_name TEXT NOT NULL,
     name TEXT NOT NULL,
     path TEXT NOT NULL,
     content_type TEXT,
     category TEXT NOT NULL DEFAULT 'general',
+    FOREIGN KEY (tenant_id, load_id) REFERENCES loads(tenant_id, id),
     CHECK (category IN ('general', 'invoice'))
 );
-CREATE INDEX idx_load_files_load_id ON load_files(load_id) WHERE deleted IS NULL;
+CREATE INDEX idx_load_files_load_id ON load_files(tenant_id, load_id) WHERE deleted IS NULL;
 
 CREATE TABLE load_lines (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    load_id BIGINT NOT NULL REFERENCES loads(id),
-    item_id BIGINT NOT NULL REFERENCES items(id),
-    sku_id BIGINT REFERENCES skus(id),
+    load_id BIGINT NOT NULL,
+    item_id BIGINT NOT NULL,
+    sku_id BIGINT,
     expected_qty BIGINT NOT NULL CHECK (expected_qty > 0),
     received_qty BIGINT NOT NULL DEFAULT 0 CHECK (received_qty >= 0),
     rejected_qty BIGINT NOT NULL DEFAULT 0 CHECK (rejected_qty >= 0),
@@ -176,6 +215,9 @@ CREATE TABLE load_lines (
     serial TEXT,
     expiration TIMESTAMPTZ,
     status TEXT NOT NULL DEFAULT 'pending',
+    FOREIGN KEY (tenant_id, load_id) REFERENCES loads(tenant_id, id),
+    FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id),
+    FOREIGN KEY (tenant_id, item_id, sku_id) REFERENCES skus(tenant_id, item_id, id),
     CHECK (status IN ('pending', 'partial', 'received', 'rejected', 'missing')),
     CHECK (received_qty + rejected_qty + missing_qty <= expected_qty),
     CHECK (
@@ -183,22 +225,24 @@ CREATE TABLE load_lines (
         OR (missing_qty > 0 AND missing_confirmed_by IS NOT NULL AND missing_confirmed_at IS NOT NULL)
     )
 );
-CREATE INDEX idx_load_lines_load ON load_lines(load_id);
-CREATE INDEX idx_load_lines_item ON load_lines(item_id);
-CREATE INDEX idx_load_lines_open ON load_lines(load_id, status)
+CREATE INDEX idx_load_lines_load ON load_lines(tenant_id, load_id);
+CREATE INDEX idx_load_lines_item ON load_lines(tenant_id, item_id);
+CREATE INDEX idx_load_lines_open ON load_lines(tenant_id, load_id, status)
     WHERE deleted IS NULL AND status IN ('pending', 'partial');
 
 CREATE TABLE load_activity (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    load_id BIGINT REFERENCES loads(id),
+    load_id BIGINT NOT NULL,
     user_id BIGINT REFERENCES users(id),
     action TEXT NOT NULL,
     message TEXT,
-    metadata_json TEXT
+    metadata_json TEXT,
+    FOREIGN KEY (tenant_id, load_id) REFERENCES loads(tenant_id, id)
 );
-CREATE INDEX idx_load_activity_load_id ON load_activity(load_id);
+CREATE INDEX idx_load_activity_load_id ON load_activity(tenant_id, load_id);
 
 CREATE TABLE item_batches (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -209,7 +253,7 @@ CREATE TABLE item_batches (
     item_id BIGINT NOT NULL,
     uom TEXT NOT NULL,
     lot TEXT,
-    load_id BIGINT REFERENCES loads(id),
+    load_id BIGINT,
     order_id BIGINT REFERENCES orders(id),
     expiration TIMESTAMPTZ,
     serial TEXT,
@@ -217,6 +261,7 @@ CREATE TABLE item_batches (
     FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
     FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id),
     FOREIGN KEY (tenant_id, inventory_owner_id, item_id) REFERENCES inventory_owner_items(tenant_id, inventory_owner_id, item_id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, load_id) REFERENCES loads(tenant_id, inventory_owner_id, id),
     CHECK (btrim(uom) <> '')
 );
 ALTER TABLE order_items

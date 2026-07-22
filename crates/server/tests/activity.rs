@@ -65,6 +65,7 @@ async fn order_and_load_mutations_write_activity_history() {
     .unwrap();
     let load_id = repo::loads::add_load(
         &db,
+        tenant_id,
         user.id,
         facility,
         inventory_owner,
@@ -82,6 +83,7 @@ async fn order_and_load_mutations_write_activity_history() {
     .unwrap();
     assert!(repo::loads::update_load(
         &db,
+        tenant_id,
         user.id,
         load_id,
         Some(LoadStatus::Arrived),
@@ -103,17 +105,19 @@ async fn order_and_load_mutations_write_activity_history() {
     )
     .await
     .unwrap());
-    let note_id = repo::loads::add_note(&db, user.id, load_id, "activity note")
+    let note_id = repo::loads::add_note(&db, tenant_id, user.id, load_id, "activity note")
         .await
         .unwrap();
     assert!(
-        repo::loads::set_load_note_deleted(&db, user.id, note_id, true)
+        repo::loads::set_load_note_deleted(&db, tenant_id, user.id, note_id, true)
             .await
             .unwrap()
     );
-    assert!(repo::loads::set_load_deleted(&db, user.id, load_id, true)
-        .await
-        .unwrap());
+    assert!(
+        repo::loads::set_load_deleted(&db, tenant_id, user.id, load_id, true)
+            .await
+            .unwrap()
+    );
 
     let load_actions = sqlx::query_scalar::<_, String>(
         "SELECT action FROM load_activity WHERE load_id = $1 ORDER BY id",

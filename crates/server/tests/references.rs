@@ -166,6 +166,7 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
 
     let load = repo::loads::add_load(
         &db,
+        tenant_id,
         user.id,
         facility,
         inventory_owner,
@@ -212,8 +213,12 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
             .await
             .unwrap()
     );
-    assert!(repo::loads::active_load_exists(&db, load).await.unwrap());
-    assert!(!repo::loads::active_load_exists(&db, 999_999).await.unwrap());
+    assert!(repo::loads::active_load_exists(&db, tenant_id, load)
+        .await
+        .unwrap());
+    assert!(!repo::loads::active_load_exists(&db, tenant_id, 999_999)
+        .await
+        .unwrap());
     assert!(
         repo::locations::active_location_exists(&db, tenant_id, active_location)
             .await

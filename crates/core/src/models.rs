@@ -666,21 +666,23 @@ pub struct Employee {
 // receive_completed per requirements.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoadNote {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
-    pub load_id: Option<i64>,
+    pub load_id: i64,
     pub note: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoadFile {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
-    pub load_id: Option<i64>,
+    pub load_id: i64,
     /// Filename as uploaded (e.g. "BOL-1234.pdf").
     pub original_name: String,
     /// Stored (unique) filename on the server.
@@ -690,9 +692,10 @@ pub struct LoadFile {
     pub category: LoadFileCategory,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoadLine {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub load_id: i64,
@@ -716,21 +719,23 @@ pub struct ReceiveLoadLineResult {
     pub inventory_transaction_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoadActivity {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
-    pub load_id: Option<i64>,
+    pub load_id: i64,
     pub user_id: Option<i64>,
     pub action: String,
     pub message: Option<String>,
     pub metadata_json: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Load {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub facility_id: i64,
