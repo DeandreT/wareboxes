@@ -3,7 +3,7 @@ use axum::Json;
 use wareboxes_core::dto::{AddEmployee, EmployeeIdRequest, EmployeeUpdate};
 use wareboxes_core::models::Employee;
 
-use crate::auth::CurrentUser;
+use crate::auth::CurrentTenant;
 use crate::db::now_iso;
 use crate::error::AppResult;
 use crate::repo;
@@ -15,7 +15,7 @@ const PERM: &str = "admin";
 
 pub async fn list(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Query(q): Query<ShowDeleted>,
 ) -> AppResult<Json<Vec<Employee>>> {
     user.require_permission(&state.db, PERM).await?;
@@ -26,7 +26,7 @@ pub async fn list(
 
 pub async fn add(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddEmployee>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
@@ -48,7 +48,7 @@ pub async fn add(
 
 pub async fn update(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<EmployeeUpdate>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
@@ -70,7 +70,7 @@ pub async fn update(
 
 pub async fn delete(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<EmployeeIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
@@ -82,7 +82,7 @@ pub async fn delete(
 
 pub async fn restore(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<EmployeeIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;

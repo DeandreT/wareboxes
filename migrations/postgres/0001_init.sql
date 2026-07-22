@@ -81,43 +81,60 @@ CREATE INDEX idx_sessions_expires ON sessions(expires);
 
 CREATE TABLE roles (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    name TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
     description TEXT,
-    parent_id BIGINT REFERENCES roles(id)
+    parent_id BIGINT,
+    self_user_id BIGINT,
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, name),
+    UNIQUE (tenant_id, self_user_id),
+    FOREIGN KEY (tenant_id, parent_id) REFERENCES roles(tenant_id, id),
+    FOREIGN KEY (tenant_id, self_user_id) REFERENCES tenant_memberships(tenant_id, user_id),
+    CHECK (self_user_id IS NULL OR description = 'Self role')
 );
-CREATE INDEX roles_parent_id_key ON roles(parent_id);
+CREATE INDEX roles_parent_id_key ON roles(tenant_id, parent_id);
 
 CREATE TABLE user_roles (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role_id BIGINT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-    UNIQUE (user_id, role_id)
+    user_id BIGINT NOT NULL,
+    role_id BIGINT NOT NULL,
+    FOREIGN KEY (tenant_id, user_id) REFERENCES tenant_memberships(tenant_id, user_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, role_id) REFERENCES roles(tenant_id, id) ON DELETE CASCADE,
+    UNIQUE (tenant_id, user_id, role_id)
 );
-CREATE INDEX idx_user_roles_role_id ON user_roles(role_id);
-CREATE INDEX idx_user_roles_user_id ON user_roles(user_id);
+CREATE INDEX idx_user_roles_role_id ON user_roles(tenant_id, role_id);
+CREATE INDEX idx_user_roles_user_id ON user_roles(tenant_id, user_id);
 
 CREATE TABLE permissions (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    name TEXT NOT NULL UNIQUE,
-    description TEXT
+    name TEXT NOT NULL,
+    description TEXT,
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, name)
 );
 
 CREATE TABLE role_permissions (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    role_id BIGINT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-    permission_id BIGINT NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
-    UNIQUE (role_id, permission_id)
+    role_id BIGINT NOT NULL,
+    permission_id BIGINT NOT NULL,
+    FOREIGN KEY (tenant_id, role_id) REFERENCES roles(tenant_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, permission_id) REFERENCES permissions(tenant_id, id) ON DELETE CASCADE,
+    UNIQUE (tenant_id, role_id, permission_id)
 );
-CREATE INDEX idx_role_permissions_permission_id ON role_permissions(permission_id);
-CREATE INDEX idx_role_permissions_role_id ON role_permissions(role_id);
+CREATE INDEX idx_role_permissions_permission_id ON role_permissions(tenant_id, permission_id);
+CREATE INDEX idx_role_permissions_role_id ON role_permissions(tenant_id, role_id);
 
 CREATE TABLE inventory_owners (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

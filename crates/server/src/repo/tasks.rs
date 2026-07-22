@@ -652,7 +652,7 @@ pub async fn start_next_task(
 ) -> AppResult<Option<WorkTask>> {
     release_expired_tasks(db, tenant_id).await?;
 
-    let permissions = permissions::get_user_permissions(db, user_id).await?;
+    let permissions = permissions::get_user_permissions(db, tenant_id, user_id).await?;
     let is_admin = permissions
         .iter()
         .any(|permission| permission.name.eq_ignore_ascii_case("admin"));

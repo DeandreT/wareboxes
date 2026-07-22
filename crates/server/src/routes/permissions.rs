@@ -3,7 +3,7 @@ use axum::Json;
 use wareboxes_core::dto::{AddPermission, PermissionIdRequest, UpdatePermission};
 use wareboxes_core::models::Permission;
 
-use crate::auth::CurrentUser;
+use crate::auth::CurrentTenant;
 use crate::error::AppResult;
 use crate::repo;
 use crate::routes::users::ShowDeleted;
@@ -14,35 +14,43 @@ const PERM: &str = "admin";
 
 pub async fn list(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Query(q): Query<ShowDeleted>,
 ) -> AppResult<Json<Vec<Permission>>> {
     user.require_permission(&state.db, PERM).await?;
-    let perms = repo::permissions::get_permissions(&state.db, q.show_deleted).await?;
+    let perms =
+        repo::permissions::get_permissions(&state.db, user.tenant.tenant_id, q.show_deleted)
+            .await?;
     Ok(Json(perms))
 }
 
 pub async fn add(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddPermission>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let id = repo::permissions::add_permission(&state.db, &body.name, body.description.as_deref())
-        .await?;
+    let id = repo::permissions::add_permission(
+        &state.db,
+        user.tenant.tenant_id,
+        &body.name,
+        body.description.as_deref(),
+    )
+    .await?;
     Ok(Json(id))
 }
 
 pub async fn update(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<UpdatePermission>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     let ok = repo::permissions::update_permission(
         &state.db,
+        user.tenant.tenant_id,
         body.permission_id,
         body.name.as_deref(),
         body.description.as_deref(),
@@ -53,22 +61,26 @@ pub async fn update(
 
 pub async fn delete(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<PermissionIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::permissions::set_deleted(&state.db, body.permission_id, true).await?;
+    let ok =
+        repo::permissions::set_deleted(&state.db, user.tenant.tenant_id, body.permission_id, true)
+            .await?;
     Ok(Json(ok))
 }
 
 pub async fn restore(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<PermissionIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::permissions::set_deleted(&state.db, body.permission_id, false).await?;
+    let ok =
+        repo::permissions::set_deleted(&state.db, user.tenant.tenant_id, body.permission_id, false)
+            .await?;
     Ok(Json(ok))
 }

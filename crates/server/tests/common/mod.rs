@@ -137,16 +137,22 @@ impl Fixture {
 
     pub async fn wms_user(&self, email: &str) -> wareboxes_core::models::User {
         let user = self.user(email).await;
-        let perm = repo::permissions::add_permission(&self.db, "wms", Some("WMS"))
+        let tenant_id = tenant_for_user(&self.db, user.id).await;
+        let perm = repo::permissions::add_permission(&self.db, tenant_id, "wms", Some("WMS"))
             .await
             .unwrap();
-        let role = repo::roles::add_role(&self.db, &format!("{email}-wms"), Some("WMS worker"))
+        let role = repo::roles::add_role(
+            &self.db,
+            tenant_id,
+            &format!("{email}-wms"),
+            Some("WMS worker"),
+        )
+        .await
+        .unwrap();
+        repo::roles::add_role_permission(&self.db, tenant_id, role, perm)
             .await
             .unwrap();
-        repo::roles::add_role_permission(&self.db, role, perm)
-            .await
-            .unwrap();
-        repo::roles::add_role_to_user(&self.db, user.id, role)
+        repo::roles::add_role_to_user(&self.db, tenant_id, user.id, role)
             .await
             .unwrap();
         user

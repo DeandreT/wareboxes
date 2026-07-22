@@ -54,17 +54,22 @@ async fn bootstrap_admin(pool: &db::Db, cfg: &Config) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    auth::register_user(pool, email, password, Some("Admin"), None).await?;
+    let user = auth::register_user(pool, email, password, Some("Admin"), None).await?;
+    let tenant_id = repo::tenants::default_for_user(pool, user.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("bootstrap admin has no tenant"))?
+        .tenant_id;
     let perm_id =
-        repo::permissions::add_permission(pool, "admin", Some("Admin permission")).await?;
+        repo::permissions::add_permission(pool, tenant_id, "admin", Some("Admin permission"))
+            .await?;
 
     // register_user provisioned the self role; attach admin to it.
-    if let Some(self_role) = repo::roles::get_roles(pool, true, true)
+    if let Some(self_role) = repo::roles::get_roles(pool, tenant_id, true, true)
         .await?
         .into_iter()
         .find(|r| r.name == *email)
     {
-        repo::roles::add_role_permission(pool, self_role.id, perm_id).await?;
+        repo::roles::add_role_permission(pool, tenant_id, self_role.id, perm_id).await?;
     }
     tracing::info!(%email, "bootstrapped admin user");
     Ok(())

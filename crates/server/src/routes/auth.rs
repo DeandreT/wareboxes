@@ -20,6 +20,8 @@ pub async fn login(
     let active_tenant = crate::repo::tenants::default_for_user(&state.db, user.id)
         .await?
         .ok_or_else(AppError::forbidden)?;
+    let user =
+        crate::repo::users::enrich_for_tenant(&state.db, active_tenant.tenant_id, user).await?;
     let token = auth::create_session(&state.db, user.id).await?;
     let settings = crate::repo::settings::get_user_settings(&state.db, user.id).await?;
     Ok(Json(SessionUser {
@@ -74,7 +76,7 @@ pub async fn logout(
     Ok(Json(()))
 }
 
-pub async fn me(user: CurrentUser) -> AppResult<Json<User>> {
+pub async fn me(user: CurrentTenant) -> AppResult<Json<User>> {
     Ok(Json(user.user))
 }
 

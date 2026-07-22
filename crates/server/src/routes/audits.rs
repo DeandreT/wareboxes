@@ -3,7 +3,7 @@ use axum::Json;
 use wareboxes_core::dto::{AddAuditWave, AuditWaveIdRequest, AuditWaveUpdate};
 use wareboxes_core::models::{AuditLocationCount, AuditWave};
 
-use crate::auth::CurrentUser;
+use crate::auth::CurrentTenant;
 use crate::error::AppResult;
 use crate::repo;
 use crate::routes::users::ShowDeleted;
@@ -14,7 +14,7 @@ const PERM: &str = "admin";
 
 pub async fn list(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Query(q): Query<ShowDeleted>,
 ) -> AppResult<Json<Vec<AuditWave>>> {
     user.require_permission(&state.db, PERM).await?;
@@ -25,7 +25,7 @@ pub async fn list(
 
 pub async fn add(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddAuditWave>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
@@ -37,7 +37,7 @@ pub async fn add(
 
 pub async fn update(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AuditWaveUpdate>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
@@ -54,7 +54,7 @@ pub async fn update(
 
 pub async fn delete(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AuditWaveIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
@@ -66,7 +66,7 @@ pub async fn delete(
 
 pub async fn restore(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AuditWaveIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
@@ -78,7 +78,7 @@ pub async fn restore(
 
 pub async fn counts(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Path(audit_id): Path<i64>,
 ) -> AppResult<Json<Vec<AuditLocationCount>>> {
     user.require_permission(&state.db, PERM).await?;
