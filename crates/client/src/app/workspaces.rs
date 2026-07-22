@@ -65,6 +65,15 @@ impl WareboxesApp {
         self.workspace_editor_open = true;
     }
 
+    pub(super) fn arrange_active_workspace(&mut self, layout: WorkspaceLayout) {
+        let workspace = self.active_workspace_mut();
+        workspace.layout = layout;
+        workspace.layout_generation = workspace.layout_generation.saturating_add(1);
+        for panel in workspace.panels.values_mut() {
+            panel.detached = false;
+        }
+    }
+
     fn delete_workspace(&mut self, id: u64) {
         if self.workspaces.len() <= 1 {
             return;
