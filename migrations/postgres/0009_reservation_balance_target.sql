@@ -32,7 +32,9 @@ BEGIN
 
     SELECT inventory_owner_id INTO order_inventory_owner_id
     FROM orders
-    WHERE id = NEW.order_id AND deleted IS NULL;
+    WHERE tenant_id = NEW.tenant_id
+      AND id = NEW.order_id
+      AND deleted IS NULL;
 
     IF order_inventory_owner_id IS NULL
        OR NEW.inventory_owner_id IS DISTINCT FROM order_inventory_owner_id THEN
@@ -48,6 +50,8 @@ BEGIN
            AND batch.inventory_owner_id = NEW.inventory_owner_id
            AND batch.id = NEW.item_batch_id
         WHERE order_line.id = NEW.order_item_id
+          AND order_line.tenant_id = NEW.tenant_id
+          AND order_line.inventory_owner_id = NEW.inventory_owner_id
           AND order_line.order_id = NEW.order_id
           AND order_line.item_id = batch.item_id
           AND order_line.deleted IS NULL

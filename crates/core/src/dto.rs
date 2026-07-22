@@ -225,7 +225,8 @@ pub struct NewOrder {
     pub state: String,
     pub postal_code: String,
     pub country: String,
-    pub inventory_owner_id: Option<i64>,
+    #[validate(range(min = 1, message = "Invalid inventory owner ID"))]
+    pub inventory_owner_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -239,7 +240,6 @@ pub struct OrderUpdate {
     pub closed: Option<Timestamp>,
     pub ship_by: Option<Timestamp>,
     pub wave_id: Option<i64>,
-    pub inventory_owner_id: Option<i64>,
     pub line1: Option<String>,
     pub line2: Option<String>,
     pub city: Option<String>,

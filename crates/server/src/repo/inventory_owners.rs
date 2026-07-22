@@ -141,8 +141,8 @@ pub async fn delete_inventory_owner(db: &Db, tenant_id: TenantId, id: i64) -> Ap
     let open: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM orders
-        WHERE inventory_owner_id = $1
-          AND EXISTS (SELECT 1 FROM inventory_owners WHERE tenant_id = $2 AND id = $1)
+        WHERE tenant_id = $2
+          AND inventory_owner_id = $1
           AND status NOT IN ('shipped', 'cancelled')
         "#,
     )

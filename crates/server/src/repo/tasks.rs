@@ -3,6 +3,7 @@ use wareboxes_core::models::{
     Timestamp, UnpackCancelledOrderTaskLine, WorkTask, WorkTaskProgressAction, WorkTaskStatus,
     WorkTaskType,
 };
+use wareboxes_domain::TenantId;
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
@@ -421,6 +422,7 @@ pub async fn create_break_master_pack_task(
 #[allow(clippy::too_many_arguments)]
 pub async fn create_unpack_cancelled_order_task(
     db: &Db,
+    tenant_id: TenantId,
     user_id: Option<i64>,
     order_id: i64,
     priority: Option<i64>,
@@ -429,11 +431,13 @@ pub async fn create_unpack_cancelled_order_task(
     due_at: Option<Timestamp>,
     instructions: Option<String>,
 ) -> AppResult<i64> {
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM orders WHERE id = $1 AND deleted IS NULL")
-            .bind(order_id)
-            .fetch_optional(db)
-            .await?;
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM orders WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL",
+    )
+    .bind(tenant_id.get())
+    .bind(order_id)
+    .fetch_optional(db)
+    .await?;
     if status.as_deref() != Some("cancelled") {
         return Err(AppError::bad_request(
             "unpack cancelled order tasks require a cancelled order",
@@ -499,10 +503,11 @@ pub async fn create_unpack_cancelled_order_task(
         )
         SELECT $1, oi.id, oi.item_id, oi.item_batch_id, oi.qty
         FROM order_items oi
-        WHERE oi.order_id = $2 AND oi.deleted IS NULL
+        WHERE oi.tenant_id = $2 AND oi.order_id = $3 AND oi.deleted IS NULL
         "#,
     )
     .bind(task_id)
+    .bind(tenant_id.get())
     .bind(order_id)
     .execute(&mut *tx)
     .await?;

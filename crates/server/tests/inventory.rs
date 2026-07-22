@@ -166,10 +166,10 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     .unwrap_err();
     assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
 
-    repo::orders::add_order(&db, &new_order("INV-1", Some(inventory_owner)))
+    repo::orders::add_order(&db, tenant_id, &new_order("INV-1", inventory_owner))
         .await
         .unwrap();
-    let order_id = repo::orders::get_orders(&db).await.unwrap()[0].id;
+    let order_id = repo::orders::get_orders(&db, tenant_id).await.unwrap()[0].id;
     let reservation =
         repo::inventory::reserve_inventory(&db, tenant_id, order_id, None, pick_balance.id, 20)
             .await
@@ -409,7 +409,7 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
     .await
     .is_err());
 
-    let other_owner_order = fixture.order("OTHER-OWNER-ORDER", Some(owner_b)).await;
+    let other_owner_order = fixture.order(tenant_a, "OTHER-OWNER-ORDER", owner_b).await;
     let balance = repo::inventory::get_balances(&fixture.db, tenant_a, false)
         .await
         .unwrap()

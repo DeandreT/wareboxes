@@ -536,11 +536,12 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
     )
     .await
     .unwrap();
-    let tenant_a_order = fixture.order("SCOPED-LOAD-ORDER-A", Some(owner)).await;
+    let tenant_a_order = fixture.order(tenant_a, "SCOPED-LOAD-ORDER-A", owner).await;
     sqlx::query(
-        "INSERT INTO load_orders (tenant_id, created, load_id, order_id) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO load_orders (tenant_id, inventory_owner_id, created, load_id, order_id) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(tenant_a.get())
+    .bind(owner)
     .bind(db::now_iso())
     .bind(load_id)
     .bind(tenant_a_order)
@@ -551,12 +552,13 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
         .inventory_owner(tenant_b, "Other Tenant Owner")
         .await;
     let tenant_b_order = fixture
-        .order("SCOPED-LOAD-ORDER-B", Some(tenant_b_owner))
+        .order(tenant_b, "SCOPED-LOAD-ORDER-B", tenant_b_owner)
         .await;
     assert!(sqlx::query(
-        "INSERT INTO load_orders (tenant_id, created, load_id, order_id) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO load_orders (tenant_id, inventory_owner_id, created, load_id, order_id) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(tenant_a.get())
+    .bind(owner)
     .bind(db::now_iso())
     .bind(load_id)
     .bind(tenant_b_order)
@@ -937,10 +939,10 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     assert_eq!(moved.location_id, Some(reserve));
     assert_eq!(moved.contents[0].location_id, reserve);
 
-    repo::orders::add_order(&db, &new_order("LP-RES-1", Some(inventory_owner)))
+    repo::orders::add_order(&db, tenant_id, &new_order("LP-RES-1", inventory_owner))
         .await
         .unwrap();
-    let order_id = repo::orders::get_orders(&db)
+    let order_id = repo::orders::get_orders(&db, tenant_id)
         .await
         .unwrap()
         .into_iter()

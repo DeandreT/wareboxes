@@ -91,6 +91,7 @@ struct Forms {
     password: String,
     // new order
     o_key: String,
+    o_inventory_owner_id: String,
     o_line1: String,
     o_city: String,
     o_state: String,
@@ -198,6 +199,7 @@ impl WareboxesApp {
     fn fetch(&mut self, s: Screen) {
         if s == Screen::Orders {
             self.fetch_orders();
+            self.api.get_list(Screen::InventoryOwners);
         } else if s == Screen::Loads {
             self.loading_loads = true;
             self.api.get_loads_chunk(0, LOAD_CHUNK_SIZE);

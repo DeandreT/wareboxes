@@ -10,7 +10,7 @@ use wareboxes_core::models::{
     UnpackCancelledOrderTaskLine, WorkTask, WorkTaskStatus, WorkTaskType,
 };
 
-use crate::auth::CurrentUser;
+use crate::auth::{CurrentTenant, CurrentUser};
 use crate::error::{AppError, AppResult};
 use crate::repo;
 use crate::routes::validate;
@@ -141,7 +141,7 @@ pub async fn create_break_master_pack(
 
 pub async fn create_unpack_cancelled_order(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<CreateUnpackCancelledOrderTask>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
@@ -149,6 +149,7 @@ pub async fn create_unpack_cancelled_order(
     Ok(Json(
         repo::tasks::create_unpack_cancelled_order_task(
             &state.db,
+            user.tenant.tenant_id,
             Some(user.user.id),
             body.order_id,
             body.priority,
