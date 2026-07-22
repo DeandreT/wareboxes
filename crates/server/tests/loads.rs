@@ -970,12 +970,15 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         .id;
     repo::inventory::reserve_inventory(
         &db,
-        tenant_id,
-        order_id,
-        None,
-        moved.contents[0].inventory_balance_id,
-        1,
-        "load-reservation-setup",
+        &repo::inventory::ReserveInventoryCommand {
+            tenant_id,
+            actor_user_id: user.id,
+            order_id,
+            order_item_id: None,
+            inventory_balance_id: moved.contents[0].inventory_balance_id,
+            qty: 1,
+            idempotency_key: "load-reservation-setup",
+        },
     )
     .await
     .unwrap();

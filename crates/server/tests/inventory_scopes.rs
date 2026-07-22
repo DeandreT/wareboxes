@@ -274,23 +274,29 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         .id;
     let allowed_reservation = repo::inventory::reserve_inventory(
         &db,
-        tenant_id,
-        allowed_order,
-        None,
-        allowed_balance_id,
-        3,
-        "inventory-scope-allowed-reservation-setup",
+        &repo::inventory::ReserveInventoryCommand {
+            tenant_id,
+            actor_user_id: administrator.id,
+            order_id: allowed_order,
+            order_item_id: None,
+            inventory_balance_id: allowed_balance_id,
+            qty: 3,
+            idempotency_key: "inventory-scope-allowed-reservation-setup",
+        },
     )
     .await
     .unwrap();
     let denied_reservation = repo::inventory::reserve_inventory(
         &db,
-        tenant_id,
-        denied_order,
-        None,
-        denied_balance_id,
-        3,
-        "inventory-scope-denied-reservation-setup",
+        &repo::inventory::ReserveInventoryCommand {
+            tenant_id,
+            actor_user_id: administrator.id,
+            order_id: denied_order,
+            order_item_id: None,
+            inventory_balance_id: denied_balance_id,
+            qty: 3,
+            idempotency_key: "inventory-scope-denied-reservation-setup",
+        },
     )
     .await
     .unwrap();

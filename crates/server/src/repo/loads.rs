@@ -1125,6 +1125,7 @@ pub async fn receive_line(
             &JournalCommand {
                 tenant_id,
                 inventory_owner_id,
+                facility_id,
                 actor_user_id: user_id,
                 transaction_type: InventoryTransactionType::Receive,
                 reason,
