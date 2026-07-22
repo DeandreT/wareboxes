@@ -6,12 +6,13 @@ use sqlx::Row;
 use wareboxes_core::models::{
     InventoryBalance, InventoryEntry, InventoryReconciliationIssue, InventoryReservation,
     InventoryStatus, InventoryTransaction, InventoryTransactionType, ItemBatch, ReservationStatus,
-    Timestamp,
+    TenantAccess, Timestamp,
 };
 use wareboxes_domain::{InventoryOwnerId, TenantId};
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
+use crate::repo::access::ScopeBindings;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
 
 fn parse_inventory_status(s: &str) -> AppResult<InventoryStatus> {
@@ -205,17 +206,39 @@ pub async fn get_item_batches(
     tenant_id: TenantId,
     show_deleted: bool,
 ) -> AppResult<Vec<ItemBatch>> {
+    get_item_batches_with_scope(db, tenant_id, &ScopeBindings::unrestricted(), show_deleted).await
+}
+
+pub async fn get_item_batches_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    show_deleted: bool,
+) -> AppResult<Vec<ItemBatch>> {
+    let scope = ScopeBindings::for_access(access);
+    get_item_batches_with_scope(db, access.tenant_id, &scope, show_deleted).await
+}
+
+async fn get_item_batches_with_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    scope: &ScopeBindings,
+    show_deleted: bool,
+) -> AppResult<Vec<ItemBatch>> {
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, deleted, item_id, uom,
                lot, load_id, order_id, expiration, serial
         FROM item_batches
-        WHERE tenant_id = $1 AND ($2 OR deleted IS NULL)
+        WHERE tenant_id = $1
+          AND ($2 OR deleted IS NULL)
+          AND ($3 OR inventory_owner_id = ANY($4))
         ORDER BY id
         "#,
     )
     .bind(tenant_id.get())
     .bind(show_deleted)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
     .fetch_all(db)
     .await?;
     rows.iter().map(map_batch).collect()
@@ -326,6 +349,24 @@ pub async fn get_balances(
     tenant_id: TenantId,
     show_deleted: bool,
 ) -> AppResult<Vec<InventoryBalance>> {
+    get_balances_with_scope(db, tenant_id, &ScopeBindings::unrestricted(), show_deleted).await
+}
+
+pub async fn get_balances_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    show_deleted: bool,
+) -> AppResult<Vec<InventoryBalance>> {
+    let scope = ScopeBindings::for_access(access);
+    get_balances_with_scope(db, access.tenant_id, &scope, show_deleted).await
+}
+
+async fn get_balances_with_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    scope: &ScopeBindings,
+    show_deleted: bool,
+) -> AppResult<Vec<InventoryBalance>> {
     let rows = sqlx::query(
         r#"
         SELECT ib.id, ib.tenant_id, ib.inventory_owner_id, ib.created, ib.modified,
@@ -335,12 +376,19 @@ pub async fn get_balances(
         FROM inventory_balances ib
         INNER JOIN facilities facility
             ON facility.tenant_id = ib.tenant_id AND facility.id = ib.facility_id
-        WHERE ib.tenant_id = $1 AND ($2 OR ib.deleted IS NULL)
+        WHERE ib.tenant_id = $1
+          AND ($2 OR ib.deleted IS NULL)
+          AND ($3 OR ib.facility_id = ANY($4))
+          AND ($5 OR ib.inventory_owner_id = ANY($6))
         ORDER BY ib.location_id, ib.item_batch_id, ib.status
         "#,
     )
     .bind(tenant_id.get())
     .bind(show_deleted)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
     .fetch_all(db)
     .await?;
     rows.iter().map(map_balance).collect()
@@ -350,6 +398,22 @@ pub async fn get_reconciliation_issues(
     db: &Db,
     tenant_id: TenantId,
 ) -> AppResult<Vec<InventoryReconciliationIssue>> {
+    get_reconciliation_issues_with_scope(db, tenant_id, &ScopeBindings::unrestricted()).await
+}
+
+pub async fn get_reconciliation_issues_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+) -> AppResult<Vec<InventoryReconciliationIssue>> {
+    let scope = ScopeBindings::for_access(access);
+    get_reconciliation_issues_with_scope(db, access.tenant_id, &scope).await
+}
+
+async fn get_reconciliation_issues_with_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    scope: &ScopeBindings,
+) -> AppResult<Vec<InventoryReconciliationIssue>> {
     let rows = sqlx::query(
         r#"
         SELECT tenant_id, inventory_owner_id, facility_id, location_id,
@@ -357,10 +421,16 @@ pub async fn get_reconciliation_issues(
                journal_qty, projected_qty, variance
         FROM inventory_reconciliation
         WHERE tenant_id = $1
+          AND ($2 OR facility_id = ANY($3))
+          AND ($4 OR inventory_owner_id = ANY($5))
         ORDER BY inventory_owner_id, facility_id, location_id, item_batch_id, status
         "#,
     )
     .bind(tenant_id.get())
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
     .fetch_all(db)
     .await?;
 
@@ -390,6 +460,22 @@ pub async fn get_transactions(
     db: &Db,
     tenant_id: TenantId,
 ) -> AppResult<Vec<InventoryTransaction>> {
+    get_transactions_with_scope(db, tenant_id, &ScopeBindings::unrestricted()).await
+}
+
+pub async fn get_transactions_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+) -> AppResult<Vec<InventoryTransaction>> {
+    let scope = ScopeBindings::for_access(access);
+    get_transactions_with_scope(db, access.tenant_id, &scope).await
+}
+
+async fn get_transactions_with_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    scope: &ScopeBindings,
+) -> AppResult<Vec<InventoryTransaction>> {
     let transaction_rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, actor_user_id,
@@ -397,10 +483,24 @@ pub async fn get_transactions(
                operation, idempotency_key
         FROM inventory_transactions
         WHERE tenant_id = $1
+          AND ($2 OR inventory_owner_id = ANY($3))
+          AND (
+              $4 OR EXISTS (
+                  SELECT 1
+                  FROM inventory_entries entry
+                  WHERE entry.tenant_id = inventory_transactions.tenant_id
+                    AND entry.transaction_id = inventory_transactions.id
+                    AND entry.facility_id = ANY($5)
+              )
+          )
         ORDER BY id DESC
         "#,
     )
     .bind(tenant_id.get())
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
     .fetch_all(db)
     .await?;
     let mut transactions = transaction_rows
@@ -418,12 +518,19 @@ pub async fn get_transactions(
                location_id, license_plate_id, item_batch_id, item_id, uom, lot,
                expiration, serial, status, quantity_delta
         FROM inventory_entries
-        WHERE tenant_id = $1 AND transaction_id = ANY($2)
+        WHERE tenant_id = $1
+          AND transaction_id = ANY($2)
+          AND ($3 OR facility_id = ANY($4))
+          AND ($5 OR inventory_owner_id = ANY($6))
         ORDER BY transaction_id, id
         "#,
     )
     .bind(tenant_id.get())
     .bind(&transaction_ids)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
     .fetch_all(db)
     .await?;
     let mut entries = HashMap::<i64, Vec<InventoryEntry>>::new();
@@ -442,18 +549,43 @@ pub async fn get_reservations(
     tenant_id: TenantId,
     show_deleted: bool,
 ) -> AppResult<Vec<InventoryReservation>> {
+    get_reservations_with_scope(db, tenant_id, &ScopeBindings::unrestricted(), show_deleted).await
+}
+
+pub async fn get_reservations_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    show_deleted: bool,
+) -> AppResult<Vec<InventoryReservation>> {
+    let scope = ScopeBindings::for_access(access);
+    get_reservations_with_scope(db, access.tenant_id, &scope, show_deleted).await
+}
+
+async fn get_reservations_with_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    scope: &ScopeBindings,
+    show_deleted: bool,
+) -> AppResult<Vec<InventoryReservation>> {
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, modified, deleted, order_id,
                order_item_id, inventory_balance_id, facility_id, item_batch_id,
                location_id, qty, status
         FROM inventory_reservations
-        WHERE tenant_id = $1 AND ($2 OR deleted IS NULL)
+        WHERE tenant_id = $1
+          AND ($2 OR deleted IS NULL)
+          AND ($3 OR facility_id = ANY($4))
+          AND ($5 OR inventory_owner_id = ANY($6))
         ORDER BY id
         "#,
     )
     .bind(tenant_id.get())
     .bind(show_deleted)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
     .fetch_all(db)
     .await?;
     rows.iter().map(map_reservation).collect()
