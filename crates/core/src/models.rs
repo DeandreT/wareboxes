@@ -654,9 +654,10 @@ pub struct LicensePlateContent {
 // Employees (app/utils/types/db/employees.ts)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Employee {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub user_id: Option<i64>,
@@ -968,23 +969,27 @@ impl_status_display!(LoadFileCategory);
 // Audits (app/utils/types/db/audits.ts)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditWave {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub name: Option<String>,
     pub description: Option<String>,
+    pub created_by: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditLocationCount {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub started: Option<Timestamp>,
     pub ended: Option<Timestamp>,
     pub audit_id: i64,
+    pub inventory_owner_id: i64,
     pub location_id: i64,
     pub item_id: i64,
     pub lot: Option<String>,

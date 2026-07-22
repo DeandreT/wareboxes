@@ -20,7 +20,7 @@ pub async fn list(
 ) -> AppResult<Json<Vec<Employee>>> {
     user.require_permission(&state.db, PERM).await?;
     Ok(Json(
-        repo::employees::get_employees(&state.db, q.show_deleted).await?,
+        repo::employees::get_employees(&state.db, user.tenant.tenant_id, q.show_deleted).await?,
     ))
 }
 
@@ -34,6 +34,7 @@ pub async fn add(
     let hired = body.hired.unwrap_or_else(now_iso);
     let id = repo::employees::add_employee(
         &state.db,
+        user.tenant.tenant_id,
         &body.first_name,
         &body.last_name,
         &body.title,
@@ -55,6 +56,7 @@ pub async fn update(
     validate(&body)?;
     let ok = repo::employees::update_employee(
         &state.db,
+        user.tenant.tenant_id,
         body.employee_id,
         body.first_name.as_deref(),
         body.last_name.as_deref(),
@@ -76,7 +78,13 @@ pub async fn delete(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::employees::set_employee_deleted(&state.db, body.employee_id, true).await?,
+        repo::employees::set_employee_deleted(
+            &state.db,
+            user.tenant.tenant_id,
+            body.employee_id,
+            true,
+        )
+        .await?,
     ))
 }
 
@@ -88,6 +96,12 @@ pub async fn restore(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::employees::set_employee_deleted(&state.db, body.employee_id, false).await?,
+        repo::employees::set_employee_deleted(
+            &state.db,
+            user.tenant.tenant_id,
+            body.employee_id,
+            false,
+        )
+        .await?,
     ))
 }

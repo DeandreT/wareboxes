@@ -19,7 +19,7 @@ pub async fn list(
 ) -> AppResult<Json<Vec<AuditWave>>> {
     user.require_permission(&state.db, PERM).await?;
     Ok(Json(
-        repo::audits::get_audit_waves(&state.db, q.show_deleted).await?,
+        repo::audits::get_audit_waves(&state.db, user.tenant.tenant_id, q.show_deleted).await?,
     ))
 }
 
@@ -30,8 +30,14 @@ pub async fn add(
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let id =
-        repo::audits::add_audit_wave(&state.db, &body.name, body.description.as_deref()).await?;
+    let id = repo::audits::add_audit_wave(
+        &state.db,
+        user.tenant.tenant_id,
+        user.user.id,
+        &body.name,
+        body.description.as_deref(),
+    )
+    .await?;
     Ok(Json(id))
 }
 
@@ -44,6 +50,7 @@ pub async fn update(
     validate(&body)?;
     let ok = repo::audits::update_audit_wave(
         &state.db,
+        user.tenant.tenant_id,
         body.audit_wave_id,
         body.name.as_deref(),
         body.description.as_deref(),
@@ -60,7 +67,13 @@ pub async fn delete(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::audits::set_audit_wave_deleted(&state.db, body.audit_wave_id, true).await?,
+        repo::audits::set_audit_wave_deleted(
+            &state.db,
+            user.tenant.tenant_id,
+            body.audit_wave_id,
+            true,
+        )
+        .await?,
     ))
 }
 
@@ -72,7 +85,13 @@ pub async fn restore(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::audits::set_audit_wave_deleted(&state.db, body.audit_wave_id, false).await?,
+        repo::audits::set_audit_wave_deleted(
+            &state.db,
+            user.tenant.tenant_id,
+            body.audit_wave_id,
+            false,
+        )
+        .await?,
     ))
 }
 
@@ -83,6 +102,6 @@ pub async fn counts(
 ) -> AppResult<Json<Vec<AuditLocationCount>>> {
     user.require_permission(&state.db, PERM).await?;
     Ok(Json(
-        repo::audits::get_location_counts(&state.db, audit_id).await?,
+        repo::audits::get_location_counts(&state.db, user.tenant.tenant_id, audit_id).await?,
     ))
 }

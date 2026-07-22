@@ -613,21 +613,12 @@ CREATE INDEX idx_inventory_reservations_batch_location ON inventory_reservations
 CREATE INDEX idx_inventory_reservations_open ON inventory_reservations(tenant_id, inventory_owner_id, order_id, status)
     WHERE deleted IS NULL AND status = 'reserved';
 
-CREATE TABLE picks (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    created TIMESTAMPTZ NOT NULL,
-    deleted TIMESTAMPTZ,
-    location_id BIGINT REFERENCES locations(id),
-    item_batch_id BIGINT REFERENCES item_batches(id),
-    reservation_id BIGINT REFERENCES inventory_reservations(id),
-    qty BIGINT NOT NULL DEFAULT 1 CHECK (qty > 0)
-);
-
 CREATE TABLE employees (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    user_id BIGINT REFERENCES users(id),
+    user_id BIGINT,
     first_name TEXT NOT NULL,
     last_name TEXT NOT NULL,
     email TEXT,
@@ -636,68 +627,106 @@ CREATE TABLE employees (
     type TEXT NOT NULL,
     hired TIMESTAMPTZ NOT NULL,
     terminated TIMESTAMPTZ,
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, email),
+    FOREIGN KEY (tenant_id, user_id) REFERENCES tenant_memberships(tenant_id, user_id),
+    CHECK (btrim(first_name) <> ''),
+    CHECK (btrim(last_name) <> ''),
+    CHECK (btrim(title) <> ''),
+    CHECK (btrim(type) <> ''),
     CHECK (terminated IS NULL OR terminated >= hired)
 );
+CREATE INDEX idx_employees_user ON employees(tenant_id, user_id) WHERE user_id IS NOT NULL;
 
 CREATE TABLE employee_facilities (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    employee_id BIGINT NOT NULL REFERENCES employees(id),
-    facility_id BIGINT NOT NULL REFERENCES facilities(id),
-    UNIQUE (employee_id, facility_id)
+    employee_id BIGINT NOT NULL,
+    facility_id BIGINT NOT NULL,
+    FOREIGN KEY (tenant_id, employee_id) REFERENCES employees(tenant_id, id),
+    FOREIGN KEY (tenant_id, facility_id) REFERENCES facilities(tenant_id, id),
+    UNIQUE (tenant_id, employee_id, facility_id)
 );
+CREATE INDEX idx_employee_facilities_facility ON employee_facilities(tenant_id, facility_id);
 
 CREATE TABLE audit_waves (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     name TEXT,
-    description TEXT
+    description TEXT,
+    created_by BIGINT NOT NULL,
+    UNIQUE (tenant_id, id),
+    FOREIGN KEY (tenant_id, created_by) REFERENCES tenant_memberships(tenant_id, user_id)
 );
 
 CREATE TABLE audit_wave_items (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    item_id BIGINT NOT NULL REFERENCES items(id),
-    audit_wave_id BIGINT NOT NULL REFERENCES audit_waves(id)
+    item_id BIGINT NOT NULL,
+    audit_wave_id BIGINT NOT NULL,
+    FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id),
+    FOREIGN KEY (tenant_id, audit_wave_id) REFERENCES audit_waves(tenant_id, id),
+    UNIQUE (tenant_id, audit_wave_id, item_id)
 );
 
 CREATE TABLE audit_wave_inventory_owners (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    inventory_owner_id BIGINT NOT NULL REFERENCES inventory_owners(id),
-    audit_wave_id BIGINT NOT NULL REFERENCES audit_waves(id)
+    inventory_owner_id BIGINT NOT NULL,
+    audit_wave_id BIGINT NOT NULL,
+    FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, audit_wave_id) REFERENCES audit_waves(tenant_id, id),
+    UNIQUE (tenant_id, audit_wave_id, inventory_owner_id)
 );
 
 CREATE TABLE audit_wave_locations (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     started TIMESTAMPTZ,
     ended TIMESTAMPTZ,
-    location_id BIGINT NOT NULL REFERENCES locations(id),
-    audit_wave_id BIGINT NOT NULL REFERENCES audit_waves(id),
-    auditor_id BIGINT REFERENCES users(id)
+    location_id BIGINT NOT NULL,
+    audit_wave_id BIGINT NOT NULL,
+    auditor_id BIGINT,
+    FOREIGN KEY (tenant_id, location_id) REFERENCES locations(tenant_id, id),
+    FOREIGN KEY (tenant_id, audit_wave_id) REFERENCES audit_waves(tenant_id, id),
+    FOREIGN KEY (tenant_id, auditor_id) REFERENCES tenant_memberships(tenant_id, user_id),
+    UNIQUE (tenant_id, audit_wave_id, location_id),
+    CHECK (ended IS NULL OR started IS NULL OR ended >= started)
 );
 
 CREATE TABLE audit_location_counts (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     started TIMESTAMPTZ,
     ended TIMESTAMPTZ,
-    audit_id BIGINT NOT NULL REFERENCES audit_waves(id),
-    location_id BIGINT NOT NULL REFERENCES locations(id),
-    item_id BIGINT NOT NULL REFERENCES items(id),
+    audit_id BIGINT NOT NULL,
+    inventory_owner_id BIGINT NOT NULL,
+    location_id BIGINT NOT NULL,
+    item_id BIGINT NOT NULL,
     lot TEXT,
     expiration TIMESTAMPTZ,
     serial TEXT,
     on_hand BIGINT NOT NULL,
     count BIGINT NOT NULL,
     approval_status TEXT NOT NULL,
+    FOREIGN KEY (tenant_id, audit_id) REFERENCES audit_waves(tenant_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, location_id) REFERENCES locations(tenant_id, id),
+    FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, item_id) REFERENCES inventory_owner_items(tenant_id, inventory_owner_id, item_id),
+    CHECK (ended IS NULL OR started IS NULL OR ended >= started),
     CHECK (on_hand >= 0),
     CHECK (count >= 0),
     CHECK (approval_status IN ('pending', 'approved', 'rejected'))
@@ -705,8 +734,12 @@ CREATE TABLE audit_location_counts (
 
 CREATE TABLE audit_wave_assignments (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    audit_wave_id BIGINT NOT NULL REFERENCES audit_waves(id),
-    auditor_id BIGINT NOT NULL REFERENCES users(id)
+    audit_wave_id BIGINT NOT NULL,
+    auditor_id BIGINT NOT NULL,
+    FOREIGN KEY (tenant_id, audit_wave_id) REFERENCES audit_waves(tenant_id, id),
+    FOREIGN KEY (tenant_id, auditor_id) REFERENCES tenant_memberships(tenant_id, user_id),
+    UNIQUE (tenant_id, audit_wave_id, auditor_id)
 );
