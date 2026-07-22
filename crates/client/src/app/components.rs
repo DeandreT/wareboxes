@@ -56,7 +56,7 @@ impl WareboxesApp {
                     .add_enabled(
                         can_next,
                         egui::Button::new(Self::icon(Icon::ChevronRight))
-                            .min_size(egui::vec2(30.0, 30.0)),
+                            .min_size(egui::vec2(26.0, 26.0)),
                     )
                     .on_hover_text("Next page")
                     .clicked()
@@ -68,7 +68,7 @@ impl WareboxesApp {
                     .add_enabled(
                         can_previous,
                         egui::Button::new(Self::icon(Icon::ChevronLeft))
-                            .min_size(egui::vec2(30.0, 30.0)),
+                            .min_size(egui::vec2(26.0, 26.0)),
                     )
                     .on_hover_text("Previous page")
                     .clicked()
@@ -1191,8 +1191,8 @@ impl WareboxesApp {
         egui::Frame::default()
             .fill(fill)
             .stroke(egui::Stroke::new(1.0_f32, color))
-            .rounding(egui::Rounding::same(7.0))
-            .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+            .rounding(egui::Rounding::same(5.0))
+            .inner_margin(egui::Margin::symmetric(6.0, 2.0))
             .show(ui, |ui| {
                 ui.label(
                     egui::RichText::new(format!("{label}: {count}"))

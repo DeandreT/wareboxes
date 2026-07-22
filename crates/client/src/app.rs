@@ -848,13 +848,13 @@ impl WareboxesApp {
         egui::TopBottomPanel::top("app_shell")
             .frame(
                 egui::Frame::side_top_panel(ctx.style().as_ref())
-                    .inner_margin(egui::Margin::symmetric(12.0, 7.0)),
+                    .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new("WAREBOXES")
-                            .size(17.0)
+                            .size(16.0)
                             .strong()
                             .color(Self::accent_color(ui)),
                     );
@@ -909,8 +909,9 @@ impl WareboxesApp {
                     .collect::<Vec<_>>();
                 let mut panel_changes = Vec::new();
                 let mut close_all = false;
+                let compact_navigation = ui.available_width() < 900.0;
 
-                ui.horizontal_wrapped(|ui| {
+                ui.horizontal(|ui| {
                     ui.label(Self::icon(Icon::SquareStack))
                         .on_hover_text("Workspaces");
                     for (id, name) in workspace_tabs {
@@ -950,20 +951,24 @@ impl WareboxesApp {
                         }
                     });
                     ui.separator();
-                    for screen in operational {
-                        let mut open = self
-                            .active_workspace()
-                            .panels
-                            .get(&screen)
-                            .is_some_and(|panel| panel.open);
-                        if ui.toggle_value(&mut open, screen.title()).changed() {
-                            panel_changes.push((screen, open));
-                        }
-                    }
-
-                    if !administration.is_empty() {
-                        ui.menu_button("Administration", |ui| {
+                    if compact_navigation {
+                        ui.menu_button("Panels", |ui| {
                             ui.set_min_width(190.0);
+                            ui.strong("Operations");
+                            for screen in operational {
+                                let mut open = self
+                                    .active_workspace()
+                                    .panels
+                                    .get(&screen)
+                                    .is_some_and(|panel| panel.open);
+                                if ui.toggle_value(&mut open, screen.title()).changed() {
+                                    panel_changes.push((screen, open));
+                                }
+                            }
+                            if !administration.is_empty() {
+                                ui.separator();
+                                ui.strong("Administration");
+                            }
                             for screen in administration {
                                 let mut open = self
                                     .active_workspace()
@@ -975,6 +980,33 @@ impl WareboxesApp {
                                 }
                             }
                         });
+                    } else {
+                        for screen in operational {
+                            let mut open = self
+                                .active_workspace()
+                                .panels
+                                .get(&screen)
+                                .is_some_and(|panel| panel.open);
+                            if ui.toggle_value(&mut open, screen.title()).changed() {
+                                panel_changes.push((screen, open));
+                            }
+                        }
+
+                        if !administration.is_empty() {
+                            ui.menu_button("Administration", |ui| {
+                                ui.set_min_width(190.0);
+                                for screen in administration {
+                                    let mut open = self
+                                        .active_workspace()
+                                        .panels
+                                        .get(&screen)
+                                        .is_some_and(|panel| panel.open);
+                                    if ui.toggle_value(&mut open, screen.title()).changed() {
+                                        panel_changes.push((screen, open));
+                                    }
+                                }
+                            });
+                        }
                     }
                     if Self::icon_button(ui, Icon::PanelTopClose, "Close all panels").clicked() {
                         close_all = true;
@@ -1108,11 +1140,12 @@ impl WareboxesApp {
         let mut open = true;
         let mut pop_out = false;
         let mut refresh = false;
+        let panel_bounds = ctx.available_rect();
         egui::Window::new(s.title())
             .id(egui::Id::new(("panel", workspace_id, layout_generation, s)))
             .open(&mut open)
             .resizable(true)
-            .constrain(false)
+            .constrain_to(panel_bounds)
             .default_pos(default_pos)
             .default_size(default_size)
             .show(ctx, |ui| {
@@ -1141,39 +1174,55 @@ impl WareboxesApp {
         docked_index: usize,
         docked_count: usize,
     ) -> (egui::Pos2, egui::Vec2) {
-        let preferred_size = match screen {
+        let viewport = ctx.available_rect();
+        let requested_size = match screen {
             Screen::Orders => egui::vec2(980.0, 620.0),
             Screen::Items => egui::vec2(920.0, 640.0),
             Screen::Loads | Screen::Inventory => egui::vec2(1080.0, 680.0),
             Screen::LicensePlates => egui::vec2(940.0, 620.0),
             _ => egui::vec2(840.0, 560.0),
         };
+        let preferred_size = egui::vec2(
+            requested_size.x.min((viewport.width() - 20.0).max(1.0)),
+            requested_size.y.min((viewport.height() - 20.0).max(1.0)),
+        );
 
         match layout {
             WorkspaceLayout::Free => {
                 let offset = (panel_index % 6) as f32 * 28.0;
-                (egui::pos2(18.0 + offset, 54.0 + offset), preferred_size)
+                (
+                    egui::pos2(
+                        viewport.left() + 10.0 + offset,
+                        viewport.top() + 10.0 + offset,
+                    ),
+                    preferred_size,
+                )
             }
             WorkspaceLayout::Cascade => {
                 let offset = (docked_index % 8) as f32 * 32.0;
-                (egui::pos2(18.0 + offset, 54.0 + offset), preferred_size)
+                (
+                    egui::pos2(
+                        viewport.left() + 10.0 + offset,
+                        viewport.top() + 10.0 + offset,
+                    ),
+                    preferred_size,
+                )
             }
             WorkspaceLayout::Tile => {
                 let count = docked_count.max(1);
-                let columns = match count {
+                let requested_columns = match count {
                     1 => 1,
                     2..=4 => 2,
                     _ => 3,
                 };
+                let fitting_columns = (viewport.width() / 360.0).floor().max(1.0) as usize;
+                let columns = requested_columns.min(fitting_columns);
                 let rows = count.div_ceil(columns);
                 let column = docked_index % columns;
                 let row = docked_index / columns;
-                let viewport = ctx.screen_rect();
-                let gap = 10.0;
-                let width =
-                    ((viewport.width() - gap * (columns as f32 + 1.0)) / columns as f32).max(420.0);
-                let height =
-                    ((viewport.height() - gap * (rows as f32 + 1.0)) / rows as f32).max(300.0);
+                let gap = 8.0;
+                let width = (viewport.width() - gap * (columns as f32 + 1.0)) / columns as f32;
+                let height = (viewport.height() - gap * (rows as f32 + 1.0)) / rows as f32;
                 (
                     egui::pos2(
                         viewport.left() + gap + column as f32 * (width + gap),

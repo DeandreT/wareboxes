@@ -33,6 +33,12 @@ cargo run -p wareboxes-server
 cargo run -p wareboxes-client
 ```
 
+To run the native client against the hosted demo with its credentials prefilled:
+
+```bash
+scripts/run-client-demo.sh
+```
+
 The local Postgres container uses host port `5433`.
 
 ## Tests
