@@ -16,7 +16,12 @@ pub async fn list(
     Query(q): Query<ShowDeleted>,
 ) -> AppResult<Json<Vec<Facility>>> {
     user.require_any_permission(&state.db, READ_PERMS).await?;
-    let facilities =
-        repo::facilities::get_facilities(&state.db, user.tenant.tenant_id, q.show_deleted).await?;
+    let facilities = repo::facilities::get_facilities_in_scope(
+        &state.db,
+        user.tenant.tenant_id,
+        &user.tenant.site_scope,
+        q.show_deleted,
+    )
+    .await?;
     Ok(Json(facilities))
 }

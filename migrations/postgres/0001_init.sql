@@ -55,6 +55,8 @@ CREATE TABLE tenant_memberships (
     created TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     deleted TIMESTAMPTZ,
     is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    all_facilities BOOLEAN NOT NULL DEFAULT TRUE,
+    all_inventory_owners BOOLEAN NOT NULL DEFAULT TRUE,
     CONSTRAINT tenant_memberships_tenant_user_unique UNIQUE (tenant_id, user_id)
 );
 CREATE INDEX tenant_memberships_user_active_idx
@@ -170,24 +172,50 @@ CREATE TABLE inventory_owner_facilities (
     FOREIGN KEY (tenant_id, facility_id) REFERENCES facilities(tenant_id, id),
     UNIQUE (tenant_id, inventory_owner_id, facility_id)
 );
-CREATE INDEX idx_inventory_owner_facilities_inventory_owner_id ON inventory_owner_facilities(inventory_owner_id);
-CREATE INDEX idx_inventory_owner_facilities_facility_id ON inventory_owner_facilities(facility_id);
+CREATE INDEX idx_inventory_owner_facilities_inventory_owner_id
+    ON inventory_owner_facilities(tenant_id, inventory_owner_id);
+CREATE INDEX idx_inventory_owner_facilities_facility_id
+    ON inventory_owner_facilities(tenant_id, facility_id);
+
+CREATE TABLE user_facilities (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+    created TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted TIMESTAMPTZ,
+    user_id BIGINT NOT NULL,
+    facility_id BIGINT NOT NULL,
+    FOREIGN KEY (tenant_id, user_id)
+        REFERENCES tenant_memberships(tenant_id, user_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES facilities(tenant_id, id) ON DELETE CASCADE,
+    UNIQUE (tenant_id, user_id, facility_id)
+);
+CREATE INDEX user_facilities_user_active_idx
+    ON user_facilities(tenant_id, user_id, facility_id)
+    WHERE deleted IS NULL;
+CREATE INDEX user_facilities_facility_active_idx
+    ON user_facilities(tenant_id, facility_id, user_id)
+    WHERE deleted IS NULL;
 
 CREATE TABLE user_inventory_owners (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL,
     inventory_owner_id BIGINT NOT NULL,
-    is_primary BOOLEAN NOT NULL DEFAULT false,
-    FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, user_id)
+        REFERENCES tenant_memberships(tenant_id, user_id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES inventory_owners(tenant_id, id) ON DELETE CASCADE,
     UNIQUE (tenant_id, user_id, inventory_owner_id)
 );
-CREATE INDEX idx_user_inventory_owners_inventory_owner_id ON user_inventory_owners(inventory_owner_id);
-CREATE UNIQUE INDEX idx_user_inventory_owners_one_primary
-    ON user_inventory_owners(tenant_id, user_id)
-    WHERE is_primary AND deleted IS NULL;
+CREATE INDEX user_inventory_owners_user_active_idx
+    ON user_inventory_owners(tenant_id, user_id, inventory_owner_id)
+    WHERE deleted IS NULL;
+CREATE INDEX user_inventory_owners_owner_active_idx
+    ON user_inventory_owners(tenant_id, inventory_owner_id, user_id)
+    WHERE deleted IS NULL;
 
 CREATE TABLE pick_waves (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

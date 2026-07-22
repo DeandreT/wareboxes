@@ -2,7 +2,7 @@
 //! only listed facilities (no create/update); kept faithful here.
 
 use sqlx::Row;
-use wareboxes_core::models::Facility;
+use wareboxes_core::models::{Facility, SiteScope};
 use wareboxes_domain::TenantId;
 
 use crate::db::{now_iso, Db};
@@ -40,12 +40,74 @@ pub async fn get_facilities(
     rows.iter().map(map).collect()
 }
 
+pub async fn get_facilities_in_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    site_scope: &SiteScope,
+    show_deleted: bool,
+) -> AppResult<Vec<Facility>> {
+    let facility_ids = site_scope
+        .facility_ids
+        .iter()
+        .map(|id| id.get())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT id, tenant_id, created, deleted, name, address_id
+        FROM facilities
+        WHERE tenant_id = $1
+          AND ($2 OR deleted IS NULL)
+          AND ($3 OR id = ANY($4))
+        ORDER BY id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(show_deleted)
+    .bind(site_scope.all_facilities)
+    .bind(&facility_ids)
+    .fetch_all(db)
+    .await?;
+    rows.iter().map(map).collect()
+}
+
 pub async fn active_facility_exists(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM facilities WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL)",
     )
     .bind(tenant_id.get())
     .bind(id)
+    .fetch_one(db)
+    .await?;
+    Ok(exists)
+}
+
+pub async fn active_facility_exists_in_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    site_scope: &SiteScope,
+    id: i64,
+) -> AppResult<bool> {
+    let facility_ids = site_scope
+        .facility_ids
+        .iter()
+        .map(|facility_id| facility_id.get())
+        .collect::<Vec<_>>();
+    let exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM facilities
+            WHERE tenant_id = $1
+              AND id = $2
+              AND deleted IS NULL
+              AND ($3 OR id = ANY($4))
+        )
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(id)
+    .bind(site_scope.all_facilities)
+    .bind(&facility_ids)
     .fetch_one(db)
     .await?;
     Ok(exists)

@@ -112,6 +112,18 @@ pub struct AddDeleteUserRole {
     pub role_id: i64,
 }
 
+/// Replaces a tenant member's complete facility and inventory-owner scope.
+/// An `all_*` flag and a non-empty corresponding ID list are mutually exclusive.
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct UpdateUserAccessScope {
+    #[validate(range(min = 1, message = "Invalid user ID"))]
+    pub user_id: i64,
+    pub all_facilities: bool,
+    pub facility_ids: Vec<i64>,
+    pub all_inventory_owners: bool,
+    pub inventory_owner_ids: Vec<i64>,
+}
+
 // ---------------------------------------------------------------------------
 // Roles
 // ---------------------------------------------------------------------------

@@ -19,7 +19,13 @@ pub async fn list(
 ) -> AppResult<Json<Vec<Location>>> {
     user.require_permission(&state.db, PERM).await?;
     Ok(Json(
-        repo::locations::get_locations(&state.db, user.tenant.tenant_id, q.show_deleted).await?,
+        repo::locations::get_locations_in_scope(
+            &state.db,
+            user.tenant.tenant_id,
+            &user.tenant.site_scope,
+            q.show_deleted,
+        )
+        .await?,
     ))
 }
 
@@ -30,15 +36,22 @@ pub async fn add(
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    if !repo::facilities::active_facility_exists(&state.db, user.tenant.tenant_id, body.facility_id)
-        .await?
+    user.require_facility(body.facility_id)?;
+    if !repo::facilities::active_facility_exists_in_scope(
+        &state.db,
+        user.tenant.tenant_id,
+        &user.tenant.site_scope,
+        body.facility_id,
+    )
+    .await?
     {
         return Err(AppError::bad_request("Facility not found"));
     }
     if let Some(parent_location_id) = body.parent_location_id {
-        if !repo::locations::active_location_exists(
+        if !repo::locations::active_location_exists_in_facility(
             &state.db,
             user.tenant.tenant_id,
+            body.facility_id,
             parent_location_id,
         )
         .await?
@@ -69,9 +82,32 @@ pub async fn update(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::locations::update_location(
+    let Some(facility_id) = repo::locations::active_location_facility_in_scope(
         &state.db,
         user.tenant.tenant_id,
+        &user.tenant.site_scope,
+        body.location_id,
+    )
+    .await?
+    else {
+        return Ok(Json(false));
+    };
+    if let Some(parent_location_id) = body.parent_location_id {
+        if !repo::locations::active_location_exists_in_facility(
+            &state.db,
+            user.tenant.tenant_id,
+            facility_id,
+            parent_location_id,
+        )
+        .await?
+        {
+            return Err(AppError::bad_request("Parent location not found"));
+        }
+    }
+    let ok = repo::locations::update_location_in_scope(
+        &state.db,
+        user.tenant.tenant_id,
+        &user.tenant.site_scope,
         body.location_id,
         body.parent_location_id,
         body.barcode.as_deref(),
@@ -93,9 +129,10 @@ pub async fn delete(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::locations::set_location_deleted(
+        repo::locations::set_location_deleted_in_scope(
             &state.db,
             user.tenant.tenant_id,
+            &user.tenant.site_scope,
             body.location_id,
             true,
         )
@@ -111,9 +148,10 @@ pub async fn restore(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::locations::set_location_deleted(
+        repo::locations::set_location_deleted_in_scope(
             &state.db,
             user.tenant.tenant_id,
+            &user.tenant.site_scope,
             body.location_id,
             false,
         )
