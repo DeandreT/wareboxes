@@ -330,12 +330,15 @@ pub async fn reserve(
     }
     let id = repo::inventory::reserve_inventory(
         &state.db,
-        user.tenant.tenant_id,
-        body.order_id,
-        body.order_item_id,
-        body.inventory_balance_id,
-        body.qty,
-        &body.idempotency_key,
+        &repo::inventory::ReserveInventoryCommand {
+            tenant_id: user.tenant.tenant_id,
+            actor_user_id: user.user.id,
+            order_id: body.order_id,
+            order_item_id: body.order_item_id,
+            inventory_balance_id: body.inventory_balance_id,
+            qty: body.qty,
+            idempotency_key: &body.idempotency_key,
+        },
     )
     .await?;
     Ok(Json(id))
@@ -362,9 +365,12 @@ pub async fn cancel_reservation(
     Ok(Json(
         repo::inventory::cancel_reservation(
             &state.db,
-            user.tenant.tenant_id,
-            body.reservation_id,
-            &body.idempotency_key,
+            &repo::inventory::CancelReservationCommand {
+                tenant_id: user.tenant.tenant_id,
+                actor_user_id: user.user.id,
+                reservation_id: body.reservation_id,
+                idempotency_key: &body.idempotency_key,
+            },
         )
         .await?,
     ))

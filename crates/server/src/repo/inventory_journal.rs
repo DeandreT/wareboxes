@@ -5,14 +5,17 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use wareboxes_core::models::{InventoryStatus, InventoryTransactionType};
-use wareboxes_domain::TenantId;
+use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
 
 use crate::db::now_iso;
 use crate::error::{AppError, AppResult};
 
+use super::outbox::{self, NewOutboxEvent};
+
 pub(crate) struct JournalCommand<'a> {
     pub tenant_id: TenantId,
     pub inventory_owner_id: i64,
+    pub facility_id: i64,
     pub actor_user_id: i64,
     pub transaction_type: InventoryTransactionType,
     pub reason: Option<&'a str>,
@@ -157,6 +160,7 @@ pub(crate) async fn begin_transaction(
         }
     }
 
+    let occurred_at = now_iso();
     let transaction_id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO inventory_transactions
@@ -169,7 +173,7 @@ pub(crate) async fn begin_transaction(
     )
     .bind(command.tenant_id.get())
     .bind(command.inventory_owner_id)
-    .bind(now_iso())
+    .bind(occurred_at)
     .bind(command.actor_user_id)
     .bind(command.transaction_type.as_str())
     .bind(command.reason)
@@ -180,6 +184,39 @@ pub(crate) async fn begin_transaction(
     .bind(command.idempotency_key)
     .bind(command.request_hash)
     .fetch_one(&mut **tx)
+    .await?;
+
+    let inventory_owner_id = InventoryOwnerId::new(command.inventory_owner_id)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let facility_id = FacilityId::new(command.facility_id)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let event_key = format!("inventory-transaction:{transaction_id}");
+    let aggregate_id = transaction_id.to_string();
+    let payload = serde_json::json!({
+        "inventory_transaction_id": transaction_id,
+        "inventory_owner_id": command.inventory_owner_id,
+        "facility_id": command.facility_id,
+        "transaction_type": command.transaction_type.as_str(),
+        "operation": command.operation,
+    });
+    outbox::enqueue(
+        tx,
+        &NewOutboxEvent {
+            tenant_id: command.tenant_id,
+            inventory_owner_id: Some(inventory_owner_id),
+            facility_id: Some(facility_id),
+            actor_user_id: Some(command.actor_user_id),
+            event_key: &event_key,
+            aggregate_type: "inventory_transaction",
+            aggregate_id: &aggregate_id,
+            ordering_key: &event_key,
+            aggregate_sequence: 1,
+            event_type: "inventory.transaction.recorded",
+            schema_version: 1,
+            payload: &payload,
+            occurred_at,
+        },
+    )
     .await?;
 
     if command.record_idempotency {

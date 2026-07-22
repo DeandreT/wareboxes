@@ -8,12 +8,13 @@ use wareboxes_core::models::{
     InventoryStatus, InventoryTransaction, InventoryTransactionType, ItemBatch, ReservationStatus,
     TenantAccess, Timestamp,
 };
-use wareboxes_domain::{InventoryOwnerId, TenantId};
+use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::ScopeBindings;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
+use crate::repo::outbox::{self, NewOutboxEvent};
 
 fn parse_inventory_status(s: &str) -> AppResult<InventoryStatus> {
     InventoryStatus::parse(s)
@@ -663,6 +664,7 @@ pub async fn receive_inventory(
         &JournalCommand {
             tenant_id,
             inventory_owner_id,
+            facility_id,
             actor_user_id: user_id,
             transaction_type: InventoryTransactionType::Receive,
             reason,
@@ -841,6 +843,7 @@ pub async fn move_inventory(
         &JournalCommand {
             tenant_id,
             inventory_owner_id,
+            facility_id: source_facility_id,
             actor_user_id: user_id,
             transaction_type: InventoryTransactionType::Move,
             reason,
@@ -1087,6 +1090,7 @@ pub async fn split_move_inventory(
         &JournalCommand {
             tenant_id,
             inventory_owner_id,
+            facility_id: source_facility_id,
             actor_user_id: user_id,
             transaction_type: InventoryTransactionType::Move,
             reason,
@@ -1204,15 +1208,27 @@ pub async fn split_move_inventory(
     Ok(transaction_id)
 }
 
-pub async fn reserve_inventory(
-    db: &Db,
-    tenant_id: TenantId,
-    order_id: i64,
-    order_item_id: Option<i64>,
-    inventory_balance_id: i64,
-    qty: i64,
-    idempotency_key: &str,
-) -> AppResult<i64> {
+#[derive(Debug, Clone, Copy)]
+pub struct ReserveInventoryCommand<'a> {
+    pub tenant_id: TenantId,
+    pub actor_user_id: i64,
+    pub order_id: i64,
+    pub order_item_id: Option<i64>,
+    pub inventory_balance_id: i64,
+    pub qty: i64,
+    pub idempotency_key: &'a str,
+}
+
+pub async fn reserve_inventory(db: &Db, command: &ReserveInventoryCommand<'_>) -> AppResult<i64> {
+    let ReserveInventoryCommand {
+        tenant_id,
+        actor_user_id,
+        order_id,
+        order_item_id,
+        inventory_balance_id,
+        qty,
+        idempotency_key,
+    } = *command;
     if qty <= 0 {
         return Err(AppError::bad_request("quantity must be positive"));
     }
@@ -1368,6 +1384,44 @@ pub async fn reserve_inventory(
     .fetch_one(&mut *tx)
     .await?;
 
+    let event_key = format!("inventory-reservation:{reservation_id}:created");
+    let aggregate_id = reservation_id.to_string();
+    let ordering_key = format!("inventory-reservation:{reservation_id}");
+    let payload = serde_json::json!({
+        "reservation_id": reservation_id,
+        "order_id": order_id,
+        "order_item_id": order_item_id,
+        "inventory_balance_id": resolved_balance_id,
+        "inventory_owner_id": inventory_owner_id,
+        "facility_id": facility_id,
+        "quantity": qty,
+    });
+    outbox::enqueue(
+        &mut tx,
+        &NewOutboxEvent {
+            tenant_id,
+            inventory_owner_id: Some(
+                InventoryOwnerId::new(inventory_owner_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+            ),
+            facility_id: Some(
+                FacilityId::new(facility_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+            ),
+            actor_user_id: Some(actor_user_id),
+            event_key: &event_key,
+            aggregate_type: "inventory_reservation",
+            aggregate_id: &aggregate_id,
+            ordering_key: &ordering_key,
+            aggregate_sequence: 1,
+            event_type: "inventory.reservation.created",
+            schema_version: 1,
+            payload: &payload,
+            occurred_at: now,
+        },
+    )
+    .await?;
+
     inventory_journal::record_command_result(
         &mut tx,
         tenant_id,
@@ -1383,12 +1437,24 @@ pub async fn reserve_inventory(
     Ok(reservation_id)
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CancelReservationCommand<'a> {
+    pub tenant_id: TenantId,
+    pub actor_user_id: i64,
+    pub reservation_id: i64,
+    pub idempotency_key: &'a str,
+}
+
 pub async fn cancel_reservation(
     db: &Db,
-    tenant_id: TenantId,
-    reservation_id: i64,
-    idempotency_key: &str,
+    command: &CancelReservationCommand<'_>,
 ) -> AppResult<bool> {
+    let CancelReservationCommand {
+        tenant_id,
+        actor_user_id,
+        reservation_id,
+        idempotency_key,
+    } = *command;
     let now = now_iso();
     let mut tx = db.begin().await?;
     let request_hash = inventory_journal::request_hash(&reservation_id)?;
@@ -1406,7 +1472,7 @@ pub async fn cancel_reservation(
     }
     let row = sqlx::query(
         r#"
-        SELECT inventory_balance_id, qty
+        SELECT inventory_owner_id, facility_id, order_id, inventory_balance_id, qty
         FROM inventory_reservations
         WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL AND status = 'reserved'
         FOR UPDATE
@@ -1431,6 +1497,9 @@ pub async fn cancel_reservation(
         tx.commit().await?;
         return Ok(false);
     };
+    let inventory_owner_id: i64 = row.try_get("inventory_owner_id")?;
+    let facility_id: i64 = row.try_get("facility_id")?;
+    let order_id: i64 = row.try_get("order_id")?;
     let inventory_balance_id: i64 = row.try_get("inventory_balance_id")?;
     let qty: i64 = row.try_get("qty")?;
 
@@ -1467,6 +1536,43 @@ pub async fn cancel_reservation(
     if res.rows_affected() != 1 {
         return Err(AppError::conflict("reservation could not be cancelled"));
     }
+
+    let event_key = format!("inventory-reservation:{reservation_id}:cancelled");
+    let aggregate_id = reservation_id.to_string();
+    let ordering_key = format!("inventory-reservation:{reservation_id}");
+    let payload = serde_json::json!({
+        "reservation_id": reservation_id,
+        "order_id": order_id,
+        "inventory_balance_id": inventory_balance_id,
+        "inventory_owner_id": inventory_owner_id,
+        "facility_id": facility_id,
+        "quantity": qty,
+    });
+    outbox::enqueue(
+        &mut tx,
+        &NewOutboxEvent {
+            tenant_id,
+            inventory_owner_id: Some(
+                InventoryOwnerId::new(inventory_owner_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+            ),
+            facility_id: Some(
+                FacilityId::new(facility_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+            ),
+            actor_user_id: Some(actor_user_id),
+            event_key: &event_key,
+            aggregate_type: "inventory_reservation",
+            aggregate_id: &aggregate_id,
+            ordering_key: &ordering_key,
+            aggregate_sequence: 2,
+            event_type: "inventory.reservation.cancelled",
+            schema_version: 1,
+            payload: &payload,
+            occurred_at: now,
+        },
+    )
+    .await?;
 
     inventory_journal::record_command_result(
         &mut tx,

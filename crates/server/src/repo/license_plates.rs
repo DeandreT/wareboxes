@@ -395,6 +395,7 @@ pub async fn move_license_plate(
         &JournalCommand {
             tenant_id,
             inventory_owner_id,
+            facility_id: plate_facility_id,
             actor_user_id: user_id,
             transaction_type: InventoryTransactionType::Move,
             reason,

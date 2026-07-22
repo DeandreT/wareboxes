@@ -172,35 +172,44 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     let order_id = repo::orders::get_orders(&db, tenant_id).await.unwrap()[0].id;
     let reservation = repo::inventory::reserve_inventory(
         &db,
-        tenant_id,
-        order_id,
-        None,
-        pick_balance.id,
-        20,
-        "reserve-inv-1",
+        &repo::inventory::ReserveInventoryCommand {
+            tenant_id,
+            actor_user_id: user.id,
+            order_id,
+            order_item_id: None,
+            inventory_balance_id: pick_balance.id,
+            qty: 20,
+            idempotency_key: "reserve-inv-1",
+        },
     )
     .await
     .unwrap();
     let replayed_reservation = repo::inventory::reserve_inventory(
         &db,
-        tenant_id,
-        order_id,
-        None,
-        pick_balance.id,
-        20,
-        "reserve-inv-1",
+        &repo::inventory::ReserveInventoryCommand {
+            tenant_id,
+            actor_user_id: user.id,
+            order_id,
+            order_item_id: None,
+            inventory_balance_id: pick_balance.id,
+            qty: 20,
+            idempotency_key: "reserve-inv-1",
+        },
     )
     .await
     .unwrap();
     assert_eq!(replayed_reservation, reservation);
     let changed_reservation_retry = repo::inventory::reserve_inventory(
         &db,
-        tenant_id,
-        order_id,
-        None,
-        pick_balance.id,
-        19,
-        "reserve-inv-1",
+        &repo::inventory::ReserveInventoryCommand {
+            tenant_id,
+            actor_user_id: user.id,
+            order_id,
+            order_item_id: None,
+            inventory_balance_id: pick_balance.id,
+            qty: 19,
+            idempotency_key: "reserve-inv-1",
+        },
     )
     .await
     .unwrap_err();
@@ -230,20 +239,39 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     .unwrap_err();
     assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
 
-    assert!(
-        repo::inventory::cancel_reservation(&db, tenant_id, reservation, "cancel-inv-1")
-            .await
-            .unwrap()
-    );
-    assert!(
-        repo::inventory::cancel_reservation(&db, tenant_id, reservation, "cancel-inv-1")
-            .await
-            .unwrap()
-    );
-    let changed_cancel_retry =
-        repo::inventory::cancel_reservation(&db, tenant_id, reservation + 1, "cancel-inv-1")
-            .await
-            .unwrap_err();
+    assert!(repo::inventory::cancel_reservation(
+        &db,
+        &repo::inventory::CancelReservationCommand {
+            tenant_id,
+            actor_user_id: user.id,
+            reservation_id: reservation,
+            idempotency_key: "cancel-inv-1",
+        },
+    )
+    .await
+    .unwrap());
+    assert!(repo::inventory::cancel_reservation(
+        &db,
+        &repo::inventory::CancelReservationCommand {
+            tenant_id,
+            actor_user_id: user.id,
+            reservation_id: reservation,
+            idempotency_key: "cancel-inv-1",
+        },
+    )
+    .await
+    .unwrap());
+    let changed_cancel_retry = repo::inventory::cancel_reservation(
+        &db,
+        &repo::inventory::CancelReservationCommand {
+            tenant_id,
+            actor_user_id: user.id,
+            reservation_id: reservation + 1,
+            idempotency_key: "cancel-inv-1",
+        },
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(
         changed_cancel_retry,
         AppError::Core(CoreError::Conflict(_))
@@ -464,12 +492,15 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
         .unwrap();
     let owner_mismatch = repo::inventory::reserve_inventory(
         &fixture.db,
-        tenant_a,
-        other_owner_order,
-        None,
-        balance.id,
-        1,
-        "owner-mismatch-reservation",
+        &repo::inventory::ReserveInventoryCommand {
+            tenant_id: tenant_a,
+            actor_user_id: tenant_a_user.id,
+            order_id: other_owner_order,
+            order_item_id: None,
+            inventory_balance_id: balance.id,
+            qty: 1,
+            idempotency_key: "owner-mismatch-reservation",
+        },
     )
     .await
     .unwrap_err();
@@ -598,12 +629,15 @@ async fn concurrent_inventory_retries_apply_effects_once() {
         reservation_retries.spawn(async move {
             repo::inventory::reserve_inventory(
                 &db,
-                tenant_id,
-                order_id,
-                None,
-                destination_balance_id,
-                10,
-                "concurrent-reservation-key",
+                &repo::inventory::ReserveInventoryCommand {
+                    tenant_id,
+                    actor_user_id: actor_id,
+                    order_id,
+                    order_item_id: None,
+                    inventory_balance_id: destination_balance_id,
+                    qty: 10,
+                    idempotency_key: "concurrent-reservation-key",
+                },
             )
             .await
         });
@@ -633,9 +667,12 @@ async fn concurrent_inventory_retries_apply_effects_once() {
         cancellation_retries.spawn(async move {
             repo::inventory::cancel_reservation(
                 &db,
-                tenant_id,
-                reservation_id,
-                "concurrent-cancellation-key",
+                &repo::inventory::CancelReservationCommand {
+                    tenant_id,
+                    actor_user_id: actor_id,
+                    reservation_id,
+                    idempotency_key: "concurrent-cancellation-key",
+                },
             )
             .await
         });
