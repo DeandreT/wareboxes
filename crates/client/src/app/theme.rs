@@ -25,13 +25,13 @@ impl WareboxesApp {
 
     pub(super) fn icon(icon: Icon) -> egui::RichText {
         egui::RichText::new(icon.unicode().to_string()).font(egui::FontId::new(
-            16.0,
+            15.0,
             egui::FontFamily::Name(Self::ICON_FONT.into()),
         ))
     }
 
     pub(super) fn icon_button(ui: &mut egui::Ui, icon: Icon, tooltip: &str) -> egui::Response {
-        ui.add_sized([30.0, 30.0], egui::Button::new(Self::icon(icon)))
+        ui.add_sized([26.0, 26.0], egui::Button::new(Self::icon(icon)))
             .on_hover_text(tooltip)
     }
 
@@ -39,29 +39,29 @@ impl WareboxesApp {
         use egui::{Color32, FontFamily, FontId, Rounding, Stroke, TextStyle};
 
         let mut style = egui::Style::default();
-        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        style.spacing.button_padding = egui::vec2(10.0, 6.0);
-        style.spacing.interact_size = egui::vec2(30.0, 32.0);
-        style.spacing.window_margin = egui::Margin::same(14.0);
-        style.spacing.menu_margin = egui::Margin::same(8.0);
+        style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+        style.spacing.button_padding = egui::vec2(8.0, 4.0);
+        style.spacing.interact_size = egui::vec2(26.0, 26.0);
+        style.spacing.window_margin = egui::Margin::symmetric(8.0, 6.0);
+        style.spacing.menu_margin = egui::Margin::same(6.0);
         style.animation_time = 0.16;
         style.text_styles = [
             (
                 TextStyle::Heading,
-                FontId::new(20.0, FontFamily::Proportional),
+                FontId::new(17.0, FontFamily::Proportional),
             ),
-            (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
+            (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
             (
                 TextStyle::Monospace,
-                FontId::new(13.0, FontFamily::Monospace),
+                FontId::new(12.0, FontFamily::Monospace),
             ),
             (
                 TextStyle::Button,
-                FontId::new(14.0, FontFamily::Proportional),
+                FontId::new(13.0, FontFamily::Proportional),
             ),
             (
                 TextStyle::Small,
-                FontId::new(12.0, FontFamily::Proportional),
+                FontId::new(11.0, FontFamily::Proportional),
             ),
         ]
         .into();

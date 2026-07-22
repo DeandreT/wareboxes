@@ -160,7 +160,7 @@ impl WareboxesApp {
                 ui.horizontal_wrapped(|ui| {
                     let search_response = ui.add(
                         egui::TextEdit::singleline(&mut search)
-                            .desired_width(290.0)
+                            .desired_width(ui.available_width().min(290.0))
                             .hint_text("Order, owner, city, state, or postal code"),
                     );
                     let search_submitted = search_response.lost_focus()
@@ -202,24 +202,32 @@ impl WareboxesApp {
         if refresh_orders {
             self.fetch(Screen::Orders);
         }
-        ui.add_space(6.0);
+        ui.add_space(2.0);
 
         let order_count = self.data.orders.len();
-        let table_height = (ui.available_height() - 42.0).max(180.0);
+        let table_header_height = 24.0;
+        let pagination_height = ui.spacing().interact_size.y;
+        let table_vertical_spacing = ui.spacing().item_spacing.y * 2.0;
+        let table_body_height = (ui.available_height()
+            - table_header_height
+            - pagination_height
+            - table_vertical_spacing)
+            .max(0.0);
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
             .auto_shrink([false, false])
-            .max_scroll_height(table_height)
+            .min_scrolled_height(0.0)
+            .max_scroll_height(table_body_height)
             .sense(egui::Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::auto().at_least(40.0)) // ID
-            .column(Column::initial(140.0).at_least(90.0).clip(true)) // Key
-            .column(Column::initial(140.0).at_least(100.0).clip(true)) // Inventory Owner
-            .column(Column::initial(160.0).at_least(130.0)) // Status
-            .column(Column::remainder().at_least(160.0).clip(true)) // Ship to
-            .column(Column::auto().at_least(54.0)) // Actions
-            .header(26.0, |mut h| {
+            .column(Column::auto().at_least(34.0)) // ID
+            .column(Column::initial(120.0).at_least(76.0).clip(true)) // Key
+            .column(Column::initial(128.0).at_least(88.0).clip(true)) // Inventory Owner
+            .column(Column::initial(132.0).at_least(104.0)) // Status
+            .column(Column::remainder().at_least(120.0).clip(true)) // Ship to
+            .column(Column::auto().at_least(32.0)) // Actions
+            .header(table_header_height, |mut h| {
                 for label in ["ID", "Key", "Inventory Owner", "Status", "Ship to", ""] {
                     h.col(|ui| {
                         ui.strong(label);
@@ -227,7 +235,7 @@ impl WareboxesApp {
                 }
             })
             .body(|body| {
-                body.rows(34.0, order_count, |mut row| {
+                body.rows(30.0, order_count, |mut row| {
                     let o = self.data.orders[row.index()].clone();
                     let selected = self.open_order_ids.contains(&o.id);
                     row.set_selected(selected);
