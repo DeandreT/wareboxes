@@ -1,4 +1,4 @@
-//! Warehouse location hierarchy. Locations cover zones, aisles, bins, pallets,
+//! Facility location hierarchy. Locations cover zones, aisles, bins, pallets,
 //! carts, docks, and virtual locations through `type` plus parent linkage.
 
 use sqlx::Row;
@@ -15,8 +15,8 @@ fn map(row: &sqlx::postgres::PgRow) -> AppResult<Location> {
             .map_err(|error| crate::error::AppError::internal(error.to_string()))?,
         created: row.try_get("created")?,
         deleted: row.try_get("deleted")?,
-        warehouse_id: row.try_get("warehouse_id")?,
-        warehouse_name: row.try_get("warehouse_name")?,
+        facility_id: row.try_get("facility_id")?,
+        facility_name: row.try_get("facility_name")?,
         parent_location_id: row.try_get("parent_location_id")?,
         barcode: row.try_get("barcode")?,
         name: row.try_get("name")?,
@@ -34,12 +34,12 @@ pub async fn get_locations(
 ) -> AppResult<Vec<Location>> {
     let rows = sqlx::query(
         r#"
-        SELECT l.id, l.tenant_id, l.created, l.deleted, l.warehouse_id,
-               w.name AS warehouse_name, l.parent_location_id, l.barcode,
+        SELECT l.id, l.tenant_id, l.created, l.deleted, l.facility_id,
+               w.name AS facility_name, l.parent_location_id, l.barcode,
                l.name, l.type, l.active, l.pickable, l.receivable
         FROM locations l
-        INNER JOIN warehouses w
-            ON w.tenant_id = l.tenant_id AND w.id = l.warehouse_id
+        INNER JOIN facilities w
+            ON w.tenant_id = l.tenant_id AND w.id = l.facility_id
         WHERE l.tenant_id = $1 AND ($2 OR l.deleted IS NULL)
         ORDER BY l.id
         "#,
@@ -81,7 +81,7 @@ pub async fn location_active_state(
 pub async fn add_location(
     db: &Db,
     tenant_id: TenantId,
-    warehouse_id: i64,
+    facility_id: i64,
     parent_location_id: Option<i64>,
     barcode: Option<&str>,
     name: Option<&str>,
@@ -93,14 +93,14 @@ pub async fn add_location(
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO locations
-            (tenant_id, created, warehouse_id, parent_location_id, barcode, name, type, active, pickable, receivable)
+            (tenant_id, created, facility_id, parent_location_id, barcode, name, type, active, pickable, receivable)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         RETURNING id
         "#,
     )
     .bind(tenant_id.get())
     .bind(now_iso())
-    .bind(warehouse_id)
+    .bind(facility_id)
     .bind(parent_location_id)
     .bind(barcode)
     .bind(name)

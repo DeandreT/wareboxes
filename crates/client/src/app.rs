@@ -20,9 +20,9 @@ use egui_extras::{Column, TableBuilder};
 use serde_json::{json, Value};
 use wareboxes_core::dto::{SessionUser, SummaryCount};
 use wareboxes_core::models::{
-    Account, AuditWave, Employee, InventoryBalance, Item, ItemBatch, LicensePlate, Load,
-    LoadFileCategory, LoadLine, LoadLineStatus, LoadNote, LoadStatus, LoadType, Location, Movement,
-    Order, OrderStatus, Permission, Role, User, Warehouse,
+    AuditWave, Employee, Facility, InventoryBalance, InventoryOwner, Item, ItemBatch, LicensePlate,
+    Load, LoadFileCategory, LoadLine, LoadLineStatus, LoadNote, LoadStatus, LoadType, Location,
+    Movement, Order, OrderStatus, Permission, Role, User,
 };
 
 use crate::api::{ApiClient, ApiEvent, Screen};
@@ -80,7 +80,7 @@ struct LoadFilters<'a> {
     date_mode: &'a str,
     status: &'a str,
     load_type: &'a str,
-    account: &'a str,
+    inventory_owner: &'a str,
     search: &'a str,
 }
 
@@ -97,15 +97,15 @@ struct Forms {
     o_zip: String,
     o_country: String,
     o_rush: bool,
-    // new role / permission / account
+    // new role / permission / inventory owner
     new_name: String,
     new_desc: String,
     new_email: String,
     new_packaging_unit: String,
     new_barcode: String,
     new_type: String,
-    new_warehouse_id: String,
-    new_account_id: String,
+    new_facility_id: String,
+    new_inventory_owner_id: String,
     new_first_name: String,
     new_last_name: String,
     new_title: String,
@@ -120,8 +120,8 @@ struct Data {
     users: Vec<User>,
     roles: Vec<Role>,
     permissions: Vec<Permission>,
-    accounts: Vec<Account>,
-    warehouses: Vec<Warehouse>,
+    inventory_owners: Vec<InventoryOwner>,
+    facilities: Vec<Facility>,
     orders: Vec<Order>,
     items: Vec<Item>,
     locations: Vec<Location>,
@@ -201,8 +201,8 @@ impl WareboxesApp {
         } else if s == Screen::Loads {
             self.loading_loads = true;
             self.api.get_loads_chunk(0, LOAD_CHUNK_SIZE);
-            self.api.get_list(Screen::Accounts);
-            self.api.get_list(Screen::Warehouses);
+            self.api.get_list(Screen::InventoryOwners);
+            self.api.get_list(Screen::Facilities);
         } else {
             self.api.get_list(s);
         }
@@ -214,7 +214,7 @@ impl WareboxesApp {
                 self.api.get_list(Screen::Locations);
             }
             Screen::Locations => {
-                self.api.get_list(Screen::Warehouses);
+                self.api.get_list(Screen::Facilities);
             }
             Screen::LicensePlates => {
                 self.api.get_list(Screen::Locations);
@@ -416,8 +416,8 @@ impl WareboxesApp {
                 ApiEvent::Users(u) => self.data.users = u,
                 ApiEvent::Roles(r) => self.data.roles = r,
                 ApiEvent::Permissions(p) => self.data.permissions = p,
-                ApiEvent::Accounts(a) => self.data.accounts = a,
-                ApiEvent::Warehouses(w) => self.data.warehouses = w,
+                ApiEvent::InventoryOwners(a) => self.data.inventory_owners = a,
+                ApiEvent::Facilities(w) => self.data.facilities = w,
                 ApiEvent::Orders(page) => {
                     self.order_total = page.page.total;
                     self.order_limit = page.page.limit;
@@ -585,7 +585,7 @@ impl WareboxesApp {
         });
     }
 
-    /// Single top bar: panel toggles on the left, account actions on the
+    /// Single top bar: panel toggles on the left, identity actions on the
     /// right. Replaces the old separate header + left sidebar.
     fn nav_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("nav_bar").show(ctx, |ui| {
@@ -740,8 +740,8 @@ impl WareboxesApp {
             Screen::Users => self.users_screen(ui),
             Screen::Roles => self.roles_screen(ui),
             Screen::Permissions => self.permissions_screen(ui),
-            Screen::Accounts => self.accounts_screen(ui),
-            Screen::Warehouses => self.warehouses_screen(ui),
+            Screen::InventoryOwners => self.inventory_owners_screen(ui),
+            Screen::Facilities => self.facilities_screen(ui),
             Screen::Items => self.items_screen(ui),
             Screen::Locations => self.locations_screen(ui),
             Screen::Loads => self.loads_screen(ui),

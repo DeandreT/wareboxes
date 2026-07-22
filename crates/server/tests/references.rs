@@ -3,33 +3,33 @@ mod common;
 use common::*;
 
 #[tokio::test]
-async fn warehouses_listing_filters_deleted() {
+async fn facilities_listing_filters_deleted() {
     let db = setup().await;
     let user = auth::register_user(&db, "facilities@test.com", "supersecret", None, None)
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
 
-    let keep = repo::warehouses::add_warehouse(&db, tenant_id, "Main DC")
+    let keep = repo::facilities::add_facility(&db, tenant_id, "Main DC")
         .await
         .unwrap();
-    let gone = repo::warehouses::add_warehouse(&db, tenant_id, "Old DC")
+    let gone = repo::facilities::add_facility(&db, tenant_id, "Old DC")
         .await
         .unwrap();
-    sqlx::query("UPDATE warehouses SET deleted = $1 WHERE id = $2")
+    sqlx::query("UPDATE facilities SET deleted = $1 WHERE id = $2")
         .bind(db::now_iso())
         .bind(gone)
         .execute(&db)
         .await
         .unwrap();
 
-    let active = repo::warehouses::get_warehouses(&db, tenant_id, false)
+    let active = repo::facilities::get_facilities(&db, tenant_id, false)
         .await
         .unwrap();
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].id, keep);
 
-    let all = repo::warehouses::get_warehouses(&db, tenant_id, true)
+    let all = repo::facilities::get_facilities(&db, tenant_id, true)
         .await
         .unwrap();
     assert_eq!(all.len(), 2);
@@ -43,32 +43,42 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
-    let warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "Selector DC")
+    let facility = repo::facilities::add_facility(&db, tenant_id, "Selector DC")
         .await
         .unwrap();
-    let deleted_warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "Deleted DC")
+    let deleted_facility = repo::facilities::add_facility(&db, tenant_id, "Deleted DC")
         .await
         .unwrap();
-    sqlx::query("UPDATE warehouses SET deleted = $1 WHERE id = $2")
+    sqlx::query("UPDATE facilities SET deleted = $1 WHERE id = $2")
         .bind(db::now_iso())
-        .bind(deleted_warehouse)
+        .bind(deleted_facility)
         .execute(&db)
         .await
         .unwrap();
 
-    let account =
-        repo::accounts::add_account(&db, tenant_id, "Selector Account", "ops@selector.test")
-            .await
-            .unwrap();
-    let deleted_account =
-        repo::accounts::add_account(&db, tenant_id, "Deleted Account", "gone@test")
-            .await
-            .unwrap();
-    assert!(
-        repo::accounts::delete_account(&db, tenant_id, deleted_account)
-            .await
-            .unwrap()
-    );
+    let inventory_owner = repo::inventory_owners::add_inventory_owner(
+        &db,
+        tenant_id,
+        "Selector InventoryOwner",
+        "ops@selector.test",
+    )
+    .await
+    .unwrap();
+    let deleted_inventory_owner = repo::inventory_owners::add_inventory_owner(
+        &db,
+        tenant_id,
+        "Deleted InventoryOwner",
+        "gone@test",
+    )
+    .await
+    .unwrap();
+    assert!(repo::inventory_owners::delete_inventory_owner(
+        &db,
+        tenant_id,
+        deleted_inventory_owner
+    )
+    .await
+    .unwrap());
 
     let item = repo::items::add_item(
         &db,
@@ -109,7 +119,7 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     let active_location = repo::locations::add_location(
         &db,
         tenant_id,
-        warehouse,
+        facility,
         None,
         Some("ACTIVE"),
         Some("Active"),
@@ -123,7 +133,7 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     let inactive_location = repo::locations::add_location(
         &db,
         tenant_id,
-        warehouse,
+        facility,
         None,
         Some("INACTIVE"),
         Some("Inactive"),
@@ -137,7 +147,7 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     let deleted_location = repo::locations::add_location(
         &db,
         tenant_id,
-        warehouse,
+        facility,
         None,
         Some("DELETED"),
         Some("Deleted"),
@@ -157,8 +167,8 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     let load = repo::loads::add_load(
         &db,
         user.id,
-        warehouse,
-        account,
+        facility,
+        inventory_owner,
         LoadType::Inbound,
         Some("SEL-LOAD"),
         None,
@@ -173,25 +183,27 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     .unwrap();
 
     assert!(
-        repo::warehouses::active_warehouse_exists(&db, tenant_id, warehouse)
+        repo::facilities::active_facility_exists(&db, tenant_id, facility)
             .await
             .unwrap()
     );
     assert!(
-        !repo::warehouses::active_warehouse_exists(&db, tenant_id, deleted_warehouse)
+        !repo::facilities::active_facility_exists(&db, tenant_id, deleted_facility)
             .await
             .unwrap()
     );
     assert!(
-        repo::accounts::active_account_exists(&db, tenant_id, account)
+        repo::inventory_owners::active_inventory_owner_exists(&db, tenant_id, inventory_owner)
             .await
             .unwrap()
     );
-    assert!(
-        !repo::accounts::active_account_exists(&db, tenant_id, deleted_account)
-            .await
-            .unwrap()
-    );
+    assert!(!repo::inventory_owners::active_inventory_owner_exists(
+        &db,
+        tenant_id,
+        deleted_inventory_owner
+    )
+    .await
+    .unwrap());
     assert!(repo::items::active_item_exists(&db, tenant_id, item)
         .await
         .unwrap());

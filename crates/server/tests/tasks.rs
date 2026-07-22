@@ -25,13 +25,13 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
-    let warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "Task DC")
+    let facility = repo::facilities::add_facility(&db, tenant_id, "Task DC")
         .await
         .unwrap();
     let freezer = repo::locations::add_location(
         &db,
         tenant_id,
-        warehouse,
+        facility,
         None,
         Some("FRZ-01"),
         Some("Freezer"),
@@ -45,7 +45,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     let shelf = repo::locations::add_location(
         &db,
         tenant_id,
-        warehouse,
+        facility,
         None,
         Some("SHF-01"),
         Some("Shelf"),
@@ -317,11 +317,13 @@ async fn cancelling_order_creates_unpack_task() {
 
     let user = fixture.user("cancel-task@test.com").await;
     let tenant_id = tenant_for_user(db, user.id).await;
-    let account = fixture.account(tenant_id, "Cancel Task Account").await;
+    let inventory_owner = fixture
+        .inventory_owner(tenant_id, "Cancel Task InventoryOwner")
+        .await;
     let item = fixture
         .item(tenant_id, "Cancelled Order Item", "each")
         .await;
-    let order_id = fixture.order("CANCEL-TASK-1", Some(account)).await;
+    let order_id = fixture.order("CANCEL-TASK-1", Some(inventory_owner)).await;
     let order_item_id = fixture.order_item(order_id, item, 3).await;
     let update = OrderUpdate {
         order_id,
@@ -332,7 +334,7 @@ async fn cancelling_order_creates_unpack_task() {
         closed: None,
         ship_by: None,
         wave_id: None,
-        account_id: None,
+        inventory_owner_id: None,
         line1: None,
         line2: None,
         city: None,

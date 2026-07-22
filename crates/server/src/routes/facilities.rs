@@ -1,6 +1,6 @@
 use axum::extract::{Query, State};
 use axum::Json;
-use wareboxes_core::models::Warehouse;
+use wareboxes_core::models::Facility;
 
 use crate::auth::CurrentTenant;
 use crate::error::AppResult;
@@ -14,9 +14,9 @@ pub async fn list(
     State(state): State<AppState>,
     user: CurrentTenant,
     Query(q): Query<ShowDeleted>,
-) -> AppResult<Json<Vec<Warehouse>>> {
+) -> AppResult<Json<Vec<Facility>>> {
     user.require_any_permission(&state.db, READ_PERMS).await?;
-    let warehouses =
-        repo::warehouses::get_warehouses(&state.db, user.tenant.tenant_id, q.show_deleted).await?;
-    Ok(Json(warehouses))
+    let facilities =
+        repo::facilities::get_facilities(&state.db, user.tenant.tenant_id, q.show_deleted).await?;
+    Ok(Json(facilities))
 }

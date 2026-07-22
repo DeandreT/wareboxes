@@ -77,7 +77,7 @@ impl WareboxesApp {
             let search_response = ui.add(
                 egui::TextEdit::singleline(&mut search)
                     .desired_width(220.0)
-                    .hint_text("Order, account, city, state, postal"),
+                    .hint_text("Order, inventory owner, city, state, postal"),
             );
             let search_submitted = search_response.lost_focus()
                 && ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -166,12 +166,19 @@ impl WareboxesApp {
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::auto().at_least(40.0)) // ID
             .column(Column::initial(140.0).at_least(90.0).clip(true)) // Key
-            .column(Column::initial(140.0).at_least(100.0).clip(true)) // Account
+            .column(Column::initial(140.0).at_least(100.0).clip(true)) // Inventory Owner
             .column(Column::initial(160.0).at_least(130.0)) // Status
             .column(Column::remainder().at_least(160.0).clip(true)) // Ship to
             .column(Column::auto().at_least(190.0)) // Actions
             .header(26.0, |mut h| {
-                for label in ["ID", "Key", "Account", "Status", "Ship to", "Actions"] {
+                for label in [
+                    "ID",
+                    "Key",
+                    "Inventory Owner",
+                    "Status",
+                    "Ship to",
+                    "Actions",
+                ] {
                     h.col(|ui| {
                         ui.strong(label);
                     });
@@ -213,7 +220,7 @@ impl WareboxesApp {
                     row.col(|ui| {
                         ui.colored_label(
                             Self::order_state_color(ui, &o),
-                            self.order_account_label(&o),
+                            self.order_inventory_owner_label(&o),
                         );
                     });
                     row.col(|ui| {
@@ -327,8 +334,8 @@ impl WareboxesApp {
                             ui.strong("Closed");
                             ui.label(Self::optional_datetime(order.closed));
                             ui.end_row();
-                            ui.strong("Account");
-                            ui.label(self.order_account_label(order));
+                            ui.strong("InventoryOwner");
+                            ui.label(self.order_inventory_owner_label(order));
                             ui.end_row();
                             ui.strong("Wave");
                             ui.label(
@@ -826,9 +833,9 @@ impl WareboxesApp {
             });
     }
 
-    // ---- Accounts --------------------------------------------------------
-    pub(super) fn accounts_screen(&mut self, ui: &mut egui::Ui) {
-        ui.collapsing("New account", |ui| {
+    // ---- Inventory Owners ------------------------------------------------------
+    pub(super) fn inventory_owners_screen(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing("New inventory owner", |ui| {
             ui.horizontal(|ui| {
                 ui.label("Name");
                 ui.text_edit_singleline(&mut self.forms.new_name);
@@ -836,10 +843,10 @@ impl WareboxesApp {
                 ui.text_edit_singleline(&mut self.forms.new_email);
                 if ui.button("Create").clicked() {
                     self.api.action(
-                        "/api/accounts/add",
+                        "/api/inventory-owners/add",
                         json!({"name": self.forms.new_name, "email": self.forms.new_email}),
-                        Screen::Accounts,
-                        "Account created",
+                        Screen::InventoryOwners,
+                        "Inventory owner created",
                     );
                     self.forms.new_name.clear();
                     self.forms.new_email.clear();
@@ -847,7 +854,7 @@ impl WareboxesApp {
             });
         });
         ui.separator();
-        let accounts = self.data.accounts.clone();
+        let inventory_owners = self.data.inventory_owners.clone();
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
@@ -856,17 +863,17 @@ impl WareboxesApp {
             .column(Column::auto().at_least(40.0)) // ID
             .column(Column::initial(160.0).at_least(100.0).clip(true)) // Name
             .column(Column::remainder().at_least(160.0).clip(true)) // Email
-            .column(Column::auto().at_least(90.0)) // Warehouses
+            .column(Column::auto().at_least(90.0)) // Facilities
             .column(Column::auto().at_least(90.0)) // Actions
             .header(26.0, |mut h| {
-                for label in ["ID", "Name", "Email", "Warehouses", "Actions"] {
+                for label in ["ID", "Name", "Email", "Facilities", "Actions"] {
                     h.col(|ui| {
                         ui.strong(label);
                     });
                 }
             })
             .body(|mut body| {
-                for a in &accounts {
+                for a in &inventory_owners {
                     body.row(28.0, |mut row| {
                         row.col(|ui| {
                             ui.label(a.id.to_string());
@@ -878,25 +885,25 @@ impl WareboxesApp {
                             ui.label(&a.email);
                         });
                         row.col(|ui| {
-                            ui.label(a.account_warehouses.len().to_string());
+                            ui.label(a.inventory_owner_facilities.len().to_string());
                         });
                         row.col(|ui| {
                             if a.deleted.is_none() {
                                 self.delete_button(
                                     ui,
                                     true,
-                                    format!("account {}", a.name),
-                                    "/api/accounts/delete",
-                                    json!({"account_id": a.id}),
-                                    Screen::Accounts,
-                                    "Account deleted",
+                                    format!("inventory owner {}", a.name),
+                                    "/api/inventory-owners/delete",
+                                    json!({"inventory_owner_id": a.id}),
+                                    Screen::InventoryOwners,
+                                    "Inventory owner deleted",
                                 );
                             } else if ui.small_button("Restore").clicked() {
                                 self.api.action(
-                                    "/api/accounts/restore",
-                                    json!({"account_id": a.id}),
-                                    Screen::Accounts,
-                                    "Account restored",
+                                    "/api/inventory-owners/restore",
+                                    json!({"inventory_owner_id": a.id}),
+                                    Screen::InventoryOwners,
+                                    "Inventory owner restored",
                                 );
                             }
                         });
@@ -905,9 +912,9 @@ impl WareboxesApp {
             });
     }
 
-    // ---- Warehouses (read-only, mirrors the original getWarehouses) ------
-    pub(super) fn warehouses_screen(&mut self, ui: &mut egui::Ui) {
-        let warehouses = self.data.warehouses.clone();
+    // ---- Facilities (read-only, mirrors the original getFacilities) ------
+    pub(super) fn facilities_screen(&mut self, ui: &mut egui::Ui) {
+        let facilities = self.data.facilities.clone();
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
@@ -925,7 +932,7 @@ impl WareboxesApp {
                 }
             })
             .body(|mut body| {
-                for w in &warehouses {
+                for w in &facilities {
                     body.row(28.0, |mut row| {
                         row.col(|ui| {
                             ui.label(w.id.to_string());
@@ -1196,26 +1203,26 @@ impl WareboxesApp {
     // ---- Locations -------------------------------------------------------
     pub(super) fn locations_screen(&mut self, ui: &mut egui::Ui) {
         ui.collapsing("New location", |ui| {
-            let warehouse_options = self.warehouse_options();
+            let facility_options = self.facility_options();
             ui.horizontal_wrapped(|ui| {
-                ui.label("Warehouse");
-                let warehouse_id = Self::entity_picker(
+                ui.label("Facility");
+                let facility_id = Self::entity_picker(
                     ui,
-                    "new_location_warehouse",
-                    &mut self.forms.new_warehouse_id,
-                    &warehouse_options,
-                    "Search warehouse",
+                    "new_location_facility",
+                    &mut self.forms.new_facility_id,
+                    &facility_options,
+                    "Search facility",
                 );
                 ui.label("Name");
                 ui.text_edit_singleline(&mut self.forms.new_name);
                 ui.label("Type");
                 ui.text_edit_singleline(&mut self.forms.new_type);
                 if ui.button("Create").clicked() {
-                    if let Some(warehouse_id) = warehouse_id {
+                    if let Some(facility_id) = facility_id {
                         self.api.action(
                             "/api/locations/add",
                             json!({
-                                "warehouse_id": warehouse_id,
+                                "facility_id": facility_id,
                                 "name": self.forms.new_name,
                                 "type": self.forms.new_type,
                             }),
@@ -1224,7 +1231,7 @@ impl WareboxesApp {
                         );
                         self.forms.new_name.clear();
                     } else {
-                        self.toast("Choose a warehouse", true, self.now);
+                        self.toast("Choose a facility", true, self.now);
                     }
                 }
             });
@@ -1243,7 +1250,7 @@ impl WareboxesApp {
             .column(Column::initial(100.0))
             .column(Column::auto().at_least(90.0))
             .header(26.0, |mut h| {
-                for label in ["ID", "Warehouse", "Scan Code", "Type", "Actions"] {
+                for label in ["ID", "Facility", "Scan Code", "Type", "Actions"] {
                     h.col(|ui| {
                         ui.strong(label);
                     });
@@ -1257,9 +1264,9 @@ impl WareboxesApp {
                         });
                         row.col(|ui| {
                             ui.label(
-                                loc.warehouse_name
+                                loc.facility_name
                                     .clone()
-                                    .unwrap_or_else(|| self.warehouse_label(loc.warehouse_id)),
+                                    .unwrap_or_else(|| self.facility_label(loc.facility_id)),
                             );
                         });
                         row.col(|ui| {

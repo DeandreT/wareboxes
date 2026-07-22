@@ -19,7 +19,7 @@ async fn order_and_load_mutations_write_activity_history() {
         closed: None,
         ship_by: None,
         wave_id: None,
-        account_id: None,
+        inventory_owner_id: None,
         line1: None,
         line2: None,
         city: None,
@@ -52,17 +52,22 @@ async fn order_and_load_mutations_write_activity_history() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
-    let warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "Activity DC")
+    let facility = repo::facilities::add_facility(&db, tenant_id, "Activity DC")
         .await
         .unwrap();
-    let account = repo::accounts::add_account(&db, tenant_id, "Activity Account", "activity@test")
-        .await
-        .unwrap();
+    let inventory_owner = repo::inventory_owners::add_inventory_owner(
+        &db,
+        tenant_id,
+        "Activity InventoryOwner",
+        "activity@test",
+    )
+    .await
+    .unwrap();
     let load_id = repo::loads::add_load(
         &db,
         user.id,
-        warehouse,
-        account,
+        facility,
+        inventory_owner,
         LoadType::Inbound,
         Some("ACT-LOAD"),
         None,

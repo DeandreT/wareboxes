@@ -221,7 +221,7 @@ pub async fn create_item_location_cycle_count_task(
     inventory_balance_id: Option<i64>,
     note: Option<&str>,
 ) -> AppResult<i64> {
-    let warehouse_id = warehouse_for_location(db, location_id).await?;
+    let facility_id = facility_for_location(db, location_id).await?;
     ensure_active_item(db, item_id).await?;
     let mut tx = db.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
@@ -277,14 +277,14 @@ pub async fn create_item_location_cycle_count_task(
     sqlx::query(
         r#"
         INSERT INTO cycle_count_item_location_tasks (
-            task_id, warehouse_id, location_id, item_id, inventory_balance_id,
+            task_id, facility_id, location_id, item_id, inventory_balance_id,
             order_id, order_item_id, source, note
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
     )
     .bind(task_id)
-    .bind(warehouse_id)
+    .bind(facility_id)
     .bind(location_id)
     .bind(item_id)
     .bind(inventory_balance_id)
@@ -309,7 +309,7 @@ pub async fn create_location_cycle_count_task(
     due_at: Option<Timestamp>,
     instructions: Option<String>,
 ) -> AppResult<i64> {
-    let warehouse_id = warehouse_for_location(db, location_id).await?;
+    let facility_id = facility_for_location(db, location_id).await?;
     let mut tx = db.begin().await?;
     let task_id = insert_task_tx(
         &mut tx,
@@ -329,10 +329,10 @@ pub async fn create_location_cycle_count_task(
     )
     .await?;
     sqlx::query(
-        "INSERT INTO cycle_count_location_tasks (task_id, warehouse_id, location_id) VALUES ($1, $2, $3)",
+        "INSERT INTO cycle_count_location_tasks (task_id, facility_id, location_id) VALUES ($1, $2, $3)",
     )
     .bind(task_id)
-    .bind(warehouse_id)
+    .bind(facility_id)
     .bind(location_id)
     .execute(&mut *tx)
     .await?;
@@ -377,7 +377,7 @@ pub async fn create_break_master_pack_task(
             "break master pack tasks require a master-to-single item pack link",
         ));
     };
-    let warehouse_id = warehouse_for_location(db, location_id).await?;
+    let facility_id = facility_for_location(db, location_id).await?;
     let mut tx = db.begin().await?;
     let task_id = insert_task_tx(
         &mut tx,
@@ -399,14 +399,14 @@ pub async fn create_break_master_pack_task(
     sqlx::query(
         r#"
         INSERT INTO break_master_pack_tasks (
-            task_id, warehouse_id, location_id, master_item_id, single_item_id,
+            task_id, facility_id, location_id, master_item_id, single_item_id,
             master_qty, inner_qty_snapshot
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(task_id)
-    .bind(warehouse_id)
+    .bind(facility_id)
     .bind(location_id)
     .bind(master_item_id)
     .bind(single_item_id)
@@ -1022,9 +1022,9 @@ async fn insert_progress(
     Ok(id)
 }
 
-async fn warehouse_for_location(db: &Db, location_id: i64) -> AppResult<i64> {
+async fn facility_for_location(db: &Db, location_id: i64) -> AppResult<i64> {
     sqlx::query_scalar(
-        "SELECT warehouse_id FROM locations WHERE id = $1 AND deleted IS NULL AND active",
+        "SELECT facility_id FROM locations WHERE id = $1 AND deleted IS NULL AND active",
     )
     .bind(location_id)
     .fetch_optional(db)

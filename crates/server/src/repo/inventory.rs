@@ -45,8 +45,8 @@ fn map_balance(row: &sqlx::postgres::PgRow) -> AppResult<InventoryBalance> {
         created: row.try_get("created")?,
         modified: row.try_get("modified")?,
         deleted: row.try_get("deleted")?,
-        warehouse_id: row.try_get("warehouse_id")?,
-        warehouse_name: row.try_get("warehouse_name")?,
+        facility_id: row.try_get("facility_id")?,
+        facility_name: row.try_get("facility_name")?,
         location_id: row.try_get("location_id")?,
         license_plate_id: row.try_get::<Option<i64>, _>("license_plate_id")?,
         item_batch_id: row.try_get("item_batch_id")?,
@@ -200,18 +200,18 @@ pub async fn set_item_batch_deleted(db: &Db, id: i64, deleted: bool) -> AppResul
 pub async fn get_balances(db: &Db, show_deleted: bool) -> AppResult<Vec<InventoryBalance>> {
     let sql = if show_deleted {
         r#"
-        SELECT ib.id, ib.created, ib.modified, ib.deleted, ib.warehouse_id, w.name AS warehouse_name,
+        SELECT ib.id, ib.created, ib.modified, ib.deleted, ib.facility_id, w.name AS facility_name,
                ib.location_id, ib.license_plate_id, ib.item_batch_id, ib.status, ib.qty_on_hand, ib.qty_reserved
         FROM inventory_balances ib
-        LEFT JOIN warehouses w ON w.id = ib.warehouse_id
+        LEFT JOIN facilities w ON w.id = ib.facility_id
         ORDER BY ib.location_id, ib.item_batch_id, ib.status
         "#
     } else {
         r#"
-        SELECT ib.id, ib.created, ib.modified, ib.deleted, ib.warehouse_id, w.name AS warehouse_name,
+        SELECT ib.id, ib.created, ib.modified, ib.deleted, ib.facility_id, w.name AS facility_name,
                ib.location_id, ib.license_plate_id, ib.item_batch_id, ib.status, ib.qty_on_hand, ib.qty_reserved
         FROM inventory_balances ib
-        LEFT JOIN warehouses w ON w.id = ib.warehouse_id
+        LEFT JOIN facilities w ON w.id = ib.facility_id
         WHERE ib.deleted IS NULL
         ORDER BY ib.location_id, ib.item_batch_id, ib.status
         "#
@@ -265,8 +265,8 @@ pub async fn receive_inventory(
     let now = now_iso();
     let mut tx = db.begin().await?;
 
-    let warehouse_id: i64 = sqlx::query_scalar(
-        "SELECT warehouse_id FROM locations WHERE id = $1 AND deleted IS NULL AND active",
+    let facility_id: i64 = sqlx::query_scalar(
+        "SELECT facility_id FROM locations WHERE id = $1 AND deleted IS NULL AND active",
     )
     .bind(to_location_id)
     .fetch_one(&mut *tx)
@@ -277,7 +277,7 @@ pub async fn receive_inventory(
     sqlx::query(
         r#"
         INSERT INTO inventory_balances
-            (created, modified, warehouse_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved)
+            (created, modified, facility_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved)
         VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, 0)
         ON CONFLICT (location_id, item_batch_id, status) WHERE license_plate_id IS NULL DO UPDATE
         SET qty_on_hand = inventory_balances.qty_on_hand + excluded.qty_on_hand,
@@ -287,7 +287,7 @@ pub async fn receive_inventory(
     )
     .bind(now)
     .bind(now)
-    .bind(warehouse_id)
+    .bind(facility_id)
     .bind(to_location_id)
     .bind(item_batch_id)
     .bind(status.as_str())
@@ -376,8 +376,8 @@ pub async fn move_inventory(
         ));
     }
 
-    let warehouse_id: i64 = sqlx::query_scalar(
-        "SELECT warehouse_id FROM locations WHERE id = $1 AND deleted IS NULL AND active",
+    let facility_id: i64 = sqlx::query_scalar(
+        "SELECT facility_id FROM locations WHERE id = $1 AND deleted IS NULL AND active",
     )
     .bind(to_location_id)
     .fetch_one(&mut *tx)
@@ -386,7 +386,7 @@ pub async fn move_inventory(
     sqlx::query(
         r#"
         INSERT INTO inventory_balances
-            (created, modified, warehouse_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved)
+            (created, modified, facility_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved)
         VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, 0)
         ON CONFLICT (location_id, item_batch_id, status) WHERE license_plate_id IS NULL DO UPDATE
         SET qty_on_hand = inventory_balances.qty_on_hand + excluded.qty_on_hand,
@@ -396,7 +396,7 @@ pub async fn move_inventory(
     )
     .bind(now)
     .bind(now)
-    .bind(warehouse_id)
+    .bind(facility_id)
     .bind(to_location_id)
     .bind(item_batch_id)
     .bind(status.as_str())
@@ -472,7 +472,7 @@ pub async fn split_move_inventory(
 
     let Some(source) = sqlx::query(
         r#"
-        SELECT id, warehouse_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved
+        SELECT id, facility_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved
         FROM inventory_balances
         WHERE id = $1 AND deleted IS NULL
         FOR UPDATE
@@ -534,8 +534,8 @@ pub async fn split_move_inventory(
 
     let mut movement_ids = Vec::with_capacity(destinations.len());
     for (idx, (to_location_id, qty)) in destinations.iter().enumerate() {
-        let warehouse_id: i64 = sqlx::query_scalar(
-            "SELECT warehouse_id FROM locations WHERE id = $1 AND deleted IS NULL AND active",
+        let facility_id: i64 = sqlx::query_scalar(
+            "SELECT facility_id FROM locations WHERE id = $1 AND deleted IS NULL AND active",
         )
         .bind(*to_location_id)
         .fetch_one(&mut *tx)
@@ -546,7 +546,7 @@ pub async fn split_move_inventory(
         sqlx::query(
             r#"
             INSERT INTO inventory_balances
-                (created, modified, warehouse_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved)
+                (created, modified, facility_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved)
             VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, 0)
             ON CONFLICT (location_id, item_batch_id, status) WHERE license_plate_id IS NULL DO UPDATE
             SET qty_on_hand = inventory_balances.qty_on_hand + excluded.qty_on_hand,
@@ -556,7 +556,7 @@ pub async fn split_move_inventory(
         )
         .bind(now)
         .bind(now)
-        .bind(warehouse_id)
+        .bind(facility_id)
         .bind(*to_location_id)
         .bind(item_batch_id)
         .bind(&status)

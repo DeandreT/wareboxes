@@ -7,7 +7,7 @@ CREATE TABLE locations (
     tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    warehouse_id BIGINT NOT NULL,
+    facility_id BIGINT NOT NULL,
     parent_location_id BIGINT,
     barcode TEXT,
     name TEXT,
@@ -17,10 +17,10 @@ CREATE TABLE locations (
     receivable BOOLEAN NOT NULL DEFAULT false,
     UNIQUE (tenant_id, id),
     UNIQUE (tenant_id, barcode),
-    FOREIGN KEY (tenant_id, warehouse_id) REFERENCES warehouses(tenant_id, id),
+    FOREIGN KEY (tenant_id, facility_id) REFERENCES facilities(tenant_id, id),
     FOREIGN KEY (tenant_id, parent_location_id) REFERENCES locations(tenant_id, id)
 );
-CREATE INDEX idx_locations_warehouse_id ON locations(tenant_id, warehouse_id);
+CREATE INDEX idx_locations_facility_id ON locations(tenant_id, facility_id);
 CREATE INDEX idx_locations_parent_location_id ON locations(tenant_id, parent_location_id);
 
 CREATE TABLE dims (
@@ -81,11 +81,11 @@ CREATE TABLE barcodes (
     FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id)
 );
 
-CREATE TABLE account_items (
+CREATE TABLE inventory_owner_items (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    account_id BIGINT NOT NULL REFERENCES accounts(id),
+    inventory_owner_id BIGINT NOT NULL REFERENCES inventory_owners(id),
     item_id BIGINT NOT NULL REFERENCES items(id)
 );
 
@@ -93,8 +93,8 @@ CREATE TABLE loads (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    warehouse_id BIGINT NOT NULL REFERENCES warehouses(id),
-    account_id BIGINT NOT NULL REFERENCES accounts(id),
+    facility_id BIGINT NOT NULL REFERENCES facilities(id),
+    inventory_owner_id BIGINT NOT NULL REFERENCES inventory_owners(id),
     status TEXT NOT NULL DEFAULT 'planned',
     type TEXT NOT NULL,
     reference_number TEXT,
@@ -118,7 +118,7 @@ CREATE TABLE loads (
 );
 CREATE INDEX idx_loads_status ON loads(status);
 CREATE INDEX idx_loads_dock_door ON loads(dock_door_location_id);
-CREATE INDEX idx_loads_active_work ON loads(warehouse_id, account_id, status, appointment_time)
+CREATE INDEX idx_loads_active_work ON loads(facility_id, inventory_owner_id, status, appointment_time)
     WHERE deleted IS NULL AND status NOT IN ('closed', 'cancelled');
 
 CREATE TABLE load_orders (
@@ -227,7 +227,7 @@ CREATE TABLE inventory_balances (
     created TIMESTAMPTZ NOT NULL,
     modified TIMESTAMPTZ,
     deleted TIMESTAMPTZ,
-    warehouse_id BIGINT NOT NULL REFERENCES warehouses(id),
+    facility_id BIGINT NOT NULL REFERENCES facilities(id),
     location_id BIGINT NOT NULL REFERENCES locations(id),
     license_plate_id BIGINT REFERENCES license_plates(id),
     item_batch_id BIGINT NOT NULL REFERENCES item_batches(id),
@@ -321,13 +321,13 @@ CREATE TABLE employees (
     CHECK (terminated IS NULL OR terminated >= hired)
 );
 
-CREATE TABLE employee_warehouses (
+CREATE TABLE employee_facilities (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     employee_id BIGINT NOT NULL REFERENCES employees(id),
-    warehouse_id BIGINT NOT NULL REFERENCES warehouses(id),
-    UNIQUE (employee_id, warehouse_id)
+    facility_id BIGINT NOT NULL REFERENCES facilities(id),
+    UNIQUE (employee_id, facility_id)
 );
 
 CREATE TABLE audit_waves (
@@ -346,11 +346,11 @@ CREATE TABLE audit_wave_items (
     audit_wave_id BIGINT NOT NULL REFERENCES audit_waves(id)
 );
 
-CREATE TABLE audit_wave_accounts (
+CREATE TABLE audit_wave_inventory_owners (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    account_id BIGINT NOT NULL REFERENCES accounts(id),
+    inventory_owner_id BIGINT NOT NULL REFERENCES inventory_owners(id),
     audit_wave_id BIGINT NOT NULL REFERENCES audit_waves(id)
 );
 

@@ -48,7 +48,7 @@ CREATE INDEX idx_work_tasks_assigned
 
 CREATE TABLE cycle_count_item_location_tasks (
     task_id BIGINT PRIMARY KEY REFERENCES work_tasks(id) ON DELETE CASCADE,
-    warehouse_id BIGINT NOT NULL REFERENCES warehouses(id),
+    facility_id BIGINT NOT NULL REFERENCES facilities(id),
     location_id BIGINT NOT NULL REFERENCES locations(id),
     item_id BIGINT NOT NULL REFERENCES items(id),
     inventory_balance_id BIGINT REFERENCES inventory_balances(id),
@@ -62,7 +62,7 @@ CREATE INDEX idx_cycle_count_item_location_tasks_location
 
 CREATE TABLE cycle_count_location_tasks (
     task_id BIGINT PRIMARY KEY REFERENCES work_tasks(id) ON DELETE CASCADE,
-    warehouse_id BIGINT NOT NULL REFERENCES warehouses(id),
+    facility_id BIGINT NOT NULL REFERENCES facilities(id),
     location_id BIGINT NOT NULL REFERENCES locations(id)
 );
 CREATE INDEX idx_cycle_count_location_tasks_location
@@ -70,7 +70,7 @@ CREATE INDEX idx_cycle_count_location_tasks_location
 
 CREATE TABLE break_master_pack_tasks (
     task_id BIGINT PRIMARY KEY REFERENCES work_tasks(id) ON DELETE CASCADE,
-    warehouse_id BIGINT NOT NULL REFERENCES warehouses(id),
+    facility_id BIGINT NOT NULL REFERENCES facilities(id),
     location_id BIGINT NOT NULL REFERENCES locations(id),
     master_item_id BIGINT NOT NULL REFERENCES items(id),
     single_item_id BIGINT NOT NULL REFERENCES items(id),

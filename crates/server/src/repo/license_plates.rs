@@ -204,8 +204,8 @@ pub async fn move_license_plate(
         return Ok(false);
     }
 
-    let destination_warehouse_id: i64 = sqlx::query_scalar(
-        "SELECT warehouse_id FROM locations WHERE id = $1 AND deleted IS NULL AND active",
+    let destination_facility_id: i64 = sqlx::query_scalar(
+        "SELECT facility_id FROM locations WHERE id = $1 AND deleted IS NULL AND active",
     )
     .bind(to_location_id)
     .fetch_one(&mut *tx)
@@ -291,11 +291,11 @@ pub async fn move_license_plate(
     sqlx::query(
         r#"
         UPDATE inventory_balances
-        SET warehouse_id = $1, location_id = $2, modified = $3
+        SET facility_id = $1, location_id = $2, modified = $3
         WHERE license_plate_id = $4 AND deleted IS NULL
         "#,
     )
-    .bind(destination_warehouse_id)
+    .bind(destination_facility_id)
     .bind(to_location_id)
     .bind(now)
     .bind(id)
