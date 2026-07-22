@@ -309,9 +309,10 @@ pub struct Dim {
     pub weight_uom: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Item {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub description: Option<String>,
@@ -327,9 +328,10 @@ pub struct Item {
     pub barcodes: Vec<Barcode>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ItemPackLink {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub master_item_id: i64,
@@ -338,9 +340,10 @@ pub struct ItemPackLink {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Sku {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub name: String,
@@ -348,9 +351,10 @@ pub struct Sku {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Barcode {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub name: String,

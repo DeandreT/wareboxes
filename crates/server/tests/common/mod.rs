@@ -181,9 +181,10 @@ impl Fixture {
         .unwrap()
     }
 
-    pub async fn item(&self, name: &str, packaging_unit: &str) -> i64 {
+    pub async fn item(&self, tenant_id: TenantId, name: &str, packaging_unit: &str) -> i64 {
         repo::items::add_item(
             &self.db,
+            tenant_id,
             name,
             None,
             packaging_unit,

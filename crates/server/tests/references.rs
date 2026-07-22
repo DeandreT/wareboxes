@@ -72,6 +72,7 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
 
     let item = repo::items::add_item(
         &db,
+        tenant_id,
         "Selector Item",
         None,
         "each",
@@ -86,6 +87,7 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     .unwrap();
     let deleted_item = repo::items::add_item(
         &db,
+        tenant_id,
         "Deleted Item",
         None,
         "each",
@@ -98,9 +100,11 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     )
     .await
     .unwrap();
-    assert!(repo::items::set_item_deleted(&db, deleted_item, true)
-        .await
-        .unwrap());
+    assert!(
+        repo::items::set_item_deleted(&db, tenant_id, deleted_item, true)
+            .await
+            .unwrap()
+    );
 
     let active_location = repo::locations::add_location(
         &db,
@@ -188,10 +192,14 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
             .await
             .unwrap()
     );
-    assert!(repo::items::active_item_exists(&db, item).await.unwrap());
-    assert!(!repo::items::active_item_exists(&db, deleted_item)
+    assert!(repo::items::active_item_exists(&db, tenant_id, item)
         .await
         .unwrap());
+    assert!(
+        !repo::items::active_item_exists(&db, tenant_id, deleted_item)
+            .await
+            .unwrap()
+    );
     assert!(repo::loads::active_load_exists(&db, load).await.unwrap());
     assert!(!repo::loads::active_load_exists(&db, 999_999).await.unwrap());
     assert!(

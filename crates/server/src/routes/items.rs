@@ -6,7 +6,7 @@ use wareboxes_core::dto::{
 };
 use wareboxes_core::models::{Item, ItemPackLink};
 
-use crate::auth::CurrentUser;
+use crate::auth::CurrentTenant;
 use crate::error::{AppError, AppResult};
 use crate::repo;
 use crate::routes::users::ShowDeleted;
@@ -38,29 +38,29 @@ fn normalize_barcode_value(barcode_type: &str, value: &str) -> AppResult<String>
 
 pub async fn list(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Query(q): Query<ShowDeleted>,
 ) -> AppResult<Json<Vec<Item>>> {
     user.require_permission(&state.db, PERM).await?;
     Ok(Json(
-        repo::items::get_items(&state.db, q.show_deleted).await?,
+        repo::items::get_items(&state.db, user.tenant.tenant_id, q.show_deleted).await?,
     ))
 }
 
 pub async fn list_pack_links(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Query(q): Query<ShowDeleted>,
 ) -> AppResult<Json<Vec<ItemPackLink>>> {
     user.require_permission(&state.db, PERM).await?;
     Ok(Json(
-        repo::items::get_item_pack_links(&state.db, q.show_deleted).await?,
+        repo::items::get_item_pack_links(&state.db, user.tenant.tenant_id, q.show_deleted).await?,
     ))
 }
 
 pub async fn add(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddItem>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
@@ -68,6 +68,7 @@ pub async fn add(
     ensure_packaging_unit(&body.packaging_unit)?;
     let id = repo::items::add_item(
         &state.db,
+        user.tenant.tenant_id,
         &body.description,
         body.notes.as_deref(),
         &body.packaging_unit,
@@ -84,7 +85,7 @@ pub async fn add(
 
 pub async fn update(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<ItemUpdate>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
@@ -94,6 +95,7 @@ pub async fn update(
     }
     let ok = repo::items::update_item(
         &state.db,
+        user.tenant.tenant_id,
         body.item_id,
         body.description.as_deref(),
         body.notes.as_deref(),
@@ -105,37 +107,39 @@ pub async fn update(
 
 pub async fn delete(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<ItemIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::items::set_item_deleted(&state.db, body.item_id, true).await?,
+        repo::items::set_item_deleted(&state.db, user.tenant.tenant_id, body.item_id, true).await?,
     ))
 }
 
 pub async fn restore(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<ItemIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::items::set_item_deleted(&state.db, body.item_id, false).await?,
+        repo::items::set_item_deleted(&state.db, user.tenant.tenant_id, body.item_id, false)
+            .await?,
     ))
 }
 
 pub async fn add_pack_link(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddItemPackLink>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     let id = repo::items::add_item_pack_link(
         &state.db,
+        user.tenant.tenant_id,
         body.master_item_id,
         body.single_item_id,
         body.inner_qty,
@@ -147,38 +151,52 @@ pub async fn add_pack_link(
 
 pub async fn delete_pack_link(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<ItemPackLinkIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::items::set_item_pack_link_deleted(&state.db, body.item_pack_link_id, true).await?,
+        repo::items::set_item_pack_link_deleted(
+            &state.db,
+            user.tenant.tenant_id,
+            body.item_pack_link_id,
+            true,
+        )
+        .await?,
     ))
 }
 
 pub async fn add_sku(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddSku>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let id =
-        repo::items::add_sku(&state.db, body.item_id, &body.name, body.notes.as_deref()).await?;
+    let id = repo::items::add_sku(
+        &state.db,
+        user.tenant.tenant_id,
+        body.item_id,
+        &body.name,
+        body.notes.as_deref(),
+    )
+    .await?;
     Ok(Json(id))
 }
 
 pub async fn add_barcode(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddBarcode>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     ensure_barcode_type(&body.r#type)?;
     let name = normalize_barcode_value(&body.r#type, &body.name)?;
-    if let Some(owner_item_id) = repo::items::active_barcode_item_by_name(&state.db, &name).await? {
+    if let Some(owner_item_id) =
+        repo::items::active_barcode_item_by_name(&state.db, user.tenant.tenant_id, &name).await?
+    {
         if owner_item_id != body.item_id {
             return Err(AppError::conflict(
                 "barcode value is already assigned to another item",
@@ -187,6 +205,7 @@ pub async fn add_barcode(
     }
     let id = repo::items::add_barcode(
         &state.db,
+        user.tenant.tenant_id,
         body.item_id,
         &name,
         &body.r#type,
@@ -198,12 +217,13 @@ pub async fn add_barcode(
 
 pub async fn delete_barcode(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<BarcodeIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::items::set_barcode_deleted(&state.db, body.barcode_id, true).await?,
+        repo::items::set_barcode_deleted(&state.db, user.tenant.tenant_id, body.barcode_id, true)
+            .await?,
     ))
 }

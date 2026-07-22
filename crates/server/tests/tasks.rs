@@ -58,6 +58,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     .unwrap();
     let master_item = repo::items::add_item(
         &db,
+        tenant_id,
         "Frozen Meal 12 Pack",
         None,
         "case",
@@ -72,6 +73,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     .unwrap();
     let single_item = repo::items::add_item(
         &db,
+        tenant_id,
         "Frozen Meal Single",
         None,
         "each",
@@ -160,12 +162,21 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     .unwrap_err();
     assert!(matches!(err, AppError::Core(CoreError::BadRequest(_))));
 
-    let pack_link =
-        repo::items::add_item_pack_link(&db, master_item, single_item, 12, Some("12 pack"))
-            .await
-            .unwrap();
+    let pack_link = repo::items::add_item_pack_link(
+        &db,
+        tenant_id,
+        master_item,
+        single_item,
+        12,
+        Some("12 pack"),
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        repo::items::get_item_pack_links(&db, false).await.unwrap()[0].id,
+        repo::items::get_item_pack_links(&db, tenant_id, false)
+            .await
+            .unwrap()[0]
+            .id,
         pack_link
     );
     let break_task = repo::tasks::create_break_master_pack_task(
@@ -307,7 +318,9 @@ async fn cancelling_order_creates_unpack_task() {
     let user = fixture.user("cancel-task@test.com").await;
     let tenant_id = tenant_for_user(db, user.id).await;
     let account = fixture.account(tenant_id, "Cancel Task Account").await;
-    let item = fixture.item("Cancelled Order Item", "each").await;
+    let item = fixture
+        .item(tenant_id, "Cancelled Order Item", "each")
+        .await;
     let order_id = fixture.order("CANCEL-TASK-1", Some(account)).await;
     let order_item_id = fixture.order_item(order_id, item, 3).await;
     let update = OrderUpdate {

@@ -31,7 +31,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         .await
         .unwrap();
     let item = repo::items::add_item(
-        &db, "Cases", None, "case", None, None, None, None, None, None,
+        &db, tenant_id, "Cases", None, "case", None, None, None, None, None, None,
     )
     .await
     .unwrap();
@@ -321,6 +321,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         .unwrap();
     let item = repo::items::add_item(
         &db,
+        tenant_id,
         "Palletized Cases",
         None,
         "case",
