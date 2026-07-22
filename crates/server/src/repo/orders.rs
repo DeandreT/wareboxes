@@ -632,7 +632,7 @@ async fn order_summaries(
     .collect())
 }
 
-pub async fn orders_by_load(db: &Db) -> AppResult<HashMap<i64, Vec<Order>>> {
+pub async fn orders_by_load(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i64, Vec<Order>>> {
     let rows = sqlx::query(
         r#"
         SELECT lo.load_id AS load_id,
@@ -646,12 +646,15 @@ pub async fn orders_by_load(db: &Db) -> AppResult<HashMap<i64, Vec<Order>>> {
         FROM load_orders lo
         INNER JOIN orders o ON o.id = lo.order_id
         LEFT JOIN addresses a ON a.id = o.address_id
-        LEFT JOIN inventory_owners acct ON acct.id = o.inventory_owner_id
-        WHERE lo.deleted IS NULL
+        INNER JOIN inventory_owners acct
+            ON acct.tenant_id = lo.tenant_id AND acct.id = o.inventory_owner_id
+        WHERE lo.tenant_id = $1
+          AND lo.deleted IS NULL
           AND o.deleted IS NULL
         ORDER BY lo.load_id, o.created DESC, o.id DESC
         "#,
     )
+    .bind(tenant_id.get())
     .fetch_all(db)
     .await?;
     let items = items_by_order(db).await?;
@@ -670,7 +673,7 @@ pub async fn orders_by_load(db: &Db) -> AppResult<HashMap<i64, Vec<Order>>> {
     Ok(by_load)
 }
 
-pub async fn orders_for_load(db: &Db, load_id: i64) -> AppResult<Vec<Order>> {
+pub async fn orders_for_load(db: &Db, tenant_id: TenantId, load_id: i64) -> AppResult<Vec<Order>> {
     let rows = sqlx::query(
         r#"
         SELECT o.id AS id, o.order_key AS order_key, o.created AS created,
@@ -683,13 +686,16 @@ pub async fn orders_for_load(db: &Db, load_id: i64) -> AppResult<Vec<Order>> {
         FROM load_orders lo
         INNER JOIN orders o ON o.id = lo.order_id
         LEFT JOIN addresses a ON a.id = o.address_id
-        LEFT JOIN inventory_owners acct ON acct.id = o.inventory_owner_id
-        WHERE lo.load_id = $1
+        INNER JOIN inventory_owners acct
+            ON acct.tenant_id = lo.tenant_id AND acct.id = o.inventory_owner_id
+        WHERE lo.tenant_id = $1
+          AND lo.load_id = $2
           AND lo.deleted IS NULL
           AND o.deleted IS NULL
         ORDER BY o.created DESC, o.id DESC
         "#,
     )
+    .bind(tenant_id.get())
     .bind(load_id)
     .fetch_all(db)
     .await?;

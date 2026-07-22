@@ -54,6 +54,8 @@ fn load_line_status(expected: i64, received: i64, rejected: i64, missing: i64) -
 fn map_load(row: &sqlx::postgres::PgRow) -> AppResult<Load> {
     Ok(Load {
         id: row.try_get("id")?,
+        tenant_id: TenantId::new(row.try_get("tenant_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
         created: row.try_get("created")?,
         deleted: row.try_get("deleted")?,
         facility_id: row.try_get("facility_id")?,
@@ -89,9 +91,11 @@ fn map_load(row: &sqlx::postgres::PgRow) -> AppResult<Load> {
 fn map_file(r: &sqlx::postgres::PgRow) -> AppResult<LoadFile> {
     Ok(LoadFile {
         id: r.try_get("id")?,
+        tenant_id: TenantId::new(r.try_get("tenant_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
         created: r.try_get("created")?,
         deleted: r.try_get("deleted")?,
-        load_id: r.try_get::<Option<i64>, _>("load_id")?,
+        load_id: r.try_get("load_id")?,
         original_name: r.try_get("original_name")?,
         name: r.try_get("name")?,
         path: r.try_get("path")?,
@@ -100,9 +104,23 @@ fn map_file(r: &sqlx::postgres::PgRow) -> AppResult<LoadFile> {
     })
 }
 
+fn map_note(r: &sqlx::postgres::PgRow) -> AppResult<LoadNote> {
+    Ok(LoadNote {
+        id: r.try_get("id")?,
+        tenant_id: TenantId::new(r.try_get("tenant_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        created: r.try_get("created")?,
+        deleted: r.try_get("deleted")?,
+        load_id: r.try_get("load_id")?,
+        note: r.try_get("note")?,
+    })
+}
+
 fn map_line(r: &sqlx::postgres::PgRow) -> AppResult<LoadLine> {
     Ok(LoadLine {
         id: r.try_get("id")?,
+        tenant_id: TenantId::new(r.try_get("tenant_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
         created: r.try_get("created")?,
         deleted: r.try_get("deleted")?,
         load_id: r.try_get("load_id")?,
@@ -124,9 +142,11 @@ fn map_line(r: &sqlx::postgres::PgRow) -> AppResult<LoadLine> {
 fn map_activity(r: &sqlx::postgres::PgRow) -> AppResult<LoadActivity> {
     Ok(LoadActivity {
         id: r.try_get("id")?,
+        tenant_id: TenantId::new(r.try_get("tenant_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
         created: r.try_get("created")?,
         deleted: r.try_get("deleted")?,
-        load_id: r.try_get::<Option<i64>, _>("load_id")?,
+        load_id: r.try_get("load_id")?,
         user_id: r.try_get::<Option<i64>, _>("user_id")?,
         action: r.try_get("action")?,
         message: r.try_get::<Option<String>, _>("message")?,
@@ -136,77 +156,66 @@ fn map_activity(r: &sqlx::postgres::PgRow) -> AppResult<LoadActivity> {
 
 pub async fn get_loads(
     db: &Db,
+    tenant_id: TenantId,
     show_deleted: bool,
     show_deleted_notes: bool,
 ) -> AppResult<Vec<Load>> {
-    let sql = if show_deleted {
+    let rows = sqlx::query(
         r#"
-        SELECT l.id, l.created, l.deleted, l.facility_id, w.name AS facility_name,
+        SELECT l.id, l.tenant_id, l.created, l.deleted, l.facility_id, facility.name AS facility_name,
                l.inventory_owner_id, a.name AS inventory_owner_name, l.status, l.type, l.reference_number,
                l.invoice_number, l.carrier, l.trailer_number, l.seal_number, l.dock_door_location_id,
                l.expected_time, l.appointment_time, l.actual_time, l.arrival, l.departure, l.rejected,
                l.receive_completed, l.closed, l.checked_in_by, l.closed_by
         FROM loads l
-        LEFT JOIN facilities w ON w.id = l.facility_id
-        LEFT JOIN inventory_owners a ON a.id = l.inventory_owner_id
+        INNER JOIN facilities facility
+            ON facility.tenant_id = l.tenant_id AND facility.id = l.facility_id
+        INNER JOIN inventory_owners a
+            ON a.tenant_id = l.tenant_id AND a.id = l.inventory_owner_id
+        WHERE l.tenant_id = $1 AND ($2 OR l.deleted IS NULL)
         ORDER BY l.id DESC
-        "#
-    } else {
-        r#"
-        SELECT l.id, l.created, l.deleted, l.facility_id, w.name AS facility_name,
-               l.inventory_owner_id, a.name AS inventory_owner_name, l.status, l.type, l.reference_number,
-               l.invoice_number, l.carrier, l.trailer_number, l.seal_number, l.dock_door_location_id,
-               l.expected_time, l.appointment_time, l.actual_time, l.arrival, l.departure, l.rejected,
-               l.receive_completed, l.closed, l.checked_in_by, l.closed_by
-        FROM loads l
-        LEFT JOIN facilities w ON w.id = l.facility_id
-        LEFT JOIN inventory_owners a ON a.id = l.inventory_owner_id
-        WHERE l.deleted IS NULL
-        ORDER BY l.id DESC
-        "#
-    };
-    let rows = sqlx::query(sql).fetch_all(db).await?;
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(show_deleted)
+    .fetch_all(db)
+    .await?;
 
-    let note_sql = if show_deleted_notes {
-        "SELECT id, created, deleted, load_id, note FROM load_notes ORDER BY id"
-    } else {
-        "SELECT id, created, deleted, load_id, note FROM load_notes WHERE deleted IS NULL ORDER BY id"
-    };
-    let note_rows = sqlx::query(note_sql).fetch_all(db).await?;
+    let note_rows = sqlx::query(
+        "SELECT id, tenant_id, created, deleted, load_id, note FROM load_notes WHERE tenant_id = $1 AND ($2 OR deleted IS NULL) ORDER BY id",
+    )
+    .bind(tenant_id.get())
+    .bind(show_deleted_notes)
+    .fetch_all(db)
+    .await?;
     let mut notes: HashMap<i64, Vec<LoadNote>> = HashMap::new();
     for r in &note_rows {
-        if let Some(lid) = r.try_get::<Option<i64>, _>("load_id")? {
-            notes.entry(lid).or_default().push(LoadNote {
-                id: r.try_get("id")?,
-                created: r.try_get("created")?,
-                deleted: r.try_get("deleted")?,
-                load_id: Some(lid),
-                note: r.try_get("note")?,
-            });
-        }
+        let note = map_note(r)?;
+        notes.entry(note.load_id).or_default().push(note);
     }
 
     let file_rows = sqlx::query(
-        "SELECT id, created, deleted, load_id, original_name, name, path, content_type, category FROM load_files WHERE deleted IS NULL",
+        "SELECT id, tenant_id, created, deleted, load_id, original_name, name, path, content_type, category FROM load_files WHERE tenant_id = $1 AND deleted IS NULL",
     )
+    .bind(tenant_id.get())
     .fetch_all(db)
     .await?;
     let mut files: HashMap<i64, Vec<LoadFile>> = HashMap::new();
     for r in &file_rows {
-        if let Some(lid) = r.try_get::<Option<i64>, _>("load_id")? {
-            files.entry(lid).or_default().push(map_file(r)?);
-        }
+        let file = map_file(r)?;
+        files.entry(file.load_id).or_default().push(file);
     }
 
     let line_rows = sqlx::query(
         r#"
-        SELECT id, created, deleted, load_id, item_id, sku_id, expected_qty, received_qty,
+        SELECT id, tenant_id, created, deleted, load_id, item_id, sku_id, expected_qty, received_qty,
                rejected_qty, missing_qty, missing_confirmed_by, missing_confirmed_at, lot, serial, expiration, status
         FROM load_lines
-        WHERE deleted IS NULL
+        WHERE tenant_id = $1 AND deleted IS NULL
         ORDER BY id
         "#,
     )
+    .bind(tenant_id.get())
     .fetch_all(db)
     .await?;
     let mut lines: HashMap<i64, Vec<LoadLine>> = HashMap::new();
@@ -215,18 +224,18 @@ pub async fn get_loads(
         lines.entry(line.load_id).or_default().push(line);
     }
 
-    let mut orders = orders::orders_by_load(db).await?;
+    let mut orders = orders::orders_by_load(db, tenant_id).await?;
 
     let activity_rows = sqlx::query(
-        "SELECT id, created, deleted, load_id, user_id, action, message, metadata_json FROM load_activity WHERE deleted IS NULL ORDER BY id",
+        "SELECT id, tenant_id, created, deleted, load_id, user_id, action, message, metadata_json FROM load_activity WHERE tenant_id = $1 AND deleted IS NULL ORDER BY id",
     )
+    .bind(tenant_id.get())
     .fetch_all(db)
     .await?;
     let mut activity: HashMap<i64, Vec<LoadActivity>> = HashMap::new();
     for r in &activity_rows {
-        if let Some(lid) = r.try_get::<Option<i64>, _>("load_id")? {
-            activity.entry(lid).or_default().push(map_activity(r)?);
-        }
+        let event = map_activity(r)?;
+        activity.entry(event.load_id).or_default().push(event);
     }
 
     rows.iter()
@@ -244,39 +253,30 @@ pub async fn get_loads(
 
 pub async fn get_load_summaries(
     db: &Db,
+    tenant_id: TenantId,
     show_deleted: bool,
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<Load>> {
-    let sql = if show_deleted {
+    let rows = sqlx::query(
         r#"
-        SELECT l.id, l.created, l.deleted, l.facility_id, w.name AS facility_name,
+        SELECT l.id, l.tenant_id, l.created, l.deleted, l.facility_id, facility.name AS facility_name,
                l.inventory_owner_id, a.name AS inventory_owner_name, l.status, l.type, l.reference_number,
                l.invoice_number, l.carrier, l.trailer_number, l.seal_number, l.dock_door_location_id,
                l.expected_time, l.appointment_time, l.actual_time, l.arrival, l.departure, l.rejected,
                l.receive_completed, l.closed, l.checked_in_by, l.closed_by
         FROM loads l
-        LEFT JOIN facilities w ON w.id = l.facility_id
-        LEFT JOIN inventory_owners a ON a.id = l.inventory_owner_id
+        INNER JOIN facilities facility
+            ON facility.tenant_id = l.tenant_id AND facility.id = l.facility_id
+        INNER JOIN inventory_owners a
+            ON a.tenant_id = l.tenant_id AND a.id = l.inventory_owner_id
+        WHERE l.tenant_id = $1 AND ($2 OR l.deleted IS NULL)
         ORDER BY l.created DESC, l.id DESC
-        LIMIT $1 OFFSET $2
-        "#
-    } else {
-        r#"
-        SELECT l.id, l.created, l.deleted, l.facility_id, w.name AS facility_name,
-               l.inventory_owner_id, a.name AS inventory_owner_name, l.status, l.type, l.reference_number,
-               l.invoice_number, l.carrier, l.trailer_number, l.seal_number, l.dock_door_location_id,
-               l.expected_time, l.appointment_time, l.actual_time, l.arrival, l.departure, l.rejected,
-               l.receive_completed, l.closed, l.checked_in_by, l.closed_by
-        FROM loads l
-        LEFT JOIN facilities w ON w.id = l.facility_id
-        LEFT JOIN inventory_owners a ON a.id = l.inventory_owner_id
-        WHERE l.deleted IS NULL
-        ORDER BY l.created DESC, l.id DESC
-        LIMIT $1 OFFSET $2
-        "#
-    };
-    let rows = sqlx::query(sql)
+        LIMIT $3 OFFSET $4
+        "#,
+    )
+        .bind(tenant_id.get())
+        .bind(show_deleted)
         .bind(limit)
         .bind(offset)
         .fetch_all(db)
@@ -291,13 +291,14 @@ pub async fn get_load_summaries(
 
     let line_rows = sqlx::query(
         r#"
-        SELECT id, created, deleted, load_id, item_id, sku_id, expected_qty, received_qty,
+        SELECT id, tenant_id, created, deleted, load_id, item_id, sku_id, expected_qty, received_qty,
                rejected_qty, missing_qty, missing_confirmed_by, missing_confirmed_at, lot, serial, expiration, status
         FROM load_lines
-        WHERE deleted IS NULL AND load_id = ANY($1)
+        WHERE tenant_id = $1 AND deleted IS NULL AND load_id = ANY($2)
         ORDER BY id
         "#,
     )
+    .bind(tenant_id.get())
     .bind(&load_ids)
     .fetch_all(db)
     .await?;
@@ -316,20 +317,28 @@ pub async fn get_load_summaries(
         .collect()
 }
 
-pub async fn get_load(db: &Db, load_id: i64, show_deleted_notes: bool) -> AppResult<Option<Load>> {
+pub async fn get_load(
+    db: &Db,
+    tenant_id: TenantId,
+    load_id: i64,
+    show_deleted_notes: bool,
+) -> AppResult<Option<Load>> {
     let row = sqlx::query(
         r#"
-        SELECT l.id, l.created, l.deleted, l.facility_id, w.name AS facility_name,
+        SELECT l.id, l.tenant_id, l.created, l.deleted, l.facility_id, facility.name AS facility_name,
                l.inventory_owner_id, a.name AS inventory_owner_name, l.status, l.type, l.reference_number,
                l.invoice_number, l.carrier, l.trailer_number, l.seal_number, l.dock_door_location_id,
                l.expected_time, l.appointment_time, l.actual_time, l.arrival, l.departure, l.rejected,
                l.receive_completed, l.closed, l.checked_in_by, l.closed_by
         FROM loads l
-        LEFT JOIN facilities w ON w.id = l.facility_id
-        LEFT JOIN inventory_owners a ON a.id = l.inventory_owner_id
-        WHERE l.id = $1 AND l.deleted IS NULL
+        INNER JOIN facilities facility
+            ON facility.tenant_id = l.tenant_id AND facility.id = l.facility_id
+        INNER JOIN inventory_owners a
+            ON a.tenant_id = l.tenant_id AND a.id = l.inventory_owner_id
+        WHERE l.tenant_id = $1 AND l.id = $2 AND l.deleted IS NULL
         "#,
     )
+    .bind(tenant_id.get())
     .bind(load_id)
     .fetch_optional(db)
     .await?;
@@ -338,25 +347,22 @@ pub async fn get_load(db: &Db, load_id: i64, show_deleted_notes: bool) -> AppRes
     };
     let mut load = map_load(&row)?;
 
-    let note_sql = if show_deleted_notes {
-        "SELECT id, created, deleted, load_id, note FROM load_notes WHERE load_id = $1 ORDER BY id"
-    } else {
-        "SELECT id, created, deleted, load_id, note FROM load_notes WHERE load_id = $1 AND deleted IS NULL ORDER BY id"
-    };
-    let note_rows = sqlx::query(note_sql).bind(load_id).fetch_all(db).await?;
+    let note_rows = sqlx::query(
+        "SELECT id, tenant_id, created, deleted, load_id, note FROM load_notes WHERE tenant_id = $1 AND load_id = $2 AND ($3 OR deleted IS NULL) ORDER BY id",
+    )
+    .bind(tenant_id.get())
+    .bind(load_id)
+    .bind(show_deleted_notes)
+    .fetch_all(db)
+    .await?;
     for r in &note_rows {
-        load.notes.push(LoadNote {
-            id: r.try_get("id")?,
-            created: r.try_get("created")?,
-            deleted: r.try_get("deleted")?,
-            load_id: r.try_get("load_id")?,
-            note: r.try_get("note")?,
-        });
+        load.notes.push(map_note(r)?);
     }
 
     let file_rows = sqlx::query(
-        "SELECT id, created, deleted, load_id, original_name, name, path, content_type, category FROM load_files WHERE load_id = $1 AND deleted IS NULL ORDER BY id",
+        "SELECT id, tenant_id, created, deleted, load_id, original_name, name, path, content_type, category FROM load_files WHERE tenant_id = $1 AND load_id = $2 AND deleted IS NULL ORDER BY id",
     )
+    .bind(tenant_id.get())
     .bind(load_id)
     .fetch_all(db)
     .await?;
@@ -366,13 +372,14 @@ pub async fn get_load(db: &Db, load_id: i64, show_deleted_notes: bool) -> AppRes
 
     let line_rows = sqlx::query(
         r#"
-        SELECT id, created, deleted, load_id, item_id, sku_id, expected_qty, received_qty,
+        SELECT id, tenant_id, created, deleted, load_id, item_id, sku_id, expected_qty, received_qty,
                rejected_qty, missing_qty, missing_confirmed_by, missing_confirmed_at, lot, serial, expiration, status
         FROM load_lines
-        WHERE load_id = $1 AND deleted IS NULL
+        WHERE tenant_id = $1 AND load_id = $2 AND deleted IS NULL
         ORDER BY id
         "#,
     )
+    .bind(tenant_id.get())
     .bind(load_id)
     .fetch_all(db)
     .await?;
@@ -380,11 +387,12 @@ pub async fn get_load(db: &Db, load_id: i64, show_deleted_notes: bool) -> AppRes
         load.lines.push(map_line(r)?);
     }
 
-    load.orders = orders::orders_for_load(db, load_id).await?;
+    load.orders = orders::orders_for_load(db, tenant_id, load_id).await?;
 
     let activity_rows = sqlx::query(
-        "SELECT id, created, deleted, load_id, user_id, action, message, metadata_json FROM load_activity WHERE load_id = $1 AND deleted IS NULL ORDER BY id",
+        "SELECT id, tenant_id, created, deleted, load_id, user_id, action, message, metadata_json FROM load_activity WHERE tenant_id = $1 AND load_id = $2 AND deleted IS NULL ORDER BY id",
     )
+    .bind(tenant_id.get())
     .bind(load_id)
     .fetch_all(db)
     .await?;
@@ -395,18 +403,21 @@ pub async fn get_load(db: &Db, load_id: i64, show_deleted_notes: bool) -> AppRes
     Ok(Some(load))
 }
 
-pub async fn active_load_exists(db: &Db, id: i64) -> AppResult<bool> {
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM loads WHERE id = $1 AND deleted IS NULL)")
-            .bind(id)
-            .fetch_one(db)
-            .await?;
+pub async fn active_load_exists(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM loads WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL)",
+    )
+    .bind(tenant_id.get())
+    .bind(id)
+    .fetch_one(db)
+    .await?;
     Ok(exists)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn add_load(
     db: &Db,
+    tenant_id: TenantId,
     user_id: i64,
     facility_id: i64,
     inventory_owner_id: i64,
@@ -425,13 +436,14 @@ pub async fn add_load(
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO loads
-            (created, facility_id, inventory_owner_id, status, type, reference_number, invoice_number, carrier,
+            (tenant_id, created, facility_id, inventory_owner_id, status, type, reference_number, invoice_number, carrier,
              trailer_number, seal_number, dock_door_location_id, expected_time, appointment_time,
              receive_completed)
-        VALUES ($1, $2, $3, 'planned', $4, $5, $6, $7, $8, $9, $10, $11, $12, false)
+        VALUES ($1, $2, $3, $4, 'planned', $5, $6, $7, $8, $9, $10, $11, $12, $13, false)
         RETURNING id
         "#,
     )
+    .bind(tenant_id.get())
     .bind(now)
     .bind(facility_id)
     .bind(inventory_owner_id)
@@ -449,6 +461,7 @@ pub async fn add_load(
 
     insert_activity_tx(
         &mut tx,
+        tenant_id,
         id,
         Some(user_id),
         "created",
@@ -463,6 +476,7 @@ pub async fn add_load(
 #[allow(clippy::too_many_arguments)]
 pub async fn update_load(
     db: &Db,
+    tenant_id: TenantId,
     user_id: i64,
     id: i64,
     status: Option<LoadStatus>,
@@ -483,11 +497,13 @@ pub async fn update_load(
     mut closed: Option<Timestamp>,
 ) -> AppResult<bool> {
     let mut tx = db.begin().await?;
-    let current: Option<String> =
-        sqlx::query_scalar("SELECT status FROM loads WHERE id = $1 AND deleted IS NULL")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let current: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM loads WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL FOR UPDATE",
+    )
+    .bind(tenant_id.get())
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
     let Some(current) = current else {
         return Ok(false);
     };
@@ -499,7 +515,7 @@ pub async fn update_load(
     let next_status = match status {
         Some(s) => {
             if s == LoadStatus::Closed {
-                ensure_load_resolved_tx(&mut tx, id).await?;
+                ensure_load_resolved_tx(&mut tx, tenant_id, id).await?;
             }
             if !current.can_transition_to(s) {
                 return Err(AppError::bad_request(format!(
@@ -559,7 +575,7 @@ pub async fn update_load(
             closed = COALESCE($16, closed),
             checked_in_by = COALESCE($17, checked_in_by),
             closed_by = COALESCE($18, closed_by)
-        WHERE id = $19 AND deleted IS NULL
+        WHERE tenant_id = $19 AND id = $20 AND deleted IS NULL
         "#,
     )
     .bind(next_status.map(|s| s.as_str()))
@@ -580,6 +596,7 @@ pub async fn update_load(
     .bind(closed)
     .bind(checked_in_by)
     .bind(closed_by)
+    .bind(tenant_id.get())
     .bind(id)
     .execute(&mut *tx)
     .await?;
@@ -587,6 +604,7 @@ pub async fn update_load(
     if res.rows_affected() > 0 {
         insert_activity_tx(
             &mut tx,
+            tenant_id,
             id,
             Some(user_id),
             "updated",
@@ -599,16 +617,31 @@ pub async fn update_load(
     Ok(res.rows_affected() > 0)
 }
 
-pub async fn set_load_deleted(db: &Db, user_id: i64, id: i64, deleted: bool) -> AppResult<bool> {
+pub async fn set_load_deleted(
+    db: &Db,
+    tenant_id: TenantId,
+    user_id: i64,
+    id: i64,
+    deleted: bool,
+) -> AppResult<bool> {
     let mut tx = db.begin().await?;
-    let res = sqlx::query("UPDATE loads SET deleted = $1 WHERE id = $2")
-        .bind(if deleted { Some(now_iso()) } else { None })
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+    let res = sqlx::query(
+        r#"
+        UPDATE loads SET deleted = $1
+        WHERE tenant_id = $2 AND id = $3
+          AND (($4 AND deleted IS NULL) OR (NOT $4 AND deleted IS NOT NULL))
+        "#,
+    )
+    .bind(if deleted { Some(now_iso()) } else { None })
+    .bind(tenant_id.get())
+    .bind(id)
+    .bind(deleted)
+    .execute(&mut *tx)
+    .await?;
     if res.rows_affected() > 0 {
         insert_activity_tx(
             &mut tx,
+            tenant_id,
             id,
             Some(user_id),
             if deleted { "deleted" } else { "restored" },
@@ -625,18 +658,33 @@ pub async fn set_load_deleted(db: &Db, user_id: i64, id: i64, deleted: bool) -> 
     Ok(res.rows_affected() > 0)
 }
 
-pub async fn add_note(db: &Db, user_id: i64, load_id: i64, note: &str) -> AppResult<i64> {
+pub async fn add_note(
+    db: &Db,
+    tenant_id: TenantId,
+    user_id: i64,
+    load_id: i64,
+    note: &str,
+) -> AppResult<i64> {
     let mut tx = db.begin().await?;
-    let id: i64 = sqlx::query_scalar(
-        "INSERT INTO load_notes (created, load_id, note) VALUES ($1, $2, $3) RETURNING id",
+    let id: Option<i64> = sqlx::query_scalar(
+        r#"
+        INSERT INTO load_notes (tenant_id, created, load_id, note)
+        SELECT $1, $2, load.id, $4
+        FROM loads load
+        WHERE load.tenant_id = $1 AND load.id = $3 AND load.deleted IS NULL
+        RETURNING id
+        "#,
     )
+    .bind(tenant_id.get())
     .bind(now_iso())
     .bind(load_id)
     .bind(note)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+    let id = id.ok_or_else(|| AppError::not_found("load"))?;
     insert_activity_tx(
         &mut tx,
+        tenant_id,
         load_id,
         Some(user_id),
         "note_added",
@@ -650,16 +698,23 @@ pub async fn add_note(db: &Db, user_id: i64, load_id: i64, note: &str) -> AppRes
 
 pub async fn set_load_note_deleted(
     db: &Db,
+    tenant_id: TenantId,
     user_id: i64,
     note_id: i64,
     deleted: bool,
 ) -> AppResult<bool> {
     let mut tx = db.begin().await?;
     let load_id: Option<i64> = sqlx::query_scalar(
-        "SELECT load_id FROM load_notes WHERE id = $1 AND ($2::boolean OR deleted IS NULL)",
+        r#"
+        SELECT load_id FROM load_notes
+        WHERE tenant_id = $1 AND id = $2
+          AND (($3 AND deleted IS NULL) OR (NOT $3 AND deleted IS NOT NULL))
+        FOR UPDATE
+        "#,
     )
+    .bind(tenant_id.get())
     .bind(note_id)
-    .bind(!deleted)
+    .bind(deleted)
     .fetch_optional(&mut *tx)
     .await?
     .flatten();
@@ -667,14 +722,16 @@ pub async fn set_load_note_deleted(
         return Ok(false);
     };
 
-    let res = sqlx::query("UPDATE load_notes SET deleted = $1 WHERE id = $2")
+    let res = sqlx::query("UPDATE load_notes SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(if deleted { Some(now_iso()) } else { None })
+        .bind(tenant_id.get())
         .bind(note_id)
         .execute(&mut *tx)
         .await?;
     if res.rows_affected() > 0 {
         insert_activity_tx(
             &mut tx,
+            tenant_id,
             load_id,
             Some(user_id),
             if deleted {
@@ -694,6 +751,7 @@ pub async fn set_load_note_deleted(
 #[allow(clippy::too_many_arguments)]
 pub async fn add_line(
     db: &Db,
+    tenant_id: TenantId,
     user_id: i64,
     load_id: i64,
     item_id: i64,
@@ -706,25 +764,43 @@ pub async fn add_line(
     if expected_qty <= 0 {
         return Err(AppError::bad_request("expected quantity must be positive"));
     }
-    let load_status: String =
-        sqlx::query_scalar("SELECT status FROM loads WHERE id = $1 AND deleted IS NULL")
-            .bind(load_id)
-            .fetch_one(db)
-            .await?;
+    let mut tx = db.begin().await?;
+    let load_status: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT load.status
+        FROM loads load
+        INNER JOIN items item
+            ON item.tenant_id = load.tenant_id AND item.id = $3 AND item.deleted IS NULL
+        WHERE load.tenant_id = $1 AND load.id = $2 AND load.deleted IS NULL
+          AND ($4::BIGINT IS NULL OR EXISTS (
+              SELECT 1 FROM skus sku
+              WHERE sku.tenant_id = $1 AND sku.item_id = item.id
+                AND sku.id = $4 AND sku.deleted IS NULL
+          ))
+        FOR UPDATE OF load
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(load_id)
+    .bind(item_id)
+    .bind(sku_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let load_status = load_status
+        .ok_or_else(|| AppError::not_found("load, item, or SKU in the selected tenant"))?;
     let load_status = parse_load_status(&load_status)?;
     if load_status.is_terminal() {
         return Err(AppError::conflict("cannot add lines to a terminal load"));
     }
-
-    let mut tx = db.begin().await?;
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO load_lines
-            (created, load_id, item_id, sku_id, expected_qty, lot, serial, expiration, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
+            (tenant_id, created, load_id, item_id, sku_id, expected_qty, lot, serial, expiration, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')
         RETURNING id
         "#,
     )
+    .bind(tenant_id.get())
     .bind(now_iso())
     .bind(load_id)
     .bind(item_id)
@@ -737,6 +813,7 @@ pub async fn add_line(
     .await?;
     insert_activity_tx(
         &mut tx,
+        tenant_id,
         load_id,
         Some(user_id),
         "line_added",
@@ -813,10 +890,11 @@ pub async fn receive_line(
                COALESCE($3, ll.expiration) AS expiration, l.status AS load_status,
                l.inventory_owner_id, owner.tenant_id, item.packaging_unit AS uom
         FROM load_lines ll
-        INNER JOIN loads l ON l.id = ll.load_id
-        INNER JOIN inventory_owners owner ON owner.id = l.inventory_owner_id
+        INNER JOIN loads l ON l.tenant_id = ll.tenant_id AND l.id = ll.load_id
+        INNER JOIN inventory_owners owner
+            ON owner.tenant_id = l.tenant_id AND owner.id = l.inventory_owner_id
         INNER JOIN items item ON item.id = ll.item_id AND item.tenant_id = owner.tenant_id
-        WHERE ll.id = $4 AND owner.tenant_id = $5
+        WHERE ll.tenant_id = $5 AND ll.id = $4
           AND ll.deleted IS NULL AND l.deleted IS NULL
         FOR UPDATE OF ll, l
         "#,
@@ -876,7 +954,7 @@ pub async fn receive_line(
             serial = COALESCE($7, serial),
             expiration = COALESCE($8, expiration),
             status = $9
-        WHERE id = $10
+        WHERE tenant_id = $10 AND id = $11
         "#,
     )
     .bind(new_received)
@@ -888,6 +966,7 @@ pub async fn receive_line(
     .bind(serial)
     .bind(expiration)
     .bind(line_status.as_str())
+    .bind(tenant_id.get())
     .bind(load_line_id)
     .execute(&mut *tx)
     .await?;
@@ -1055,8 +1134,9 @@ pub async fn receive_line(
     }
 
     let open_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM load_lines WHERE load_id = $1 AND deleted IS NULL AND status IN ('pending', 'partial')",
+        "SELECT COUNT(*) FROM load_lines WHERE tenant_id = $1 AND load_id = $2 AND deleted IS NULL AND status IN ('pending', 'partial')",
     )
+    .bind(tenant_id.get())
     .bind(load_id)
     .fetch_one(&mut *tx)
     .await?;
@@ -1067,17 +1147,19 @@ pub async fn receive_line(
     };
     let receive_completed = open_count == 0;
     sqlx::query(
-        "UPDATE loads SET status = $1, receive_completed = $2, actual_time = COALESCE(actual_time, $3) WHERE id = $4",
+        "UPDATE loads SET status = $1, receive_completed = $2, actual_time = COALESCE(actual_time, $3) WHERE tenant_id = $4 AND id = $5",
     )
     .bind(next_load_status.as_str())
     .bind(receive_completed)
     .bind(now)
+    .bind(tenant_id.get())
     .bind(load_id)
     .execute(&mut *tx)
     .await?;
 
     insert_activity_tx(
         &mut tx,
+        tenant_id,
         load_id,
         Some(user_id),
         "line_received",
@@ -1108,11 +1190,13 @@ pub async fn receive_line(
 
 async fn ensure_load_resolved_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
     load_id: i64,
 ) -> AppResult<()> {
     let open_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM load_lines WHERE load_id = $1 AND deleted IS NULL AND status IN ('pending', 'partial')",
+        "SELECT COUNT(*) FROM load_lines WHERE tenant_id = $1 AND load_id = $2 AND deleted IS NULL AND status IN ('pending', 'partial')",
     )
+    .bind(tenant_id.get())
     .bind(load_id)
     .fetch_one(&mut **tx)
     .await?;
@@ -1126,6 +1210,7 @@ async fn ensure_load_resolved_tx(
 
 async fn insert_activity_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
     load_id: i64,
     user_id: Option<i64>,
     action: &str,
@@ -1133,8 +1218,9 @@ async fn insert_activity_tx(
     metadata_json: Option<&str>,
 ) -> AppResult<i64> {
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO load_activity (created, load_id, user_id, action, message, metadata_json) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        "INSERT INTO load_activity (tenant_id, created, load_id, user_id, action, message, metadata_json) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
+    .bind(tenant_id.get())
     .bind(now_iso())
     .bind(load_id)
     .bind(user_id)
@@ -1151,6 +1237,7 @@ async fn insert_activity_tx(
 #[allow(clippy::too_many_arguments)]
 pub async fn add_file(
     db: &Db,
+    tenant_id: TenantId,
     user_id: i64,
     load_id: i64,
     original_name: &str,
@@ -1160,9 +1247,17 @@ pub async fn add_file(
     category: LoadFileCategory,
 ) -> AppResult<i64> {
     let mut tx = db.begin().await?;
-    let id: i64 = sqlx::query_scalar(
-        "INSERT INTO load_files (created, load_id, original_name, name, path, content_type, category) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+    let id: Option<i64> = sqlx::query_scalar(
+        r#"
+        INSERT INTO load_files
+            (tenant_id, created, load_id, original_name, name, path, content_type, category)
+        SELECT $1, $2, load.id, $4, $5, $6, $7, $8
+        FROM loads load
+        WHERE load.tenant_id = $1 AND load.id = $3 AND load.deleted IS NULL
+        RETURNING id
+        "#,
     )
+    .bind(tenant_id.get())
     .bind(now_iso())
     .bind(load_id)
     .bind(original_name)
@@ -1170,10 +1265,12 @@ pub async fn add_file(
     .bind(path)
     .bind(content_type)
     .bind(category.as_str())
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+    let id = id.ok_or_else(|| AppError::not_found("load"))?;
     insert_activity_tx(
         &mut tx,
+        tenant_id,
         load_id,
         Some(user_id),
         "file_added",
@@ -1189,36 +1286,46 @@ pub async fn add_file(
     Ok(id)
 }
 
-pub async fn get_file(db: &Db, file_id: i64) -> AppResult<Option<LoadFile>> {
+pub async fn get_file(db: &Db, tenant_id: TenantId, file_id: i64) -> AppResult<Option<LoadFile>> {
     let row = sqlx::query(
-        "SELECT id, created, deleted, load_id, original_name, name, path, content_type, category FROM load_files WHERE id = $1",
+        "SELECT id, tenant_id, created, deleted, load_id, original_name, name, path, content_type, category FROM load_files WHERE tenant_id = $1 AND id = $2",
     )
+    .bind(tenant_id.get())
     .bind(file_id)
     .fetch_optional(db)
     .await?;
     row.as_ref().map(map_file).transpose()
 }
 
-pub async fn delete_file(db: &Db, user_id: i64, file_id: i64) -> AppResult<bool> {
+pub async fn delete_file(
+    db: &Db,
+    tenant_id: TenantId,
+    user_id: i64,
+    file_id: i64,
+) -> AppResult<bool> {
     let mut tx = db.begin().await?;
-    let load_id: Option<i64> =
-        sqlx::query_scalar("SELECT load_id FROM load_files WHERE id = $1 AND deleted IS NULL")
-            .bind(file_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .flatten();
+    let load_id: Option<i64> = sqlx::query_scalar(
+        "SELECT load_id FROM load_files WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL FOR UPDATE",
+    )
+    .bind(tenant_id.get())
+    .bind(file_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .flatten();
     let Some(load_id) = load_id else {
         return Ok(false);
     };
 
-    let res = sqlx::query("UPDATE load_files SET deleted = $1 WHERE id = $2")
+    let res = sqlx::query("UPDATE load_files SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(now_iso())
+        .bind(tenant_id.get())
         .bind(file_id)
         .execute(&mut *tx)
         .await?;
     if res.rows_affected() > 0 {
         insert_activity_tx(
             &mut tx,
+            tenant_id,
             load_id,
             Some(user_id),
             "file_deleted",

@@ -114,16 +114,26 @@ BEGIN
 
   IF clear_seed THEN
     DELETE FROM load_orders
-    WHERE load_id IN (SELECT id FROM loads WHERE reference_number LIKE 'WB-SEED-LOAD-%');
+    WHERE tenant_id = tenant AND load_id IN (
+      SELECT id FROM loads WHERE tenant_id = tenant AND reference_number LIKE 'WB-SEED-LOAD-%'
+    );
     DELETE FROM load_activity
-    WHERE load_id IN (SELECT id FROM loads WHERE reference_number LIKE 'WB-SEED-LOAD-%');
+    WHERE tenant_id = tenant AND load_id IN (
+      SELECT id FROM loads WHERE tenant_id = tenant AND reference_number LIKE 'WB-SEED-LOAD-%'
+    );
     DELETE FROM load_files
-    WHERE load_id IN (SELECT id FROM loads WHERE reference_number LIKE 'WB-SEED-LOAD-%');
+    WHERE tenant_id = tenant AND load_id IN (
+      SELECT id FROM loads WHERE tenant_id = tenant AND reference_number LIKE 'WB-SEED-LOAD-%'
+    );
     DELETE FROM load_notes
-    WHERE load_id IN (SELECT id FROM loads WHERE reference_number LIKE 'WB-SEED-LOAD-%');
+    WHERE tenant_id = tenant AND load_id IN (
+      SELECT id FROM loads WHERE tenant_id = tenant AND reference_number LIKE 'WB-SEED-LOAD-%'
+    );
     DELETE FROM load_lines
-    WHERE load_id IN (SELECT id FROM loads WHERE reference_number LIKE 'WB-SEED-LOAD-%');
-    DELETE FROM loads WHERE reference_number LIKE 'WB-SEED-LOAD-%';
+    WHERE tenant_id = tenant AND load_id IN (
+      SELECT id FROM loads WHERE tenant_id = tenant AND reference_number LIKE 'WB-SEED-LOAD-%'
+    );
+    DELETE FROM loads WHERE tenant_id = tenant AND reference_number LIKE 'WB-SEED-LOAD-%';
   END IF;
 
   INSERT INTO facilities (tenant_id, created, name)
@@ -170,7 +180,10 @@ BEGIN
 
   FOR i IN 1..seed_count LOOP
     seed_no := lpad(i::text, greatest(length(i::text), 6), '0');
-    IF EXISTS (SELECT 1 FROM loads WHERE reference_number = 'WB-SEED-LOAD-' || seed_no) THEN
+    IF EXISTS (
+      SELECT 1 FROM loads
+      WHERE tenant_id = tenant AND reference_number = 'WB-SEED-LOAD-' || seed_no
+    ) THEN
       CONTINUE;
     END IF;
 
@@ -179,11 +192,12 @@ BEGIN
     created_at := now() - ((i % 90) || ' days')::interval;
 
     INSERT INTO loads
-        (created, facility_id, inventory_owner_id, status, type, reference_number,
+        (tenant_id, created, facility_id, inventory_owner_id, status, type, reference_number,
          invoice_number, carrier, trailer_number, seal_number, dock_door_location_id,
          expected_time, appointment_time, actual_time, arrival, rejected,
          receive_completed, closed, checked_in_by, closed_by)
     VALUES (
+      tenant,
       created_at,
       facility,
       owner_ids[((i - 1) % array_length(owner_ids, 1)) + 1],
@@ -207,8 +221,8 @@ BEGIN
     )
     RETURNING id INTO v_load_id;
 
-    INSERT INTO load_notes (created, load_id, note)
-    VALUES (created_at, v_load_id, 'Seed load');
+    INSERT INTO load_notes (tenant_id, created, load_id, note)
+    VALUES (tenant, created_at, v_load_id, 'Seed load');
 
     FOR j IN 1..(1 + (i % 4)) LOOP
       expected_qty := 12 + ((i * j * 7) % 96);
@@ -222,10 +236,10 @@ BEGIN
       END;
 
       INSERT INTO load_lines
-          (created, load_id, item_id, expected_qty, received_qty, rejected_qty,
+          (tenant_id, created, load_id, item_id, expected_qty, received_qty, rejected_qty,
            missing_qty, lot, status)
       VALUES (
-        created_at, v_load_id,
+        tenant, created_at, v_load_id,
         item_ids[((i + j - 2) % array_length(item_ids, 1)) + 1],
         expected_qty, received_qty, rejected_qty, missing_qty,
         'WB-SEED-LOT-' || seed_no || '-' || j,
@@ -233,8 +247,8 @@ BEGIN
       );
     END LOOP;
 
-    INSERT INTO load_activity (created, load_id, user_id, action, message)
-    VALUES (created_at, v_load_id, actor, 'load_created', 'Seed load created');
+    INSERT INTO load_activity (tenant_id, created, load_id, user_id, action, message)
+    VALUES (tenant, created_at, v_load_id, actor, 'load_created', 'Seed load created');
   END LOOP;
 
   RAISE NOTICE 'Seeded up to % loads for tenant %.', seed_count, tenant;

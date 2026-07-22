@@ -7,7 +7,7 @@ use wareboxes_core::dto::{
 };
 use wareboxes_core::models::{Load, LoadFileCategory, LoadStatus, LoadType, ReceiveLoadLineResult};
 
-use crate::auth::{CurrentTenant, CurrentUser};
+use crate::auth::CurrentTenant;
 use crate::error::{AppError, AppResult};
 use crate::permissions;
 use crate::repo;
@@ -28,7 +28,7 @@ pub struct LoadListQuery {
 
 pub async fn list(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Query(q): Query<LoadListQuery>,
 ) -> AppResult<Json<Vec<Load>>> {
     user.require_permission(&state.db, PERM).await?;
@@ -38,43 +38,57 @@ pub async fn list(
         .clamp(1, MAX_LOAD_LIMIT);
     let offset = q.offset.unwrap_or(0).max(0);
     Ok(Json(
-        repo::loads::get_load_summaries(&state.db, q.show_deleted, limit, offset).await?,
+        repo::loads::get_load_summaries(
+            &state.db,
+            user.tenant.tenant_id,
+            q.show_deleted,
+            limit,
+            offset,
+        )
+        .await?,
     ))
 }
 
 pub async fn get(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Path(load_id): Path<i64>,
 ) -> AppResult<Json<Option<Load>>> {
     user.require_permission(&state.db, PERM).await?;
     let show_deleted_notes =
         permissions::user_has_permission(&state.db, user.user.id, "admin").await?;
     Ok(Json(
-        repo::loads::get_load(&state.db, load_id, show_deleted_notes).await?,
+        repo::loads::get_load(
+            &state.db,
+            user.tenant.tenant_id,
+            load_id,
+            show_deleted_notes,
+        )
+        .await?,
     ))
 }
 
 pub async fn mobile_inbound_list(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
 ) -> AppResult<Json<Vec<Load>>> {
     user.require_permission(&state.db, PERM).await?;
-    let loads = repo::loads::get_load_summaries(&state.db, false, MAX_LOAD_LIMIT, 0)
-        .await?
-        .into_iter()
-        .filter(|load| load.r#type == LoadType::Inbound)
-        .collect();
+    let loads =
+        repo::loads::get_load_summaries(&state.db, user.tenant.tenant_id, false, MAX_LOAD_LIMIT, 0)
+            .await?
+            .into_iter()
+            .filter(|load| load.r#type == LoadType::Inbound)
+            .collect();
     Ok(Json(loads))
 }
 
 pub async fn mobile_inbound_get(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Path(load_id): Path<i64>,
 ) -> AppResult<Json<Option<Load>>> {
     user.require_permission(&state.db, PERM).await?;
-    let load = repo::loads::get_load(&state.db, load_id, false)
+    let load = repo::loads::get_load(&state.db, user.tenant.tenant_id, load_id, false)
         .await?
         .filter(|load| load.r#type == LoadType::Inbound);
     Ok(Json(load))
@@ -82,7 +96,7 @@ pub async fn mobile_inbound_get(
 
 pub async fn mobile_arrive(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Path(load_id): Path<i64>,
     Json(body): Json<ArriveLoad>,
 ) -> AppResult<Json<bool>> {
@@ -98,6 +112,7 @@ pub async fn mobile_arrive(
     }
     let ok = repo::loads::update_load(
         &state.db,
+        user.tenant.tenant_id,
         user.user.id,
         load_id,
         Some(LoadStatus::Arrived),
@@ -182,6 +197,7 @@ pub async fn add(
     }
     let id = repo::loads::add_load(
         &state.db,
+        user.tenant.tenant_id,
         user.user.id,
         body.facility_id,
         body.inventory_owner_id,
@@ -201,13 +217,14 @@ pub async fn add(
 
 pub async fn update(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<LoadUpdate>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     let ok = repo::loads::update_load(
         &state.db,
+        user.tenant.tenant_id,
         user.user.id,
         body.load_id,
         body.status,
@@ -233,61 +250,89 @@ pub async fn update(
 
 pub async fn delete(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<LoadIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::loads::set_load_deleted(&state.db, user.user.id, body.load_id, true).await?,
+        repo::loads::set_load_deleted(
+            &state.db,
+            user.tenant.tenant_id,
+            user.user.id,
+            body.load_id,
+            true,
+        )
+        .await?,
     ))
 }
 
 pub async fn restore(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<LoadIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::loads::set_load_deleted(&state.db, user.user.id, body.load_id, false).await?,
+        repo::loads::set_load_deleted(
+            &state.db,
+            user.tenant.tenant_id,
+            user.user.id,
+            body.load_id,
+            false,
+        )
+        .await?,
     ))
 }
 
 pub async fn add_note(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddLoadNote>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let id = repo::loads::add_note(&state.db, user.user.id, body.load_id, &body.note).await?;
+    let id = repo::loads::add_note(
+        &state.db,
+        user.tenant.tenant_id,
+        user.user.id,
+        body.load_id,
+        &body.note,
+    )
+    .await?;
     Ok(Json(id))
 }
 
 pub async fn delete_note(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<LoadNoteIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::loads::set_load_note_deleted(&state.db, user.user.id, body.load_note_id, true)
-            .await?,
+        repo::loads::set_load_note_deleted(
+            &state.db,
+            user.tenant.tenant_id,
+            user.user.id,
+            body.load_note_id,
+            true,
+        )
+        .await?,
     ))
 }
 
 pub async fn add_line(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddLoadLine>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     let id = repo::loads::add_line(
         &state.db,
+        user.tenant.tenant_id,
         user.user.id,
         body.load_id,
         body.item_id,
@@ -331,13 +376,14 @@ pub async fn receive_line(
 
 pub async fn add_file(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddLoadFile>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     let id = repo::loads::add_file(
         &state.db,
+        user.tenant.tenant_id,
         user.user.id,
         body.load_id,
         &body.original_name,
@@ -352,12 +398,13 @@ pub async fn add_file(
 
 pub async fn delete_file(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<LoadFileIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::loads::delete_file(&state.db, user.user.id, body.file_id).await?,
+        repo::loads::delete_file(&state.db, user.tenant.tenant_id, user.user.id, body.file_id)
+            .await?,
     ))
 }

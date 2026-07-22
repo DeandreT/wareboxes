@@ -269,9 +269,8 @@ pub async fn add_item_batch(
         WHERE i.tenant_id = $1 AND i.id = $4 AND i.deleted IS NULL
           AND ($5::BIGINT IS NULL OR EXISTS (
               SELECT 1 FROM loads l
-              INNER JOIN inventory_owners load_owner ON load_owner.id = l.inventory_owner_id
-              WHERE l.id = $5 AND l.inventory_owner_id = $2
-                AND load_owner.tenant_id = $1 AND l.deleted IS NULL
+              WHERE l.tenant_id = $1 AND l.id = $5
+                AND l.inventory_owner_id = $2 AND l.deleted IS NULL
           ))
         RETURNING item_batches.id
         "#,
