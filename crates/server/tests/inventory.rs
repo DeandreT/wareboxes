@@ -10,13 +10,13 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
-    let warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "Main DC")
+    let facility = repo::facilities::add_facility(&db, tenant_id, "Main DC")
         .await
         .unwrap();
     let receiving = repo::locations::add_location(
         &db,
         tenant_id,
-        warehouse,
+        facility,
         None,
         Some("RCV-01"),
         Some("Receiving"),
@@ -30,7 +30,7 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
     let pick_face = repo::locations::add_location(
         &db,
         tenant_id,
-        warehouse,
+        facility,
         None,
         Some("A-01-01"),
         Some("Aisle 1 Bin 1"),
@@ -103,9 +103,14 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
     .unwrap_err();
     assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
 
-    let acc = repo::accounts::add_account(&db, tenant_id, "Inventory Customer", "ic@test.com")
-        .await
-        .unwrap();
+    let acc = repo::inventory_owners::add_inventory_owner(
+        &db,
+        tenant_id,
+        "Inventory Customer",
+        "ic@test.com",
+    )
+    .await
+    .unwrap();
     repo::orders::add_order(&db, &new_order("INV-1", Some(acc)))
         .await
         .unwrap();
@@ -145,7 +150,7 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
     let split_a = repo::locations::add_location(
         &db,
         tenant_id,
-        warehouse,
+        facility,
         None,
         Some("A-01-02"),
         Some("Aisle 1 Bin 2"),
@@ -159,7 +164,7 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
     let split_b = repo::locations::add_location(
         &db,
         tenant_id,
-        warehouse,
+        facility,
         None,
         Some("A-01-03"),
         Some("Aisle 1 Bin 3"),
@@ -233,13 +238,13 @@ async fn inventory_rejects_mixed_lot_or_expiration_in_same_location() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
-    let warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "Lot Guard DC")
+    let facility = repo::facilities::add_facility(&db, tenant_id, "Lot Guard DC")
         .await
         .unwrap();
     let receiving = repo::locations::add_location(
         &db,
         tenant_id,
-        warehouse,
+        facility,
         None,
         Some("LG-RCV"),
         Some("Lot Guard Receiving"),
@@ -253,7 +258,7 @@ async fn inventory_rejects_mixed_lot_or_expiration_in_same_location() {
     let reserve = repo::locations::add_location(
         &db,
         tenant_id,
-        warehouse,
+        facility,
         None,
         Some("LG-RSV"),
         Some("Lot Guard Reserve"),

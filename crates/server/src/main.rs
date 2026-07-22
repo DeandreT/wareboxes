@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// Mirrors the original `addDevAdmin`: make sure an `admin` permission exists
 /// and is attached to the bootstrap user's per-user "self role" so the first
-/// account can administer the system.
+/// administrator can administer the system.
 async fn bootstrap_admin(pool: &db::Db, cfg: &Config) -> anyhow::Result<()> {
     let (Some(email), Some(password)) = (&cfg.bootstrap_admin_email, &cfg.bootstrap_admin_password)
     else {

@@ -10,11 +10,12 @@ use wareboxes_core::field_errors;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
-pub mod accounts;
 pub mod audits;
 pub mod auth;
 pub mod employees;
+pub mod facilities;
 pub mod inventory;
+pub mod inventory_owners;
 pub mod items;
 pub mod license_plates;
 pub mod loads;
@@ -24,7 +25,6 @@ pub mod permissions;
 pub mod roles;
 pub mod tasks;
 pub mod users;
-pub mod warehouses;
 
 /// Validate a request body the same way the Zod `safeParse` did, surfacing
 /// per-field messages.
@@ -67,14 +67,14 @@ pub fn app(state: AppState) -> Router {
         .route("/permissions/update", post(permissions::update))
         .route("/permissions/delete", post(permissions::delete))
         .route("/permissions/restore", post(permissions::restore))
-        // accounts
-        .route("/accounts", get(accounts::list))
-        .route("/accounts/add", post(accounts::add))
-        .route("/accounts/update", post(accounts::update))
-        .route("/accounts/delete", post(accounts::delete))
-        .route("/accounts/restore", post(accounts::restore))
-        // warehouses (read-only, mirrors the original getWarehouses)
-        .route("/warehouses", get(warehouses::list))
+        // inventory owners
+        .route("/inventory-owners", get(inventory_owners::list))
+        .route("/inventory-owners/add", post(inventory_owners::add))
+        .route("/inventory-owners/update", post(inventory_owners::update))
+        .route("/inventory-owners/delete", post(inventory_owners::delete))
+        .route("/inventory-owners/restore", post(inventory_owners::restore))
+        // facilities (read-only, mirrors the original getFacilities)
+        .route("/facilities", get(facilities::list))
         // orders
         .route("/orders", get(orders::list))
         .route("/orders/:order_id", get(orders::get))

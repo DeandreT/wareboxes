@@ -198,25 +198,25 @@ impl WareboxesApp {
         value.parse::<i64>().ok()
     }
 
-    pub(super) fn account_options(&self) -> Vec<(i64, String)> {
+    pub(super) fn inventory_owner_options(&self) -> Vec<(i64, String)> {
         self.data
-            .accounts
+            .inventory_owners
             .iter()
-            .map(|account| (account.id, account.name.clone()))
+            .map(|inventory_owner| (inventory_owner.id, inventory_owner.name.clone()))
             .collect()
     }
 
-    pub(super) fn warehouse_options(&self) -> Vec<(i64, String)> {
+    pub(super) fn facility_options(&self) -> Vec<(i64, String)> {
         self.data
-            .warehouses
+            .facilities
             .iter()
-            .map(|warehouse| {
+            .map(|facility| {
                 (
-                    warehouse.id,
-                    warehouse
+                    facility.id,
+                    facility
                         .name
                         .clone()
-                        .unwrap_or_else(|| format!("Warehouse {}", warehouse.id)),
+                        .unwrap_or_else(|| format!("Facility {}", facility.id)),
                 )
             })
             .collect()
@@ -251,7 +251,7 @@ impl WareboxesApp {
                     load.id,
                     format!(
                         "{} {} {}",
-                        self.load_account_label(load),
+                        self.load_inventory_owner_label(load),
                         Self::load_type_label(load.r#type),
                         reference
                     ),
@@ -270,11 +270,11 @@ impl WareboxesApp {
                     .as_deref()
                     .or(location.name.as_deref())
                     .unwrap_or("Unnamed location");
-                let warehouse = location
-                    .warehouse_name
+                let facility = location
+                    .facility_name
                     .clone()
-                    .unwrap_or_else(|| self.warehouse_label(location.warehouse_id));
-                (location.id, format!("{scan_code} - {warehouse}"))
+                    .unwrap_or_else(|| self.facility_label(location.facility_id));
+                (location.id, format!("{scan_code} - {facility}"))
             })
             .collect()
     }
@@ -302,11 +302,11 @@ impl WareboxesApp {
             .map(|location| {
                 let name = location.name.as_deref().unwrap_or("Unnamed location");
                 let barcode = location.barcode.as_deref().unwrap_or("No scan code");
-                let warehouse = location
-                    .warehouse_name
+                let facility = location
+                    .facility_name
                     .clone()
-                    .unwrap_or_else(|| self.warehouse_label(location.warehouse_id));
-                format!("{name}\nScan code: {barcode}\nWarehouse: {warehouse}")
+                    .unwrap_or_else(|| self.facility_label(location.facility_id));
+                format!("{name}\nScan code: {barcode}\nFacility: {facility}")
             })
             .unwrap_or_else(|| format!("Location {id}"))
     }
@@ -400,13 +400,16 @@ impl WareboxesApp {
             return false;
         }
 
-        let account_filter = filters.account.trim().to_ascii_lowercase();
-        if !account_filter.is_empty()
-            && !load.account_id.to_string().contains(&account_filter)
+        let inventory_owner_filter = filters.inventory_owner.trim().to_ascii_lowercase();
+        if !inventory_owner_filter.is_empty()
+            && !load
+                .inventory_owner_id
+                .to_string()
+                .contains(&inventory_owner_filter)
             && !self
-                .load_account_label(load)
+                .load_inventory_owner_label(load)
                 .to_ascii_lowercase()
-                .contains(&account_filter)
+                .contains(&inventory_owner_filter)
         {
             return false;
         }
@@ -468,41 +471,45 @@ impl WareboxesApp {
             .unwrap_or(30)
     }
 
-    pub(super) fn account_label(&self, id: i64) -> String {
+    pub(super) fn inventory_owner_label(&self, id: i64) -> String {
         self.data
-            .accounts
+            .inventory_owners
             .iter()
-            .find(|account| account.id == id)
-            .map(|account| account.name.clone())
+            .find(|inventory_owner| inventory_owner.id == id)
+            .map(|inventory_owner| inventory_owner.name.clone())
             .unwrap_or_else(|| id.to_string())
     }
 
-    pub(super) fn warehouse_label(&self, id: i64) -> String {
+    pub(super) fn facility_label(&self, id: i64) -> String {
         self.data
-            .warehouses
+            .facilities
             .iter()
-            .find(|warehouse| warehouse.id == id)
-            .and_then(|warehouse| warehouse.name.clone())
+            .find(|facility| facility.id == id)
+            .and_then(|facility| facility.name.clone())
             .unwrap_or_else(|| id.to_string())
     }
 
-    pub(super) fn load_account_label(&self, load: &Load) -> String {
-        load.account_name
+    pub(super) fn load_inventory_owner_label(&self, load: &Load) -> String {
+        load.inventory_owner_name
             .clone()
-            .unwrap_or_else(|| self.account_label(load.account_id))
+            .unwrap_or_else(|| self.inventory_owner_label(load.inventory_owner_id))
     }
 
-    pub(super) fn load_warehouse_label(&self, load: &Load) -> String {
-        load.warehouse_name
+    pub(super) fn load_facility_label(&self, load: &Load) -> String {
+        load.facility_name
             .clone()
-            .unwrap_or_else(|| self.warehouse_label(load.warehouse_id))
+            .unwrap_or_else(|| self.facility_label(load.facility_id))
     }
 
-    pub(super) fn order_account_label(&self, order: &Order) -> String {
+    pub(super) fn order_inventory_owner_label(&self, order: &Order) -> String {
         order
-            .account_name
+            .inventory_owner_name
             .clone()
-            .or_else(|| order.account_id.map(|id| self.account_label(id)))
+            .or_else(|| {
+                order
+                    .inventory_owner_id
+                    .map(|id| self.inventory_owner_label(id))
+            })
             .unwrap_or_else(|| "-".to_owned())
     }
 

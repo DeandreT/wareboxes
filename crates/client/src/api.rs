@@ -8,8 +8,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use wareboxes_core::dto::{ErrorResponse, OrderPage, SessionUser, UserSettings};
 use wareboxes_core::models::{
-    Account, AuditWave, Employee, InventoryBalance, Item, ItemBatch, LicensePlate, Load, Location,
-    Movement, Order, Permission, Role, User, Warehouse,
+    AuditWave, Employee, Facility, InventoryBalance, InventoryOwner, Item, ItemBatch, LicensePlate,
+    Load, Location, Movement, Order, Permission, Role, User,
 };
 use wareboxes_domain::TenantId;
 
@@ -19,8 +19,8 @@ pub enum ApiEvent {
     Users(Vec<User>),
     Roles(Vec<Role>),
     Permissions(Vec<Permission>),
-    Accounts(Vec<Account>),
-    Warehouses(Vec<Warehouse>),
+    InventoryOwners(Vec<InventoryOwner>),
+    Facilities(Vec<Facility>),
     Orders(OrderPage),
     OrderDetail(Order),
     Items(Vec<Item>),
@@ -52,8 +52,8 @@ pub enum Screen {
     Users,
     Roles,
     Permissions,
-    Accounts,
-    Warehouses,
+    InventoryOwners,
+    Facilities,
     Items,
     Locations,
     Loads,
@@ -74,8 +74,8 @@ impl Screen {
         Screen::Users,
         Screen::Roles,
         Screen::Permissions,
-        Screen::Accounts,
-        Screen::Warehouses,
+        Screen::InventoryOwners,
+        Screen::Facilities,
         Screen::Employees,
         Screen::Audits,
     ];
@@ -86,8 +86,8 @@ impl Screen {
             Screen::Users => "Users",
             Screen::Roles => "Roles",
             Screen::Permissions => "Permissions",
-            Screen::Accounts => "Accounts",
-            Screen::Warehouses => "Warehouses",
+            Screen::InventoryOwners => "Inventory Owners",
+            Screen::Facilities => "Facilities",
             Screen::Items => "Item Master",
             Screen::Locations => "Locations",
             Screen::Loads => "Loads",
@@ -209,8 +209,8 @@ impl ApiClient {
             Screen::Users => "/api/users",
             Screen::Roles => "/api/roles?show_self=true",
             Screen::Permissions => "/api/permissions",
-            Screen::Accounts => "/api/accounts",
-            Screen::Warehouses => "/api/warehouses",
+            Screen::InventoryOwners => "/api/inventory-owners",
+            Screen::Facilities => "/api/facilities",
             Screen::Items => "/api/items",
             Screen::Locations => "/api/locations",
             Screen::Loads => "/api/loads",
@@ -225,8 +225,10 @@ impl ApiClient {
             Screen::Users => self.send::<Vec<User>, _>(req, ApiEvent::Users),
             Screen::Roles => self.send::<Vec<Role>, _>(req, ApiEvent::Roles),
             Screen::Permissions => self.send::<Vec<Permission>, _>(req, ApiEvent::Permissions),
-            Screen::Accounts => self.send::<Vec<Account>, _>(req, ApiEvent::Accounts),
-            Screen::Warehouses => self.send::<Vec<Warehouse>, _>(req, ApiEvent::Warehouses),
+            Screen::InventoryOwners => {
+                self.send::<Vec<InventoryOwner>, _>(req, ApiEvent::InventoryOwners)
+            }
+            Screen::Facilities => self.send::<Vec<Facility>, _>(req, ApiEvent::Facilities),
             Screen::Items => self.send::<Vec<Item>, _>(req, ApiEvent::Items),
             Screen::Locations => self.send::<Vec<Location>, _>(req, ApiEvent::Locations),
             Screen::Loads => self.send::<Vec<Load>, _>(req, ApiEvent::Loads),

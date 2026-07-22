@@ -174,50 +174,61 @@ async fn owner_and_facility_master_data_is_tenant_scoped() {
     let second_tenant = tenant_for_user(&db, other.id).await;
 
     // The same business identifiers are valid in different tenant boundaries.
-    let first_account =
-        repo::accounts::add_account(&db, first_tenant, "Shared Customer", "first@test.com")
-            .await
-            .unwrap();
-    let second_account =
-        repo::accounts::add_account(&db, second_tenant, "Shared Customer", "second@test.com")
-            .await
-            .unwrap();
-    let first_warehouse = repo::warehouses::add_warehouse(&db, first_tenant, "Shared Facility")
+    let first_inventory_owner = repo::inventory_owners::add_inventory_owner(
+        &db,
+        first_tenant,
+        "Shared Customer",
+        "first@test.com",
+    )
+    .await
+    .unwrap();
+    let second_inventory_owner = repo::inventory_owners::add_inventory_owner(
+        &db,
+        second_tenant,
+        "Shared Customer",
+        "second@test.com",
+    )
+    .await
+    .unwrap();
+    let first_facility = repo::facilities::add_facility(&db, first_tenant, "Shared Facility")
         .await
         .unwrap();
-    let second_warehouse = repo::warehouses::add_warehouse(&db, second_tenant, "Shared Facility")
+    let second_facility = repo::facilities::add_facility(&db, second_tenant, "Shared Facility")
         .await
         .unwrap();
 
-    let first_accounts = repo::accounts::get_accounts(&db, first_tenant, false)
-        .await
-        .unwrap();
-    assert_eq!(first_accounts.len(), 1);
-    assert_eq!(first_accounts[0].id, first_account);
-    assert_eq!(first_accounts[0].tenant_id, first_tenant);
-    assert!(
-        !repo::accounts::active_account_exists(&db, first_tenant, second_account)
+    let first_inventory_owners =
+        repo::inventory_owners::get_inventory_owners(&db, first_tenant, false)
             .await
-            .unwrap()
-    );
-    assert!(!repo::accounts::update_account(
+            .unwrap();
+    assert_eq!(first_inventory_owners.len(), 1);
+    assert_eq!(first_inventory_owners[0].id, first_inventory_owner);
+    assert_eq!(first_inventory_owners[0].tenant_id, first_tenant);
+    assert!(!repo::inventory_owners::active_inventory_owner_exists(
         &db,
         first_tenant,
-        second_account,
+        second_inventory_owner
+    )
+    .await
+    .unwrap());
+    assert!(!repo::inventory_owners::update_inventory_owner(
+        &db,
+        first_tenant,
+        second_inventory_owner,
         Some("Cross-tenant update"),
         None,
     )
     .await
     .unwrap());
 
-    let first_warehouses = repo::warehouses::get_warehouses(&db, first_tenant, false)
+    let first_facilities = repo::facilities::get_facilities(&db, first_tenant, false)
         .await
         .unwrap();
-    assert_eq!(first_warehouses.len(), 1);
-    assert_eq!(first_warehouses[0].id, first_warehouse);
-    assert_eq!(first_warehouses[0].tenant_id, first_tenant);
+    assert_eq!(first_facilities.len(), 1);
+    assert_eq!(first_facilities[0].id, first_facility);
+    assert_eq!(first_facilities[0].tenant_id, first_tenant);
     assert!(
-        !repo::warehouses::active_warehouse_exists(&db, first_tenant, second_warehouse)
+        !repo::facilities::active_facility_exists(&db, first_tenant, second_facility)
             .await
             .unwrap()
     );
@@ -250,7 +261,7 @@ async fn owner_and_facility_master_data_is_tenant_scoped() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/api/accounts")
+                .uri("/api/inventory-owners")
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .header(TENANT_ID_HEADER, second_tenant.to_string())
                 .body(Body::empty())
@@ -260,10 +271,11 @@ async fn owner_and_facility_master_data_is_tenant_scoped() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
-    let accounts: Vec<wareboxes_core::models::Account> = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(accounts.len(), 1);
-    assert_eq!(accounts[0].id, second_account);
-    assert_eq!(accounts[0].tenant_id, second_tenant);
+    let inventory_owners: Vec<wareboxes_core::models::InventoryOwner> =
+        serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(inventory_owners.len(), 1);
+    assert_eq!(inventory_owners[0].id, second_inventory_owner);
+    assert_eq!(inventory_owners[0].tenant_id, second_tenant);
 }
 
 #[tokio::test]
@@ -277,17 +289,17 @@ async fn locations_are_tenant_scoped_for_repositories_and_routes() {
         .unwrap();
     let first_tenant = tenant_for_user(&db, operator.id).await;
     let second_tenant = tenant_for_user(&db, other.id).await;
-    let first_warehouse = repo::warehouses::add_warehouse(&db, first_tenant, "Shared Facility")
+    let first_facility = repo::facilities::add_facility(&db, first_tenant, "Shared Facility")
         .await
         .unwrap();
-    let second_warehouse = repo::warehouses::add_warehouse(&db, second_tenant, "Shared Facility")
+    let second_facility = repo::facilities::add_facility(&db, second_tenant, "Shared Facility")
         .await
         .unwrap();
 
     let first_location = repo::locations::add_location(
         &db,
         first_tenant,
-        first_warehouse,
+        first_facility,
         None,
         Some("SHARED-BIN"),
         Some("First Tenant Bin"),
@@ -301,7 +313,7 @@ async fn locations_are_tenant_scoped_for_repositories_and_routes() {
     let second_location = repo::locations::add_location(
         &db,
         second_tenant,
-        second_warehouse,
+        second_facility,
         None,
         Some("SHARED-BIN"),
         Some("Second Tenant Bin"),

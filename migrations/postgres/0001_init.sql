@@ -117,7 +117,7 @@ CREATE TABLE role_permissions (
 CREATE INDEX idx_role_permissions_permission_id ON role_permissions(permission_id);
 CREATE INDEX idx_role_permissions_role_id ON role_permissions(role_id);
 
-CREATE TABLE accounts (
+CREATE TABLE inventory_owners (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
@@ -128,7 +128,7 @@ CREATE TABLE accounts (
     UNIQUE (tenant_id, name)
 );
 
-CREATE TABLE warehouses (
+CREATE TABLE facilities (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
@@ -139,34 +139,34 @@ CREATE TABLE warehouses (
     UNIQUE (tenant_id, name)
 );
 
-CREATE TABLE account_warehouses (
+CREATE TABLE inventory_owner_facilities (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    account_id BIGINT NOT NULL,
-    warehouse_id BIGINT NOT NULL,
-    FOREIGN KEY (tenant_id, account_id) REFERENCES accounts(tenant_id, id),
-    FOREIGN KEY (tenant_id, warehouse_id) REFERENCES warehouses(tenant_id, id),
-    UNIQUE (tenant_id, account_id, warehouse_id)
+    inventory_owner_id BIGINT NOT NULL,
+    facility_id BIGINT NOT NULL,
+    FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, facility_id) REFERENCES facilities(tenant_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, facility_id)
 );
-CREATE INDEX idx_account_warehouses_account_id ON account_warehouses(account_id);
-CREATE INDEX idx_account_warehouses_warehouse_id ON account_warehouses(warehouse_id);
+CREATE INDEX idx_inventory_owner_facilities_inventory_owner_id ON inventory_owner_facilities(inventory_owner_id);
+CREATE INDEX idx_inventory_owner_facilities_facility_id ON inventory_owner_facilities(facility_id);
 
-CREATE TABLE user_accounts (
+CREATE TABLE user_inventory_owners (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    account_id BIGINT NOT NULL,
+    inventory_owner_id BIGINT NOT NULL,
     is_primary BOOLEAN NOT NULL DEFAULT false,
-    FOREIGN KEY (tenant_id, account_id) REFERENCES accounts(tenant_id, id) ON DELETE CASCADE,
-    UNIQUE (tenant_id, user_id, account_id)
+    FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id) ON DELETE CASCADE,
+    UNIQUE (tenant_id, user_id, inventory_owner_id)
 );
-CREATE INDEX idx_user_accounts_account_id ON user_accounts(account_id);
-CREATE UNIQUE INDEX idx_user_accounts_one_primary
-    ON user_accounts(tenant_id, user_id)
+CREATE INDEX idx_user_inventory_owners_inventory_owner_id ON user_inventory_owners(inventory_owner_id);
+CREATE UNIQUE INDEX idx_user_inventory_owners_one_primary
+    ON user_inventory_owners(tenant_id, user_id)
     WHERE is_primary AND deleted IS NULL;
 
 CREATE TABLE pick_waves (
@@ -188,11 +188,11 @@ CREATE TABLE orders (
     closed TIMESTAMPTZ,
     ship_by TIMESTAMPTZ,
     wave_id BIGINT REFERENCES pick_waves(id),
-    account_id BIGINT REFERENCES accounts(id),
+    inventory_owner_id BIGINT REFERENCES inventory_owners(id),
     CHECK (status IN ('awaiting shipment', 'shipped', 'cancelled', 'held', 'processing', 'open', 'void')),
-    UNIQUE (order_key, account_id)
+    UNIQUE (order_key, inventory_owner_id)
 );
-CREATE INDEX idx_orders_account_status ON orders(account_id, status) WHERE deleted IS NULL;
+CREATE INDEX idx_orders_inventory_owner_status ON orders(inventory_owner_id, status) WHERE deleted IS NULL;
 CREATE INDEX idx_orders_status_created ON orders(status, created DESC) WHERE deleted IS NULL;
 CREATE INDEX idx_orders_ship_by ON orders(ship_by) WHERE deleted IS NULL AND ship_by IS NOT NULL;
 

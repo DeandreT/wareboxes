@@ -155,19 +155,19 @@ pub async fn add(
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    if !repo::warehouses::active_warehouse_exists(
+    if !repo::facilities::active_facility_exists(&state.db, user.tenant.tenant_id, body.facility_id)
+        .await?
+    {
+        return Err(AppError::bad_request("Facility not found"));
+    }
+    if !repo::inventory_owners::active_inventory_owner_exists(
         &state.db,
         user.tenant.tenant_id,
-        body.warehouse_id,
+        body.inventory_owner_id,
     )
     .await?
     {
-        return Err(AppError::bad_request("Warehouse not found"));
-    }
-    if !repo::accounts::active_account_exists(&state.db, user.tenant.tenant_id, body.account_id)
-        .await?
-    {
-        return Err(AppError::bad_request("Account not found"));
+        return Err(AppError::bad_request("Inventory owner not found"));
     }
     if let Some(location_id) = body.dock_door_location_id {
         match repo::locations::location_active_state(&state.db, user.tenant.tenant_id, location_id)
@@ -181,8 +181,8 @@ pub async fn add(
     let id = repo::loads::add_load(
         &state.db,
         user.user.id,
-        body.warehouse_id,
-        body.account_id,
+        body.facility_id,
+        body.inventory_owner_id,
         body.r#type,
         body.reference_number.as_deref(),
         body.invoice_number.as_deref(),

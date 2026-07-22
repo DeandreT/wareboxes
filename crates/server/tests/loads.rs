@@ -10,13 +10,13 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
-    let warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "Inbound DC")
+    let facility = repo::facilities::add_facility(&db, tenant_id, "Inbound DC")
         .await
         .unwrap();
     let dock = repo::locations::add_location(
         &db,
         tenant_id,
-        warehouse,
+        facility,
         None,
         Some("DOCK-1"),
         Some("Dock 1"),
@@ -27,9 +27,14 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     )
     .await
     .unwrap();
-    let account = repo::accounts::add_account(&db, tenant_id, "Load Customer", "loads@test.com")
-        .await
-        .unwrap();
+    let inventory_owner = repo::inventory_owners::add_inventory_owner(
+        &db,
+        tenant_id,
+        "Load Customer",
+        "loads@test.com",
+    )
+    .await
+    .unwrap();
     let item = repo::items::add_item(
         &db, tenant_id, "Cases", None, "case", None, None, None, None, None, None,
     )
@@ -39,8 +44,8 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     let load = repo::loads::add_load(
         &db,
         user.id,
-        warehouse,
-        account,
+        facility,
+        inventory_owner,
         wareboxes_core::models::LoadType::Inbound,
         Some("BOL-100"),
         None,
@@ -175,8 +180,8 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     let mixed_lot_load = repo::loads::add_load(
         &db,
         user.id,
-        warehouse,
-        account,
+        facility,
+        inventory_owner,
         wareboxes_core::models::LoadType::Inbound,
         Some("BOL-MIXED"),
         None,
@@ -285,13 +290,13 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
-    let warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "LP Inbound DC")
+    let facility = repo::facilities::add_facility(&db, tenant_id, "LP Inbound DC")
         .await
         .unwrap();
     let dock = repo::locations::add_location(
         &db,
         tenant_id,
-        warehouse,
+        facility,
         None,
         Some("LP-DOCK"),
         Some("LP Dock"),
@@ -305,7 +310,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     let reserve = repo::locations::add_location(
         &db,
         tenant_id,
-        warehouse,
+        facility,
         None,
         Some("RSV-01"),
         Some("Reserve"),
@@ -316,9 +321,10 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     )
     .await
     .unwrap();
-    let account = repo::accounts::add_account(&db, tenant_id, "LP Customer", "lp@test.com")
-        .await
-        .unwrap();
+    let inventory_owner =
+        repo::inventory_owners::add_inventory_owner(&db, tenant_id, "LP Customer", "lp@test.com")
+            .await
+            .unwrap();
     let item = repo::items::add_item(
         &db,
         tenant_id,
@@ -338,8 +344,8 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     let load = repo::loads::add_load(
         &db,
         user.id,
-        warehouse,
-        account,
+        facility,
+        inventory_owner,
         wareboxes_core::models::LoadType::Inbound,
         Some("BOL-LP"),
         Some("INV-123"),
@@ -447,7 +453,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     assert_eq!(moved.location_id, Some(reserve));
     assert_eq!(moved.contents[0].location_id, reserve);
 
-    let acc = repo::accounts::add_account(
+    let acc = repo::inventory_owners::add_inventory_owner(
         &db,
         tenant_id,
         "LP Reserve Customer",

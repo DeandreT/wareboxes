@@ -116,7 +116,7 @@ pub async fn get_roles(db: &Db, show_deleted: bool, show_self_role: bool) -> App
         (show_deleted || r.deleted.is_none())
             && (show_self_role || r.description.as_deref() != Some(Role::SELF_ROLE_DESCRIPTION))
     });
-    roles.sort_by(|a, b| b.created.cmp(&a.created));
+    roles.sort_by_key(|role| std::cmp::Reverse(role.created));
 
     for role in &mut roles {
         let anc = ancestors(role.id, &parent_of);

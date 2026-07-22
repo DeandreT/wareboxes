@@ -138,7 +138,7 @@ pub struct UserRole {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Warehouse {
+pub struct Facility {
     pub id: i64,
     pub tenant_id: TenantId,
     pub created: Timestamp,
@@ -148,7 +148,7 @@ pub struct Warehouse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Account {
+pub struct InventoryOwner {
     pub id: i64,
     pub tenant_id: TenantId,
     pub created: Timestamp,
@@ -156,7 +156,7 @@ pub struct Account {
     pub name: String,
     pub email: String,
     #[serde(default)]
-    pub account_warehouses: Vec<Warehouse>,
+    pub inventory_owner_facilities: Vec<Facility>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -268,8 +268,8 @@ pub struct Order {
     pub closed: Option<Timestamp>,
     pub ship_by: Option<Timestamp>,
     pub wave_id: Option<i64>,
-    pub account_id: Option<i64>,
-    pub account_name: Option<String>,
+    pub inventory_owner_id: Option<i64>,
+    pub inventory_owner_name: Option<String>,
     pub line1: Option<String>,
     pub line2: Option<String>,
     pub city: Option<String>,
@@ -373,8 +373,8 @@ pub struct Location {
     pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
-    pub warehouse_id: i64,
-    pub warehouse_name: Option<String>,
+    pub facility_id: i64,
+    pub facility_name: Option<String>,
     pub parent_location_id: Option<i64>,
     pub barcode: Option<String>,
     pub name: Option<String>,
@@ -407,8 +407,8 @@ pub struct InventoryBalance {
     pub created: Timestamp,
     pub modified: Option<Timestamp>,
     pub deleted: Option<Timestamp>,
-    pub warehouse_id: i64,
-    pub warehouse_name: Option<String>,
+    pub facility_id: i64,
+    pub facility_name: Option<String>,
     pub location_id: i64,
     pub license_plate_id: Option<i64>,
     pub item_batch_id: i64,
@@ -679,10 +679,10 @@ pub struct Load {
     pub id: i64,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
-    pub warehouse_id: i64,
-    pub warehouse_name: Option<String>,
-    pub account_id: i64,
-    pub account_name: Option<String>,
+    pub facility_id: i64,
+    pub facility_name: Option<String>,
+    pub inventory_owner_id: i64,
+    pub inventory_owner_name: Option<String>,
     pub status: LoadStatus,
     pub r#type: LoadType,
     pub reference_number: Option<String>,
@@ -1060,7 +1060,7 @@ pub struct WorkTask {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CycleCountItemLocationTask {
     pub task_id: i64,
-    pub warehouse_id: i64,
+    pub facility_id: i64,
     pub location_id: i64,
     pub item_id: i64,
     pub inventory_balance_id: Option<i64>,
@@ -1073,14 +1073,14 @@ pub struct CycleCountItemLocationTask {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CycleCountLocationTask {
     pub task_id: i64,
-    pub warehouse_id: i64,
+    pub facility_id: i64,
     pub location_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BreakMasterPackTask {
     pub task_id: i64,
-    pub warehouse_id: i64,
+    pub facility_id: i64,
     pub location_id: i64,
     pub master_item_id: i64,
     pub single_item_id: i64,

@@ -4,24 +4,24 @@ impl WareboxesApp {
     // ---- Loads -----------------------------------------------------------
     pub(super) fn loads_screen(&mut self, ui: &mut egui::Ui) {
         ui.collapsing("New load", |ui| {
-            let warehouse_options = self.warehouse_options();
-            let account_options = self.account_options();
+            let facility_options = self.facility_options();
+            let inventory_owner_options = self.inventory_owner_options();
             ui.horizontal_wrapped(|ui| {
-                ui.label("Warehouse");
-                let warehouse_id = Self::entity_picker(
+                ui.label("Facility");
+                let facility_id = Self::entity_picker(
                     ui,
-                    "new_load_warehouse",
-                    &mut self.forms.new_warehouse_id,
-                    &warehouse_options,
-                    "Search warehouse",
+                    "new_load_facility",
+                    &mut self.forms.new_facility_id,
+                    &facility_options,
+                    "Search facility",
                 );
-                ui.label("Account");
-                let account_id = Self::entity_picker(
+                ui.label("Inventory Owner");
+                let inventory_owner_id = Self::entity_picker(
                     ui,
-                    "new_load_account",
-                    &mut self.forms.new_account_id,
-                    &account_options,
-                    "Search account",
+                    "new_load_inventory_owner",
+                    &mut self.forms.new_inventory_owner_id,
+                    &inventory_owner_options,
+                    "Search inventory owner",
                 );
                 ui.label("Type");
                 egui::ComboBox::from_id_source("new_load_type")
@@ -40,19 +40,21 @@ impl WareboxesApp {
                         }
                     });
                 if ui.button("Create").clicked() {
-                    if let (Some(warehouse_id), Some(account_id)) = (warehouse_id, account_id) {
+                    if let (Some(facility_id), Some(inventory_owner_id)) =
+                        (facility_id, inventory_owner_id)
+                    {
                         self.api.action(
                             "/api/loads/add",
                             json!({
-                                "warehouse_id": warehouse_id,
-                                "account_id": account_id,
+                                "facility_id": facility_id,
+                                "inventory_owner_id": inventory_owner_id,
                                 "type": self.forms.new_type,
                             }),
                             Screen::Loads,
                             "Load created",
                         );
                     } else {
-                        self.toast("Choose a warehouse and account", true, self.now);
+                        self.toast("Choose a facility and inventory owner", true, self.now);
                     }
                 }
             });
@@ -63,7 +65,7 @@ impl WareboxesApp {
         let date_mode_key = "loads:filter:date_mode".to_owned();
         let status_key = "loads:filter:status".to_owned();
         let type_key = "loads:filter:type".to_owned();
-        let account_key = "loads:filter:account".to_owned();
+        let inventory_owner_key = "loads:filter:inventory_owner".to_owned();
         let search_key = "loads:filter:search".to_owned();
 
         let mut date_filter = self
@@ -90,10 +92,10 @@ impl WareboxesApp {
             .get(&type_key)
             .cloned()
             .unwrap_or_default();
-        let mut account_filter = self
+        let mut inventory_owner_filter = self
             .forms
             .drafts
-            .get(&account_key)
+            .get(&inventory_owner_key)
             .cloned()
             .unwrap_or_default();
         let mut search_filter = self
@@ -146,8 +148,10 @@ impl WareboxesApp {
                             );
                         }
                     });
-                ui.label("Account");
-                ui.add(egui::TextEdit::singleline(&mut account_filter).hint_text("ID or Name"));
+                ui.label("Inventory Owner");
+                ui.add(
+                    egui::TextEdit::singleline(&mut inventory_owner_filter).hint_text("ID or Name"),
+                );
                 ui.label("Search");
                 ui.add(
                     egui::TextEdit::singleline(&mut search_filter)
@@ -158,7 +162,7 @@ impl WareboxesApp {
                     date_mode = "day".to_owned();
                     status_filter.clear();
                     type_filter.clear();
-                    account_filter.clear();
+                    inventory_owner_filter.clear();
                     search_filter.clear();
                 }
             });
@@ -170,7 +174,7 @@ impl WareboxesApp {
         self.forms.drafts.insert(type_key, type_filter.clone());
         self.forms
             .drafts
-            .insert(account_key, account_filter.clone());
+            .insert(inventory_owner_key, inventory_owner_filter.clone());
         self.forms.drafts.insert(search_key, search_filter.clone());
 
         let load_indices = self
@@ -186,7 +190,7 @@ impl WareboxesApp {
                         date_mode: &date_mode,
                         status: &status_filter,
                         load_type: &type_filter,
-                        account: &account_filter,
+                        inventory_owner: &inventory_owner_filter,
                         search: &search_filter,
                     },
                 )
@@ -275,12 +279,13 @@ impl WareboxesApp {
         let max_text_width = content_rect.width();
         let mut y = content_rect.top();
 
-        let account = Self::fit_card_text(&self.load_account_label(load), max_text_width, 15.0);
+        let inventory_owner =
+            Self::fit_card_text(&self.load_inventory_owner_label(load), max_text_width, 15.0);
         Self::paint_outlined_text(
             &painter,
             egui::pos2(x, y),
             egui::Align2::LEFT_TOP,
-            &account,
+            &inventory_owner,
             egui::FontId::proportional(15.0),
             text_color,
             outline_color,
@@ -649,10 +654,13 @@ impl WareboxesApp {
                         ui.strong(format!("{} Load", Self::load_type_label(load.r#type)));
                         ui.label(format!("Created {}", Self::short_datetime(load.created)));
                         ui.label(format!(
-                            "Warehouse {}",
-                            self.load_warehouse_label(load)
+                            "Facility {}",
+                            self.load_facility_label(load)
                         ));
-                        ui.label(format!("Account {}", self.load_account_label(load)));
+                        ui.label(format!(
+                            "Inventory Owner {}",
+                            self.load_inventory_owner_label(load)
+                        ));
                         if load.r#type == LoadType::Inbound && load.receive_completed {
                             ui.colored_label(Self::success_text_color(ui), "Receive Complete");
                         }

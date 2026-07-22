@@ -30,14 +30,10 @@ pub async fn add(
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    if !repo::warehouses::active_warehouse_exists(
-        &state.db,
-        user.tenant.tenant_id,
-        body.warehouse_id,
-    )
-    .await?
+    if !repo::facilities::active_facility_exists(&state.db, user.tenant.tenant_id, body.facility_id)
+        .await?
     {
-        return Err(AppError::bad_request("Warehouse not found"));
+        return Err(AppError::bad_request("Facility not found"));
     }
     if let Some(parent_location_id) = body.parent_location_id {
         if !repo::locations::active_location_exists(
@@ -53,7 +49,7 @@ pub async fn add(
     let id = repo::locations::add_location(
         &state.db,
         user.tenant.tenant_id,
-        body.warehouse_id,
+        body.facility_id,
         body.parent_location_id,
         body.barcode.as_deref(),
         body.name.as_deref(),

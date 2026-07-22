@@ -32,7 +32,7 @@ async fn order_status_guards_and_soft_delete() {
         closed: None,
         ship_by: None,
         wave_id: None,
-        account_id: None,
+        inventory_owner_id: None,
         line1: None,
         line2: None,
         city: None,
@@ -88,21 +88,21 @@ async fn order_pagination_filters_and_reports_total() {
 }
 
 #[tokio::test]
-async fn account_delete_blocked_by_open_orders() {
+async fn inventory_owner_delete_blocked_by_open_orders() {
     let db = setup().await;
 
     let user = auth::register_user(&db, "orders-owner@test.com", "supersecret", None, None)
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
-    let acc = repo::accounts::add_account(&db, tenant_id, "Acme", "ops@acme.test")
+    let acc = repo::inventory_owners::add_inventory_owner(&db, tenant_id, "Acme", "ops@acme.test")
         .await
         .unwrap();
     repo::orders::add_order(&db, &new_order("A1", Some(acc)))
         .await
         .unwrap();
 
-    let err = repo::accounts::delete_account(&db, tenant_id, acc)
+    let err = repo::inventory_owners::delete_inventory_owner(&db, tenant_id, acc)
         .await
         .unwrap_err();
     assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
@@ -118,7 +118,7 @@ async fn account_delete_blocked_by_open_orders() {
         closed: None,
         ship_by: None,
         wave_id: None,
-        account_id: None,
+        inventory_owner_id: None,
         line1: None,
         line2: None,
         city: None,
@@ -127,7 +127,9 @@ async fn account_delete_blocked_by_open_orders() {
         country: None,
     };
     assert!(repo::orders::update_order(&db, &upd).await.unwrap());
-    assert!(repo::accounts::delete_account(&db, tenant_id, acc)
-        .await
-        .unwrap());
+    assert!(
+        repo::inventory_owners::delete_inventory_owner(&db, tenant_id, acc)
+            .await
+            .unwrap()
+    );
 }

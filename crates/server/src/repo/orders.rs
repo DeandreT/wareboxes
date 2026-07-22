@@ -33,8 +33,8 @@ fn map_order(row: &sqlx::postgres::PgRow) -> AppResult<Order> {
         closed: row.try_get("closed")?,
         ship_by: row.try_get("ship_by")?,
         wave_id: row.try_get("wave_id")?,
-        account_id: row.try_get("account_id")?,
-        account_name: row.try_get("account_name")?,
+        inventory_owner_id: row.try_get("inventory_owner_id")?,
+        inventory_owner_name: row.try_get("inventory_owner_name")?,
         line1: row.try_get("line1")?,
         line2: row.try_get("line2")?,
         city: row.try_get("city")?,
@@ -349,12 +349,12 @@ pub async fn get_orders(db: &Db) -> AppResult<Vec<Order>> {
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
                o.address_id AS address_id, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
-               o.account_id AS account_id, acct.name AS account_name,
+               o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM orders o
         LEFT JOIN addresses a ON a.id = o.address_id
-        LEFT JOIN accounts acct ON acct.id = o.account_id
+        LEFT JOIN inventory_owners acct ON acct.id = o.inventory_owner_id
         WHERE o.deleted IS NULL
         ORDER BY o.created DESC
         "#,
@@ -394,7 +394,7 @@ pub async fn get_orders_page(
         SELECT COUNT(*)::BIGINT
         FROM orders o
         LEFT JOIN addresses a ON a.id = o.address_id
-        LEFT JOIN accounts acct ON acct.id = o.account_id
+        LEFT JOIN inventory_owners acct ON acct.id = o.inventory_owner_id
         WHERE o.deleted IS NULL
           AND ($1::TEXT IS NULL OR o.status = $1)
           AND (
@@ -419,12 +419,12 @@ pub async fn get_orders_page(
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
                o.address_id AS address_id, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
-               o.account_id AS account_id, acct.name AS account_name,
+               o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM orders o
         LEFT JOIN addresses a ON a.id = o.address_id
-        LEFT JOIN accounts acct ON acct.id = o.account_id
+        LEFT JOIN inventory_owners acct ON acct.id = o.inventory_owner_id
         WHERE o.deleted IS NULL
           AND ($1::TEXT IS NULL OR o.status = $1)
           AND (
@@ -471,12 +471,12 @@ pub async fn get_order(db: &Db, order_id: i64) -> AppResult<Option<Order>> {
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
                o.address_id AS address_id, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
-               o.account_id AS account_id, acct.name AS account_name,
+               o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM orders o
         LEFT JOIN addresses a ON a.id = o.address_id
-        LEFT JOIN accounts acct ON acct.id = o.account_id
+        LEFT JOIN inventory_owners acct ON acct.id = o.inventory_owner_id
         WHERE o.id = $1
           AND o.deleted IS NULL
         "#,
@@ -520,7 +520,7 @@ async fn order_summaries(
                COALESCE(res.reserved_qty, 0)::BIGINT AS reserved_qty
         FROM orders o
         LEFT JOIN addresses a ON a.id = o.address_id
-        LEFT JOIN accounts acct ON acct.id = o.account_id
+        LEFT JOIN inventory_owners acct ON acct.id = o.inventory_owner_id
         LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.deleted IS NULL
         LEFT JOIN (
             SELECT r.order_id AS order_id,
@@ -632,13 +632,13 @@ pub async fn orders_by_load(db: &Db) -> AppResult<HashMap<i64, Vec<Order>>> {
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
                o.address_id AS address_id, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
-               o.account_id AS account_id, acct.name AS account_name,
+               o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM load_orders lo
         INNER JOIN orders o ON o.id = lo.order_id
         LEFT JOIN addresses a ON a.id = o.address_id
-        LEFT JOIN accounts acct ON acct.id = o.account_id
+        LEFT JOIN inventory_owners acct ON acct.id = o.inventory_owner_id
         WHERE lo.deleted IS NULL
           AND o.deleted IS NULL
         ORDER BY lo.load_id, o.created DESC, o.id DESC
@@ -669,13 +669,13 @@ pub async fn orders_for_load(db: &Db, load_id: i64) -> AppResult<Vec<Order>> {
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
                o.address_id AS address_id, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
-               o.account_id AS account_id, acct.name AS account_name,
+               o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM load_orders lo
         INNER JOIN orders o ON o.id = lo.order_id
         LEFT JOIN addresses a ON a.id = o.address_id
-        LEFT JOIN accounts acct ON acct.id = o.account_id
+        LEFT JOIN inventory_owners acct ON acct.id = o.inventory_owner_id
         WHERE lo.load_id = $1
           AND lo.deleted IS NULL
           AND o.deleted IS NULL
@@ -791,7 +791,7 @@ pub async fn add_order(db: &Db, o: &NewOrder) -> AppResult<bool> {
     let mut tx = db.begin().await?;
     let order_id: i64 = sqlx::query_scalar(
         r#"
-        INSERT INTO orders (order_key, created, rush, status, address_id, ship_by, account_id)
+        INSERT INTO orders (order_key, created, rush, status, address_id, ship_by, inventory_owner_id)
         VALUES ($1, $2, $3, 'open', $4, $5, $6)
         RETURNING id
         "#,
@@ -801,7 +801,7 @@ pub async fn add_order(db: &Db, o: &NewOrder) -> AppResult<bool> {
     .bind(o.rush.unwrap_or(false))
     .bind(address_id)
     .bind(o.ship_by)
-    .bind(o.account_id)
+    .bind(o.inventory_owner_id)
     .fetch_one(&mut *tx)
     .await?;
     insert_order_activity_tx(&mut tx, order_id, "created order").await?;
@@ -868,7 +868,7 @@ async fn update_order_inner(db: &Db, u: &OrderUpdate, user_id: Option<i64>) -> A
             closed = COALESCE($5, closed),
             ship_by = COALESCE($6, ship_by),
             wave_id = COALESCE($7, wave_id),
-            account_id = COALESCE($8, account_id),
+            inventory_owner_id = COALESCE($8, inventory_owner_id),
             address_id = COALESCE($9, address_id)
         WHERE id = $10
           AND deleted IS NULL
@@ -884,7 +884,7 @@ async fn update_order_inner(db: &Db, u: &OrderUpdate, user_id: Option<i64>) -> A
         .bind(u.closed)
         .bind(u.ship_by)
         .bind(u.wave_id)
-        .bind(u.account_id)
+        .bind(u.inventory_owner_id)
         .bind(new_address_id)
         .bind(u.order_id)
         .execute(&mut *tx)

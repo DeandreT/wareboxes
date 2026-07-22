@@ -1,6 +1,6 @@
 use super::*;
 
-type WarehouseInventoryTotals = (i64, i64, BTreeSet<i64>, usize);
+type FacilityInventoryTotals = (i64, i64, BTreeSet<i64>, usize);
 
 impl WareboxesApp {
     // ---- Inventory -------------------------------------------------------
@@ -47,7 +47,7 @@ impl WareboxesApp {
             ("actions", "Actions"),
             ("balances", "Balances"),
             ("location", "By Location"),
-            ("warehouse", "By Warehouse"),
+            ("facility", "By Facility"),
             ("item", "By Item"),
             ("movements", "Movements"),
         ];
@@ -65,7 +65,7 @@ impl WareboxesApp {
         match tab.as_str() {
             "balances" => self.inventory_balances_tab(ui),
             "location" => self.inventory_location_summary_tab(ui),
-            "warehouse" => self.inventory_warehouse_summary_tab(ui),
+            "facility" => self.inventory_facility_summary_tab(ui),
             "item" => self.inventory_item_summary_tab(ui),
             "movements" => self.inventory_movements_tab(ui),
             _ => self.inventory_actions_tab(ui),
@@ -719,9 +719,9 @@ impl WareboxesApp {
             });
     }
 
-    fn inventory_warehouse_summary_tab(&self, ui: &mut egui::Ui) {
-        ui.heading("On Hand by Warehouse");
-        let mut totals: BTreeMap<(i64, i64), WarehouseInventoryTotals> = BTreeMap::new();
+    fn inventory_facility_summary_tab(&self, ui: &mut egui::Ui) {
+        ui.heading("On Hand by Facility");
+        let mut totals: BTreeMap<(i64, i64), FacilityInventoryTotals> = BTreeMap::new();
         for balance in self
             .data
             .inventory_balances
@@ -731,7 +731,7 @@ impl WareboxesApp {
             let Some(item_id) = self.item_id_for_batch(balance.item_batch_id) else {
                 continue;
             };
-            let entry = totals.entry((item_id, balance.warehouse_id)).or_default();
+            let entry = totals.entry((item_id, balance.facility_id)).or_default();
             entry.0 += balance.qty_on_hand;
             entry.1 += balance.qty_reserved;
             entry.2.insert(balance.location_id);
@@ -753,7 +753,7 @@ impl WareboxesApp {
             .header(24.0, |mut h| {
                 for label in [
                     "Item",
-                    "Warehouse",
+                    "Facility",
                     "Locations",
                     "Balances",
                     "On hand",
@@ -767,13 +767,13 @@ impl WareboxesApp {
             })
             .body(|body| {
                 body.rows(28.0, rows.len(), |mut row| {
-                    let ((item_id, warehouse_id), (on_hand, reserved, locations, balance_count)) =
+                    let ((item_id, facility_id), (on_hand, reserved, locations, balance_count)) =
                         &rows[row.index()];
                     row.col(|ui| {
                         ui.label(self.item_label(*item_id));
                     });
                     row.col(|ui| {
-                        ui.label(self.warehouse_label(*warehouse_id));
+                        ui.label(self.facility_label(*facility_id));
                     });
                     row.col(|ui| {
                         ui.label(locations.len().to_string());

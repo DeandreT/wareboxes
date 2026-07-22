@@ -55,10 +55,10 @@ fn map_load(row: &sqlx::postgres::PgRow) -> AppResult<Load> {
         id: row.try_get("id")?,
         created: row.try_get("created")?,
         deleted: row.try_get("deleted")?,
-        warehouse_id: row.try_get("warehouse_id")?,
-        warehouse_name: row.try_get("warehouse_name")?,
-        account_id: row.try_get("account_id")?,
-        account_name: row.try_get("account_name")?,
+        facility_id: row.try_get("facility_id")?,
+        facility_name: row.try_get("facility_name")?,
+        inventory_owner_id: row.try_get("inventory_owner_id")?,
+        inventory_owner_name: row.try_get("inventory_owner_name")?,
         status: parse_load_status(row.try_get::<String, _>("status")?.as_str())?,
         r#type: parse_load_type(row.try_get::<String, _>("type")?.as_str())?,
         reference_number: row.try_get::<Option<String>, _>("reference_number")?,
@@ -140,26 +140,26 @@ pub async fn get_loads(
 ) -> AppResult<Vec<Load>> {
     let sql = if show_deleted {
         r#"
-        SELECT l.id, l.created, l.deleted, l.warehouse_id, w.name AS warehouse_name,
-               l.account_id, a.name AS account_name, l.status, l.type, l.reference_number,
+        SELECT l.id, l.created, l.deleted, l.facility_id, w.name AS facility_name,
+               l.inventory_owner_id, a.name AS inventory_owner_name, l.status, l.type, l.reference_number,
                l.invoice_number, l.carrier, l.trailer_number, l.seal_number, l.dock_door_location_id,
                l.expected_time, l.appointment_time, l.actual_time, l.arrival, l.departure, l.rejected,
                l.receive_completed, l.closed, l.checked_in_by, l.closed_by
         FROM loads l
-        LEFT JOIN warehouses w ON w.id = l.warehouse_id
-        LEFT JOIN accounts a ON a.id = l.account_id
+        LEFT JOIN facilities w ON w.id = l.facility_id
+        LEFT JOIN inventory_owners a ON a.id = l.inventory_owner_id
         ORDER BY l.id DESC
         "#
     } else {
         r#"
-        SELECT l.id, l.created, l.deleted, l.warehouse_id, w.name AS warehouse_name,
-               l.account_id, a.name AS account_name, l.status, l.type, l.reference_number,
+        SELECT l.id, l.created, l.deleted, l.facility_id, w.name AS facility_name,
+               l.inventory_owner_id, a.name AS inventory_owner_name, l.status, l.type, l.reference_number,
                l.invoice_number, l.carrier, l.trailer_number, l.seal_number, l.dock_door_location_id,
                l.expected_time, l.appointment_time, l.actual_time, l.arrival, l.departure, l.rejected,
                l.receive_completed, l.closed, l.checked_in_by, l.closed_by
         FROM loads l
-        LEFT JOIN warehouses w ON w.id = l.warehouse_id
-        LEFT JOIN accounts a ON a.id = l.account_id
+        LEFT JOIN facilities w ON w.id = l.facility_id
+        LEFT JOIN inventory_owners a ON a.id = l.inventory_owner_id
         WHERE l.deleted IS NULL
         ORDER BY l.id DESC
         "#
@@ -249,27 +249,27 @@ pub async fn get_load_summaries(
 ) -> AppResult<Vec<Load>> {
     let sql = if show_deleted {
         r#"
-        SELECT l.id, l.created, l.deleted, l.warehouse_id, w.name AS warehouse_name,
-               l.account_id, a.name AS account_name, l.status, l.type, l.reference_number,
+        SELECT l.id, l.created, l.deleted, l.facility_id, w.name AS facility_name,
+               l.inventory_owner_id, a.name AS inventory_owner_name, l.status, l.type, l.reference_number,
                l.invoice_number, l.carrier, l.trailer_number, l.seal_number, l.dock_door_location_id,
                l.expected_time, l.appointment_time, l.actual_time, l.arrival, l.departure, l.rejected,
                l.receive_completed, l.closed, l.checked_in_by, l.closed_by
         FROM loads l
-        LEFT JOIN warehouses w ON w.id = l.warehouse_id
-        LEFT JOIN accounts a ON a.id = l.account_id
+        LEFT JOIN facilities w ON w.id = l.facility_id
+        LEFT JOIN inventory_owners a ON a.id = l.inventory_owner_id
         ORDER BY l.created DESC, l.id DESC
         LIMIT $1 OFFSET $2
         "#
     } else {
         r#"
-        SELECT l.id, l.created, l.deleted, l.warehouse_id, w.name AS warehouse_name,
-               l.account_id, a.name AS account_name, l.status, l.type, l.reference_number,
+        SELECT l.id, l.created, l.deleted, l.facility_id, w.name AS facility_name,
+               l.inventory_owner_id, a.name AS inventory_owner_name, l.status, l.type, l.reference_number,
                l.invoice_number, l.carrier, l.trailer_number, l.seal_number, l.dock_door_location_id,
                l.expected_time, l.appointment_time, l.actual_time, l.arrival, l.departure, l.rejected,
                l.receive_completed, l.closed, l.checked_in_by, l.closed_by
         FROM loads l
-        LEFT JOIN warehouses w ON w.id = l.warehouse_id
-        LEFT JOIN accounts a ON a.id = l.account_id
+        LEFT JOIN facilities w ON w.id = l.facility_id
+        LEFT JOIN inventory_owners a ON a.id = l.inventory_owner_id
         WHERE l.deleted IS NULL
         ORDER BY l.created DESC, l.id DESC
         LIMIT $1 OFFSET $2
@@ -318,14 +318,14 @@ pub async fn get_load_summaries(
 pub async fn get_load(db: &Db, load_id: i64, show_deleted_notes: bool) -> AppResult<Option<Load>> {
     let row = sqlx::query(
         r#"
-        SELECT l.id, l.created, l.deleted, l.warehouse_id, w.name AS warehouse_name,
-               l.account_id, a.name AS account_name, l.status, l.type, l.reference_number,
+        SELECT l.id, l.created, l.deleted, l.facility_id, w.name AS facility_name,
+               l.inventory_owner_id, a.name AS inventory_owner_name, l.status, l.type, l.reference_number,
                l.invoice_number, l.carrier, l.trailer_number, l.seal_number, l.dock_door_location_id,
                l.expected_time, l.appointment_time, l.actual_time, l.arrival, l.departure, l.rejected,
                l.receive_completed, l.closed, l.checked_in_by, l.closed_by
         FROM loads l
-        LEFT JOIN warehouses w ON w.id = l.warehouse_id
-        LEFT JOIN accounts a ON a.id = l.account_id
+        LEFT JOIN facilities w ON w.id = l.facility_id
+        LEFT JOIN inventory_owners a ON a.id = l.inventory_owner_id
         WHERE l.id = $1 AND l.deleted IS NULL
         "#,
     )
@@ -407,8 +407,8 @@ pub async fn active_load_exists(db: &Db, id: i64) -> AppResult<bool> {
 pub async fn add_load(
     db: &Db,
     user_id: i64,
-    warehouse_id: i64,
-    account_id: i64,
+    facility_id: i64,
+    inventory_owner_id: i64,
     load_type: LoadType,
     reference_number: Option<&str>,
     invoice_number: Option<&str>,
@@ -424,7 +424,7 @@ pub async fn add_load(
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO loads
-            (created, warehouse_id, account_id, status, type, reference_number, invoice_number, carrier,
+            (created, facility_id, inventory_owner_id, status, type, reference_number, invoice_number, carrier,
              trailer_number, seal_number, dock_door_location_id, expected_time, appointment_time,
              receive_completed)
         VALUES ($1, $2, $3, 'planned', $4, $5, $6, $7, $8, $9, $10, $11, $12, false)
@@ -432,8 +432,8 @@ pub async fn add_load(
         "#,
     )
     .bind(now)
-    .bind(warehouse_id)
-    .bind(account_id)
+    .bind(facility_id)
+    .bind(inventory_owner_id)
     .bind(load_type.as_str())
     .bind(reference_number)
     .bind(invoice_number)
@@ -877,8 +877,8 @@ pub async fn receive_line(
 
         inventory::ensure_location_accepts_batch_tx(&mut tx, to_location_id, batch_id).await?;
 
-        let warehouse_id: i64 = sqlx::query_scalar(
-            "SELECT warehouse_id FROM locations WHERE id = $1 AND deleted IS NULL AND active AND receivable",
+        let facility_id: i64 = sqlx::query_scalar(
+            "SELECT facility_id FROM locations WHERE id = $1 AND deleted IS NULL AND active AND receivable",
         )
         .bind(to_location_id)
         .fetch_one(&mut *tx)
@@ -888,7 +888,7 @@ pub async fn receive_line(
             sqlx::query(
                 r#"
                 INSERT INTO inventory_balances
-                    (created, modified, warehouse_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved)
+                    (created, modified, facility_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved)
                 VALUES ($1, $2, $3, $4, $5, $6, 'available', $7, 0)
                 ON CONFLICT (location_id, license_plate_id, item_batch_id, status) WHERE license_plate_id IS NOT NULL DO UPDATE
                 SET qty_on_hand = inventory_balances.qty_on_hand + excluded.qty_on_hand,
@@ -898,7 +898,7 @@ pub async fn receive_line(
             )
             .bind(now)
             .bind(now)
-            .bind(warehouse_id)
+            .bind(facility_id)
             .bind(to_location_id)
             .bind(license_plate_id)
             .bind(batch_id)
@@ -909,7 +909,7 @@ pub async fn receive_line(
             sqlx::query(
                 r#"
                 INSERT INTO inventory_balances
-                    (created, modified, warehouse_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved)
+                    (created, modified, facility_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved)
                 VALUES ($1, $2, $3, $4, NULL, $5, 'available', $6, 0)
                 ON CONFLICT (location_id, item_batch_id, status) WHERE license_plate_id IS NULL DO UPDATE
                 SET qty_on_hand = inventory_balances.qty_on_hand + excluded.qty_on_hand,
@@ -919,7 +919,7 @@ pub async fn receive_line(
             )
             .bind(now)
             .bind(now)
-            .bind(warehouse_id)
+            .bind(facility_id)
             .bind(to_location_id)
             .bind(batch_id)
             .bind(received_qty)

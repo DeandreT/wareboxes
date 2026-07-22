@@ -1,7 +1,7 @@
 # Wareboxes Product Roadmap
 
 This roadmap defines durable capability milestones and acceptance gates for building
-Wareboxes into a multi-tenant warehouse management platform. Milestones may overlap,
+Wareboxes into a multi-tenant facility execution platform. Milestones may overlap,
 but a later capability must not bypass an unmet foundation gate.
 
 ## Development Policy
@@ -15,7 +15,7 @@ begin only when production data or published external contracts exist.
 
 Wareboxes will provide configurable execution for:
 
-- Multi-tenant warehouse operators and multi-client 3PL facilities.
+- Multi-tenant facility operators and multi-client 3PL facilities.
 - Inbound planning, receiving, inspection, labeling, and putaway.
 - Real-time inventory, containers, holds, traceability, counting, and adjustment.
 - Order ingestion, reservation, allocation, replenishment, picking, packing,
@@ -24,7 +24,7 @@ Wareboxes will provide configurable execution for:
 - External APIs, document exchange, event delivery, reporting, and support tooling.
 
 An ERP or order-management system may remain the financial and commercial system of
-record. Wareboxes owns warehouse execution and its auditable inventory consequences.
+record. Wareboxes owns facility execution and its auditable inventory consequences.
 
 ## Milestone 0: Safety and Platform Foundation
 
@@ -32,7 +32,7 @@ record. Wareboxes owns warehouse execution and its auditable inventory consequen
 
 - Establish tenant and inventory-owner isolation before expanding workflows.
 - Establish production-grade command, audit, deployment, and recovery conventions.
-- Define capacity envelopes and acceptance tests for supported warehouse profiles.
+- Define capacity envelopes and acceptance tests for supported facility profiles.
 
 ### Deliverables
 
@@ -98,7 +98,7 @@ record. Wareboxes owns warehouse execution and its auditable inventory consequen
 
 - Execute validated orders through allocation, picking, packing, shipping, and load
   confirmation.
-- Support the pick methods required by selected warehouse profiles.
+- Support the pick methods required by selected facility profiles.
 
 ### Deliverables
 
@@ -155,7 +155,7 @@ record. Wareboxes owns warehouse execution and its auditable inventory consequen
   mappings without a private product branch.
 - Integration failures can be diagnosed, corrected, and replayed without database
   access.
-- Billable events reconcile to warehouse operations and exported financial records.
+- Billable events reconcile to facility operations and exported financial records.
 
 ## Milestone 4: Labor, Optimization, and Automation
 

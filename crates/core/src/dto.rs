@@ -182,31 +182,31 @@ pub struct PermissionIdRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Accounts
+// Inventory Owners
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct AddAccount {
-    #[validate(length(min = 3, message = "Account name is required"))]
+pub struct AddInventoryOwner {
+    #[validate(length(min = 3, message = "Inventory owner name is required"))]
     pub name: String,
     #[validate(email(message = "Invalid email"))]
     pub email: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct AccountUpdate {
-    #[validate(range(min = 1, message = "Invalid account ID"))]
-    pub account_id: i64,
-    #[validate(length(min = 3, message = "Account name is required"))]
+pub struct InventoryOwnerUpdate {
+    #[validate(range(min = 1, message = "Invalid inventory owner ID"))]
+    pub inventory_owner_id: i64,
+    #[validate(length(min = 3, message = "Inventory owner name is required"))]
     pub name: Option<String>,
     #[validate(email(message = "Invalid email"))]
     pub email: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct AccountIdRequest {
-    #[validate(range(min = 1, message = "Invalid account ID"))]
-    pub account_id: i64,
+pub struct InventoryOwnerIdRequest {
+    #[validate(range(min = 1, message = "Invalid inventory owner ID"))]
+    pub inventory_owner_id: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +225,7 @@ pub struct NewOrder {
     pub state: String,
     pub postal_code: String,
     pub country: String,
-    pub account_id: Option<i64>,
+    pub inventory_owner_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -239,7 +239,7 @@ pub struct OrderUpdate {
     pub closed: Option<Timestamp>,
     pub ship_by: Option<Timestamp>,
     pub wave_id: Option<i64>,
-    pub account_id: Option<i64>,
+    pub inventory_owner_id: Option<i64>,
     pub line1: Option<String>,
     pub line2: Option<String>,
     pub city: Option<String>,
@@ -337,8 +337,8 @@ pub struct BarcodeIdRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct AddLocation {
-    #[validate(range(min = 1, message = "Invalid warehouse ID"))]
-    pub warehouse_id: i64,
+    #[validate(range(min = 1, message = "Invalid facility ID"))]
+    pub facility_id: i64,
     pub parent_location_id: Option<i64>,
     pub barcode: Option<String>,
     pub name: Option<String>,
@@ -444,10 +444,10 @@ pub struct MoveLicensePlate {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct AddLoad {
-    #[validate(range(min = 1, message = "Invalid warehouse ID"))]
-    pub warehouse_id: i64,
-    #[validate(range(min = 1, message = "Invalid account ID"))]
-    pub account_id: i64,
+    #[validate(range(min = 1, message = "Invalid facility ID"))]
+    pub facility_id: i64,
+    #[validate(range(min = 1, message = "Invalid inventory owner ID"))]
+    pub inventory_owner_id: i64,
     pub r#type: LoadType,
     pub reference_number: Option<String>,
     pub invoice_number: Option<String>,

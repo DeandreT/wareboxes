@@ -105,7 +105,7 @@ async fn template_database(base_url: &str) -> String {
         .clone()
 }
 
-pub fn new_order(key: &str, account_id: Option<i64>) -> NewOrder {
+pub fn new_order(key: &str, inventory_owner_id: Option<i64>) -> NewOrder {
     NewOrder {
         order_key: key.to_string(),
         rush: Some(false),
@@ -116,7 +116,7 @@ pub fn new_order(key: &str, account_id: Option<i64>) -> NewOrder {
         state: "NV".into(),
         postal_code: "89501".into(),
         country: "US".into(),
-        account_id,
+        inventory_owner_id,
     }
 }
 
@@ -152,23 +152,28 @@ impl Fixture {
         user
     }
 
-    pub async fn account(&self, tenant_id: TenantId, name: &str) -> i64 {
-        repo::accounts::add_account(&self.db, tenant_id, name, &format!("{name}@test.local"))
+    pub async fn inventory_owner(&self, tenant_id: TenantId, name: &str) -> i64 {
+        repo::inventory_owners::add_inventory_owner(
+            &self.db,
+            tenant_id,
+            name,
+            &format!("{name}@test.local"),
+        )
+        .await
+        .unwrap()
+    }
+
+    pub async fn facility(&self, tenant_id: TenantId, name: &str) -> i64 {
+        repo::facilities::add_facility(&self.db, tenant_id, name)
             .await
             .unwrap()
     }
 
-    pub async fn warehouse(&self, tenant_id: TenantId, name: &str) -> i64 {
-        repo::warehouses::add_warehouse(&self.db, tenant_id, name)
-            .await
-            .unwrap()
-    }
-
-    pub async fn location(&self, tenant_id: TenantId, warehouse_id: i64, scan_code: &str) -> i64 {
+    pub async fn location(&self, tenant_id: TenantId, facility_id: i64, scan_code: &str) -> i64 {
         repo::locations::add_location(
             &self.db,
             tenant_id,
-            warehouse_id,
+            facility_id,
             None,
             Some(scan_code),
             Some(scan_code),
@@ -199,8 +204,8 @@ impl Fixture {
         .unwrap()
     }
 
-    pub async fn order(&self, key: &str, account_id: Option<i64>) -> i64 {
-        repo::orders::add_order(&self.db, &new_order(key, account_id))
+    pub async fn order(&self, key: &str, inventory_owner_id: Option<i64>) -> i64 {
+        repo::orders::add_order(&self.db, &new_order(key, inventory_owner_id))
             .await
             .unwrap();
         repo::orders::get_orders(&self.db)
