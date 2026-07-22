@@ -1,14 +1,15 @@
 //! The eframe/egui application.
 //!
-//! Each domain (Orders, Users, …) is an independent panel. The sidebar toggles
-//! panels on/off; an open panel is a movable/resizable [`egui::Window`] and can
-//! be **popped out into its own native OS window** (egui multi-viewport) and
-//! docked back. Multiple panels can be visible at once.
+//! Each domain (Orders, Users, …) is an independent movable panel. Named
+//! workspaces retain separate sets of open panels and window arrangements, and
+//! panels can also be popped out into native OS windows (egui multi-viewport).
 
 mod components;
 mod loads;
 mod operations;
 mod panels;
+mod theme;
+mod workspaces;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::mpsc::{channel, Receiver};
@@ -17,6 +18,7 @@ use chrono::{
     Datelike, Duration, Local, LocalResult, NaiveDate, NaiveTime, SecondsFormat, TimeZone, Utc,
 };
 use egui_extras::{Column, TableBuilder};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use wareboxes_core::dto::{SessionUser, SummaryCount};
 use wareboxes_core::models::{
@@ -28,6 +30,7 @@ use wareboxes_core::models::{
 use crate::api::{ApiClient, ApiEvent, Screen};
 
 const LOCAL_BASE_URL: &str = "http://127.0.0.1:8080";
+const WORKSPACE_STORAGE_KEY: &str = "wareboxes_panel_workspaces_v1";
 /// Open panels re-fetch their data on this cadence.
 const AUTO_REFRESH_SECS: f64 = 5.0;
 const LARGE_PANEL_AUTO_REFRESH_SECS: f64 = 60.0;
@@ -53,11 +56,38 @@ const BARCODE_TYPES: [(&str, &str); 4] = [
 ];
 
 /// Per-panel window state.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 struct PanelState {
     open: bool,
     /// Rendered as its own OS-native window (immediate viewport).
     detached: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PanelWorkspace {
+    id: u64,
+    name: String,
+    #[serde(default)]
+    layout_generation: u64,
+    panels: BTreeMap<Screen, PanelState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedWorkspaces {
+    workspaces: Vec<PanelWorkspace>,
+    active_workspace_id: u64,
+    next_workspace_id: u64,
+}
+
+impl PanelWorkspace {
+    fn new(id: u64, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            layout_generation: 0,
+            panels: BTreeMap::new(),
+        }
+    }
 }
 
 struct Toast {
@@ -141,7 +171,12 @@ pub struct WareboxesApp {
     api: ApiClient,
     rx: Receiver<ApiEvent>,
     session: Option<SessionUser>,
-    panels: BTreeMap<Screen, PanelState>,
+    workspaces: Vec<PanelWorkspace>,
+    active_workspace_id: u64,
+    next_workspace_id: u64,
+    workspace_editor_open: bool,
+    workspace_name_draft: String,
+    pending_workspace_delete: Option<u64>,
     forms: Forms,
     data: Data,
     toasts: Vec<Toast>,
@@ -173,11 +208,54 @@ impl WareboxesApp {
             ..Default::default()
         };
         prefill_demo_login(&mut forms);
+        let saved = cc.storage.and_then(|storage| {
+            eframe::get_value::<SavedWorkspaces>(storage, WORKSPACE_STORAGE_KEY)
+        });
+        let (mut workspaces, requested_active_id, requested_next_id) = saved
+            .map(|saved| {
+                (
+                    saved.workspaces,
+                    saved.active_workspace_id,
+                    saved.next_workspace_id,
+                )
+            })
+            .unwrap_or_else(|| (vec![PanelWorkspace::new(1, "Operations")], 1, 2));
+        let mut workspace_ids = BTreeSet::new();
+        workspaces.retain(|workspace| workspace.id > 0 && workspace_ids.insert(workspace.id));
+        if workspaces.is_empty() {
+            workspaces.push(PanelWorkspace::new(1, "Operations"));
+        }
+        for workspace in &mut workspaces {
+            if workspace.name.trim().is_empty() {
+                workspace.name = format!("Workspace {}", workspace.id);
+            }
+            for panel in workspace.panels.values_mut() {
+                panel.detached = false;
+            }
+        }
+        let active_workspace_id = workspaces
+            .iter()
+            .find(|workspace| workspace.id == requested_active_id)
+            .map(|workspace| workspace.id)
+            .unwrap_or(workspaces[0].id);
+        let next_workspace_id = requested_next_id.max(
+            workspaces
+                .iter()
+                .map(|workspace| workspace.id)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+        );
         Self {
             api,
             rx,
             session: None,
-            panels: BTreeMap::new(),
+            workspaces,
+            active_workspace_id,
+            next_workspace_id,
+            workspace_editor_open: false,
+            workspace_name_draft: String::new(),
+            pending_workspace_delete: None,
             forms,
             data: Data::default(),
             toasts: Vec::new(),
@@ -261,24 +339,17 @@ impl WareboxesApp {
             .filter(|s| self.has_perm(s.permission()))
     }
 
-    fn panel(&mut self, s: Screen) -> &mut PanelState {
-        self.panels.entry(s).or_default()
-    }
-
-    /// Toggle a panel and fetch its data when it becomes visible.
-    fn set_panel_open(&mut self, s: Screen, open: bool) {
-        self.panel(s).open = open;
-        if open {
-            self.fetch(s);
-        }
-    }
-
     /// Re-fetch every open, visible panel whose data is older than the
     /// refresh interval.
     fn auto_refresh(&mut self) {
         let stale: Vec<Screen> = self
             .visible_screens()
-            .filter(|s| self.panels.get(s).is_some_and(|p| p.open))
+            .filter(|s| {
+                self.active_workspace()
+                    .panels
+                    .get(s)
+                    .is_some_and(|panel| panel.open)
+            })
             .filter(|s| {
                 self.now - self.last_fetch.get(s).copied().unwrap_or(f64::MIN)
                     >= Self::auto_refresh_secs(*s)
@@ -387,11 +458,7 @@ impl WareboxesApp {
     }
 
     fn apply_visuals(&self, ctx: &egui::Context) {
-        if self.light_mode {
-            ctx.set_visuals(egui::Visuals::light());
-        } else {
-            ctx.set_visuals(egui::Visuals::dark());
-        }
+        ctx.set_style(Self::theme_style(self.light_mode));
     }
 
     fn drain_events(&mut self, now: f64) {
@@ -413,7 +480,13 @@ impl WareboxesApp {
                     self.session = None;
                     self.api.token = None;
                     self.api.tenant_id = None;
-                    self.panels.clear();
+                    for workspace in &mut self.workspaces {
+                        for panel in workspace.panels.values_mut() {
+                            panel.detached = false;
+                        }
+                    }
+                    self.workspace_editor_open = false;
+                    self.pending_workspace_delete = None;
                     self.open_load_ids.clear();
                     self.open_order_ids.clear();
                     self.settings_open = false;
@@ -581,91 +654,274 @@ impl eframe::App for WareboxesApp {
         self.nav_bar(ctx);
         self.settings_panel(ctx);
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if self.panels.values().all(|p| !p.open) {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(40.0);
-                    ui.weak("Open a panel from the bar above. Panels are movable windows you can pop out.");
-                });
-            }
-        });
-
+        egui::CentralPanel::default().show(ctx, |_ui| {});
         self.show_panels(ctx);
+        self.workspace_editor(ctx);
+        self.workspace_delete_confirmation(ctx);
         self.confirmation_dialog(ctx);
         self.toast_overlay(ctx);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(
+            storage,
+            WORKSPACE_STORAGE_KEY,
+            &SavedWorkspaces {
+                workspaces: self.workspaces.clone(),
+                active_workspace_id: self.active_workspace_id,
+                next_workspace_id: self.next_workspace_id,
+            },
+        );
+    }
+
+    fn auto_save_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(5)
     }
 }
 
 impl WareboxesApp {
     fn login_view(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(80.0);
-                ui.heading("Wareboxes WMS");
-                ui.add_space(20.0);
-                egui::Grid::new("login").num_columns(2).show(ui, |ui| {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        ui.label("Server URL");
-                        ui.text_edit_singleline(&mut self.forms.base_url);
-                        ui.end_row();
-                    }
-                    ui.label("Email");
-                    ui.text_edit_singleline(&mut self.forms.email);
-                    ui.end_row();
-                    ui.label("Password");
-                    ui.add(egui::TextEdit::singleline(&mut self.forms.password).password(true));
-                    ui.end_row();
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().inner_margin(egui::Margin::same(16.0)))
+            .show(ctx, |ui| {
+                let width = ui.available_width().min(380.0);
+                #[cfg(target_arch = "wasm32")]
+                let height: f32 = 286.0;
+                #[cfg(not(target_arch = "wasm32"))]
+                let height: f32 = 354.0;
+                let size = egui::vec2(width, height.min(ui.available_height()));
+                let rect = egui::Rect::from_center_size(ui.max_rect().center(), size);
+
+                ui.allocate_ui_at_rect(rect, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("WAREBOXES")
+                                .size(28.0)
+                                .strong()
+                                .color(Self::accent_color(ui)),
+                        );
+                        ui.label(egui::RichText::new("Warehouse operations").size(15.0));
+                        ui.add_space(26.0);
+
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            ui.strong("Server URL");
+                            ui.add_sized(
+                                [width, 36.0],
+                                egui::TextEdit::singleline(&mut self.forms.base_url),
+                            );
+                            ui.add_space(8.0);
+                        }
+
+                        ui.strong("Email");
+                        ui.add_sized(
+                            [width, 36.0],
+                            egui::TextEdit::singleline(&mut self.forms.email),
+                        );
+                        ui.add_space(8.0);
+                        ui.strong("Password");
+                        let password = ui.add_sized(
+                            [width, 36.0],
+                            egui::TextEdit::singleline(&mut self.forms.password).password(true),
+                        );
+                        ui.add_space(14.0);
+
+                        let can_submit =
+                            !self.forms.email.trim().is_empty() && !self.forms.password.is_empty();
+                        let button = egui::Button::new(
+                            egui::RichText::new("Log in")
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(Self::accent_color(ui))
+                        .min_size(egui::vec2(width, 38.0));
+                        let clicked = ui.add_enabled(can_submit, button).clicked();
+                        let enter = password.lost_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                        if can_submit && (clicked || enter) {
+                            self.api.base_url = self.forms.base_url.clone();
+                            self.api.login(&self.forms.email, &self.forms.password);
+                        }
+                    });
                 });
-                ui.add_space(12.0);
-                let submit = ui.button("Log in").clicked();
-                if submit {
-                    self.api.base_url = self.forms.base_url.clone();
-                    self.api.login(&self.forms.email, &self.forms.password);
-                }
             });
-        });
     }
 
-    /// Single top bar: panel toggles on the left, identity actions on the
-    /// right. Replaces the old separate header + left sidebar.
+    fn accent_color(ui: &egui::Ui) -> egui::Color32 {
+        if ui.visuals().dark_mode {
+            egui::Color32::from_rgb(49, 181, 143)
+        } else {
+            egui::Color32::from_rgb(8, 122, 99)
+        }
+    }
+
     fn nav_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("nav_bar").show(ctx, |ui| {
-            ui.add_space(2.0);
-            ui.horizontal_wrapped(|ui| {
-                for s in self.visible_screens().collect::<Vec<_>>() {
-                    let mut open = self.panels.get(&s).is_some_and(|p| p.open);
-                    if ui.toggle_value(&mut open, s.title()).changed() {
-                        self.set_panel_open(s, open);
+        egui::TopBottomPanel::top("app_shell")
+            .frame(
+                egui::Frame::side_top_panel(ctx.style().as_ref())
+                    .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("WAREBOXES")
+                            .size(17.0)
+                            .strong()
+                            .color(Self::accent_color(ui)),
+                    );
+                    ui.separator();
+                    if let Some(session) = &self.session {
+                        ui.strong(&session.active_tenant.name);
                     }
-                }
 
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Log out").clicked() {
+                            self.api.logout();
+                        }
+                        if ui
+                            .add_sized([32.0, 32.0], egui::Button::new("⚙"))
+                            .on_hover_text("Settings")
+                            .clicked()
+                        {
+                            self.settings_open = true;
+                        }
+                        if let Some(session) = &self.session {
+                            let tenant_is_identity = session
+                                .active_tenant
+                                .name
+                                .eq_ignore_ascii_case(&session.user.email);
+                            if ui.available_width() > 260.0 && !tenant_is_identity {
+                                ui.weak(&session.user.email);
+                            }
+                        }
+                    });
+                });
+
+                ui.add_space(4.0);
                 ui.separator();
-                if ui.button("Open all").clicked() {
-                    for s in self.visible_screens().collect::<Vec<_>>() {
-                        self.set_panel_open(s, true);
+                ui.add_space(4.0);
+
+                let workspace_tabs = self
+                    .workspaces
+                    .iter()
+                    .map(|workspace| (workspace.id, workspace.name.clone()))
+                    .collect::<Vec<_>>();
+                let mut selected_workspace = None;
+                let mut create_workspace = false;
+                let mut duplicate_workspace = false;
+                let mut edit_workspace = false;
+                let mut reset_layout = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.weak("WORKSPACE");
+                    for (id, name) in workspace_tabs {
+                        if ui
+                            .add(egui::Button::new(name).selected(id == self.active_workspace_id))
+                            .clicked()
+                        {
+                            selected_workspace = Some(id);
+                        }
                     }
+                    if ui
+                        .add_sized([30.0, 30.0], egui::Button::new("+"))
+                        .on_hover_text("New workspace")
+                        .clicked()
+                    {
+                        create_workspace = true;
+                    }
+                    ui.menu_button("...", |ui| {
+                        if ui.button("Rename workspace").clicked() {
+                            edit_workspace = true;
+                            ui.close_menu();
+                        }
+                        if ui.button("Duplicate workspace").clicked() {
+                            duplicate_workspace = true;
+                            ui.close_menu();
+                        }
+                        if ui.button("Reset window layout").clicked() {
+                            reset_layout = true;
+                            ui.close_menu();
+                        }
+                    });
+                });
+
+                if let Some(id) = selected_workspace {
+                    self.active_workspace_id = id;
                 }
-                if ui.button("Close all").clicked() {
-                    for s in Screen::ALL {
-                        self.panel(s).open = false;
+                if create_workspace {
+                    self.create_workspace();
+                } else if duplicate_workspace {
+                    self.duplicate_active_workspace();
+                } else if edit_workspace {
+                    self.open_workspace_editor();
+                }
+                if reset_layout {
+                    let workspace = self.active_workspace_mut();
+                    workspace.layout_generation = workspace.layout_generation.saturating_add(1);
+                    for panel in workspace.panels.values_mut() {
+                        panel.detached = false;
                     }
                 }
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Log out").clicked() {
-                        self.api.logout();
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                let visible = self.visible_screens().collect::<Vec<_>>();
+                let operational = visible
+                    .iter()
+                    .copied()
+                    .filter(|screen| screen.permission() != "admin")
+                    .collect::<Vec<_>>();
+                let administration = visible
+                    .iter()
+                    .copied()
+                    .filter(|screen| screen.permission() == "admin")
+                    .collect::<Vec<_>>();
+                let mut panel_changes = Vec::new();
+                let mut close_all = false;
+                ui.horizontal_wrapped(|ui| {
+                    for screen in operational {
+                        let mut open = self
+                            .active_workspace()
+                            .panels
+                            .get(&screen)
+                            .is_some_and(|panel| panel.open);
+                        if ui.toggle_value(&mut open, screen.title()).changed() {
+                            panel_changes.push((screen, open));
+                        }
                     }
-                    if ui.button("Settings").clicked() {
-                        self.settings_open = true;
+
+                    if !administration.is_empty() {
+                        ui.menu_button("Administration", |ui| {
+                            ui.set_min_width(190.0);
+                            for screen in administration {
+                                let mut open = self
+                                    .active_workspace()
+                                    .panels
+                                    .get(&screen)
+                                    .is_some_and(|panel| panel.open);
+                                if ui.toggle_value(&mut open, screen.title()).changed() {
+                                    panel_changes.push((screen, open));
+                                }
+                            }
+                        });
                     }
-                    if let Some(s) = &self.session {
-                        ui.weak(&s.user.email);
+                    ui.separator();
+                    if ui.button("Close all").clicked() {
+                        close_all = true;
                     }
                 });
+
+                for (screen, open) in panel_changes {
+                    self.set_panel_open(screen, open);
+                }
+                if close_all {
+                    for panel in self.active_workspace_mut().panels.values_mut() {
+                        panel.open = false;
+                        panel.detached = false;
+                    }
+                }
             });
-            ui.add_space(2.0);
-        });
     }
 
     fn settings_panel(&mut self, ctx: &egui::Context) {
@@ -691,59 +947,101 @@ impl WareboxesApp {
         self.settings_open = open;
     }
 
-    /// Render every open panel: docked ones as [`egui::Window`]s, detached
-    /// ones as their own native window via an immediate viewport.
+    /// Render the active workspace's open panels as floating windows or
+    /// detached native viewports.
     fn show_panels(&mut self, ctx: &egui::Context) {
+        let workspace_id = self.active_workspace_id;
+        let layout_generation = self.active_workspace().layout_generation;
         let open_screens: Vec<Screen> = self
             .visible_screens()
-            .filter(|s| self.panels.get(s).is_some_and(|p| p.open))
+            .filter(|s| {
+                self.active_workspace()
+                    .panels
+                    .get(s)
+                    .is_some_and(|panel| panel.open)
+            })
             .collect();
 
         for s in open_screens {
-            let detached = self.panels.get(&s).map(|p| p.detached).unwrap_or(false);
+            let detached = self
+                .active_workspace()
+                .panels
+                .get(&s)
+                .is_some_and(|panel| panel.detached);
             if detached {
-                self.show_detached(ctx, s);
+                self.show_detached(ctx, workspace_id, layout_generation, s);
             } else {
-                self.show_window(ctx, s);
+                self.show_window(ctx, workspace_id, layout_generation, s);
             }
         }
     }
 
-    fn show_window(&mut self, ctx: &egui::Context, s: Screen) {
+    fn show_window(
+        &mut self,
+        ctx: &egui::Context,
+        workspace_id: u64,
+        layout_generation: u64,
+        s: Screen,
+    ) {
+        let panel_index = Screen::ALL
+            .iter()
+            .position(|screen| *screen == s)
+            .unwrap_or(0) as f32;
+        let offset = (panel_index % 5.0) * 26.0;
         let mut open = true;
         let mut pop_out = false;
+        let mut refresh = false;
         egui::Window::new(s.title())
-            .id(egui::Id::new(("panel", s)))
+            .id(egui::Id::new(("panel", workspace_id, layout_generation, s)))
             .open(&mut open)
             .resizable(true)
-            .default_size([760.0, 520.0])
+            .constrain(false)
+            .default_pos(egui::pos2(16.0 + offset, 80.0 + offset))
+            .default_size([820.0, 560.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("⏏ Pop out").clicked() {
+                    if ui
+                        .add_sized([30.0, 30.0], egui::Button::new("⏏"))
+                        .on_hover_text("Pop out into a separate window")
+                        .clicked()
+                    {
                         pop_out = true;
                     }
-                    if ui.button("⟳ Refresh").clicked() {
-                        self.fetch(s);
+                    if ui
+                        .add_sized([30.0, 30.0], egui::Button::new("⟳"))
+                        .on_hover_text("Refresh")
+                        .clicked()
+                    {
+                        refresh = true;
                     }
                 });
                 ui.separator();
                 self.render_screen(s, ui);
             });
 
-        let st = self.panel(s);
+        if refresh {
+            self.fetch(s);
+        }
+        let panel = self.panel(s);
         if pop_out {
-            st.detached = true;
+            panel.detached = true;
         }
         if !open {
-            st.open = false;
+            panel.open = false;
         }
     }
 
-    fn show_detached(&mut self, ctx: &egui::Context, s: Screen) {
+    fn show_detached(
+        &mut self,
+        ctx: &egui::Context,
+        workspace_id: u64,
+        layout_generation: u64,
+        s: Screen,
+    ) {
         let mut dock_back = false;
         let mut closed = false;
         ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of(("panel-vp", s)),
+            egui::ViewportId::from_hash_of(("panel-vp", workspace_id, layout_generation, s)),
             egui::ViewportBuilder::default()
                 .with_title(format!("Wareboxes — {}", s.title()))
                 .with_inner_size([900.0, 640.0]),
@@ -766,13 +1064,12 @@ impl WareboxesApp {
             },
         );
 
-        let st = self.panel(s);
-        if dock_back {
-            st.detached = false;
-        }
         if closed {
+            let st = self.panel(s);
             st.detached = false;
             st.open = false;
+        } else if dock_back {
+            self.panel(s).detached = false;
         }
     }
 

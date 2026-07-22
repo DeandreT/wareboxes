@@ -4,7 +4,7 @@
 
 use std::sync::mpsc::Sender;
 
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use wareboxes_core::dto::{ErrorResponse, OrderPage, SessionUser, UserSettings};
 use wareboxes_core::models::{
@@ -46,7 +46,7 @@ pub enum ApiEvent {
     LoggedOut,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Screen {
     Orders,
     Users,
