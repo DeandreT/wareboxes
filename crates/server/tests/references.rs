@@ -104,6 +104,7 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
 
     let active_location = repo::locations::add_location(
         &db,
+        tenant_id,
         warehouse,
         None,
         Some("ACTIVE"),
@@ -117,6 +118,7 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     .unwrap();
     let inactive_location = repo::locations::add_location(
         &db,
+        tenant_id,
         warehouse,
         None,
         Some("INACTIVE"),
@@ -130,6 +132,7 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     .unwrap();
     let deleted_location = repo::locations::add_location(
         &db,
+        tenant_id,
         warehouse,
         None,
         Some("DELETED"),
@@ -142,7 +145,7 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     .await
     .unwrap();
     assert!(
-        repo::locations::set_location_deleted(&db, deleted_location, true)
+        repo::locations::set_location_deleted(&db, tenant_id, deleted_location, true)
             .await
             .unwrap()
     );
@@ -192,24 +195,24 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     assert!(repo::loads::active_load_exists(&db, load).await.unwrap());
     assert!(!repo::loads::active_load_exists(&db, 999_999).await.unwrap());
     assert!(
-        repo::locations::active_location_exists(&db, active_location)
+        repo::locations::active_location_exists(&db, tenant_id, active_location)
             .await
             .unwrap()
     );
     assert_eq!(
-        repo::locations::location_active_state(&db, active_location)
+        repo::locations::location_active_state(&db, tenant_id, active_location)
             .await
             .unwrap(),
         Some(true)
     );
     assert_eq!(
-        repo::locations::location_active_state(&db, inactive_location)
+        repo::locations::location_active_state(&db, tenant_id, inactive_location)
             .await
             .unwrap(),
         Some(false)
     );
     assert_eq!(
-        repo::locations::location_active_state(&db, deleted_location)
+        repo::locations::location_active_state(&db, tenant_id, deleted_location)
             .await
             .unwrap(),
         None

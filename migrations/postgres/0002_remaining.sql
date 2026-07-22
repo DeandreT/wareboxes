@@ -4,19 +4,24 @@
 
 CREATE TABLE locations (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    warehouse_id BIGINT NOT NULL REFERENCES warehouses(id),
-    parent_location_id BIGINT REFERENCES locations(id),
-    barcode TEXT UNIQUE,
+    warehouse_id BIGINT NOT NULL,
+    parent_location_id BIGINT,
+    barcode TEXT,
     name TEXT,
     type TEXT NOT NULL,
     active BOOLEAN NOT NULL DEFAULT true,
     pickable BOOLEAN NOT NULL DEFAULT false,
-    receivable BOOLEAN NOT NULL DEFAULT false
+    receivable BOOLEAN NOT NULL DEFAULT false,
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, barcode),
+    FOREIGN KEY (tenant_id, warehouse_id) REFERENCES warehouses(tenant_id, id),
+    FOREIGN KEY (tenant_id, parent_location_id) REFERENCES locations(tenant_id, id)
 );
-CREATE INDEX idx_locations_warehouse_id ON locations(warehouse_id);
-CREATE INDEX idx_locations_parent_location_id ON locations(parent_location_id);
+CREATE INDEX idx_locations_warehouse_id ON locations(tenant_id, warehouse_id);
+CREATE INDEX idx_locations_parent_location_id ON locations(tenant_id, parent_location_id);
 
 CREATE TABLE dims (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

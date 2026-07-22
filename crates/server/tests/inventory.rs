@@ -15,6 +15,7 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
         .unwrap();
     let receiving = repo::locations::add_location(
         &db,
+        tenant_id,
         warehouse,
         None,
         Some("RCV-01"),
@@ -28,6 +29,7 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
     .unwrap();
     let pick_face = repo::locations::add_location(
         &db,
+        tenant_id,
         warehouse,
         None,
         Some("A-01-01"),
@@ -142,6 +144,7 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
 
     let split_a = repo::locations::add_location(
         &db,
+        tenant_id,
         warehouse,
         None,
         Some("A-01-02"),
@@ -155,6 +158,7 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
     .unwrap();
     let split_b = repo::locations::add_location(
         &db,
+        tenant_id,
         warehouse,
         None,
         Some("A-01-03"),
@@ -234,6 +238,7 @@ async fn inventory_rejects_mixed_lot_or_expiration_in_same_location() {
         .unwrap();
     let receiving = repo::locations::add_location(
         &db,
+        tenant_id,
         warehouse,
         None,
         Some("LG-RCV"),
@@ -247,6 +252,7 @@ async fn inventory_rejects_mixed_lot_or_expiration_in_same_location() {
     .unwrap();
     let reserve = repo::locations::add_location(
         &db,
+        tenant_id,
         warehouse,
         None,
         Some("LG-RSV"),

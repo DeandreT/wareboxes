@@ -3,7 +3,7 @@ use axum::Json;
 use wareboxes_core::dto::{AddLocation, LocationIdRequest, LocationUpdate};
 use wareboxes_core::models::Location;
 
-use crate::auth::{CurrentTenant, CurrentUser};
+use crate::auth::CurrentTenant;
 use crate::error::{AppError, AppResult};
 use crate::repo;
 use crate::routes::users::ShowDeleted;
@@ -14,12 +14,12 @@ const PERM: &str = "wms";
 
 pub async fn list(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Query(q): Query<ShowDeleted>,
 ) -> AppResult<Json<Vec<Location>>> {
     user.require_permission(&state.db, PERM).await?;
     Ok(Json(
-        repo::locations::get_locations(&state.db, q.show_deleted).await?,
+        repo::locations::get_locations(&state.db, user.tenant.tenant_id, q.show_deleted).await?,
     ))
 }
 
@@ -40,12 +40,19 @@ pub async fn add(
         return Err(AppError::bad_request("Warehouse not found"));
     }
     if let Some(parent_location_id) = body.parent_location_id {
-        if !repo::locations::active_location_exists(&state.db, parent_location_id).await? {
+        if !repo::locations::active_location_exists(
+            &state.db,
+            user.tenant.tenant_id,
+            parent_location_id,
+        )
+        .await?
+        {
             return Err(AppError::bad_request("Parent location not found"));
         }
     }
     let id = repo::locations::add_location(
         &state.db,
+        user.tenant.tenant_id,
         body.warehouse_id,
         body.parent_location_id,
         body.barcode.as_deref(),
@@ -61,13 +68,14 @@ pub async fn add(
 
 pub async fn update(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<LocationUpdate>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     let ok = repo::locations::update_location(
         &state.db,
+        user.tenant.tenant_id,
         body.location_id,
         body.parent_location_id,
         body.barcode.as_deref(),
@@ -83,24 +91,36 @@ pub async fn update(
 
 pub async fn delete(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<LocationIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::locations::set_location_deleted(&state.db, body.location_id, true).await?,
+        repo::locations::set_location_deleted(
+            &state.db,
+            user.tenant.tenant_id,
+            body.location_id,
+            true,
+        )
+        .await?,
     ))
 }
 
 pub async fn restore(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<LocationIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::locations::set_location_deleted(&state.db, body.location_id, false).await?,
+        repo::locations::set_location_deleted(
+            &state.db,
+            user.tenant.tenant_id,
+            body.location_id,
+            false,
+        )
+        .await?,
     ))
 }

@@ -4,7 +4,7 @@ use wareboxes_core::dto::MoveLicensePlate;
 use wareboxes_core::dto::{AddLicensePlate, LicensePlateIdRequest, LicensePlateUpdate};
 use wareboxes_core::models::LicensePlate;
 
-use crate::auth::CurrentUser;
+use crate::auth::{CurrentTenant, CurrentUser};
 use crate::error::{AppError, AppResult};
 use crate::repo;
 use crate::routes::users::ShowDeleted;
@@ -78,12 +78,18 @@ pub async fn delete(
 
 pub async fn move_plate(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<MoveLicensePlate>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    match repo::locations::location_active_state(&state.db, body.to_location_id).await? {
+    match repo::locations::location_active_state(
+        &state.db,
+        user.tenant.tenant_id,
+        body.to_location_id,
+    )
+    .await?
+    {
         None => return Err(AppError::bad_request("Destination location not found")),
         Some(false) => return Err(AppError::bad_request("Destination location is inactive")),
         Some(true) => {}

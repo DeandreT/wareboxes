@@ -15,6 +15,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         .unwrap();
     let dock = repo::locations::add_location(
         &db,
+        tenant_id,
         warehouse,
         None,
         Some("DOCK-1"),
@@ -289,6 +290,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         .unwrap();
     let dock = repo::locations::add_location(
         &db,
+        tenant_id,
         warehouse,
         None,
         Some("LP-DOCK"),
@@ -302,6 +304,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     .unwrap();
     let reserve = repo::locations::add_location(
         &db,
+        tenant_id,
         warehouse,
         None,
         Some("RSV-01"),
