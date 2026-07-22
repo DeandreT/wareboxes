@@ -16,6 +16,7 @@ CREATE TABLE locations (
     pickable BOOLEAN NOT NULL DEFAULT false,
     receivable BOOLEAN NOT NULL DEFAULT false,
     UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, facility_id, id),
     UNIQUE (tenant_id, barcode),
     FOREIGN KEY (tenant_id, facility_id) REFERENCES facilities(tenant_id, id),
     FOREIGN KEY (tenant_id, parent_location_id) REFERENCES locations(tenant_id, id)
@@ -83,10 +84,14 @@ CREATE TABLE barcodes (
 
 CREATE TABLE inventory_owner_items (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    inventory_owner_id BIGINT NOT NULL REFERENCES inventory_owners(id),
-    item_id BIGINT NOT NULL REFERENCES items(id)
+    inventory_owner_id BIGINT NOT NULL,
+    item_id BIGINT NOT NULL,
+    FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, item_id)
 );
 
 CREATE TABLE loads (
@@ -197,14 +202,22 @@ CREATE INDEX idx_load_activity_load_id ON load_activity(load_id);
 
 CREATE TABLE item_batches (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+    inventory_owner_id BIGINT NOT NULL,
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    item_id BIGINT NOT NULL REFERENCES items(id),
+    item_id BIGINT NOT NULL,
+    uom TEXT NOT NULL,
     lot TEXT,
     load_id BIGINT REFERENCES loads(id),
     order_id BIGINT REFERENCES orders(id),
     expiration TIMESTAMPTZ,
-    serial TEXT
+    serial TEXT,
+    UNIQUE (tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, item_id) REFERENCES inventory_owner_items(tenant_id, inventory_owner_id, item_id),
+    CHECK (btrim(uom) <> '')
 );
 ALTER TABLE order_items
     ADD CONSTRAINT order_items_item_id_fkey FOREIGN KEY (item_id) REFERENCES items(id),
@@ -214,85 +227,361 @@ CREATE INDEX idx_item_batches_load_id ON item_batches(load_id) WHERE deleted IS 
 
 CREATE TABLE license_plates (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+    inventory_owner_id BIGINT NOT NULL,
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    barcode TEXT UNIQUE,
-    location_id BIGINT REFERENCES locations(id),
-    dims_id BIGINT REFERENCES dims(id)
+    barcode TEXT,
+    location_id BIGINT,
+    dims_id BIGINT REFERENCES dims(id),
+    UNIQUE (tenant_id, inventory_owner_id, id),
+    UNIQUE (tenant_id, barcode),
+    FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, location_id) REFERENCES locations(tenant_id, id)
 );
 CREATE INDEX idx_license_plates_location_id ON license_plates(location_id) WHERE deleted IS NULL;
 
 CREATE TABLE inventory_balances (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+    inventory_owner_id BIGINT NOT NULL,
     created TIMESTAMPTZ NOT NULL,
     modified TIMESTAMPTZ,
     deleted TIMESTAMPTZ,
-    facility_id BIGINT NOT NULL REFERENCES facilities(id),
-    location_id BIGINT NOT NULL REFERENCES locations(id),
-    license_plate_id BIGINT REFERENCES license_plates(id),
-    item_batch_id BIGINT NOT NULL REFERENCES item_batches(id),
+    facility_id BIGINT NOT NULL,
+    location_id BIGINT NOT NULL,
+    license_plate_id BIGINT,
+    item_batch_id BIGINT NOT NULL,
+    item_id BIGINT NOT NULL,
+    uom TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'available',
     qty_on_hand BIGINT NOT NULL DEFAULT 0,
     qty_reserved BIGINT NOT NULL DEFAULT 0,
     CHECK (qty_on_hand >= 0),
     CHECK (qty_reserved >= 0),
     CHECK (status IN ('available', 'hold', 'damaged', 'quarantine')),
-    CHECK (qty_reserved <= qty_on_hand)
+    CHECK (qty_reserved <= qty_on_hand),
+    CHECK (btrim(uom) <> ''),
+    UNIQUE (tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES locations(tenant_id, facility_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, license_plate_id) REFERENCES license_plates(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES item_batches(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id)
 );
-CREATE INDEX idx_inventory_balances_batch ON inventory_balances(item_batch_id);
-CREATE INDEX idx_inventory_balances_location ON inventory_balances(location_id);
-CREATE INDEX idx_inventory_balances_lookup ON inventory_balances(location_id, status, item_batch_id)
+CREATE INDEX idx_inventory_balances_batch ON inventory_balances(tenant_id, inventory_owner_id, item_batch_id);
+CREATE INDEX idx_inventory_balances_location ON inventory_balances(tenant_id, facility_id, location_id);
+CREATE INDEX idx_inventory_balances_lookup ON inventory_balances(tenant_id, inventory_owner_id, location_id, status, item_batch_id)
     WHERE deleted IS NULL;
 CREATE UNIQUE INDEX idx_inventory_balances_loose_unique
-    ON inventory_balances(location_id, item_batch_id, status)
+    ON inventory_balances(tenant_id, inventory_owner_id, location_id, item_batch_id, uom, status)
     WHERE license_plate_id IS NULL;
 CREATE UNIQUE INDEX idx_inventory_balances_lp_unique
-    ON inventory_balances(location_id, license_plate_id, item_batch_id, status)
+    ON inventory_balances(tenant_id, inventory_owner_id, location_id, license_plate_id, item_batch_id, uom, status)
     WHERE license_plate_id IS NOT NULL;
 CREATE INDEX idx_inventory_balances_license_plate
-    ON inventory_balances(license_plate_id)
+    ON inventory_balances(tenant_id, license_plate_id)
     WHERE deleted IS NULL AND license_plate_id IS NOT NULL;
 
-CREATE TABLE stock_movements (
+CREATE TABLE inventory_transactions (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+    inventory_owner_id BIGINT NOT NULL,
     created TIMESTAMPTZ NOT NULL,
-    deleted TIMESTAMPTZ,
-    user_id BIGINT REFERENCES users(id),
-    item_batch_id BIGINT NOT NULL REFERENCES item_batches(id),
-    license_plate_id BIGINT REFERENCES license_plates(id),
-    from_location_id BIGINT REFERENCES locations(id),
-    to_location_id BIGINT REFERENCES locations(id),
-    qty BIGINT NOT NULL CHECK (qty > 0),
-    movement_type TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'available',
+    actor_user_id BIGINT REFERENCES users(id),
+    transaction_type TEXT NOT NULL,
     reason TEXT,
     reference_type TEXT,
     reference_id BIGINT,
-    idempotency_key TEXT UNIQUE,
-    CHECK (movement_type IN ('receive', 'move', 'reserve', 'adjust')),
-    CHECK (status IN ('available', 'hold', 'damaged', 'quarantine'))
+    correlation_id TEXT,
+    operation TEXT NOT NULL,
+    idempotency_key TEXT,
+    request_hash TEXT NOT NULL,
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
+    CHECK (transaction_type IN ('receive', 'move', 'adjust', 'ship')),
+    CHECK (btrim(operation) <> ''),
+    CHECK (btrim(request_hash) <> '')
 );
-CREATE INDEX idx_stock_movements_batch ON stock_movements(item_batch_id);
-CREATE INDEX idx_stock_movements_locations ON stock_movements(from_location_id, to_location_id);
-CREATE INDEX idx_stock_movements_reference ON stock_movements(reference_type, reference_id)
+CREATE INDEX idx_inventory_transactions_reference
+    ON inventory_transactions(tenant_id, inventory_owner_id, reference_type, reference_id)
     WHERE reference_type IS NOT NULL AND reference_id IS NOT NULL;
+
+CREATE TABLE command_idempotency_records (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+    created TIMESTAMPTZ NOT NULL,
+    operation TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    result_json JSONB NOT NULL,
+    inventory_transaction_id BIGINT,
+    UNIQUE (tenant_id, operation, idempotency_key),
+    FOREIGN KEY (tenant_id, inventory_transaction_id) REFERENCES inventory_transactions(tenant_id, id),
+    CHECK (btrim(operation) <> ''),
+    CHECK (btrim(idempotency_key) <> ''),
+    CHECK (btrim(request_hash) <> '')
+);
+
+CREATE TABLE inventory_entries (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+    inventory_owner_id BIGINT NOT NULL,
+    transaction_id BIGINT NOT NULL,
+    created TIMESTAMPTZ NOT NULL,
+    facility_id BIGINT NOT NULL,
+    location_id BIGINT NOT NULL,
+    license_plate_id BIGINT,
+    item_batch_id BIGINT NOT NULL,
+    item_id BIGINT NOT NULL,
+    uom TEXT NOT NULL,
+    lot TEXT,
+    expiration TIMESTAMPTZ,
+    serial TEXT,
+    status TEXT NOT NULL,
+    quantity_delta BIGINT NOT NULL,
+    FOREIGN KEY (tenant_id, inventory_owner_id, transaction_id) REFERENCES inventory_transactions(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES item_batches(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES locations(tenant_id, facility_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, license_plate_id) REFERENCES license_plates(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id),
+    CHECK (quantity_delta <> 0),
+    CHECK (status IN ('available', 'hold', 'damaged', 'quarantine')),
+    CHECK (btrim(uom) <> '')
+);
+CREATE INDEX idx_inventory_entries_transaction
+    ON inventory_entries(tenant_id, transaction_id, id);
+CREATE INDEX idx_inventory_entries_dimensions
+    ON inventory_entries(tenant_id, inventory_owner_id, facility_id, location_id, item_id, uom, status);
+
+CREATE OR REPLACE FUNCTION reject_inventory_journal_mutation()
+RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'inventory journal rows are immutable'
+        USING ERRCODE = '55000';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER inventory_transactions_are_immutable
+    BEFORE UPDATE OR DELETE ON inventory_transactions
+    FOR EACH ROW EXECUTE FUNCTION reject_inventory_journal_mutation();
+
+CREATE TRIGGER inventory_entries_are_immutable
+    BEFORE UPDATE OR DELETE ON inventory_entries
+    FOR EACH ROW EXECUTE FUNCTION reject_inventory_journal_mutation();
+
+CREATE TRIGGER command_idempotency_records_are_immutable
+    BEFORE UPDATE OR DELETE ON command_idempotency_records
+    FOR EACH ROW EXECUTE FUNCTION reject_inventory_journal_mutation();
+
+CREATE OR REPLACE FUNCTION require_open_inventory_transaction()
+RETURNS trigger AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM inventory_transactions
+        WHERE tenant_id = NEW.tenant_id
+          AND inventory_owner_id = NEW.inventory_owner_id
+          AND id = NEW.transaction_id
+          AND xmin::TEXT = pg_current_xact_id()::TEXT
+    ) THEN
+        RAISE EXCEPTION 'inventory entries may only be appended while creating their transaction'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER inventory_entries_require_open_transaction
+    BEFORE INSERT ON inventory_entries
+    FOR EACH ROW EXECUTE FUNCTION require_open_inventory_transaction();
+
+CREATE OR REPLACE FUNCTION enforce_inventory_transaction_conservation()
+RETURNS trigger AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM inventory_entries WHERE transaction_id = NEW.id
+    ) THEN
+        RAISE EXCEPTION 'inventory transaction must contain at least one entry'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.transaction_type = 'move' AND EXISTS (
+        SELECT 1
+        FROM inventory_entries
+        WHERE transaction_id = NEW.id
+        GROUP BY inventory_owner_id, item_id, uom, lot, expiration, serial, status
+        HAVING SUM(quantity_delta) <> 0
+    ) THEN
+        RAISE EXCEPTION 'inventory move entries must conserve quantity for every stock dimension'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.transaction_type = 'receive' AND EXISTS (
+        SELECT 1 FROM inventory_entries
+        WHERE transaction_id = NEW.id AND quantity_delta <= 0
+    ) THEN
+        RAISE EXCEPTION 'inventory receipt entries must be positive'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.transaction_type = 'ship' AND EXISTS (
+        SELECT 1 FROM inventory_entries
+        WHERE transaction_id = NEW.id AND quantity_delta >= 0
+    ) THEN
+        RAISE EXCEPTION 'inventory shipment entries must be negative'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER inventory_transactions_conserve_quantity
+    AFTER INSERT ON inventory_transactions
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION enforce_inventory_transaction_conservation();
+
+CREATE OR REPLACE FUNCTION inventory_row_matches_batch()
+RETURNS trigger AS $$
+DECLARE
+    batch_item_id BIGINT;
+    batch_uom TEXT;
+BEGIN
+    SELECT item_id, uom
+    INTO batch_item_id, batch_uom
+    FROM item_batches
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND id = NEW.item_batch_id;
+
+    IF batch_item_id IS NULL THEN
+        RAISE EXCEPTION 'inventory item batch does not exist in this tenant and owner scope'
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF NEW.item_id IS DISTINCT FROM batch_item_id
+       OR NEW.uom IS DISTINCT FROM batch_uom THEN
+        RAISE EXCEPTION 'inventory dimensions must match the item batch'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION inventory_entry_matches_batch()
+RETURNS trigger AS $$
+DECLARE
+    batch_item_id BIGINT;
+    batch_uom TEXT;
+    batch_lot TEXT;
+    batch_expiration TIMESTAMPTZ;
+    batch_serial TEXT;
+BEGIN
+    SELECT item_id, uom, lot, expiration, serial
+    INTO batch_item_id, batch_uom, batch_lot, batch_expiration, batch_serial
+    FROM item_batches
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND id = NEW.item_batch_id;
+
+    IF batch_item_id IS NULL THEN
+        RAISE EXCEPTION 'inventory item batch does not exist in this tenant and owner scope'
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF NEW.item_id IS DISTINCT FROM batch_item_id
+       OR NEW.uom IS DISTINCT FROM batch_uom
+       OR NEW.lot IS DISTINCT FROM batch_lot
+       OR NEW.expiration IS DISTINCT FROM batch_expiration
+       OR NEW.serial IS DISTINCT FROM batch_serial THEN
+        RAISE EXCEPTION 'inventory dimensions must match the item batch'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER inventory_balances_match_batch
+    BEFORE INSERT OR UPDATE OF tenant_id, inventory_owner_id, item_batch_id, item_id, uom
+    ON inventory_balances
+    FOR EACH ROW EXECUTE FUNCTION inventory_row_matches_batch();
+
+CREATE TRIGGER inventory_entries_match_batch
+    BEFORE INSERT OR UPDATE OF tenant_id, inventory_owner_id, item_batch_id, item_id, uom, lot, expiration, serial
+    ON inventory_entries
+    FOR EACH ROW EXECUTE FUNCTION inventory_entry_matches_batch();
+
+CREATE VIEW inventory_reconciliation AS
+WITH journal AS (
+    SELECT tenant_id, inventory_owner_id, facility_id, location_id,
+           license_plate_id, item_batch_id, item_id, uom, status,
+           SUM(quantity_delta)::BIGINT AS journal_qty
+    FROM inventory_entries
+    GROUP BY tenant_id, inventory_owner_id, facility_id, location_id,
+             license_plate_id, item_batch_id, item_id, uom, status
+), projection AS (
+    SELECT tenant_id, inventory_owner_id, facility_id, location_id,
+           license_plate_id, item_batch_id, item_id, uom, status,
+           SUM(qty_on_hand)::BIGINT AS projected_qty
+    FROM inventory_balances
+    WHERE deleted IS NULL
+    GROUP BY tenant_id, inventory_owner_id, facility_id, location_id,
+             license_plate_id, item_batch_id, item_id, uom, status
+)
+SELECT COALESCE(journal.tenant_id, projection.tenant_id) AS tenant_id,
+       COALESCE(journal.inventory_owner_id, projection.inventory_owner_id) AS inventory_owner_id,
+       COALESCE(journal.facility_id, projection.facility_id) AS facility_id,
+       COALESCE(journal.location_id, projection.location_id) AS location_id,
+       COALESCE(journal.license_plate_id, projection.license_plate_id) AS license_plate_id,
+       COALESCE(journal.item_batch_id, projection.item_batch_id) AS item_batch_id,
+       COALESCE(journal.item_id, projection.item_id) AS item_id,
+       COALESCE(journal.uom, projection.uom) AS uom,
+       COALESCE(journal.status, projection.status) AS status,
+       COALESCE(journal.journal_qty, 0)::BIGINT AS journal_qty,
+       COALESCE(projection.projected_qty, 0)::BIGINT AS projected_qty,
+       (COALESCE(projection.projected_qty, 0) - COALESCE(journal.journal_qty, 0))::BIGINT AS variance
+FROM journal
+FULL OUTER JOIN projection
+    ON projection.tenant_id = journal.tenant_id
+   AND projection.inventory_owner_id = journal.inventory_owner_id
+   AND projection.facility_id = journal.facility_id
+   AND projection.location_id = journal.location_id
+   AND projection.license_plate_id IS NOT DISTINCT FROM journal.license_plate_id
+   AND projection.item_batch_id = journal.item_batch_id
+   AND projection.item_id = journal.item_id
+   AND projection.uom = journal.uom
+   AND projection.status = journal.status
+WHERE COALESCE(projection.projected_qty, 0) <> COALESCE(journal.journal_qty, 0);
 
 CREATE TABLE inventory_reservations (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+    inventory_owner_id BIGINT NOT NULL,
     created TIMESTAMPTZ NOT NULL,
     modified TIMESTAMPTZ,
     deleted TIMESTAMPTZ,
     order_id BIGINT NOT NULL REFERENCES orders(id),
     order_item_id BIGINT REFERENCES order_items(id),
-    item_batch_id BIGINT NOT NULL REFERENCES item_batches(id),
-    location_id BIGINT NOT NULL REFERENCES locations(id),
+    inventory_balance_id BIGINT NOT NULL,
+    facility_id BIGINT NOT NULL,
+    item_batch_id BIGINT NOT NULL,
+    location_id BIGINT NOT NULL,
     qty BIGINT NOT NULL CHECK (qty > 0),
     status TEXT NOT NULL DEFAULT 'reserved',
-    CHECK (status IN ('reserved', 'cancelled', 'fulfilled'))
+    CHECK (status IN ('reserved', 'cancelled', 'fulfilled')),
+    FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, inventory_balance_id) REFERENCES inventory_balances(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES item_batches(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES locations(tenant_id, facility_id, id)
 );
-CREATE INDEX idx_inventory_reservations_order ON inventory_reservations(order_id);
-CREATE INDEX idx_inventory_reservations_batch_location ON inventory_reservations(item_batch_id, location_id);
-CREATE INDEX idx_inventory_reservations_open ON inventory_reservations(order_id, status)
+CREATE INDEX idx_inventory_reservations_order ON inventory_reservations(tenant_id, inventory_owner_id, order_id);
+CREATE INDEX idx_inventory_reservations_batch_location ON inventory_reservations(tenant_id, inventory_owner_id, item_batch_id, location_id);
+CREATE INDEX idx_inventory_reservations_open ON inventory_reservations(tenant_id, inventory_owner_id, order_id, status)
     WHERE deleted IS NULL AND status = 'reserved';
 
 CREATE TABLE picks (

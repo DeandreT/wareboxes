@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use wareboxes_domain::{TenantId, UserId};
+use wareboxes_domain::{InventoryOwnerId, TenantId, UserId};
 
 pub type Timestamp = DateTime<Utc>;
 
@@ -388,12 +388,15 @@ pub struct Location {
 // Inventory (app/utils/types/db/inventory.ts)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ItemBatch {
     pub id: i64,
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub item_id: i64,
+    pub uom: String,
     pub lot: Option<String>,
     pub load_id: Option<i64>,
     pub order_id: Option<i64>,
@@ -401,9 +404,11 @@ pub struct ItemBatch {
     pub serial: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InventoryBalance {
     pub id: i64,
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
     pub created: Timestamp,
     pub modified: Option<Timestamp>,
     pub deleted: Option<Timestamp>,
@@ -412,39 +417,78 @@ pub struct InventoryBalance {
     pub location_id: i64,
     pub license_plate_id: Option<i64>,
     pub item_batch_id: i64,
+    pub item_id: i64,
+    pub uom: String,
     pub status: InventoryStatus,
     pub qty_on_hand: i64,
     pub qty_reserved: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct Movement {
-    pub id: i64,
-    pub created: Timestamp,
-    pub deleted: Option<Timestamp>,
-    pub user_id: Option<i64>,
-    pub item_batch_id: i64,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventoryReconciliationIssue {
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub location_id: i64,
     pub license_plate_id: Option<i64>,
-    pub from_location_id: Option<i64>,
-    pub to_location_id: Option<i64>,
-    pub qty: i64,
-    pub movement_type: MovementType,
+    pub item_batch_id: i64,
+    pub item_id: i64,
+    pub uom: String,
     pub status: InventoryStatus,
+    pub journal_qty: i64,
+    pub projected_qty: i64,
+    pub variance: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventoryTransaction {
+    pub id: i64,
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub created: Timestamp,
+    pub actor_user_id: Option<i64>,
+    pub transaction_type: InventoryTransactionType,
     pub reason: Option<String>,
     pub reference_type: Option<String>,
     pub reference_id: Option<i64>,
+    pub correlation_id: Option<String>,
+    pub operation: String,
     pub idempotency_key: Option<String>,
+    pub entries: Vec<InventoryEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventoryEntry {
+    pub id: i64,
+    pub transaction_id: i64,
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub created: Timestamp,
+    pub facility_id: i64,
+    pub location_id: i64,
+    pub item_batch_id: i64,
+    pub item_id: i64,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub expiration: Option<Timestamp>,
+    pub serial: Option<String>,
+    pub license_plate_id: Option<i64>,
+    pub status: InventoryStatus,
+    pub quantity_delta: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InventoryReservation {
     pub id: i64,
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
     pub created: Timestamp,
     pub modified: Option<Timestamp>,
     pub deleted: Option<Timestamp>,
     pub order_id: i64,
     pub order_item_id: Option<i64>,
     pub inventory_balance_id: i64,
+    pub facility_id: i64,
     pub item_batch_id: i64,
     pub location_id: i64,
     pub qty: i64,
@@ -493,43 +537,43 @@ impl_status_display!(InventoryStatus);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
-pub enum MovementType {
+pub enum InventoryTransactionType {
     #[default]
     Receive,
     Move,
-    Reserve,
     Adjust,
+    Ship,
 }
 
-impl MovementType {
-    pub const ALL: [MovementType; 4] = [
-        MovementType::Receive,
-        MovementType::Move,
-        MovementType::Reserve,
-        MovementType::Adjust,
+impl InventoryTransactionType {
+    pub const ALL: [InventoryTransactionType; 4] = [
+        InventoryTransactionType::Receive,
+        InventoryTransactionType::Move,
+        InventoryTransactionType::Adjust,
+        InventoryTransactionType::Ship,
     ];
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            MovementType::Receive => "receive",
-            MovementType::Move => "move",
-            MovementType::Reserve => "reserve",
-            MovementType::Adjust => "adjust",
+            InventoryTransactionType::Receive => "receive",
+            InventoryTransactionType::Move => "move",
+            InventoryTransactionType::Adjust => "adjust",
+            InventoryTransactionType::Ship => "ship",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
-            "receive" => MovementType::Receive,
-            "move" => MovementType::Move,
-            "reserve" => MovementType::Reserve,
-            "adjust" => MovementType::Adjust,
+            "receive" => InventoryTransactionType::Receive,
+            "move" => InventoryTransactionType::Move,
+            "adjust" => InventoryTransactionType::Adjust,
+            "ship" => InventoryTransactionType::Ship,
             _ => return None,
         })
     }
 }
 
-impl_status_display!(MovementType);
+impl_status_display!(InventoryTransactionType);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -571,9 +615,11 @@ impl_status_display!(ReservationStatus);
 // License plates
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LicensePlate {
     pub id: i64,
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub barcode: Option<String>,
@@ -583,9 +629,11 @@ pub struct LicensePlate {
     pub contents: Vec<LicensePlateContent>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LicensePlateContent {
     pub inventory_balance_id: i64,
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
     pub location_id: i64,
     pub item_batch_id: i64,
     pub status: InventoryStatus,
@@ -660,6 +708,12 @@ pub struct LoadLine {
     pub serial: Option<String>,
     pub expiration: Option<Timestamp>,
     pub status: LoadLineStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReceiveLoadLineResult {
+    pub load_line_id: i64,
+    pub inventory_transaction_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

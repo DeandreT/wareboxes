@@ -86,8 +86,18 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     )
     .await
     .unwrap();
+    let inventory_owner = repo::inventory_owners::add_inventory_owner(
+        &db,
+        tenant_id,
+        "Task Inventory Owner",
+        "task-owner@test.com",
+    )
+    .await
+    .unwrap();
     let batch = repo::inventory::add_item_batch(
         &db,
+        tenant_id,
+        inventory_owner,
         master_item,
         None,
         Some("LOT-TASK"),
@@ -98,6 +108,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     .unwrap();
     repo::inventory::receive_inventory(
         &db,
+        tenant_id,
         user.id,
         batch,
         freezer,
@@ -110,7 +121,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     )
     .await
     .unwrap();
-    let balance = repo::inventory::get_balances(&db, false)
+    let balance = repo::inventory::get_balances(&db, tenant_id, false)
         .await
         .unwrap()
         .into_iter()

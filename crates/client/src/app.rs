@@ -20,9 +20,9 @@ use egui_extras::{Column, TableBuilder};
 use serde_json::{json, Value};
 use wareboxes_core::dto::{SessionUser, SummaryCount};
 use wareboxes_core::models::{
-    AuditWave, Employee, Facility, InventoryBalance, InventoryOwner, Item, ItemBatch, LicensePlate,
-    Load, LoadFileCategory, LoadLine, LoadLineStatus, LoadNote, LoadStatus, LoadType, Location,
-    Movement, Order, OrderStatus, Permission, Role, User,
+    AuditWave, Employee, Facility, InventoryBalance, InventoryOwner, InventoryTransaction, Item,
+    ItemBatch, LicensePlate, Load, LoadFileCategory, LoadLine, LoadLineStatus, LoadNote,
+    LoadStatus, LoadType, Location, Order, OrderStatus, Permission, Role, User,
 };
 
 use crate::api::{ApiClient, ApiEvent, Screen};
@@ -128,7 +128,7 @@ struct Data {
     loads: Vec<Load>,
     item_batches: Vec<ItemBatch>,
     inventory_balances: Vec<InventoryBalance>,
-    movements: Vec<Movement>,
+    inventory_transactions: Vec<InventoryTransaction>,
     license_plates: Vec<LicensePlate>,
     license_plate_lookup: Option<LicensePlate>,
     employees: Vec<Employee>,
@@ -209,7 +209,8 @@ impl WareboxesApp {
         match s {
             Screen::Inventory => {
                 self.api.get_inventory_balances();
-                self.api.get_movements();
+                self.api.get_inventory_transactions();
+                self.api.get_list(Screen::InventoryOwners);
                 self.api.get_list(Screen::Items);
                 self.api.get_list(Screen::Locations);
             }
@@ -218,6 +219,7 @@ impl WareboxesApp {
             }
             Screen::LicensePlates => {
                 self.api.get_list(Screen::Locations);
+                self.api.get_list(Screen::InventoryOwners);
             }
             _ => {}
         }
@@ -499,7 +501,9 @@ impl WareboxesApp {
                 }
                 ApiEvent::ItemBatches(b) => self.data.item_batches = b,
                 ApiEvent::InventoryBalances(b) => self.data.inventory_balances = b,
-                ApiEvent::Movements(m) => self.data.movements = m,
+                ApiEvent::InventoryTransactions(transactions) => {
+                    self.data.inventory_transactions = transactions;
+                }
                 ApiEvent::LicensePlates(lp) => self.data.license_plates = lp,
                 ApiEvent::LicensePlateLookup(lp) => self.data.license_plate_lookup = lp,
                 ApiEvent::Employees(e) => self.data.employees = e,

@@ -1,17 +1,18 @@
 //! Load planning and receiving workflows. Inbound receiving writes structured
-//! load lines, inventory balances, and stock movement ledger rows in one
-//! transaction.
+//! load lines, journal entries, and balance projections in one transaction.
 
 use std::collections::HashMap;
 
 use sqlx::Row;
 use wareboxes_core::models::{
-    Load, LoadActivity, LoadFile, LoadFileCategory, LoadLine, LoadLineStatus, LoadNote, LoadStatus,
-    LoadType, Timestamp,
+    InventoryStatus, InventoryTransactionType, Load, LoadActivity, LoadFile, LoadFileCategory,
+    LoadLine, LoadLineStatus, LoadNote, LoadStatus, LoadType, ReceiveLoadLineResult, Timestamp,
 };
+use wareboxes_domain::TenantId;
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
+use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
 use crate::repo::{inventory, license_plates, orders};
 
 fn parse_load_status(s: &str) -> AppResult<LoadStatus> {
@@ -750,6 +751,7 @@ pub async fn add_line(
 #[allow(clippy::too_many_arguments)]
 pub async fn receive_line(
     db: &Db,
+    tenant_id: TenantId,
     user_id: i64,
     load_line_id: i64,
     to_location_id: i64,
@@ -762,7 +764,8 @@ pub async fn receive_line(
     serial: Option<&str>,
     expiration: Option<Timestamp>,
     reason: Option<&str>,
-) -> AppResult<i64> {
+    idempotency_key: &str,
+) -> AppResult<ReceiveLoadLineResult> {
     if received_qty < 0 || rejected_qty < 0 || missing_qty < 0 {
         return Err(AppError::bad_request(
             "received, rejected, and missing quantities cannot be negative",
@@ -776,26 +779,62 @@ pub async fn receive_line(
     let now = now_iso();
     let mut tx = db.begin().await?;
 
+    let request_hash = inventory_journal::request_hash(&(
+        load_line_id,
+        to_location_id,
+        received_qty,
+        rejected_qty,
+        missing_qty,
+        license_plate_id,
+        license_plate_barcode,
+        lot,
+        serial,
+        &expiration,
+        reason,
+    ))?;
+    if let Some(result) = inventory_journal::replayed_result::<ReceiveLoadLineResult>(
+        &mut tx,
+        tenant_id,
+        "receive_load_line",
+        Some(idempotency_key),
+        &request_hash,
+    )
+    .await?
+    {
+        tx.commit().await?;
+        return Ok(result);
+    }
+
     let row = sqlx::query(
         r#"
         SELECT ll.id, ll.load_id, ll.item_id, ll.expected_qty, ll.received_qty, ll.rejected_qty,
                ll.missing_qty,
                COALESCE($1, ll.lot) AS lot, COALESCE($2, ll.serial) AS serial,
-               COALESCE($3, ll.expiration) AS expiration, l.status AS load_status
+               COALESCE($3, ll.expiration) AS expiration, l.status AS load_status,
+               l.inventory_owner_id, owner.tenant_id, item.packaging_unit AS uom
         FROM load_lines ll
         INNER JOIN loads l ON l.id = ll.load_id
-        WHERE ll.id = $4 AND ll.deleted IS NULL AND l.deleted IS NULL
+        INNER JOIN inventory_owners owner ON owner.id = l.inventory_owner_id
+        INNER JOIN items item ON item.id = ll.item_id AND item.tenant_id = owner.tenant_id
+        WHERE ll.id = $4 AND owner.tenant_id = $5
+          AND ll.deleted IS NULL AND l.deleted IS NULL
+        FOR UPDATE OF ll, l
         "#,
     )
     .bind(lot)
     .bind(serial)
     .bind(expiration)
     .bind(load_line_id)
+    .bind(tenant_id.get())
     .fetch_one(&mut *tx)
     .await?;
 
     let load_id: i64 = row.try_get("load_id")?;
+    let tenant_id = TenantId::new(row.try_get("tenant_id")?)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let inventory_owner_id: i64 = row.try_get("inventory_owner_id")?;
     let item_id: i64 = row.try_get("item_id")?;
+    let uom: String = row.try_get("uom")?;
     let expected: i64 = row.try_get("expected_qty")?;
     let prior_received: i64 = row.try_get("received_qty")?;
     let prior_rejected: i64 = row.try_get("rejected_qty")?;
@@ -853,9 +892,11 @@ pub async fn receive_line(
     .execute(&mut *tx)
     .await?;
 
-    let mut movement_id = 0;
+    let mut inventory_transaction_id = None;
     let resolved_license_plate_id = license_plates::find_or_create_license_plate_tx(
         &mut tx,
+        tenant_id,
+        inventory_owner_id,
         license_plate_barcode,
         license_plate_id,
         to_location_id,
@@ -863,11 +904,30 @@ pub async fn receive_line(
     .await?;
 
     if received_qty > 0 {
-        let batch_id: i64 = sqlx::query_scalar(
-            "INSERT INTO item_batches (created, item_id, load_id, lot, serial, expiration) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        sqlx::query(
+            r#"
+            INSERT INTO inventory_owner_items
+                (tenant_id, created, inventory_owner_id, item_id)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (tenant_id, inventory_owner_id, item_id)
+            DO UPDATE SET deleted = NULL
+            "#,
         )
+        .bind(tenant_id.get())
+        .bind(now)
+        .bind(inventory_owner_id)
+        .bind(item_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let batch_id: i64 = sqlx::query_scalar(
+            "INSERT INTO item_batches (tenant_id, inventory_owner_id, created, item_id, uom, load_id, lot, serial, expiration) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+        )
+        .bind(tenant_id.get())
+        .bind(inventory_owner_id)
         .bind(now)
         .bind(item_id)
+        .bind(&uom)
         .bind(load_id)
         .bind(final_lot.as_deref())
         .bind(final_serial.as_deref())
@@ -875,33 +935,76 @@ pub async fn receive_line(
         .fetch_one(&mut *tx)
         .await?;
 
-        inventory::ensure_location_accepts_batch_tx(&mut tx, to_location_id, batch_id).await?;
+        inventory::ensure_location_accepts_batch_tx(
+            &mut tx,
+            tenant_id,
+            inventory_owner_id,
+            to_location_id,
+            batch_id,
+        )
+        .await?;
 
         let facility_id: i64 = sqlx::query_scalar(
-            "SELECT facility_id FROM locations WHERE id = $1 AND deleted IS NULL AND active AND receivable",
+            "SELECT facility_id FROM locations WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL AND active AND receivable",
         )
+        .bind(tenant_id.get())
         .bind(to_location_id)
         .fetch_one(&mut *tx)
         .await?;
+
+        let transaction_id = match inventory_journal::begin_transaction(
+            &mut tx,
+            &JournalCommand {
+                tenant_id,
+                inventory_owner_id,
+                actor_user_id: user_id,
+                transaction_type: InventoryTransactionType::Receive,
+                reason,
+                reference_type: Some("load"),
+                reference_id: Some(load_id),
+                correlation_id: None,
+                operation: "receive_load_line",
+                idempotency_key: Some(idempotency_key),
+                request_hash: &request_hash,
+                record_idempotency: false,
+            },
+        )
+        .await?
+        {
+            JournalStart::New(id) => id,
+            JournalStart::Replay(_) => {
+                return Err(AppError::internal(
+                    "load receipt journal unexpectedly replayed",
+                ));
+            }
+        };
+        inventory_transaction_id = Some(transaction_id);
 
         if let Some(license_plate_id) = resolved_license_plate_id {
             sqlx::query(
                 r#"
                 INSERT INTO inventory_balances
-                    (created, modified, facility_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved)
-                VALUES ($1, $2, $3, $4, $5, $6, 'available', $7, 0)
-                ON CONFLICT (location_id, license_plate_id, item_batch_id, status) WHERE license_plate_id IS NOT NULL DO UPDATE
+                    (tenant_id, inventory_owner_id, created, modified, facility_id,
+                     location_id, license_plate_id, item_batch_id, item_id, uom,
+                     status, qty_on_hand, qty_reserved)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'available', $11, 0)
+                ON CONFLICT (tenant_id, inventory_owner_id, location_id, license_plate_id, item_batch_id, uom, status)
+                    WHERE license_plate_id IS NOT NULL DO UPDATE
                 SET qty_on_hand = inventory_balances.qty_on_hand + excluded.qty_on_hand,
                     modified = excluded.modified,
                     deleted = NULL
                 "#,
             )
+            .bind(tenant_id.get())
+            .bind(inventory_owner_id)
             .bind(now)
             .bind(now)
             .bind(facility_id)
             .bind(to_location_id)
             .bind(license_plate_id)
             .bind(batch_id)
+            .bind(item_id)
+            .bind(&uom)
             .bind(received_qty)
             .execute(&mut *tx)
             .await?;
@@ -909,42 +1012,45 @@ pub async fn receive_line(
             sqlx::query(
                 r#"
                 INSERT INTO inventory_balances
-                    (created, modified, facility_id, location_id, license_plate_id, item_batch_id, status, qty_on_hand, qty_reserved)
-                VALUES ($1, $2, $3, $4, NULL, $5, 'available', $6, 0)
-                ON CONFLICT (location_id, item_batch_id, status) WHERE license_plate_id IS NULL DO UPDATE
+                    (tenant_id, inventory_owner_id, created, modified, facility_id,
+                     location_id, license_plate_id, item_batch_id, item_id, uom,
+                     status, qty_on_hand, qty_reserved)
+                VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, 'available', $10, 0)
+                ON CONFLICT (tenant_id, inventory_owner_id, location_id, item_batch_id, uom, status)
+                    WHERE license_plate_id IS NULL DO UPDATE
                 SET qty_on_hand = inventory_balances.qty_on_hand + excluded.qty_on_hand,
                     modified = excluded.modified,
                     deleted = NULL
                 "#,
             )
+            .bind(tenant_id.get())
+            .bind(inventory_owner_id)
             .bind(now)
             .bind(now)
             .bind(facility_id)
             .bind(to_location_id)
             .bind(batch_id)
+            .bind(item_id)
+            .bind(&uom)
             .bind(received_qty)
             .execute(&mut *tx)
             .await?;
         }
 
-        movement_id = sqlx::query_scalar(
-            r#"
-            INSERT INTO stock_movements
-                (created, user_id, item_batch_id, license_plate_id, from_location_id, to_location_id, qty, movement_type,
-                 status, reason, reference_type, reference_id, idempotency_key)
-            VALUES ($1, $2, $3, $4, NULL, $5, $6, 'receive', 'available', $7, 'load', $8, NULL)
-            RETURNING id
-            "#,
+        inventory_journal::append_entry(
+            &mut tx,
+            tenant_id,
+            inventory_owner_id,
+            transaction_id,
+            &JournalEntry {
+                facility_id,
+                location_id: to_location_id,
+                license_plate_id: resolved_license_plate_id,
+                item_batch_id: batch_id,
+                status: InventoryStatus::Available,
+                quantity_delta: received_qty,
+            },
         )
-        .bind(now)
-        .bind(user_id)
-        .bind(batch_id)
-        .bind(resolved_license_plate_id)
-        .bind(to_location_id)
-        .bind(received_qty)
-        .bind(reason)
-        .bind(load_id)
-        .fetch_one(&mut *tx)
         .await?;
     }
 
@@ -982,8 +1088,22 @@ pub async fn receive_line(
         )),
     )
     .await?;
+    let result = ReceiveLoadLineResult {
+        load_line_id,
+        inventory_transaction_id,
+    };
+    inventory_journal::record_command_result(
+        &mut tx,
+        tenant_id,
+        "receive_load_line",
+        idempotency_key,
+        &request_hash,
+        &result,
+        inventory_transaction_id,
+    )
+    .await?;
     tx.commit().await?;
-    Ok(movement_id)
+    Ok(result)
 }
 
 async fn ensure_load_resolved_tx(

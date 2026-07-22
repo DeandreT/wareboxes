@@ -19,10 +19,12 @@ BEGIN
 
         SELECT item_id INTO incoming_item_id
         FROM item_batches
-        WHERE id = NEW.item_batch_id;
+        WHERE tenant_id = NEW.tenant_id
+          AND inventory_owner_id = NEW.inventory_owner_id
+          AND id = NEW.item_batch_id;
 
         PERFORM pg_advisory_xact_lock(hashtextextended(
-            'inventory-location-item:' || NEW.location_id::text || ':' || incoming_item_id::text,
+            'inventory-location-item:' || NEW.tenant_id::text || ':' || NEW.inventory_owner_id::text || ':' || NEW.location_id::text || ':' || incoming_item_id::text,
             0
         ));
 
@@ -33,6 +35,8 @@ BEGIN
             INNER JOIN item_batches incoming_batch ON incoming_batch.id = NEW.item_batch_id
             WHERE ib.id <> COALESCE(NEW.id, -1)
               AND ib.location_id = NEW.location_id
+              AND ib.tenant_id = NEW.tenant_id
+              AND ib.inventory_owner_id = NEW.inventory_owner_id
               AND ib.deleted IS NULL
               AND ib.qty_on_hand > 0
               AND existing_batch.item_id = incoming_item_id

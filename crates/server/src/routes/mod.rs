@@ -139,13 +139,14 @@ pub fn app(state: AppState) -> Router {
         .route("/inventory/batches/add", post(inventory::add_batch))
         .route("/inventory/batches/delete", post(inventory::delete_batch))
         .route("/inventory/balances", get(inventory::list_balances))
-        .route("/inventory/receive", post(inventory::receive))
-        .route("/inventory/movements", get(inventory::list_movements))
-        .route("/inventory/movements/add", post(inventory::move_stock))
         .route(
-            "/inventory/movements/split",
-            post(inventory::split_move_stock),
+            "/inventory/reconciliation",
+            get(inventory::list_reconciliation_issues),
         )
+        .route("/inventory/receive", post(inventory::receive))
+        .route("/inventory/transactions", get(inventory::list_transactions))
+        .route("/inventory/moves", post(inventory::move_stock))
+        .route("/inventory/moves/split", post(inventory::split_move_stock))
         .route("/inventory/reservations", get(inventory::list_reservations))
         .route("/inventory/reservations/add", post(inventory::reserve))
         .route(
