@@ -37,6 +37,10 @@ async fn registrations_receive_distinct_default_tenants() {
     assert_ne!(first_access[0].tenant_id, second_access[0].tenant_id);
     assert_eq!(first_access[0].user_id.get(), first.id);
     assert_eq!(second_access[0].user_id.get(), second.id);
+    assert!(first_access[0].site_scope.all_facilities);
+    assert!(first_access[0].owner_scope.all_inventory_owners);
+    assert!(first_access[0].site_scope.facility_ids.is_empty());
+    assert!(first_access[0].owner_scope.inventory_owner_ids.is_empty());
 }
 
 #[tokio::test]

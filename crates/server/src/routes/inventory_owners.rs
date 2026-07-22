@@ -19,9 +19,11 @@ pub async fn list(
     Query(q): Query<ShowDeleted>,
 ) -> AppResult<Json<Vec<InventoryOwner>>> {
     user.require_any_permission(&state.db, READ_PERMS).await?;
-    let inventory_owners = repo::inventory_owners::get_inventory_owners(
+    let inventory_owners = repo::inventory_owners::get_inventory_owners_in_scope(
         &state.db,
         user.tenant.tenant_id,
+        &user.tenant.owner_scope,
+        &user.tenant.site_scope,
         q.show_deleted,
     )
     .await?;
@@ -35,6 +37,9 @@ pub async fn add(
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    if !user.tenant.owner_scope.all_inventory_owners {
+        return Err(wareboxes_core::CoreError::Forbidden.into());
+    }
     let id = repo::inventory_owners::add_inventory_owner(
         &state.db,
         user.tenant.tenant_id,
@@ -52,9 +57,11 @@ pub async fn update(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::inventory_owners::update_inventory_owner(
+    user.require_inventory_owner(body.inventory_owner_id)?;
+    let ok = repo::inventory_owners::update_inventory_owner_in_scope(
         &state.db,
         user.tenant.tenant_id,
+        &user.tenant.owner_scope,
         body.inventory_owner_id,
         body.name.as_deref(),
         body.email.as_deref(),
@@ -70,9 +77,11 @@ pub async fn delete(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::inventory_owners::delete_inventory_owner(
+    user.require_inventory_owner(body.inventory_owner_id)?;
+    let ok = repo::inventory_owners::delete_inventory_owner_in_scope(
         &state.db,
         user.tenant.tenant_id,
+        &user.tenant.owner_scope,
         body.inventory_owner_id,
     )
     .await?;
@@ -86,9 +95,11 @@ pub async fn restore(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::inventory_owners::restore_inventory_owner(
+    user.require_inventory_owner(body.inventory_owner_id)?;
+    let ok = repo::inventory_owners::restore_inventory_owner_in_scope(
         &state.db,
         user.tenant.tenant_id,
+        &user.tenant.owner_scope,
         body.inventory_owner_id,
     )
     .await?;

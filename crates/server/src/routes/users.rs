@@ -1,7 +1,7 @@
 use axum::extract::{Query, State};
 use axum::Json;
 use serde::Deserialize;
-use wareboxes_core::dto::{AddDeleteUserRole, UserIdRequest, UserUpdate};
+use wareboxes_core::dto::{AddDeleteUserRole, UpdateUserAccessScope, UserIdRequest, UserUpdate};
 use wareboxes_core::models::User;
 
 use crate::auth::CurrentTenant;
@@ -106,4 +106,17 @@ pub async fn remove_role(
         repo::roles::delete_user_role(&state.db, user.tenant.tenant_id, body.user_id, body.role_id)
             .await?;
     Ok(Json(ok))
+}
+
+pub async fn update_access_scope(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Json(body): Json<UpdateUserAccessScope>,
+) -> AppResult<Json<bool>> {
+    user.require_permission(&state.db, PERM).await?;
+    validate(&body)?;
+    user.require_scope_delegation(&body)?;
+    let updated =
+        repo::tenants::update_user_access_scope(&state.db, user.tenant.tenant_id, &body).await?;
+    Ok(Json(updated))
 }

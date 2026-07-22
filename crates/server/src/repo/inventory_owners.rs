@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use sqlx::Row;
-use wareboxes_core::models::{Facility, InventoryOwner};
+use wareboxes_core::models::{Facility, InventoryOwner, OwnerScope, SiteScope};
 use wareboxes_core::CoreError;
 use wareboxes_domain::TenantId;
 
@@ -56,6 +56,56 @@ async fn facilities_by_inventory_owner(
     Ok(map)
 }
 
+async fn facilities_by_inventory_owner_in_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    site_scope: &SiteScope,
+) -> AppResult<HashMap<i64, Vec<Facility>>> {
+    let facility_ids = site_scope
+        .facility_ids
+        .iter()
+        .map(|id| id.get())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT owner_facility.inventory_owner_id AS inventory_owner_id,
+               facility.id AS id, facility.tenant_id AS tenant_id,
+               facility.created AS created, facility.deleted AS deleted,
+               facility.name AS name, facility.address_id AS address_id
+        FROM inventory_owner_facilities owner_facility
+        INNER JOIN facilities facility
+            ON facility.tenant_id = owner_facility.tenant_id
+           AND facility.id = owner_facility.facility_id
+        WHERE owner_facility.tenant_id = $1
+          AND owner_facility.deleted IS NULL
+          AND facility.deleted IS NULL
+          AND ($2 OR facility.id = ANY($3))
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(site_scope.all_facilities)
+    .bind(&facility_ids)
+    .fetch_all(db)
+    .await?;
+    let mut facilities = HashMap::<i64, Vec<Facility>>::new();
+    for row in &rows {
+        let inventory_owner_id = row.try_get("inventory_owner_id")?;
+        facilities
+            .entry(inventory_owner_id)
+            .or_default()
+            .push(Facility {
+                id: row.try_get("id")?,
+                tenant_id: TenantId::new(row.try_get("tenant_id")?)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                created: row.try_get("created")?,
+                deleted: row.try_get("deleted")?,
+                name: row.try_get("name")?,
+                address_id: row.try_get("address_id")?,
+            });
+    }
+    Ok(facilities)
+}
+
 pub async fn get_inventory_owners(
     db: &Db,
     tenant_id: TenantId,
@@ -79,6 +129,45 @@ pub async fn get_inventory_owners(
             let mut a = map_inventory_owner(r)?;
             a.inventory_owner_facilities = wh.remove(&a.id).unwrap_or_default();
             Ok(a)
+        })
+        .collect()
+}
+
+pub async fn get_inventory_owners_in_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    owner_scope: &OwnerScope,
+    site_scope: &SiteScope,
+    show_deleted: bool,
+) -> AppResult<Vec<InventoryOwner>> {
+    let inventory_owner_ids = owner_scope
+        .inventory_owner_ids
+        .iter()
+        .map(|id| id.get())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        r#"
+        SELECT id, tenant_id, created, deleted, name, email
+        FROM inventory_owners
+        WHERE tenant_id = $1
+          AND ($2 OR deleted IS NULL)
+          AND ($3 OR id = ANY($4))
+        ORDER BY id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(show_deleted)
+    .bind(owner_scope.all_inventory_owners)
+    .bind(&inventory_owner_ids)
+    .fetch_all(db)
+    .await?;
+    let mut facilities = facilities_by_inventory_owner_in_scope(db, tenant_id, site_scope).await?;
+    rows.iter()
+        .map(|row| {
+            let mut inventory_owner = map_inventory_owner(row)?;
+            inventory_owner.inventory_owner_facilities =
+                facilities.remove(&inventory_owner.id).unwrap_or_default();
+            Ok(inventory_owner)
         })
         .collect()
 }
@@ -135,6 +224,39 @@ pub async fn update_inventory_owner(
     Ok(res.rows_affected() > 0)
 }
 
+pub async fn update_inventory_owner_in_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    owner_scope: &OwnerScope,
+    id: i64,
+    name: Option<&str>,
+    email: Option<&str>,
+) -> AppResult<bool> {
+    let inventory_owner_ids = owner_scope
+        .inventory_owner_ids
+        .iter()
+        .map(|owner_id| owner_id.get())
+        .collect::<Vec<_>>();
+    let result = sqlx::query(
+        r#"
+        UPDATE inventory_owners
+        SET name = COALESCE($1, name), email = COALESCE($2, email)
+        WHERE tenant_id = $3
+          AND id = $4
+          AND ($5 OR id = ANY($6))
+        "#,
+    )
+    .bind(name)
+    .bind(email)
+    .bind(tenant_id.get())
+    .bind(id)
+    .bind(owner_scope.all_inventory_owners)
+    .bind(&inventory_owner_ids)
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Refuses if the inventory owner still has orders that are not
 /// shipped or cancelled.
 pub async fn delete_inventory_owner(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
@@ -165,6 +287,18 @@ pub async fn delete_inventory_owner(db: &Db, tenant_id: TenantId, id: i64) -> Ap
     Ok(res.rows_affected() > 0)
 }
 
+pub async fn delete_inventory_owner_in_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    owner_scope: &OwnerScope,
+    id: i64,
+) -> AppResult<bool> {
+    if !active_inventory_owner_exists_in_scope(db, tenant_id, owner_scope, id).await? {
+        return Ok(false);
+    }
+    delete_inventory_owner(db, tenant_id, id).await
+}
+
 pub async fn restore_inventory_owner(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
     let res =
         sqlx::query("UPDATE inventory_owners SET deleted = NULL WHERE tenant_id = $1 AND id = $2")
@@ -173,4 +307,65 @@ pub async fn restore_inventory_owner(db: &Db, tenant_id: TenantId, id: i64) -> A
             .execute(db)
             .await?;
     Ok(res.rows_affected() > 0)
+}
+
+pub async fn restore_inventory_owner_in_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    owner_scope: &OwnerScope,
+    id: i64,
+) -> AppResult<bool> {
+    let inventory_owner_ids = owner_scope
+        .inventory_owner_ids
+        .iter()
+        .map(|owner_id| owner_id.get())
+        .collect::<Vec<_>>();
+    let result = sqlx::query(
+        r#"
+        UPDATE inventory_owners
+        SET deleted = NULL
+        WHERE tenant_id = $1
+          AND id = $2
+          AND ($3 OR id = ANY($4))
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(id)
+    .bind(owner_scope.all_inventory_owners)
+    .bind(&inventory_owner_ids)
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn active_inventory_owner_exists_in_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    owner_scope: &OwnerScope,
+    id: i64,
+) -> AppResult<bool> {
+    let inventory_owner_ids = owner_scope
+        .inventory_owner_ids
+        .iter()
+        .map(|owner_id| owner_id.get())
+        .collect::<Vec<_>>();
+    let exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM inventory_owners
+            WHERE tenant_id = $1
+              AND id = $2
+              AND deleted IS NULL
+              AND ($3 OR id = ANY($4))
+        )
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(id)
+    .bind(owner_scope.all_inventory_owners)
+    .bind(&inventory_owner_ids)
+    .fetch_one(db)
+    .await?;
+    Ok(exists)
 }

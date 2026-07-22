@@ -51,6 +51,7 @@ pub fn app(state: AppState) -> Router {
         .route("/users/restore", post(users::restore))
         .route("/users/roles/add", post(users::add_role))
         .route("/users/roles/delete", post(users::remove_role))
+        .route("/users/access-scope", post(users::update_access_scope))
         // roles
         .route("/roles", get(roles::list))
         .route("/roles/add", post(roles::add))

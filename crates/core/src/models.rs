@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use wareboxes_domain::{InventoryOwnerId, TenantId, UserId};
+use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId, UserId};
 
 pub type Timestamp = DateTime<Utc>;
 
@@ -44,6 +44,30 @@ impl TenantStatus {
 
 impl_status_display!(TenantStatus);
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SiteScope {
+    pub all_facilities: bool,
+    pub facility_ids: Vec<FacilityId>,
+}
+
+impl SiteScope {
+    pub fn includes(&self, facility_id: FacilityId) -> bool {
+        self.all_facilities || self.facility_ids.contains(&facility_id)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwnerScope {
+    pub all_inventory_owners: bool,
+    pub inventory_owner_ids: Vec<InventoryOwnerId>,
+}
+
+impl OwnerScope {
+    pub fn includes(&self, inventory_owner_id: InventoryOwnerId) -> bool {
+        self.all_inventory_owners || self.inventory_owner_ids.contains(&inventory_owner_id)
+    }
+}
+
 /// A tenant available to the authenticated user. This is an access projection,
 /// not the persistence model for either a tenant or membership.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,6 +78,8 @@ pub struct TenantAccess {
     pub name: String,
     pub status: TenantStatus,
     pub is_default: bool,
+    pub site_scope: SiteScope,
+    pub owner_scope: OwnerScope,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

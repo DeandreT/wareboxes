@@ -12,8 +12,9 @@ use rand::distributions::Alphanumeric;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::{TenantAccess, User};
-use wareboxes_domain::TenantId;
+use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
@@ -154,6 +155,43 @@ impl CurrentTenant {
         } else {
             Err(AppError::forbidden())
         }
+    }
+
+    pub fn require_facility(&self, facility_id: i64) -> AppResult<FacilityId> {
+        let facility_id = FacilityId::new(facility_id)
+            .map_err(|_| AppError::bad_request("facility ID must be positive"))?;
+        if self.tenant.site_scope.includes(facility_id) {
+            Ok(facility_id)
+        } else {
+            Err(AppError::forbidden())
+        }
+    }
+
+    pub fn require_inventory_owner(&self, inventory_owner_id: i64) -> AppResult<InventoryOwnerId> {
+        let inventory_owner_id = InventoryOwnerId::new(inventory_owner_id)
+            .map_err(|_| AppError::bad_request("inventory owner ID must be positive"))?;
+        if self.tenant.owner_scope.includes(inventory_owner_id) {
+            Ok(inventory_owner_id)
+        } else {
+            Err(AppError::forbidden())
+        }
+    }
+
+    pub fn require_scope_delegation(&self, scope: &UpdateUserAccessScope) -> AppResult<()> {
+        if scope.all_facilities && !self.tenant.site_scope.all_facilities {
+            return Err(AppError::forbidden());
+        }
+        for facility_id in &scope.facility_ids {
+            self.require_facility(*facility_id)?;
+        }
+
+        if scope.all_inventory_owners && !self.tenant.owner_scope.all_inventory_owners {
+            return Err(AppError::forbidden());
+        }
+        for inventory_owner_id in &scope.inventory_owner_ids {
+            self.require_inventory_owner(*inventory_owner_id)?;
+        }
+        Ok(())
     }
 }
 
