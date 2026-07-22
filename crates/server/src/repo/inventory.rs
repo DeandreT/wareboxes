@@ -285,8 +285,8 @@ pub async fn receive_inventory(
             deleted = NULL
         "#,
     )
-    .bind(&now)
-    .bind(&now)
+    .bind(now)
+    .bind(now)
     .bind(warehouse_id)
     .bind(to_location_id)
     .bind(item_batch_id)
@@ -304,7 +304,7 @@ pub async fn receive_inventory(
         RETURNING id
         "#,
     )
-    .bind(&now)
+    .bind(now)
     .bind(user_id)
     .bind(item_batch_id)
     .bind(to_location_id)
@@ -363,7 +363,7 @@ pub async fn move_inventory(
         "#,
     )
     .bind(qty)
-    .bind(&now)
+    .bind(now)
     .bind(from_location_id)
     .bind(item_batch_id)
     .bind(status.as_str())
@@ -394,8 +394,8 @@ pub async fn move_inventory(
             deleted = NULL
         "#,
     )
-    .bind(&now)
-    .bind(&now)
+    .bind(now)
+    .bind(now)
     .bind(warehouse_id)
     .bind(to_location_id)
     .bind(item_batch_id)
@@ -413,7 +413,7 @@ pub async fn move_inventory(
         RETURNING id
         "#,
     )
-    .bind(&now)
+    .bind(now)
     .bind(user_id)
     .bind(item_batch_id)
     .bind(from_location_id)
@@ -521,7 +521,7 @@ pub async fn split_move_inventory(
         "#,
     )
     .bind(total_qty)
-    .bind(&now)
+    .bind(now)
     .bind(from_inventory_balance_id)
     .bind(total_qty)
     .execute(&mut *tx)
@@ -554,8 +554,8 @@ pub async fn split_move_inventory(
                 deleted = NULL
             "#,
         )
-        .bind(&now)
-        .bind(&now)
+        .bind(now)
+        .bind(now)
         .bind(warehouse_id)
         .bind(*to_location_id)
         .bind(item_batch_id)
@@ -574,7 +574,7 @@ pub async fn split_move_inventory(
             RETURNING id
             "#,
         )
-        .bind(&now)
+        .bind(now)
         .bind(user_id)
         .bind(item_batch_id)
         .bind(from_location_id)
@@ -648,7 +648,7 @@ pub async fn reserve_inventory(
         "#,
     )
     .bind(qty)
-    .bind(&now)
+    .bind(now)
     .bind(resolved_balance_id)
     .bind(qty)
     .execute(&mut *tx)
@@ -667,8 +667,8 @@ pub async fn reserve_inventory(
         RETURNING id
         "#,
     )
-    .bind(&now)
-    .bind(&now)
+    .bind(now)
+    .bind(now)
     .bind(order_id)
     .bind(order_item_id)
     .bind(resolved_balance_id)
@@ -686,7 +686,7 @@ pub async fn reserve_inventory(
         VALUES ($1, $2, $3, $4, $5, NULL, $6, 'reserve', 'available', 'order reservation', 'order', $7, NULL)
         "#,
     )
-    .bind(&now)
+    .bind(now)
     .bind(user_id)
     .bind(resolved_item_batch_id)
     .bind(resolved_license_plate_id)
@@ -728,7 +728,7 @@ pub async fn cancel_reservation(db: &Db, reservation_id: i64) -> AppResult<bool>
         "#,
     )
     .bind(qty)
-    .bind(&now)
+    .bind(now)
     .bind(inventory_balance_id)
     .bind(qty)
     .execute(&mut *tx)
@@ -737,8 +737,8 @@ pub async fn cancel_reservation(db: &Db, reservation_id: i64) -> AppResult<bool>
     let res = sqlx::query(
         "UPDATE inventory_reservations SET deleted = $1, modified = $2, status = 'cancelled' WHERE id = $3",
     )
-    .bind(&now)
-    .bind(&now)
+    .bind(now)
+    .bind(now)
     .bind(reservation_id)
     .execute(&mut *tx)
     .await?;

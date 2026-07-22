@@ -10,8 +10,10 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
+use sha2::{Digest, Sha256};
 use sqlx::Row;
-use wareboxes_core::models::User;
+use wareboxes_core::models::{TenantAccess, User};
+use wareboxes_domain::TenantId;
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
@@ -20,6 +22,7 @@ use crate::repo;
 use crate::state::AppState;
 
 const SESSION_TTL_DAYS: i64 = 30;
+pub const TENANT_ID_HEADER: &str = "x-wareboxes-tenant-id";
 
 pub fn hash_password(password: &str) -> AppResult<String> {
     let salt = SaltString::generate(&mut OsRng);
@@ -46,12 +49,17 @@ fn random_token() -> String {
         .collect()
 }
 
+fn session_token_hash(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
 pub async fn create_session(db: &Db, user_id: i64) -> AppResult<String> {
     let token = random_token();
+    let token_hash = session_token_hash(&token);
     let now = chrono::Utc::now();
     let expires = now + chrono::Duration::days(SESSION_TTL_DAYS);
     sqlx::query("INSERT INTO sessions (token, user_id, created, expires) VALUES ($1, $2, $3, $4)")
-        .bind(&token)
+        .bind(token_hash)
         .bind(user_id)
         .bind(now)
         .bind(expires)
@@ -61,16 +69,18 @@ pub async fn create_session(db: &Db, user_id: i64) -> AppResult<String> {
 }
 
 pub async fn destroy_session(db: &Db, token: &str) -> AppResult<()> {
+    let token_hash = session_token_hash(token);
     sqlx::query("DELETE FROM sessions WHERE token = $1")
-        .bind(token)
+        .bind(token_hash)
         .execute(db)
         .await?;
     Ok(())
 }
 
 async fn user_id_for_token(db: &Db, token: &str) -> AppResult<Option<i64>> {
+    let token_hash = session_token_hash(token);
     let row = sqlx::query("SELECT user_id, expires FROM sessions WHERE token = $1")
-        .bind(token)
+        .bind(token_hash)
         .fetch_optional(db)
         .await?;
     let Some(row) = row else { return Ok(None) };
@@ -136,6 +146,63 @@ impl FromRequestParts<AppState> for CurrentUser {
     }
 }
 
+/// Authenticated user plus an active tenant membership selected by request header.
+/// Tenant-scoped commands and queries must use this extractor rather than
+/// `CurrentUser` so a missing or unauthorized tenant fails before domain work.
+#[derive(Debug)]
+pub struct CurrentTenant {
+    pub user: User,
+    pub tenant: TenantAccess,
+}
+
+impl CurrentTenant {
+    pub async fn require_permission(&self, db: &Db, permission: &str) -> AppResult<()> {
+        if permissions::user_has_permission(db, self.user.id, permission).await? {
+            Ok(())
+        } else {
+            Err(AppError::forbidden())
+        }
+    }
+
+    pub async fn require_any_permission(&self, db: &Db, perms: &[&str]) -> AppResult<()> {
+        if permissions::user_has_any_permission(db, self.user.id, perms).await? {
+            Ok(())
+        } else {
+            Err(AppError::forbidden())
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl FromRequestParts<AppState> for CurrentTenant {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let current_user = CurrentUser::from_request_parts(parts, state).await?;
+        let tenant_id = parts
+            .headers
+            .get(TENANT_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| AppError::bad_request("tenant context header is required"))?
+            .parse::<i64>()
+            .map_err(|_| AppError::bad_request("tenant context header must be a positive ID"))?;
+        let tenant_id = TenantId::new(tenant_id)
+            .map_err(|_| AppError::bad_request("tenant context header must be a positive ID"))?;
+
+        let tenant = repo::tenants::access_for_user(&state.db, current_user.user.id, tenant_id)
+            .await?
+            .ok_or_else(AppError::forbidden)?;
+
+        Ok(Self {
+            user: current_user.user,
+            tenant,
+        })
+    }
+}
+
 /// Create a user + credentials (used by registration and admin bootstrap).
 pub async fn register_user(
     db: &Db,
@@ -157,7 +224,7 @@ pub async fn register_user(
     .bind(email)
     .bind(first_name)
     .bind(last_name)
-    .bind(&now)
+    .bind(now)
     .fetch_one(db)
     .await?;
 
@@ -167,11 +234,12 @@ pub async fn register_user(
     )
     .bind(user_id)
     .bind(&hash)
-    .bind(&now)
+    .bind(now)
     .execute(db)
     .await?;
 
     permissions::ensure_self_role(db, user_id, email).await?;
+    repo::tenants::ensure_default_for_user(db, user_id, email).await?;
 
     repo::users::get_user_by_id(db, user_id, true)
         .await?

@@ -3,7 +3,7 @@ use axum::Json;
 use wareboxes_core::dto::{AddLocation, LocationIdRequest, LocationUpdate};
 use wareboxes_core::models::Location;
 
-use crate::auth::CurrentUser;
+use crate::auth::{CurrentTenant, CurrentUser};
 use crate::error::{AppError, AppResult};
 use crate::repo;
 use crate::routes::users::ShowDeleted;
@@ -25,12 +25,18 @@ pub async fn list(
 
 pub async fn add(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddLocation>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    if !repo::warehouses::active_warehouse_exists(&state.db, body.warehouse_id).await? {
+    if !repo::warehouses::active_warehouse_exists(
+        &state.db,
+        user.tenant.tenant_id,
+        body.warehouse_id,
+    )
+    .await?
+    {
         return Err(AppError::bad_request("Warehouse not found"));
     }
     if let Some(parent_location_id) = body.parent_location_id {

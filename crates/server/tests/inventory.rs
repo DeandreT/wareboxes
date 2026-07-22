@@ -9,7 +9,8 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
     let user = auth::register_user(&db, "wms@test.com", "supersecret", None, None)
         .await
         .unwrap();
-    let warehouse = repo::warehouses::add_warehouse(&db, "Main DC")
+    let tenant_id = tenant_for_user(&db, user.id).await;
+    let warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "Main DC")
         .await
         .unwrap();
     let receiving = repo::locations::add_location(
@@ -100,7 +101,7 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
     .unwrap_err();
     assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
 
-    let acc = repo::accounts::add_account(&db, "Inventory Customer", "ic@test.com")
+    let acc = repo::accounts::add_account(&db, tenant_id, "Inventory Customer", "ic@test.com")
         .await
         .unwrap();
     repo::orders::add_order(&db, &new_order("INV-1", Some(acc)))
@@ -227,7 +228,8 @@ async fn inventory_rejects_mixed_lot_or_expiration_in_same_location() {
     let user = auth::register_user(&db, "lot-guard@test.com", "supersecret", None, None)
         .await
         .unwrap();
-    let warehouse = repo::warehouses::add_warehouse(&db, "Lot Guard DC")
+    let tenant_id = tenant_for_user(&db, user.id).await;
+    let warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "Lot Guard DC")
         .await
         .unwrap();
     let receiving = repo::locations::add_location(

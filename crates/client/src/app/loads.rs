@@ -181,12 +181,14 @@ impl WareboxesApp {
             .filter(|load| {
                 self.load_matches_filters(
                     load.1,
-                    &date_filter,
-                    &date_mode,
-                    &status_filter,
-                    &type_filter,
-                    &account_filter,
-                    &search_filter,
+                    &LoadFilters {
+                        date: &date_filter,
+                        date_mode: &date_mode,
+                        status: &status_filter,
+                        load_type: &type_filter,
+                        account: &account_filter,
+                        search: &search_filter,
+                    },
                 )
             })
             .map(|(idx, _)| idx)

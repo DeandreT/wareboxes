@@ -1,5 +1,7 @@
 use super::*;
 
+type WarehouseInventoryTotals = (i64, i64, BTreeSet<i64>, usize);
+
 impl WareboxesApp {
     // ---- Inventory -------------------------------------------------------
     pub(super) fn inventory_screen(&mut self, ui: &mut egui::Ui) {
@@ -719,7 +721,7 @@ impl WareboxesApp {
 
     fn inventory_warehouse_summary_tab(&self, ui: &mut egui::Ui) {
         ui.heading("On Hand by Warehouse");
-        let mut totals: BTreeMap<(i64, i64), (i64, i64, BTreeSet<i64>, usize)> = BTreeMap::new();
+        let mut totals: BTreeMap<(i64, i64), WarehouseInventoryTotals> = BTreeMap::new();
         for balance in self
             .data
             .inventory_balances

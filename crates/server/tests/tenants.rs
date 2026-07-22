@@ -1,0 +1,267 @@
+mod common;
+
+use axum::body::{to_bytes, Body};
+use axum::extract::FromRequestParts;
+use axum::http::{header, Request, StatusCode};
+use common::*;
+use tower::ServiceExt;
+use wareboxes_server::auth::{CurrentTenant, TENANT_ID_HEADER};
+use wareboxes_server::routes;
+use wareboxes_server::state::AppState;
+
+fn request_parts(token: &str, tenant_id: Option<i64>) -> axum::http::request::Parts {
+    let mut request = Request::builder().header(header::AUTHORIZATION, format!("Bearer {token}"));
+    if let Some(tenant_id) = tenant_id {
+        request = request.header(TENANT_ID_HEADER, tenant_id.to_string());
+    }
+    request.body(()).unwrap().into_parts().0
+}
+
+#[tokio::test]
+async fn registrations_receive_distinct_default_tenants() {
+    let db = setup().await;
+    let first = auth::register_user(&db, "first@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let second = auth::register_user(&db, "second@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+
+    let first_access = repo::tenants::list_for_user(&db, first.id).await.unwrap();
+    let second_access = repo::tenants::list_for_user(&db, second.id).await.unwrap();
+
+    assert_eq!(first_access.len(), 1);
+    assert_eq!(second_access.len(), 1);
+    assert!(first_access[0].is_default);
+    assert!(second_access[0].is_default);
+    assert_ne!(first_access[0].tenant_id, second_access[0].tenant_id);
+    assert_eq!(first_access[0].user_id.get(), first.id);
+    assert_eq!(second_access[0].user_id.get(), second.id);
+}
+
+#[tokio::test]
+async fn membership_queries_do_not_return_other_tenants() {
+    let db = setup().await;
+    let owner = auth::register_user(&db, "owner@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let outsider = auth::register_user(&db, "outsider@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+
+    let owner_tenant = repo::tenants::list_for_user(&db, owner.id).await.unwrap()[0].tenant_id;
+    let outsider_access = repo::tenants::list_for_user(&db, outsider.id)
+        .await
+        .unwrap();
+
+    assert!(outsider_access
+        .iter()
+        .all(|access| access.tenant_id != owner_tenant));
+}
+
+#[tokio::test]
+async fn selected_tenant_context_requires_an_active_membership() {
+    let db = setup().await;
+    let member = auth::register_user(&db, "member@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let outsider = auth::register_user(&db, "other@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let member_tenant = repo::tenants::default_for_user(&db, member.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let outsider_tenant = repo::tenants::default_for_user(&db, outsider.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let token = auth::create_session(&db, member.id).await.unwrap();
+    let state = AppState::new(db.clone());
+
+    let mut valid_parts = request_parts(&token, Some(member_tenant.tenant_id.get()));
+    let context = CurrentTenant::from_request_parts(&mut valid_parts, &state)
+        .await
+        .unwrap();
+    assert_eq!(context.user.id, member.id);
+    assert_eq!(context.tenant.tenant_id, member_tenant.tenant_id);
+
+    let mut cross_tenant_parts = request_parts(&token, Some(outsider_tenant.tenant_id.get()));
+    let error = CurrentTenant::from_request_parts(&mut cross_tenant_parts, &state)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Core(CoreError::Forbidden)));
+
+    let mut missing_parts = request_parts(&token, None);
+    let error = CurrentTenant::from_request_parts(&mut missing_parts, &state)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Core(CoreError::BadRequest(_))));
+
+    sqlx::query("UPDATE tenants SET status = 'suspended' WHERE id = $1")
+        .bind(member_tenant.tenant_id.get())
+        .execute(&db)
+        .await
+        .unwrap();
+    let mut suspended_parts = request_parts(&token, Some(member_tenant.tenant_id.get()));
+    let error = CurrentTenant::from_request_parts(&mut suspended_parts, &state)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Core(CoreError::Forbidden)));
+}
+
+#[tokio::test]
+async fn tenant_context_route_rejects_cross_tenant_requests() {
+    let db = setup().await;
+    let member = auth::register_user(&db, "route-member@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let outsider = auth::register_user(&db, "route-other@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let member_tenant = repo::tenants::default_for_user(&db, member.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let outsider_tenant = repo::tenants::default_for_user(&db, outsider.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let token = auth::create_session(&db, member.id).await.unwrap();
+    let app = routes::app(AppState::new(db));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/context")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(TENANT_ID_HEADER, member_tenant.tenant_id.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 1024).await.unwrap();
+    let access: wareboxes_core::models::TenantAccess = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(access.tenant_id, member_tenant.tenant_id);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/auth/context")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(TENANT_ID_HEADER, outsider_tenant.tenant_id.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn owner_and_facility_master_data_is_tenant_scoped() {
+    let db = setup().await;
+    let operator = auth::register_user(&db, "master-data@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let other = auth::register_user(&db, "master-data-other@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let first_tenant = tenant_for_user(&db, operator.id).await;
+    let second_tenant = tenant_for_user(&db, other.id).await;
+
+    // The same business identifiers are valid in different tenant boundaries.
+    let first_account =
+        repo::accounts::add_account(&db, first_tenant, "Shared Customer", "first@test.com")
+            .await
+            .unwrap();
+    let second_account =
+        repo::accounts::add_account(&db, second_tenant, "Shared Customer", "second@test.com")
+            .await
+            .unwrap();
+    let first_warehouse = repo::warehouses::add_warehouse(&db, first_tenant, "Shared Facility")
+        .await
+        .unwrap();
+    let second_warehouse = repo::warehouses::add_warehouse(&db, second_tenant, "Shared Facility")
+        .await
+        .unwrap();
+
+    let first_accounts = repo::accounts::get_accounts(&db, first_tenant, false)
+        .await
+        .unwrap();
+    assert_eq!(first_accounts.len(), 1);
+    assert_eq!(first_accounts[0].id, first_account);
+    assert_eq!(first_accounts[0].tenant_id, first_tenant);
+    assert!(
+        !repo::accounts::active_account_exists(&db, first_tenant, second_account)
+            .await
+            .unwrap()
+    );
+    assert!(!repo::accounts::update_account(
+        &db,
+        first_tenant,
+        second_account,
+        Some("Cross-tenant update"),
+        None,
+    )
+    .await
+    .unwrap());
+
+    let first_warehouses = repo::warehouses::get_warehouses(&db, first_tenant, false)
+        .await
+        .unwrap();
+    assert_eq!(first_warehouses.len(), 1);
+    assert_eq!(first_warehouses[0].id, first_warehouse);
+    assert_eq!(first_warehouses[0].tenant_id, first_tenant);
+    assert!(
+        !repo::warehouses::active_warehouse_exists(&db, first_tenant, second_warehouse)
+            .await
+            .unwrap()
+    );
+
+    // Give one operator access to both tenants to prove the selected header,
+    // rather than the identity alone, controls the HTTP result set.
+    sqlx::query(
+        "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
+    )
+    .bind(second_tenant.get())
+    .bind(operator.id)
+    .execute(&db)
+    .await
+    .unwrap();
+    let permission = repo::permissions::add_permission(&db, "admin", Some("Admin"))
+        .await
+        .unwrap();
+    let role = repo::roles::add_role(&db, "master-data-admin", Some("Master data admin"))
+        .await
+        .unwrap();
+    repo::roles::add_role_permission(&db, role, permission)
+        .await
+        .unwrap();
+    repo::roles::add_role_to_user(&db, operator.id, role)
+        .await
+        .unwrap();
+    let token = auth::create_session(&db, operator.id).await.unwrap();
+    let app = routes::app(AppState::new(db));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/accounts")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(TENANT_ID_HEADER, second_tenant.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+    let accounts: Vec<wareboxes_core::models::Account> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].id, second_account);
+    assert_eq!(accounts[0].tenant_id, second_tenant);
+}

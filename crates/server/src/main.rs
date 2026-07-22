@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = Config::from_env()?;
-    tracing::info!(database = %cfg.database_url, "starting wareboxes-server");
+    tracing::info!(bind_address = %cfg.bind_addr, "starting wareboxes-server");
 
     let pool = db::connect(&cfg.database_url).await?;
     db::run_migrations(&pool)
@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
 
     bootstrap_admin(&pool, &cfg).await?;
 
-    let state = AppState::new(pool);
+    let state = AppState::with_security(pool, cfg.security.clone());
     let app = routes::app(state);
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr)

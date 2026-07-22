@@ -1,6 +1,8 @@
+use axum::extract::DefaultBodyLimit;
+use axum::http::{header, HeaderName, Method};
 use axum::routing::{get, post};
 use axum::Router;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use validator::Validate;
 use wareboxes_core::field_errors;
@@ -39,6 +41,8 @@ pub fn app(state: AppState) -> Router {
         .route("/auth/register", post(auth::register))
         .route("/auth/logout", post(auth::logout))
         .route("/auth/me", get(auth::me))
+        .route("/auth/tenants", get(auth::tenants))
+        .route("/auth/context", get(auth::context))
         .route("/auth/settings", post(auth::update_settings))
         // users
         .route("/users", get(users::list))
@@ -191,15 +195,25 @@ pub fn app(state: AppState) -> Router {
         .route("/audits/restore", post(audits::restore))
         .route("/audits/:audit_id/counts", get(audits::counts));
 
-    Router::new()
+    let security = state.security.clone();
+    let mut app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .nest("/api", api)
         .layer(TraceLayer::new_for_http())
-        .layer(
+        .layer(DefaultBodyLimit::max(security.max_request_body_bytes));
+
+    if !security.cors_allowed_origins.is_empty() {
+        app = app.layer(
             CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
-        .with_state(state)
+                .allow_origin(security.cors_allowed_origins)
+                .allow_methods([Method::GET, Method::POST])
+                .allow_headers([
+                    header::AUTHORIZATION,
+                    header::CONTENT_TYPE,
+                    HeaderName::from_static(crate::auth::TENANT_ID_HEADER),
+                ]),
+        );
+    }
+
+    app.with_state(state)
 }

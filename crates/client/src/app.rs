@@ -75,6 +75,15 @@ struct PendingDelete {
     success_message: &'static str,
 }
 
+struct LoadFilters<'a> {
+    date: &'a str,
+    date_mode: &'a str,
+    status: &'a str,
+    load_type: &'a str,
+    account: &'a str,
+    search: &'a str,
+}
+
 #[derive(Default)]
 struct Forms {
     base_url: String,
@@ -290,6 +299,7 @@ impl WareboxesApp {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn delete_button(
         &mut self,
         ui: &mut egui::Ui,
@@ -384,6 +394,7 @@ impl WareboxesApp {
             match ev {
                 ApiEvent::LoggedIn(s) => {
                     self.api.token = Some(s.token.clone());
+                    self.api.tenant_id = Some(s.active_tenant.tenant_id);
                     self.light_mode = s.settings.light_mode;
                     self.session = Some(*s);
                     let first = if self.has_perm("orders") {
@@ -396,6 +407,7 @@ impl WareboxesApp {
                 ApiEvent::LoggedOut => {
                     self.session = None;
                     self.api.token = None;
+                    self.api.tenant_id = None;
                     self.panels.clear();
                     self.open_load_ids.clear();
                     self.open_order_ids.clear();

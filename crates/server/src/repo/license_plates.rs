@@ -297,7 +297,7 @@ pub async fn move_license_plate(
     )
     .bind(destination_warehouse_id)
     .bind(to_location_id)
-    .bind(&now)
+    .bind(now)
     .bind(id)
     .execute(&mut *tx)
     .await?;
@@ -321,7 +321,7 @@ pub async fn move_license_plate(
             VALUES ($1, $2, $3, $4, $5, $6, $7, 'move', $8, $9, 'license_plate', $10, $11)
             "#,
         )
-        .bind(&now)
+        .bind(now)
         .bind(user_id)
         .bind(item_batch_id)
         .bind(id)

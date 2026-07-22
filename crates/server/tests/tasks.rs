@@ -24,7 +24,8 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     repo::roles::add_role_to_user(&db, assignee.id, wms_role)
         .await
         .unwrap();
-    let warehouse = repo::warehouses::add_warehouse(&db, "Task DC")
+    let tenant_id = tenant_for_user(&db, user.id).await;
+    let warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "Task DC")
         .await
         .unwrap();
     let freezer = repo::locations::add_location(
@@ -199,6 +200,19 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
         .unwrap()
         .unwrap();
     assert_eq!(started.id, break_task);
+    assert!(!repo::tasks::record_task_progress(
+        &db,
+        user.id,
+        break_task,
+        None,
+        WorkTaskProgressAction::Progress,
+        1,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap());
     assert!(repo::tasks::record_task_progress(
         &db,
         assignee.id,
@@ -289,7 +303,8 @@ async fn cancelling_order_creates_unpack_task() {
     let db = &fixture.db;
 
     let user = fixture.user("cancel-task@test.com").await;
-    let account = fixture.account("Cancel Task Account").await;
+    let tenant_id = tenant_for_user(db, user.id).await;
+    let account = fixture.account(tenant_id, "Cancel Task Account").await;
     let item = fixture.item("Cancelled Order Item", "each").await;
     let order_id = fixture.order("CANCEL-TASK-1", Some(account)).await;
     let order_item_id = fixture.order_item(order_id, item, 3).await;

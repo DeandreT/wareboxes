@@ -2,6 +2,19 @@
 -- app/utils/types/db/*.ts. Timestamps use TIMESTAMPTZ;
 -- booleans use native BOOLEAN.
 
+CREATE TABLE tenants (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    created TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted TIMESTAMPTZ,
+    slug TEXT NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    CONSTRAINT tenants_slug_unique UNIQUE (slug),
+    CONSTRAINT tenants_slug_not_blank CHECK (btrim(slug) <> ''),
+    CONSTRAINT tenants_name_not_blank CHECK (btrim(name) <> ''),
+    CONSTRAINT tenants_status_valid CHECK (status IN ('active', 'suspended'))
+);
+
 CREATE TABLE addresses (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     created TIMESTAMPTZ NOT NULL,
@@ -32,6 +45,22 @@ CREATE TABLE users (
     nick_name TEXT,
     phone TEXT
 );
+
+CREATE TABLE tenant_memberships (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    created TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted TIMESTAMPTZ,
+    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    CONSTRAINT tenant_memberships_tenant_user_unique UNIQUE (tenant_id, user_id)
+);
+CREATE INDEX tenant_memberships_user_active_idx
+    ON tenant_memberships (user_id, tenant_id)
+    WHERE deleted IS NULL;
+CREATE UNIQUE INDEX tenant_memberships_one_default_per_user_idx
+    ON tenant_memberships (user_id)
+    WHERE deleted IS NULL AND is_default;
 
 CREATE TABLE user_credentials (
     user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -90,43 +119,54 @@ CREATE INDEX idx_role_permissions_role_id ON role_permissions(role_id);
 
 CREATE TABLE accounts (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    name TEXT NOT NULL UNIQUE,
-    email TEXT NOT NULL
+    name TEXT NOT NULL,
+    email TEXT NOT NULL,
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, name)
 );
 
 CREATE TABLE warehouses (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     name TEXT,
-    address_id BIGINT REFERENCES addresses(id)
+    address_id BIGINT REFERENCES addresses(id),
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, name)
 );
 
 CREATE TABLE account_warehouses (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    account_id BIGINT NOT NULL REFERENCES accounts(id),
-    warehouse_id BIGINT NOT NULL REFERENCES warehouses(id),
-    UNIQUE (account_id, warehouse_id)
+    account_id BIGINT NOT NULL,
+    warehouse_id BIGINT NOT NULL,
+    FOREIGN KEY (tenant_id, account_id) REFERENCES accounts(tenant_id, id),
+    FOREIGN KEY (tenant_id, warehouse_id) REFERENCES warehouses(tenant_id, id),
+    UNIQUE (tenant_id, account_id, warehouse_id)
 );
 CREATE INDEX idx_account_warehouses_account_id ON account_warehouses(account_id);
 CREATE INDEX idx_account_warehouses_warehouse_id ON account_warehouses(warehouse_id);
 
 CREATE TABLE user_accounts (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    account_id BIGINT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    account_id BIGINT NOT NULL,
     is_primary BOOLEAN NOT NULL DEFAULT false,
-    UNIQUE (user_id, account_id)
+    FOREIGN KEY (tenant_id, account_id) REFERENCES accounts(tenant_id, id) ON DELETE CASCADE,
+    UNIQUE (tenant_id, user_id, account_id)
 );
 CREATE INDEX idx_user_accounts_account_id ON user_accounts(account_id);
 CREATE UNIQUE INDEX idx_user_accounts_one_primary
-    ON user_accounts(user_id)
+    ON user_accounts(tenant_id, user_id)
     WHERE is_primary AND deleted IS NULL;
 
 CREATE TABLE pick_waves (

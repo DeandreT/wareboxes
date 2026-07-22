@@ -51,10 +51,11 @@ async fn order_and_load_mutations_write_activity_history() {
     let user = auth::register_user(&db, "activity@test.com", "supersecret", None, None)
         .await
         .unwrap();
-    let warehouse = repo::warehouses::add_warehouse(&db, "Activity DC")
+    let tenant_id = tenant_for_user(&db, user.id).await;
+    let warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "Activity DC")
         .await
         .unwrap();
-    let account = repo::accounts::add_account(&db, "Activity Account", "activity@test")
+    let account = repo::accounts::add_account(&db, tenant_id, "Activity Account", "activity@test")
         .await
         .unwrap();
     let load_id = repo::loads::add_load(

@@ -11,6 +11,7 @@ name = "wareboxes-client"
 path = "src/main.rs"
 
 [dependencies]
+wareboxes-domain = { workspace = true }
 wareboxes-core = { workspace = true }
 wareboxes-barcodes = { workspace = true }
 serde = { workspace = true }

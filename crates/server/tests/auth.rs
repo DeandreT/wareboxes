@@ -1,6 +1,10 @@
 mod common;
 
+use axum::extract::State;
+use axum::Json;
 use common::*;
+use wareboxes_core::dto::{LoginRequest, RegisterRequest};
+use wareboxes_server::state::AppState;
 
 #[tokio::test]
 async fn auth_and_hierarchical_rbac() {
@@ -19,6 +23,23 @@ async fn auth_and_hierarchical_rbac() {
         .await
         .unwrap()
         .is_none());
+
+    let token = auth::create_session(&db, user.id).await.unwrap();
+    let stored_token: String = sqlx::query_scalar("SELECT token FROM sessions WHERE user_id = $1")
+        .bind(user.id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_ne!(stored_token, token);
+    assert_eq!(stored_token.len(), 64);
+    auth::destroy_session(&db, &token).await.unwrap();
+    let remaining_sessions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE user_id = $1")
+            .bind(user.id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(remaining_sessions, 0);
 
     // Role hierarchy: `child.parent_id = parent`. The ported recursive CTE
     // resolves a user's roles plus their descendants, so a holder of `parent`
@@ -72,4 +93,32 @@ async fn auth_and_hierarchical_rbac() {
         .await
         .unwrap_err();
     assert!(matches!(err, AppError::Core(CoreError::BadRequest(_))));
+}
+
+#[tokio::test]
+async fn public_registration_is_disabled_by_default() {
+    let db = setup().await;
+    let state = AppState::new(db.clone());
+    let request = RegisterRequest {
+        email: "public@test.com".to_string(),
+        password: "supersecret".to_string(),
+        first_name: None,
+        last_name: None,
+    };
+
+    let result = wareboxes_server::routes::auth::register(State(state), Json(request)).await;
+    assert!(matches!(result, Err(AppError::Core(CoreError::Forbidden))));
+
+    auth::register_user(&db, "login@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let login = LoginRequest {
+        email: "login@test.com".to_string(),
+        password: "supersecret".to_string(),
+    };
+    let result = wareboxes_server::routes::auth::login(State(AppState::new(db)), Json(login)).await;
+    let session = result.unwrap().0;
+    assert_eq!(session.user.email, "login@test.com");
+    assert_eq!(session.active_tenant.user_id.get(), session.user.id);
+    assert!(session.active_tenant.is_default);
 }

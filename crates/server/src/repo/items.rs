@@ -181,7 +181,7 @@ pub async fn add_item(
     let dims_id: i64 = sqlx::query_scalar(
         "INSERT INTO dims (created, length, width, height, length_uom, weight, weight_uom) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
-    .bind(&now)
+    .bind(now)
     .bind(length)
     .bind(width)
     .bind(height)
@@ -193,7 +193,7 @@ pub async fn add_item(
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO items (created, description, notes, packaging_unit, dims_id) VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
-    .bind(&now)
+    .bind(now)
     .bind(description)
     .bind(notes)
     .bind(packaging_unit)

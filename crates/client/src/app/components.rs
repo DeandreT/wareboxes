@@ -373,17 +373,8 @@ impl WareboxesApp {
             .unwrap_or_else(|| format!("Batch {id}"))
     }
 
-    pub(super) fn load_matches_filters(
-        &self,
-        load: &Load,
-        date_filter: &str,
-        date_mode: &str,
-        status_filter: &str,
-        type_filter: &str,
-        account_filter: &str,
-        search_filter: &str,
-    ) -> bool {
-        if let Some(selected_date) = Self::parse_filter_date(date_filter) {
+    pub(super) fn load_matches_filters(&self, load: &Load, filters: &LoadFilters<'_>) -> bool {
+        if let Some(selected_date) = Self::parse_filter_date(filters.date) {
             let date_matches = [
                 Some(load.created),
                 load.expected_time,
@@ -395,20 +386,21 @@ impl WareboxesApp {
             ]
             .into_iter()
             .flatten()
-            .any(|ts| Self::timestamp_matches_date_filter(ts, selected_date, date_mode));
+            .any(|ts| Self::timestamp_matches_date_filter(ts, selected_date, filters.date_mode));
             if !date_matches {
                 return false;
             }
         }
 
-        if !status_filter.trim().is_empty() && load.status.as_str() != status_filter.trim() {
+        if !filters.status.trim().is_empty() && load.status.as_str() != filters.status.trim() {
             return false;
         }
-        if !type_filter.trim().is_empty() && load.r#type.as_str() != type_filter.trim() {
+        if !filters.load_type.trim().is_empty() && load.r#type.as_str() != filters.load_type.trim()
+        {
             return false;
         }
 
-        let account_filter = account_filter.trim().to_ascii_lowercase();
+        let account_filter = filters.account.trim().to_ascii_lowercase();
         if !account_filter.is_empty()
             && !load.account_id.to_string().contains(&account_filter)
             && !self
@@ -419,7 +411,7 @@ impl WareboxesApp {
             return false;
         }
 
-        let search_filter = search_filter.trim().to_ascii_lowercase();
+        let search_filter = filters.search.trim().to_ascii_lowercase();
         if !search_filter.is_empty() {
             let haystack = format!(
                 "{} {} {} {} {} {}",

@@ -31,7 +31,7 @@ pub async fn add(
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let hired = body.hired.clone().unwrap_or_else(now_iso);
+    let hired = body.hired.unwrap_or_else(now_iso);
     let id = repo::employees::add_employee(
         &state.db,
         &body.first_name,

@@ -22,7 +22,7 @@ pub async fn connect(database_url: &str) -> anyhow::Result<Db> {
         .max_connections(10)
         .connect(database_url)
         .await
-        .with_context(|| format!("connecting to database at {database_url}"))?;
+        .context("connecting to PostgreSQL")?;
     Ok(pool)
 }
 

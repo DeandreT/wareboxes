@@ -1124,7 +1124,7 @@ impl WareboxesApp {
                             ui.label("Type");
                             Self::select_from_allowed(
                                 ui,
-                                &format!("item_{}_barcode_type", item.id),
+                                format!("item_{}_barcode_type", item.id),
                                 &mut barcode_type,
                                 &BARCODE_TYPES,
                             );

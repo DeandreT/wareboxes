@@ -615,12 +615,11 @@ async fn order_summaries(
         ("void", "Void", void),
     ]
     .into_iter()
-    .filter_map(|(key, label, count)| {
-        (count > 0).then(|| SummaryCount {
-            key: key.to_owned(),
-            label: label.to_owned(),
-            count,
-        })
+    .filter(|&(_key, _label, count)| count > 0)
+    .map(|(key, label, count)| SummaryCount {
+        key: key.to_owned(),
+        label: label.to_owned(),
+        count,
     })
     .collect())
 }
