@@ -796,6 +796,7 @@ impl WareboxesApp {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn sanitize_filename(value: &str) -> String {
         let sanitized = value
             .chars()

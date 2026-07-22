@@ -27,7 +27,7 @@ use wareboxes_core::models::{
 
 use crate::api::{ApiClient, ApiEvent, Screen};
 
-const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8080";
+const LOCAL_BASE_URL: &str = "http://127.0.0.1:8080";
 /// Open panels re-fetch their data on this cadence.
 const AUTO_REFRESH_SECS: f64 = 5.0;
 const LARGE_PANEL_AUTO_REFRESH_SECS: f64 = 60.0;
@@ -163,7 +163,7 @@ impl WareboxesApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let (tx, rx) = channel();
-        let api = ApiClient::new(DEFAULT_BASE_URL.to_owned(), tx, cc.egui_ctx.clone());
+        let api = ApiClient::new(default_base_url(), tx, cc.egui_ctx.clone());
         let forms = Forms {
             base_url: api.base_url.clone(),
             o_country: "US".to_owned(),
@@ -523,6 +523,19 @@ impl WareboxesApp {
             }
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn default_base_url() -> String {
+    LOCAL_BASE_URL.to_owned()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn default_base_url() -> String {
+    web_sys::window()
+        .and_then(|window| window.location().origin().ok())
+        .filter(|origin| !origin.is_empty() && origin != "null")
+        .unwrap_or_else(|| LOCAL_BASE_URL.to_owned())
 }
 
 impl eframe::App for WareboxesApp {

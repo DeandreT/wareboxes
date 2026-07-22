@@ -1,0 +1,88 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hetzner-production
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-24.04
+    environment: hetzner-production
+    steps:
+      - name: Resolve release revision
+        id: release
+        env:
+          WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          sha="${WORKFLOW_SHA:-$DISPATCH_SHA}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      - name: Build release
+        run: |
+          cargo build --release --locked -p wareboxes-server
+          scripts/build-site.sh
+
+      - name: Package release
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          install -d release/site
+          install -m 0755 target/release/wareboxes-server release/wareboxes-server
+          cp -a _site/. release/site/
+          tar -C release -czf "wareboxes-${RELEASE_SHA}.tar.gz" .
+          sha256sum "wareboxes-${RELEASE_SHA}.tar.gz" > "wareboxes-${RELEASE_SHA}.tar.gz.sha256"
+
+      - name: Configure deployment SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/wareboxes_deploy"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/wareboxes_deploy" "$HOME/.ssh/known_hosts"
+
+      - name: Upload and activate release
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          ssh_options=(-o BatchMode=yes -o IdentitiesOnly=yes -i "$HOME/.ssh/wareboxes_deploy")
+          scp "${ssh_options[@]}" \
+            "wareboxes-${RELEASE_SHA}.tar.gz" \
+            "wareboxes-${RELEASE_SHA}.tar.gz.sha256" \
+            "deploy@${DEPLOY_HOST}:/var/lib/wareboxes/uploads/"
+          ssh "${ssh_options[@]}" "deploy@${DEPLOY_HOST}" \
+            "sudo /usr/local/sbin/wareboxes-deploy '${RELEASE_SHA}'"

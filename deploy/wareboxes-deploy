@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 1 ] || [[ ! "$1" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "usage: wareboxes-deploy <40-character-git-sha>" >&2
+  exit 2
+fi
+
+release_sha="$1"
+archive="wareboxes-$release_sha.tar.gz"
+upload_dir=/var/lib/wareboxes/uploads
+release_dir="/opt/wareboxes/releases/$release_sha"
+current_link=/opt/wareboxes/current
+lock_file=/run/lock/wareboxes-deploy.lock
+
+exec 9>"$lock_file"
+flock -n 9 || {
+  echo "another Wareboxes deployment is active" >&2
+  exit 1
+}
+
+cd "$upload_dir"
+sha256sum --check --strict "$archive.sha256"
+
+if tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+  echo "release archive contains an unsafe path" >&2
+  exit 1
+fi
+
+previous_target="$(readlink -f "$current_link" 2>/dev/null || true)"
+temporary_dir="$(mktemp -d "/opt/wareboxes/releases/.${release_sha}.XXXXXX")"
+trap 'rm -rf "$temporary_dir"' EXIT
+
+tar -xzf "$archive" --no-same-owner -C "$temporary_dir"
+test -x "$temporary_dir/wareboxes-server"
+test -f "$temporary_dir/site/index.html"
+chown -R root:root "$temporary_dir"
+chmod 0755 "$temporary_dir" "$temporary_dir/wareboxes-server" "$temporary_dir/site"
+
+if [ -e "$release_dir" ]; then
+  rm -rf "$release_dir"
+fi
+mv "$temporary_dir" "$release_dir"
+trap - EXIT
+ln -sfn "$release_dir" "$current_link"
+
+systemctl restart wareboxes.service
+
+healthy=false
+for _ in $(seq 1 60); do
+  if curl --fail --silent --show-error http://127.0.0.1:8080/health >/dev/null; then
+    healthy=true
+    break
+  fi
+  sleep 1
+done
+
+if [ "$healthy" != true ]; then
+  journalctl -u wareboxes.service --no-pager -n 100 >&2 || true
+  if [ -n "$previous_target" ] && [ -d "$previous_target" ]; then
+    ln -sfn "$previous_target" "$current_link"
+    systemctl restart wareboxes.service
+  fi
+  echo "release failed its health check" >&2
+  exit 1
+fi
+
+rm -f "$upload_dir/$archive" "$upload_dir/$archive.sha256"
+find /opt/wareboxes/releases -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
+  | sort -nr \
+  | tail -n +6 \
+  | cut -d' ' -f2- \
+  | xargs -r rm -rf
+
+echo "deployed $release_sha"
