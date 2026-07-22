@@ -2,6 +2,7 @@
 //! file. Nested aggregates (roles, permissions, order items, facilities) are
 //! assembled in Rust rather than via PostgreSQL `json_agg`.
 
+pub mod access;
 pub mod address;
 pub mod audits;
 pub mod employees;

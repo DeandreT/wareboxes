@@ -33,9 +33,9 @@ pub async fn list(
         .unwrap_or(DEFAULT_ORDER_LIMIT)
         .clamp(1, MAX_ORDER_LIMIT);
     let offset = q.offset.unwrap_or(0).max(0);
-    let orders = repo::orders::get_orders_page(
+    let orders = repo::orders::get_orders_page_in_scope(
         &state.db,
-        user.tenant.tenant_id,
+        &user.tenant,
         limit,
         offset,
         q.status,
@@ -51,7 +51,7 @@ pub async fn get(
     Path(order_id): Path<i64>,
 ) -> AppResult<Json<Option<Order>>> {
     user.require_permission(&state.db, PERM).await?;
-    let order = repo::orders::get_order(&state.db, user.tenant.tenant_id, order_id).await?;
+    let order = repo::orders::get_order_in_scope(&state.db, &user.tenant, order_id).await?;
     Ok(Json(order))
 }
 
@@ -62,6 +62,17 @@ pub async fn add(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    user.require_inventory_owner(body.inventory_owner_id)?;
+    if !repo::inventory_owners::active_inventory_owner_exists_in_scope(
+        &state.db,
+        user.tenant.tenant_id,
+        &user.tenant.owner_scope,
+        body.inventory_owner_id,
+    )
+    .await?
+    {
+        return Err(AppError::bad_request("Inventory owner not found"));
+    }
     let ok = repo::orders::add_order(&state.db, user.tenant.tenant_id, &body).await?;
     Ok(Json(ok))
 }
@@ -73,6 +84,9 @@ pub async fn update(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    if !repo::access::order_is_accessible(&state.db, &user.tenant, body.order_id, false).await? {
+        return Ok(Json(false));
+    }
     let ok =
         repo::orders::update_order_by_user(&state.db, user.tenant.tenant_id, &body, user.user.id)
             .await?;
@@ -86,6 +100,11 @@ pub async fn delete(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    if !repo::access::order_is_accessible(&state.db, &user.tenant, body.order_id, false).await? {
+        return Err(AppError::conflict(
+            "order cannot be deleted because it is shipped, confirmed, closed, deleted, or not mutable",
+        ));
+    }
     let ok = repo::orders::delete_order(&state.db, user.tenant.tenant_id, body.order_id).await?;
     if !ok {
         return Err(AppError::conflict(
@@ -102,6 +121,9 @@ pub async fn restore(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    if !repo::access::order_is_accessible(&state.db, &user.tenant, body.order_id, true).await? {
+        return Ok(Json(false));
+    }
     let ok = repo::orders::restore_order(&state.db, user.tenant.tenant_id, body.order_id).await?;
     Ok(Json(ok))
 }
