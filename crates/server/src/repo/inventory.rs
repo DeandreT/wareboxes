@@ -1211,12 +1211,27 @@ pub async fn reserve_inventory(
     order_item_id: Option<i64>,
     inventory_balance_id: i64,
     qty: i64,
+    idempotency_key: &str,
 ) -> AppResult<i64> {
     if qty <= 0 {
         return Err(AppError::bad_request("quantity must be positive"));
     }
     let now = now_iso();
     let mut tx = db.begin().await?;
+    let request_hash =
+        inventory_journal::request_hash(&(order_id, order_item_id, inventory_balance_id, qty))?;
+    if let Some(reservation_id) = inventory_journal::replayed_result(
+        &mut tx,
+        tenant_id,
+        "reserve_inventory",
+        Some(idempotency_key),
+        &request_hash,
+    )
+    .await?
+    {
+        tx.commit().await?;
+        return Ok(reservation_id);
+    }
 
     let Some(balance_row) = sqlx::query(
         r#"
@@ -1353,6 +1368,17 @@ pub async fn reserve_inventory(
     .fetch_one(&mut *tx)
     .await?;
 
+    inventory_journal::record_command_result(
+        &mut tx,
+        tenant_id,
+        "reserve_inventory",
+        idempotency_key,
+        &request_hash,
+        &reservation_id,
+        None,
+    )
+    .await?;
+
     tx.commit().await?;
     Ok(reservation_id)
 }
@@ -1361,14 +1387,29 @@ pub async fn cancel_reservation(
     db: &Db,
     tenant_id: TenantId,
     reservation_id: i64,
+    idempotency_key: &str,
 ) -> AppResult<bool> {
     let now = now_iso();
     let mut tx = db.begin().await?;
+    let request_hash = inventory_journal::request_hash(&reservation_id)?;
+    if let Some(cancelled) = inventory_journal::replayed_result(
+        &mut tx,
+        tenant_id,
+        "cancel_reservation",
+        Some(idempotency_key),
+        &request_hash,
+    )
+    .await?
+    {
+        tx.commit().await?;
+        return Ok(cancelled);
+    }
     let row = sqlx::query(
         r#"
         SELECT inventory_balance_id, qty
         FROM inventory_reservations
         WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL AND status = 'reserved'
+        FOR UPDATE
         "#,
     )
     .bind(tenant_id.get())
@@ -1377,12 +1418,23 @@ pub async fn cancel_reservation(
     .await?;
 
     let Some(row) = row else {
+        inventory_journal::record_command_result(
+            &mut tx,
+            tenant_id,
+            "cancel_reservation",
+            idempotency_key,
+            &request_hash,
+            &false,
+            None,
+        )
+        .await?;
+        tx.commit().await?;
         return Ok(false);
     };
     let inventory_balance_id: i64 = row.try_get("inventory_balance_id")?;
     let qty: i64 = row.try_get("qty")?;
 
-    sqlx::query(
+    let balance_update = sqlx::query(
         r#"
         UPDATE inventory_balances
         SET qty_reserved = qty_reserved - $1, modified = $2
@@ -1396,6 +1448,11 @@ pub async fn cancel_reservation(
     .bind(qty)
     .execute(&mut *tx)
     .await?;
+    if balance_update.rows_affected() != 1 {
+        return Err(AppError::conflict(
+            "reservation balance could not be released",
+        ));
+    }
 
     let res = sqlx::query(
         "UPDATE inventory_reservations SET deleted = $1, modified = $2, status = 'cancelled' WHERE tenant_id = $3 AND id = $4",
@@ -1407,6 +1464,21 @@ pub async fn cancel_reservation(
     .execute(&mut *tx)
     .await?;
 
+    if res.rows_affected() != 1 {
+        return Err(AppError::conflict("reservation could not be cancelled"));
+    }
+
+    inventory_journal::record_command_result(
+        &mut tx,
+        tenant_id,
+        "cancel_reservation",
+        idempotency_key,
+        &request_hash,
+        &true,
+        None,
+    )
+    .await?;
+
     tx.commit().await?;
-    Ok(res.rows_affected() > 0)
+    Ok(true)
 }
