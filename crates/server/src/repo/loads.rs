@@ -6,12 +6,14 @@ use std::collections::HashMap;
 use sqlx::Row;
 use wareboxes_core::models::{
     InventoryStatus, InventoryTransactionType, Load, LoadActivity, LoadFile, LoadFileCategory,
-    LoadLine, LoadLineStatus, LoadNote, LoadStatus, LoadType, ReceiveLoadLineResult, Timestamp,
+    LoadLine, LoadLineStatus, LoadNote, LoadStatus, LoadType, ReceiveLoadLineResult, TenantAccess,
+    Timestamp,
 };
 use wareboxes_domain::TenantId;
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
+use crate::repo::access::ScopeBindings;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
 use crate::repo::{inventory, license_plates, orders};
 
@@ -258,6 +260,36 @@ pub async fn get_load_summaries(
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<Load>> {
+    get_load_summaries_with_scope(
+        db,
+        tenant_id,
+        &ScopeBindings::unrestricted(),
+        show_deleted,
+        limit,
+        offset,
+    )
+    .await
+}
+
+pub async fn get_load_summaries_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    show_deleted: bool,
+    limit: i64,
+    offset: i64,
+) -> AppResult<Vec<Load>> {
+    let scope = ScopeBindings::for_access(access);
+    get_load_summaries_with_scope(db, access.tenant_id, &scope, show_deleted, limit, offset).await
+}
+
+async fn get_load_summaries_with_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    scope: &ScopeBindings,
+    show_deleted: bool,
+    limit: i64,
+    offset: i64,
+) -> AppResult<Vec<Load>> {
     let rows = sqlx::query(
         r#"
         SELECT l.id, l.tenant_id, l.created, l.deleted, l.facility_id, facility.name AS facility_name,
@@ -270,13 +302,20 @@ pub async fn get_load_summaries(
             ON facility.tenant_id = l.tenant_id AND facility.id = l.facility_id
         INNER JOIN inventory_owners a
             ON a.tenant_id = l.tenant_id AND a.id = l.inventory_owner_id
-        WHERE l.tenant_id = $1 AND ($2 OR l.deleted IS NULL)
+        WHERE l.tenant_id = $1
+          AND ($2 OR l.deleted IS NULL)
+          AND ($3 OR l.facility_id = ANY($4))
+          AND ($5 OR l.inventory_owner_id = ANY($6))
         ORDER BY l.created DESC, l.id DESC
-        LIMIT $3 OFFSET $4
+        LIMIT $7 OFFSET $8
         "#,
     )
         .bind(tenant_id.get())
         .bind(show_deleted)
+        .bind(scope.all_facilities)
+        .bind(&scope.facility_ids)
+        .bind(scope.all_inventory_owners)
+        .bind(&scope.inventory_owner_ids)
         .bind(limit)
         .bind(offset)
         .fetch_all(db)
@@ -323,6 +362,33 @@ pub async fn get_load(
     load_id: i64,
     show_deleted_notes: bool,
 ) -> AppResult<Option<Load>> {
+    get_load_with_scope(
+        db,
+        tenant_id,
+        &ScopeBindings::unrestricted(),
+        load_id,
+        show_deleted_notes,
+    )
+    .await
+}
+
+pub async fn get_load_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    load_id: i64,
+    show_deleted_notes: bool,
+) -> AppResult<Option<Load>> {
+    let scope = ScopeBindings::for_access(access);
+    get_load_with_scope(db, access.tenant_id, &scope, load_id, show_deleted_notes).await
+}
+
+async fn get_load_with_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    scope: &ScopeBindings,
+    load_id: i64,
+    show_deleted_notes: bool,
+) -> AppResult<Option<Load>> {
     let row = sqlx::query(
         r#"
         SELECT l.id, l.tenant_id, l.created, l.deleted, l.facility_id, facility.name AS facility_name,
@@ -335,11 +401,19 @@ pub async fn get_load(
             ON facility.tenant_id = l.tenant_id AND facility.id = l.facility_id
         INNER JOIN inventory_owners a
             ON a.tenant_id = l.tenant_id AND a.id = l.inventory_owner_id
-        WHERE l.tenant_id = $1 AND l.id = $2 AND l.deleted IS NULL
+        WHERE l.tenant_id = $1
+          AND l.id = $2
+          AND l.deleted IS NULL
+          AND ($3 OR l.facility_id = ANY($4))
+          AND ($5 OR l.inventory_owner_id = ANY($6))
         "#,
     )
     .bind(tenant_id.get())
     .bind(load_id)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
     .fetch_optional(db)
     .await?;
     let Some(row) = row else {
@@ -888,7 +962,8 @@ pub async fn receive_line(
                ll.missing_qty,
                COALESCE($1, ll.lot) AS lot, COALESCE($2, ll.serial) AS serial,
                COALESCE($3, ll.expiration) AS expiration, l.status AS load_status,
-               l.inventory_owner_id, owner.tenant_id, item.packaging_unit AS uom
+               l.facility_id AS load_facility_id, l.inventory_owner_id,
+               owner.tenant_id, item.packaging_unit AS uom
         FROM load_lines ll
         INNER JOIN loads l ON l.tenant_id = ll.tenant_id AND l.id = ll.load_id
         INNER JOIN inventory_owners owner
@@ -911,6 +986,7 @@ pub async fn receive_line(
     let tenant_id = TenantId::new(row.try_get("tenant_id")?)
         .map_err(|error| AppError::internal(error.to_string()))?;
     let inventory_owner_id: i64 = row.try_get("inventory_owner_id")?;
+    let load_facility_id: i64 = row.try_get("load_facility_id")?;
     let item_id: i64 = row.try_get("item_id")?;
     let uom: String = row.try_get("uom")?;
     let expected: i64 = row.try_get("expected_qty")?;
@@ -1023,13 +1099,26 @@ pub async fn receive_line(
         )
         .await?;
 
-        let facility_id: i64 = sqlx::query_scalar(
-            "SELECT facility_id FROM locations WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL AND active AND receivable",
+        let facility_id: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT facility_id
+            FROM locations
+            WHERE tenant_id = $1
+              AND id = $2
+              AND facility_id = $3
+              AND deleted IS NULL
+              AND active
+              AND receivable
+            "#,
         )
         .bind(tenant_id.get())
         .bind(to_location_id)
-        .fetch_one(&mut *tx)
+        .bind(load_facility_id)
+        .fetch_optional(&mut *tx)
         .await?;
+        let facility_id = facility_id.ok_or_else(|| {
+            AppError::bad_request("receiving location must be active in the load facility")
+        })?;
 
         let transaction_id = match inventory_journal::begin_transaction(
             &mut tx,

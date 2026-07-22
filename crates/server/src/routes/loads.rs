@@ -8,6 +8,7 @@ use wareboxes_core::dto::{
 use wareboxes_core::models::{Load, LoadFileCategory, LoadStatus, LoadType, ReceiveLoadLineResult};
 
 use crate::auth::CurrentTenant;
+use crate::db::Db;
 use crate::error::{AppError, AppResult};
 use crate::permissions;
 use crate::repo;
@@ -17,6 +18,42 @@ use crate::state::AppState;
 const PERM: &str = "wms";
 const DEFAULT_LOAD_LIMIT: i64 = 500;
 const MAX_LOAD_LIMIT: i64 = 2_000;
+
+async fn require_active_load(
+    db: &Db,
+    user: &CurrentTenant,
+    load_id: i64,
+) -> AppResult<repo::access::OperationalDimensions> {
+    repo::access::load_dimensions(db, &user.tenant, load_id, false)
+        .await?
+        .ok_or_else(|| AppError::not_found("load"))
+}
+
+fn require_active_load_child(
+    dimensions: Option<repo::access::OperationalDimensions>,
+    resource: &'static str,
+) -> AppResult<repo::access::OperationalDimensions> {
+    dimensions.ok_or_else(|| AppError::not_found(resource))
+}
+
+async fn require_active_location_in_facility(
+    db: &Db,
+    tenant_id: wareboxes_domain::TenantId,
+    facility_id: i64,
+    location_id: i64,
+    label: &'static str,
+) -> AppResult<()> {
+    if !repo::locations::active_location_exists_in_facility(db, tenant_id, facility_id, location_id)
+        .await?
+    {
+        return Err(AppError::bad_request(format!("{label} not found")));
+    }
+    match repo::locations::location_active_state(db, tenant_id, location_id).await? {
+        Some(true) => Ok(()),
+        Some(false) => Err(AppError::bad_request(format!("{label} is inactive"))),
+        None => Err(AppError::bad_request(format!("{label} not found"))),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct LoadListQuery {
@@ -38,9 +75,9 @@ pub async fn list(
         .clamp(1, MAX_LOAD_LIMIT);
     let offset = q.offset.unwrap_or(0).max(0);
     Ok(Json(
-        repo::loads::get_load_summaries(
+        repo::loads::get_load_summaries_in_scope(
             &state.db,
-            user.tenant.tenant_id,
+            &user.tenant,
             q.show_deleted,
             limit,
             offset,
@@ -59,13 +96,8 @@ pub async fn get(
         permissions::user_has_permission(&state.db, user.tenant.tenant_id, user.user.id, "admin")
             .await?;
     Ok(Json(
-        repo::loads::get_load(
-            &state.db,
-            user.tenant.tenant_id,
-            load_id,
-            show_deleted_notes,
-        )
-        .await?,
+        repo::loads::get_load_in_scope(&state.db, &user.tenant, load_id, show_deleted_notes)
+            .await?,
     ))
 }
 
@@ -75,7 +107,7 @@ pub async fn mobile_inbound_list(
 ) -> AppResult<Json<Vec<Load>>> {
     user.require_permission(&state.db, PERM).await?;
     let loads =
-        repo::loads::get_load_summaries(&state.db, user.tenant.tenant_id, false, MAX_LOAD_LIMIT, 0)
+        repo::loads::get_load_summaries_in_scope(&state.db, &user.tenant, false, MAX_LOAD_LIMIT, 0)
             .await?
             .into_iter()
             .filter(|load| load.r#type == LoadType::Inbound)
@@ -89,7 +121,7 @@ pub async fn mobile_inbound_get(
     Path(load_id): Path<i64>,
 ) -> AppResult<Json<Option<Load>>> {
     user.require_permission(&state.db, PERM).await?;
-    let load = repo::loads::get_load(&state.db, user.tenant.tenant_id, load_id, false)
+    let load = repo::loads::get_load_in_scope(&state.db, &user.tenant, load_id, false)
         .await?
         .filter(|load| load.r#type == LoadType::Inbound);
     Ok(Json(load))
@@ -103,6 +135,7 @@ pub async fn mobile_arrive(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    require_active_load(&state.db, &user, load_id).await?;
     if body
         .arrival
         .is_some_and(|arrival| arrival > chrono::Utc::now())
@@ -145,6 +178,18 @@ pub async fn mobile_receive_line(
 ) -> AppResult<Json<ReceiveLoadLineResult>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    let dimensions = require_active_load_child(
+        repo::access::load_line_dimensions(&state.db, &user.tenant, load_line_id).await?,
+        "load line",
+    )?;
+    require_active_location_in_facility(
+        &state.db,
+        user.tenant.tenant_id,
+        dimensions.facility_id.get(),
+        body.to_location_id,
+        "Receiving location",
+    )
+    .await?;
     let id = repo::loads::receive_line(
         &state.db,
         user.tenant.tenant_id,
@@ -173,14 +218,22 @@ pub async fn add(
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    if !repo::facilities::active_facility_exists(&state.db, user.tenant.tenant_id, body.facility_id)
-        .await?
+    user.require_facility(body.facility_id)?;
+    user.require_inventory_owner(body.inventory_owner_id)?;
+    if !repo::facilities::active_facility_exists_in_scope(
+        &state.db,
+        user.tenant.tenant_id,
+        &user.tenant.site_scope,
+        body.facility_id,
+    )
+    .await?
     {
         return Err(AppError::bad_request("Facility not found"));
     }
-    if !repo::inventory_owners::active_inventory_owner_exists(
+    if !repo::inventory_owners::active_inventory_owner_exists_in_scope(
         &state.db,
         user.tenant.tenant_id,
+        &user.tenant.owner_scope,
         body.inventory_owner_id,
     )
     .await?
@@ -188,13 +241,14 @@ pub async fn add(
         return Err(AppError::bad_request("Inventory owner not found"));
     }
     if let Some(location_id) = body.dock_door_location_id {
-        match repo::locations::location_active_state(&state.db, user.tenant.tenant_id, location_id)
-            .await?
-        {
-            None => return Err(AppError::bad_request("Dock door location not found")),
-            Some(false) => return Err(AppError::bad_request("Dock door location is inactive")),
-            Some(true) => {}
-        }
+        require_active_location_in_facility(
+            &state.db,
+            user.tenant.tenant_id,
+            body.facility_id,
+            location_id,
+            "Dock door location",
+        )
+        .await?;
     }
     let id = repo::loads::add_load(
         &state.db,
@@ -223,6 +277,21 @@ pub async fn update(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    let Some(dimensions) =
+        repo::access::load_dimensions(&state.db, &user.tenant, body.load_id, false).await?
+    else {
+        return Ok(Json(false));
+    };
+    if let Some(location_id) = body.dock_door_location_id {
+        require_active_location_in_facility(
+            &state.db,
+            user.tenant.tenant_id,
+            dimensions.facility_id.get(),
+            location_id,
+            "Dock door location",
+        )
+        .await?;
+    }
     let ok = repo::loads::update_load(
         &state.db,
         user.tenant.tenant_id,
@@ -256,6 +325,12 @@ pub async fn delete(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    if repo::access::load_dimensions(&state.db, &user.tenant, body.load_id, false)
+        .await?
+        .is_none()
+    {
+        return Ok(Json(false));
+    }
     Ok(Json(
         repo::loads::set_load_deleted(
             &state.db,
@@ -275,6 +350,12 @@ pub async fn restore(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    if repo::access::load_dimensions(&state.db, &user.tenant, body.load_id, true)
+        .await?
+        .is_none()
+    {
+        return Ok(Json(false));
+    }
     Ok(Json(
         repo::loads::set_load_deleted(
             &state.db,
@@ -294,6 +375,7 @@ pub async fn add_note(
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    require_active_load(&state.db, &user, body.load_id).await?;
     let id = repo::loads::add_note(
         &state.db,
         user.tenant.tenant_id,
@@ -312,6 +394,12 @@ pub async fn delete_note(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    if repo::access::load_note_dimensions(&state.db, &user.tenant, body.load_note_id)
+        .await?
+        .is_none()
+    {
+        return Ok(Json(false));
+    }
     Ok(Json(
         repo::loads::set_load_note_deleted(
             &state.db,
@@ -331,6 +419,7 @@ pub async fn add_line(
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    require_active_load(&state.db, &user, body.load_id).await?;
     let id = repo::loads::add_line(
         &state.db,
         user.tenant.tenant_id,
@@ -354,6 +443,18 @@ pub async fn receive_line(
 ) -> AppResult<Json<ReceiveLoadLineResult>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    let dimensions = require_active_load_child(
+        repo::access::load_line_dimensions(&state.db, &user.tenant, body.load_line_id).await?,
+        "load line",
+    )?;
+    require_active_location_in_facility(
+        &state.db,
+        user.tenant.tenant_id,
+        dimensions.facility_id.get(),
+        body.to_location_id,
+        "Receiving location",
+    )
+    .await?;
     let id = repo::loads::receive_line(
         &state.db,
         user.tenant.tenant_id,
@@ -382,6 +483,7 @@ pub async fn add_file(
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    require_active_load(&state.db, &user, body.load_id).await?;
     let id = repo::loads::add_file(
         &state.db,
         user.tenant.tenant_id,
@@ -404,6 +506,12 @@ pub async fn delete_file(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    if repo::access::load_file_dimensions(&state.db, &user.tenant, body.file_id)
+        .await?
+        .is_none()
+    {
+        return Ok(Json(false));
+    }
     Ok(Json(
         repo::loads::delete_file(&state.db, user.tenant.tenant_id, user.user.id, body.file_id)
             .await?,

@@ -8,15 +8,24 @@ use sqlx::Row;
 use wareboxes_core::dto::{NewOrder, OrderPage, OrderUpdate, Paged, SummaryCount};
 use wareboxes_core::models::{
     InventoryReservation, Order, OrderActivity, OrderItem, OrderStatus, OrderTrackingNumber,
-    ReservationStatus,
+    ReservationStatus, TenantAccess,
 };
 use wareboxes_domain::{InventoryOwnerId, TenantId};
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
+use crate::repo::access::ScopeBindings;
 use crate::repo::{address, tasks};
 
 const MUTABLE: &str = "('cancelled', 'held', 'open', 'void')";
+
+#[derive(Debug, Clone, Copy)]
+struct OrderPageParameters<'a> {
+    limit: i64,
+    offset: i64,
+    status: Option<OrderStatus>,
+    search: Option<&'a str>,
+}
 
 fn map_order(row: &sqlx::postgres::PgRow) -> AppResult<Order> {
     let status: String = row.try_get("status")?;
@@ -177,6 +186,14 @@ async fn items_by_order_ids(
 }
 
 async fn available_by_item(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<(i64, i64), i64>> {
+    available_by_item_in_scope(db, tenant_id, &ScopeBindings::unrestricted()).await
+}
+
+async fn available_by_item_in_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    scope: &ScopeBindings,
+) -> AppResult<HashMap<(i64, i64), i64>> {
     let rows = sqlx::query(
         r#"
         SELECT inv.inventory_owner_id AS inventory_owner_id, inv.item_id AS item_id,
@@ -185,10 +202,16 @@ async fn available_by_item(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<(i
         WHERE inv.tenant_id = $1
           AND inv.deleted IS NULL
           AND inv.status = 'available'
+          AND ($2 OR inv.facility_id = ANY($3))
+          AND ($4 OR inv.inventory_owner_id = ANY($5))
         GROUP BY inv.inventory_owner_id, inv.item_id
         "#,
     )
     .bind(tenant_id.get())
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
     .fetch_all(db)
     .await?;
     let mut map = HashMap::new();
@@ -319,10 +342,11 @@ async fn tracking_by_order_ids(
     Ok(map)
 }
 
-async fn reserved_by_order_ids(
+async fn reserved_by_order_ids_in_scope(
     db: &Db,
     tenant_id: TenantId,
     order_ids: &[i64],
+    scope: &ScopeBindings,
 ) -> AppResult<HashMap<(i64, i64), i64>> {
     if order_ids.is_empty() {
         return Ok(HashMap::new());
@@ -341,11 +365,17 @@ async fn reserved_by_order_ids(
           AND r.deleted IS NULL
           AND r.status = 'reserved'
           AND r.order_id = ANY($2)
+          AND ($3 OR r.facility_id = ANY($4))
+          AND ($5 OR r.inventory_owner_id = ANY($6))
         GROUP BY r.order_id, ib.item_id
         "#,
     )
     .bind(tenant_id.get())
     .bind(order_ids)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
     .fetch_all(db)
     .await?;
     let mut map = HashMap::new();
@@ -358,10 +388,11 @@ async fn reserved_by_order_ids(
     Ok(map)
 }
 
-async fn reservations_for_order(
+async fn reservations_for_order_in_scope(
     db: &Db,
     tenant_id: TenantId,
     order_id: i64,
+    scope: &ScopeBindings,
 ) -> AppResult<Vec<InventoryReservation>> {
     let rows = sqlx::query(
         r#"
@@ -372,11 +403,17 @@ async fn reservations_for_order(
         WHERE tenant_id = $1
           AND deleted IS NULL
           AND order_id = $2
+          AND ($3 OR facility_id = ANY($4))
+          AND ($5 OR inventory_owner_id = ANY($6))
         ORDER BY id
         "#,
     )
     .bind(tenant_id.get())
     .bind(order_id)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
     .fetch_all(db)
     .await?;
     rows.iter().map(map_reservation).collect()
@@ -448,14 +485,59 @@ pub async fn get_orders_page(
     status: Option<OrderStatus>,
     search: Option<&str>,
 ) -> AppResult<OrderPage> {
-    let status_text = status.map(|status| status.as_str().to_owned());
-    let search_pattern = search
+    get_orders_page_with_scope(
+        db,
+        tenant_id,
+        &ScopeBindings::unrestricted(),
+        OrderPageParameters {
+            limit,
+            offset,
+            status,
+            search,
+        },
+    )
+    .await
+}
+
+pub async fn get_orders_page_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    limit: i64,
+    offset: i64,
+    status: Option<OrderStatus>,
+    search: Option<&str>,
+) -> AppResult<OrderPage> {
+    let scope = ScopeBindings::for_access(access);
+    get_orders_page_with_scope(
+        db,
+        access.tenant_id,
+        &scope,
+        OrderPageParameters {
+            limit,
+            offset,
+            status,
+            search,
+        },
+    )
+    .await
+}
+
+async fn get_orders_page_with_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    scope: &ScopeBindings,
+    parameters: OrderPageParameters<'_>,
+) -> AppResult<OrderPage> {
+    let status_text = parameters.status.map(|status| status.as_str().to_owned());
+    let search_pattern = parameters
+        .search
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| format!("%{value}%"));
     let summaries = order_summaries(
         db,
         tenant_id,
+        scope,
         status_text.as_deref(),
         search_pattern.as_deref(),
     )
@@ -469,6 +551,7 @@ pub async fn get_orders_page(
             ON acct.tenant_id = o.tenant_id AND acct.id = o.inventory_owner_id
         WHERE o.tenant_id = $1
           AND o.deleted IS NULL
+          AND ($4 OR o.inventory_owner_id = ANY($5))
           AND ($2::TEXT IS NULL OR o.status = $2)
           AND (
               $3::TEXT IS NULL
@@ -484,6 +567,8 @@ pub async fn get_orders_page(
     .bind(tenant_id.get())
     .bind(status_text.as_deref())
     .bind(search_pattern.as_deref())
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
     .fetch_one(db)
     .await?;
 
@@ -502,6 +587,7 @@ pub async fn get_orders_page(
             ON acct.tenant_id = o.tenant_id AND acct.id = o.inventory_owner_id
         WHERE o.tenant_id = $1
           AND o.deleted IS NULL
+          AND ($4 OR o.inventory_owner_id = ANY($5))
           AND ($2::TEXT IS NULL OR o.status = $2)
           AND (
               $3::TEXT IS NULL
@@ -513,14 +599,16 @@ pub async fn get_orders_page(
               OR acct.name ILIKE $3
           )
         ORDER BY o.created DESC, o.id DESC
-        LIMIT $4 OFFSET $5
+        LIMIT $6 OFFSET $7
         "#,
     )
     .bind(tenant_id.get())
     .bind(status_text.as_deref())
     .bind(search_pattern.as_deref())
-    .bind(limit)
-    .bind(offset)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .bind(parameters.limit)
+    .bind(parameters.offset)
     .fetch_all(db)
     .await?;
 
@@ -528,20 +616,38 @@ pub async fn get_orders_page(
     let order_ids = orders.iter().map(|order| order.id).collect::<Vec<_>>();
     let mut items = items_by_order_ids(db, tenant_id, &order_ids).await?;
     let mut tracking = tracking_by_order_ids(db, tenant_id, &order_ids).await?;
-    let available = available_by_item(db, tenant_id).await?;
-    let reserved = reserved_by_order_ids(db, tenant_id, &order_ids).await?;
+    let available = available_by_item_in_scope(db, tenant_id, scope).await?;
+    let reserved = reserved_by_order_ids_in_scope(db, tenant_id, &order_ids, scope).await?;
     for order in &mut orders {
         order.order_items = items.remove(&order.id).unwrap_or_default();
         order.tracking_numbers = tracking.remove(&order.id).unwrap_or_default();
         apply_order_stock_state(order, &available, &reserved);
     }
     Ok(OrderPage {
-        page: Paged::new(orders, total, limit, offset),
+        page: Paged::new(orders, total, parameters.limit, parameters.offset),
         summaries,
     })
 }
 
 pub async fn get_order(db: &Db, tenant_id: TenantId, order_id: i64) -> AppResult<Option<Order>> {
+    get_order_with_scope(db, tenant_id, order_id, &ScopeBindings::unrestricted()).await
+}
+
+pub async fn get_order_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    order_id: i64,
+) -> AppResult<Option<Order>> {
+    let scope = ScopeBindings::for_access(access);
+    get_order_with_scope(db, access.tenant_id, order_id, &scope).await
+}
+
+async fn get_order_with_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    order_id: i64,
+    scope: &ScopeBindings,
+) -> AppResult<Option<Order>> {
     let row = sqlx::query(
         r#"
         SELECT o.id AS id, o.tenant_id AS tenant_id, o.order_key AS order_key, o.created AS created,
@@ -558,10 +664,13 @@ pub async fn get_order(db: &Db, tenant_id: TenantId, order_id: i64) -> AppResult
         WHERE o.tenant_id = $1
           AND o.id = $2
           AND o.deleted IS NULL
+          AND ($3 OR o.inventory_owner_id = ANY($4))
         "#,
     )
     .bind(tenant_id.get())
     .bind(order_id)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
     .fetch_optional(db)
     .await?;
 
@@ -573,12 +682,12 @@ pub async fn get_order(db: &Db, tenant_id: TenantId, order_id: i64) -> AppResult
     let order_ids = [order.id];
     let mut items = items_by_order_ids(db, tenant_id, &order_ids).await?;
     let mut tracking = tracking_by_order_ids(db, tenant_id, &order_ids).await?;
-    let available = available_by_item(db, tenant_id).await?;
-    let reserved = reserved_by_order_ids(db, tenant_id, &order_ids).await?;
+    let available = available_by_item_in_scope(db, tenant_id, scope).await?;
+    let reserved = reserved_by_order_ids_in_scope(db, tenant_id, &order_ids, scope).await?;
 
     order.order_items = items.remove(&order.id).unwrap_or_default();
     order.tracking_numbers = tracking.remove(&order.id).unwrap_or_default();
-    order.reservations = reservations_for_order(db, tenant_id, order.id).await?;
+    order.reservations = reservations_for_order_in_scope(db, tenant_id, order.id, scope).await?;
     order.activity = activity_for_order(db, tenant_id, order.id).await?;
     apply_order_stock_state(&mut order, &available, &reserved);
 
@@ -588,10 +697,11 @@ pub async fn get_order(db: &Db, tenant_id: TenantId, order_id: i64) -> AppResult
 async fn order_summaries(
     db: &Db,
     tenant_id: TenantId,
+    scope: &ScopeBindings,
     status: Option<&str>,
     search: Option<&str>,
 ) -> AppResult<Vec<SummaryCount>> {
-    let available = available_by_item(db, tenant_id).await?;
+    let available = available_by_item_in_scope(db, tenant_id, scope).await?;
     let rows = sqlx::query(
         r#"
         SELECT o.id AS order_id,
@@ -622,6 +732,8 @@ async fn order_summaries(
                AND ib.id = r.item_batch_id
             WHERE r.deleted IS NULL
               AND r.status = 'reserved'
+              AND ($4 OR r.facility_id = ANY($5))
+              AND ($6 OR r.inventory_owner_id = ANY($7))
             GROUP BY r.tenant_id, r.inventory_owner_id, r.order_id, ib.item_id
         ) res ON res.tenant_id = o.tenant_id
              AND res.inventory_owner_id = o.inventory_owner_id
@@ -629,6 +741,7 @@ async fn order_summaries(
              AND res.item_id = oi.item_id
         WHERE o.tenant_id = $1
           AND o.deleted IS NULL
+          AND ($6 OR o.inventory_owner_id = ANY($7))
           AND o.status <> 'shipped'
           AND ($2::TEXT IS NULL OR o.status = $2)
           AND (
@@ -646,6 +759,10 @@ async fn order_summaries(
     .bind(tenant_id.get())
     .bind(status)
     .bind(search)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
     .fetch_all(db)
     .await?;
 
