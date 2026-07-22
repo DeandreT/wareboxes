@@ -42,7 +42,7 @@ async fn inventory_receive_move_and_reserve_updates_balances_and_ledger() {
     .await
     .unwrap();
     let item = repo::items::add_item(
-        &db, "Widget", None, "each", None, None, None, None, None, None,
+        &db, tenant_id, "Widget", None, "each", None, None, None, None, None, None,
     )
     .await
     .unwrap();
@@ -266,6 +266,7 @@ async fn inventory_rejects_mixed_lot_or_expiration_in_same_location() {
     .unwrap();
     let item = repo::items::add_item(
         &db,
+        tenant_id,
         "Lot Guard Item",
         None,
         "case",

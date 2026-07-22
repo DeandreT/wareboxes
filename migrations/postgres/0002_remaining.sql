@@ -41,6 +41,7 @@ CREATE TABLE dims (
 
 CREATE TABLE items (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     description TEXT,
@@ -50,6 +51,7 @@ CREATE TABLE items (
     pallet_hi BIGINT,
     pallet_ti BIGINT,
     inner_units BIGINT,
+    UNIQUE (tenant_id, id),
     CHECK (pallet_hi IS NULL OR pallet_hi > 0),
     CHECK (pallet_ti IS NULL OR pallet_ti > 0),
     CHECK (inner_units IS NULL OR inner_units > 0)
@@ -57,22 +59,26 @@ CREATE TABLE items (
 
 CREATE TABLE skus (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     name TEXT NOT NULL,
-    item_id BIGINT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    item_id BIGINT NOT NULL,
     notes TEXT,
-    UNIQUE (item_id, name)
+    UNIQUE (tenant_id, item_id, name),
+    FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id) ON DELETE CASCADE
 );
 
 CREATE TABLE barcodes (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    name TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
     type TEXT NOT NULL,
-    item_id BIGINT NOT NULL REFERENCES items(id),
-    notes TEXT
+    item_id BIGINT NOT NULL,
+    notes TEXT,
+    FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id)
 );
 
 CREATE TABLE account_items (

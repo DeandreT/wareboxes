@@ -6,7 +6,7 @@ use wareboxes_core::dto::{
 };
 use wareboxes_core::models::{InventoryBalance, InventoryReservation, ItemBatch, Movement};
 
-use crate::auth::CurrentUser;
+use crate::auth::{CurrentTenant, CurrentUser};
 use crate::error::{AppError, AppResult};
 use crate::repo;
 use crate::routes::users::ShowDeleted;
@@ -28,12 +28,12 @@ pub async fn list_batches(
 
 pub async fn add_batch(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddItemBatch>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    if !repo::items::active_item_exists(&state.db, body.item_id).await? {
+    if !repo::items::active_item_exists(&state.db, user.tenant.tenant_id, body.item_id).await? {
         return Err(AppError::bad_request("Item not found"));
     }
     if let Some(load_id) = body.load_id {

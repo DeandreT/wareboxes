@@ -391,3 +391,169 @@ async fn locations_are_tenant_scoped_for_repositories_and_routes() {
     assert_eq!(locations[0].id, second_location);
     assert_eq!(locations[0].tenant_id, second_tenant);
 }
+
+#[tokio::test]
+async fn item_catalog_is_tenant_scoped_for_repositories_and_routes() {
+    let db = setup().await;
+    let operator = auth::register_user(&db, "catalog@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let other = auth::register_user(&db, "catalog-other@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let first_tenant = tenant_for_user(&db, operator.id).await;
+    let second_tenant = tenant_for_user(&db, other.id).await;
+
+    let first_item = repo::items::add_item(
+        &db,
+        first_tenant,
+        "Shared Catalog Item",
+        None,
+        "each",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let second_item = repo::items::add_item(
+        &db,
+        second_tenant,
+        "Shared Catalog Item",
+        None,
+        "each",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let first_case_item = repo::items::add_item(
+        &db,
+        first_tenant,
+        "First Case",
+        None,
+        "case",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let barcode = "036000291452";
+    repo::items::add_barcode(&db, first_tenant, first_item, barcode, "upc-a", None)
+        .await
+        .unwrap();
+    repo::items::add_barcode(&db, second_tenant, second_item, barcode, "upc-a", None)
+        .await
+        .unwrap();
+    repo::items::add_sku(&db, first_tenant, first_item, "SHARED-SKU", None)
+        .await
+        .unwrap();
+    repo::items::add_sku(&db, second_tenant, second_item, "SHARED-SKU", None)
+        .await
+        .unwrap();
+
+    let first_items = repo::items::get_items(&db, first_tenant, false)
+        .await
+        .unwrap();
+    assert_eq!(first_items.len(), 2);
+    assert!(first_items
+        .iter()
+        .all(|item| item.tenant_id == first_tenant));
+    assert!(
+        !repo::items::active_item_exists(&db, first_tenant, second_item)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        repo::items::active_barcode_item_by_name(&db, first_tenant, barcode)
+            .await
+            .unwrap(),
+        Some(first_item)
+    );
+    assert_eq!(
+        repo::items::active_barcode_item_by_name(&db, second_tenant, barcode)
+            .await
+            .unwrap(),
+        Some(second_item)
+    );
+    assert!(!repo::items::update_item(
+        &db,
+        first_tenant,
+        second_item,
+        Some("Cross-tenant item update"),
+        None,
+        None,
+    )
+    .await
+    .unwrap());
+    assert!(
+        !repo::items::set_item_deleted(&db, first_tenant, second_item, true)
+            .await
+            .unwrap()
+    );
+    let cross_pack_link =
+        repo::items::add_item_pack_link(&db, first_tenant, first_case_item, second_item, 12, None)
+            .await
+            .unwrap_err();
+    assert!(matches!(
+        cross_pack_link,
+        AppError::Core(CoreError::BadRequest(_))
+    ));
+
+    sqlx::query(
+        "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
+    )
+    .bind(second_tenant.get())
+    .bind(operator.id)
+    .execute(&db)
+    .await
+    .unwrap();
+    let permission = repo::permissions::add_permission(&db, "wms", Some("WMS"))
+        .await
+        .unwrap();
+    let role = repo::roles::add_role(&db, "catalog-wms", Some("Catalog WMS"))
+        .await
+        .unwrap();
+    repo::roles::add_role_permission(&db, role, permission)
+        .await
+        .unwrap();
+    repo::roles::add_role_to_user(&db, operator.id, role)
+        .await
+        .unwrap();
+    let token = auth::create_session(&db, operator.id).await.unwrap();
+    let app = routes::app(AppState::new(db));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/items")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(TENANT_ID_HEADER, second_tenant.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+    let items: Vec<wareboxes_core::models::Item> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, second_item);
+    assert_eq!(items[0].tenant_id, second_tenant);
+    assert_eq!(items[0].barcodes.len(), 1);
+    assert_eq!(items[0].barcodes[0].tenant_id, second_tenant);
+    assert_eq!(items[0].skus.len(), 1);
+    assert_eq!(items[0].skus[0].tenant_id, second_tenant);
+}
