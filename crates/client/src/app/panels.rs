@@ -976,10 +976,6 @@ impl WareboxesApp {
 
     // ---- Item Master -----------------------------------------------------
     pub(super) fn items_screen(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Item Master");
-        ui.weak("Maintain item definitions, packaging units, SKUs, and item barcodes.");
-        ui.add_space(8.0);
-
         ui.collapsing("New item", |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Description");
@@ -1011,20 +1007,9 @@ impl WareboxesApp {
         egui::ScrollArea::vertical().show(ui, |ui| {
             for item in &items {
                 egui::Frame::default()
-                    .fill(if ui.visuals().dark_mode {
-                        egui::Color32::from_black_alpha(38)
-                    } else {
-                        egui::Color32::from_rgb(250, 251, 253)
-                    })
-                    .stroke(egui::Stroke::new(
-                        1.0_f32,
-                        if ui.visuals().dark_mode {
-                            egui::Color32::from_rgb(68, 82, 104)
-                        } else {
-                            egui::Color32::from_rgb(214, 221, 232)
-                        },
-                    ))
-                    .rounding(egui::Rounding::same(8.0))
+                    .fill(ui.visuals().window_fill)
+                    .stroke(ui.visuals().window_stroke)
+                    .rounding(egui::Rounding::same(6.0))
                     .inner_margin(egui::Margin::same(10.0))
                     .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -1040,9 +1025,9 @@ impl WareboxesApp {
                     });
 
                     ui.add_space(8.0);
-                    ui.group(|ui| {
+                    ui.vertical(|ui| {
                         ui.horizontal(|ui| {
-                            ui.heading("SKUs");
+                            ui.strong("SKUs");
                             ui.weak(format!("{} assigned", item.skus.len()));
                         });
                         if item.skus.is_empty() {
@@ -1091,9 +1076,9 @@ impl WareboxesApp {
                     });
 
                     ui.add_space(8.0);
-                    ui.group(|ui| {
+                    ui.vertical(|ui| {
                         ui.horizontal(|ui| {
-                            ui.heading("Barcodes");
+                            ui.strong("Barcodes");
                             ui.weak(format!("{} assigned", item.barcodes.len()));
                         });
                         if item.barcodes.is_empty() {
