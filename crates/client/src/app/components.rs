@@ -1028,9 +1028,9 @@ impl WareboxesApp {
             )
         {
             return if ui.visuals().dark_mode {
-                egui::Color32::from_rgb(255, 120, 210)
+                egui::Color32::from_rgb(255, 112, 101)
             } else {
-                egui::Color32::from_rgb(170, 42, 128)
+                egui::Color32::from_rgb(180, 54, 48)
             };
         }
         Self::order_status_color(ui, order.status)
@@ -1055,9 +1055,9 @@ impl WareboxesApp {
             }
             OrderStatus::Held => {
                 if ui.visuals().dark_mode {
-                    egui::Color32::from_rgb(175, 145, 255)
+                    egui::Color32::from_rgb(232, 178, 74)
                 } else {
-                    egui::Color32::from_rgb(95, 72, 185)
+                    egui::Color32::from_rgb(160, 101, 12)
                 }
             }
             OrderStatus::AwaitingShipment => {
@@ -1082,9 +1082,9 @@ impl WareboxesApp {
         match key {
             "out_of_stock" => {
                 if ui.visuals().dark_mode {
-                    egui::Color32::from_rgb(255, 120, 210)
+                    egui::Color32::from_rgb(255, 112, 101)
                 } else {
-                    egui::Color32::from_rgb(170, 42, 128)
+                    egui::Color32::from_rgb(180, 54, 48)
                 }
             }
             "processing" => Self::order_status_color(ui, OrderStatus::Processing),
