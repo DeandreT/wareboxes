@@ -431,7 +431,7 @@ pub async fn add_load(
         RETURNING id
         "#,
     )
-    .bind(&now)
+    .bind(now)
     .bind(warehouse_id)
     .bind(account_id)
     .bind(load_type.as_str())
@@ -690,6 +690,7 @@ pub async fn set_load_note_deleted(
     Ok(res.rows_affected() > 0)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn add_line(
     db: &Db,
     user_id: i64,
@@ -865,7 +866,7 @@ pub async fn receive_line(
         let batch_id: i64 = sqlx::query_scalar(
             "INSERT INTO item_batches (created, item_id, load_id, lot, serial, expiration) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
         )
-        .bind(&now)
+        .bind(now)
         .bind(item_id)
         .bind(load_id)
         .bind(final_lot.as_deref())
@@ -895,8 +896,8 @@ pub async fn receive_line(
                     deleted = NULL
                 "#,
             )
-            .bind(&now)
-            .bind(&now)
+            .bind(now)
+            .bind(now)
             .bind(warehouse_id)
             .bind(to_location_id)
             .bind(license_plate_id)
@@ -916,8 +917,8 @@ pub async fn receive_line(
                     deleted = NULL
                 "#,
             )
-            .bind(&now)
-            .bind(&now)
+            .bind(now)
+            .bind(now)
             .bind(warehouse_id)
             .bind(to_location_id)
             .bind(batch_id)
@@ -935,7 +936,7 @@ pub async fn receive_line(
             RETURNING id
             "#,
         )
-        .bind(&now)
+        .bind(now)
         .bind(user_id)
         .bind(batch_id)
         .bind(resolved_license_plate_id)
@@ -964,7 +965,7 @@ pub async fn receive_line(
     )
     .bind(next_load_status.as_str())
     .bind(receive_completed)
-    .bind(&now)
+    .bind(now)
     .bind(load_id)
     .execute(&mut *tx)
     .await?;
@@ -1027,6 +1028,7 @@ async fn insert_activity_tx(
 
 /// Record an uploaded document/image against a load. The bytes themselves are
 /// written to disk by the route handler; this stores the metadata row.
+#[allow(clippy::too_many_arguments)]
 pub async fn add_file(
     db: &Db,
     user_id: i64,

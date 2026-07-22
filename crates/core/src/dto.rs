@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::models::{
-    InventoryStatus, LoadFileCategory, LoadStatus, LoadType, Order, OrderStatus, Timestamp, User,
+    InventoryStatus, LoadFileCategory, LoadStatus, LoadType, Order, OrderStatus, TenantAccess,
+    Timestamp, User,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +74,7 @@ pub struct RegisterRequest {
 pub struct SessionUser {
     pub token: String,
     pub user: User,
+    pub active_tenant: TenantAccess,
     #[serde(default)]
     pub settings: UserSettings,
 }

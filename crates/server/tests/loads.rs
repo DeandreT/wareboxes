@@ -9,7 +9,8 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     let user = auth::register_user(&db, "receiver@test.com", "supersecret", None, None)
         .await
         .unwrap();
-    let warehouse = repo::warehouses::add_warehouse(&db, "Inbound DC")
+    let tenant_id = tenant_for_user(&db, user.id).await;
+    let warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "Inbound DC")
         .await
         .unwrap();
     let dock = repo::locations::add_location(
@@ -25,7 +26,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     )
     .await
     .unwrap();
-    let account = repo::accounts::add_account(&db, "Load Customer", "loads@test.com")
+    let account = repo::accounts::add_account(&db, tenant_id, "Load Customer", "loads@test.com")
         .await
         .unwrap();
     let item = repo::items::add_item(
@@ -282,7 +283,8 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     let user = auth::register_user(&db, "lp-receiver@test.com", "supersecret", None, None)
         .await
         .unwrap();
-    let warehouse = repo::warehouses::add_warehouse(&db, "LP Inbound DC")
+    let tenant_id = tenant_for_user(&db, user.id).await;
+    let warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "LP Inbound DC")
         .await
         .unwrap();
     let dock = repo::locations::add_location(
@@ -311,7 +313,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     )
     .await
     .unwrap();
-    let account = repo::accounts::add_account(&db, "LP Customer", "lp@test.com")
+    let account = repo::accounts::add_account(&db, tenant_id, "LP Customer", "lp@test.com")
         .await
         .unwrap();
     let item = repo::items::add_item(
@@ -441,9 +443,14 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     assert_eq!(moved.location_id, Some(reserve));
     assert_eq!(moved.contents[0].location_id, reserve);
 
-    let acc = repo::accounts::add_account(&db, "LP Reserve Customer", "lp-customer@test.com")
-        .await
-        .unwrap();
+    let acc = repo::accounts::add_account(
+        &db,
+        tenant_id,
+        "LP Reserve Customer",
+        "lp-customer@test.com",
+    )
+    .await
+    .unwrap();
     repo::orders::add_order(&db, &new_order("LP-RES-1", Some(acc)))
         .await
         .unwrap();

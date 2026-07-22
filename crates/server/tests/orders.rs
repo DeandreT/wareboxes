@@ -91,14 +91,20 @@ async fn order_pagination_filters_and_reports_total() {
 async fn account_delete_blocked_by_open_orders() {
     let db = setup().await;
 
-    let acc = repo::accounts::add_account(&db, "Acme", "ops@acme.test")
+    let user = auth::register_user(&db, "orders-owner@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let tenant_id = tenant_for_user(&db, user.id).await;
+    let acc = repo::accounts::add_account(&db, tenant_id, "Acme", "ops@acme.test")
         .await
         .unwrap();
     repo::orders::add_order(&db, &new_order("A1", Some(acc)))
         .await
         .unwrap();
 
-    let err = repo::accounts::delete_account(&db, acc).await.unwrap_err();
+    let err = repo::accounts::delete_account(&db, tenant_id, acc)
+        .await
+        .unwrap_err();
     assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
 
     // Ship the order, then deletion is allowed.
@@ -121,5 +127,7 @@ async fn account_delete_blocked_by_open_orders() {
         country: None,
     };
     assert!(repo::orders::update_order(&db, &upd).await.unwrap());
-    assert!(repo::accounts::delete_account(&db, acc).await.unwrap());
+    assert!(repo::accounts::delete_account(&db, tenant_id, acc)
+        .await
+        .unwrap());
 }

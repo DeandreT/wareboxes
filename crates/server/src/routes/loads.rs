@@ -7,7 +7,7 @@ use wareboxes_core::dto::{
 };
 use wareboxes_core::models::{Load, LoadFileCategory, LoadStatus, LoadType};
 
-use crate::auth::CurrentUser;
+use crate::auth::{CurrentTenant, CurrentUser};
 use crate::error::{AppError, AppResult};
 use crate::permissions;
 use crate::repo;
@@ -150,15 +150,23 @@ pub async fn mobile_receive_line(
 
 pub async fn add(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<AddLoad>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    if !repo::warehouses::active_warehouse_exists(&state.db, body.warehouse_id).await? {
+    if !repo::warehouses::active_warehouse_exists(
+        &state.db,
+        user.tenant.tenant_id,
+        body.warehouse_id,
+    )
+    .await?
+    {
         return Err(AppError::bad_request("Warehouse not found"));
     }
-    if !repo::accounts::active_account_exists(&state.db, body.account_id).await? {
+    if !repo::accounts::active_account_exists(&state.db, user.tenant.tenant_id, body.account_id)
+        .await?
+    {
         return Err(AppError::bad_request("Account not found"));
     }
     if let Some(location_id) = body.dock_door_location_id {

@@ -82,14 +82,14 @@ pub async fn ensure_self_role(db: &Db, user_id: i64, email: &str) -> AppResult<(
         "INSERT INTO roles (name, description, created) VALUES ($1, 'Self role', $2) RETURNING id",
     )
     .bind(email)
-    .bind(&now)
+    .bind(now)
     .fetch_one(db)
     .await?;
 
     sqlx::query("INSERT INTO user_roles (user_id, role_id, created) VALUES ($1, $2, $3)")
         .bind(user_id)
         .bind(role_id)
-        .bind(&now)
+        .bind(now)
         .execute(db)
         .await?;
 

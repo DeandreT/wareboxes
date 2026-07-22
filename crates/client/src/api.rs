@@ -11,6 +11,7 @@ use wareboxes_core::models::{
     Account, AuditWave, Employee, InventoryBalance, Item, ItemBatch, LicensePlate, Load, Location,
     Movement, Order, Permission, Role, User, Warehouse,
 };
+use wareboxes_domain::TenantId;
 
 #[derive(Debug)]
 pub enum ApiEvent {
@@ -115,6 +116,7 @@ impl Screen {
 pub struct ApiClient {
     pub base_url: String,
     pub token: Option<String>,
+    pub tenant_id: Option<TenantId>,
     tx: Sender<ApiEvent>,
     ctx: egui::Context,
 }
@@ -124,6 +126,7 @@ impl ApiClient {
         Self {
             base_url,
             token: None,
+            tenant_id: None,
             tx,
             ctx,
         }
@@ -133,6 +136,9 @@ impl ApiClient {
         let mut h = ehttp::Headers::new(&[("Content-Type", "application/json")]);
         if let Some(t) = &self.token {
             h.insert("Authorization", format!("Bearer {t}"));
+        }
+        if let Some(tenant_id) = self.tenant_id {
+            h.insert("X-Wareboxes-Tenant-Id", tenant_id.to_string());
         }
         h
     }
@@ -330,5 +336,23 @@ impl ApiClient {
             }
         }
         encoded
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authenticated_headers_include_selected_tenant() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut client =
+            ApiClient::new("http://localhost".to_owned(), tx, egui::Context::default());
+        client.token = Some("session-token".to_owned());
+        client.tenant_id = Some(TenantId::new(42).unwrap());
+
+        let headers = client.headers();
+        assert_eq!(headers.get("Authorization"), Some("Bearer session-token"));
+        assert_eq!(headers.get("X-Wareboxes-Tenant-Id"), Some("42"));
     }
 }

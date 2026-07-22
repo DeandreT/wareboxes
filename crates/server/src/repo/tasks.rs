@@ -209,6 +209,7 @@ async fn insert_task_tx(
     Ok(id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_item_location_cycle_count_task(
     db: &Db,
     user_id: i64,
@@ -297,6 +298,7 @@ pub async fn create_item_location_cycle_count_task(
     Ok(task_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_location_cycle_count_task(
     db: &Db,
     user_id: i64,
@@ -338,6 +340,7 @@ pub async fn create_location_cycle_count_task(
     Ok(task_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_break_master_pack_task(
     db: &Db,
     user_id: i64,
@@ -415,6 +418,7 @@ pub async fn create_break_master_pack_task(
     Ok(task_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_unpack_cancelled_order_task(
     db: &Db,
     user_id: Option<i64>,
@@ -705,6 +709,7 @@ pub async fn start_task(db: &Db, task_id: i64, user_id: i64) -> AppResult<bool> 
     Ok(res.rows_affected() > 0)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn record_task_progress(
     db: &Db,
     user_id: i64,
@@ -736,11 +741,13 @@ pub async fn record_task_progress(
                   AND detail.task_id = $2
                   AND task.deleted IS NULL
                   AND task.status IN ('assigned', 'in_progress')
+                  AND task.assigned_user_id = $3
                   AND detail.master_qty_completed + $1 <= detail.master_qty
                 "#,
             )
             .bind(qty_completed)
             .bind(task_id)
+            .bind(user_id)
             .execute(db)
             .await?;
             res.rows_affected() > 0
@@ -775,6 +782,7 @@ pub async fn record_task_progress(
                   AND line.task_id = $4
                   AND task.deleted IS NULL
                   AND task.status IN ('assigned', 'in_progress')
+                  AND task.assigned_user_id = $7
                   AND line.status IN ('open', 'partial')
                   AND line.unpacked_qty + line.missing_qty + line.damaged_qty + $2 <= line.expected_qty
                 "#,
@@ -785,6 +793,7 @@ pub async fn record_task_progress(
             .bind(task_id)
             .bind(from_location_id)
             .bind(to_location_id)
+            .bind(user_id)
             .execute(db)
             .await?;
             res.rows_affected() > 0

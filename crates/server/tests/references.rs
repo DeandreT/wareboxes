@@ -5,11 +5,15 @@ use common::*;
 #[tokio::test]
 async fn warehouses_listing_filters_deleted() {
     let db = setup().await;
-
-    let keep = repo::warehouses::add_warehouse(&db, "Main DC")
+    let user = auth::register_user(&db, "facilities@test.com", "supersecret", None, None)
         .await
         .unwrap();
-    let gone = repo::warehouses::add_warehouse(&db, "Old DC")
+    let tenant_id = tenant_for_user(&db, user.id).await;
+
+    let keep = repo::warehouses::add_warehouse(&db, tenant_id, "Main DC")
+        .await
+        .unwrap();
+    let gone = repo::warehouses::add_warehouse(&db, tenant_id, "Old DC")
         .await
         .unwrap();
     sqlx::query("UPDATE warehouses SET deleted = $1 WHERE id = $2")
@@ -19,11 +23,15 @@ async fn warehouses_listing_filters_deleted() {
         .await
         .unwrap();
 
-    let active = repo::warehouses::get_warehouses(&db, false).await.unwrap();
+    let active = repo::warehouses::get_warehouses(&db, tenant_id, false)
+        .await
+        .unwrap();
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].id, keep);
 
-    let all = repo::warehouses::get_warehouses(&db, true).await.unwrap();
+    let all = repo::warehouses::get_warehouses(&db, tenant_id, true)
+        .await
+        .unwrap();
     assert_eq!(all.len(), 2);
 }
 
@@ -34,10 +42,11 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     let user = auth::register_user(&db, "selector@test.com", "supersecret", None, None)
         .await
         .unwrap();
-    let warehouse = repo::warehouses::add_warehouse(&db, "Selector DC")
+    let tenant_id = tenant_for_user(&db, user.id).await;
+    let warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "Selector DC")
         .await
         .unwrap();
-    let deleted_warehouse = repo::warehouses::add_warehouse(&db, "Deleted DC")
+    let deleted_warehouse = repo::warehouses::add_warehouse(&db, tenant_id, "Deleted DC")
         .await
         .unwrap();
     sqlx::query("UPDATE warehouses SET deleted = $1 WHERE id = $2")
@@ -47,15 +56,19 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
         .await
         .unwrap();
 
-    let account = repo::accounts::add_account(&db, "Selector Account", "ops@selector.test")
-        .await
-        .unwrap();
-    let deleted_account = repo::accounts::add_account(&db, "Deleted Account", "gone@test")
-        .await
-        .unwrap();
-    assert!(repo::accounts::delete_account(&db, deleted_account)
-        .await
-        .unwrap());
+    let account =
+        repo::accounts::add_account(&db, tenant_id, "Selector Account", "ops@selector.test")
+            .await
+            .unwrap();
+    let deleted_account =
+        repo::accounts::add_account(&db, tenant_id, "Deleted Account", "gone@test")
+            .await
+            .unwrap();
+    assert!(
+        repo::accounts::delete_account(&db, tenant_id, deleted_account)
+            .await
+            .unwrap()
+    );
 
     let item = repo::items::add_item(
         &db,
@@ -152,20 +165,26 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     .await
     .unwrap();
 
-    assert!(repo::warehouses::active_warehouse_exists(&db, warehouse)
-        .await
-        .unwrap());
     assert!(
-        !repo::warehouses::active_warehouse_exists(&db, deleted_warehouse)
+        repo::warehouses::active_warehouse_exists(&db, tenant_id, warehouse)
             .await
             .unwrap()
     );
-    assert!(repo::accounts::active_account_exists(&db, account)
-        .await
-        .unwrap());
-    assert!(!repo::accounts::active_account_exists(&db, deleted_account)
-        .await
-        .unwrap());
+    assert!(
+        !repo::warehouses::active_warehouse_exists(&db, tenant_id, deleted_warehouse)
+            .await
+            .unwrap()
+    );
+    assert!(
+        repo::accounts::active_account_exists(&db, tenant_id, account)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo::accounts::active_account_exists(&db, tenant_id, deleted_account)
+            .await
+            .unwrap()
+    );
     assert!(repo::items::active_item_exists(&db, item).await.unwrap());
     assert!(!repo::items::active_item_exists(&db, deleted_item)
         .await

@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/server", "crates/client", "crates/barcodes"]
+members = [
+    "crates/domain",
+    "crates/core",
+    "crates/server",
+    "crates/client",
+    "crates/barcodes",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +15,7 @@ license = "MIT"
 rust-version = "1.78"
 
 [workspace.dependencies]
+wareboxes-domain = { path = "crates/domain" }
 wareboxes-core = { path = "crates/core" }
 wareboxes-barcodes = { path = "crates/barcodes" }
 

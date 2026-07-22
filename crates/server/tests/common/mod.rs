@@ -12,6 +12,7 @@ pub use wareboxes_core::models::{
     WorkTaskStatus, WorkTaskType,
 };
 pub use wareboxes_core::CoreError;
+pub use wareboxes_domain::TenantId;
 pub use wareboxes_server::error::AppError;
 pub use wareboxes_server::{auth, db, permissions, repo};
 
@@ -60,6 +61,14 @@ pub async fn setup() -> db::Db {
         .unwrap_or_else(|e| panic!("connect test db ({test_url}): {e}"));
     db::run_migrations(&pool).await.unwrap();
     pool
+}
+
+pub async fn tenant_for_user(db: &db::Db, user_id: i64) -> TenantId {
+    repo::tenants::default_for_user(db, user_id)
+        .await
+        .unwrap()
+        .expect("registered test user has a tenant")
+        .tenant_id
 }
 
 async fn template_database(base_url: &str) -> String {
@@ -143,14 +152,14 @@ impl Fixture {
         user
     }
 
-    pub async fn account(&self, name: &str) -> i64 {
-        repo::accounts::add_account(&self.db, name, &format!("{name}@test.local"))
+    pub async fn account(&self, tenant_id: TenantId, name: &str) -> i64 {
+        repo::accounts::add_account(&self.db, tenant_id, name, &format!("{name}@test.local"))
             .await
             .unwrap()
     }
 
-    pub async fn warehouse(&self, name: &str) -> i64 {
-        repo::warehouses::add_warehouse(&self.db, name)
+    pub async fn warehouse(&self, tenant_id: TenantId, name: &str) -> i64 {
+        repo::warehouses::add_warehouse(&self.db, tenant_id, name)
             .await
             .unwrap()
     }
