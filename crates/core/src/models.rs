@@ -1101,6 +1101,7 @@ impl_status_display!(WorkTaskProgressAction);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkTask {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub modified: Option<Timestamp>,
     pub deleted: Option<Timestamp>,
@@ -1126,6 +1127,7 @@ pub struct WorkTask {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CycleCountItemLocationTask {
+    pub tenant_id: TenantId,
     pub task_id: i64,
     pub facility_id: i64,
     pub location_id: i64,
@@ -1139,6 +1141,7 @@ pub struct CycleCountItemLocationTask {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CycleCountLocationTask {
+    pub tenant_id: TenantId,
     pub task_id: i64,
     pub facility_id: i64,
     pub location_id: i64,
@@ -1146,6 +1149,7 @@ pub struct CycleCountLocationTask {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BreakMasterPackTask {
+    pub tenant_id: TenantId,
     pub task_id: i64,
     pub facility_id: i64,
     pub location_id: i64,
@@ -1158,6 +1162,7 @@ pub struct BreakMasterPackTask {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UnpackCancelledOrderTask {
+    pub tenant_id: TenantId,
     pub task_id: i64,
     pub order_id: i64,
     #[serde(default)]
@@ -1167,6 +1172,7 @@ pub struct UnpackCancelledOrderTask {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UnpackCancelledOrderTaskLine {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub task_id: i64,
     pub order_item_id: Option<i64>,
     pub item_id: i64,
@@ -1185,6 +1191,7 @@ pub struct UnpackCancelledOrderTaskLine {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkTaskProgress {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub task_id: i64,
     pub task_line_id: Option<i64>,

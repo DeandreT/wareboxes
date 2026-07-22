@@ -1,6 +1,12 @@
 mod common;
 
+use axum::body::{to_bytes, Body};
+use axum::http::{header, Request, StatusCode};
 use common::*;
+use tower::ServiceExt;
+use wareboxes_core::models::WorkTask;
+use wareboxes_server::auth::TENANT_ID_HEADER;
+use wareboxes_server::{routes, state::AppState};
 
 #[tokio::test]
 async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
@@ -25,6 +31,14 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
+    sqlx::query(
+        "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
+    )
+    .bind(tenant_id.get())
+    .bind(assignee.id)
+    .execute(&db)
+    .await
+    .unwrap();
     let facility = repo::facilities::add_facility(&db, tenant_id, "Task DC")
         .await
         .unwrap();
@@ -130,6 +144,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
 
     let cycle_a = repo::tasks::create_item_location_cycle_count_task(
         &db,
+        tenant_id,
         user.id,
         freezer,
         master_item,
@@ -143,6 +158,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     .unwrap();
     let cycle_b = repo::tasks::create_item_location_cycle_count_task(
         &db,
+        tenant_id,
         user.id,
         freezer,
         master_item,
@@ -158,6 +174,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
 
     let err = repo::tasks::create_break_master_pack_task(
         &db,
+        tenant_id,
         user.id,
         master_item,
         single_item,
@@ -192,6 +209,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     );
     let break_task = repo::tasks::create_break_master_pack_task(
         &db,
+        tenant_id,
         user.id,
         master_item,
         single_item,
@@ -207,7 +225,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     .unwrap();
     assert!(break_task > 0);
 
-    let started = repo::tasks::start_next_task(&db, assignee.id, None)
+    let started = repo::tasks::start_next_task(&db, tenant_id, assignee.id, None)
         .await
         .unwrap()
         .unwrap();
@@ -215,17 +233,20 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     assert_eq!(started.assigned_user_id, Some(assignee.id));
     assert_eq!(started.status, WorkTaskStatus::InProgress);
     assert!(started.lease_expires_at.is_some());
-    assert!(repo::tasks::complete_task(&db, cycle_a, assignee.id, None)
-        .await
-        .unwrap());
+    assert!(
+        repo::tasks::complete_task(&db, tenant_id, cycle_a, assignee.id, None)
+            .await
+            .unwrap()
+    );
 
-    let started = repo::tasks::start_next_task(&db, assignee.id, None)
+    let started = repo::tasks::start_next_task(&db, tenant_id, assignee.id, None)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(started.id, break_task);
     assert!(!repo::tasks::record_task_progress(
         &db,
+        tenant_id,
         user.id,
         break_task,
         None,
@@ -239,6 +260,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     .unwrap());
     assert!(repo::tasks::record_task_progress(
         &db,
+        tenant_id,
         assignee.id,
         break_task,
         None,
@@ -250,11 +272,14 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     )
     .await
     .unwrap());
-    assert!(repo::tasks::abort_task(&db, break_task, assignee.id)
-        .await
-        .unwrap());
+    assert!(
+        repo::tasks::abort_task(&db, tenant_id, break_task, assignee.id)
+            .await
+            .unwrap()
+    );
     let aborted = repo::tasks::get_tasks(
         &db,
+        tenant_id,
         repo::tasks::WorkTaskFilters {
             show_deleted: false,
             status: Some(WorkTaskStatus::Open),
@@ -279,19 +304,20 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     .unwrap();
     assert_eq!(master_qty_completed, 1);
 
-    let restarted = repo::tasks::start_next_task(&db, assignee.id, None)
+    let restarted = repo::tasks::start_next_task(&db, tenant_id, assignee.id, None)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(restarted.id, break_task);
     assert!(
-        repo::tasks::complete_task(&db, break_task, assignee.id, Some(1))
+        repo::tasks::complete_task(&db, tenant_id, break_task, assignee.id, Some(1))
             .await
             .unwrap()
     );
 
     let tasks = repo::tasks::get_tasks(
         &db,
+        tenant_id,
         repo::tasks::WorkTaskFilters {
             show_deleted: false,
             status: None,
@@ -367,6 +393,7 @@ async fn cancelling_order_creates_unpack_task() {
 
     let tasks = repo::tasks::get_tasks(
         db,
+        tenant_id,
         repo::tasks::WorkTaskFilters {
             show_deleted: false,
             status: None,
@@ -391,11 +418,12 @@ async fn cancelling_order_creates_unpack_task() {
     assert_eq!(line.2, 3);
     assert_eq!(line.3, "open");
 
-    assert!(repo::tasks::start_task(db, tasks[0].id, user.id)
+    assert!(repo::tasks::start_task(db, tenant_id, tasks[0].id, user.id)
         .await
         .unwrap());
     assert!(repo::tasks::record_task_progress(
         db,
+        tenant_id,
         user.id,
         tasks[0].id,
         Some(line.0),
@@ -407,11 +435,14 @@ async fn cancelling_order_creates_unpack_task() {
     )
     .await
     .unwrap());
-    assert!(!repo::tasks::complete_task(db, tasks[0].id, user.id, None)
-        .await
-        .unwrap());
+    assert!(
+        !repo::tasks::complete_task(db, tenant_id, tasks[0].id, user.id, None)
+            .await
+            .unwrap()
+    );
     assert!(repo::tasks::record_task_progress(
         db,
+        tenant_id,
         user.id,
         tasks[0].id,
         Some(line.0),
@@ -431,7 +462,224 @@ async fn cancelling_order_creates_unpack_task() {
     .await
     .unwrap();
     assert_eq!(line, (2, 1, 0, "exception".to_owned()));
-    assert!(repo::tasks::complete_task(db, tasks[0].id, user.id, None)
+    assert!(
+        repo::tasks::complete_task(db, tenant_id, tasks[0].id, user.id, None)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn task_queue_is_tenant_isolated_and_claims_once() {
+    let fixture = Fixture::new().await;
+    let operator = fixture.wms_user("task-scope-operator@test.com").await;
+    let tenant_a = tenant_for_user(&fixture.db, operator.id).await;
+    let second_tenant_user = fixture.user("task-scope-tenant-b@test.com").await;
+    let tenant_b = tenant_for_user(&fixture.db, second_tenant_user.id).await;
+    sqlx::query(
+        "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
+    )
+    .bind(tenant_b.get())
+    .bind(operator.id)
+    .execute(&fixture.db)
+    .await
+    .unwrap();
+
+    let facility_a = fixture.facility(tenant_a, "Task Scope Facility A").await;
+    let facility_b = fixture.facility(tenant_b, "Task Scope Facility B").await;
+    let location_a = fixture.location(tenant_a, facility_a, "TASK-SCOPE-A").await;
+    let location_b = fixture.location(tenant_b, facility_b, "TASK-SCOPE-B").await;
+    let task_a = repo::tasks::create_location_cycle_count_task(
+        &fixture.db,
+        tenant_a,
+        operator.id,
+        location_a,
+        Some(100),
+        None,
+        None,
+        None,
+        Some("tenant A count".to_owned()),
+    )
+    .await
+    .unwrap();
+    let task_b = repo::tasks::create_location_cycle_count_task(
+        &fixture.db,
+        tenant_b,
+        operator.id,
+        location_b,
+        Some(100),
+        None,
+        None,
+        None,
+        Some("tenant B count".to_owned()),
+    )
+    .await
+    .unwrap();
+
+    let filters = repo::tasks::WorkTaskFilters {
+        show_deleted: false,
+        status: None,
+        task_type: None,
+        assigned_user_id: None,
+        location_id: None,
+        order_id: None,
+    };
+    let tenant_a_tasks = repo::tasks::get_tasks(&fixture.db, tenant_a, filters.clone())
         .await
-        .unwrap());
+        .unwrap();
+    let tenant_b_tasks = repo::tasks::get_tasks(&fixture.db, tenant_b, filters)
+        .await
+        .unwrap();
+    assert_eq!(tenant_a_tasks.len(), 1);
+    assert_eq!(tenant_a_tasks[0].id, task_a);
+    assert_eq!(tenant_a_tasks[0].tenant_id, tenant_a);
+    assert_eq!(tenant_b_tasks.len(), 1);
+    assert_eq!(tenant_b_tasks[0].id, task_b);
+    assert_eq!(tenant_b_tasks[0].tenant_id, tenant_b);
+    assert!(
+        !repo::tasks::start_task(&fixture.db, tenant_b, task_a, operator.id)
+            .await
+            .unwrap()
+    );
+
+    let worker_a = fixture.user("task-scope-worker-a@test.com").await;
+    let worker_b = fixture.user("task-scope-worker-b@test.com").await;
+    let role_id: i64 =
+        sqlx::query_scalar("SELECT id FROM roles WHERE name = 'task-scope-operator@test.com-wms'")
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+    for worker in [&worker_a, &worker_b] {
+        repo::roles::add_role_to_user(&fixture.db, worker.id, role_id)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
+        )
+        .bind(tenant_a.get())
+        .bind(worker.id)
+        .execute(&fixture.db)
+        .await
+        .unwrap();
+    }
+
+    let first_db = fixture.db.clone();
+    let second_db = fixture.db.clone();
+    let (first, second) = tokio::join!(
+        repo::tasks::start_next_task(&first_db, tenant_a, worker_a.id, None),
+        repo::tasks::start_next_task(&second_db, tenant_a, worker_b.id, None),
+    );
+    let claims = [first.unwrap(), second.unwrap()];
+    assert_eq!(claims.iter().filter(|claim| claim.is_some()).count(), 1);
+    let claimed_task = claims.iter().flatten().next().unwrap();
+    assert_eq!(
+        (claimed_task.id, claimed_task.tenant_id),
+        (task_a, tenant_a)
+    );
+    let claimed_by = claimed_task.assigned_user_id.unwrap();
+
+    let next_task = repo::tasks::create_location_cycle_count_task(
+        &fixture.db,
+        tenant_a,
+        operator.id,
+        location_a,
+        Some(90),
+        None,
+        None,
+        None,
+        Some("second tenant A count".to_owned()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !repo::tasks::start_task(&fixture.db, tenant_a, next_task, claimed_by)
+            .await
+            .unwrap()
+    );
+
+    sqlx::query(
+        "UPDATE work_tasks SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(tenant_a.get())
+    .bind(task_a)
+    .execute(&fixture.db)
+    .await
+    .unwrap();
+    let first_db = fixture.db.clone();
+    let second_db = fixture.db.clone();
+    let (first_release, second_release) = tokio::join!(
+        repo::tasks::release_expired_tasks(&first_db, tenant_a),
+        repo::tasks::release_expired_tasks(&second_db, tenant_a),
+    );
+    assert_eq!(first_release.unwrap() + second_release.unwrap(), 1);
+    let release: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT task.release_count, COUNT(progress.id)
+        FROM work_tasks task
+        LEFT JOIN work_task_progress progress
+          ON progress.tenant_id = task.tenant_id
+         AND progress.task_id = task.id
+         AND progress.action = 'expired'
+        WHERE task.tenant_id = $1 AND task.id = $2
+        GROUP BY task.release_count
+        "#,
+    )
+    .bind(tenant_a.get())
+    .bind(task_a)
+    .fetch_one(&fixture.db)
+    .await
+    .unwrap();
+    assert_eq!(release, (1, 1));
+
+    assert!(
+        repo::tasks::cancel_task(&fixture.db, tenant_a, next_task, operator.id)
+            .await
+            .unwrap()
+    );
+    let cancellation_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM work_task_progress WHERE tenant_id = $1 AND task_id = $2 AND action = 'cancelled'",
+    )
+    .bind(tenant_a.get())
+    .bind(next_task)
+    .fetch_one(&fixture.db)
+    .await
+    .unwrap();
+    assert_eq!(cancellation_events, 1);
+
+    let token = auth::create_session(&fixture.db, operator.id)
+        .await
+        .unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let missing_tenant = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/tasks")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_tenant.status(), StatusCode::BAD_REQUEST);
+
+    let selected_tenant = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/tasks")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(TENANT_ID_HEADER, tenant_b.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected_tenant.status(), StatusCode::OK);
+    let body = to_bytes(selected_tenant.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let tasks = serde_json::from_slice::<Vec<WorkTask>>(&body).unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].id, task_b);
+    assert_eq!(tasks[0].tenant_id, tenant_b);
 }
