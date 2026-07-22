@@ -4,41 +4,60 @@ impl WareboxesApp {
     // ---- Orders ----------------------------------------------------------
     pub(super) fn orders_screen(&mut self, ui: &mut egui::Ui) {
         ui.collapsing("New order", |ui| {
-            egui::Grid::new("new_order").num_columns(2).show(ui, |ui| {
-                ui.label("Order key");
-                ui.text_edit_singleline(&mut self.forms.o_key);
-                ui.end_row();
-                ui.label("Line 1");
-                ui.text_edit_singleline(&mut self.forms.o_line1);
-                ui.end_row();
-                ui.label("City");
-                ui.text_edit_singleline(&mut self.forms.o_city);
-                ui.end_row();
-                ui.label("State");
-                ui.text_edit_singleline(&mut self.forms.o_state);
-                ui.end_row();
-                ui.label("Postal code");
-                ui.text_edit_singleline(&mut self.forms.o_zip);
-                ui.end_row();
-                ui.label("Country");
-                ui.text_edit_singleline(&mut self.forms.o_country);
-                ui.end_row();
-                ui.checkbox(&mut self.forms.o_rush, "Rush");
-                ui.end_row();
-            });
+            let inventory_owner_options = self.inventory_owner_options();
+            let inventory_owner_id = egui::Grid::new("new_order")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("Order key");
+                    ui.text_edit_singleline(&mut self.forms.o_key);
+                    ui.end_row();
+                    ui.label("Inventory owner");
+                    let inventory_owner_id = Self::entity_picker(
+                        ui,
+                        "new_order_inventory_owner",
+                        &mut self.forms.o_inventory_owner_id,
+                        &inventory_owner_options,
+                        "Search inventory owner",
+                    );
+                    ui.end_row();
+                    ui.label("Line 1");
+                    ui.text_edit_singleline(&mut self.forms.o_line1);
+                    ui.end_row();
+                    ui.label("City");
+                    ui.text_edit_singleline(&mut self.forms.o_city);
+                    ui.end_row();
+                    ui.label("State");
+                    ui.text_edit_singleline(&mut self.forms.o_state);
+                    ui.end_row();
+                    ui.label("Postal code");
+                    ui.text_edit_singleline(&mut self.forms.o_zip);
+                    ui.end_row();
+                    ui.label("Country");
+                    ui.text_edit_singleline(&mut self.forms.o_country);
+                    ui.end_row();
+                    ui.checkbox(&mut self.forms.o_rush, "Rush");
+                    ui.end_row();
+                    inventory_owner_id
+                })
+                .inner;
             if ui.button("Create order").clicked() {
-                let body = json!({
-                    "order_key": self.forms.o_key,
-                    "line1": self.forms.o_line1,
-                    "city": self.forms.o_city,
-                    "state": self.forms.o_state,
-                    "postal_code": self.forms.o_zip,
-                    "country": self.forms.o_country,
-                    "rush": self.forms.o_rush,
-                });
-                self.api
-                    .action("/api/orders/add", body, Screen::Orders, "Order created");
-                self.forms.o_key.clear();
+                if let Some(inventory_owner_id) = inventory_owner_id {
+                    let body = json!({
+                        "order_key": self.forms.o_key,
+                        "inventory_owner_id": inventory_owner_id,
+                        "line1": self.forms.o_line1,
+                        "city": self.forms.o_city,
+                        "state": self.forms.o_state,
+                        "postal_code": self.forms.o_zip,
+                        "country": self.forms.o_country,
+                        "rush": self.forms.o_rush,
+                    });
+                    self.api
+                        .action("/api/orders/add", body, Screen::Orders, "Order created");
+                    self.forms.o_key.clear();
+                } else {
+                    self.toast("Choose an inventory owner", true, self.now);
+                }
             }
         });
         ui.separator();

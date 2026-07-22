@@ -105,7 +105,7 @@ async fn template_database(base_url: &str) -> String {
         .clone()
 }
 
-pub fn new_order(key: &str, inventory_owner_id: Option<i64>) -> NewOrder {
+pub fn new_order(key: &str, inventory_owner_id: i64) -> NewOrder {
     NewOrder {
         order_key: key.to_string(),
         rush: Some(false),
@@ -204,11 +204,11 @@ impl Fixture {
         .unwrap()
     }
 
-    pub async fn order(&self, key: &str, inventory_owner_id: Option<i64>) -> i64 {
-        repo::orders::add_order(&self.db, &new_order(key, inventory_owner_id))
+    pub async fn order(&self, tenant_id: TenantId, key: &str, inventory_owner_id: i64) -> i64 {
+        repo::orders::add_order(&self.db, tenant_id, &new_order(key, inventory_owner_id))
             .await
             .unwrap();
-        repo::orders::get_orders(&self.db)
+        repo::orders::get_orders(&self.db, tenant_id)
             .await
             .unwrap()
             .into_iter()
@@ -219,7 +219,14 @@ impl Fixture {
 
     pub async fn order_item(&self, order_id: i64, item_id: i64, qty: i64) -> i64 {
         sqlx::query_scalar(
-            "INSERT INTO order_items (created, qty, item_id, order_id) VALUES ($1, $2, $3, $4) RETURNING id",
+            r#"
+            INSERT INTO order_items
+                (tenant_id, inventory_owner_id, created, qty, item_id, order_id)
+            SELECT tenant_id, inventory_owner_id, $1, $2, $3, id
+            FROM orders
+            WHERE id = $4
+            RETURNING id
+            "#,
         )
         .bind(db::now_iso())
         .bind(qty)

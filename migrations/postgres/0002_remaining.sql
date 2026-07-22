@@ -137,38 +137,16 @@ CREATE INDEX idx_loads_active_work ON loads(tenant_id, facility_id, inventory_ow
 CREATE TABLE load_orders (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+    inventory_owner_id BIGINT NOT NULL,
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     load_id BIGINT NOT NULL,
-    order_id BIGINT NOT NULL REFERENCES orders(id),
-    FOREIGN KEY (tenant_id, load_id) REFERENCES loads(tenant_id, id)
+    order_id BIGINT NOT NULL,
+    FOREIGN KEY (tenant_id, inventory_owner_id, load_id) REFERENCES loads(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES orders(tenant_id, inventory_owner_id, id)
 );
-CREATE INDEX idx_load_orders_load_id ON load_orders(tenant_id, load_id);
-CREATE INDEX idx_load_orders_order_id ON load_orders(tenant_id, order_id);
-
-CREATE OR REPLACE FUNCTION load_order_matches_owner_scope()
-RETURNS trigger AS $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM loads load
-        INNER JOIN orders customer_order
-            ON customer_order.id = NEW.order_id
-           AND customer_order.inventory_owner_id = load.inventory_owner_id
-        WHERE load.tenant_id = NEW.tenant_id
-          AND load.id = NEW.load_id
-    ) THEN
-        RAISE EXCEPTION 'load and order must share the same tenant and inventory owner'
-            USING ERRCODE = '23514';
-    END IF;
-
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER load_orders_match_owner_scope
-    BEFORE INSERT OR UPDATE OF tenant_id, load_id, order_id ON load_orders
-    FOR EACH ROW EXECUTE FUNCTION load_order_matches_owner_scope();
+CREATE INDEX idx_load_orders_load_id ON load_orders(tenant_id, inventory_owner_id, load_id);
+CREATE INDEX idx_load_orders_order_id ON load_orders(tenant_id, inventory_owner_id, order_id);
 
 CREATE TABLE load_notes (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -254,7 +232,7 @@ CREATE TABLE item_batches (
     uom TEXT NOT NULL,
     lot TEXT,
     load_id BIGINT,
-    order_id BIGINT REFERENCES orders(id),
+    order_id BIGINT,
     expiration TIMESTAMPTZ,
     serial TEXT,
     UNIQUE (tenant_id, inventory_owner_id, id),
@@ -262,11 +240,12 @@ CREATE TABLE item_batches (
     FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id),
     FOREIGN KEY (tenant_id, inventory_owner_id, item_id) REFERENCES inventory_owner_items(tenant_id, inventory_owner_id, item_id),
     FOREIGN KEY (tenant_id, inventory_owner_id, load_id) REFERENCES loads(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES orders(tenant_id, inventory_owner_id, id),
     CHECK (btrim(uom) <> '')
 );
 ALTER TABLE order_items
-    ADD CONSTRAINT order_items_item_id_fkey FOREIGN KEY (item_id) REFERENCES items(id),
-    ADD CONSTRAINT order_items_item_batch_id_fkey FOREIGN KEY (item_batch_id) REFERENCES item_batches(id);
+    ADD CONSTRAINT order_items_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES items(tenant_id, id),
+    ADD CONSTRAINT order_items_item_batch_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES item_batches(tenant_id, inventory_owner_id, id);
 CREATE INDEX idx_item_batches_item_id ON item_batches(item_id) WHERE deleted IS NULL;
 CREATE INDEX idx_item_batches_load_id ON item_batches(load_id) WHERE deleted IS NULL;
 
@@ -610,8 +589,8 @@ CREATE TABLE inventory_reservations (
     created TIMESTAMPTZ NOT NULL,
     modified TIMESTAMPTZ,
     deleted TIMESTAMPTZ,
-    order_id BIGINT NOT NULL REFERENCES orders(id),
-    order_item_id BIGINT REFERENCES order_items(id),
+    order_id BIGINT NOT NULL,
+    order_item_id BIGINT,
     inventory_balance_id BIGINT NOT NULL,
     facility_id BIGINT NOT NULL,
     item_batch_id BIGINT NOT NULL,
@@ -620,6 +599,8 @@ CREATE TABLE inventory_reservations (
     status TEXT NOT NULL DEFAULT 'reserved',
     CHECK (status IN ('reserved', 'cancelled', 'fulfilled')),
     FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES orders(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_item_id) REFERENCES order_items(tenant_id, inventory_owner_id, id),
     FOREIGN KEY (tenant_id, inventory_owner_id, inventory_balance_id) REFERENCES inventory_balances(tenant_id, inventory_owner_id, id),
     FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES item_batches(tenant_id, inventory_owner_id, id),
     FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES locations(tenant_id, facility_id, id)

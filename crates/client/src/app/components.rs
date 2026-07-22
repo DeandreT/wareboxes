@@ -505,12 +505,7 @@ impl WareboxesApp {
         order
             .inventory_owner_name
             .clone()
-            .or_else(|| {
-                order
-                    .inventory_owner_id
-                    .map(|id| self.inventory_owner_label(id))
-            })
-            .unwrap_or_else(|| "-".to_owned())
+            .unwrap_or_else(|| self.inventory_owner_label(order.inventory_owner_id))
     }
 
     pub(super) fn item_label(&self, id: i64) -> String {

@@ -24,6 +24,8 @@ fn map_order(row: &sqlx::postgres::PgRow) -> AppResult<Order> {
         .ok_or_else(|| AppError::internal(format!("invalid order status in database: {status}")))?;
     Ok(Order {
         id: row.try_get("id")?,
+        tenant_id: TenantId::new(row.try_get("tenant_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
         order_key: row.try_get("order_key")?,
         created: row.try_get("created")?,
         deleted: row.try_get("deleted")?,
@@ -55,10 +57,47 @@ fn map_order(row: &sqlx::postgres::PgRow) -> AppResult<Order> {
 fn map_order_activity(row: &sqlx::postgres::PgRow) -> AppResult<OrderActivity> {
     Ok(OrderActivity {
         id: row.try_get("id")?,
+        tenant_id: TenantId::new(row.try_get("tenant_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        inventory_owner_id: InventoryOwnerId::new(row.try_get("inventory_owner_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
         created: row.try_get("created")?,
         deleted: row.try_get("deleted")?,
         order_id: row.try_get("order_id")?,
         action: row.try_get("action")?,
+    })
+}
+
+fn map_order_item(row: &sqlx::postgres::PgRow) -> AppResult<OrderItem> {
+    Ok(OrderItem {
+        id: row.try_get("id")?,
+        tenant_id: TenantId::new(row.try_get("tenant_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        inventory_owner_id: InventoryOwnerId::new(row.try_get("inventory_owner_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        created: row.try_get("created")?,
+        deleted: row.try_get("deleted")?,
+        qty: row.try_get("qty")?,
+        item_id: row.try_get("item_id")?,
+        item_description: row.try_get("item_description")?,
+        order_id: row.try_get("order_id")?,
+        item_batch_id: row.try_get("item_batch_id")?,
+    })
+}
+
+fn map_tracking_number(row: &sqlx::postgres::PgRow) -> AppResult<OrderTrackingNumber> {
+    Ok(OrderTrackingNumber {
+        id: row.try_get("id")?,
+        tenant_id: TenantId::new(row.try_get("tenant_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        inventory_owner_id: InventoryOwnerId::new(row.try_get("inventory_owner_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        created: row.try_get("created")?,
+        deleted: row.try_get("deleted")?,
+        order_id: row.try_get("order_id")?,
+        tracking_number: row.try_get("tracking_number")?,
+        carrier: row.try_get("carrier")?,
+        service: row.try_get("service")?,
     })
 }
 
@@ -87,103 +126,102 @@ fn map_reservation(row: &sqlx::postgres::PgRow) -> AppResult<InventoryReservatio
     })
 }
 
-async fn items_by_order(db: &Db) -> AppResult<HashMap<i64, Vec<OrderItem>>> {
+async fn items_by_order(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i64, Vec<OrderItem>>> {
     let rows = sqlx::query(
         r#"
-        SELECT oi.id, oi.created, oi.deleted, oi.qty, oi.item_id, i.description AS item_description,
-               oi.order_id, oi.item_batch_id
+        SELECT oi.id, oi.tenant_id, oi.inventory_owner_id, oi.created, oi.deleted,
+               oi.qty, oi.item_id, i.description AS item_description, oi.order_id, oi.item_batch_id
         FROM order_items oi
-        LEFT JOIN items i ON i.id = oi.item_id
-        WHERE oi.deleted IS NULL
+        LEFT JOIN items i ON i.tenant_id = oi.tenant_id AND i.id = oi.item_id
+        WHERE oi.tenant_id = $1 AND oi.deleted IS NULL
         "#,
     )
+    .bind(tenant_id.get())
     .fetch_all(db)
     .await?;
     let mut map: HashMap<i64, Vec<OrderItem>> = HashMap::new();
     for r in &rows {
         let oid = r.try_get("order_id")?;
-        map.entry(oid).or_default().push(OrderItem {
-            id: r.try_get("id")?,
-            created: r.try_get("created")?,
-            deleted: r.try_get("deleted")?,
-            qty: r.try_get("qty")?,
-            item_id: r.try_get("item_id")?,
-            item_description: r.try_get("item_description")?,
-            order_id: oid,
-            item_batch_id: r.try_get("item_batch_id")?,
-        });
+        map.entry(oid).or_default().push(map_order_item(r)?);
     }
     Ok(map)
 }
 
-async fn items_by_order_ids(db: &Db, order_ids: &[i64]) -> AppResult<HashMap<i64, Vec<OrderItem>>> {
+async fn items_by_order_ids(
+    db: &Db,
+    tenant_id: TenantId,
+    order_ids: &[i64],
+) -> AppResult<HashMap<i64, Vec<OrderItem>>> {
     if order_ids.is_empty() {
         return Ok(HashMap::new());
     }
     let rows = sqlx::query(
         r#"
-        SELECT oi.id, oi.created, oi.deleted, oi.qty, oi.item_id, i.description AS item_description,
-               oi.order_id, oi.item_batch_id
+        SELECT oi.id, oi.tenant_id, oi.inventory_owner_id, oi.created, oi.deleted,
+               oi.qty, oi.item_id, i.description AS item_description, oi.order_id, oi.item_batch_id
         FROM order_items oi
-        LEFT JOIN items i ON i.id = oi.item_id
-        WHERE oi.deleted IS NULL AND oi.order_id = ANY($1)
+        LEFT JOIN items i ON i.tenant_id = oi.tenant_id AND i.id = oi.item_id
+        WHERE oi.tenant_id = $1 AND oi.deleted IS NULL AND oi.order_id = ANY($2)
         "#,
     )
+    .bind(tenant_id.get())
     .bind(order_ids)
     .fetch_all(db)
     .await?;
     let mut map: HashMap<i64, Vec<OrderItem>> = HashMap::new();
     for r in &rows {
         let oid = r.try_get("order_id")?;
-        map.entry(oid).or_default().push(OrderItem {
-            id: r.try_get("id")?,
-            created: r.try_get("created")?,
-            deleted: r.try_get("deleted")?,
-            qty: r.try_get("qty")?,
-            item_id: r.try_get("item_id")?,
-            item_description: r.try_get("item_description")?,
-            order_id: oid,
-            item_batch_id: r.try_get("item_batch_id")?,
-        });
+        map.entry(oid).or_default().push(map_order_item(r)?);
     }
     Ok(map)
 }
 
-async fn available_by_item(db: &Db) -> AppResult<HashMap<i64, i64>> {
+async fn available_by_item(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<(i64, i64), i64>> {
     let rows = sqlx::query(
         r#"
-        SELECT ib.item_id AS item_id,
+        SELECT inv.inventory_owner_id AS inventory_owner_id, inv.item_id AS item_id,
                COALESCE(SUM(GREATEST(inv.qty_on_hand - inv.qty_reserved, 0)), 0)::BIGINT AS available_qty
         FROM inventory_balances inv
-        INNER JOIN item_batches ib ON ib.id = inv.item_batch_id
-        WHERE inv.deleted IS NULL
-          AND ib.deleted IS NULL
+        WHERE inv.tenant_id = $1
+          AND inv.deleted IS NULL
           AND inv.status = 'available'
-        GROUP BY ib.item_id
+        GROUP BY inv.inventory_owner_id, inv.item_id
         "#,
     )
+    .bind(tenant_id.get())
     .fetch_all(db)
     .await?;
     let mut map = HashMap::new();
     for r in &rows {
-        map.insert(r.try_get("item_id")?, r.try_get("available_qty")?);
+        map.insert(
+            (r.try_get("inventory_owner_id")?, r.try_get("item_id")?),
+            r.try_get("available_qty")?,
+        );
     }
     Ok(map)
 }
 
-async fn reserved_by_order_item(db: &Db) -> AppResult<HashMap<(i64, i64), i64>> {
+async fn reserved_by_order_item(
+    db: &Db,
+    tenant_id: TenantId,
+) -> AppResult<HashMap<(i64, i64), i64>> {
     let rows = sqlx::query(
         r#"
         SELECT r.order_id AS order_id,
                ib.item_id AS item_id,
                COALESCE(SUM(r.qty), 0)::BIGINT AS reserved_qty
         FROM inventory_reservations r
-        INNER JOIN item_batches ib ON ib.id = r.item_batch_id
-        WHERE r.deleted IS NULL
+        INNER JOIN item_batches ib
+            ON ib.tenant_id = r.tenant_id
+           AND ib.inventory_owner_id = r.inventory_owner_id
+           AND ib.id = r.item_batch_id
+        WHERE r.tenant_id = $1
+          AND r.deleted IS NULL
           AND r.status = 'reserved'
         GROUP BY r.order_id, ib.item_id
         "#,
     )
+    .bind(tenant_id.get())
     .fetch_all(db)
     .await?;
     let mut map = HashMap::new();
@@ -198,7 +236,7 @@ async fn reserved_by_order_item(db: &Db) -> AppResult<HashMap<(i64, i64), i64>> 
 
 fn apply_order_stock_state(
     order: &mut Order,
-    available: &HashMap<i64, i64>,
+    available: &HashMap<(i64, i64), i64>,
     reserved: &HashMap<(i64, i64), i64>,
 ) {
     order.ordered_qty = order.order_items.iter().map(|item| item.qty).sum();
@@ -220,40 +258,41 @@ fn apply_order_stock_state(
             .get(&(order.id, item.item_id))
             .copied()
             .unwrap_or_default();
-        let available_to_reserve = available.get(&item.item_id).copied().unwrap_or_default();
+        let available_to_reserve = available
+            .get(&(order.inventory_owner_id, item.item_id))
+            .copied()
+            .unwrap_or_default();
         already_reserved + available_to_reserve < item.qty
     });
 }
 
-async fn tracking_by_order(db: &Db) -> AppResult<HashMap<i64, Vec<OrderTrackingNumber>>> {
+async fn tracking_by_order(
+    db: &Db,
+    tenant_id: TenantId,
+) -> AppResult<HashMap<i64, Vec<OrderTrackingNumber>>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, created, deleted, order_id, tracking_number, carrier, service
+        SELECT id, tenant_id, inventory_owner_id, created, deleted, order_id,
+               tracking_number, carrier, service
         FROM order_tracking_numbers
-        WHERE deleted IS NULL
+        WHERE tenant_id = $1 AND deleted IS NULL
         ORDER BY id
         "#,
     )
+    .bind(tenant_id.get())
     .fetch_all(db)
     .await?;
     let mut map: HashMap<i64, Vec<OrderTrackingNumber>> = HashMap::new();
     for r in &rows {
         let oid = r.try_get("order_id")?;
-        map.entry(oid).or_default().push(OrderTrackingNumber {
-            id: r.try_get("id")?,
-            created: r.try_get("created")?,
-            deleted: r.try_get("deleted")?,
-            order_id: oid,
-            tracking_number: r.try_get("tracking_number")?,
-            carrier: r.try_get("carrier")?,
-            service: r.try_get("service")?,
-        });
+        map.entry(oid).or_default().push(map_tracking_number(r)?);
     }
     Ok(map)
 }
 
 async fn tracking_by_order_ids(
     db: &Db,
+    tenant_id: TenantId,
     order_ids: &[i64],
 ) -> AppResult<HashMap<i64, Vec<OrderTrackingNumber>>> {
     if order_ids.is_empty() {
@@ -261,32 +300,30 @@ async fn tracking_by_order_ids(
     }
     let rows = sqlx::query(
         r#"
-        SELECT id, created, deleted, order_id, tracking_number, carrier, service
+        SELECT id, tenant_id, inventory_owner_id, created, deleted, order_id,
+               tracking_number, carrier, service
         FROM order_tracking_numbers
-        WHERE deleted IS NULL AND order_id = ANY($1)
+        WHERE tenant_id = $1 AND deleted IS NULL AND order_id = ANY($2)
         ORDER BY id
         "#,
     )
+    .bind(tenant_id.get())
     .bind(order_ids)
     .fetch_all(db)
     .await?;
     let mut map: HashMap<i64, Vec<OrderTrackingNumber>> = HashMap::new();
     for r in &rows {
         let oid = r.try_get("order_id")?;
-        map.entry(oid).or_default().push(OrderTrackingNumber {
-            id: r.try_get("id")?,
-            created: r.try_get("created")?,
-            deleted: r.try_get("deleted")?,
-            order_id: oid,
-            tracking_number: r.try_get("tracking_number")?,
-            carrier: r.try_get("carrier")?,
-            service: r.try_get("service")?,
-        });
+        map.entry(oid).or_default().push(map_tracking_number(r)?);
     }
     Ok(map)
 }
 
-async fn reserved_by_order_ids(db: &Db, order_ids: &[i64]) -> AppResult<HashMap<(i64, i64), i64>> {
+async fn reserved_by_order_ids(
+    db: &Db,
+    tenant_id: TenantId,
+    order_ids: &[i64],
+) -> AppResult<HashMap<(i64, i64), i64>> {
     if order_ids.is_empty() {
         return Ok(HashMap::new());
     }
@@ -296,13 +333,18 @@ async fn reserved_by_order_ids(db: &Db, order_ids: &[i64]) -> AppResult<HashMap<
                ib.item_id AS item_id,
                COALESCE(SUM(r.qty), 0)::BIGINT AS reserved_qty
         FROM inventory_reservations r
-        INNER JOIN item_batches ib ON ib.id = r.item_batch_id
-        WHERE r.deleted IS NULL
+        INNER JOIN item_batches ib
+            ON ib.tenant_id = r.tenant_id
+           AND ib.inventory_owner_id = r.inventory_owner_id
+           AND ib.id = r.item_batch_id
+        WHERE r.tenant_id = $1
+          AND r.deleted IS NULL
           AND r.status = 'reserved'
-          AND r.order_id = ANY($1)
+          AND r.order_id = ANY($2)
         GROUP BY r.order_id, ib.item_id
         "#,
     )
+    .bind(tenant_id.get())
     .bind(order_ids)
     .fetch_all(db)
     .await?;
@@ -316,44 +358,56 @@ async fn reserved_by_order_ids(db: &Db, order_ids: &[i64]) -> AppResult<HashMap<
     Ok(map)
 }
 
-async fn reservations_for_order(db: &Db, order_id: i64) -> AppResult<Vec<InventoryReservation>> {
+async fn reservations_for_order(
+    db: &Db,
+    tenant_id: TenantId,
+    order_id: i64,
+) -> AppResult<Vec<InventoryReservation>> {
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, modified, deleted,
                order_id, order_item_id, inventory_balance_id, facility_id,
                item_batch_id, location_id, qty, status
         FROM inventory_reservations
-        WHERE deleted IS NULL
-          AND order_id = $1
+        WHERE tenant_id = $1
+          AND deleted IS NULL
+          AND order_id = $2
         ORDER BY id
         "#,
     )
+    .bind(tenant_id.get())
     .bind(order_id)
     .fetch_all(db)
     .await?;
     rows.iter().map(map_reservation).collect()
 }
 
-async fn activity_for_order(db: &Db, order_id: i64) -> AppResult<Vec<OrderActivity>> {
+async fn activity_for_order(
+    db: &Db,
+    tenant_id: TenantId,
+    order_id: i64,
+) -> AppResult<Vec<OrderActivity>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, created, deleted, order_id, action
+        SELECT id, tenant_id, inventory_owner_id, created, deleted, order_id, action
         FROM order_activity
-        WHERE deleted IS NULL
-          AND order_id = $1
+        WHERE tenant_id = $1
+          AND deleted IS NULL
+          AND order_id = $2
         ORDER BY created DESC, id DESC
         "#,
     )
+    .bind(tenant_id.get())
     .bind(order_id)
     .fetch_all(db)
     .await?;
     rows.iter().map(map_order_activity).collect()
 }
 
-pub async fn get_orders(db: &Db) -> AppResult<Vec<Order>> {
+pub async fn get_orders(db: &Db, tenant_id: TenantId) -> AppResult<Vec<Order>> {
     let rows = sqlx::query(
         r#"
-        SELECT o.id AS id, o.order_key AS order_key, o.created AS created,
+        SELECT o.id AS id, o.tenant_id AS tenant_id, o.order_key AS order_key, o.created AS created,
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
                o.address_id AS address_id, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
@@ -361,18 +415,20 @@ pub async fn get_orders(db: &Db) -> AppResult<Vec<Order>> {
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM orders o
-        LEFT JOIN addresses a ON a.id = o.address_id
-        LEFT JOIN inventory_owners acct ON acct.id = o.inventory_owner_id
-        WHERE o.deleted IS NULL
+        LEFT JOIN addresses a ON a.tenant_id = o.tenant_id AND a.id = o.address_id
+        INNER JOIN inventory_owners acct
+            ON acct.tenant_id = o.tenant_id AND acct.id = o.inventory_owner_id
+        WHERE o.tenant_id = $1 AND o.deleted IS NULL
         ORDER BY o.created DESC
         "#,
     )
+    .bind(tenant_id.get())
     .fetch_all(db)
     .await?;
-    let mut items = items_by_order(db).await?;
-    let mut tracking = tracking_by_order(db).await?;
-    let available = available_by_item(db).await?;
-    let reserved = reserved_by_order_item(db).await?;
+    let mut items = items_by_order(db, tenant_id).await?;
+    let mut tracking = tracking_by_order(db, tenant_id).await?;
+    let available = available_by_item(db, tenant_id).await?;
+    let reserved = reserved_by_order_item(db, tenant_id).await?;
     rows.iter()
         .map(|r| {
             let mut o = map_order(r)?;
@@ -386,6 +442,7 @@ pub async fn get_orders(db: &Db) -> AppResult<Vec<Order>> {
 
 pub async fn get_orders_page(
     db: &Db,
+    tenant_id: TenantId,
     limit: i64,
     offset: i64,
     status: Option<OrderStatus>,
@@ -396,26 +453,35 @@ pub async fn get_orders_page(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| format!("%{value}%"));
-    let summaries = order_summaries(db, status_text.as_deref(), search_pattern.as_deref()).await?;
+    let summaries = order_summaries(
+        db,
+        tenant_id,
+        status_text.as_deref(),
+        search_pattern.as_deref(),
+    )
+    .await?;
     let total: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*)::BIGINT
         FROM orders o
-        LEFT JOIN addresses a ON a.id = o.address_id
-        LEFT JOIN inventory_owners acct ON acct.id = o.inventory_owner_id
-        WHERE o.deleted IS NULL
-          AND ($1::TEXT IS NULL OR o.status = $1)
+        LEFT JOIN addresses a ON a.tenant_id = o.tenant_id AND a.id = o.address_id
+        INNER JOIN inventory_owners acct
+            ON acct.tenant_id = o.tenant_id AND acct.id = o.inventory_owner_id
+        WHERE o.tenant_id = $1
+          AND o.deleted IS NULL
+          AND ($2::TEXT IS NULL OR o.status = $2)
           AND (
-              $2::TEXT IS NULL
-              OR o.order_key ILIKE $2
-              OR o.id::TEXT ILIKE $2
-              OR a.city ILIKE $2
-              OR a.state ILIKE $2
-              OR a.postal_code ILIKE $2
-              OR acct.name ILIKE $2
+              $3::TEXT IS NULL
+              OR o.order_key ILIKE $3
+              OR o.id::TEXT ILIKE $3
+              OR a.city ILIKE $3
+              OR a.state ILIKE $3
+              OR a.postal_code ILIKE $3
+              OR acct.name ILIKE $3
           )
         "#,
     )
+    .bind(tenant_id.get())
     .bind(status_text.as_deref())
     .bind(search_pattern.as_deref())
     .fetch_one(db)
@@ -423,7 +489,7 @@ pub async fn get_orders_page(
 
     let rows = sqlx::query(
         r#"
-        SELECT o.id AS id, o.order_key AS order_key, o.created AS created,
+        SELECT o.id AS id, o.tenant_id AS tenant_id, o.order_key AS order_key, o.created AS created,
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
                o.address_id AS address_id, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
@@ -431,23 +497,26 @@ pub async fn get_orders_page(
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM orders o
-        LEFT JOIN addresses a ON a.id = o.address_id
-        LEFT JOIN inventory_owners acct ON acct.id = o.inventory_owner_id
-        WHERE o.deleted IS NULL
-          AND ($1::TEXT IS NULL OR o.status = $1)
+        LEFT JOIN addresses a ON a.tenant_id = o.tenant_id AND a.id = o.address_id
+        INNER JOIN inventory_owners acct
+            ON acct.tenant_id = o.tenant_id AND acct.id = o.inventory_owner_id
+        WHERE o.tenant_id = $1
+          AND o.deleted IS NULL
+          AND ($2::TEXT IS NULL OR o.status = $2)
           AND (
-              $2::TEXT IS NULL
-              OR o.order_key ILIKE $2
-              OR o.id::TEXT ILIKE $2
-              OR a.city ILIKE $2
-              OR a.state ILIKE $2
-              OR a.postal_code ILIKE $2
-              OR acct.name ILIKE $2
+              $3::TEXT IS NULL
+              OR o.order_key ILIKE $3
+              OR o.id::TEXT ILIKE $3
+              OR a.city ILIKE $3
+              OR a.state ILIKE $3
+              OR a.postal_code ILIKE $3
+              OR acct.name ILIKE $3
           )
         ORDER BY o.created DESC, o.id DESC
-        LIMIT $3 OFFSET $4
+        LIMIT $4 OFFSET $5
         "#,
     )
+    .bind(tenant_id.get())
     .bind(status_text.as_deref())
     .bind(search_pattern.as_deref())
     .bind(limit)
@@ -457,10 +526,10 @@ pub async fn get_orders_page(
 
     let mut orders = rows.iter().map(map_order).collect::<AppResult<Vec<_>>>()?;
     let order_ids = orders.iter().map(|order| order.id).collect::<Vec<_>>();
-    let mut items = items_by_order_ids(db, &order_ids).await?;
-    let mut tracking = tracking_by_order_ids(db, &order_ids).await?;
-    let available = available_by_item(db).await?;
-    let reserved = reserved_by_order_ids(db, &order_ids).await?;
+    let mut items = items_by_order_ids(db, tenant_id, &order_ids).await?;
+    let mut tracking = tracking_by_order_ids(db, tenant_id, &order_ids).await?;
+    let available = available_by_item(db, tenant_id).await?;
+    let reserved = reserved_by_order_ids(db, tenant_id, &order_ids).await?;
     for order in &mut orders {
         order.order_items = items.remove(&order.id).unwrap_or_default();
         order.tracking_numbers = tracking.remove(&order.id).unwrap_or_default();
@@ -472,10 +541,10 @@ pub async fn get_orders_page(
     })
 }
 
-pub async fn get_order(db: &Db, order_id: i64) -> AppResult<Option<Order>> {
+pub async fn get_order(db: &Db, tenant_id: TenantId, order_id: i64) -> AppResult<Option<Order>> {
     let row = sqlx::query(
         r#"
-        SELECT o.id AS id, o.order_key AS order_key, o.created AS created,
+        SELECT o.id AS id, o.tenant_id AS tenant_id, o.order_key AS order_key, o.created AS created,
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
                o.address_id AS address_id, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
@@ -483,12 +552,15 @@ pub async fn get_order(db: &Db, order_id: i64) -> AppResult<Option<Order>> {
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM orders o
-        LEFT JOIN addresses a ON a.id = o.address_id
-        LEFT JOIN inventory_owners acct ON acct.id = o.inventory_owner_id
-        WHERE o.id = $1
+        LEFT JOIN addresses a ON a.tenant_id = o.tenant_id AND a.id = o.address_id
+        INNER JOIN inventory_owners acct
+            ON acct.tenant_id = o.tenant_id AND acct.id = o.inventory_owner_id
+        WHERE o.tenant_id = $1
+          AND o.id = $2
           AND o.deleted IS NULL
         "#,
     )
+    .bind(tenant_id.get())
     .bind(order_id)
     .fetch_optional(db)
     .await?;
@@ -499,15 +571,15 @@ pub async fn get_order(db: &Db, order_id: i64) -> AppResult<Option<Order>> {
 
     let mut order = map_order(&row)?;
     let order_ids = [order.id];
-    let mut items = items_by_order_ids(db, &order_ids).await?;
-    let mut tracking = tracking_by_order_ids(db, &order_ids).await?;
-    let available = available_by_item(db).await?;
-    let reserved = reserved_by_order_ids(db, &order_ids).await?;
+    let mut items = items_by_order_ids(db, tenant_id, &order_ids).await?;
+    let mut tracking = tracking_by_order_ids(db, tenant_id, &order_ids).await?;
+    let available = available_by_item(db, tenant_id).await?;
+    let reserved = reserved_by_order_ids(db, tenant_id, &order_ids).await?;
 
     order.order_items = items.remove(&order.id).unwrap_or_default();
     order.tracking_numbers = tracking.remove(&order.id).unwrap_or_default();
-    order.reservations = reservations_for_order(db, order.id).await?;
-    order.activity = activity_for_order(db, order.id).await?;
+    order.reservations = reservations_for_order(db, tenant_id, order.id).await?;
+    order.activity = activity_for_order(db, tenant_id, order.id).await?;
     apply_order_stock_state(&mut order, &available, &reserved);
 
     Ok(Some(order))
@@ -515,46 +587,63 @@ pub async fn get_order(db: &Db, order_id: i64) -> AppResult<Option<Order>> {
 
 async fn order_summaries(
     db: &Db,
+    tenant_id: TenantId,
     status: Option<&str>,
     search: Option<&str>,
 ) -> AppResult<Vec<SummaryCount>> {
-    let available = available_by_item(db).await?;
+    let available = available_by_item(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT o.id AS order_id,
+               o.inventory_owner_id AS inventory_owner_id,
                o.status AS status,
                oi.item_id AS item_id,
                oi.qty AS qty,
                COALESCE(res.reserved_qty, 0)::BIGINT AS reserved_qty
         FROM orders o
-        LEFT JOIN addresses a ON a.id = o.address_id
-        LEFT JOIN inventory_owners acct ON acct.id = o.inventory_owner_id
-        LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.deleted IS NULL
+        LEFT JOIN addresses a ON a.tenant_id = o.tenant_id AND a.id = o.address_id
+        INNER JOIN inventory_owners acct
+            ON acct.tenant_id = o.tenant_id AND acct.id = o.inventory_owner_id
+        LEFT JOIN order_items oi
+            ON oi.tenant_id = o.tenant_id
+           AND oi.inventory_owner_id = o.inventory_owner_id
+           AND oi.order_id = o.id
+           AND oi.deleted IS NULL
         LEFT JOIN (
-            SELECT r.order_id AS order_id,
+            SELECT r.tenant_id AS tenant_id,
+                   r.inventory_owner_id AS inventory_owner_id,
+                   r.order_id AS order_id,
                    ib.item_id AS item_id,
                    COALESCE(SUM(r.qty), 0)::BIGINT AS reserved_qty
             FROM inventory_reservations r
-            INNER JOIN item_batches ib ON ib.id = r.item_batch_id
+            INNER JOIN item_batches ib
+                ON ib.tenant_id = r.tenant_id
+               AND ib.inventory_owner_id = r.inventory_owner_id
+               AND ib.id = r.item_batch_id
             WHERE r.deleted IS NULL
               AND r.status = 'reserved'
-            GROUP BY r.order_id, ib.item_id
-        ) res ON res.order_id = o.id AND res.item_id = oi.item_id
-        WHERE o.deleted IS NULL
+            GROUP BY r.tenant_id, r.inventory_owner_id, r.order_id, ib.item_id
+        ) res ON res.tenant_id = o.tenant_id
+             AND res.inventory_owner_id = o.inventory_owner_id
+             AND res.order_id = o.id
+             AND res.item_id = oi.item_id
+        WHERE o.tenant_id = $1
+          AND o.deleted IS NULL
           AND o.status <> 'shipped'
-          AND ($1::TEXT IS NULL OR o.status = $1)
+          AND ($2::TEXT IS NULL OR o.status = $2)
           AND (
-              $2::TEXT IS NULL
-              OR o.order_key ILIKE $2
-              OR o.id::TEXT ILIKE $2
-              OR a.city ILIKE $2
-              OR a.state ILIKE $2
-              OR a.postal_code ILIKE $2
-              OR acct.name ILIKE $2
+              $3::TEXT IS NULL
+              OR o.order_key ILIKE $3
+              OR o.id::TEXT ILIKE $3
+              OR a.city ILIKE $3
+              OR a.state ILIKE $3
+              OR a.postal_code ILIKE $3
+              OR acct.name ILIKE $3
           )
         ORDER BY o.id
         "#,
     )
+    .bind(tenant_id.get())
     .bind(status)
     .bind(search)
     .fetch_all(db)
@@ -578,11 +667,15 @@ async fn order_summaries(
             out_of_stock: false,
         });
         if matches!(status, OrderStatus::Open | OrderStatus::AwaitingShipment) {
+            let inventory_owner_id: i64 = row.try_get("inventory_owner_id")?;
             let item_id: Option<i64> = row.try_get("item_id")?;
             let qty: Option<i64> = row.try_get("qty")?;
             let reserved_qty: i64 = row.try_get("reserved_qty")?;
             if let (Some(item_id), Some(qty)) = (item_id, qty) {
-                let available_to_reserve = available.get(&item_id).copied().unwrap_or_default();
+                let available_to_reserve = available
+                    .get(&(inventory_owner_id, item_id))
+                    .copied()
+                    .unwrap_or_default();
                 if reserved_qty + available_to_reserve < qty {
                     entry.out_of_stock = true;
                 }
@@ -636,7 +729,7 @@ pub async fn orders_by_load(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i
     let rows = sqlx::query(
         r#"
         SELECT lo.load_id AS load_id,
-               o.id AS id, o.order_key AS order_key, o.created AS created,
+               o.id AS id, o.tenant_id AS tenant_id, o.order_key AS order_key, o.created AS created,
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
                o.address_id AS address_id, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
@@ -644,10 +737,13 @@ pub async fn orders_by_load(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM load_orders lo
-        INNER JOIN orders o ON o.id = lo.order_id
-        LEFT JOIN addresses a ON a.id = o.address_id
+        INNER JOIN orders o
+            ON o.tenant_id = lo.tenant_id
+           AND o.inventory_owner_id = lo.inventory_owner_id
+           AND o.id = lo.order_id
+        LEFT JOIN addresses a ON a.tenant_id = o.tenant_id AND a.id = o.address_id
         INNER JOIN inventory_owners acct
-            ON acct.tenant_id = lo.tenant_id AND acct.id = o.inventory_owner_id
+            ON acct.tenant_id = o.tenant_id AND acct.id = o.inventory_owner_id
         WHERE lo.tenant_id = $1
           AND lo.deleted IS NULL
           AND o.deleted IS NULL
@@ -657,10 +753,10 @@ pub async fn orders_by_load(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i
     .bind(tenant_id.get())
     .fetch_all(db)
     .await?;
-    let items = items_by_order(db).await?;
-    let tracking = tracking_by_order(db).await?;
-    let available = available_by_item(db).await?;
-    let reserved = reserved_by_order_item(db).await?;
+    let items = items_by_order(db, tenant_id).await?;
+    let tracking = tracking_by_order(db, tenant_id).await?;
+    let available = available_by_item(db, tenant_id).await?;
+    let reserved = reserved_by_order_item(db, tenant_id).await?;
     let mut by_load: HashMap<i64, Vec<Order>> = HashMap::new();
     for r in &rows {
         let load_id = r.try_get("load_id")?;
@@ -676,7 +772,7 @@ pub async fn orders_by_load(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i
 pub async fn orders_for_load(db: &Db, tenant_id: TenantId, load_id: i64) -> AppResult<Vec<Order>> {
     let rows = sqlx::query(
         r#"
-        SELECT o.id AS id, o.order_key AS order_key, o.created AS created,
+        SELECT o.id AS id, o.tenant_id AS tenant_id, o.order_key AS order_key, o.created AS created,
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
                o.address_id AS address_id, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
@@ -684,10 +780,13 @@ pub async fn orders_for_load(db: &Db, tenant_id: TenantId, load_id: i64) -> AppR
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM load_orders lo
-        INNER JOIN orders o ON o.id = lo.order_id
-        LEFT JOIN addresses a ON a.id = o.address_id
+        INNER JOIN orders o
+            ON o.tenant_id = lo.tenant_id
+           AND o.inventory_owner_id = lo.inventory_owner_id
+           AND o.id = lo.order_id
+        LEFT JOIN addresses a ON a.tenant_id = o.tenant_id AND a.id = o.address_id
         INNER JOIN inventory_owners acct
-            ON acct.tenant_id = lo.tenant_id AND acct.id = o.inventory_owner_id
+            ON acct.tenant_id = o.tenant_id AND acct.id = o.inventory_owner_id
         WHERE lo.tenant_id = $1
           AND lo.load_id = $2
           AND lo.deleted IS NULL
@@ -707,70 +806,64 @@ pub async fn orders_for_load(db: &Db, tenant_id: TenantId, load_id: i64) -> AppR
     let order_ids = orders.iter().map(|order| order.id).collect::<Vec<_>>();
     let item_rows = sqlx::query(
         r#"
-        SELECT oi.id, oi.created, oi.deleted, oi.qty, oi.item_id, i.description AS item_description,
-               oi.order_id, oi.item_batch_id
+        SELECT oi.id, oi.tenant_id, oi.inventory_owner_id, oi.created, oi.deleted,
+               oi.qty, oi.item_id, i.description AS item_description, oi.order_id, oi.item_batch_id
         FROM order_items oi
-        LEFT JOIN items i ON i.id = oi.item_id
-        WHERE oi.deleted IS NULL AND oi.order_id = ANY($1)
+        LEFT JOIN items i ON i.tenant_id = oi.tenant_id AND i.id = oi.item_id
+        WHERE oi.tenant_id = $1 AND oi.deleted IS NULL AND oi.order_id = ANY($2)
         "#,
     )
+    .bind(tenant_id.get())
     .bind(&order_ids)
     .fetch_all(db)
     .await?;
     let mut items: HashMap<i64, Vec<OrderItem>> = HashMap::new();
     for r in &item_rows {
         let oid = r.try_get("order_id")?;
-        items.entry(oid).or_default().push(OrderItem {
-            id: r.try_get("id")?,
-            created: r.try_get("created")?,
-            deleted: r.try_get("deleted")?,
-            qty: r.try_get("qty")?,
-            item_id: r.try_get("item_id")?,
-            item_description: r.try_get("item_description")?,
-            order_id: oid,
-            item_batch_id: r.try_get("item_batch_id")?,
-        });
+        items.entry(oid).or_default().push(map_order_item(r)?);
     }
 
     let tracking_rows = sqlx::query(
         r#"
-        SELECT id, created, deleted, order_id, tracking_number, carrier, service
+        SELECT id, tenant_id, inventory_owner_id, created, deleted, order_id,
+               tracking_number, carrier, service
         FROM order_tracking_numbers
-        WHERE deleted IS NULL AND order_id = ANY($1)
+        WHERE tenant_id = $1 AND deleted IS NULL AND order_id = ANY($2)
         ORDER BY id
         "#,
     )
+    .bind(tenant_id.get())
     .bind(&order_ids)
     .fetch_all(db)
     .await?;
     let mut tracking: HashMap<i64, Vec<OrderTrackingNumber>> = HashMap::new();
     for r in &tracking_rows {
         let oid = r.try_get("order_id")?;
-        tracking.entry(oid).or_default().push(OrderTrackingNumber {
-            id: r.try_get("id")?,
-            created: r.try_get("created")?,
-            deleted: r.try_get("deleted")?,
-            order_id: oid,
-            tracking_number: r.try_get("tracking_number")?,
-            carrier: r.try_get("carrier")?,
-            service: r.try_get("service")?,
-        });
+        tracking
+            .entry(oid)
+            .or_default()
+            .push(map_tracking_number(r)?);
     }
 
-    let available = available_by_item(db).await?;
+    let available = available_by_item(db, tenant_id).await?;
     let reserved_rows = sqlx::query(
         r#"
         SELECT r.order_id AS order_id,
                ib.item_id AS item_id,
                COALESCE(SUM(r.qty), 0)::BIGINT AS reserved_qty
         FROM inventory_reservations r
-        INNER JOIN item_batches ib ON ib.id = r.item_batch_id
-        WHERE r.deleted IS NULL
+        INNER JOIN item_batches ib
+            ON ib.tenant_id = r.tenant_id
+           AND ib.inventory_owner_id = r.inventory_owner_id
+           AND ib.id = r.item_batch_id
+        WHERE r.tenant_id = $1
+          AND r.deleted IS NULL
           AND r.status = 'reserved'
-          AND r.order_id = ANY($1)
+          AND r.order_id = ANY($2)
         GROUP BY r.order_id, ib.item_id
         "#,
     )
+    .bind(tenant_id.get())
     .bind(&order_ids)
     .fetch_all(db)
     .await?;
@@ -790,9 +883,13 @@ pub async fn orders_for_load(db: &Db, tenant_id: TenantId, load_id: i64) -> AppR
     Ok(orders)
 }
 
-pub async fn add_order(db: &Db, o: &NewOrder) -> AppResult<bool> {
-    let address_id = address::insert_address(
-        db,
+pub async fn add_order(db: &Db, tenant_id: TenantId, o: &NewOrder) -> AppResult<bool> {
+    let inventory_owner_id = InventoryOwnerId::new(o.inventory_owner_id)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let mut tx = db.begin().await?;
+    let address_id = address::insert_address_tx(
+        &mut tx,
+        tenant_id,
         o.line1.as_deref(),
         o.line2.as_deref(),
         Some(&o.city),
@@ -802,35 +899,52 @@ pub async fn add_order(db: &Db, o: &NewOrder) -> AppResult<bool> {
     )
     .await?;
 
-    let mut tx = db.begin().await?;
     let order_id: i64 = sqlx::query_scalar(
         r#"
-        INSERT INTO orders (order_key, created, rush, status, address_id, ship_by, inventory_owner_id)
-        VALUES ($1, $2, $3, 'open', $4, $5, $6)
+        INSERT INTO orders
+            (tenant_id, inventory_owner_id, order_key, created, rush, status, address_id, ship_by)
+        VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
         RETURNING id
         "#,
     )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id.get())
     .bind(&o.order_key)
     .bind(now_iso())
     .bind(o.rush.unwrap_or(false))
     .bind(address_id)
     .bind(o.ship_by)
-    .bind(o.inventory_owner_id)
     .fetch_one(&mut *tx)
     .await?;
-    insert_order_activity_tx(&mut tx, order_id, "created order").await?;
+    insert_order_activity_tx(
+        &mut tx,
+        tenant_id,
+        inventory_owner_id,
+        order_id,
+        "created order",
+    )
+    .await?;
     tx.commit().await?;
     Ok(true)
 }
 
 async fn insert_order_activity_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    inventory_owner_id: InventoryOwnerId,
     order_id: i64,
     action: &str,
 ) -> AppResult<i64> {
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO order_activity (created, order_id, action) VALUES ($1, $2, $3) RETURNING id",
+        r#"
+        INSERT INTO order_activity
+            (tenant_id, inventory_owner_id, created, order_id, action)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id
+        "#,
     )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id.get())
     .bind(now_iso())
     .bind(order_id)
     .bind(action)
@@ -839,15 +953,25 @@ async fn insert_order_activity_tx(
     Ok(id)
 }
 
-pub async fn update_order(db: &Db, u: &OrderUpdate) -> AppResult<bool> {
-    update_order_inner(db, u, None).await
+pub async fn update_order(db: &Db, tenant_id: TenantId, u: &OrderUpdate) -> AppResult<bool> {
+    update_order_inner(db, tenant_id, u, None).await
 }
 
-pub async fn update_order_by_user(db: &Db, u: &OrderUpdate, user_id: i64) -> AppResult<bool> {
-    update_order_inner(db, u, Some(user_id)).await
+pub async fn update_order_by_user(
+    db: &Db,
+    tenant_id: TenantId,
+    u: &OrderUpdate,
+    user_id: i64,
+) -> AppResult<bool> {
+    update_order_inner(db, tenant_id, u, Some(user_id)).await
 }
 
-async fn update_order_inner(db: &Db, u: &OrderUpdate, user_id: Option<i64>) -> AppResult<bool> {
+async fn update_order_inner(
+    db: &Db,
+    tenant_id: TenantId,
+    u: &OrderUpdate,
+    user_id: Option<i64>,
+) -> AppResult<bool> {
     let has_address = u.line1.is_some()
         || u.line2.is_some()
         || u.city.is_some()
@@ -855,10 +979,12 @@ async fn update_order_inner(db: &Db, u: &OrderUpdate, user_id: Option<i64>) -> A
         || u.postal_code.is_some()
         || u.country.is_some();
 
+    let mut tx = db.begin().await?;
     let new_address_id = if has_address {
         Some(
-            address::insert_address(
-                db,
+            address::insert_address_tx(
+                &mut tx,
+                tenant_id,
                 u.line1.as_deref(),
                 u.line2.as_deref(),
                 u.city.as_deref(),
@@ -882,15 +1008,15 @@ async fn update_order_inner(db: &Db, u: &OrderUpdate, user_id: Option<i64>) -> A
             closed = COALESCE($5, closed),
             ship_by = COALESCE($6, ship_by),
             wave_id = COALESCE($7, wave_id),
-            inventory_owner_id = COALESCE($8, inventory_owner_id),
-            address_id = COALESCE($9, address_id)
-        WHERE id = $10
+            address_id = COALESCE($8, address_id)
+        WHERE tenant_id = $9
+          AND id = $10
           AND deleted IS NULL
           AND status IN {MUTABLE}
+        RETURNING inventory_owner_id
         "#
     );
-    let mut tx = db.begin().await?;
-    let res = sqlx::query(&sql)
+    let inventory_owner_id: Option<i64> = sqlx::query_scalar(&sql)
         .bind(u.order_key.as_deref())
         .bind(u.status.map(|s| s.as_str()))
         .bind(u.rush)
@@ -898,23 +1024,27 @@ async fn update_order_inner(db: &Db, u: &OrderUpdate, user_id: Option<i64>) -> A
         .bind(u.closed)
         .bind(u.ship_by)
         .bind(u.wave_id)
-        .bind(u.inventory_owner_id)
         .bind(new_address_id)
+        .bind(tenant_id.get())
         .bind(u.order_id)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-    if res.rows_affected() > 0 {
+    if let Some(inventory_owner_id) = inventory_owner_id {
         let action = u
             .status
             .map(|status| format!("updated order status to {status}"))
             .unwrap_or_else(|| "updated order".to_owned());
-        insert_order_activity_tx(&mut tx, u.order_id, &action).await?;
+        let inventory_owner_id = InventoryOwnerId::new(inventory_owner_id)
+            .map_err(|error| AppError::internal(error.to_string()))?;
+        insert_order_activity_tx(&mut tx, tenant_id, inventory_owner_id, u.order_id, &action)
+            .await?;
     }
-    let changed = res.rows_affected() > 0;
+    let changed = inventory_owner_id.is_some();
     tx.commit().await?;
     if changed && matches!(u.status, Some(OrderStatus::Cancelled)) {
         tasks::create_unpack_cancelled_order_task(
             db,
+            tenant_id,
             user_id,
             u.order_id,
             None,
@@ -928,38 +1058,56 @@ async fn update_order_inner(db: &Db, u: &OrderUpdate, user_id: Option<i64>) -> A
     Ok(changed)
 }
 
-pub async fn delete_order(db: &Db, id: i64) -> AppResult<bool> {
+pub async fn delete_order(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
     let sql = format!(
         r#"
         UPDATE orders SET deleted = $1
-        WHERE id = $2
+        WHERE tenant_id = $2
+          AND id = $3
+          AND deleted IS NULL
           AND status IN {MUTABLE}
           AND closed IS NULL
           AND confirmed IS NULL
+        RETURNING inventory_owner_id
         "#
     );
     let mut tx = db.begin().await?;
-    let res = sqlx::query(&sql)
+    let inventory_owner_id: Option<i64> = sqlx::query_scalar(&sql)
         .bind(now_iso())
+        .bind(tenant_id.get())
         .bind(id)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-    if res.rows_affected() > 0 {
-        insert_order_activity_tx(&mut tx, id, "deleted order").await?;
+    if let Some(inventory_owner_id) = inventory_owner_id {
+        let inventory_owner_id = InventoryOwnerId::new(inventory_owner_id)
+            .map_err(|error| AppError::internal(error.to_string()))?;
+        insert_order_activity_tx(&mut tx, tenant_id, inventory_owner_id, id, "deleted order")
+            .await?;
     }
     tx.commit().await?;
-    Ok(res.rows_affected() > 0)
+    Ok(inventory_owner_id.is_some())
 }
 
-pub async fn restore_order(db: &Db, id: i64) -> AppResult<bool> {
+pub async fn restore_order(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
     let mut tx = db.begin().await?;
-    let res = sqlx::query("UPDATE orders SET deleted = NULL WHERE id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    if res.rows_affected() > 0 {
-        insert_order_activity_tx(&mut tx, id, "restored order").await?;
+    let inventory_owner_id: Option<i64> = sqlx::query_scalar(
+        r#"
+        UPDATE orders
+        SET deleted = NULL
+        WHERE tenant_id = $1 AND id = $2 AND deleted IS NOT NULL
+        RETURNING inventory_owner_id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(inventory_owner_id) = inventory_owner_id {
+        let inventory_owner_id = InventoryOwnerId::new(inventory_owner_id)
+            .map_err(|error| AppError::internal(error.to_string()))?;
+        insert_order_activity_tx(&mut tx, tenant_id, inventory_owner_id, id, "restored order")
+            .await?;
     }
     tx.commit().await?;
-    Ok(res.rows_affected() > 0)
+    Ok(inventory_owner_id.is_some())
 }

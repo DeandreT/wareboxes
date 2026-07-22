@@ -56,9 +56,10 @@ pub struct TenantAccess {
     pub is_default: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Address {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub name: Option<String>,
@@ -221,9 +222,11 @@ impl OrderStatus {
 
 impl_status_display!(OrderStatus);
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OrderItem {
     pub id: i64,
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub qty: i64,
@@ -233,9 +236,11 @@ pub struct OrderItem {
     pub item_batch_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OrderTrackingNumber {
     pub id: i64,
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub order_id: i64,
@@ -244,20 +249,23 @@ pub struct OrderTrackingNumber {
     pub service: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OrderActivity {
     pub id: i64,
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
-    pub order_id: Option<i64>,
+    pub order_id: i64,
     pub action: String,
 }
 
 /// Orders join their shipping address, so the address columns are flattened
 /// onto the order (matching `SelectOrder` in `app/utils/types/db/orders.ts`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Order {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub order_key: String,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
@@ -268,7 +276,7 @@ pub struct Order {
     pub closed: Option<Timestamp>,
     pub ship_by: Option<Timestamp>,
     pub wave_id: Option<i64>,
-    pub inventory_owner_id: Option<i64>,
+    pub inventory_owner_id: i64,
     pub inventory_owner_name: Option<String>,
     pub line1: Option<String>,
     pub line2: Option<String>,

@@ -334,7 +334,9 @@ async fn cancelling_order_creates_unpack_task() {
     let item = fixture
         .item(tenant_id, "Cancelled Order Item", "each")
         .await;
-    let order_id = fixture.order("CANCEL-TASK-1", Some(inventory_owner)).await;
+    let order_id = fixture
+        .order(tenant_id, "CANCEL-TASK-1", inventory_owner)
+        .await;
     let order_item_id = fixture.order_item(order_id, item, 3).await;
     let update = OrderUpdate {
         order_id,
@@ -345,7 +347,6 @@ async fn cancelling_order_creates_unpack_task() {
         closed: None,
         ship_by: None,
         wave_id: None,
-        inventory_owner_id: None,
         line1: None,
         line2: None,
         city: None,
@@ -353,12 +354,16 @@ async fn cancelling_order_creates_unpack_task() {
         postal_code: None,
         country: None,
     };
-    assert!(repo::orders::update_order_by_user(db, &update, user.id)
-        .await
-        .unwrap());
-    assert!(repo::orders::update_order_by_user(db, &update, user.id)
-        .await
-        .unwrap());
+    assert!(
+        repo::orders::update_order_by_user(db, tenant_id, &update, user.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        repo::orders::update_order_by_user(db, tenant_id, &update, user.id)
+            .await
+            .unwrap()
+    );
 
     let tasks = repo::tasks::get_tasks(
         db,

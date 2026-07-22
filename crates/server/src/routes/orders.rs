@@ -4,7 +4,7 @@ use serde::Deserialize;
 use wareboxes_core::dto::{NewOrder, OrderIdRequest, OrderPage, OrderUpdate};
 use wareboxes_core::models::{Order, OrderStatus};
 
-use crate::auth::CurrentUser;
+use crate::auth::CurrentTenant;
 use crate::error::{AppError, AppResult};
 use crate::repo;
 use crate::routes::validate;
@@ -24,7 +24,7 @@ pub struct OrderListQuery {
 
 pub async fn list(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Query(q): Query<OrderListQuery>,
 ) -> AppResult<Json<OrderPage>> {
     user.require_permission(&state.db, PERM).await?;
@@ -33,52 +33,60 @@ pub async fn list(
         .unwrap_or(DEFAULT_ORDER_LIMIT)
         .clamp(1, MAX_ORDER_LIMIT);
     let offset = q.offset.unwrap_or(0).max(0);
-    let orders =
-        repo::orders::get_orders_page(&state.db, limit, offset, q.status, q.search.as_deref())
-            .await?;
+    let orders = repo::orders::get_orders_page(
+        &state.db,
+        user.tenant.tenant_id,
+        limit,
+        offset,
+        q.status,
+        q.search.as_deref(),
+    )
+    .await?;
     Ok(Json(orders))
 }
 
 pub async fn get(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Path(order_id): Path<i64>,
 ) -> AppResult<Json<Option<Order>>> {
     user.require_permission(&state.db, PERM).await?;
-    let order = repo::orders::get_order(&state.db, order_id).await?;
+    let order = repo::orders::get_order(&state.db, user.tenant.tenant_id, order_id).await?;
     Ok(Json(order))
 }
 
 pub async fn add(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<NewOrder>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::orders::add_order(&state.db, &body).await?;
+    let ok = repo::orders::add_order(&state.db, user.tenant.tenant_id, &body).await?;
     Ok(Json(ok))
 }
 
 pub async fn update(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<OrderUpdate>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::orders::update_order_by_user(&state.db, &body, user.user.id).await?;
+    let ok =
+        repo::orders::update_order_by_user(&state.db, user.tenant.tenant_id, &body, user.user.id)
+            .await?;
     Ok(Json(ok))
 }
 
 pub async fn delete(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<OrderIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::orders::delete_order(&state.db, body.order_id).await?;
+    let ok = repo::orders::delete_order(&state.db, user.tenant.tenant_id, body.order_id).await?;
     if !ok {
         return Err(AppError::conflict(
             "order cannot be deleted because it is shipped, confirmed, closed, deleted, or not mutable",
@@ -89,11 +97,11 @@ pub async fn delete(
 
 pub async fn restore(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: CurrentTenant,
     Json(body): Json<OrderIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::orders::restore_order(&state.db, body.order_id).await?;
+    let ok = repo::orders::restore_order(&state.db, user.tenant.tenant_id, body.order_id).await?;
     Ok(Json(ok))
 }

@@ -5,11 +5,23 @@ use common::*;
 #[tokio::test]
 async fn order_and_load_mutations_write_activity_history() {
     let db = setup().await;
-
-    repo::orders::add_order(&db, &new_order("ACT-ORDER", None))
+    let user = auth::register_user(&db, "activity@test.com", "supersecret", None, None)
         .await
         .unwrap();
-    let order_id = repo::orders::get_orders(&db).await.unwrap()[0].id;
+    let tenant_id = tenant_for_user(&db, user.id).await;
+    let inventory_owner = repo::inventory_owners::add_inventory_owner(
+        &db,
+        tenant_id,
+        "Activity InventoryOwner",
+        "activity@test",
+    )
+    .await
+    .unwrap();
+
+    repo::orders::add_order(&db, tenant_id, &new_order("ACT-ORDER", inventory_owner))
+        .await
+        .unwrap();
+    let order_id = repo::orders::get_orders(&db, tenant_id).await.unwrap()[0].id;
     let update = OrderUpdate {
         order_id,
         order_key: None,
@@ -19,7 +31,6 @@ async fn order_and_load_mutations_write_activity_history() {
         closed: None,
         ship_by: None,
         wave_id: None,
-        inventory_owner_id: None,
         line1: None,
         line2: None,
         city: None,
@@ -27,9 +38,15 @@ async fn order_and_load_mutations_write_activity_history() {
         postal_code: None,
         country: None,
     };
-    assert!(repo::orders::update_order(&db, &update).await.unwrap());
-    assert!(repo::orders::delete_order(&db, order_id).await.unwrap());
-    assert!(repo::orders::restore_order(&db, order_id).await.unwrap());
+    assert!(repo::orders::update_order(&db, tenant_id, &update)
+        .await
+        .unwrap());
+    assert!(repo::orders::delete_order(&db, tenant_id, order_id)
+        .await
+        .unwrap());
+    assert!(repo::orders::restore_order(&db, tenant_id, order_id)
+        .await
+        .unwrap());
 
     let order_actions = sqlx::query_scalar::<_, String>(
         "SELECT action FROM order_activity WHERE order_id = $1 ORDER BY id",
@@ -48,21 +65,9 @@ async fn order_and_load_mutations_write_activity_history() {
         ]
     );
 
-    let user = auth::register_user(&db, "activity@test.com", "supersecret", None, None)
-        .await
-        .unwrap();
-    let tenant_id = tenant_for_user(&db, user.id).await;
     let facility = repo::facilities::add_facility(&db, tenant_id, "Activity DC")
         .await
         .unwrap();
-    let inventory_owner = repo::inventory_owners::add_inventory_owner(
-        &db,
-        tenant_id,
-        "Activity InventoryOwner",
-        "activity@test",
-    )
-    .await
-    .unwrap();
     let load_id = repo::loads::add_load(
         &db,
         tenant_id,

@@ -17,6 +17,7 @@ CREATE TABLE tenants (
 
 CREATE TABLE addresses (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     name TEXT,
@@ -32,7 +33,8 @@ CREATE TABLE addresses (
     city TEXT,
     territory TEXT,
     district TEXT,
-    validated TIMESTAMPTZ
+    validated TIMESTAMPTZ,
+    UNIQUE (tenant_id, id)
 );
 
 CREATE TABLE users (
@@ -134,9 +136,10 @@ CREATE TABLE facilities (
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     name TEXT,
-    address_id BIGINT REFERENCES addresses(id),
+    address_id BIGINT,
     UNIQUE (tenant_id, id),
-    UNIQUE (tenant_id, name)
+    UNIQUE (tenant_id, name),
+    FOREIGN KEY (tenant_id, address_id) REFERENCES addresses(tenant_id, id)
 );
 
 CREATE TABLE inventory_owner_facilities (
@@ -171,13 +174,17 @@ CREATE UNIQUE INDEX idx_user_inventory_owners_one_primary
 
 CREATE TABLE pick_waves (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    name TEXT
+    name TEXT,
+    UNIQUE (tenant_id, id)
 );
 
 CREATE TABLE orders (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+    inventory_owner_id BIGINT NOT NULL,
     order_key TEXT NOT NULL,
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
@@ -187,32 +194,43 @@ CREATE TABLE orders (
     confirmed TIMESTAMPTZ,
     closed TIMESTAMPTZ,
     ship_by TIMESTAMPTZ,
-    wave_id BIGINT REFERENCES pick_waves(id),
-    inventory_owner_id BIGINT REFERENCES inventory_owners(id),
+    wave_id BIGINT,
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, address_id) REFERENCES addresses(tenant_id, id),
+    FOREIGN KEY (tenant_id, wave_id) REFERENCES pick_waves(tenant_id, id),
     CHECK (status IN ('awaiting shipment', 'shipped', 'cancelled', 'held', 'processing', 'open', 'void')),
-    UNIQUE (order_key, inventory_owner_id)
+    UNIQUE (tenant_id, inventory_owner_id, order_key)
 );
-CREATE INDEX idx_orders_inventory_owner_status ON orders(inventory_owner_id, status) WHERE deleted IS NULL;
-CREATE INDEX idx_orders_status_created ON orders(status, created DESC) WHERE deleted IS NULL;
-CREATE INDEX idx_orders_ship_by ON orders(ship_by) WHERE deleted IS NULL AND ship_by IS NOT NULL;
+CREATE INDEX idx_orders_inventory_owner_status ON orders(tenant_id, inventory_owner_id, status) WHERE deleted IS NULL;
+CREATE INDEX idx_orders_status_created ON orders(tenant_id, status, created DESC) WHERE deleted IS NULL;
+CREATE INDEX idx_orders_ship_by ON orders(tenant_id, ship_by) WHERE deleted IS NULL AND ship_by IS NOT NULL;
 
 CREATE TABLE order_items (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+    inventory_owner_id BIGINT NOT NULL,
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     qty BIGINT NOT NULL CHECK (qty > 0),
     item_id BIGINT NOT NULL,
-    order_id BIGINT NOT NULL REFERENCES orders(id),
-    item_batch_id BIGINT
+    order_id BIGINT NOT NULL,
+    item_batch_id BIGINT,
+    UNIQUE (tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES orders(tenant_id, inventory_owner_id, id)
 );
-CREATE INDEX idx_order_items_order_id ON order_items(order_id);
-CREATE INDEX idx_order_items_item_id ON order_items(item_id);
+CREATE INDEX idx_order_items_order_id ON order_items(tenant_id, inventory_owner_id, order_id);
+CREATE INDEX idx_order_items_item_id ON order_items(tenant_id, item_id);
 
 CREATE TABLE order_activity (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
+    inventory_owner_id BIGINT NOT NULL,
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
-    order_id BIGINT REFERENCES orders(id),
-    action TEXT NOT NULL
+    order_id BIGINT NOT NULL,
+    action TEXT NOT NULL,
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES orders(tenant_id, inventory_owner_id, id)
 );
-CREATE INDEX idx_order_activity_order_id ON order_activity(order_id);
+CREATE INDEX idx_order_activity_order_id ON order_activity(tenant_id, inventory_owner_id, order_id);

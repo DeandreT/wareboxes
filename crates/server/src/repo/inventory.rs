@@ -1127,9 +1127,10 @@ pub async fn reserve_inventory(
         SELECT EXISTS(
             SELECT 1
             FROM orders o
-            INNER JOIN inventory_owners owner ON owner.id = o.inventory_owner_id
-            WHERE o.id = $1 AND o.inventory_owner_id = $2
-              AND owner.tenant_id = $3 AND o.deleted IS NULL
+            WHERE o.tenant_id = $3
+              AND o.id = $1
+              AND o.inventory_owner_id = $2
+              AND o.deleted IS NULL
         )
         "#,
     )
@@ -1146,11 +1147,24 @@ pub async fn reserve_inventory(
 
     if let Some(order_item_id) = order_item_id {
         let item_matches: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM order_items WHERE id = $1 AND order_id = $2 AND item_id = $3 AND deleted IS NULL)",
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM order_items
+                WHERE tenant_id = $4
+                  AND inventory_owner_id = $5
+                  AND id = $1
+                  AND order_id = $2
+                  AND item_id = $3
+                  AND deleted IS NULL
+            )
+            "#,
         )
         .bind(order_item_id)
         .bind(order_id)
         .bind(resolved_item_id)
+        .bind(tenant_id.get())
+        .bind(inventory_owner_id)
         .fetch_one(&mut *tx)
         .await?;
         if !item_matches {
