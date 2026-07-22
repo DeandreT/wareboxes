@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#111512" />
+  <meta name="description" content="Wareboxes is an open warehouse management platform for multi-client operations, auditable inventory, and facility execution." />
+  <meta property="og:title" content="Wareboxes | Warehouse execution, in full view" />
+  <meta property="og:description" content="An open, multi-tenant warehouse management platform for operators and 3PLs." />
+  <meta property="og:type" content="website" />
+  <title>Wareboxes | Warehouse execution, in full view</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%23111512"/><path d="M7 8h8v7H7zm10 0h8v7h-8zM7 17h8v7H7zm10 0h8v7h-8z" fill="%23f2c94c"/></svg>' />
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+
+  <header class="site-header">
+    <div class="wrap nav-inner">
+      <a class="brand" href="#top" aria-label="Wareboxes home">
+        <span class="brand-mark" aria-hidden="true">
+          <i></i><i></i><i></i><i></i>
+        </span>
+        <span>wareboxes</span>
+      </a>
+
+      <nav class="desktop-nav" aria-label="Primary navigation">
+        <a href="#product">Product</a>
+        <a href="#model">Operating model</a>
+        <a href="#roadmap">Roadmap</a>
+        <a class="nav-source" href="app/">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 22h8M12 18v4"/></svg>
+          Web client
+        </a>
+      </nav>
+
+      <details class="mobile-nav">
+        <summary aria-label="Open navigation">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </summary>
+        <nav aria-label="Mobile navigation">
+          <a href="#product">Product</a>
+          <a href="#model">Operating model</a>
+          <a href="#roadmap">Roadmap</a>
+          <a href="app/">Web client</a>
+          <a href="https://github.com/DeandreT/wareboxes">GitHub</a>
+        </nav>
+      </details>
+    </div>
+  </header>
+
+  <main id="main-content">
+    <section class="hero" id="top">
+      <div class="hero-scene" aria-hidden="true">
+        <div class="facility-caption">
+          <span class="live-dot"></span>
+          FACILITY 01 / LIVE
+        </div>
+        <div class="facility-plane">
+          <div class="floor-line floor-line-a"></div>
+          <div class="floor-line floor-line-b"></div>
+          <div class="rack rack-a">
+            <i></i><i></i><i></i><i></i><i></i><i></i>
+          </div>
+          <div class="rack rack-b">
+            <i></i><i></i><i></i><i></i><i></i><i></i>
+          </div>
+          <div class="rack rack-c">
+            <i></i><i></i><i></i><i></i><i></i><i></i>
+          </div>
+          <div class="rack rack-d">
+            <i></i><i></i><i></i><i></i><i></i><i></i>
+          </div>
+          <div class="dock dock-a">01</div>
+          <div class="dock dock-b">02</div>
+          <div class="dock dock-c">03</div>
+          <div class="route route-a"></div>
+          <div class="route route-b"></div>
+          <div class="route-marker marker-a"></div>
+          <div class="route-marker marker-b"></div>
+          <div class="scan-beam"></div>
+        </div>
+        <div class="event-flag event-flag-a"><b>RCV-1842</b><span>received</span></div>
+        <div class="event-flag event-flag-b"><b>LP-00981</b><span>putaway ready</span></div>
+        <div class="event-flag event-flag-c"><b>ORD-4420</b><span>allocated</span></div>
+      </div>
+
+      <div class="wrap hero-inner">
+        <div class="hero-copy">
+          <p class="eyebrow"><span></span>Warehouse management, built in the open</p>
+          <h1>Wareboxes</h1>
+          <p class="hero-statement">Warehouse execution,<br />in full view.</p>
+          <p class="hero-body">An open, multi-tenant WMS for warehouse operators and multi-client 3PLs. Inventory ownership, facility work, and every stock movement stay explicit.</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="app/">
+              Open web client
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </a>
+            <a class="button button-secondary" href="https://github.com/DeandreT/wareboxes">
+              View source
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7A5.4 5.4 0 0 0 19.4 4 5 5 0 0 0 19.3.5S18.2.1 15 1.8a13.4 13.4 0 0 0-7 0C4.8.1 3.7.5 3.7.5A5 5 0 0 0 3.6 4a5.4 5.4 0 0 0-1.4 3.7c0 5.3 3.5 6.5 6.8 7A4.8 4.8 0 0 0 8 18v4M8 19c-3 .9-3-1.5-4-2"/></svg>
+            </a>
+          </div>
+          <div class="build-status">
+            <span>Development preview</span>
+            <p>Current focus: auditable inventory and inbound execution</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="signal-strip" aria-label="Sample warehouse events">
+      <div class="signal-track">
+        <div class="signal-group">
+          <span><b>09:42:18</b> receipt posted</span>
+          <span><b>09:42:21</b> balance reconciled</span>
+          <span><b>09:42:25</b> putaway task ready</span>
+          <span><b>09:42:31</b> stock reserved</span>
+          <span><b>09:42:36</b> owner scope verified</span>
+        </div>
+        <div class="signal-group" aria-hidden="true">
+          <span><b>09:42:18</b> receipt posted</span>
+          <span><b>09:42:21</b> balance reconciled</span>
+          <span><b>09:42:25</b> putaway task ready</span>
+          <span><b>09:42:31</b> stock reserved</span>
+          <span><b>09:42:36</b> owner scope verified</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="product-section" id="product">
+      <div class="wrap">
+        <div class="section-heading reveal">
+          <div>
+            <p class="section-kicker">Live client</p>
+            <h2>The current Wareboxes console, running in your browser.</h2>
+          </div>
+          <p>This is the real egui application compiled to WebAssembly. It shares the desktop client's API, panels, forms, and warehouse workflows rather than presenting a separate mock interface.</p>
+        </div>
+
+        <div class="live-console reveal">
+          <div class="console-titlebar">
+            <div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+            <div class="console-meta">
+              <span>Live application</span>
+              <b>wareboxes-client / wasm32</b>
+            </div>
+            <a class="console-open" href="app/" aria-label="Open the Wareboxes web client full screen">
+              Open full screen
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+            </a>
+          </div>
+          <div class="console-viewport">
+            <iframe src="app/" title="Wareboxes WMS web client" loading="lazy"></iframe>
+          </div>
+        </div>
+
+        <div class="foundation-list">
+          <article class="reveal">
+            <span>01</span>
+            <h3>Scope every operation</h3>
+            <p>Tenant, inventory owner, and facility remain distinct boundaries in the data model and request context.</p>
+          </article>
+          <article class="reveal">
+            <span>02</span>
+            <h3>Account for every unit</h3>
+            <p>Inventory work is moving toward an immutable journal with transactional balance projections and reconciliation.</p>
+          </article>
+          <article class="reveal">
+            <span>03</span>
+            <h3>Direct facility work</h3>
+            <p>Inbound loads, receiving, moves, counts, reservations, and task execution use explicit warehouse workflows.</p>
+          </article>
+          <article class="reveal">
+            <span>04</span>
+            <h3>Recover cleanly</h3>
+            <p>Replay-safe commands, audit trails, and operator-facing exceptions are treated as product behavior.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="model-section" id="model">
+      <div class="wrap model-grid">
+        <div class="model-copy reveal">
+          <p class="section-kicker light">Built for 3PL reality</p>
+          <h2>One tenant.<br />Many owners.<br />No blurred boundaries.</h2>
+          <p>A warehouse operator can manage multiple client inventories across multiple facilities while preserving the legal owner, authorization scope, and operational history of every unit.</p>
+          <dl>
+            <div><dt>Tenant</dt><dd>The operating organization and hard SaaS isolation boundary.</dd></div>
+            <div><dt>Inventory owner</dt><dd>The client or legal owner of stock managed by that tenant.</dd></div>
+            <div><dt>Facility</dt><dd>A warehouse where the tenant receives, stores, and ships goods.</dd></div>
+          </dl>
+        </div>
+
+        <div class="scope-map reveal" aria-label="Diagram showing a tenant operating two facilities for three inventory owners">
+          <div class="scope-map-header"><span>Tenant</span><b>Northstar Logistics</b><i>tenant_01</i></div>
+          <div class="scope-columns">
+            <div class="scope-column owners">
+              <p>Inventory owners</p>
+              <div><i class="owner-dot owner-atlas"></i><span><b>Atlas Goods</b><small>owner_014</small></span></div>
+              <div><i class="owner-dot owner-kinetic"></i><span><b>Kinetic Home</b><small>owner_027</small></span></div>
+              <div><i class="owner-dot owner-union"></i><span><b>Union Supply</b><small>owner_031</small></span></div>
+            </div>
+            <div class="scope-connections" aria-hidden="true">
+              <span class="connection connection-a"></span>
+              <span class="connection connection-b"></span>
+              <span class="connection connection-c"></span>
+              <i class="scope-packet packet-a"></i>
+              <i class="scope-packet packet-b"></i>
+              <i class="scope-packet packet-c"></i>
+            </div>
+            <div class="scope-column facilities">
+              <p>Facilities</p>
+              <div><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21V8l9-5 9 5v13M3 12h18M8 21v-5h8v5"/></svg><span><b>Stockton DC</b><small>facility_01</small></span></div>
+              <div><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21V8l9-5 9 5v13M3 12h18M8 21v-5h8v5"/></svg><span><b>Reno Annex</b><small>facility_02</small></span></div>
+            </div>
+          </div>
+          <div class="scope-legend"><span><i></i>Owner-scoped stock</span><span><i></i>Facility-scoped work</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="workflow-section">
+      <div class="wrap">
+        <div class="section-heading compact reveal">
+          <div>
+            <p class="section-kicker">Facility execution</p>
+            <h2>From arrival to departure.</h2>
+          </div>
+          <p>Wareboxes is organized around explicit commands and recoverable warehouse workflows, not arbitrary status edits.</p>
+        </div>
+
+        <ol class="workflow-line">
+          <li class="reveal"><span>01</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17h4V5H2v12h3M14 9h4l4 4v4h-3M8 17h8"/><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="16.5" cy="17.5" r="2.5"/></svg><h3>Arrive</h3><p>Appointments, loads, doors, and expected stock.</p></li>
+          <li class="reveal"><span>02</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5v4M3 15v4M21 5v4M21 15v4M7 3h2M15 3h2M7 21h2M15 21h2M7 8h10v8H7z"/></svg><h3>Receive</h3><p>Scan, identify, inspect, label, and reconcile.</p></li>
+          <li class="reveal"><span>03</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 8-9 5-9-5M3 8l9-5 9 5v8l-9 5-9-5Z"/><path d="M12 13v8"/></svg><h3>Control</h3><p>Put away, move, hold, count, and trace.</p></li>
+          <li class="reveal"><span>04</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><h3>Execute</h3><p>Reserve, allocate, pick, pack, and verify.</p></li>
+          <li class="reveal"><span>05</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></svg><h3>Ship</h3><p>Manifest, load, confirm, and publish events.</p></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="roadmap-section" id="roadmap">
+      <div class="wrap roadmap-inner reveal">
+        <div>
+          <p class="section-kicker dark">Open development</p>
+          <h2>Follow the build.</h2>
+          <p>Wareboxes is early. The public roadmap puts tenant isolation, owner isolation, reconciliation, replay safety, operational recovery, and concurrency ahead of broad feature expansion.</p>
+        </div>
+        <div class="roadmap-actions">
+          <a class="button button-dark" href="https://github.com/DeandreT/wareboxes/blob/main/ROADMAP.md">Read the roadmap<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg></a>
+          <a class="text-link" href="https://github.com/DeandreT/wareboxes">Explore the repository<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg></a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap footer-inner">
+      <a class="brand footer-brand" href="#top"><span class="brand-mark mini" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>wareboxes</span></a>
+      <p>Warehouse management, built in the open.</p>
+      <a href="https://github.com/DeandreT/wareboxes">GitHub<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"/></svg></a>
+    </div>
+  </footer>
+</body>
+</html>

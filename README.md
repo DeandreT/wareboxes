@@ -55,3 +55,19 @@ If migrations were changed during development, reset the local database with:
 ```bash
 scripts/reset-db.sh
 ```
+
+## Website
+
+The deployable website combines the static pages in `site/` with the real eframe
+client compiled to WebAssembly. Install [Trunk](https://trunkrs.dev/) and the
+`wasm32-unknown-unknown` Rust target, then build and preview the assembled site
+from the repository root:
+
+```bash
+rustup target add wasm32-unknown-unknown
+scripts/build-site.sh
+python3 -m http.server 4173 --directory _site
+```
+
+Pushes to `main` that change the site or client deploy through the GitHub Pages
+workflow.

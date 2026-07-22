@@ -7,3 +7,4 @@
 .env
 dist/
 barcode_exports/
+/_site/

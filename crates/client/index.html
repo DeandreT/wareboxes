@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#1b1d22" />
+  <title>Wareboxes WMS</title>
+  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="%231b1d22"/><path d="M7 8h8v7H7zm10 0h8v7h-8zM7 17h8v7H7zm10 0h8v7h-8z" fill="%23f2c94c"/></svg>' />
+  <!-- Keep wasm-opt off: older Binaryen versions can corrupt modern externref tables. -->
+  <link data-trunk rel="rust" data-wasm-opt="0" />
+  <style>
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #1b1d22;
+      color: #d7d9de;
+      font-family: system-ui, sans-serif;
+    }
+
+    #wareboxes_canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      outline: none;
+    }
+
+    .loader {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-content: center;
+      gap: 14px;
+      text-align: center;
+      pointer-events: none;
+    }
+
+    .loader i {
+      width: 38px;
+      height: 38px;
+      margin-inline: auto;
+      border: 3px solid #3c4048;
+      border-top-color: #f2c94c;
+      border-radius: 50%;
+      animation: spin 800ms linear infinite;
+    }
+
+    .loader p {
+      margin: 0;
+      color: #989da7;
+      font-size: 13px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .loader i { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="loader" id="loader">
+    <i aria-hidden="true"></i>
+    <p id="loader_status">Loading Wareboxes WebAssembly...</p>
+  </div>
+  <canvas id="wareboxes_canvas"></canvas>
+  <noscript>Wareboxes requires JavaScript and WebAssembly.</noscript>
+  <script type="module">
+    const check = setInterval(() => {
+      const canvas = document.getElementById("wareboxes_canvas");
+      if (canvas?.dataset.wareboxesReady === "true") {
+        document.getElementById("loader")?.remove();
+        clearInterval(check);
+      }
+    }, 200);
+  </script>
+</body>
+</html>

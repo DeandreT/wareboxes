@@ -1,0 +1,32 @@
+[Unit]
+Description=Wareboxes WMS API
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=wareboxes
+Group=wareboxes
+WorkingDirectory=/opt/wareboxes/current
+EnvironmentFile=/etc/wareboxes/wareboxes.env
+ExecStart=/opt/wareboxes/current/wareboxes-server
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+name: wareboxes
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: wareboxes
+      POSTGRES_USER: wareboxes
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    secrets:
+      - postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wareboxes -d wareboxes"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    stop_grace_period: 60s
+    shm_size: 256mb
+
+secrets:
+  postgres_password:
+    file: /etc/wareboxes/postgres_password
+
+volumes:
+  postgres_data:
