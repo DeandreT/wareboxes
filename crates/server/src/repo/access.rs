@@ -87,6 +87,152 @@ pub async fn order_is_accessible(
     Ok(exists)
 }
 
+pub async fn item_batch_owner(
+    db: &Db,
+    access: &TenantAccess,
+    item_batch_id: i64,
+    include_deleted: bool,
+) -> AppResult<Option<InventoryOwnerId>> {
+    let scope = ScopeBindings::for_access(access);
+    let owner_id = sqlx::query_scalar(
+        r#"
+        SELECT inventory_owner_id
+        FROM item_batches
+        WHERE tenant_id = $1
+          AND id = $2
+          AND ($3 OR deleted IS NULL)
+          AND ($4 OR inventory_owner_id = ANY($5))
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(item_batch_id)
+    .bind(include_deleted)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .fetch_optional(db)
+    .await?;
+    owner_id
+        .map(|id| InventoryOwnerId::new(id).map_err(|error| AppError::internal(error.to_string())))
+        .transpose()
+}
+
+pub async fn inventory_balance_dimensions(
+    db: &Db,
+    access: &TenantAccess,
+    inventory_balance_id: i64,
+    include_deleted: bool,
+) -> AppResult<Option<OperationalDimensions>> {
+    inventory_dimensions(
+        db,
+        access,
+        InventoryRecord::Balance(inventory_balance_id),
+        include_deleted,
+    )
+    .await
+}
+
+pub async fn inventory_position_dimensions(
+    db: &Db,
+    access: &TenantAccess,
+    item_batch_id: i64,
+    location_id: i64,
+    status: &str,
+) -> AppResult<Option<OperationalDimensions>> {
+    let scope = ScopeBindings::for_access(access);
+    let row = sqlx::query(
+        r#"
+        SELECT facility_id, inventory_owner_id
+        FROM inventory_balances
+        WHERE tenant_id = $1
+          AND item_batch_id = $2
+          AND location_id = $3
+          AND status = $4
+          AND license_plate_id IS NULL
+          AND deleted IS NULL
+          AND ($5 OR facility_id = ANY($6))
+          AND ($7 OR inventory_owner_id = ANY($8))
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(item_batch_id)
+    .bind(location_id)
+    .bind(status)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .fetch_optional(db)
+    .await?;
+    row.as_ref().map(dimensions_from_row).transpose()
+}
+
+pub async fn inventory_reservation_dimensions(
+    db: &Db,
+    access: &TenantAccess,
+    reservation_id: i64,
+    include_deleted: bool,
+) -> AppResult<Option<OperationalDimensions>> {
+    inventory_dimensions(
+        db,
+        access,
+        InventoryRecord::Reservation(reservation_id),
+        include_deleted,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InventoryRecord {
+    Balance(i64),
+    Reservation(i64),
+}
+
+async fn inventory_dimensions(
+    db: &Db,
+    access: &TenantAccess,
+    record: InventoryRecord,
+    include_deleted: bool,
+) -> AppResult<Option<OperationalDimensions>> {
+    let scope = ScopeBindings::for_access(access);
+    let (sql, id) = match record {
+        InventoryRecord::Balance(id) => (
+            r#"
+            SELECT facility_id, inventory_owner_id
+            FROM inventory_balances
+            WHERE tenant_id = $1
+              AND id = $2
+              AND ($3 OR deleted IS NULL)
+              AND ($4 OR facility_id = ANY($5))
+              AND ($6 OR inventory_owner_id = ANY($7))
+            "#,
+            id,
+        ),
+        InventoryRecord::Reservation(id) => (
+            r#"
+            SELECT facility_id, inventory_owner_id
+            FROM inventory_reservations
+            WHERE tenant_id = $1
+              AND id = $2
+              AND ($3 OR deleted IS NULL)
+              AND ($4 OR facility_id = ANY($5))
+              AND ($6 OR inventory_owner_id = ANY($7))
+            "#,
+            id,
+        ),
+    };
+    let row = sqlx::query(sql)
+        .bind(access.tenant_id.get())
+        .bind(id)
+        .bind(include_deleted)
+        .bind(scope.all_facilities)
+        .bind(&scope.facility_ids)
+        .bind(scope.all_inventory_owners)
+        .bind(&scope.inventory_owner_ids)
+        .fetch_optional(db)
+        .await?;
+    row.as_ref().map(dimensions_from_row).transpose()
+}
+
 pub async fn load_dimensions(
     db: &Db,
     access: &TenantAccess,
