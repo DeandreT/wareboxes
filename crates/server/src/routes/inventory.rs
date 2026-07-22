@@ -314,7 +314,7 @@ pub async fn reserve(
         &state.db,
         &user.tenant,
         body.inventory_balance_id,
-        false,
+        true,
     )
     .await?
     .is_none()
@@ -323,7 +323,7 @@ pub async fn reserve(
             "insufficient available inventory to reserve",
         ));
     }
-    if !repo::access::order_is_accessible(&state.db, &user.tenant, body.order_id, false).await? {
+    if !repo::access::order_is_accessible(&state.db, &user.tenant, body.order_id, true).await? {
         return Err(AppError::conflict(
             "order and inventory balance must have the same tenant and inventory owner",
         ));
@@ -335,6 +335,7 @@ pub async fn reserve(
         body.order_item_id,
         body.inventory_balance_id,
         body.qty,
+        &body.idempotency_key,
     )
     .await?;
     Ok(Json(id))
@@ -351,7 +352,7 @@ pub async fn cancel_reservation(
         &state.db,
         &user.tenant,
         body.reservation_id,
-        false,
+        true,
     )
     .await?
     .is_none()
@@ -359,7 +360,12 @@ pub async fn cancel_reservation(
         return Ok(Json(false));
     }
     Ok(Json(
-        repo::inventory::cancel_reservation(&state.db, user.tenant.tenant_id, body.reservation_id)
-            .await?,
+        repo::inventory::cancel_reservation(
+            &state.db,
+            user.tenant.tenant_id,
+            body.reservation_id,
+            &body.idempotency_key,
+        )
+        .await?,
     ))
 }

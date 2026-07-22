@@ -815,10 +815,14 @@ pub struct ReserveInventory {
     pub inventory_balance_id: i64,
     #[validate(range(min = 1, message = "Quantity must be positive"))]
     pub qty: i64,
+    #[validate(length(min = 1, max = 200, message = "Idempotency key is required"))]
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct ReservationIdRequest {
     #[validate(range(min = 1, message = "Invalid reservation ID"))]
     pub reservation_id: i64,
+    #[validate(length(min = 1, max = 200, message = "Idempotency key is required"))]
+    pub idempotency_key: String,
 }

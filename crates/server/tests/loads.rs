@@ -975,6 +975,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         None,
         moved.contents[0].inventory_balance_id,
         1,
+        "load-reservation-setup",
     )
     .await
     .unwrap();

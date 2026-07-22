@@ -279,6 +279,7 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         None,
         allowed_balance_id,
         3,
+        "inventory-scope-allowed-reservation-setup",
     )
     .await
     .unwrap();
@@ -289,6 +290,7 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         None,
         denied_balance_id,
         3,
+        "inventory-scope-denied-reservation-setup",
     )
     .await
     .unwrap();
@@ -532,7 +534,8 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         Some(json!({
             "order_id": denied_order,
             "inventory_balance_id": allowed_balance_id,
-            "qty": 1
+            "qty": 1,
+            "idempotency_key": "inventory-scope-hidden-order-reservation"
         })),
     )
     .await;
@@ -547,7 +550,8 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         Some(json!({
             "order_id": allowed_order,
             "inventory_balance_id": denied_balance_id,
-            "qty": 1
+            "qty": 1,
+            "idempotency_key": "inventory-scope-hidden-balance-reservation"
         })),
     )
     .await;
@@ -559,7 +563,10 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         tenant_id,
         Method::POST,
         "/api/inventory/reservations/cancel",
-        Some(json!({"reservation_id": denied_reservation})),
+        Some(json!({
+            "reservation_id": denied_reservation,
+            "idempotency_key": "inventory-scope-hidden-reservation-cancel"
+        })),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -589,7 +596,25 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         tenant_id,
         Method::POST,
         "/api/inventory/reservations/cancel",
-        Some(json!({"reservation_id": allowed_reservation})),
+        Some(json!({
+            "reservation_id": allowed_reservation,
+            "idempotency_key": "inventory-scope-allowed-reservation-cancel"
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response_json::<bool>(response).await);
+
+    let response = send_api(
+        &app,
+        &token,
+        tenant_id,
+        Method::POST,
+        "/api/inventory/reservations/cancel",
+        Some(json!({
+            "reservation_id": allowed_reservation,
+            "idempotency_key": "inventory-scope-allowed-reservation-cancel"
+        })),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);

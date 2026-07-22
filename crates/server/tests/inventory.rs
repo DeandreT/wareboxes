@@ -170,10 +170,44 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
         .await
         .unwrap();
     let order_id = repo::orders::get_orders(&db, tenant_id).await.unwrap()[0].id;
-    let reservation =
-        repo::inventory::reserve_inventory(&db, tenant_id, order_id, None, pick_balance.id, 20)
-            .await
-            .unwrap();
+    let reservation = repo::inventory::reserve_inventory(
+        &db,
+        tenant_id,
+        order_id,
+        None,
+        pick_balance.id,
+        20,
+        "reserve-inv-1",
+    )
+    .await
+    .unwrap();
+    let replayed_reservation = repo::inventory::reserve_inventory(
+        &db,
+        tenant_id,
+        order_id,
+        None,
+        pick_balance.id,
+        20,
+        "reserve-inv-1",
+    )
+    .await
+    .unwrap();
+    assert_eq!(replayed_reservation, reservation);
+    let changed_reservation_retry = repo::inventory::reserve_inventory(
+        &db,
+        tenant_id,
+        order_id,
+        None,
+        pick_balance.id,
+        19,
+        "reserve-inv-1",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        changed_reservation_retry,
+        AppError::Core(CoreError::Conflict(_))
+    ));
     let balances = repo::inventory::get_balances(&db, tenant_id, false)
         .await
         .unwrap();
@@ -197,10 +231,23 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
 
     assert!(
-        repo::inventory::cancel_reservation(&db, tenant_id, reservation)
+        repo::inventory::cancel_reservation(&db, tenant_id, reservation, "cancel-inv-1")
             .await
             .unwrap()
     );
+    assert!(
+        repo::inventory::cancel_reservation(&db, tenant_id, reservation, "cancel-inv-1")
+            .await
+            .unwrap()
+    );
+    let changed_cancel_retry =
+        repo::inventory::cancel_reservation(&db, tenant_id, reservation + 1, "cancel-inv-1")
+            .await
+            .unwrap_err();
+    assert!(matches!(
+        changed_cancel_retry,
+        AppError::Core(CoreError::Conflict(_))
+    ));
     let balances = repo::inventory::get_balances(&db, tenant_id, false)
         .await
         .unwrap();
@@ -422,6 +469,7 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
         None,
         balance.id,
         1,
+        "owner-mismatch-reservation",
     )
     .await
     .unwrap_err();
@@ -533,6 +581,75 @@ async fn concurrent_inventory_retries_apply_effects_once() {
             .unwrap()
             .is_empty()
     );
+
+    let destination_balance = repo::inventory::get_balances(&fixture.db, tenant_id, false)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|balance| balance.location_id == destination)
+        .unwrap();
+    let destination_balance_id = destination_balance.id;
+    let order_id = fixture
+        .order(tenant_id, "CONCURRENT-ORDER", inventory_owner)
+        .await;
+    let mut reservation_retries = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let db = fixture.db.clone();
+        reservation_retries.spawn(async move {
+            repo::inventory::reserve_inventory(
+                &db,
+                tenant_id,
+                order_id,
+                None,
+                destination_balance_id,
+                10,
+                "concurrent-reservation-key",
+            )
+            .await
+        });
+    }
+
+    let mut reservation_ids = std::collections::BTreeSet::new();
+    while let Some(result) = reservation_retries.join_next().await {
+        reservation_ids.insert(result.unwrap().unwrap());
+    }
+    assert_eq!(reservation_ids.len(), 1);
+    let reservation_id = *reservation_ids.first().unwrap();
+    let reservations = repo::inventory::get_reservations(&fixture.db, tenant_id, false)
+        .await
+        .unwrap();
+    assert_eq!(reservations.len(), 1);
+    let destination_balance = repo::inventory::get_balances(&fixture.db, tenant_id, false)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|balance| balance.location_id == destination)
+        .unwrap();
+    assert_eq!(destination_balance.qty_reserved, 10);
+
+    let mut cancellation_retries = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let db = fixture.db.clone();
+        cancellation_retries.spawn(async move {
+            repo::inventory::cancel_reservation(
+                &db,
+                tenant_id,
+                reservation_id,
+                "concurrent-cancellation-key",
+            )
+            .await
+        });
+    }
+    while let Some(result) = cancellation_retries.join_next().await {
+        assert!(result.unwrap().unwrap());
+    }
+    let destination_balance = repo::inventory::get_balances(&fixture.db, tenant_id, false)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|balance| balance.location_id == destination)
+        .unwrap();
+    assert_eq!(destination_balance.qty_reserved, 0);
 
     let outsider = fixture.user("inventory-route-outsider@test.com").await;
     let outsider_tenant = tenant_for_user(&fixture.db, outsider.id).await;
