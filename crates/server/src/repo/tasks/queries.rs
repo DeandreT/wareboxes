@@ -173,6 +173,8 @@ pub async fn get_unpack_cancelled_order_task_lines(
     tenant_id: TenantId,
     task_id: i64,
 ) -> AppResult<Vec<UnpackCancelledOrderTaskLine>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, task_id, facility_id, inventory_owner_id, order_item_id, item_id,
@@ -185,11 +187,14 @@ pub async fn get_unpack_cancelled_order_task_lines(
     )
     .bind(tenant_id.get())
     .bind(task_id)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.iter()
+    let task_lines = rows
+        .iter()
         .map(map_unpack_cancelled_order_task_line)
-        .collect()
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(task_lines)
 }
 
 pub async fn get_unpack_cancelled_order_task_lines_in_scope(

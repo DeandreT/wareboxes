@@ -358,13 +358,15 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     .find(|task| task.id == break_task)
     .unwrap();
     assert_eq!(aborted.release_count, 1);
+    let mut tx = tenant_tx(&db, tenant_id).await;
     let master_qty_completed: i64 = sqlx::query_scalar(
         "SELECT master_qty_completed FROM break_master_pack_tasks WHERE task_id = $1",
     )
     .bind(break_task)
-    .fetch_one(&db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(master_qty_completed, 1);
 
     let restarted = repo::tasks::start_next_task(&db, tenant_id, assignee.id, None)
@@ -400,13 +402,15 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     assert!(tasks
         .iter()
         .any(|task| task.task_type == WorkTaskType::BreakMasterPack));
+    let mut tx = tenant_tx(&db, tenant_id).await;
     let detail: (i64, i64) = sqlx::query_as(
         "SELECT master_item_id, single_item_id FROM break_master_pack_tasks WHERE task_id = $1",
     )
     .bind(break_task)
-    .fetch_one(&db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(detail, (master_item, single_item));
 }
 
@@ -512,13 +516,15 @@ async fn cancelled_order_unpack_task_is_facility_scoped_and_deduplicated() {
     assert!(!repo::orders::delete_order(db, tenant_id, order_id)
         .await
         .unwrap());
+    let mut tx = tenant_tx(db, tenant_id).await;
     let line: (i64, i64, i64, String) = sqlx::query_as(
         "SELECT id, order_item_id, expected_qty, status FROM unpack_cancelled_order_task_lines WHERE task_id = $1",
     )
     .bind(tasks[0].id)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(line.1, order_item_id);
     assert_eq!(line.2, 3);
     assert_eq!(line.3, "open");
@@ -559,13 +565,15 @@ async fn cancelled_order_unpack_task_is_facility_scoped_and_deduplicated() {
     )
     .await
     .unwrap());
+    let mut tx = tenant_tx(db, tenant_id).await;
     let line: (i64, i64, i64, String) = sqlx::query_as(
         "SELECT unpacked_qty, missing_qty, damaged_qty, status FROM unpack_cancelled_order_task_lines WHERE id = $1",
     )
     .bind(line.0)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(line, (2, 1, 0, "exception".to_owned()));
     assert!(
         repo::tasks::complete_task(db, tenant_id, tasks[0].id, user.id, None)

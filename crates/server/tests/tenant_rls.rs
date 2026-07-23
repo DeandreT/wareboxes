@@ -165,6 +165,26 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         ("load_activity", "load_activity_tenant_isolation"),
         ("work_tasks", "work_tasks_tenant_isolation"),
         ("work_task_progress", "work_task_progress_tenant_isolation"),
+        (
+            "cycle_count_item_location_tasks",
+            "cycle_count_item_location_tasks_tenant_isolation",
+        ),
+        (
+            "cycle_count_location_tasks",
+            "cycle_count_location_tasks_tenant_isolation",
+        ),
+        (
+            "break_master_pack_tasks",
+            "break_master_pack_tasks_tenant_isolation",
+        ),
+        (
+            "unpack_cancelled_order_tasks",
+            "unpack_cancelled_order_tasks_tenant_isolation",
+        ),
+        (
+            "unpack_cancelled_order_task_lines",
+            "unpack_cancelled_order_task_lines_tenant_isolation",
+        ),
     ] {
         sqlx::query(&format!(
             "ALTER POLICY {policy_name} ON {table_name} \
