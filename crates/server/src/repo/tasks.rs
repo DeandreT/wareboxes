@@ -1,6 +1,6 @@
 use wareboxes_core::models::{TenantAccess, Timestamp, WorkTaskStatus, WorkTaskType};
 use wareboxes_core::CoreError;
-use wareboxes_domain::TenantId;
+use wareboxes_domain::{CommandContext, TenantId};
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
@@ -82,6 +82,14 @@ fn require_dimensions_visible(
         Ok(dimensions)
     } else {
         Err(AppError::not_found("task references"))
+    }
+}
+
+fn require_command_context(access: &TenantAccess, command: &CommandContext) -> AppResult<()> {
+    if command.tenant_id == access.tenant_id && command.actor_id == access.user_id {
+        Ok(())
+    } else {
+        Err(AppError::forbidden())
     }
 }
 

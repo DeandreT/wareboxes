@@ -1,13 +1,14 @@
 use sqlx::Row;
 use wareboxes_core::models::{TenantAccess, WorkTask, WorkTaskProgressAction, WorkTaskType};
-use wareboxes_domain::TenantId;
+use wareboxes_domain::{CommandContext, TenantId};
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::permissions;
+use crate::repo::idempotency::PreparedCommand;
 
-use super::leasing::{release_expired_tasks_with_scope, release_inaccessible_active_tasks_tx};
-use super::{map_task, ScopeBindings, TaskDimensions};
+use super::leasing::{release_expired_tasks_tx, release_inaccessible_active_tasks_tx};
+use super::{map_task, require_command_context, ScopeBindings, TaskDimensions};
 use crate::repo::access::lock_current_scope_tx;
 
 pub async fn start_next_task(
@@ -23,6 +24,7 @@ pub async fn start_next_task(
         task_type,
         None,
         &ScopeBindings::unrestricted(),
+        None,
     )
     .await
 }
@@ -30,16 +32,18 @@ pub async fn start_next_task(
 pub async fn start_next_task_in_scope(
     db: &Db,
     access: &TenantAccess,
-    user_id: i64,
+    command: &CommandContext,
     task_type: Option<WorkTaskType>,
 ) -> AppResult<Option<WorkTask>> {
+    require_command_context(access, command)?;
     start_next_task_with_scope(
         db,
         access.tenant_id,
-        user_id,
+        command.actor_id.get(),
         task_type,
-        Some(user_id),
+        Some(command.actor_id.get()),
         &ScopeBindings::for_access(access),
+        Some(command),
     )
     .await
 }
@@ -51,9 +55,11 @@ async fn start_next_task_with_scope(
     task_type: Option<WorkTaskType>,
     scope_user_id: Option<i64>,
     scope: &ScopeBindings,
+    command: Option<&CommandContext>,
 ) -> AppResult<Option<WorkTask>> {
-    release_expired_tasks_with_scope(db, tenant_id, scope_user_id, scope).await?;
-
+    let prepared = command
+        .map(|command| PreparedCommand::new(command, "task.start_next.v1", &task_type))
+        .transpose()?;
     let permissions = permissions::get_user_permissions(db, tenant_id, user_id).await?;
     let is_admin = permissions
         .iter()
@@ -83,6 +89,16 @@ async fn start_next_task_with_scope(
         .await?;
     }
     let scope = current_scope.as_ref().unwrap_or(scope);
+    if let Some(prepared) = prepared.as_ref() {
+        if let Some(task) = prepared.replayed::<Option<WorkTask>>(&mut tx).await? {
+            if let Some(task) = task.as_ref() {
+                require_current_task_replay_tx(&mut tx, tenant_id, user_id, task.id, scope).await?;
+            }
+            tx.commit().await?;
+            return Ok(task);
+        }
+    }
+    release_expired_tasks_tx(&mut tx, tenant_id, Some(user_id), scope).await?;
     release_inaccessible_active_tasks_tx(&mut tx, tenant_id, user_id, scope).await?;
     let active: Option<i64> = sqlx::query_scalar(
         r#"
@@ -92,13 +108,11 @@ async fn start_next_task_with_scope(
           AND deleted IS NULL
           AND assigned_user_id = $2
           AND status IN ('assigned', 'in_progress')
-          AND (lease_expires_at IS NULL OR lease_expires_at > $3)
         LIMIT 1
         "#,
     )
     .bind(tenant_id.get())
     .bind(user_id)
-    .bind(now_iso())
     .fetch_optional(&mut *tx)
     .await?;
     if active.is_some() {
@@ -171,8 +185,57 @@ async fn start_next_task_with_scope(
         .await?;
     }
     let task = row.as_ref().map(map_task).transpose()?;
-    tx.commit().await?;
-    Ok(task)
+    match prepared {
+        Some(prepared) => prepared.commit(tx, task).await,
+        None => {
+            tx.commit().await?;
+            Ok(task)
+        }
+    }
+}
+
+async fn require_current_task_replay_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    user_id: i64,
+    task_id: i64,
+    scope: &ScopeBindings,
+) -> AppResult<()> {
+    let row = sqlx::query(
+        r#"
+        SELECT facility_id, inventory_owner_id, assigned_user_id, status,
+               lease_expires_at > statement_timestamp() AS lease_is_current
+        FROM work_tasks
+        WHERE tenant_id = $1
+          AND id = $2
+          AND deleted IS NULL
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(task_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(row) = row else {
+        return Err(AppError::conflict("task claim is no longer active"));
+    };
+    let dimensions = TaskDimensions {
+        facility_id: row.try_get("facility_id")?,
+        inventory_owner_id: row.try_get("inventory_owner_id")?,
+    };
+    if !dimensions.is_allowed_by(scope) {
+        return Err(AppError::not_found("task"));
+    }
+    let assigned_user_id: Option<i64> = row.try_get("assigned_user_id")?;
+    let status: String = row.try_get("status")?;
+    let lease_is_current: Option<bool> = row.try_get("lease_is_current")?;
+    if assigned_user_id != Some(user_id)
+        || !matches!(status.as_str(), "assigned" | "in_progress")
+        || lease_is_current == Some(false)
+    {
+        return Err(AppError::conflict("task claim is no longer active"));
+    }
+    Ok(())
 }
 
 pub async fn start_task(
@@ -188,6 +251,7 @@ pub async fn start_task(
         user_id,
         None,
         &ScopeBindings::unrestricted(),
+        None,
     )
     .await
 }
@@ -195,16 +259,18 @@ pub async fn start_task(
 pub async fn start_task_in_scope(
     db: &Db,
     access: &TenantAccess,
+    command: &CommandContext,
     task_id: i64,
-    user_id: i64,
 ) -> AppResult<bool> {
+    require_command_context(access, command)?;
     start_task_with_scope(
         db,
         access.tenant_id,
         task_id,
-        user_id,
-        Some(user_id),
+        command.actor_id.get(),
+        Some(command.actor_id.get()),
         &ScopeBindings::for_access(access),
+        Some(command),
     )
     .await
 }
@@ -216,13 +282,21 @@ async fn start_task_with_scope(
     user_id: i64,
     scope_user_id: Option<i64>,
     scope: &ScopeBindings,
+    command: Option<&CommandContext>,
 ) -> AppResult<bool> {
-    release_expired_tasks_with_scope(db, tenant_id, scope_user_id, scope).await?;
+    let prepared = command
+        .map(|command| PreparedCommand::new(command, "task.start.v1", &task_id))
+        .transpose()?;
     let now = now_iso();
     let mut tx = db.begin().await?;
     let current_scope = match scope_user_id {
         Some(scope_user_id) => {
-            Some(lock_current_scope_tx(&mut tx, tenant_id, scope_user_id).await?)
+            let Some(scope) =
+                lock_task_in_current_scope_tx(&mut tx, tenant_id, scope_user_id, task_id).await?
+            else {
+                return Err(AppError::not_found("task"));
+            };
+            Some(scope)
         }
         None => None,
     };
@@ -236,6 +310,13 @@ async fn start_task_with_scope(
         .await?;
     }
     let scope = current_scope.as_ref().unwrap_or(scope);
+    if let Some(prepared) = prepared.as_ref() {
+        if let Some(started) = prepared.replayed::<bool>(&mut tx).await? {
+            tx.commit().await?;
+            return Ok(started);
+        }
+    }
+    release_expired_tasks_tx(&mut tx, tenant_id, Some(user_id), scope).await?;
     release_inaccessible_active_tasks_tx(&mut tx, tenant_id, user_id, scope).await?;
     let active: Option<i64> = sqlx::query_scalar(
         r#"
@@ -301,8 +382,16 @@ async fn start_task_with_scope(
         .await?;
     }
     let started = res.rows_affected() > 0;
-    tx.commit().await?;
-    Ok(started)
+    if !started {
+        return Ok(false);
+    }
+    match prepared {
+        Some(prepared) => prepared.commit(tx, started).await,
+        None => {
+            tx.commit().await?;
+            Ok(started)
+        }
+    }
 }
 
 async fn lock_task_in_current_scope_tx(
@@ -402,6 +491,7 @@ pub async fn record_task_progress(
         from_location_id,
         to_location_id,
         note,
+        None,
     )
     .await
 }
@@ -419,10 +509,28 @@ async fn record_task_progress_with_scope(
     from_location_id: Option<i64>,
     to_location_id: Option<i64>,
     note: Option<&str>,
+    command: Option<&CommandContext>,
 ) -> AppResult<bool> {
     if qty_completed <= 0 {
         return Err(AppError::bad_request("completed quantity must be positive"));
     }
+    let prepared = command
+        .map(|command| {
+            PreparedCommand::new(
+                command,
+                "task.progress.v1",
+                &(
+                    task_id,
+                    task_line_id,
+                    action,
+                    qty_completed,
+                    from_location_id,
+                    to_location_id,
+                    note,
+                ),
+            )
+        })
+        .transpose()?;
     let mut tx = db.begin().await?;
     if let Some(scope_user_id) = scope_user_id {
         let Some(scope) =
@@ -430,6 +538,12 @@ async fn record_task_progress_with_scope(
         else {
             return Ok(false);
         };
+        if let Some(prepared) = prepared.as_ref() {
+            if let Some(updated) = prepared.replayed::<bool>(&mut tx).await? {
+                tx.commit().await?;
+                return Ok(updated);
+            }
+        }
         if !progress_locations_match_task_tx(
             &mut tx,
             tenant_id,
@@ -441,6 +555,14 @@ async fn record_task_progress_with_scope(
         .await?
         {
             return Ok(false);
+        }
+    }
+    if scope_user_id.is_none() {
+        if let Some(prepared) = prepared.as_ref() {
+            if let Some(updated) = prepared.replayed::<bool>(&mut tx).await? {
+                tx.commit().await?;
+                return Ok(updated);
+            }
         }
     }
     let updated = record_task_progress_tx(
@@ -456,15 +578,23 @@ async fn record_task_progress_with_scope(
         note,
     )
     .await?;
-    tx.commit().await?;
-    Ok(updated)
+    if !updated {
+        return Ok(false);
+    }
+    match prepared {
+        Some(prepared) => prepared.commit(tx, updated).await,
+        None => {
+            tx.commit().await?;
+            Ok(updated)
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn record_task_progress_in_scope(
     db: &Db,
     access: &TenantAccess,
-    user_id: i64,
+    command: &CommandContext,
     task_id: i64,
     task_line_id: Option<i64>,
     action: WorkTaskProgressAction,
@@ -473,11 +603,12 @@ pub async fn record_task_progress_in_scope(
     to_location_id: Option<i64>,
     note: Option<&str>,
 ) -> AppResult<bool> {
+    require_command_context(access, command)?;
     record_task_progress_with_scope(
         db,
         access.tenant_id,
-        user_id,
-        Some(access.user_id.get()),
+        command.actor_id.get(),
+        Some(command.actor_id.get()),
         task_id,
         task_line_id,
         action,
@@ -485,6 +616,7 @@ pub async fn record_task_progress_in_scope(
         from_location_id,
         to_location_id,
         note,
+        Some(command),
     )
     .await
 }
@@ -616,7 +748,7 @@ pub async fn complete_task(
     user_id: i64,
     qty_completed: Option<i64>,
 ) -> AppResult<bool> {
-    complete_task_with_scope(db, tenant_id, task_id, user_id, qty_completed, None).await
+    complete_task_with_scope(db, tenant_id, task_id, user_id, qty_completed, None, None).await
 }
 
 async fn complete_task_with_scope(
@@ -626,10 +758,14 @@ async fn complete_task_with_scope(
     user_id: i64,
     qty_completed: Option<i64>,
     scope_user_id: Option<i64>,
+    command: Option<&CommandContext>,
 ) -> AppResult<bool> {
     if qty_completed.is_some_and(|quantity| quantity <= 0) {
         return Err(AppError::bad_request("completed quantity must be positive"));
     }
+    let prepared = command
+        .map(|command| PreparedCommand::new(command, "task.complete.v1", &(task_id, qty_completed)))
+        .transpose()?;
     let mut tx = db.begin().await?;
     if let Some(scope_user_id) = scope_user_id {
         if lock_task_in_current_scope_tx(&mut tx, tenant_id, scope_user_id, task_id)
@@ -637,6 +773,12 @@ async fn complete_task_with_scope(
             .is_none()
         {
             return Ok(false);
+        }
+    }
+    if let Some(prepared) = prepared.as_ref() {
+        if let Some(completed) = prepared.replayed::<bool>(&mut tx).await? {
+            tx.commit().await?;
+            return Ok(completed);
         }
     }
     if let Some(qty_completed) = qty_completed {
@@ -734,24 +876,34 @@ async fn complete_task_with_scope(
         .await?;
     }
     let completed = res.rows_affected() > 0;
-    tx.commit().await?;
-    Ok(completed)
+    if !completed {
+        return Ok(false);
+    }
+    match prepared {
+        Some(prepared) => prepared.commit(tx, completed).await,
+        None => {
+            tx.commit().await?;
+            Ok(completed)
+        }
+    }
 }
 
 pub async fn complete_task_in_scope(
     db: &Db,
     access: &TenantAccess,
+    command: &CommandContext,
     task_id: i64,
-    user_id: i64,
     qty_completed: Option<i64>,
 ) -> AppResult<bool> {
+    require_command_context(access, command)?;
     complete_task_with_scope(
         db,
         access.tenant_id,
         task_id,
-        user_id,
+        command.actor_id.get(),
         qty_completed,
-        Some(access.user_id.get()),
+        Some(command.actor_id.get()),
+        Some(command),
     )
     .await
 }
@@ -762,7 +914,7 @@ pub async fn abort_task(
     task_id: i64,
     user_id: i64,
 ) -> AppResult<bool> {
-    abort_task_with_scope(db, tenant_id, task_id, user_id, None).await
+    abort_task_with_scope(db, tenant_id, task_id, user_id, None, None).await
 }
 
 async fn abort_task_with_scope(
@@ -771,7 +923,11 @@ async fn abort_task_with_scope(
     task_id: i64,
     user_id: i64,
     scope_user_id: Option<i64>,
+    command: Option<&CommandContext>,
 ) -> AppResult<bool> {
+    let prepared = command
+        .map(|command| PreparedCommand::new(command, "task.abort.v1", &task_id))
+        .transpose()?;
     let mut tx = db.begin().await?;
     if let Some(scope_user_id) = scope_user_id {
         if lock_task_in_current_scope_tx(&mut tx, tenant_id, scope_user_id, task_id)
@@ -779,6 +935,12 @@ async fn abort_task_with_scope(
             .is_none()
         {
             return Ok(false);
+        }
+    }
+    if let Some(prepared) = prepared.as_ref() {
+        if let Some(aborted) = prepared.replayed::<bool>(&mut tx).await? {
+            tx.commit().await?;
+            return Ok(aborted);
         }
     }
     let res = sqlx::query(
@@ -822,22 +984,32 @@ async fn abort_task_with_scope(
         .await?;
     }
     let aborted = res.rows_affected() > 0;
-    tx.commit().await?;
-    Ok(aborted)
+    if !aborted {
+        return Ok(false);
+    }
+    match prepared {
+        Some(prepared) => prepared.commit(tx, aborted).await,
+        None => {
+            tx.commit().await?;
+            Ok(aborted)
+        }
+    }
 }
 
 pub async fn abort_task_in_scope(
     db: &Db,
     access: &TenantAccess,
+    command: &CommandContext,
     task_id: i64,
-    user_id: i64,
 ) -> AppResult<bool> {
+    require_command_context(access, command)?;
     abort_task_with_scope(
         db,
         access.tenant_id,
         task_id,
-        user_id,
-        Some(access.user_id.get()),
+        command.actor_id.get(),
+        Some(command.actor_id.get()),
+        Some(command),
     )
     .await
 }
@@ -848,7 +1020,7 @@ pub async fn cancel_task(
     task_id: i64,
     user_id: i64,
 ) -> AppResult<bool> {
-    cancel_task_with_scope(db, tenant_id, task_id, user_id, None).await
+    cancel_task_with_scope(db, tenant_id, task_id, user_id, None, None).await
 }
 
 async fn cancel_task_with_scope(
@@ -857,7 +1029,11 @@ async fn cancel_task_with_scope(
     task_id: i64,
     user_id: i64,
     scope_user_id: Option<i64>,
+    command: Option<&CommandContext>,
 ) -> AppResult<bool> {
+    let prepared = command
+        .map(|command| PreparedCommand::new(command, "task.cancel.v1", &task_id))
+        .transpose()?;
     let mut tx = db.begin().await?;
     if let Some(scope_user_id) = scope_user_id {
         if lock_task_in_current_scope_tx(&mut tx, tenant_id, scope_user_id, task_id)
@@ -865,6 +1041,12 @@ async fn cancel_task_with_scope(
             .is_none()
         {
             return Ok(false);
+        }
+    }
+    if let Some(prepared) = prepared.as_ref() {
+        if let Some(cancelled) = prepared.replayed::<bool>(&mut tx).await? {
+            tx.commit().await?;
+            return Ok(cancelled);
         }
     }
     let res = sqlx::query(
@@ -904,22 +1086,32 @@ async fn cancel_task_with_scope(
         .await?;
     }
     let cancelled = res.rows_affected() > 0;
-    tx.commit().await?;
-    Ok(cancelled)
+    if !cancelled {
+        return Ok(false);
+    }
+    match prepared {
+        Some(prepared) => prepared.commit(tx, cancelled).await,
+        None => {
+            tx.commit().await?;
+            Ok(cancelled)
+        }
+    }
 }
 
 pub async fn cancel_task_in_scope(
     db: &Db,
     access: &TenantAccess,
+    command: &CommandContext,
     task_id: i64,
-    user_id: i64,
 ) -> AppResult<bool> {
+    require_command_context(access, command)?;
     cancel_task_with_scope(
         db,
         access.tenant_id,
         task_id,
-        user_id,
-        Some(access.user_id.get()),
+        command.actor_id.get(),
+        Some(command.actor_id.get()),
+        Some(command),
     )
     .await
 }

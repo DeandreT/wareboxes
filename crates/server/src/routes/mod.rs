@@ -236,6 +236,7 @@ pub fn app(state: AppState) -> Router {
                     header::CONTENT_TYPE,
                     HeaderName::from_static(crate::auth::TENANT_ID_HEADER),
                     HeaderName::from_static(REQUEST_ID_HEADER),
+                    HeaderName::from_static(crate::request_context::IDEMPOTENCY_KEY_HEADER),
                 ])
                 .expose_headers([HeaderName::from_static(REQUEST_ID_HEADER)]),
         );

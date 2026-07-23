@@ -1,5 +1,7 @@
 use axum::body::Body;
+use axum::extract::FromRequestParts;
 use axum::extract::Request;
+use axum::http::request::Parts;
 use axum::http::{header, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
@@ -7,7 +9,44 @@ use rand::distributions::Alphanumeric;
 use rand::Rng;
 use wareboxes_core::dto::{ErrorCode, ErrorResponse};
 
+use crate::error::AppError;
+
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
+pub const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+
+#[derive(Debug, Clone)]
+pub struct IdempotencyKey(String);
+
+impl IdempotencyKey {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> FromRequestParts<S> for IdempotencyKey
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let value = parts
+            .headers
+            .get(IDEMPOTENCY_KEY_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .ok_or_else(AppError::idempotency_key_required)?;
+        if value.is_empty() || value.len() > 200 {
+            return Err(if value.is_empty() {
+                AppError::idempotency_key_required()
+            } else {
+                AppError::bad_request("idempotency key cannot exceed 200 characters")
+            });
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
 
 tokio::task_local! {
     static REQUEST_ID: String;

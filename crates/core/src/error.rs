@@ -16,6 +16,10 @@ pub enum CoreError {
     Validation(Vec<FieldError>),
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("idempotency key was already used with a different request")]
+    IdempotencyKeyReused,
+    #[error("idempotency key is required")]
+    IdempotencyKeyRequired,
     #[error("bad request: {0}")]
     BadRequest(String),
     #[error("internal error: {0}")]

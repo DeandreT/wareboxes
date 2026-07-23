@@ -614,6 +614,7 @@ pub async fn receive_inventory(
     let mut tx = db.begin().await?;
 
     let request_hash = inventory_journal::request_hash(&(
+        user_id,
         item_batch_id,
         to_location_id,
         qty,
@@ -771,6 +772,7 @@ pub async fn move_inventory(
     let mut tx = db.begin().await?;
 
     let request_hash = inventory_journal::request_hash(&(
+        user_id,
         item_batch_id,
         from_location_id,
         to_location_id,
@@ -994,6 +996,7 @@ pub async fn split_move_inventory(
     let mut tx = db.begin().await?;
 
     let request_hash = inventory_journal::request_hash(&(
+        user_id,
         from_inventory_balance_id,
         destinations,
         reason,
@@ -1234,8 +1237,13 @@ pub async fn reserve_inventory(db: &Db, command: &ReserveInventoryCommand<'_>) -
     }
     let now = now_iso();
     let mut tx = db.begin().await?;
-    let request_hash =
-        inventory_journal::request_hash(&(order_id, order_item_id, inventory_balance_id, qty))?;
+    let request_hash = inventory_journal::request_hash(&(
+        actor_user_id,
+        order_id,
+        order_item_id,
+        inventory_balance_id,
+        qty,
+    ))?;
     if let Some(reservation_id) = inventory_journal::replayed_result(
         &mut tx,
         tenant_id,
@@ -1424,12 +1432,15 @@ pub async fn reserve_inventory(db: &Db, command: &ReserveInventoryCommand<'_>) -
 
     inventory_journal::record_command_result(
         &mut tx,
-        tenant_id,
-        "reserve_inventory",
-        idempotency_key,
-        &request_hash,
-        &reservation_id,
-        None,
+        &inventory_journal::NewCommandResult {
+            tenant_id,
+            operation: "reserve_inventory",
+            idempotency_key,
+            request_hash: &request_hash,
+            result: &reservation_id,
+            inventory_transaction_id: None,
+            actor_user_id,
+        },
     )
     .await?;
 
@@ -1457,7 +1468,7 @@ pub async fn cancel_reservation(
     } = *command;
     let now = now_iso();
     let mut tx = db.begin().await?;
-    let request_hash = inventory_journal::request_hash(&reservation_id)?;
+    let request_hash = inventory_journal::request_hash(&(actor_user_id, reservation_id))?;
     if let Some(cancelled) = inventory_journal::replayed_result(
         &mut tx,
         tenant_id,
@@ -1486,12 +1497,15 @@ pub async fn cancel_reservation(
     let Some(row) = row else {
         inventory_journal::record_command_result(
             &mut tx,
-            tenant_id,
-            "cancel_reservation",
-            idempotency_key,
-            &request_hash,
-            &false,
-            None,
+            &inventory_journal::NewCommandResult {
+                tenant_id,
+                operation: "cancel_reservation",
+                idempotency_key,
+                request_hash: &request_hash,
+                result: &false,
+                inventory_transaction_id: None,
+                actor_user_id,
+            },
         )
         .await?;
         tx.commit().await?;
@@ -1576,12 +1590,15 @@ pub async fn cancel_reservation(
 
     inventory_journal::record_command_result(
         &mut tx,
-        tenant_id,
-        "cancel_reservation",
-        idempotency_key,
-        &request_hash,
-        &true,
-        None,
+        &inventory_journal::NewCommandResult {
+            tenant_id,
+            operation: "cancel_reservation",
+            idempotency_key,
+            request_hash: &request_hash,
+            result: &true,
+            inventory_transaction_id: None,
+            actor_user_id,
+        },
     )
     .await?;
 

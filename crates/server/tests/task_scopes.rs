@@ -1,5 +1,7 @@
 mod common;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use common::*;
@@ -7,8 +9,12 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::WorkTask;
+use wareboxes_domain::CommandContext;
 use wareboxes_server::auth::TENANT_ID_HEADER;
+use wareboxes_server::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_server::{routes, state::AppState};
+
+static NEXT_IDEMPOTENCY_KEY: AtomicU64 = AtomicU64::new(1);
 
 fn api_request(
     token: &str,
@@ -21,7 +27,14 @@ fn api_request(
         .method(method)
         .uri(uri)
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .header(TENANT_ID_HEADER, tenant_id.to_string());
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .header(
+            IDEMPOTENCY_KEY_HEADER,
+            format!(
+                "task-scope-test-{}",
+                NEXT_IDEMPOTENCY_KEY.fetch_add(1, Ordering::Relaxed)
+            ),
+        );
     if body.is_some() {
         request = request.header(header::CONTENT_TYPE, "application/json");
     }
@@ -538,12 +551,21 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
             "/api/tasks/assign",
             json!({"task_id": denied_open, "assigned_user_id": operator.id}),
         ),
-        ("/api/tasks/start", json!({"task_id": denied_open})),
         ("/api/tasks/cancel", json!({"task_id": denied_open})),
     ] {
         let response = send_api(&app, &token, tenant_id, Method::POST, uri, Some(body)).await;
         assert_eq!(response.status(), StatusCode::CONFLICT, "{uri}");
     }
+    let response = send_api(
+        &app,
+        &token,
+        tenant_id,
+        Method::POST,
+        "/api/tasks/start",
+        Some(json!({"task_id": denied_open})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     sqlx::query(
         r#"
@@ -752,9 +774,15 @@ async fn concurrent_scope_shrink_cannot_leave_task_active() {
         all_inventory_owners: true,
         inventory_owner_ids: Vec::new(),
     };
+    let command = CommandContext {
+        tenant_id,
+        actor_id: stale_access.user_id,
+        request_id: "task-scope-race".into(),
+        idempotency_key: Some("task-scope-race".into()),
+    };
 
     let (started, scope_updated) = tokio::join!(
-        repo::tasks::start_task_in_scope(&fixture.db, &stale_access, task_id, operator.id),
+        repo::tasks::start_task_in_scope(&fixture.db, &stale_access, &command, task_id),
         repo::tenants::update_user_access_scope(&fixture.db, tenant_id, &shrink),
     );
     started.unwrap();

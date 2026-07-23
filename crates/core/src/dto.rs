@@ -18,6 +18,8 @@ pub enum ErrorCode {
     NotFound,
     ValidationFailed,
     Conflict,
+    IdempotencyKeyReused,
+    IdempotencyKeyRequired,
     InvalidRequest,
     MethodNotAllowed,
     PayloadTooLarge,

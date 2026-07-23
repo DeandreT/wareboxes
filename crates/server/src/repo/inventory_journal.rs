@@ -1,9 +1,5 @@
 //! Immutable inventory journal primitives shared by inventory workflows.
 
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use sha2::{Digest, Sha256};
-use sqlx::Row;
 use wareboxes_core::models::{InventoryStatus, InventoryTransactionType};
 use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
 
@@ -11,6 +7,10 @@ use crate::db::now_iso;
 use crate::error::{AppError, AppResult};
 
 use super::outbox::{self, NewOutboxEvent};
+
+pub(crate) use super::idempotency::{
+    record_command_result, replayed_result, replayed_transaction, request_hash, NewCommandResult,
+};
 
 pub(crate) struct JournalCommand<'a> {
     pub tenant_id: TenantId,
@@ -40,102 +40,6 @@ pub(crate) struct JournalEntry {
     pub item_batch_id: i64,
     pub status: InventoryStatus,
     pub quantity_delta: i64,
-}
-
-pub(crate) fn request_hash<T: Serialize>(request: &T) -> AppResult<String> {
-    let encoded = serde_json::to_vec(request)
-        .map_err(|error| AppError::internal(format!("serializing command request: {error}")))?;
-    Ok(hex::encode(Sha256::digest(encoded)))
-}
-
-pub(crate) async fn replayed_result<T: DeserializeOwned>(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    operation: &str,
-    idempotency_key: Option<&str>,
-    request_hash: &str,
-) -> AppResult<Option<T>> {
-    let Some(idempotency_key) = idempotency_key else {
-        return Ok(None);
-    };
-    if idempotency_key.trim().is_empty() {
-        return Err(AppError::bad_request("idempotency key cannot be blank"));
-    }
-
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!(
-            "command-idempotency:{tenant_id}:{operation}:{idempotency_key}"
-        ))
-        .execute(&mut **tx)
-        .await?;
-
-    let record = sqlx::query(
-        r#"
-        SELECT request_hash, result_json::TEXT AS result_json
-        FROM command_idempotency_records
-        WHERE tenant_id = $1 AND operation = $2 AND idempotency_key = $3
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(operation)
-    .bind(idempotency_key)
-    .fetch_optional(&mut **tx)
-    .await?;
-    let Some(record) = record else {
-        return Ok(None);
-    };
-
-    let stored_hash: String = record.try_get("request_hash")?;
-    if stored_hash != request_hash {
-        return Err(AppError::conflict(
-            "idempotency key was already used with a different request",
-        ));
-    }
-    let result_json: String = record.try_get("result_json")?;
-    serde_json::from_str(&result_json)
-        .map(Some)
-        .map_err(|error| AppError::internal(format!("decoding stored command result: {error}")))
-}
-
-pub(crate) async fn replayed_transaction(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    operation: &str,
-    idempotency_key: Option<&str>,
-    request_hash: &str,
-) -> AppResult<Option<i64>> {
-    replayed_result(tx, tenant_id, operation, idempotency_key, request_hash).await
-}
-
-pub(crate) async fn record_command_result<T: Serialize>(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    operation: &str,
-    idempotency_key: &str,
-    request_hash: &str,
-    result: &T,
-    inventory_transaction_id: Option<i64>,
-) -> AppResult<()> {
-    let result_json = serde_json::to_string(result)
-        .map_err(|error| AppError::internal(format!("encoding command result: {error}")))?;
-    sqlx::query(
-        r#"
-        INSERT INTO command_idempotency_records
-            (tenant_id, created, operation, idempotency_key, request_hash,
-             result_json, inventory_transaction_id)
-        VALUES ($1, $2, $3, $4, $5, $6::JSONB, $7)
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(now_iso())
-    .bind(operation)
-    .bind(idempotency_key)
-    .bind(request_hash)
-    .bind(result_json)
-    .bind(inventory_transaction_id)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
 }
 
 pub(crate) async fn begin_transaction(
@@ -225,8 +129,8 @@ pub(crate) async fn begin_transaction(
                 r#"
             INSERT INTO command_idempotency_records
                 (tenant_id, created, operation, idempotency_key, request_hash,
-                 result_json, inventory_transaction_id)
-            VALUES ($1, $2, $3, $4, $5, to_jsonb($6::BIGINT), $6)
+                 result_json, inventory_transaction_id, actor_user_id)
+            VALUES ($1, $2, $3, $4, $5, to_jsonb($6::BIGINT), $6, $7)
             "#,
             )
             .bind(command.tenant_id.get())
@@ -235,6 +139,7 @@ pub(crate) async fn begin_transaction(
             .bind(idempotency_key)
             .bind(command.request_hash)
             .bind(transaction_id)
+            .bind(command.actor_user_id)
             .execute(&mut **tx)
             .await?;
         }

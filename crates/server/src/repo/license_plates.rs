@@ -364,7 +364,7 @@ pub async fn move_license_plate(
     let now = now_iso();
     let mut tx = db.begin().await?;
 
-    let request_hash = inventory_journal::request_hash(&(id, to_location_id, reason))?;
+    let request_hash = inventory_journal::request_hash(&(user_id, id, to_location_id, reason))?;
     if let Some(transaction_id) = inventory_journal::replayed_transaction(
         &mut tx,
         tenant_id,

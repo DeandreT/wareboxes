@@ -43,6 +43,8 @@ record. Wareboxes owns facility execution and its auditable inventory consequenc
 - PostgreSQL row-level security and fail-closed repository access.
 - Versioned API conventions, stable error codes, request IDs, optimistic revisions,
   cursor pagination, and replay-safe idempotency records.
+- Partition and archive durable command records without weakening exact replay or
+  actor attribution guarantees.
 - Transactional outbox and inbox foundations.
 - Restricted registration and CORS, protected credentials, login controls, short
   sessions, and production identity integration boundaries.

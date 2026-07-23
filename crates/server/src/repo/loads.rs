@@ -931,6 +931,7 @@ pub async fn receive_line(
     let mut tx = db.begin().await?;
 
     let request_hash = inventory_journal::request_hash(&(
+        user_id,
         load_line_id,
         to_location_id,
         received_qty,
@@ -1266,12 +1267,15 @@ pub async fn receive_line(
     };
     inventory_journal::record_command_result(
         &mut tx,
-        tenant_id,
-        "receive_load_line",
-        idempotency_key,
-        &request_hash,
-        &result,
-        inventory_transaction_id,
+        &inventory_journal::NewCommandResult {
+            tenant_id,
+            operation: "receive_load_line",
+            idempotency_key,
+            request_hash: &request_hash,
+            result: &result,
+            inventory_transaction_id,
+            actor_user_id: user_id,
+        },
     )
     .await?;
     tx.commit().await?;
