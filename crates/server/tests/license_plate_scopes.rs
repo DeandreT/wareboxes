@@ -190,6 +190,7 @@ async fn license_plates_are_owner_and_facility_scoped() {
     .await
     .unwrap();
 
+    let mut tx = tenant_tx(&db, tenant_id).await;
     let mismatched_location = sqlx::query(
         r#"
         INSERT INTO license_plates
@@ -203,9 +204,10 @@ async fn license_plates_are_owner_and_facility_scoped() {
     .bind("LPN-SCOPE-INVALID-LOCATION")
     .bind(allowed_facility)
     .bind(denied_location)
-    .execute(&db)
+    .execute(&mut *tx)
     .await;
     assert!(mismatched_location.is_err());
+    tx.rollback().await.unwrap();
 
     let mut tx = db.begin().await.unwrap();
     let resolved_plate = repo::license_plates::find_or_create_license_plate_tx(
@@ -532,4 +534,198 @@ async fn license_plates_are_owner_and_facility_scoped() {
         .find(|plate| plate.id == denied_owner_plate)
         .unwrap();
     assert!(hidden_owner_plate.deleted.is_some());
+}
+
+#[tokio::test]
+async fn license_plates_require_a_transaction_local_tenant_context() {
+    let fixture = Fixture::new().await;
+    let user_a = fixture.user("license-plate-rls-a@test.com").await;
+    let user_b = fixture.user("license-plate-rls-b@test.com").await;
+    let tenant_a = tenant_for_user(&fixture.db, user_a.id).await;
+    let tenant_b = tenant_for_user(&fixture.db, user_b.id).await;
+    let owner_a = fixture
+        .inventory_owner(tenant_a, "License Plate RLS Owner A")
+        .await;
+    let owner_b = fixture
+        .inventory_owner(tenant_b, "License Plate RLS Owner B")
+        .await;
+    let facility_a = fixture
+        .facility(tenant_a, "License Plate RLS Facility A")
+        .await;
+    let facility_b = fixture
+        .facility(tenant_b, "License Plate RLS Facility B")
+        .await;
+    let location_b = fixture
+        .location(tenant_b, facility_b, "LICENSE-PLATE-RLS-BIN-B")
+        .await;
+
+    let shared_plate_a = repo::license_plates::add_license_plate(
+        &fixture.db,
+        tenant_a,
+        owner_a,
+        facility_a,
+        Some("LICENSE-PLATE-RLS-SHARED"),
+    )
+    .await
+    .unwrap();
+    let private_plate_a = repo::license_plates::add_license_plate(
+        &fixture.db,
+        tenant_a,
+        owner_a,
+        facility_a,
+        Some("LICENSE-PLATE-RLS-A-PRIVATE"),
+    )
+    .await
+    .unwrap();
+
+    let mut tx = fixture.db.begin().await.unwrap();
+    let shared_plate_b = repo::license_plates::find_or_create_license_plate_tx(
+        &mut tx,
+        tenant_b,
+        owner_b,
+        Some("LICENSE-PLATE-RLS-SHARED"),
+        None,
+        location_b,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_ne!(shared_plate_a, shared_plate_b);
+
+    let tenant_a_shared = repo::license_plates::get_license_plate_by_barcode(
+        &fixture.db,
+        tenant_a,
+        "LICENSE-PLATE-RLS-SHARED",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(tenant_a_shared.id, shared_plate_a);
+    let tenant_b_shared = repo::license_plates::get_license_plate_by_barcode(
+        &fixture.db,
+        tenant_b,
+        "LICENSE-PLATE-RLS-SHARED",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(tenant_b_shared.id, shared_plate_b);
+    assert!(repo::license_plates::get_license_plate_by_barcode(
+        &fixture.db,
+        tenant_b,
+        "LICENSE-PLATE-RLS-A-PRIVATE",
+    )
+    .await
+    .unwrap()
+    .is_none());
+    assert!(!repo::license_plates::update_license_plate(
+        &fixture.db,
+        tenant_b,
+        private_plate_a,
+        Some("LICENSE-PLATE-RLS-CROSS-TENANT"),
+    )
+    .await
+    .unwrap());
+    assert!(!repo::license_plates::set_license_plate_deleted(
+        &fixture.db,
+        tenant_b,
+        private_plate_a,
+        true,
+    )
+    .await
+    .unwrap());
+
+    let unbound_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM license_plates")
+        .fetch_one(&fixture.db)
+        .await
+        .unwrap();
+    assert_eq!(unbound_count, 0);
+    let unbound_updates =
+        sqlx::query("UPDATE license_plates SET barcode = 'UNBOUND' WHERE id = $1")
+            .bind(private_plate_a)
+            .execute(&fixture.db)
+            .await
+            .unwrap()
+            .rows_affected();
+    assert_eq!(unbound_updates, 0);
+    let unbound_deletes = sqlx::query("DELETE FROM license_plates WHERE id = $1")
+        .bind(private_plate_a)
+        .execute(&fixture.db)
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(unbound_deletes, 0);
+    let mut unbound_tx = fixture.db.begin().await.unwrap();
+    assert!(sqlx::query(
+        r#"
+        INSERT INTO license_plates
+            (tenant_id, inventory_owner_id, created, barcode, facility_id)
+        VALUES ($1, $2, $3, 'LICENSE-PLATE-RLS-UNBOUND', $4)
+        "#,
+    )
+    .bind(tenant_a.get())
+    .bind(owner_a)
+    .bind(db::now_iso())
+    .bind(facility_a)
+    .execute(&mut *unbound_tx)
+    .await
+    .is_err());
+    unbound_tx.rollback().await.unwrap();
+
+    let mut tenant_b_tx = tenant_tx(&fixture.db, tenant_b).await;
+    let guessed_id: Option<i64> = sqlx::query_scalar("SELECT id FROM license_plates WHERE id = $1")
+        .bind(private_plate_a)
+        .fetch_optional(&mut *tenant_b_tx)
+        .await
+        .unwrap();
+    assert_eq!(guessed_id, None);
+    let guessed_barcode: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM license_plates WHERE barcode = $1")
+            .bind("LICENSE-PLATE-RLS-A-PRIVATE")
+            .fetch_optional(&mut *tenant_b_tx)
+            .await
+            .unwrap();
+    assert_eq!(guessed_barcode, None);
+    let cross_tenant_updates =
+        sqlx::query("UPDATE license_plates SET barcode = 'CROSS-TENANT' WHERE id = $1")
+            .bind(private_plate_a)
+            .execute(&mut *tenant_b_tx)
+            .await
+            .unwrap()
+            .rows_affected();
+    assert_eq!(cross_tenant_updates, 0);
+    let cross_tenant_deletes = sqlx::query("DELETE FROM license_plates WHERE id = $1")
+        .bind(private_plate_a)
+        .execute(&mut *tenant_b_tx)
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(cross_tenant_deletes, 0);
+    assert!(sqlx::query(
+        r#"
+        INSERT INTO license_plates
+            (tenant_id, inventory_owner_id, created, barcode, facility_id)
+        VALUES ($1, $2, $3, 'LICENSE-PLATE-RLS-CROSS-INSERT', $4)
+        "#,
+    )
+    .bind(tenant_a.get())
+    .bind(owner_a)
+    .bind(db::now_iso())
+    .bind(facility_a)
+    .execute(&mut *tenant_b_tx)
+    .await
+    .is_err());
+    tenant_b_tx.rollback().await.unwrap();
+
+    let tenant_a_private = repo::license_plates::get_license_plate_by_barcode(
+        &fixture.db,
+        tenant_a,
+        "LICENSE-PLATE-RLS-A-PRIVATE",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(tenant_a_private.id, private_plate_a);
+    assert!(tenant_a_private.deleted.is_none());
 }

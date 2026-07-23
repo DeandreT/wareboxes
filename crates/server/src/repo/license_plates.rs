@@ -6,7 +6,7 @@ use wareboxes_core::models::{
 };
 use wareboxes_domain::{InventoryOwnerId, TenantId};
 
-use crate::db::{now_iso, Db};
+use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::ScopeBindings;
 use crate::repo::inventory;
@@ -50,7 +50,7 @@ fn map_content(row: &sqlx::postgres::PgRow) -> AppResult<LicensePlateContent> {
 }
 
 async fn contents_by_license_plate(
-    db: &Db,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     ids: &[i64],
 ) -> AppResult<std::collections::HashMap<i64, Vec<LicensePlateContent>>> {
@@ -72,7 +72,7 @@ async fn contents_by_license_plate(
     )
     .bind(tenant_id.get())
     .bind(ids)
-    .fetch_all(db)
+    .fetch_all(&mut **tx)
     .await?;
     for row in &rows {
         let license_plate_id: i64 = row.try_get("license_plate_id")?;
@@ -107,6 +107,8 @@ async fn get_license_plates_with_scope(
     scope: &ScopeBindings,
     show_deleted: bool,
 ) -> AppResult<Vec<LicensePlate>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, deleted, barcode,
@@ -125,14 +127,15 @@ async fn get_license_plates_with_scope(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let mut plates = rows.iter().map(map).collect::<AppResult<Vec<_>>>()?;
     let ids = plates.iter().map(|lp| lp.id).collect::<Vec<_>>();
-    let mut contents = contents_by_license_plate(db, tenant_id, &ids).await?;
+    let mut contents = contents_by_license_plate(&mut tx, tenant_id, &ids).await?;
     for plate in &mut plates {
         plate.contents = contents.remove(&plate.id).unwrap_or_default();
     }
+    tx.commit().await?;
     Ok(plates)
 }
 
@@ -160,7 +163,9 @@ async fn get_license_plate_by_barcode_with_scope(
     scope: &ScopeBindings,
     barcode: &str,
 ) -> AppResult<Option<LicensePlate>> {
-    let Some(row) = sqlx::query(
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
+    let row = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, deleted, barcode,
                facility_id, location_id, dims_id
@@ -178,14 +183,16 @@ async fn get_license_plate_by_barcode_with_scope(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_optional(db)
-    .await?
-    else {
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.commit().await?;
         return Ok(None);
     };
     let mut plate = map(&row)?;
-    let mut contents = contents_by_license_plate(db, tenant_id, &[plate.id]).await?;
+    let mut contents = contents_by_license_plate(&mut tx, tenant_id, &[plate.id]).await?;
     plate.contents = contents.remove(&plate.id).unwrap_or_default();
+    tx.commit().await?;
     Ok(Some(plate))
 }
 
@@ -196,6 +203,8 @@ pub async fn add_license_plate(
     facility_id: i64,
     barcode: Option<&str>,
 ) -> AppResult<i64> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO license_plates (tenant_id, inventory_owner_id, created, barcode, facility_id) VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
@@ -204,8 +213,9 @@ pub async fn add_license_plate(
     .bind(now_iso())
     .bind(barcode)
     .bind(facility_id)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(id)
 }
 
@@ -217,6 +227,7 @@ pub async fn find_or_create_license_plate_tx(
     license_plate_id: Option<i64>,
     location_id: i64,
 ) -> AppResult<Option<i64>> {
+    bind_tenant_context(tx, tenant_id).await?;
     if license_plate_id.is_none() && barcode.is_none() {
         return Ok(None);
     }
@@ -342,13 +353,16 @@ pub async fn update_license_plate(
     id: i64,
     barcode: Option<&str>,
 ) -> AppResult<bool> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let res =
         sqlx::query("UPDATE license_plates SET barcode = COALESCE($1, barcode) WHERE tenant_id = $2 AND id = $3")
             .bind(barcode)
             .bind(tenant_id.get())
             .bind(id)
-            .execute(db)
+            .execute(&mut *tx)
             .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -363,6 +377,7 @@ pub async fn move_license_plate(
 ) -> AppResult<i64> {
     let now = now_iso();
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
 
     let request_hash = inventory_journal::request_hash(&(user_id, id, to_location_id, reason))?;
     if let Some(transaction_id) = inventory_journal::replayed_transaction(
@@ -597,6 +612,7 @@ pub async fn set_license_plate_deleted(
     deleted: bool,
 ) -> AppResult<bool> {
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let exists: Option<i64> = sqlx::query_scalar(
         "SELECT id FROM license_plates WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
     )
