@@ -5,7 +5,7 @@ use wareboxes_domain::{CommandContext, TenantId};
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
-use crate::repo::idempotency::PreparedCommand;
+use crate::repo::idempotency::{require_command_context, PreparedCommand};
 
 use super::access::{current_scope_tx, lock_user_tx, ScopeBindings};
 use execution::user_can_execute_task_tx;
@@ -73,14 +73,6 @@ fn concealed_task_reference(error: AppError) -> AppError {
             CoreError::BadRequest(_) | CoreError::NotFound(_) | CoreError::Forbidden,
         ) => AppError::not_found("task references"),
         other => other,
-    }
-}
-
-fn require_command_context(access: &TenantAccess, command: &CommandContext) -> AppResult<()> {
-    if command.tenant_id == access.tenant_id && command.actor_id == access.user_id {
-        Ok(())
-    } else {
-        Err(AppError::forbidden())
     }
 }
 

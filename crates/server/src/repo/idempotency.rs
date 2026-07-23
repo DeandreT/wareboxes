@@ -2,10 +2,22 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{CommandContext, TenantId};
 
 use crate::db::now_iso;
 use crate::error::{AppError, AppResult};
+
+pub(crate) fn require_command_context(
+    access: &TenantAccess,
+    command: &CommandContext,
+) -> AppResult<()> {
+    if command.tenant_id == access.tenant_id && command.actor_id == access.user_id {
+        Ok(())
+    } else {
+        Err(AppError::forbidden())
+    }
+}
 
 fn validate_identity(operation: &str, idempotency_key: &str) -> AppResult<()> {
     if operation.trim().is_empty() {

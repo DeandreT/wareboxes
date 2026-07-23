@@ -10,11 +10,12 @@ use wareboxes_core::models::{
     InventoryReservation, Order, OrderActivity, OrderItem, OrderStatus, OrderTrackingNumber,
     ReservationStatus, TenantAccess,
 };
-use wareboxes_domain::{InventoryOwnerId, TenantId};
+use wareboxes_domain::{CommandContext, InventoryOwnerId, TenantId};
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
+use crate::repo::idempotency::{require_command_context, PreparedCommand};
 use crate::repo::{address, tasks};
 
 const MUTABLE: &str = "('cancelled', 'held', 'open', 'void')";
@@ -1156,14 +1157,21 @@ async fn update_order_inner(db: &Db, tenant_id: TenantId, u: &OrderUpdate) -> Ap
 pub async fn cancel_order_with_unpack_task(
     db: &Db,
     access: &TenantAccess,
-    user_id: i64,
+    command: &CommandContext,
     order_id: i64,
     facility_id: i64,
 ) -> AppResult<Option<i64>> {
+    require_command_context(access, command)?;
+    let prepared = PreparedCommand::new(command, "order.cancel.v1", &(order_id, facility_id))?;
     let mut tx = db.begin().await?;
-    let scope = lock_current_scope_tx(&mut tx, access.tenant_id, user_id).await?;
+    let scope = lock_current_scope_tx(&mut tx, access.tenant_id, command.actor_id.get()).await?;
     if !scope.all_facilities && !scope.facility_ids.contains(&facility_id) {
         return Err(AppError::forbidden());
+    }
+    if let Some(task_id) = prepared.replayed::<i64>(&mut tx).await? {
+        tasks::require_replayed_task_visible_tx(&mut tx, access.tenant_id, task_id, &scope).await?;
+        tx.commit().await?;
+        return Ok(Some(task_id));
     }
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
         .bind(access.tenant_id.get())
@@ -1212,7 +1220,7 @@ pub async fn cancel_order_with_unpack_task(
     let task_id = tasks::create_unpack_cancelled_order_task_tx(
         &mut tx,
         access.tenant_id,
-        Some(user_id),
+        Some(command.actor_id.get()),
         order_id,
         facility_id,
         None,
@@ -1220,11 +1228,10 @@ pub async fn cancel_order_with_unpack_task(
         None,
         None,
         Some("Unpack inventory allocated to cancelled order".to_owned()),
-        None,
+        Some(&scope),
     )
     .await?;
-    tx.commit().await?;
-    Ok(Some(task_id))
+    prepared.commit(tx, task_id).await.map(Some)
 }
 
 pub async fn delete_order(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {

@@ -5,6 +5,7 @@ use axum::http::{header, Request, StatusCode};
 use common::*;
 use tower::ServiceExt;
 use wareboxes_core::models::WorkTask;
+use wareboxes_domain::CommandContext;
 use wareboxes_server::auth::TENANT_ID_HEADER;
 use wareboxes_server::{routes, state::AppState};
 
@@ -441,11 +442,22 @@ async fn cancelled_order_unpack_task_is_facility_scoped_and_deduplicated() {
         .await
         .unwrap()
         .unwrap();
-    let unpack_task =
-        repo::orders::cancel_order_with_unpack_task(db, &access, user.id, order_id, facility)
-            .await
-            .unwrap()
-            .unwrap();
+    let cancel_command = CommandContext {
+        tenant_id,
+        actor_id: access.user_id,
+        request_id: "cancel-task-1".into(),
+        idempotency_key: Some("cancel-task-1".into()),
+    };
+    let unpack_task = repo::orders::cancel_order_with_unpack_task(
+        db,
+        &access,
+        &cancel_command,
+        order_id,
+        facility,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let duplicate = repo::tasks::create_unpack_cancelled_order_task(
         db,
         tenant_id,
@@ -461,10 +473,21 @@ async fn cancelled_order_unpack_task_is_facility_scoped_and_deduplicated() {
     .await
     .unwrap();
     assert_eq!(duplicate, unpack_task);
+    let retry_command = CommandContext {
+        request_id: "cancel-task-2".into(),
+        idempotency_key: Some("cancel-task-2".into()),
+        ..cancel_command
+    };
     assert_eq!(
-        repo::orders::cancel_order_with_unpack_task(db, &access, user.id, order_id, facility,)
-            .await
-            .unwrap(),
+        repo::orders::cancel_order_with_unpack_task(
+            db,
+            &access,
+            &retry_command,
+            order_id,
+            facility,
+        )
+        .await
+        .unwrap(),
         Some(unpack_task)
     );
 

@@ -7,6 +7,7 @@ use wareboxes_core::models::{Order, OrderStatus};
 use crate::auth::CurrentTenant;
 use crate::error::{AppError, AppResult};
 use crate::repo;
+use crate::request_context::IdempotencyKey;
 use crate::routes::validate;
 use crate::state::AppState;
 
@@ -94,15 +95,17 @@ pub async fn update(
 pub async fn cancel(
     State(state): State<AppState>,
     user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
     Json(body): Json<CancelOrder>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     user.require_facility(body.facility_id)?;
+    let command = user.command_context(&idempotency_key);
     let task_id = repo::orders::cancel_order_with_unpack_task(
         &state.db,
         &user.tenant,
-        user.user.id,
+        &command,
         body.order_id,
         body.facility_id,
     )
