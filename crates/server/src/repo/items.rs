@@ -219,9 +219,11 @@ pub async fn add_item(
     weight_uom: Option<&str>,
 ) -> AppResult<i64> {
     let now = now_iso();
+    let mut tx = db.begin().await?;
     let dims_id: i64 = sqlx::query_scalar(
-        "INSERT INTO dims (created, length, width, height, length_uom, weight, weight_uom) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+        "INSERT INTO dims (tenant_id, created, length, width, height, length_uom, weight, weight_uom) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
     )
+    .bind(tenant_id.get())
     .bind(now)
     .bind(length)
     .bind(width)
@@ -229,7 +231,7 @@ pub async fn add_item(
     .bind(length_uom)
     .bind(weight)
     .bind(weight_uom)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO items (tenant_id, created, description, notes, packaging_unit, dims_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
@@ -240,8 +242,9 @@ pub async fn add_item(
     .bind(notes)
     .bind(packaging_unit)
     .bind(dims_id)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(id)
 }
 

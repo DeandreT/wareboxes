@@ -331,9 +331,10 @@ pub struct Order {
 // Items / catalog (app/utils/types/db/items.ts)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Dim {
     pub id: i64,
+    pub tenant_id: TenantId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub length: Option<i64>,
