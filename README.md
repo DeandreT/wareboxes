@@ -41,6 +41,12 @@ scripts/run-client-demo.sh
 
 The local Postgres container uses host port `5433`.
 
+The server uses separate database identities. `MIGRATION_DATABASE_URL` is the
+schema-owner connection used during startup migrations and bootstrap;
+`DATABASE_URL` is the restricted runtime connection. Both URLs must resolve to the
+same PostgreSQL database. Local volumes created before this role split must be
+rebuilt with `scripts/reset-db.sh`.
+
 ## Tests
 
 ```bash
@@ -50,7 +56,7 @@ scripts/test-postgres.sh
 Or directly:
 
 ```bash
-TEST_DATABASE_URL=postgres://wareboxes:wareboxes@127.0.0.1:5433/wareboxes \
+TEST_DATABASE_URL=postgres://wareboxes_admin:wareboxes_admin@127.0.0.1:5433/wareboxes \
   cargo test --workspace -- --test-threads=1
 ```
 

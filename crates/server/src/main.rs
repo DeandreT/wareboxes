@@ -17,12 +17,22 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
     tracing::info!(bind_address = %cfg.bind_addr, "starting wareboxes-server");
 
-    let pool = db::connect(&cfg.database_url).await?;
-    db::run_migrations(&pool)
+    let migration_pool = db::connect(&cfg.migration_database_url).await?;
+    let preflight_pool = db::connect(&cfg.database_url).await?;
+    db::validate_same_database(&migration_pool, &preflight_pool)
+        .await
+        .context("validating migration and runtime database targets")?;
+    preflight_pool.close().await;
+    db::run_migrations(&migration_pool)
         .await
         .context("running migrations")?;
 
-    bootstrap_admin(&pool, &cfg).await?;
+    let pool = db::connect_runtime(&cfg.database_url).await?;
+    db::validate_same_database(&migration_pool, &pool)
+        .await
+        .context("validating migrated runtime database target")?;
+    bootstrap_admin(&migration_pool, &cfg).await?;
+    migration_pool.close().await;
 
     let state = AppState::with_security(pool, cfg.security.clone());
     let app = routes::app(state);

@@ -447,13 +447,15 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         task.facility_id != Some(denied_facility) && task.inventory_owner_id != Some(denied_owner)
     }));
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let command_count_before: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM command_idempotency_records WHERE tenant_id = $1 AND operation LIKE 'task.create_%'",
     )
     .bind(tenant_id.get())
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     let concealed_references = [
         (
             "/api/tasks/cycle-counts/item-location/add",
@@ -523,13 +525,15 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         let response = send_api(&app, &token, tenant_id, Method::POST, uri, Some(body)).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
     }
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let command_count_after: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM command_idempotency_records WHERE tenant_id = $1 AND operation LIKE 'task.create_%'",
     )
     .bind(tenant_id.get())
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(command_count_after, command_count_before);
 
     let response = send_api(

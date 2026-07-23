@@ -4,7 +4,8 @@
 #   scripts/dev.sh server   start only the API (foreground)
 #   scripts/dev.sh client   start only the client (assumes API already running)
 #
-# Config comes from .env (DATABASE_URL, BIND_ADDR, BOOTSTRAP_ADMIN_*).
+# Config comes from .env (DATABASE_URL, MIGRATION_DATABASE_URL, BIND_ADDR,
+# BOOTSTRAP_ADMIN_*).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -15,7 +16,10 @@ fi
 
 # shellcheck disable=SC1091
 [ -f .env ] && set -a && . ./.env && set +a
+DATABASE_URL="${DATABASE_URL:-postgres://wareboxes_app:wareboxes_app@127.0.0.1:5433/wareboxes}"
+MIGRATION_DATABASE_URL="${MIGRATION_DATABASE_URL:-postgres://wareboxes_admin:wareboxes_admin@127.0.0.1:5433/wareboxes}"
 BIND_ADDR="${BIND_ADDR:-127.0.0.1:8080}"
+export DATABASE_URL MIGRATION_DATABASE_URL
 HEALTH="http://${BIND_ADDR}/health"
 
 ensure_cargo() {
@@ -41,8 +45,23 @@ ensure_postgres() {
   ensure_docker
   docker compose up -d postgres
   for _ in $(seq 1 60); do
-    if docker compose exec -T postgres pg_isready -U wareboxes -d wareboxes >/dev/null 2>&1; then
-      return 0
+    if docker compose exec -T postgres pg_isready -U wareboxes_admin -d wareboxes >/dev/null 2>&1; then
+      if ! role_flags="$(
+        docker compose exec -T postgres \
+          psql -U wareboxes_admin -d wareboxes -Atc \
+          "SELECT rolcanlogin, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls FROM pg_roles WHERE rolname = 'wareboxes_app';" \
+          2>/dev/null
+      )"; then
+        echo "postgres is using an incompatible local data volume." >&2
+        echo "Reset it with: scripts/reset-db.sh" >&2
+        exit 1
+      fi
+      if [ "$role_flags" = "t|f|f|f|f|f|f" ]; then
+        return 0
+      fi
+      echo "postgres is using an incompatible local data volume." >&2
+      echo "Reset it with: scripts/reset-db.sh" >&2
+      exit 1
     fi
     sleep 0.5
   done

@@ -443,6 +443,7 @@ async fn task_commands_replay_results_without_repeating_work() {
         ErrorCode::IdempotencyKeyReused
     );
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let stored_metadata: (i64, String) = sqlx::query_as(
         r#"
         SELECT actor_user_id, request_id
@@ -451,9 +452,10 @@ async fn task_commands_replay_results_without_repeating_work() {
         "#,
     )
     .bind(tenant_id.get())
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(stored_metadata.0, worker.id);
     assert!(!stored_metadata.1.is_empty());
 }
@@ -536,26 +538,25 @@ async fn idempotency_keys_are_tenant_scoped_and_records_are_immutable() {
         second_task
     );
 
-    let stored_actors: Vec<(i64, i64)> = sqlx::query_as(
-        r#"
-        SELECT tenant_id, actor_user_id
-        FROM command_idempotency_records
-        WHERE operation = 'task.start_next.v1'
-          AND idempotency_key = 'shared-tenant-key'
-        ORDER BY tenant_id
-        "#,
-    )
-    .fetch_all(&fixture.db)
-    .await
-    .unwrap();
-    assert_eq!(
-        stored_actors,
-        vec![
-            (first_tenant.get(), first.id),
-            (second_tenant.get(), second.id)
-        ]
-    );
+    for (tenant_id, actor_user_id) in [(first_tenant, first.id), (second_tenant, second.id)] {
+        let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+        let stored_actors: Vec<(i64, i64)> = sqlx::query_as(
+            r#"
+            SELECT tenant_id, actor_user_id
+            FROM command_idempotency_records
+            WHERE operation = 'task.start_next.v1'
+              AND idempotency_key = 'shared-tenant-key'
+            ORDER BY tenant_id
+            "#,
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(stored_actors, vec![(tenant_id.get(), actor_user_id)]);
+    }
 
+    let mut tx = tenant_tx(&fixture.db, first_tenant).await;
     let early_delete = sqlx::query(
         r#"
         DELETE FROM command_idempotency_records
@@ -565,8 +566,9 @@ async fn idempotency_keys_are_tenant_scoped_and_records_are_immutable() {
         "#,
     )
     .bind(first_tenant.get())
-    .execute(&fixture.db)
+    .execute(&mut *tx)
     .await;
+    tx.rollback().await.unwrap();
     assert!(early_delete.is_err());
 }
 
@@ -860,14 +862,16 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
             .await
             .unwrap();
     assert_eq!(task_count, 4);
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let command_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM command_idempotency_records WHERE tenant_id = $1 AND idempotency_key = $2 AND operation LIKE 'task.create_%'",
     )
     .bind(tenant_id.get())
     .bind(shared_key)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(command_count, 4);
 
     sqlx::query(

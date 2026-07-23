@@ -5,7 +5,7 @@ use sqlx::Row;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{CommandContext, TenantId};
 
-use crate::db::now_iso;
+use crate::db::{bind_tenant_context, now_iso};
 use crate::error::{AppError, AppResult};
 
 pub(crate) fn require_command_context(
@@ -50,6 +50,7 @@ pub(crate) async fn replayed_result<T: DeserializeOwned>(
         return Ok(None);
     };
     validate_identity(operation, idempotency_key)?;
+    bind_tenant_context(tx, tenant_id).await?;
 
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
@@ -106,6 +107,7 @@ async fn record_result<T: Serialize>(
     request_id: Option<&str>,
 ) -> AppResult<()> {
     validate_identity(operation, idempotency_key)?;
+    bind_tenant_context(tx, tenant_id).await?;
     let created = now_iso();
     let result_json = serde_json::to_string(result)
         .map_err(|error| AppError::internal(format!("encoding command result: {error}")))?;
