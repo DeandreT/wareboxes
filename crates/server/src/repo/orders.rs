@@ -229,6 +229,8 @@ async fn reserved_by_order_item(
     db: &Db,
     tenant_id: TenantId,
 ) -> AppResult<HashMap<(i64, i64), i64>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT r.order_id AS order_id,
@@ -246,7 +248,7 @@ async fn reserved_by_order_item(
         "#,
     )
     .bind(tenant_id.get())
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let mut map = HashMap::new();
     for r in &rows {
@@ -255,6 +257,7 @@ async fn reserved_by_order_item(
             r.try_get("reserved_qty")?,
         );
     }
+    tx.commit().await?;
     Ok(map)
 }
 
@@ -352,6 +355,8 @@ async fn reserved_by_order_ids_in_scope(
     if order_ids.is_empty() {
         return Ok(HashMap::new());
     }
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT r.order_id AS order_id,
@@ -377,7 +382,7 @@ async fn reserved_by_order_ids_in_scope(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let mut map = HashMap::new();
     for r in &rows {
@@ -386,6 +391,7 @@ async fn reserved_by_order_ids_in_scope(
             r.try_get("reserved_qty")?,
         );
     }
+    tx.commit().await?;
     Ok(map)
 }
 
@@ -395,6 +401,8 @@ async fn reservations_for_order_in_scope(
     order_id: i64,
     scope: &ScopeBindings,
 ) -> AppResult<Vec<InventoryReservation>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, modified, deleted,
@@ -415,9 +423,14 @@ async fn reservations_for_order_in_scope(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.iter().map(map_reservation).collect()
+    let reservations = rows
+        .iter()
+        .map(map_reservation)
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(reservations)
 }
 
 async fn activity_for_order(
@@ -710,6 +723,8 @@ async fn order_summaries(
     search: Option<&str>,
 ) -> AppResult<Vec<SummaryCount>> {
     let available = available_by_item_in_scope(db, tenant_id, scope).await?;
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT o.id AS order_id,
@@ -771,7 +786,7 @@ async fn order_summaries(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
 
     #[derive(Default)]
@@ -831,7 +846,7 @@ async fn order_summaries(
         }
     }
 
-    Ok([
+    let summaries = [
         ("out_of_stock", "Out of Stock", out_of_stock),
         ("processing", "Partial Pick", processing),
         ("held", "Held", held),
@@ -847,7 +862,9 @@ async fn order_summaries(
         label: label.to_owned(),
         count,
     })
-    .collect())
+    .collect::<Vec<_>>();
+    tx.commit().await?;
+    Ok(summaries)
 }
 
 pub async fn orders_by_load(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i64, Vec<Order>>> {
@@ -971,6 +988,8 @@ pub async fn orders_for_load(db: &Db, tenant_id: TenantId, load_id: i64) -> AppR
     }
 
     let available = available_by_item(db, tenant_id).await?;
+    let mut reservation_tx = db.begin().await?;
+    bind_tenant_context(&mut reservation_tx, tenant_id).await?;
     let reserved_rows = sqlx::query(
         r#"
         SELECT r.order_id AS order_id,
@@ -990,8 +1009,9 @@ pub async fn orders_for_load(db: &Db, tenant_id: TenantId, load_id: i64) -> AppR
     )
     .bind(tenant_id.get())
     .bind(&order_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *reservation_tx)
     .await?;
+    reservation_tx.commit().await?;
     let mut reserved = HashMap::new();
     for r in &reserved_rows {
         reserved.insert(

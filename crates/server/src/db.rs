@@ -182,6 +182,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'unpack_cancelled_order_task_lines',
                     'unpack_cancelled_order_task_lines_tenant_isolation'
+                ),
+                (
+                    'inventory_reservations',
+                    'inventory_reservations_tenant_isolation'
                 )
         )
         SELECT role.rolname AS name,
@@ -316,7 +320,7 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
         || role.has_database_temporary
         || role.has_non_system_schema_create
         || role.has_role_memberships
-        || role.valid_tenant_policy_count != 13
+        || role.valid_tenant_policy_count != 14
         || !role.reconciliation_view_contract_valid
         || role.preset_tenant_id.is_some()
         || role.search_path != "pg_catalog, public"

@@ -330,6 +330,8 @@ async fn inventory_dimensions(
             id,
         ),
     };
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
     let row = sqlx::query(sql)
         .bind(access.tenant_id.get())
         .bind(id)
@@ -338,9 +340,11 @@ async fn inventory_dimensions(
         .bind(&scope.facility_ids)
         .bind(scope.all_inventory_owners)
         .bind(&scope.inventory_owner_ids)
-        .fetch_optional(db)
+        .fetch_optional(&mut *tx)
         .await?;
-    row.as_ref().map(dimensions_from_row).transpose()
+    let dimensions = row.as_ref().map(dimensions_from_row).transpose()?;
+    tx.commit().await?;
+    Ok(dimensions)
 }
 
 pub async fn load_dimensions(
