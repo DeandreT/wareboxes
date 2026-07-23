@@ -68,22 +68,26 @@ async fn dimensions_are_tenant_scoped_and_item_creation_is_atomic() {
     )
     .await
     .unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_a).await;
     assert!(
         sqlx::query("UPDATE license_plates SET dims_id = $1 WHERE tenant_id = $2 AND id = $3",)
             .bind(dims_b)
             .bind(tenant_a.get())
             .bind(plate_a)
-            .execute(&fixture.db)
+            .execute(&mut *tx)
             .await
             .is_err()
     );
+    tx.rollback().await.unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_a).await;
     sqlx::query("UPDATE license_plates SET dims_id = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(dims_a)
         .bind(tenant_a.get())
         .bind(plate_a)
-        .execute(&fixture.db)
+        .execute(&mut *tx)
         .await
         .unwrap();
+    tx.commit().await.unwrap();
 
     let catalog: (bool, i64, i64) = sqlx::query_as(
         r#"

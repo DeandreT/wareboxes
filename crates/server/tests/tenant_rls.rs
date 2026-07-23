@@ -129,6 +129,37 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         .unwrap();
     db::validate_runtime_role(&fixture.db).await.unwrap();
 
+    sqlx::query(
+        r#"
+        ALTER POLICY license_plates_tenant_isolation
+        ON license_plates
+        USING (true)
+        WITH CHECK (true)
+        "#,
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    assert!(db::validate_runtime_role(&fixture.db).await.is_err());
+    sqlx::query(
+        r#"
+        ALTER POLICY license_plates_tenant_isolation
+        ON license_plates
+        USING (
+            tenant_id =
+                NULLIF(current_setting('wareboxes.tenant_id', true), '')::BIGINT
+        )
+        WITH CHECK (
+            tenant_id =
+                NULLIF(current_setting('wareboxes.tenant_id', true), '')::BIGINT
+        )
+        "#,
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    db::validate_runtime_role(&fixture.db).await.unwrap();
+
     let reconciliation_definition: String = sqlx::query_scalar(
         "SELECT pg_get_viewdef('public.inventory_reconciliation'::REGCLASS, true)",
     )
