@@ -185,6 +185,10 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "unpack_cancelled_order_task_lines",
             "unpack_cancelled_order_task_lines_tenant_isolation",
         ),
+        (
+            "inventory_reservations",
+            "inventory_reservations_tenant_isolation",
+        ),
     ] {
         sqlx::query(&format!(
             "ALTER POLICY {policy_name} ON {table_name} \

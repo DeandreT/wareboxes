@@ -577,6 +577,8 @@ async fn get_reservations_with_scope(
     scope: &ScopeBindings,
     show_deleted: bool,
 ) -> AppResult<Vec<InventoryReservation>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, modified, deleted, order_id,
@@ -596,9 +598,14 @@ async fn get_reservations_with_scope(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.iter().map(map_reservation).collect()
+    let reservations = rows
+        .iter()
+        .map(map_reservation)
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(reservations)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1246,6 +1253,7 @@ pub async fn reserve_inventory(db: &Db, command: &ReserveInventoryCommand<'_>) -
     }
     let now = now_iso();
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let request_hash = inventory_journal::request_hash(&(
         actor_user_id,
         order_id,
@@ -1477,6 +1485,7 @@ pub async fn cancel_reservation(
     } = *command;
     let now = now_iso();
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let request_hash = inventory_journal::request_hash(&(actor_user_id, reservation_id))?;
     if let Some(cancelled) = inventory_journal::replayed_result(
         &mut tx,
