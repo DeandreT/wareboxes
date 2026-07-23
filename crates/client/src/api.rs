@@ -169,7 +169,19 @@ impl ApiClient {
                 Ok(resp) => {
                     let message = serde_json::from_slice::<ErrorResponse>(&resp.bytes)
                         .ok()
-                        .map(|body| body.errors.join("; "))
+                        .map(|body| {
+                            if body.details.is_empty() {
+                                format!("{} (request {})", body.message, body.request_id)
+                            } else {
+                                let details = body
+                                    .details
+                                    .iter()
+                                    .map(|detail| format!("{}: {}", detail.field, detail.message))
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                format!("{details} (request {})", body.request_id)
+                            }
+                        })
                         .filter(|message| !message.is_empty())
                         .unwrap_or_else(|| String::from_utf8_lossy(&resp.bytes).to_string());
                     ApiEvent::Error(format!("HTTP {} — {message}", resp.status))

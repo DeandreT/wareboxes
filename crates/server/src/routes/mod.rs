@@ -1,5 +1,6 @@
 use axum::extract::DefaultBodyLimit;
-use axum::http::{header, HeaderName, Method};
+use axum::http::{header, HeaderName, Method, Request};
+use axum::middleware;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
@@ -8,6 +9,7 @@ use validator::Validate;
 use wareboxes_core::field_errors;
 
 use crate::error::{AppError, AppResult};
+use crate::request_context::{assign_request_id, REQUEST_ID_HEADER};
 use crate::state::AppState;
 
 pub mod audits;
@@ -206,8 +208,23 @@ pub fn app(state: AppState) -> Router {
     let mut app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .nest("/api", api)
-        .layer(TraceLayer::new_for_http())
-        .layer(DefaultBodyLimit::max(security.max_request_body_bytes));
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
+                let request_id = request
+                    .headers()
+                    .get(REQUEST_ID_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("unknown");
+                tracing::info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    uri = %request.uri(),
+                    %request_id
+                )
+            }),
+        )
+        .layer(DefaultBodyLimit::max(security.max_request_body_bytes))
+        .layer(middleware::from_fn(assign_request_id));
 
     if !security.cors_allowed_origins.is_empty() {
         app = app.layer(
@@ -218,7 +235,9 @@ pub fn app(state: AppState) -> Router {
                     header::AUTHORIZATION,
                     header::CONTENT_TYPE,
                     HeaderName::from_static(crate::auth::TENANT_ID_HEADER),
-                ]),
+                    HeaderName::from_static(REQUEST_ID_HEADER),
+                ])
+                .expose_headers([HeaderName::from_static(REQUEST_ID_HEADER)]),
         );
     }
 
