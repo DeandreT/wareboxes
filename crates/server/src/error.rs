@@ -1,9 +1,11 @@
-use axum::http::StatusCode;
+use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use sqlx::error::ErrorKind;
-use wareboxes_core::dto::ErrorResponse;
-use wareboxes_core::CoreError;
+use wareboxes_core::dto::{ErrorCode, ErrorResponse};
+use wareboxes_core::{CoreError, FieldError};
+
+use crate::request_context::{current_request_id_or_new, REQUEST_ID_HEADER};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -40,21 +42,10 @@ impl AppError {
         Self::Core(CoreError::Internal(message.into()))
     }
 
-    fn status(&self) -> StatusCode {
-        match self.public_core() {
-            CoreError::Unauthorized => StatusCode::UNAUTHORIZED,
-            CoreError::Forbidden => StatusCode::FORBIDDEN,
-            CoreError::NotFound(_) => StatusCode::NOT_FOUND,
-            CoreError::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            CoreError::Conflict(_) => StatusCode::CONFLICT,
-            CoreError::BadRequest(_) => StatusCode::BAD_REQUEST,
-            CoreError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    }
-
     fn public_core(&self) -> CoreError {
         match self {
-            AppError::Core(c) => c.clone(),
+            AppError::Core(CoreError::Internal(_)) => CoreError::Internal("internal error".into()),
+            AppError::Core(core) => core.clone(),
             AppError::Db(sqlx::Error::RowNotFound) => CoreError::NotFound("resource".to_string()),
             AppError::Db(sqlx::Error::Database(e)) => match e.kind() {
                 ErrorKind::UniqueViolation => {
@@ -76,30 +67,77 @@ impl AppError {
         }
     }
 
-    fn public_errors(&self) -> Vec<String> {
+    fn public_contract(&self) -> (StatusCode, ErrorCode, String, Vec<FieldError>) {
         match self.public_core() {
-            CoreError::Validation(fields) => fields
-                .iter()
-                .map(|f| format!("{}: {}", f.field, f.message))
-                .collect(),
-            other => vec![other.to_string()],
+            CoreError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                ErrorCode::Unauthorized,
+                "unauthorized".into(),
+                Vec::new(),
+            ),
+            CoreError::Forbidden => (
+                StatusCode::FORBIDDEN,
+                ErrorCode::Forbidden,
+                "forbidden".into(),
+                Vec::new(),
+            ),
+            CoreError::NotFound(resource) => (
+                StatusCode::NOT_FOUND,
+                ErrorCode::NotFound,
+                format!("not found: {resource}"),
+                Vec::new(),
+            ),
+            CoreError::Validation(details) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::ValidationFailed,
+                "validation failed".into(),
+                details,
+            ),
+            CoreError::Conflict(message) => (
+                StatusCode::CONFLICT,
+                ErrorCode::Conflict,
+                message,
+                Vec::new(),
+            ),
+            CoreError::BadRequest(message) => (
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                message,
+                Vec::new(),
+            ),
+            CoreError::Internal(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::InternalError,
+                "internal error".into(),
+                Vec::new(),
+            ),
         }
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let status = self.status();
+        let request_id = current_request_id_or_new();
+        let (status, code, message, details) = self.public_contract();
         if status.is_server_error() {
-            tracing::error!(error = %self, "request failed");
+            tracing::error!(%request_id, error = %self, "request failed");
         }
-        (
+        let mut response = (
             status,
             Json(ErrorResponse {
-                errors: self.public_errors(),
+                code,
+                message,
+                request_id: request_id.clone(),
+                details,
             }),
         )
-            .into_response()
+            .into_response();
+        if let Ok(header_value) = HeaderValue::from_str(&request_id) {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static(REQUEST_ID_HEADER), header_value);
+        }
+        response
     }
 }
 

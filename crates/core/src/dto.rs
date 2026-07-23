@@ -10,9 +10,29 @@ use crate::models::{
     Timestamp, User,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    Unauthorized,
+    Forbidden,
+    NotFound,
+    ValidationFailed,
+    Conflict,
+    InvalidRequest,
+    MethodNotAllowed,
+    PayloadTooLarge,
+    UnsupportedMediaType,
+    RateLimited,
+    InternalError,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ErrorResponse {
-    pub errors: Vec<String>,
+    pub code: ErrorCode,
+    pub message: String,
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<crate::FieldError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

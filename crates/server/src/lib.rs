@@ -8,5 +8,6 @@ pub mod db;
 pub mod error;
 pub mod permissions;
 pub mod repo;
+pub mod request_context;
 pub mod routes;
 pub mod state;
