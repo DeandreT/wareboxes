@@ -417,18 +417,23 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
 
     let transaction_id = transactions[0].id;
     let entry_id = transactions[0].entries[0].id;
+    let mut tx = tenant_tx(&db, tenant_id).await;
     assert!(
         sqlx::query("UPDATE inventory_transactions SET reason = 'tampered' WHERE id = $1")
             .bind(transaction_id)
-            .execute(&db)
+            .execute(&mut *tx)
             .await
             .is_err()
     );
+    tx.rollback().await.unwrap();
+    let mut tx = tenant_tx(&db, tenant_id).await;
     assert!(sqlx::query("DELETE FROM inventory_entries WHERE id = $1")
         .bind(entry_id)
-        .execute(&db)
+        .execute(&mut *tx)
         .await
         .is_err());
+    tx.rollback().await.unwrap();
+    let mut tx = tenant_tx(&db, tenant_id).await;
     assert!(sqlx::query(
         r#"
         INSERT INTO inventory_entries
@@ -443,9 +448,10 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
         "#,
     )
     .bind(entry_id)
-    .execute(&db)
+    .execute(&mut *tx)
     .await
     .is_err());
+    tx.rollback().await.unwrap();
 }
 
 #[tokio::test]
@@ -512,6 +518,130 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
     )
     .await
     .is_err());
+
+    let tenant_a_transactions = repo::inventory::get_transactions(&fixture.db, tenant_a)
+        .await
+        .unwrap();
+    let transaction_id = tenant_a_transactions[0].id;
+    let entry_id = tenant_a_transactions[0].entries[0].id;
+    sqlx::query("UPDATE inventory_balances SET qty_on_hand = qty_on_hand + 1 WHERE tenant_id = $1")
+        .bind(tenant_a.get())
+        .execute(&fixture.db)
+        .await
+        .unwrap();
+
+    let unbound_visibility: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT (SELECT COUNT(*) FROM inventory_transactions),
+               (SELECT COUNT(*) FROM inventory_entries),
+               (SELECT COUNT(*) FROM inventory_reconciliation)
+        "#,
+    )
+    .fetch_one(&fixture.db)
+    .await
+    .unwrap();
+    assert_eq!(unbound_visibility, (0, 0, 0));
+
+    let mut tenant_a_tx = tenant_tx(&fixture.db, tenant_a).await;
+    let tenant_a_visibility: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT (SELECT COUNT(*) FROM inventory_transactions),
+               (SELECT COUNT(*) FROM inventory_entries),
+               (SELECT COUNT(*) FROM inventory_reconciliation)
+        "#,
+    )
+    .fetch_one(&mut *tenant_a_tx)
+    .await
+    .unwrap();
+    assert_eq!(tenant_a_visibility, (1, 1, 1));
+    tenant_a_tx.rollback().await.unwrap();
+
+    let mut tenant_b_tx = tenant_tx(&fixture.db, tenant_b).await;
+    let tenant_b_visibility: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT (SELECT COUNT(*) FROM inventory_transactions),
+               (SELECT COUNT(*) FROM inventory_entries),
+               (SELECT COUNT(*) FROM inventory_reconciliation)
+        "#,
+    )
+    .fetch_one(&mut *tenant_b_tx)
+    .await
+    .unwrap();
+    assert_eq!(tenant_b_visibility, (0, 0, 0));
+    let cross_tenant_updates =
+        sqlx::query("UPDATE inventory_transactions SET reason = 'cross-tenant' WHERE id = $1")
+            .bind(transaction_id)
+            .execute(&mut *tenant_b_tx)
+            .await
+            .unwrap()
+            .rows_affected();
+    assert_eq!(cross_tenant_updates, 0);
+    let cross_tenant_deletes = sqlx::query("DELETE FROM inventory_entries WHERE id = $1")
+        .bind(entry_id)
+        .execute(&mut *tenant_b_tx)
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(cross_tenant_deletes, 0);
+    tenant_b_tx.rollback().await.unwrap();
+
+    let mut unbound_tx = fixture.db.begin().await.unwrap();
+    assert!(sqlx::query(
+        r#"
+        INSERT INTO inventory_transactions
+            (tenant_id, inventory_owner_id, created, transaction_type,
+             operation, request_hash)
+        VALUES ($1, $2, $3, 'adjust', 'rls.unbound', 'request-hash')
+        "#,
+    )
+    .bind(tenant_a.get())
+    .bind(owner_a)
+    .bind(db::now_iso())
+    .execute(&mut *unbound_tx)
+    .await
+    .is_err());
+    unbound_tx.rollback().await.unwrap();
+
+    let mut tenant_b_tx = tenant_tx(&fixture.db, tenant_b).await;
+    assert!(sqlx::query(
+        r#"
+        INSERT INTO inventory_entries
+            (tenant_id, inventory_owner_id, transaction_id, created, facility_id,
+             location_id, item_batch_id, item_id, uom, status, quantity_delta)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'each', 'available', 1)
+        "#,
+    )
+    .bind(tenant_a.get())
+    .bind(owner_a)
+    .bind(transaction_id)
+    .bind(db::now_iso())
+    .bind(facility)
+    .bind(location)
+    .bind(batch)
+    .bind(item)
+    .execute(&mut *tenant_b_tx)
+    .await
+    .is_err());
+    tenant_b_tx.rollback().await.unwrap();
+
+    assert_eq!(
+        repo::inventory::get_reconciliation_issues(&fixture.db, tenant_a)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        repo::inventory::get_reconciliation_issues(&fixture.db, tenant_b)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    sqlx::query("UPDATE inventory_balances SET qty_on_hand = qty_on_hand - 1 WHERE tenant_id = $1")
+        .bind(tenant_a.get())
+        .execute(&fixture.db)
+        .await
+        .unwrap();
 
     let other_owner_order = fixture.order(tenant_a, "OTHER-OWNER-ORDER", owner_b).await;
     let balance = repo::inventory::get_balances(&fixture.db, tenant_a, false)

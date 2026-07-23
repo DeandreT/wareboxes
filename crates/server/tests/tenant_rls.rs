@@ -118,6 +118,50 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         .unwrap();
     db::validate_runtime_role(&fixture.db).await.unwrap();
 
+    sqlx::query("ALTER TABLE inventory_entries DISABLE ROW LEVEL SECURITY")
+        .execute(&admin_db)
+        .await
+        .unwrap();
+    assert!(db::validate_runtime_role(&fixture.db).await.is_err());
+    sqlx::query("ALTER TABLE inventory_entries ENABLE ROW LEVEL SECURITY")
+        .execute(&admin_db)
+        .await
+        .unwrap();
+    db::validate_runtime_role(&fixture.db).await.unwrap();
+
+    let reconciliation_definition: String = sqlx::query_scalar(
+        "SELECT pg_get_viewdef('public.inventory_reconciliation'::REGCLASS, true)",
+    )
+    .fetch_one(&admin_db)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE VIEW public.inventory_reconciliation
+        WITH (security_invoker = true)
+        AS
+        SELECT tenant_id, inventory_owner_id, facility_id, location_id,
+               license_plate_id, item_batch_id, item_id, uom, status,
+               0::BIGINT AS journal_qty,
+               qty_on_hand::BIGINT AS projected_qty,
+               qty_on_hand::BIGINT AS variance
+        FROM inventory_balances
+        WHERE deleted IS NULL
+        "#,
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    assert!(db::validate_runtime_role(&fixture.db).await.is_err());
+    sqlx::query(&format!(
+        "CREATE OR REPLACE VIEW public.inventory_reconciliation \
+         WITH (security_invoker = true) AS {reconciliation_definition}"
+    ))
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    db::validate_runtime_role(&fixture.db).await.unwrap();
+
     let set_role_default: String = sqlx::query_scalar(
         r#"
         SELECT format(

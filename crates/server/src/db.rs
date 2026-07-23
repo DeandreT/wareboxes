@@ -31,11 +31,8 @@ struct RuntimeRole {
     has_database_temporary: bool,
     has_non_system_schema_create: bool,
     has_role_memberships: bool,
-    command_records_exist: bool,
-    command_records_rls_enabled: bool,
-    command_records_rls_forced: bool,
-    command_record_policy_count: i64,
-    valid_command_record_policy_count: i64,
+    valid_tenant_policy_count: i64,
+    reconciliation_view_contract_valid: bool,
     preset_tenant_id: Option<String>,
     search_path: String,
     in_recovery: bool,
@@ -132,6 +129,21 @@ pub async fn validate_runtime_role(pool: &Db) -> anyhow::Result<()> {
 async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::Result<()> {
     let role: RuntimeRole = sqlx::query_as(
         r#"
+        WITH expected_policy(table_name, policy_name) AS (
+            VALUES
+                (
+                    'command_idempotency_records',
+                    'command_idempotency_records_tenant_isolation'
+                ),
+                (
+                    'inventory_transactions',
+                    'inventory_transactions_tenant_isolation'
+                ),
+                (
+                    'inventory_entries',
+                    'inventory_entries_tenant_isolation'
+                )
+        )
         SELECT role.rolname AS name,
                session_user::TEXT AS session_name,
                role.rolcanlogin AS can_login,
@@ -192,29 +204,51 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                    SELECT 1 FROM pg_auth_members membership
                    WHERE membership.member = role.oid
                ) AS has_role_memberships,
-               command_records.oid IS NOT NULL AS command_records_exist,
-               COALESCE(command_records.relrowsecurity, false)
-                   AS command_records_rls_enabled,
-               COALESCE(command_records.relforcerowsecurity, false)
-                   AS command_records_rls_forced,
                (
                    SELECT COUNT(*)
-                   FROM pg_policy policy
-                   WHERE policy.polrelid = command_records.oid
-               ) AS command_record_policy_count,
-               (
-                   SELECT COUNT(*)
-                   FROM pg_policy policy
-                   WHERE policy.polrelid = command_records.oid
-                     AND policy.polname = 'command_idempotency_records_tenant_isolation'
-                     AND policy.polcmd = '*'
-                     AND policy.polpermissive
-                     AND policy.polroles = ARRAY[0::OID]
-                     AND pg_get_expr(policy.polqual, policy.polrelid) =
-                         '(tenant_id = (NULLIF(current_setting(''wareboxes.tenant_id''::text, true), ''''::text))::bigint)'
-                     AND pg_get_expr(policy.polwithcheck, policy.polrelid) =
-                         '(tenant_id = (NULLIF(current_setting(''wareboxes.tenant_id''::text, true), ''''::text))::bigint)'
-               ) AS valid_command_record_policy_count,
+                   FROM expected_policy expected
+                   JOIN pg_namespace policy_namespace
+                     ON policy_namespace.nspname = 'public'
+                   JOIN pg_class protected_table
+                     ON protected_table.relnamespace = policy_namespace.oid
+                    AND protected_table.relname = expected.table_name
+                   WHERE protected_table.relrowsecurity
+                     AND protected_table.relforcerowsecurity
+                     AND (
+                         SELECT COUNT(*)
+                         FROM pg_policy policy
+                         WHERE policy.polrelid = protected_table.oid
+                     ) = 1
+                     AND EXISTS (
+                         SELECT 1
+                         FROM pg_policy policy
+                         WHERE policy.polrelid = protected_table.oid
+                           AND policy.polname = expected.policy_name
+                           AND policy.polcmd = '*'
+                           AND policy.polpermissive
+                           AND policy.polroles = ARRAY[0::OID]
+                           AND pg_get_expr(policy.polqual, policy.polrelid) =
+                               '(tenant_id = (NULLIF(current_setting(''wareboxes.tenant_id''::text, true), ''''::text))::bigint)'
+                           AND pg_get_expr(policy.polwithcheck, policy.polrelid) =
+                               '(tenant_id = (NULLIF(current_setting(''wareboxes.tenant_id''::text, true), ''''::text))::bigint)'
+                     )
+               ) AS valid_tenant_policy_count,
+               EXISTS (
+                   SELECT 1
+                   FROM pg_class reconciliation_view
+                   JOIN pg_namespace reconciliation_namespace
+                     ON reconciliation_namespace.oid =
+                        reconciliation_view.relnamespace
+                   WHERE reconciliation_namespace.nspname = 'public'
+                     AND reconciliation_view.relname = 'inventory_reconciliation'
+                     AND reconciliation_view.relkind = 'v'
+                     AND COALESCE(reconciliation_view.reloptions, ARRAY[]::TEXT[])
+                         @> ARRAY['security_invoker=true']
+                     AND obj_description(reconciliation_view.oid, 'pg_class') =
+                         'wareboxes.tenant_contract.md5=' || md5(
+                             pg_get_viewdef(reconciliation_view.oid, true)
+                         )
+               ) AS reconciliation_view_contract_valid,
                NULLIF(current_setting('wareboxes.tenant_id', true), '')
                    AS preset_tenant_id,
                current_setting('search_path') AS search_path,
@@ -223,8 +257,6 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                    AS transaction_read_only
         FROM pg_roles role
         JOIN pg_database database ON database.datname = current_database()
-        LEFT JOIN pg_class command_records
-          ON command_records.oid = to_regclass('public.command_idempotency_records')
         WHERE role.rolname = current_user
         "#,
     )
@@ -244,11 +276,8 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
         || role.has_database_temporary
         || role.has_non_system_schema_create
         || role.has_role_memberships
-        || !role.command_records_exist
-        || !role.command_records_rls_enabled
-        || !role.command_records_rls_forced
-        || role.command_record_policy_count != 1
-        || role.valid_command_record_policy_count != 1
+        || role.valid_tenant_policy_count != 3
+        || !role.reconciliation_view_contract_valid
         || role.preset_tenant_id.is_some()
         || role.search_path != "pg_catalog, public"
         || role.in_recovery
