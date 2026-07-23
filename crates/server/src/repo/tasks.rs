@@ -1,9 +1,11 @@
+use sqlx::Row;
 use wareboxes_core::models::{TenantAccess, Timestamp, WorkTaskStatus, WorkTaskType};
 use wareboxes_core::CoreError;
 use wareboxes_domain::{CommandContext, TenantId};
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
+use crate::repo::idempotency::PreparedCommand;
 
 use super::access::{current_scope_tx, lock_user_tx, ScopeBindings};
 use execution::user_can_execute_task_tx;
@@ -74,22 +76,41 @@ fn concealed_task_reference(error: AppError) -> AppError {
     }
 }
 
-fn require_dimensions_visible(
-    access: &TenantAccess,
-    dimensions: TaskDimensions,
-) -> AppResult<TaskDimensions> {
-    if dimensions.is_allowed_by(&ScopeBindings::for_access(access)) {
-        Ok(dimensions)
-    } else {
-        Err(AppError::not_found("task references"))
-    }
-}
-
 fn require_command_context(access: &TenantAccess, command: &CommandContext) -> AppResult<()> {
     if command.tenant_id == access.tenant_id && command.actor_id == access.user_id {
         Ok(())
     } else {
         Err(AppError::forbidden())
+    }
+}
+
+pub(super) async fn require_replayed_task_visible_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    task_id: i64,
+    scope: &ScopeBindings,
+) -> AppResult<()> {
+    let row = sqlx::query(
+        r#"
+        SELECT facility_id, inventory_owner_id
+        FROM work_tasks
+        WHERE tenant_id = $1 AND id = $2
+        FOR SHARE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(task_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::not_found("task"))?;
+    let dimensions = TaskDimensions {
+        facility_id: row.try_get("facility_id")?,
+        inventory_owner_id: row.try_get("inventory_owner_id")?,
+    };
+    if dimensions.is_allowed_by(scope) {
+        Ok(())
+    } else {
+        Err(AppError::not_found("task"))
     }
 }
 
@@ -219,6 +240,7 @@ pub async fn create_item_location_cycle_count_task(
         order_item_id,
         inventory_balance_id,
         note,
+        None,
     )
     .await
 }
@@ -236,30 +258,43 @@ async fn create_item_location_cycle_count_task_with_scope(
     order_item_id: Option<i64>,
     inventory_balance_id: Option<i64>,
     note: Option<&str>,
+    command: Option<&CommandContext>,
 ) -> AppResult<i64> {
-    let dimensions = item_location_cycle_count_dimensions(
-        db,
-        tenant_id,
-        location_id,
-        item_id,
-        order_id,
-        order_item_id,
-        inventory_balance_id,
-    )
-    .await?;
-    let facility_id = dimensions
-        .facility_id
-        .ok_or_else(|| AppError::internal("cycle count task is missing a facility"))?;
-    ensure_active_item(db, tenant_id, item_id).await?;
+    let prepared = command
+        .map(|command| {
+            PreparedCommand::new(
+                command,
+                "task.create_item_location_cycle_count.v1",
+                &(
+                    location_id,
+                    item_id,
+                    source,
+                    order_id,
+                    order_item_id,
+                    inventory_balance_id,
+                    note,
+                ),
+            )
+        })
+        .transpose()?;
     let mut tx = db.begin().await?;
-    if let Some(scope_user_id) = scope_user_id {
-        let current_scope =
-            lock_current_task_scope_tx(&mut tx, tenant_id, scope_user_id, None).await?;
-        if !dimensions.is_allowed_by(&current_scope) {
-            return Err(AppError::not_found("task references"));
+    let current_scope = match scope_user_id {
+        Some(scope_user_id) => {
+            Some(lock_current_task_scope_tx(&mut tx, tenant_id, scope_user_id, None).await?)
+        }
+        None => None,
+    };
+    if let Some(prepared) = prepared.as_ref() {
+        if let Some(task_id) = prepared.replayed::<i64>(&mut tx).await? {
+            let scope = current_scope
+                .as_ref()
+                .ok_or_else(|| AppError::internal("scoped task command is missing its scope"))?;
+            require_replayed_task_visible_tx(&mut tx, tenant_id, task_id, scope).await?;
+            tx.commit().await?;
+            return Ok(task_id);
         }
     }
-    lock_item_cycle_references_tx(
+    let references = lock_item_cycle_references_tx(
         &mut tx,
         tenant_id,
         location_id,
@@ -268,7 +303,41 @@ async fn create_item_location_cycle_count_task_with_scope(
         order_item_id,
         inventory_balance_id,
     )
-    .await?;
+    .await;
+    if let Err(error) = references {
+        return Err(if current_scope.is_some() {
+            concealed_task_reference(error)
+        } else {
+            error
+        });
+    }
+    let dimensions = item_location_cycle_count_dimensions_tx(
+        &mut tx,
+        tenant_id,
+        location_id,
+        item_id,
+        order_id,
+        order_item_id,
+        inventory_balance_id,
+    )
+    .await
+    .map_err(|error| {
+        if current_scope.is_some() {
+            concealed_task_reference(error)
+        } else {
+            error
+        }
+    })?;
+    if current_scope
+        .as_ref()
+        .is_some_and(|scope| !dimensions.is_allowed_by(scope))
+    {
+        return Err(AppError::not_found("task references"));
+    }
+    let facility_id = dimensions
+        .facility_id
+        .ok_or_else(|| AppError::internal("cycle count task is missing a facility"))?;
+    ensure_active_item_tx(&mut tx, tenant_id, item_id).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT || ':' || $3::TEXT, 0))")
         .bind(tenant_id.get())
         .bind(location_id)
@@ -307,8 +376,13 @@ async fn create_item_location_cycle_count_task_with_scope(
             .bind(existing)
             .execute(&mut *tx)
             .await?;
-        tx.commit().await?;
-        return Ok(existing);
+        return match prepared {
+            Some(prepared) => prepared.commit(tx, existing).await,
+            None => {
+                tx.commit().await?;
+                Ok(existing)
+            }
+        };
     }
 
     let task_id = insert_task_tx(
@@ -353,15 +427,20 @@ async fn create_item_location_cycle_count_task_with_scope(
     .bind(note)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
-    Ok(task_id)
+    match prepared {
+        Some(prepared) => prepared.commit(tx, task_id).await,
+        None => {
+            tx.commit().await?;
+            Ok(task_id)
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn create_item_location_cycle_count_task_in_scope(
     db: &Db,
     access: &TenantAccess,
-    user_id: i64,
+    command: &CommandContext,
     location_id: i64,
     item_id: i64,
     source: Option<&str>,
@@ -370,23 +449,12 @@ pub async fn create_item_location_cycle_count_task_in_scope(
     inventory_balance_id: Option<i64>,
     note: Option<&str>,
 ) -> AppResult<i64> {
-    let dimensions = item_location_cycle_count_dimensions(
-        db,
-        access.tenant_id,
-        location_id,
-        item_id,
-        order_id,
-        order_item_id,
-        inventory_balance_id,
-    )
-    .await
-    .map_err(concealed_task_reference)?;
-    require_dimensions_visible(access, dimensions)?;
+    require_command_context(access, command)?;
     create_item_location_cycle_count_task_with_scope(
         db,
         access.tenant_id,
-        user_id,
-        Some(access.user_id.get()),
+        command.actor_id.get(),
+        Some(command.actor_id.get()),
         location_id,
         item_id,
         source,
@@ -394,6 +462,7 @@ pub async fn create_item_location_cycle_count_task_in_scope(
         order_item_id,
         inventory_balance_id,
         note,
+        Some(command),
     )
     .await
 }
@@ -421,6 +490,7 @@ pub async fn create_location_cycle_count_task(
         scheduled_for,
         due_at,
         instructions,
+        None,
     )
     .await
 }
@@ -437,24 +507,58 @@ async fn create_location_cycle_count_task_with_scope(
     scheduled_for: Option<Timestamp>,
     due_at: Option<Timestamp>,
     instructions: Option<String>,
+    command: Option<&CommandContext>,
 ) -> AppResult<i64> {
-    let facility_id = facility_for_location(db, tenant_id, location_id).await?;
+    let prepared = command
+        .map(|command| {
+            PreparedCommand::new(
+                command,
+                "task.create_location_cycle_count.v1",
+                &(
+                    location_id,
+                    priority,
+                    assigned_user_id,
+                    scheduled_for,
+                    due_at,
+                    &instructions,
+                ),
+            )
+        })
+        .transpose()?;
     let mut tx = db.begin().await?;
-    if let Some(scope_user_id) = scope_user_id {
-        let current_scope =
-            lock_current_task_scope_tx(&mut tx, tenant_id, scope_user_id, assigned_user_id).await?;
-        if !(TaskDimensions {
+    let current_scope = match scope_user_id {
+        Some(scope_user_id) => Some(
+            lock_current_task_scope_tx(&mut tx, tenant_id, scope_user_id, assigned_user_id).await?,
+        ),
+        None => None,
+    };
+    if let Some(prepared) = prepared.as_ref() {
+        if let Some(task_id) = prepared.replayed::<i64>(&mut tx).await? {
+            let scope = current_scope
+                .as_ref()
+                .ok_or_else(|| AppError::internal("scoped task command is missing its scope"))?;
+            require_replayed_task_visible_tx(&mut tx, tenant_id, task_id, scope).await?;
+            tx.commit().await?;
+            return Ok(task_id);
+        }
+    }
+    let facility_id = lock_active_location_tx(&mut tx, tenant_id, location_id)
+        .await
+        .map_err(|error| {
+            if current_scope.is_some() {
+                concealed_task_reference(error)
+            } else {
+                error
+            }
+        })?;
+    if current_scope.as_ref().is_some_and(|scope| {
+        !(TaskDimensions {
             facility_id: Some(facility_id),
             inventory_owner_id: None,
         })
-        .is_allowed_by(&current_scope)
-        {
-            return Err(AppError::not_found("task references"));
-        }
-    }
-    let locked_facility_id = lock_active_location_tx(&mut tx, tenant_id, location_id).await?;
-    if locked_facility_id != facility_id {
-        return Err(AppError::conflict("location facility changed"));
+        .is_allowed_by(scope)
+    }) {
+        return Err(AppError::not_found("task references"));
     }
     let task_id = insert_task_tx(
         &mut tx,
@@ -485,15 +589,20 @@ async fn create_location_cycle_count_task_with_scope(
     .bind(location_id)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
-    Ok(task_id)
+    match prepared {
+        Some(prepared) => prepared.commit(tx, task_id).await,
+        None => {
+            tx.commit().await?;
+            Ok(task_id)
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn create_location_cycle_count_task_in_scope(
     db: &Db,
     access: &TenantAccess,
-    user_id: i64,
+    command: &CommandContext,
     location_id: i64,
     priority: Option<i64>,
     assigned_user_id: Option<i64>,
@@ -501,27 +610,19 @@ pub async fn create_location_cycle_count_task_in_scope(
     due_at: Option<Timestamp>,
     instructions: Option<String>,
 ) -> AppResult<i64> {
-    let facility_id = facility_for_location(db, access.tenant_id, location_id)
-        .await
-        .map_err(concealed_task_reference)?;
-    require_dimensions_visible(
-        access,
-        TaskDimensions {
-            facility_id: Some(facility_id),
-            inventory_owner_id: None,
-        },
-    )?;
+    require_command_context(access, command)?;
     create_location_cycle_count_task_with_scope(
         db,
         access.tenant_id,
-        user_id,
-        Some(access.user_id.get()),
+        command.actor_id.get(),
+        Some(command.actor_id.get()),
         location_id,
         priority,
         assigned_user_id,
         scheduled_for,
         due_at,
         instructions,
+        Some(command),
     )
     .await
 }
@@ -555,6 +656,7 @@ pub async fn create_break_master_pack_task(
         scheduled_for,
         due_at,
         instructions,
+        None,
     )
     .await
 }
@@ -574,10 +676,30 @@ async fn create_break_master_pack_task_with_scope(
     scheduled_for: Option<Timestamp>,
     due_at: Option<Timestamp>,
     instructions: Option<String>,
+    command: Option<&CommandContext>,
 ) -> AppResult<i64> {
     if qty <= 0 {
         return Err(AppError::bad_request("quantity must be positive"));
     }
+    let prepared = command
+        .map(|command| {
+            PreparedCommand::new(
+                command,
+                "task.create_break_master_pack.v1",
+                &(
+                    master_item_id,
+                    single_item_id,
+                    location_id,
+                    qty,
+                    priority,
+                    assigned_user_id,
+                    scheduled_for,
+                    due_at,
+                    &instructions,
+                ),
+            )
+        })
+        .transpose()?;
     let mut tx = db.begin().await?;
     let current_scope = match scope_user_id {
         Some(scope_user_id) => Some(
@@ -585,6 +707,16 @@ async fn create_break_master_pack_task_with_scope(
         ),
         None => None,
     };
+    if let Some(prepared) = prepared.as_ref() {
+        if let Some(task_id) = prepared.replayed::<i64>(&mut tx).await? {
+            let scope = current_scope
+                .as_ref()
+                .ok_or_else(|| AppError::internal("scoped task command is missing its scope"))?;
+            require_replayed_task_visible_tx(&mut tx, tenant_id, task_id, scope).await?;
+            tx.commit().await?;
+            return Ok(task_id);
+        }
+    }
     let pack: Option<(i64, i64)> = sqlx::query_as(
         r#"
         SELECT pack.inner_qty, location.facility_id
@@ -618,9 +750,13 @@ async fn create_break_master_pack_task_with_scope(
     .fetch_optional(&mut *tx)
     .await?;
     let Some((inner_qty, facility_id)) = pack else {
-        return Err(AppError::bad_request(
-            "break master pack tasks require active items, location, and pack link",
-        ));
+        return Err(if current_scope.is_some() {
+            AppError::not_found("task references")
+        } else {
+            AppError::bad_request(
+                "break master pack tasks require active items, location, and pack link",
+            )
+        });
     };
     if let Some(current_scope) = current_scope {
         if !(TaskDimensions {
@@ -671,15 +807,20 @@ async fn create_break_master_pack_task_with_scope(
     .bind(inner_qty)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
-    Ok(task_id)
+    match prepared {
+        Some(prepared) => prepared.commit(tx, task_id).await,
+        None => {
+            tx.commit().await?;
+            Ok(task_id)
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub async fn create_break_master_pack_task_in_scope(
     db: &Db,
     access: &TenantAccess,
-    user_id: i64,
+    command: &CommandContext,
     master_item_id: i64,
     single_item_id: i64,
     location_id: i64,
@@ -690,21 +831,12 @@ pub async fn create_break_master_pack_task_in_scope(
     due_at: Option<Timestamp>,
     instructions: Option<String>,
 ) -> AppResult<i64> {
-    let facility_id = facility_for_location(db, access.tenant_id, location_id)
-        .await
-        .map_err(concealed_task_reference)?;
-    require_dimensions_visible(
-        access,
-        TaskDimensions {
-            facility_id: Some(facility_id),
-            inventory_owner_id: None,
-        },
-    )?;
+    require_command_context(access, command)?;
     create_break_master_pack_task_with_scope(
         db,
         access.tenant_id,
-        user_id,
-        Some(access.user_id.get()),
+        command.actor_id.get(),
+        Some(command.actor_id.get()),
         master_item_id,
         single_item_id,
         location_id,
@@ -714,6 +846,7 @@ pub async fn create_break_master_pack_task_in_scope(
         scheduled_for,
         due_at,
         instructions,
+        Some(command),
     )
     .await
 }
@@ -732,6 +865,9 @@ pub async fn create_unpack_cancelled_order_task(
     instructions: Option<String>,
 ) -> AppResult<i64> {
     let mut tx = db.begin().await?;
+    if let Some(assigned_user_id) = assigned_user_id {
+        lock_user_tx(&mut tx, tenant_id, assigned_user_id).await?;
+    }
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
         .bind(tenant_id.get())
         .bind(order_id)
@@ -797,13 +933,12 @@ pub(crate) async fn create_unpack_cancelled_order_task_tx(
     .fetch_optional(&mut **tx)
     .await?;
     let Some((status, inventory_owner_id)) = order else {
-        return Err(AppError::bad_request("order not found"));
+        return Err(if scope.is_some() {
+            AppError::not_found("task references")
+        } else {
+            AppError::bad_request("order not found")
+        });
     };
-    if status != "cancelled" {
-        return Err(AppError::bad_request(
-            "unpack cancelled order tasks require a cancelled order",
-        ));
-    }
     if scope.is_some_and(|scope| {
         !(TaskDimensions {
             facility_id: Some(facility_id),
@@ -812,6 +947,11 @@ pub(crate) async fn create_unpack_cancelled_order_task_tx(
         .is_allowed_by(scope)
     }) {
         return Err(AppError::not_found("task references"));
+    }
+    if status != "cancelled" {
+        return Err(AppError::bad_request(
+            "unpack cancelled order tasks require a cancelled order",
+        ));
     }
     lock_unpack_order_lines_tx(tx, tenant_id, inventory_owner_id, order_id).await?;
 
@@ -909,7 +1049,7 @@ pub(crate) async fn create_unpack_cancelled_order_task_tx(
 pub async fn create_unpack_cancelled_order_task_in_scope(
     db: &Db,
     access: &TenantAccess,
-    user_id: Option<i64>,
+    command: &CommandContext,
     order_id: i64,
     facility_id: i64,
     priority: Option<i64>,
@@ -918,6 +1058,20 @@ pub async fn create_unpack_cancelled_order_task_in_scope(
     due_at: Option<Timestamp>,
     instructions: Option<String>,
 ) -> AppResult<i64> {
+    require_command_context(access, command)?;
+    let prepared = PreparedCommand::new(
+        command,
+        "task.create_unpack_cancelled_order.v1",
+        &(
+            order_id,
+            facility_id,
+            priority,
+            assigned_user_id,
+            scheduled_for,
+            due_at,
+            &instructions,
+        ),
+    )?;
     let mut tx = db.begin().await?;
     let current_scope = lock_current_task_scope_tx(
         &mut tx,
@@ -926,6 +1080,12 @@ pub async fn create_unpack_cancelled_order_task_in_scope(
         assigned_user_id,
     )
     .await?;
+    if let Some(task_id) = prepared.replayed::<i64>(&mut tx).await? {
+        require_replayed_task_visible_tx(&mut tx, access.tenant_id, task_id, &current_scope)
+            .await?;
+        tx.commit().await?;
+        return Ok(task_id);
+    }
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
         .bind(access.tenant_id.get())
         .bind(order_id)
@@ -934,7 +1094,7 @@ pub async fn create_unpack_cancelled_order_task_in_scope(
     let task_id = create_unpack_cancelled_order_task_tx(
         &mut tx,
         access.tenant_id,
-        user_id,
+        Some(command.actor_id.get()),
         order_id,
         facility_id,
         priority,
@@ -945,13 +1105,12 @@ pub async fn create_unpack_cancelled_order_task_in_scope(
         Some(&current_scope),
     )
     .await?;
-    tx.commit().await?;
-    Ok(task_id)
+    prepared.commit(tx, task_id).await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn item_location_cycle_count_dimensions(
-    db: &Db,
+async fn item_location_cycle_count_dimensions_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     location_id: i64,
     item_id: i64,
@@ -959,7 +1118,14 @@ async fn item_location_cycle_count_dimensions(
     order_item_id: Option<i64>,
     inventory_balance_id: Option<i64>,
 ) -> AppResult<TaskDimensions> {
-    let facility_id = facility_for_location(db, tenant_id, location_id).await?;
+    let facility_id: i64 = sqlx::query_scalar(
+        "SELECT facility_id FROM locations WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL AND active",
+    )
+    .bind(tenant_id.get())
+    .bind(location_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::bad_request("location not found"))?;
     let mut inventory_owner_id = None;
 
     if let Some(inventory_balance_id) = inventory_balance_id {
@@ -972,7 +1138,7 @@ async fn item_location_cycle_count_dimensions(
         )
         .bind(tenant_id.get())
         .bind(inventory_balance_id)
-        .fetch_optional(db)
+        .fetch_optional(&mut **tx)
         .await?;
         let Some((owner_id, balance_facility_id, balance_location_id, balance_item_id)) = balance
         else {
@@ -995,7 +1161,7 @@ async fn item_location_cycle_count_dimensions(
         )
         .bind(tenant_id.get())
         .bind(order_id)
-        .fetch_optional(db)
+        .fetch_optional(&mut **tx)
         .await?;
         merge_task_owner(&mut inventory_owner_id, owner_id, "order")?;
     }
@@ -1010,7 +1176,7 @@ async fn item_location_cycle_count_dimensions(
         )
         .bind(tenant_id.get())
         .bind(order_item_id)
-        .fetch_optional(db)
+        .fetch_optional(&mut **tx)
         .await?;
         let Some((owner_id, item_order_id, order_item_item_id)) = order_item else {
             return Err(AppError::bad_request("order item not found"));
@@ -1047,24 +1213,17 @@ fn merge_task_owner(
     Ok(())
 }
 
-async fn facility_for_location(db: &Db, tenant_id: TenantId, location_id: i64) -> AppResult<i64> {
-    sqlx::query_scalar(
-        "SELECT facility_id FROM locations WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL AND active",
-    )
-    .bind(tenant_id.get())
-    .bind(location_id)
-    .fetch_optional(db)
-    .await?
-    .ok_or_else(|| AppError::bad_request("location not found"))
-}
-
-async fn ensure_active_item(db: &Db, tenant_id: TenantId, item_id: i64) -> AppResult<()> {
+async fn ensure_active_item_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    item_id: i64,
+) -> AppResult<()> {
     let found: Option<i64> = sqlx::query_scalar(
         "SELECT id FROM items WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL",
     )
     .bind(tenant_id.get())
     .bind(item_id)
-    .fetch_optional(db)
+    .fetch_optional(&mut **tx)
     .await?;
     if found.is_none() {
         return Err(AppError::bad_request("item not found"));

@@ -49,6 +49,33 @@ async fn response_json<T: serde::de::DeserializeOwned>(response: axum::response:
     serde_json::from_slice(&body).unwrap()
 }
 
+async fn create_twice(
+    app: &axum::Router,
+    token: &str,
+    tenant_id: TenantId,
+    uri: &str,
+    idempotency_key: &str,
+    body: Value,
+) -> i64 {
+    let (first, second) = tokio::join!(
+        send(
+            app,
+            token,
+            tenant_id,
+            uri,
+            Some(idempotency_key),
+            body.clone(),
+        ),
+        send(app, token, tenant_id, uri, Some(idempotency_key), body,),
+    );
+    assert_eq!(first.status(), StatusCode::OK, "{uri}");
+    assert_eq!(second.status(), StatusCode::OK, "{uri}");
+    let first_id = response_json::<i64>(first).await;
+    let second_id = response_json::<i64>(second).await;
+    assert_eq!(first_id, second_id, "{uri}");
+    first_id
+}
+
 async fn create_break_task(
     fixture: &Fixture,
     tenant_id: TenantId,
@@ -672,4 +699,336 @@ async fn new_task_claims_release_expired_leases_atomically() {
     .await
     .unwrap();
     assert_eq!(active_count, 1);
+}
+
+#[tokio::test]
+async fn task_creation_and_lease_release_commands_are_replay_safe() {
+    let fixture = Fixture::new().await;
+    let worker = fixture.wms_user("task-creation-idempotency@test.com").await;
+    let tenant_id = tenant_for_user(&fixture.db, worker.id).await;
+    let token = auth::create_session(&fixture.db, worker.id).await.unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let facility = fixture.facility(tenant_id, "Creation Replay DC").await;
+    let location = fixture
+        .location(tenant_id, facility, "CREATE-REPLAY-01")
+        .await;
+    let master = fixture
+        .item(tenant_id, "Creation Replay Case", "case")
+        .await;
+    let single = fixture
+        .item(tenant_id, "Creation Replay Each", "each")
+        .await;
+    repo::items::add_item_pack_link(
+        &fixture.db,
+        tenant_id,
+        master,
+        single,
+        8,
+        Some("creation replay pack"),
+    )
+    .await
+    .unwrap();
+    let owner = fixture
+        .inventory_owner(tenant_id, "Creation Replay Owner")
+        .await;
+    sqlx::query(
+        "INSERT INTO inventory_owner_facilities (tenant_id, created, inventory_owner_id, facility_id) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(tenant_id.get())
+    .bind(db::now_iso())
+    .bind(owner)
+    .bind(facility)
+    .execute(&fixture.db)
+    .await
+    .unwrap();
+    let order = fixture.order(tenant_id, "CREATE-REPLAY-ORDER", owner).await;
+    fixture.order_item(order, single, 3).await;
+    sqlx::query("UPDATE orders SET status = 'cancelled' WHERE tenant_id = $1 AND id = $2")
+        .bind(tenant_id.get())
+        .bind(order)
+        .execute(&fixture.db)
+        .await
+        .unwrap();
+
+    let cases = [
+        (
+            "/api/tasks/cycle-counts/item-location/add",
+            json!({"location_id": location, "item_id": single, "source": "manual"}),
+        ),
+        (
+            "/api/tasks/cycle-counts/location/add",
+            json!({"location_id": location, "priority": 31}),
+        ),
+        (
+            "/api/tasks/break-master-packs/add",
+            json!({
+                "master_item_id": master,
+                "single_item_id": single,
+                "location_id": location,
+                "qty": 2
+            }),
+        ),
+        (
+            "/api/tasks/unpack-cancelled-orders/add",
+            json!({"order_id": order, "facility_id": facility}),
+        ),
+        ("/api/tasks/release-expired", json!({})),
+    ];
+    for (uri, body) in &cases {
+        let response = send(&app, &token, tenant_id, uri, None, body.clone()).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(
+            response_json::<ErrorResponse>(response).await.code,
+            ErrorCode::IdempotencyKeyRequired,
+            "{uri}"
+        );
+    }
+
+    let shared_key = "shared-create-operation-key";
+    let item_task = create_twice(
+        &app,
+        &token,
+        tenant_id,
+        cases[0].0,
+        shared_key,
+        cases[0].1.clone(),
+    )
+    .await;
+    let location_task = create_twice(
+        &app,
+        &token,
+        tenant_id,
+        cases[1].0,
+        shared_key,
+        cases[1].1.clone(),
+    )
+    .await;
+    let break_task = create_twice(
+        &app,
+        &token,
+        tenant_id,
+        cases[2].0,
+        shared_key,
+        cases[2].1.clone(),
+    )
+    .await;
+    let unpack_task = create_twice(
+        &app,
+        &token,
+        tenant_id,
+        cases[3].0,
+        shared_key,
+        cases[3].1.clone(),
+    )
+    .await;
+
+    for (uri, body) in [
+        (
+            cases[0].0,
+            json!({"location_id": location, "item_id": single, "source": "changed"}),
+        ),
+        (cases[1].0, json!({"location_id": location, "priority": 32})),
+        (
+            cases[2].0,
+            json!({
+                "master_item_id": master,
+                "single_item_id": single,
+                "location_id": location,
+                "qty": 3
+            }),
+        ),
+        (
+            cases[3].0,
+            json!({"order_id": order, "facility_id": facility, "priority": 71}),
+        ),
+    ] {
+        let response = send(&app, &token, tenant_id, uri, Some(shared_key), body).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{uri}");
+        assert_eq!(
+            response_json::<ErrorResponse>(response).await.code,
+            ErrorCode::IdempotencyKeyReused,
+            "{uri}"
+        );
+    }
+
+    let task_ids = vec![item_task, location_task, break_task, unpack_task];
+    let task_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM work_tasks WHERE tenant_id = $1 AND id = ANY($2)")
+            .bind(tenant_id.get())
+            .bind(&task_ids)
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+    assert_eq!(task_count, 4);
+    let command_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM command_idempotency_records WHERE tenant_id = $1 AND idempotency_key = $2 AND operation LIKE 'task.create_%'",
+    )
+    .bind(tenant_id.get())
+    .bind(shared_key)
+    .fetch_one(&fixture.db)
+    .await
+    .unwrap();
+    assert_eq!(command_count, 4);
+
+    sqlx::query(
+        r#"
+        UPDATE work_tasks
+        SET status = 'in_progress', assigned_user_id = $1,
+            started_at = statement_timestamp() - INTERVAL '2 minutes',
+            lease_expires_at = statement_timestamp() - INTERVAL '1 minute'
+        WHERE tenant_id = $2 AND id = $3
+        "#,
+    )
+    .bind(worker.id)
+    .bind(tenant_id.get())
+    .bind(location_task)
+    .execute(&fixture.db)
+    .await
+    .unwrap();
+    let first_release_request = send(
+        &app,
+        &token,
+        tenant_id,
+        "/api/tasks/release-expired",
+        Some("release-sweep-1"),
+        json!({}),
+    );
+    let concurrent_replay_request = send(
+        &app,
+        &token,
+        tenant_id,
+        "/api/tasks/release-expired",
+        Some("release-sweep-1"),
+        json!({}),
+    );
+    let (first_release, concurrent_replay) =
+        tokio::join!(first_release_request, concurrent_replay_request);
+    assert_eq!(first_release.status(), StatusCode::OK);
+    assert_eq!(response_json::<u64>(first_release).await, 1);
+    assert_eq!(concurrent_replay.status(), StatusCode::OK);
+    assert_eq!(response_json::<u64>(concurrent_replay).await, 1);
+    let first_expired_progress: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM work_task_progress WHERE tenant_id = $1 AND task_id = $2 AND action = 'expired'",
+    )
+    .bind(tenant_id.get())
+    .bind(location_task)
+    .fetch_one(&fixture.db)
+    .await
+    .unwrap();
+    assert_eq!(first_expired_progress, 1);
+
+    let late_location = fixture
+        .location(tenant_id, facility, "CREATE-REPLAY-02")
+        .await;
+    let late_task = repo::tasks::create_location_cycle_count_task(
+        &fixture.db,
+        tenant_id,
+        worker.id,
+        late_location,
+        None,
+        None,
+        None,
+        None,
+        Some("later expired work".into()),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE work_tasks
+        SET status = 'in_progress', assigned_user_id = $1,
+            started_at = statement_timestamp() - INTERVAL '2 minutes',
+            lease_expires_at = statement_timestamp() - INTERVAL '1 minute'
+        WHERE tenant_id = $2 AND id = $3
+        "#,
+    )
+    .bind(worker.id)
+    .bind(tenant_id.get())
+    .bind(late_task)
+    .execute(&fixture.db)
+    .await
+    .unwrap();
+    let release_replay = send(
+        &app,
+        &token,
+        tenant_id,
+        "/api/tasks/release-expired",
+        Some("release-sweep-1"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(release_replay.status(), StatusCode::OK);
+    assert_eq!(response_json::<u64>(release_replay).await, 1);
+    let late_status: String =
+        sqlx::query_scalar("SELECT status FROM work_tasks WHERE tenant_id = $1 AND id = $2")
+            .bind(tenant_id.get())
+            .bind(late_task)
+            .fetch_one(&fixture.db)
+            .await
+            .unwrap();
+    assert_eq!(late_status, "in_progress");
+
+    let second_release = send(
+        &app,
+        &token,
+        tenant_id,
+        "/api/tasks/release-expired",
+        Some("release-sweep-2"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(second_release.status(), StatusCode::OK);
+    assert_eq!(response_json::<u64>(second_release).await, 1);
+    let expired_progress: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM work_task_progress WHERE tenant_id = $1 AND task_id = ANY($2) AND action = 'expired'",
+    )
+    .bind(tenant_id.get())
+    .bind(vec![location_task, late_task])
+    .fetch_one(&fixture.db)
+    .await
+    .unwrap();
+    assert_eq!(expired_progress, 2);
+
+    sqlx::query("UPDATE work_tasks SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
+        .bind(db::now_iso())
+        .bind(tenant_id.get())
+        .bind(break_task)
+        .execute(&fixture.db)
+        .await
+        .unwrap();
+    let deleted_replay = send(
+        &app,
+        &token,
+        tenant_id,
+        cases[2].0,
+        Some(shared_key),
+        cases[2].1.clone(),
+    )
+    .await;
+    assert_eq!(deleted_replay.status(), StatusCode::OK);
+    assert_eq!(response_json::<i64>(deleted_replay).await, break_task);
+
+    repo::tenants::update_user_access_scope(
+        &fixture.db,
+        tenant_id,
+        &UpdateUserAccessScope {
+            user_id: worker.id,
+            all_facilities: false,
+            facility_ids: Vec::new(),
+            all_inventory_owners: true,
+            inventory_owner_ids: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let revoked_replay = send(
+        &app,
+        &token,
+        tenant_id,
+        cases[1].0,
+        Some(shared_key),
+        cases[1].1.clone(),
+    )
+    .await;
+    assert_eq!(revoked_replay.status(), StatusCode::NOT_FOUND);
 }
