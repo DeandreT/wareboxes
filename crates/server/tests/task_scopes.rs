@@ -73,10 +73,17 @@ async fn cancel_order(
         .await
         .unwrap()
         .unwrap();
+    let operation_id = NEXT_IDEMPOTENCY_KEY.fetch_add(1, Ordering::Relaxed);
+    let command = CommandContext {
+        tenant_id,
+        actor_id: access.user_id,
+        request_id: format!("task-scope-cancel-{operation_id}"),
+        idempotency_key: Some(format!("task-scope-cancel-{operation_id}")),
+    };
     assert!(repo::orders::cancel_order_with_unpack_task(
         db,
         &access,
-        user_id,
+        &command,
         order_id,
         facility_id,
     )
