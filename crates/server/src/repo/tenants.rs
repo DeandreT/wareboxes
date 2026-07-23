@@ -6,6 +6,8 @@ use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId, UserId};
 use crate::db::Db;
 use crate::error::{AppError, AppResult};
 
+use super::access::ScopeBindings;
+
 fn tenant_access_from_row(row: &sqlx::postgres::PgRow) -> AppResult<TenantAccess> {
     let status: String = row.try_get("status")?;
     let facility_ids = row
@@ -219,6 +221,12 @@ pub async fn update_user_access_scope(
     validate_scope_request(scope)?;
     let mut transaction = db.begin().await?;
 
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
+        .bind(tenant_id.get())
+        .bind(scope.user_id)
+        .execute(&mut *transaction)
+        .await?;
+
     let membership_id: Option<i64> = sqlx::query_scalar(
         r#"
         SELECT id
@@ -337,6 +345,19 @@ pub async fn update_user_access_scope(
     .bind(scope.user_id)
     .bind(&scope.inventory_owner_ids)
     .execute(&mut *transaction)
+    .await?;
+
+    super::tasks::release_tasks_outside_scope_tx(
+        &mut transaction,
+        tenant_id,
+        scope.user_id,
+        &ScopeBindings {
+            all_facilities: scope.all_facilities,
+            facility_ids: scope.facility_ids.clone(),
+            all_inventory_owners: scope.all_inventory_owners,
+            inventory_owner_ids: scope.inventory_owner_ids.clone(),
+        },
+    )
     .await?;
 
     transaction.commit().await?;

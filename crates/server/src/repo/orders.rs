@@ -14,7 +14,7 @@ use wareboxes_domain::{InventoryOwnerId, TenantId};
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
-use crate::repo::access::ScopeBindings;
+use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 use crate::repo::{address, tasks};
 
 const MUTABLE: &str = "('cancelled', 'held', 'open', 'void')";
@@ -1071,24 +1071,15 @@ async fn insert_order_activity_tx(
 }
 
 pub async fn update_order(db: &Db, tenant_id: TenantId, u: &OrderUpdate) -> AppResult<bool> {
-    update_order_inner(db, tenant_id, u, None).await
+    update_order_inner(db, tenant_id, u).await
 }
 
-pub async fn update_order_by_user(
-    db: &Db,
-    tenant_id: TenantId,
-    u: &OrderUpdate,
-    user_id: i64,
-) -> AppResult<bool> {
-    update_order_inner(db, tenant_id, u, Some(user_id)).await
-}
-
-async fn update_order_inner(
-    db: &Db,
-    tenant_id: TenantId,
-    u: &OrderUpdate,
-    user_id: Option<i64>,
-) -> AppResult<bool> {
+async fn update_order_inner(db: &Db, tenant_id: TenantId, u: &OrderUpdate) -> AppResult<bool> {
+    if matches!(u.status, Some(OrderStatus::Cancelled)) {
+        return Err(AppError::bad_request(
+            "cancel orders with the facility-qualified cancellation command",
+        ));
+    }
     let has_address = u.line1.is_some()
         || u.line2.is_some()
         || u.city.is_some()
@@ -1130,6 +1121,7 @@ async fn update_order_inner(
           AND id = $10
           AND deleted IS NULL
           AND status IN {MUTABLE}
+          AND status <> 'cancelled'
         RETURNING inventory_owner_id
         "#
     );
@@ -1158,21 +1150,81 @@ async fn update_order_inner(
     }
     let changed = inventory_owner_id.is_some();
     tx.commit().await?;
-    if changed && matches!(u.status, Some(OrderStatus::Cancelled)) {
-        tasks::create_unpack_cancelled_order_task(
-            db,
-            tenant_id,
-            user_id,
-            u.order_id,
-            None,
-            None,
-            None,
-            None,
-            Some("Unpack inventory allocated to this cancelled order".to_owned()),
+    Ok(changed)
+}
+
+pub async fn cancel_order_with_unpack_task(
+    db: &Db,
+    access: &TenantAccess,
+    user_id: i64,
+    order_id: i64,
+    facility_id: i64,
+) -> AppResult<Option<i64>> {
+    let mut tx = db.begin().await?;
+    let scope = lock_current_scope_tx(&mut tx, access.tenant_id, user_id).await?;
+    if !scope.all_facilities && !scope.facility_ids.contains(&facility_id) {
+        return Err(AppError::forbidden());
+    }
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
+        .bind(access.tenant_id.get())
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    let order: Option<(i64, String)> = sqlx::query_as(
+        r#"
+        SELECT inventory_owner_id, status
+        FROM orders
+        WHERE tenant_id = $1
+          AND id = $2
+          AND deleted IS NULL
+          AND status IN ('cancelled', 'held', 'open', 'void')
+          AND ($3 OR inventory_owner_id = ANY($4))
+        FOR UPDATE
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(order_id)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((inventory_owner_id, status)) = order else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    let inventory_owner_id = InventoryOwnerId::new(inventory_owner_id)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    if status != "cancelled" {
+        sqlx::query("UPDATE orders SET status = 'cancelled' WHERE tenant_id = $1 AND id = $2")
+            .bind(access.tenant_id.get())
+            .bind(order_id)
+            .execute(&mut *tx)
+            .await?;
+        insert_order_activity_tx(
+            &mut tx,
+            access.tenant_id,
+            inventory_owner_id,
+            order_id,
+            "cancelled order",
         )
         .await?;
     }
-    Ok(changed)
+    let task_id = tasks::create_unpack_cancelled_order_task_tx(
+        &mut tx,
+        access.tenant_id,
+        Some(user_id),
+        order_id,
+        facility_id,
+        None,
+        None,
+        None,
+        None,
+        Some("Unpack inventory allocated to cancelled order".to_owned()),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Some(task_id))
 }
 
 pub async fn delete_order(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
@@ -1185,10 +1237,26 @@ pub async fn delete_order(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bo
           AND status IN {MUTABLE}
           AND closed IS NULL
           AND confirmed IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM unpack_cancelled_order_tasks unpack
+              INNER JOIN work_tasks task
+                  ON task.tenant_id = unpack.tenant_id
+                 AND task.id = unpack.task_id
+              WHERE unpack.tenant_id = orders.tenant_id
+                AND unpack.order_id = orders.id
+                AND task.deleted IS NULL
+                AND task.status IN ('open', 'assigned', 'in_progress')
+          )
         RETURNING inventory_owner_id
         "#
     );
     let mut tx = db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
+        .bind(tenant_id.get())
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     let inventory_owner_id: Option<i64> = sqlx::query_scalar(&sql)
         .bind(now_iso())
         .bind(tenant_id.get())

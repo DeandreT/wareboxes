@@ -1,7 +1,7 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
-use wareboxes_core::dto::{NewOrder, OrderIdRequest, OrderPage, OrderUpdate};
+use wareboxes_core::dto::{CancelOrder, NewOrder, OrderIdRequest, OrderPage, OrderUpdate};
 use wareboxes_core::models::{Order, OrderStatus};
 
 use crate::auth::CurrentTenant;
@@ -87,10 +87,28 @@ pub async fn update(
     if !repo::access::order_is_accessible(&state.db, &user.tenant, body.order_id, false).await? {
         return Ok(Json(false));
     }
-    let ok =
-        repo::orders::update_order_by_user(&state.db, user.tenant.tenant_id, &body, user.user.id)
-            .await?;
+    let ok = repo::orders::update_order(&state.db, user.tenant.tenant_id, &body).await?;
     Ok(Json(ok))
+}
+
+pub async fn cancel(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Json(body): Json<CancelOrder>,
+) -> AppResult<Json<i64>> {
+    user.require_permission(&state.db, PERM).await?;
+    validate(&body)?;
+    user.require_facility(body.facility_id)?;
+    let task_id = repo::orders::cancel_order_with_unpack_task(
+        &state.db,
+        &user.tenant,
+        user.user.id,
+        body.order_id,
+        body.facility_id,
+    )
+    .await?
+    .ok_or_else(|| AppError::conflict("order cannot be cancelled"))?;
+    Ok(Json(task_id))
 }
 
 pub async fn delete(

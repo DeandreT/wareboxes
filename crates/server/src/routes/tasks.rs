@@ -40,9 +40,9 @@ pub async fn list(
 ) -> AppResult<Json<Vec<WorkTask>>> {
     user.require_permission(&state.db, PERM).await?;
     Ok(Json(
-        repo::tasks::get_tasks(
+        repo::tasks::get_tasks_in_scope(
             &state.db,
-            user.tenant.tenant_id,
+            &user.tenant,
             repo::tasks::WorkTaskFilters {
                 show_deleted: q.show_deleted.unwrap_or(false),
                 status: q.status,
@@ -66,9 +66,9 @@ pub async fn list_unpack_cancelled_order_lines(
         return Err(AppError::bad_request("invalid task ID"));
     }
     Ok(Json(
-        repo::tasks::get_unpack_cancelled_order_task_lines(
+        repo::tasks::get_unpack_cancelled_order_task_lines_in_scope(
             &state.db,
-            user.tenant.tenant_id,
+            &user.tenant,
             q.task_id,
         )
         .await?,
@@ -83,9 +83,9 @@ pub async fn create_item_location_cycle_count(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::tasks::create_item_location_cycle_count_task(
+        repo::tasks::create_item_location_cycle_count_task_in_scope(
             &state.db,
-            user.tenant.tenant_id,
+            &user.tenant,
             user.user.id,
             body.location_id,
             body.item_id,
@@ -107,9 +107,9 @@ pub async fn create_location_cycle_count(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::tasks::create_location_cycle_count_task(
+        repo::tasks::create_location_cycle_count_task_in_scope(
             &state.db,
-            user.tenant.tenant_id,
+            &user.tenant,
             user.user.id,
             body.location_id,
             body.priority,
@@ -130,9 +130,9 @@ pub async fn create_break_master_pack(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::tasks::create_break_master_pack_task(
+        repo::tasks::create_break_master_pack_task_in_scope(
             &state.db,
-            user.tenant.tenant_id,
+            &user.tenant,
             user.user.id,
             body.master_item_id,
             body.single_item_id,
@@ -156,11 +156,12 @@ pub async fn create_unpack_cancelled_order(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::tasks::create_unpack_cancelled_order_task(
+        repo::tasks::create_unpack_cancelled_order_task_in_scope(
             &state.db,
-            user.tenant.tenant_id,
+            &user.tenant,
             Some(user.user.id),
             body.order_id,
+            body.facility_id,
             body.priority,
             body.assigned_user_id,
             body.scheduled_for,
@@ -178,9 +179,9 @@ pub async fn assign(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::tasks::assign_task(
+    let ok = repo::tasks::assign_task_in_scope(
         &state.db,
-        user.tenant.tenant_id,
+        &user.tenant,
         body.task_id,
         body.assigned_user_id,
     )
@@ -199,9 +200,9 @@ pub async fn start_next(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::tasks::start_next_task(
+        repo::tasks::start_next_task_in_scope(
             &state.db,
-            user.tenant.tenant_id,
+            &user.tenant,
             user.user.id,
             body.task_type,
         )
@@ -216,7 +217,7 @@ pub async fn start(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::tasks::start_task(&state.db, user.tenant.tenant_id, body.task_id, user.user.id)
+    let ok = repo::tasks::start_task_in_scope(&state.db, &user.tenant, body.task_id, user.user.id)
         .await?;
     if !ok {
         return Err(AppError::conflict("task cannot be started"));
@@ -231,9 +232,9 @@ pub async fn progress(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::tasks::record_task_progress(
+    let ok = repo::tasks::record_task_progress_in_scope(
         &state.db,
-        user.tenant.tenant_id,
+        &user.tenant,
         user.user.id,
         body.task_id,
         body.task_line_id,
@@ -257,9 +258,9 @@ pub async fn complete(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::tasks::complete_task(
+    let ok = repo::tasks::complete_task_in_scope(
         &state.db,
-        user.tenant.tenant_id,
+        &user.tenant,
         body.task_id,
         user.user.id,
         body.qty_completed,
@@ -278,7 +279,7 @@ pub async fn abort(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::tasks::abort_task(&state.db, user.tenant.tenant_id, body.task_id, user.user.id)
+    let ok = repo::tasks::abort_task_in_scope(&state.db, &user.tenant, body.task_id, user.user.id)
         .await?;
     if !ok {
         return Err(AppError::conflict("task cannot be aborted"));
@@ -292,7 +293,7 @@ pub async fn release_expired(
 ) -> AppResult<Json<u64>> {
     user.require_permission(&state.db, PERM).await?;
     Ok(Json(
-        repo::tasks::release_expired_tasks(&state.db, user.tenant.tenant_id).await?,
+        repo::tasks::release_expired_tasks_in_scope(&state.db, &user.tenant).await?,
     ))
 }
 
@@ -303,7 +304,7 @@ pub async fn cancel(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::tasks::cancel_task(&state.db, user.tenant.tenant_id, body.task_id, user.user.id)
+    let ok = repo::tasks::cancel_task_in_scope(&state.db, &user.tenant, body.task_id, user.user.id)
         .await?;
     if !ok {
         return Err(AppError::conflict("task cannot be cancelled"));

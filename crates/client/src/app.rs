@@ -360,6 +360,13 @@ impl WareboxesApp {
                 self.api.get_list(Screen::Locations);
                 self.api.get_list(Screen::InventoryOwners);
             }
+            Screen::Employees => {
+                self.api.get_list(Screen::Facilities);
+            }
+            Screen::Audits => {
+                self.api.get_list(Screen::Facilities);
+                self.api.get_list(Screen::InventoryOwners);
+            }
             _ => {}
         }
         self.last_fetch.insert(s, self.now);
