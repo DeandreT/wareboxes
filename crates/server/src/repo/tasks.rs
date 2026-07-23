@@ -3,7 +3,7 @@ use wareboxes_core::models::{TenantAccess, Timestamp, WorkTaskStatus, WorkTaskTy
 use wareboxes_core::CoreError;
 use wareboxes_domain::{CommandContext, TenantId};
 
-use crate::db::{now_iso, Db};
+use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::idempotency::{require_command_context, PreparedCommand};
 
@@ -29,6 +29,7 @@ pub(crate) async fn release_tasks_outside_scope_tx(
     user_id: i64,
     scope: &ScopeBindings,
 ) -> AppResult<()> {
+    bind_tenant_context(tx, tenant_id).await?;
     leasing::release_inaccessible_active_tasks_tx(tx, tenant_id, user_id, scope).await
 }
 
@@ -82,6 +83,7 @@ pub(super) async fn require_replayed_task_visible_tx(
     task_id: i64,
     scope: &ScopeBindings,
 ) -> AppResult<()> {
+    bind_tenant_context(tx, tenant_id).await?;
     let row = sqlx::query(
         r#"
         SELECT facility_id, inventory_owner_id
@@ -142,6 +144,7 @@ async fn insert_task_tx(
     tenant_id: TenantId,
     task: NewWorkTask,
 ) -> AppResult<i64> {
+    bind_tenant_context(tx, tenant_id).await?;
     if let Some(assigned_user_id) = task.assigned_user_id {
         sqlx::query(
             "SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))",
@@ -270,6 +273,7 @@ async fn create_item_location_cycle_count_task_with_scope(
         })
         .transpose()?;
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let current_scope = match scope_user_id {
         Some(scope_user_id) => {
             Some(lock_current_task_scope_tx(&mut tx, tenant_id, scope_user_id, None).await?)
@@ -518,6 +522,7 @@ async fn create_location_cycle_count_task_with_scope(
         })
         .transpose()?;
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let current_scope = match scope_user_id {
         Some(scope_user_id) => Some(
             lock_current_task_scope_tx(&mut tx, tenant_id, scope_user_id, assigned_user_id).await?,
@@ -693,6 +698,7 @@ async fn create_break_master_pack_task_with_scope(
         })
         .transpose()?;
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let current_scope = match scope_user_id {
         Some(scope_user_id) => Some(
             lock_current_task_scope_tx(&mut tx, tenant_id, scope_user_id, assigned_user_id).await?,
@@ -857,6 +863,7 @@ pub async fn create_unpack_cancelled_order_task(
     instructions: Option<String>,
 ) -> AppResult<i64> {
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     if let Some(assigned_user_id) = assigned_user_id {
         lock_user_tx(&mut tx, tenant_id, assigned_user_id).await?;
     }
@@ -897,6 +904,7 @@ pub(crate) async fn create_unpack_cancelled_order_task_tx(
     instructions: Option<String>,
     scope: Option<&ScopeBindings>,
 ) -> AppResult<i64> {
+    bind_tenant_context(tx, tenant_id).await?;
     let order: Option<(String, i64)> = sqlx::query_as(
         r#"
         SELECT orders.status, orders.inventory_owner_id
@@ -1065,6 +1073,7 @@ pub async fn create_unpack_cancelled_order_task_in_scope(
         ),
     )?;
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
     let current_scope = lock_current_task_scope_tx(
         &mut tx,
         access.tenant_id,

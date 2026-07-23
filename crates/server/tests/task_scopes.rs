@@ -387,6 +387,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     )
     .await
     .unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let released_on_scope_change: (String, Option<i64>, i64) = sqlx::query_as(
         r#"
         SELECT task.status, task.assigned_user_id, COUNT(progress.id)
@@ -401,9 +402,10 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     )
     .bind(tenant_id.get())
     .bind(denied_active)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(released_on_scope_change, ("open".to_owned(), None, 1));
 
     let tasks = repo::tasks::get_tasks(&fixture.db, tenant_id, Default::default())
@@ -661,6 +663,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query(
         r#"
         UPDATE work_tasks
@@ -673,9 +676,11 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     .bind(operator.id)
     .bind(tenant_id.get())
     .bind(denied_active)
-    .execute(&fixture.db)
+    .execute(&mut *tx)
     .await
     .unwrap();
+    tx.commit().await.unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query(
         r#"
         UPDATE work_tasks
@@ -686,9 +691,10 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     )
     .bind(tenant_id.get())
     .bind(allowed_release)
-    .execute(&fixture.db)
+    .execute(&mut *tx)
     .await
     .unwrap();
+    tx.commit().await.unwrap();
 
     for (uri, body) in [
         (
@@ -716,14 +722,16 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response_json::<u64>(response).await, 1);
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let statuses: Vec<(i64, String)> = sqlx::query_as(
         "SELECT id, status FROM work_tasks WHERE tenant_id = $1 AND id = ANY($2) ORDER BY id",
     )
     .bind(tenant_id.get())
     .bind(vec![allowed_release, denied_active])
-    .fetch_all(&fixture.db)
+    .fetch_all(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert!(statuses.contains(&(allowed_release, "open".to_owned())));
     assert!(statuses.contains(&(denied_active, "in_progress".to_owned())));
 
@@ -739,6 +747,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     assert_eq!(response.status(), StatusCode::OK);
     let claimed = response_json::<Option<WorkTask>>(response).await.unwrap();
     assert_eq!(claimed.id, allowed_release);
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let revoked: (String, Option<i64>, i64) = sqlx::query_as(
         r#"
         SELECT task.status, task.assigned_user_id, COUNT(progress.id)
@@ -753,21 +762,25 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     )
     .bind(tenant_id.get())
     .bind(denied_active)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(revoked, ("open".to_owned(), None, 2));
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     assert!(
         sqlx::query("UPDATE work_tasks SET facility_id = $1 WHERE tenant_id = $2 AND id = $3")
             .bind(denied_facility)
             .bind(tenant_id.get())
             .bind(allowed_claim)
-            .execute(&fixture.db)
+            .execute(&mut *tx)
             .await
             .is_err()
     );
+    tx.rollback().await.unwrap();
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let raw_task: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO work_tasks (
@@ -781,9 +794,10 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     .bind(tenant_id.get())
     .bind(allowed_facility)
     .bind("scope constraint task")
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.commit().await.unwrap();
     assert!(sqlx::query(
         "INSERT INTO cycle_count_location_tasks (tenant_id, task_id, facility_id, location_id) VALUES ($1, $2, $3, $4)",
     )
@@ -803,6 +817,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     .fetch_one(&fixture.db)
     .await
     .unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     assert!(sqlx::query(
         r#"
         INSERT INTO work_task_progress (
@@ -816,9 +831,11 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     .bind(allowed_facility)
     .bind(allowed_owner)
     .bind(denied_unpack_line_id)
-    .execute(&fixture.db)
+    .execute(&mut *tx)
     .await
     .is_err());
+    tx.rollback().await.unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     assert!(sqlx::query(
         r#"
         INSERT INTO work_task_progress (
@@ -832,9 +849,10 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     .bind(allowed_facility)
     .bind(allowed_owner)
     .bind(denied_location)
-    .execute(&fixture.db)
+    .execute(&mut *tx)
     .await
     .is_err());
+    tx.rollback().await.unwrap();
 }
 
 #[tokio::test]
@@ -882,13 +900,15 @@ async fn concurrent_scope_shrink_cannot_leave_task_active() {
     started.unwrap();
     assert!(scope_updated.unwrap());
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let task: (String, Option<i64>) = sqlx::query_as(
         "SELECT status, assigned_user_id FROM work_tasks WHERE tenant_id = $1 AND id = $2",
     )
     .bind(tenant_id.get())
     .bind(task_id)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(task, ("open".to_owned(), None));
 }

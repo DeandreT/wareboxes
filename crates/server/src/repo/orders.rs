@@ -1267,6 +1267,7 @@ pub async fn delete_order(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bo
         "#
     );
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
         .bind(tenant_id.get())
         .bind(id)

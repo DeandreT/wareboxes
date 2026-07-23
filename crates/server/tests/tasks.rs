@@ -720,14 +720,16 @@ async fn task_queue_is_tenant_isolated_and_claims_once() {
             .unwrap()
     );
 
+    let mut tx = tenant_tx(&fixture.db, tenant_a).await;
     sqlx::query(
         "UPDATE work_tasks SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE tenant_id = $1 AND id = $2",
     )
     .bind(tenant_a.get())
     .bind(task_a)
-    .execute(&fixture.db)
+    .execute(&mut *tx)
     .await
     .unwrap();
+    tx.commit().await.unwrap();
     let first_db = fixture.db.clone();
     let second_db = fixture.db.clone();
     let (first_release, second_release) = tokio::join!(
@@ -735,6 +737,7 @@ async fn task_queue_is_tenant_isolated_and_claims_once() {
         repo::tasks::release_expired_tasks(&second_db, tenant_a),
     );
     assert_eq!(first_release.unwrap() + second_release.unwrap(), 1);
+    let mut tx = tenant_tx(&fixture.db, tenant_a).await;
     let release: (i64, i64) = sqlx::query_as(
         r#"
         SELECT task.release_count, COUNT(progress.id)
@@ -749,9 +752,10 @@ async fn task_queue_is_tenant_isolated_and_claims_once() {
     )
     .bind(tenant_a.get())
     .bind(task_a)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(release, (1, 1));
 
     assert!(
@@ -759,14 +763,16 @@ async fn task_queue_is_tenant_isolated_and_claims_once() {
             .await
             .unwrap()
     );
+    let mut tx = tenant_tx(&fixture.db, tenant_a).await;
     let cancellation_events: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM work_task_progress WHERE tenant_id = $1 AND task_id = $2 AND action = 'cancelled'",
     )
     .bind(tenant_a.get())
     .bind(next_task)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(cancellation_events, 1);
 
     let tenant_b_permission =

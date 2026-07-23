@@ -332,13 +332,15 @@ async fn order_cancellation_commands_are_replay_safe() {
     )
     .await
     .unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("UPDATE work_tasks SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(db::now_iso())
         .bind(tenant_id.get())
         .bind(task_id)
-        .execute(&fixture.db)
+        .execute(&mut *tx)
         .await
         .unwrap();
+    tx.commit().await.unwrap();
     let deleted_task_replay = send(&app, &token, tenant_id, Some("cancel-order-1"), body).await;
     assert_eq!(deleted_task_replay.status(), StatusCode::OK);
     assert_eq!(response_json::<i64>(deleted_task_replay).await, task_id);

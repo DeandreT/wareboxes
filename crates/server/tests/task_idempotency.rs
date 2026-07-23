@@ -177,14 +177,16 @@ async fn task_commands_replay_results_without_repeating_work() {
         assert_eq!(started.status(), StatusCode::OK);
         assert!(response_json::<bool>(started).await);
     }
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let started_events: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM work_task_progress WHERE tenant_id = $1 AND task_id = $2 AND action = 'started'",
     )
     .bind(tenant_id.get())
     .bind(task_id)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(started_events, 1);
 
     let progress_body = json!({
@@ -215,6 +217,7 @@ async fn task_commands_replay_results_without_repeating_work() {
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response_json::<bool>(response).await);
     }
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let progress_state: (i64, i64) = sqlx::query_as(
         r#"
         SELECT detail.master_qty_completed, COUNT(progress.id)
@@ -229,9 +232,10 @@ async fn task_commands_replay_results_without_repeating_work() {
     )
     .bind(tenant_id.get())
     .bind(task_id)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(progress_state, (2, 1));
 
     sqlx::query("UPDATE locations SET active = FALSE WHERE tenant_id = $1 AND id = $2")
@@ -300,6 +304,7 @@ async fn task_commands_replay_results_without_repeating_work() {
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response_json::<bool>(response).await);
     }
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let completed_state: (i64, String, i64, i64) = sqlx::query_as(
         r#"
         SELECT detail.master_qty_completed, task.status,
@@ -316,9 +321,10 @@ async fn task_commands_replay_results_without_repeating_work() {
     )
     .bind(tenant_id.get())
     .bind(task_id)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(completed_state, (5, "completed".into(), 2, 1));
 
     let location = fixture
@@ -364,14 +370,16 @@ async fn task_commands_replay_results_without_repeating_work() {
         .unwrap();
     assert_eq!(first_task, second_task);
     assert_eq!(first_task.id, next_task);
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let next_started_events: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM work_task_progress WHERE tenant_id = $1 AND task_id = $2 AND action = 'started'",
     )
     .bind(tenant_id.get())
     .bind(next_task)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(next_started_events, 1);
 
     repo::tenants::update_user_access_scope(
@@ -606,14 +614,16 @@ async fn new_task_claims_release_expired_leases_atomically() {
     .await;
     assert_eq!(first_start.status(), StatusCode::OK);
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query(
         "UPDATE work_tasks SET lease_expires_at = statement_timestamp() - INTERVAL '1 second' WHERE tenant_id = $1 AND id = $2",
     )
     .bind(tenant_id.get())
     .bind(first_task)
-    .execute(&fixture.db)
+    .execute(&mut *tx)
     .await
     .unwrap();
+    tx.commit().await.unwrap();
     let second_location = fixture.location(tenant_id, facility, "LEASE-02").await;
     repo::tasks::create_location_cycle_count_task(
         &fixture.db,
@@ -642,23 +652,27 @@ async fn new_task_claims_release_expired_leases_atomically() {
     let claimed = response_json::<Option<WorkTask>>(next_response)
         .await
         .unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let first_release_count: i64 =
         sqlx::query_scalar("SELECT release_count FROM work_tasks WHERE tenant_id = $1 AND id = $2")
             .bind(tenant_id.get())
             .bind(first_task)
-            .fetch_one(&fixture.db)
+            .fetch_one(&mut *tx)
             .await
             .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(first_release_count, 1);
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query(
         "UPDATE work_tasks SET lease_expires_at = statement_timestamp() - INTERVAL '1 second' WHERE tenant_id = $1 AND id = $2",
     )
     .bind(tenant_id.get())
     .bind(claimed.id)
-    .execute(&fixture.db)
+    .execute(&mut *tx)
     .await
     .unwrap();
+    tx.commit().await.unwrap();
     let target_location = fixture.location(tenant_id, facility, "LEASE-03").await;
     let target_task = repo::tasks::create_location_cycle_count_task(
         &fixture.db,
@@ -685,6 +699,7 @@ async fn new_task_claims_release_expired_leases_atomically() {
     assert_eq!(explicit_response.status(), StatusCode::OK);
     assert!(response_json::<bool>(explicit_response).await);
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let active_count: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*)
@@ -697,9 +712,10 @@ async fn new_task_claims_release_expired_leases_atomically() {
     )
     .bind(tenant_id.get())
     .bind(worker.id)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(active_count, 1);
 }
 
@@ -854,13 +870,15 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     }
 
     let task_ids = vec![item_task, location_task, break_task, unpack_task];
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let task_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM work_tasks WHERE tenant_id = $1 AND id = ANY($2)")
             .bind(tenant_id.get())
             .bind(&task_ids)
-            .fetch_one(&fixture.db)
+            .fetch_one(&mut *tx)
             .await
             .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(task_count, 4);
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let command_count: i64 = sqlx::query_scalar(
@@ -874,6 +892,7 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     tx.rollback().await.unwrap();
     assert_eq!(command_count, 4);
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query(
         r#"
         UPDATE work_tasks
@@ -886,9 +905,10 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     .bind(worker.id)
     .bind(tenant_id.get())
     .bind(location_task)
-    .execute(&fixture.db)
+    .execute(&mut *tx)
     .await
     .unwrap();
+    tx.commit().await.unwrap();
     let first_release_request = send(
         &app,
         &token,
@@ -911,14 +931,16 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     assert_eq!(response_json::<u64>(first_release).await, 1);
     assert_eq!(concurrent_replay.status(), StatusCode::OK);
     assert_eq!(response_json::<u64>(concurrent_replay).await, 1);
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let first_expired_progress: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM work_task_progress WHERE tenant_id = $1 AND task_id = $2 AND action = 'expired'",
     )
     .bind(tenant_id.get())
     .bind(location_task)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(first_expired_progress, 1);
 
     let late_location = fixture
@@ -937,6 +959,7 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     )
     .await
     .unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query(
         r#"
         UPDATE work_tasks
@@ -949,9 +972,10 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     .bind(worker.id)
     .bind(tenant_id.get())
     .bind(late_task)
-    .execute(&fixture.db)
+    .execute(&mut *tx)
     .await
     .unwrap();
+    tx.commit().await.unwrap();
     let release_replay = send(
         &app,
         &token,
@@ -963,13 +987,15 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     .await;
     assert_eq!(release_replay.status(), StatusCode::OK);
     assert_eq!(response_json::<u64>(release_replay).await, 1);
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let late_status: String =
         sqlx::query_scalar("SELECT status FROM work_tasks WHERE tenant_id = $1 AND id = $2")
             .bind(tenant_id.get())
             .bind(late_task)
-            .fetch_one(&fixture.db)
+            .fetch_one(&mut *tx)
             .await
             .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(late_status, "in_progress");
 
     let second_release = send(
@@ -983,23 +1009,27 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     .await;
     assert_eq!(second_release.status(), StatusCode::OK);
     assert_eq!(response_json::<u64>(second_release).await, 1);
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let expired_progress: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM work_task_progress WHERE tenant_id = $1 AND task_id = ANY($2) AND action = 'expired'",
     )
     .bind(tenant_id.get())
     .bind(vec![location_task, late_task])
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(expired_progress, 2);
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("UPDATE work_tasks SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(db::now_iso())
         .bind(tenant_id.get())
         .bind(break_task)
-        .execute(&fixture.db)
+        .execute(&mut *tx)
         .await
         .unwrap();
+    tx.commit().await.unwrap();
     let deleted_replay = send(
         &app,
         &token,
