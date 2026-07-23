@@ -297,6 +297,8 @@ async fn tracking_by_order(
     db: &Db,
     tenant_id: TenantId,
 ) -> AppResult<HashMap<i64, Vec<OrderTrackingNumber>>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, deleted, order_id,
@@ -307,13 +309,14 @@ async fn tracking_by_order(
         "#,
     )
     .bind(tenant_id.get())
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let mut map: HashMap<i64, Vec<OrderTrackingNumber>> = HashMap::new();
     for r in &rows {
         let oid = r.try_get("order_id")?;
         map.entry(oid).or_default().push(map_tracking_number(r)?);
     }
+    tx.commit().await?;
     Ok(map)
 }
 
@@ -325,6 +328,8 @@ async fn tracking_by_order_ids(
     if order_ids.is_empty() {
         return Ok(HashMap::new());
     }
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, deleted, order_id,
@@ -336,13 +341,14 @@ async fn tracking_by_order_ids(
     )
     .bind(tenant_id.get())
     .bind(order_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let mut map: HashMap<i64, Vec<OrderTrackingNumber>> = HashMap::new();
     for r in &rows {
         let oid = r.try_get("order_id")?;
         map.entry(oid).or_default().push(map_tracking_number(r)?);
     }
+    tx.commit().await?;
     Ok(map)
 }
 
@@ -965,6 +971,8 @@ pub async fn orders_for_load(db: &Db, tenant_id: TenantId, load_id: i64) -> AppR
         items.entry(oid).or_default().push(map_order_item(r)?);
     }
 
+    let mut tracking_tx = db.begin().await?;
+    bind_tenant_context(&mut tracking_tx, tenant_id).await?;
     let tracking_rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, deleted, order_id,
@@ -976,8 +984,9 @@ pub async fn orders_for_load(db: &Db, tenant_id: TenantId, load_id: i64) -> AppR
     )
     .bind(tenant_id.get())
     .bind(&order_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tracking_tx)
     .await?;
+    tracking_tx.commit().await?;
     let mut tracking: HashMap<i64, Vec<OrderTrackingNumber>> = HashMap::new();
     for r in &tracking_rows {
         let oid = r.try_get("order_id")?;
