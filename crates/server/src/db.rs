@@ -162,6 +162,26 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'work_task_progress',
                     'work_task_progress_tenant_isolation'
+                ),
+                (
+                    'cycle_count_item_location_tasks',
+                    'cycle_count_item_location_tasks_tenant_isolation'
+                ),
+                (
+                    'cycle_count_location_tasks',
+                    'cycle_count_location_tasks_tenant_isolation'
+                ),
+                (
+                    'break_master_pack_tasks',
+                    'break_master_pack_tasks_tenant_isolation'
+                ),
+                (
+                    'unpack_cancelled_order_tasks',
+                    'unpack_cancelled_order_tasks_tenant_isolation'
+                ),
+                (
+                    'unpack_cancelled_order_task_lines',
+                    'unpack_cancelled_order_task_lines_tenant_isolation'
                 )
         )
         SELECT role.rolname AS name,
@@ -296,7 +316,7 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
         || role.has_database_temporary
         || role.has_non_system_schema_create
         || role.has_role_memberships
-        || role.valid_tenant_policy_count != 8
+        || role.valid_tenant_policy_count != 13
         || !role.reconciliation_view_contract_valid
         || role.preset_tenant_id.is_some()
         || role.search_path != "pg_catalog, public"

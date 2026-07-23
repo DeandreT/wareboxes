@@ -140,14 +140,16 @@ async fn task_commands_replay_results_without_repeating_work() {
     let app = routes::app(AppState::new(fixture.db.clone()));
     let facility = fixture.facility(tenant_id, "Idempotency DC").await;
     let task_id = create_break_task(&fixture, tenant_id, worker.id, facility).await;
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let task_location: i64 = sqlx::query_scalar(
         "SELECT location_id FROM break_master_pack_tasks WHERE tenant_id = $1 AND task_id = $2",
     )
     .bind(tenant_id.get())
     .bind(task_id)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
 
     let missing_key = send(
         &app,

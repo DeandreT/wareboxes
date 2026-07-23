@@ -595,14 +595,16 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let unpack_line_id: i64 = sqlx::query_scalar(
         "SELECT id FROM unpack_cancelled_order_task_lines WHERE tenant_id = $1 AND task_id = $2",
     )
     .bind(tenant_id.get())
     .bind(allowed_owner_task)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     let response = send_api(
         &app,
         &token,
@@ -798,6 +800,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     .await
     .unwrap();
     tx.commit().await.unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     assert!(sqlx::query(
         "INSERT INTO cycle_count_location_tasks (tenant_id, task_id, facility_id, location_id) VALUES ($1, $2, $3, $4)",
     )
@@ -805,18 +808,21 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     .bind(raw_task)
     .bind(denied_facility)
     .bind(denied_location)
-    .execute(&fixture.db)
+    .execute(&mut *tx)
     .await
     .is_err());
+    tx.rollback().await.unwrap();
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let denied_unpack_line_id: i64 = sqlx::query_scalar(
         "SELECT id FROM unpack_cancelled_order_task_lines WHERE tenant_id = $1 AND task_id = $2",
     )
     .bind(tenant_id.get())
     .bind(denied_owner_task)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     assert!(sqlx::query(
         r#"
