@@ -26,6 +26,7 @@ CREATE INDEX idx_locations_parent_location_id ON locations(tenant_id, parent_loc
 
 CREATE TABLE dims (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id BIGINT NOT NULL REFERENCES tenants(id),
     created TIMESTAMPTZ NOT NULL,
     deleted TIMESTAMPTZ,
     length BIGINT,
@@ -34,6 +35,7 @@ CREATE TABLE dims (
     length_uom TEXT,
     weight BIGINT,
     weight_uom TEXT,
+    UNIQUE (tenant_id, id),
     CHECK (length IS NULL OR length > 0),
     CHECK (width IS NULL OR width > 0),
     CHECK (height IS NULL OR height > 0),
@@ -48,11 +50,12 @@ CREATE TABLE items (
     description TEXT,
     notes TEXT,
     packaging_unit TEXT NOT NULL,
-    dims_id BIGINT REFERENCES dims(id),
+    dims_id BIGINT,
     pallet_hi BIGINT,
     pallet_ti BIGINT,
     inner_units BIGINT,
     UNIQUE (tenant_id, id),
+    FOREIGN KEY (tenant_id, dims_id) REFERENCES dims(tenant_id, id),
     CHECK (pallet_hi IS NULL OR pallet_hi > 0),
     CHECK (pallet_ti IS NULL OR pallet_ti > 0),
     CHECK (inner_units IS NULL OR inner_units > 0)
@@ -259,14 +262,15 @@ CREATE TABLE license_plates (
     barcode TEXT,
     facility_id BIGINT NOT NULL,
     location_id BIGINT,
-    dims_id BIGINT REFERENCES dims(id),
+    dims_id BIGINT,
     UNIQUE (tenant_id, id),
     UNIQUE (tenant_id, inventory_owner_id, id),
     UNIQUE (tenant_id, inventory_owner_id, facility_id, id),
     UNIQUE (tenant_id, barcode),
     FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES inventory_owners(tenant_id, id),
     FOREIGN KEY (tenant_id, facility_id) REFERENCES facilities(tenant_id, id),
-    FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES locations(tenant_id, facility_id, id)
+    FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES locations(tenant_id, facility_id, id),
+    FOREIGN KEY (tenant_id, dims_id) REFERENCES dims(tenant_id, id)
 );
 CREATE INDEX idx_license_plates_facility_location
     ON license_plates(tenant_id, facility_id, location_id)
