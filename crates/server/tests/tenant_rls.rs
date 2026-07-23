@@ -136,6 +136,16 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         .await
         .unwrap();
     let preset_app_db = app_db_for(&fixture.db).await;
+    sqlx::query("SELECT set_config('search_path', 'pg_catalog, public', false)")
+        .execute(&preset_app_db)
+        .await
+        .unwrap();
+    let preset_tenant: Option<String> =
+        sqlx::query_scalar("SELECT NULLIF(current_setting('wareboxes.tenant_id', true), '')")
+            .fetch_one(&preset_app_db)
+            .await
+            .unwrap();
+    assert_eq!(preset_tenant, Some(tenant_a.to_string()));
     assert!(db::validate_runtime_role(&preset_app_db).await.is_err());
     preset_app_db.close().await;
     let reset_role_default: String = sqlx::query_scalar(
