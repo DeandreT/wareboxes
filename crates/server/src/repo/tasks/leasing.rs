@@ -144,15 +144,22 @@ pub async fn assign_task_in_scope(
 }
 
 pub async fn release_expired_tasks(db: &Db, tenant_id: TenantId) -> AppResult<u64> {
-    release_expired_tasks_with_scope(db, tenant_id, None, &ScopeBindings::unrestricted()).await
+    release_expired_tasks_with_scope(db, tenant_id, None, &ScopeBindings::unrestricted(), None)
+        .await
 }
 
-pub async fn release_expired_tasks_in_scope(db: &Db, access: &TenantAccess) -> AppResult<u64> {
+pub async fn release_expired_tasks_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    command: &CommandContext,
+) -> AppResult<u64> {
+    require_command_context(access, command)?;
     release_expired_tasks_with_scope(
         db,
         access.tenant_id,
         Some(access.user_id.get()),
         &ScopeBindings::for_access(access),
+        Some(command),
     )
     .await
 }
@@ -162,7 +169,11 @@ pub(super) async fn release_expired_tasks_with_scope(
     tenant_id: TenantId,
     scope_user_id: Option<i64>,
     scope: &ScopeBindings,
+    command: Option<&CommandContext>,
 ) -> AppResult<u64> {
+    let prepared = command
+        .map(|command| PreparedCommand::new(command, "task.release_expired.v1", &()))
+        .transpose()?;
     let mut tx = db.begin().await?;
     let current_scope = match scope_user_id {
         Some(scope_user_id) => {
@@ -171,9 +182,21 @@ pub(super) async fn release_expired_tasks_with_scope(
         None => None,
     };
     let scope = current_scope.as_ref().unwrap_or(scope);
+    if let Some(prepared) = prepared.as_ref() {
+        if let Some(released) = prepared.replayed::<u64>(&mut tx).await? {
+            tx.commit().await?;
+            return Ok(released);
+        }
+    }
     let released = release_expired_tasks_tx(&mut tx, tenant_id, None, scope).await?;
-    tx.commit().await?;
-    Ok(released)
+    let count = released.len() as u64;
+    match prepared {
+        Some(prepared) => {
+            prepared.commit(tx, count).await?;
+        }
+        None => tx.commit().await?,
+    }
+    Ok(count)
 }
 
 pub(super) async fn release_expired_tasks_tx(
@@ -181,7 +204,7 @@ pub(super) async fn release_expired_tasks_tx(
     tenant_id: TenantId,
     assigned_user_id: Option<i64>,
     scope: &ScopeBindings,
-) -> AppResult<u64> {
+) -> AppResult<Vec<i64>> {
     let now = now_iso();
     let task_ids = sqlx::query_scalar::<_, i64>(
         r#"
@@ -214,14 +237,13 @@ pub(super) async fn release_expired_tasks_tx(
     .bind(assigned_user_id)
     .fetch_all(&mut **tx)
     .await?;
-    let released = task_ids.len() as u64;
-    for task_id in task_ids {
+    for task_id in &task_ids {
         insert_progress_tx(
-            tx, tenant_id, task_id, None, None, "expired", None, None, None, None, None,
+            tx, tenant_id, *task_id, None, None, "expired", None, None, None, None, None,
         )
         .await?;
     }
-    Ok(released)
+    Ok(task_ids)
 }
 
 pub(super) async fn release_inaccessible_active_tasks_tx(

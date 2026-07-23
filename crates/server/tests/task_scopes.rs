@@ -172,6 +172,25 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     .await
     .unwrap();
 
+    let foreign_user = fixture.wms_user("task-scope-foreign@test.com").await;
+    let foreign_tenant_id = tenant_for_user(&fixture.db, foreign_user.id).await;
+    let foreign_facility = fixture.facility(foreign_tenant_id, "Foreign Task DC").await;
+    let foreign_location = fixture
+        .location(foreign_tenant_id, foreign_facility, "TASK-FOREIGN")
+        .await;
+    let foreign_item = fixture
+        .item(foreign_tenant_id, "Foreign Task Item", "each")
+        .await;
+    let foreign_master_item = fixture
+        .item(foreign_tenant_id, "Foreign Task Master", "case")
+        .await;
+    let foreign_owner = fixture
+        .inventory_owner(foreign_tenant_id, "Foreign Task Owner")
+        .await;
+    let foreign_order = fixture
+        .order(foreign_tenant_id, "TASK-SCOPE-FOREIGN-ORDER", foreign_owner)
+        .await;
+
     let allowed_batch = repo::inventory::add_item_batch(
         &fixture.db,
         tenant_id,
@@ -421,26 +440,90 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         task.facility_id != Some(denied_facility) && task.inventory_owner_id != Some(denied_owner)
     }));
 
-    let response = send_api(
-        &app,
-        &token,
-        tenant_id,
-        Method::POST,
-        "/api/tasks/cycle-counts/location/add",
-        Some(json!({"location_id": denied_location})),
+    let command_count_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM command_idempotency_records WHERE tenant_id = $1 AND operation LIKE 'task.create_%'",
     )
-    .await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let response = send_api(
-        &app,
-        &token,
-        tenant_id,
-        Method::POST,
-        "/api/tasks/unpack-cancelled-orders/add",
-        Some(json!({"order_id": denied_order, "facility_id": denied_facility})),
+    .bind(tenant_id.get())
+    .fetch_one(&fixture.db)
+    .await
+    .unwrap();
+    let concealed_references = [
+        (
+            "/api/tasks/cycle-counts/item-location/add",
+            json!({"location_id": denied_location, "item_id": item}),
+        ),
+        (
+            "/api/tasks/cycle-counts/location/add",
+            json!({"location_id": denied_location}),
+        ),
+        (
+            "/api/tasks/break-master-packs/add",
+            json!({
+                "master_item_id": master_item,
+                "single_item_id": item,
+                "location_id": denied_location,
+                "qty": 1
+            }),
+        ),
+        (
+            "/api/tasks/unpack-cancelled-orders/add",
+            json!({"order_id": denied_order, "facility_id": denied_facility}),
+        ),
+        (
+            "/api/tasks/cycle-counts/item-location/add",
+            json!({"location_id": foreign_location, "item_id": foreign_item}),
+        ),
+        (
+            "/api/tasks/cycle-counts/location/add",
+            json!({"location_id": foreign_location}),
+        ),
+        (
+            "/api/tasks/break-master-packs/add",
+            json!({
+                "master_item_id": foreign_master_item,
+                "single_item_id": foreign_item,
+                "location_id": foreign_location,
+                "qty": 1
+            }),
+        ),
+        (
+            "/api/tasks/unpack-cancelled-orders/add",
+            json!({"order_id": foreign_order, "facility_id": foreign_facility}),
+        ),
+        (
+            "/api/tasks/cycle-counts/item-location/add",
+            json!({"location_id": i64::MAX, "item_id": i64::MAX}),
+        ),
+        (
+            "/api/tasks/cycle-counts/location/add",
+            json!({"location_id": i64::MAX}),
+        ),
+        (
+            "/api/tasks/break-master-packs/add",
+            json!({
+                "master_item_id": i64::MAX,
+                "single_item_id": i64::MAX,
+                "location_id": i64::MAX,
+                "qty": 1
+            }),
+        ),
+        (
+            "/api/tasks/unpack-cancelled-orders/add",
+            json!({"order_id": i64::MAX, "facility_id": i64::MAX}),
+        ),
+    ];
+    for (uri, body) in concealed_references {
+        let response = send_api(&app, &token, tenant_id, Method::POST, uri, Some(body)).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+    let command_count_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM command_idempotency_records WHERE tenant_id = $1 AND operation LIKE 'task.create_%'",
     )
-    .await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    .bind(tenant_id.get())
+    .fetch_one(&fixture.db)
+    .await
+    .unwrap();
+    assert_eq!(command_count_after, command_count_before);
 
     let response = send_api(
         &app,

@@ -79,15 +79,17 @@ pub async fn list_unpack_cancelled_order_lines(
 pub async fn create_item_location_cycle_count(
     State(state): State<AppState>,
     user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
     Json(body): Json<CreateItemLocationCycleCountTask>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    let command = user.command_context(&idempotency_key);
     Ok(Json(
         repo::tasks::create_item_location_cycle_count_task_in_scope(
             &state.db,
             &user.tenant,
-            user.user.id,
+            &command,
             body.location_id,
             body.item_id,
             body.source.as_deref(),
@@ -103,15 +105,17 @@ pub async fn create_item_location_cycle_count(
 pub async fn create_location_cycle_count(
     State(state): State<AppState>,
     user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
     Json(body): Json<CreateLocationCycleCountTask>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    let command = user.command_context(&idempotency_key);
     Ok(Json(
         repo::tasks::create_location_cycle_count_task_in_scope(
             &state.db,
             &user.tenant,
-            user.user.id,
+            &command,
             body.location_id,
             body.priority,
             body.assigned_user_id,
@@ -126,15 +130,17 @@ pub async fn create_location_cycle_count(
 pub async fn create_break_master_pack(
     State(state): State<AppState>,
     user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
     Json(body): Json<CreateBreakMasterPackTask>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    let command = user.command_context(&idempotency_key);
     Ok(Json(
         repo::tasks::create_break_master_pack_task_in_scope(
             &state.db,
             &user.tenant,
-            user.user.id,
+            &command,
             body.master_item_id,
             body.single_item_id,
             body.location_id,
@@ -152,15 +158,17 @@ pub async fn create_break_master_pack(
 pub async fn create_unpack_cancelled_order(
     State(state): State<AppState>,
     user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
     Json(body): Json<CreateUnpackCancelledOrderTask>,
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    let command = user.command_context(&idempotency_key);
     Ok(Json(
         repo::tasks::create_unpack_cancelled_order_task_in_scope(
             &state.db,
             &user.tenant,
-            Some(user.user.id),
+            &command,
             body.order_id,
             body.facility_id,
             body.priority,
@@ -299,10 +307,12 @@ pub async fn abort(
 pub async fn release_expired(
     State(state): State<AppState>,
     user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
 ) -> AppResult<Json<u64>> {
     user.require_permission(&state.db, PERM).await?;
+    let command = user.command_context(&idempotency_key);
     Ok(Json(
-        repo::tasks::release_expired_tasks_in_scope(&state.db, &user.tenant).await?,
+        repo::tasks::release_expired_tasks_in_scope(&state.db, &user.tenant, &command).await?,
     ))
 }
 
