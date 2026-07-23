@@ -186,6 +186,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'inventory_reservations',
                     'inventory_reservations_tenant_isolation'
+                ),
+                (
+                    'order_tracking_numbers',
+                    'order_tracking_numbers_tenant_isolation'
                 )
         )
         SELECT role.rolname AS name,
