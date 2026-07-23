@@ -10,7 +10,7 @@ use wareboxes_core::models::{
 };
 use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
 
-use crate::db::{now_iso, Db};
+use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::ScopeBindings;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
@@ -415,6 +415,8 @@ async fn get_reconciliation_issues_with_scope(
     tenant_id: TenantId,
     scope: &ScopeBindings,
 ) -> AppResult<Vec<InventoryReconciliationIssue>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT tenant_id, inventory_owner_id, facility_id, location_id,
@@ -432,10 +434,11 @@ async fn get_reconciliation_issues_with_scope(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
 
-    rows.iter()
+    let issues = rows
+        .iter()
         .map(|row| {
             Ok(InventoryReconciliationIssue {
                 tenant_id: TenantId::new(row.try_get("tenant_id")?)
@@ -454,7 +457,9 @@ async fn get_reconciliation_issues_with_scope(
                 variance: row.try_get("variance")?,
             })
         })
-        .collect()
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(issues)
 }
 
 pub async fn get_transactions(
@@ -477,6 +482,8 @@ async fn get_transactions_with_scope(
     tenant_id: TenantId,
     scope: &ScopeBindings,
 ) -> AppResult<Vec<InventoryTransaction>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let transaction_rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, actor_user_id,
@@ -502,13 +509,14 @@ async fn get_transactions_with_scope(
     .bind(&scope.inventory_owner_ids)
     .bind(scope.all_facilities)
     .bind(&scope.facility_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let mut transactions = transaction_rows
         .iter()
         .map(map_transaction)
         .collect::<AppResult<Vec<_>>>()?;
     if transactions.is_empty() {
+        tx.commit().await?;
         return Ok(transactions);
     }
 
@@ -532,7 +540,7 @@ async fn get_transactions_with_scope(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let mut entries = HashMap::<i64, Vec<InventoryEntry>>::new();
     for row in &entry_rows {
@@ -542,6 +550,7 @@ async fn get_transactions_with_scope(
     for transaction in &mut transactions {
         transaction.entries = entries.remove(&transaction.id).unwrap_or_default();
     }
+    tx.commit().await?;
     Ok(transactions)
 }
 

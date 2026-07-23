@@ -3,7 +3,7 @@
 use wareboxes_core::models::{InventoryStatus, InventoryTransactionType};
 use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
 
-use crate::db::now_iso;
+use crate::db::{bind_tenant_context, now_iso};
 use crate::error::{AppError, AppResult};
 
 use super::outbox::{self, NewOutboxEvent};
@@ -49,6 +49,7 @@ pub(crate) async fn begin_transaction(
     if command.operation.trim().is_empty() {
         return Err(AppError::internal("journal operation cannot be blank"));
     }
+    bind_tenant_context(tx, command.tenant_id).await?;
 
     if command.record_idempotency {
         if let Some(transaction_id) = replayed_transaction(
@@ -160,6 +161,7 @@ pub(crate) async fn append_entry(
             "inventory journal entries cannot have a zero quantity",
         ));
     }
+    bind_tenant_context(tx, tenant_id).await?;
 
     let entry_id = sqlx::query_scalar(
         r#"
