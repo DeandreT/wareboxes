@@ -1,6 +1,6 @@
 use sqlx::Row;
 use wareboxes_core::models::TenantAccess;
-use wareboxes_domain::{FacilityId, InventoryOwnerId};
+use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
 
 use crate::db::Db;
 use crate::error::{AppError, AppResult};
@@ -41,6 +41,82 @@ impl ScopeBindings {
                 .collect(),
         }
     }
+}
+
+pub(crate) async fn lock_user_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    user_id: i64,
+) -> AppResult<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
+        .bind(tenant_id.get())
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn current_scope_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    user_id: i64,
+) -> AppResult<ScopeBindings> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            membership.all_facilities,
+            ARRAY(
+                SELECT user_facility.facility_id
+                FROM user_facilities user_facility
+                WHERE user_facility.tenant_id = membership.tenant_id
+                  AND user_facility.user_id = membership.user_id
+                  AND user_facility.deleted IS NULL
+                ORDER BY user_facility.facility_id
+            ) AS facility_ids,
+            membership.all_inventory_owners,
+            ARRAY(
+                SELECT user_owner.inventory_owner_id
+                FROM user_inventory_owners user_owner
+                WHERE user_owner.tenant_id = membership.tenant_id
+                  AND user_owner.user_id = membership.user_id
+                  AND user_owner.deleted IS NULL
+                ORDER BY user_owner.inventory_owner_id
+            ) AS inventory_owner_ids
+        FROM tenant_memberships membership
+        WHERE membership.tenant_id = $1
+          AND membership.user_id = $2
+          AND membership.deleted IS NULL
+        FOR SHARE OF membership
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(ScopeBindings {
+            all_facilities: false,
+            facility_ids: Vec::new(),
+            all_inventory_owners: false,
+            inventory_owner_ids: Vec::new(),
+        });
+    };
+    Ok(ScopeBindings {
+        all_facilities: row.try_get("all_facilities")?,
+        facility_ids: row.try_get("facility_ids")?,
+        all_inventory_owners: row.try_get("all_inventory_owners")?,
+        inventory_owner_ids: row.try_get("inventory_owner_ids")?,
+    })
+}
+
+pub(crate) async fn lock_current_scope_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    user_id: i64,
+) -> AppResult<ScopeBindings> {
+    lock_user_tx(tx, tenant_id, user_id).await?;
+    current_scope_tx(tx, tenant_id, user_id).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

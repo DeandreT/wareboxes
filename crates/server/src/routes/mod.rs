@@ -81,6 +81,7 @@ pub fn app(state: AppState) -> Router {
         .route("/orders/:order_id", get(orders::get))
         .route("/orders/add", post(orders::add))
         .route("/orders/update", post(orders::update))
+        .route("/orders/cancel", post(orders::cancel))
         .route("/orders/delete", post(orders::delete))
         .route("/orders/restore", post(orders::restore))
         // WMS catalog / locations
@@ -195,6 +196,10 @@ pub fn app(state: AppState) -> Router {
         .route("/audits/update", post(audits::update))
         .route("/audits/delete", post(audits::delete))
         .route("/audits/restore", post(audits::restore))
+        .route("/audits/counts/add", post(audits::add_count))
+        .route("/audits/counts/update", post(audits::update_count))
+        .route("/audits/counts/delete", post(audits::delete_count))
+        .route("/audits/counts/restore", post(audits::restore_count))
         .route("/audits/:audit_id/counts", get(audits::counts));
 
     let security = state.security.clone();

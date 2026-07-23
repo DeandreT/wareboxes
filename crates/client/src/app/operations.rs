@@ -1144,6 +1144,14 @@ impl WareboxesApp {
     // ---- Employees -------------------------------------------------------
     pub(super) fn employees_screen(&mut self, ui: &mut egui::Ui) {
         ui.collapsing("New employee", |ui| {
+            let facility_key = "employee:new:facility_id".to_owned();
+            let facility_options = self.facility_options();
+            let mut facility_id = self
+                .forms
+                .drafts
+                .get(&facility_key)
+                .cloned()
+                .unwrap_or_default();
             ui.horizontal_wrapped(|ui| {
                 ui.label("First");
                 ui.text_edit_singleline(&mut self.forms.new_first_name);
@@ -1153,23 +1161,37 @@ impl WareboxesApp {
                 ui.text_edit_singleline(&mut self.forms.new_title);
                 ui.label("Type");
                 ui.text_edit_singleline(&mut self.forms.new_type);
+                ui.label("Facility");
+                let selected_facility_id = Self::entity_picker(
+                    ui,
+                    "employee_new_facility",
+                    &mut facility_id,
+                    &facility_options,
+                    "Search facility",
+                );
                 if ui.button("Create").clicked() {
-                    self.api.action(
-                        "/api/employees/add",
-                        json!({
-                            "first_name": self.forms.new_first_name,
-                            "last_name": self.forms.new_last_name,
-                            "title": self.forms.new_title,
-                            "type": self.forms.new_type,
-                        }),
-                        Screen::Employees,
-                        "Employee created",
-                    );
-                    self.forms.new_first_name.clear();
-                    self.forms.new_last_name.clear();
-                    self.forms.new_title.clear();
+                    if let Some(facility_id) = selected_facility_id {
+                        self.api.action(
+                            "/api/employees/add",
+                            json!({
+                                "first_name": self.forms.new_first_name,
+                                "last_name": self.forms.new_last_name,
+                                "title": self.forms.new_title,
+                                "type": self.forms.new_type,
+                                "facility_ids": [facility_id],
+                            }),
+                            Screen::Employees,
+                            "Employee created",
+                        );
+                        self.forms.new_first_name.clear();
+                        self.forms.new_last_name.clear();
+                        self.forms.new_title.clear();
+                    } else {
+                        self.toast("Choose a facility", true, self.now);
+                    }
                 }
             });
+            self.forms.drafts.insert(facility_key, facility_id);
         });
         ui.separator();
 
@@ -1207,6 +1229,9 @@ impl WareboxesApp {
                             ui.label(&e.r#type);
                         });
                         row.col(|ui| {
+                            if !e.can_manage {
+                                return;
+                            }
                             if e.deleted.is_none() {
                                 self.delete_button(
                                     ui,
@@ -1234,22 +1259,67 @@ impl WareboxesApp {
     // ---- Audits ----------------------------------------------------------
     pub(super) fn audits_screen(&mut self, ui: &mut egui::Ui) {
         ui.collapsing("New audit wave", |ui| {
-            ui.horizontal(|ui| {
+            let facility_key = "audit:new:facility_id".to_owned();
+            let owner_key = "audit:new:inventory_owner_id".to_owned();
+            let facility_options = self.facility_options();
+            let owner_options = self.inventory_owner_options();
+            let mut facility_id = self
+                .forms
+                .drafts
+                .get(&facility_key)
+                .cloned()
+                .unwrap_or_default();
+            let mut owner_id = self
+                .forms
+                .drafts
+                .get(&owner_key)
+                .cloned()
+                .unwrap_or_default();
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Name");
                 ui.text_edit_singleline(&mut self.forms.new_name);
                 ui.label("Description");
                 ui.text_edit_singleline(&mut self.forms.new_desc);
+                ui.label("Facility");
+                let selected_facility_id = Self::entity_picker(
+                    ui,
+                    "audit_new_facility",
+                    &mut facility_id,
+                    &facility_options,
+                    "Search facility",
+                );
+                ui.label("Inventory owner");
+                let selected_owner_id = Self::entity_picker(
+                    ui,
+                    "audit_new_inventory_owner",
+                    &mut owner_id,
+                    &owner_options,
+                    "Search inventory owner",
+                );
                 if ui.button("Create").clicked() {
-                    self.api.action(
-                        "/api/audits/add",
-                        json!({"name": self.forms.new_name, "description": self.forms.new_desc}),
-                        Screen::Audits,
-                        "Audit wave created",
-                    );
-                    self.forms.new_name.clear();
-                    self.forms.new_desc.clear();
+                    if let (Some(facility_id), Some(inventory_owner_id)) =
+                        (selected_facility_id, selected_owner_id)
+                    {
+                        self.api.action(
+                            "/api/audits/add",
+                            json!({
+                                "facility_id": facility_id,
+                                "inventory_owner_id": inventory_owner_id,
+                                "name": self.forms.new_name,
+                                "description": self.forms.new_desc,
+                            }),
+                            Screen::Audits,
+                            "Audit wave created",
+                        );
+                        self.forms.new_name.clear();
+                        self.forms.new_desc.clear();
+                    } else {
+                        self.toast("Choose a facility and inventory owner", true, self.now);
+                    }
                 }
             });
+            self.forms.drafts.insert(facility_key, facility_id);
+            self.forms.drafts.insert(owner_key, owner_id);
         });
         ui.separator();
 

@@ -696,6 +696,8 @@ pub struct Employee {
     pub r#type: String,
     pub hired: Timestamp,
     pub terminated: Option<Timestamp>,
+    pub facility_ids: Vec<i64>,
+    pub can_manage: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,6 +1002,8 @@ impl_status_display!(LoadFileCategory);
 pub struct AuditWave {
     pub id: i64,
     pub tenant_id: TenantId,
+    pub facility_id: i64,
+    pub inventory_owner_id: i64,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub name: Option<String>,
@@ -1017,15 +1021,50 @@ pub struct AuditLocationCount {
     pub ended: Option<Timestamp>,
     pub audit_id: i64,
     pub inventory_owner_id: i64,
+    pub facility_id: i64,
     pub location_id: i64,
     pub item_id: i64,
+    pub uom: String,
     pub lot: Option<String>,
     pub expiration: Option<Timestamp>,
     pub serial: Option<String>,
     pub on_hand: i64,
     pub count: i64,
-    pub approval_status: String,
+    pub revision: i64,
+    pub approval_status: AuditApprovalStatus,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AuditApprovalStatus {
+    #[default]
+    Pending,
+    Approved,
+    Rejected,
+}
+
+impl AuditApprovalStatus {
+    pub const ALL: [Self; 3] = [Self::Pending, Self::Approved, Self::Rejected];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value.trim().to_ascii_lowercase().as_str() {
+            "pending" => Self::Pending,
+            "approved" => Self::Approved,
+            "rejected" => Self::Rejected,
+            _ => return None,
+        })
+    }
+}
+
+impl_status_display!(AuditApprovalStatus);
 
 // ---------------------------------------------------------------------------
 // Work tasks
@@ -1135,6 +1174,8 @@ impl_status_display!(WorkTaskProgressAction);
 pub struct WorkTask {
     pub id: i64,
     pub tenant_id: TenantId,
+    pub facility_id: Option<i64>,
+    pub inventory_owner_id: Option<i64>,
     pub created: Timestamp,
     pub modified: Option<Timestamp>,
     pub deleted: Option<Timestamp>,
@@ -1197,6 +1238,8 @@ pub struct BreakMasterPackTask {
 pub struct UnpackCancelledOrderTask {
     pub tenant_id: TenantId,
     pub task_id: i64,
+    pub facility_id: i64,
+    pub inventory_owner_id: i64,
     pub order_id: i64,
     #[serde(default)]
     pub lines: Vec<UnpackCancelledOrderTaskLine>,
@@ -1207,6 +1250,8 @@ pub struct UnpackCancelledOrderTaskLine {
     pub id: i64,
     pub tenant_id: TenantId,
     pub task_id: i64,
+    pub facility_id: i64,
+    pub inventory_owner_id: i64,
     pub order_item_id: Option<i64>,
     pub item_id: i64,
     pub item_batch_id: Option<i64>,

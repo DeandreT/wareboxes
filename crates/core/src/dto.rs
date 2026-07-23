@@ -266,6 +266,14 @@ pub struct OrderIdRequest {
     pub order_id: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct CancelOrder {
+    #[validate(range(min = 1, message = "Invalid order ID"))]
+    pub order_id: i64,
+    #[validate(range(min = 1, message = "Invalid facility ID"))]
+    pub facility_id: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Items
 // ---------------------------------------------------------------------------
@@ -397,6 +405,8 @@ pub struct AddEmployee {
     pub email: Option<String>,
     pub phone: Option<String>,
     pub hired: Option<Timestamp>,
+    #[validate(length(min = 1, message = "At least one facility is required"))]
+    pub facility_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -410,6 +420,8 @@ pub struct EmployeeUpdate {
     pub email: Option<String>,
     pub phone: Option<String>,
     pub terminated: Option<Timestamp>,
+    #[validate(length(min = 1, message = "At least one facility is required"))]
+    pub facility_ids: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -606,6 +618,10 @@ pub struct LoadFileIdRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct AddAuditWave {
+    #[validate(range(min = 1, message = "Invalid facility ID"))]
+    pub facility_id: i64,
+    #[validate(range(min = 1, message = "Invalid inventory owner ID"))]
+    pub inventory_owner_id: i64,
     #[validate(length(min = 1, message = "Name is required"))]
     pub name: String,
     pub description: Option<String>,
@@ -623,6 +639,43 @@ pub struct AuditWaveUpdate {
 pub struct AuditWaveIdRequest {
     #[validate(range(min = 1, message = "Invalid audit wave ID"))]
     pub audit_wave_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct AddAuditLocationCount {
+    #[validate(range(min = 1, message = "Invalid audit wave ID"))]
+    pub audit_wave_id: i64,
+    #[validate(range(min = 1, message = "Invalid location ID"))]
+    pub location_id: i64,
+    #[validate(range(min = 1, message = "Invalid item ID"))]
+    pub item_id: i64,
+    #[validate(length(min = 1, message = "UOM is required"))]
+    pub uom: String,
+    pub lot: Option<String>,
+    pub expiration: Option<Timestamp>,
+    pub serial: Option<String>,
+    #[validate(range(min = 0, message = "Count quantity cannot be negative"))]
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct AuditLocationCountUpdate {
+    #[validate(range(min = 1, message = "Invalid audit location count ID"))]
+    pub audit_location_count_id: i64,
+    #[validate(range(min = 1, message = "Invalid expected revision"))]
+    pub expected_revision: i64,
+    #[validate(range(min = 0, message = "Count quantity cannot be negative"))]
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct AuditLocationCountIdRequest {
+    #[validate(range(min = 1, message = "Invalid audit location count ID"))]
+    pub audit_location_count_id: i64,
+    #[validate(range(min = 1, message = "Invalid expected revision"))]
+    pub expected_revision: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -720,6 +773,8 @@ pub struct CreateBreakMasterPackTask {
 pub struct CreateUnpackCancelledOrderTask {
     #[validate(range(min = 1, message = "Invalid order ID"))]
     pub order_id: i64,
+    #[validate(range(min = 1, message = "Invalid facility ID"))]
+    pub facility_id: i64,
     #[validate(range(min = 0, message = "Priority must be zero or greater"))]
     pub priority: Option<i64>,
     pub assigned_user_id: Option<i64>,

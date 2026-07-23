@@ -1,25 +1,38 @@
-use sqlx::Row;
-use wareboxes_core::models::{
-    Timestamp, UnpackCancelledOrderTaskLine, WorkTask, WorkTaskProgressAction, WorkTaskStatus,
-    WorkTaskType,
-};
+use wareboxes_core::models::{TenantAccess, Timestamp, WorkTaskStatus, WorkTaskType};
+use wareboxes_core::CoreError;
 use wareboxes_domain::TenantId;
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
-use crate::permissions;
 
-#[derive(Debug, Clone, Default)]
-pub struct WorkTaskFilters {
-    pub show_deleted: bool,
-    pub status: Option<WorkTaskStatus>,
-    pub task_type: Option<WorkTaskType>,
-    pub assigned_user_id: Option<i64>,
-    pub location_id: Option<i64>,
-    pub order_id: Option<i64>,
+use super::access::{current_scope_tx, lock_user_tx, ScopeBindings};
+use execution::user_can_execute_task_tx;
+use queries::map_task;
+use references::{
+    lock_active_location_tx, lock_item_cycle_references_tx, lock_unpack_order_lines_tx,
+};
+
+mod execution;
+mod leasing;
+mod queries;
+mod references;
+
+pub use execution::*;
+pub use leasing::*;
+pub use queries::*;
+
+pub(crate) async fn release_tasks_outside_scope_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    user_id: i64,
+    scope: &ScopeBindings,
+) -> AppResult<()> {
+    leasing::release_inaccessible_active_tasks_tx(tx, tenant_id, user_id, scope).await
 }
 
 struct NewWorkTask {
+    facility_id: Option<i64>,
+    inventory_owner_id: Option<i64>,
     task_type: WorkTaskType,
     title: String,
     instructions: Option<String>,
@@ -31,6 +44,63 @@ struct NewWorkTask {
     scheduled_for: Option<Timestamp>,
     due_at: Option<Timestamp>,
     metadata_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TaskDimensions {
+    facility_id: Option<i64>,
+    inventory_owner_id: Option<i64>,
+}
+
+impl TaskDimensions {
+    fn is_allowed_by(self, scope: &ScopeBindings) -> bool {
+        (scope.all_facilities
+            || self
+                .facility_id
+                .is_some_and(|id| scope.facility_ids.contains(&id)))
+            && (scope.all_inventory_owners
+                || self
+                    .inventory_owner_id
+                    .is_some_and(|id| scope.inventory_owner_ids.contains(&id)))
+    }
+}
+
+fn concealed_task_reference(error: AppError) -> AppError {
+    match error {
+        AppError::Core(
+            CoreError::BadRequest(_) | CoreError::NotFound(_) | CoreError::Forbidden,
+        ) => AppError::not_found("task references"),
+        other => other,
+    }
+}
+
+fn require_dimensions_visible(
+    access: &TenantAccess,
+    dimensions: TaskDimensions,
+) -> AppResult<TaskDimensions> {
+    if dimensions.is_allowed_by(&ScopeBindings::for_access(access)) {
+        Ok(dimensions)
+    } else {
+        Err(AppError::not_found("task references"))
+    }
+}
+
+async fn lock_current_task_scope_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    scope_user_id: i64,
+    assigned_user_id: Option<i64>,
+) -> AppResult<ScopeBindings> {
+    let mut user_ids = vec![scope_user_id];
+    if let Some(assigned_user_id) = assigned_user_id {
+        user_ids.push(assigned_user_id);
+    }
+    user_ids.sort_unstable();
+    user_ids.dedup();
+    for user_id in user_ids {
+        lock_user_tx(tx, tenant_id, user_id).await?;
+    }
+    current_scope_tx(tx, tenant_id, scope_user_id).await
 }
 
 fn task_permission(_task_type: WorkTaskType) -> &'static str {
@@ -46,159 +116,51 @@ fn task_timeout_seconds(task_type: WorkTaskType) -> i64 {
     }
 }
 
-fn map_task(row: &sqlx::postgres::PgRow) -> AppResult<WorkTask> {
-    let task_type: String = row.try_get("task_type")?;
-    let status: String = row.try_get("status")?;
-    Ok(WorkTask {
-        id: row.try_get("id")?,
-        tenant_id: TenantId::new(row.try_get("tenant_id")?)
-            .map_err(|error| AppError::internal(error.to_string()))?,
-        created: row.try_get("created")?,
-        modified: row.try_get("modified")?,
-        deleted: row.try_get("deleted")?,
-        task_type: WorkTaskType::parse(&task_type).ok_or_else(|| {
-            AppError::internal(format!("invalid work task type in database: {task_type}"))
-        })?,
-        status: WorkTaskStatus::parse(&status).ok_or_else(|| {
-            AppError::internal(format!("invalid work task status in database: {status}"))
-        })?,
-        required_permission: row.try_get("required_permission")?,
-        priority: row.try_get("priority")?,
-        title: row.try_get("title")?,
-        instructions: row.try_get("instructions")?,
-        assigned_user_id: row.try_get("assigned_user_id")?,
-        created_by: row.try_get("created_by")?,
-        completed_by: row.try_get("completed_by")?,
-        scheduled_for: row.try_get("scheduled_for")?,
-        due_at: row.try_get("due_at")?,
-        started_at: row.try_get("started_at")?,
-        lease_expires_at: row.try_get("lease_expires_at")?,
-        task_timeout_seconds: row.try_get("task_timeout_seconds")?,
-        last_released_at: row.try_get("last_released_at")?,
-        release_count: row.try_get("release_count")?,
-        completed_at: row.try_get("completed_at")?,
-        metadata_json: row.try_get("metadata_json")?,
-    })
-}
-
-fn map_unpack_cancelled_order_task_line(
-    row: &sqlx::postgres::PgRow,
-) -> AppResult<UnpackCancelledOrderTaskLine> {
-    Ok(UnpackCancelledOrderTaskLine {
-        id: row.try_get("id")?,
-        tenant_id: TenantId::new(row.try_get("tenant_id")?)
-            .map_err(|error| AppError::internal(error.to_string()))?,
-        task_id: row.try_get("task_id")?,
-        order_item_id: row.try_get("order_item_id")?,
-        item_id: row.try_get("item_id")?,
-        item_batch_id: row.try_get("item_batch_id")?,
-        inventory_balance_id: row.try_get("inventory_balance_id")?,
-        license_plate_id: row.try_get("license_plate_id")?,
-        source_location_id: row.try_get("source_location_id")?,
-        destination_location_id: row.try_get("destination_location_id")?,
-        expected_qty: row.try_get("expected_qty")?,
-        unpacked_qty: row.try_get("unpacked_qty")?,
-        missing_qty: row.try_get("missing_qty")?,
-        damaged_qty: row.try_get("damaged_qty")?,
-        status: row.try_get("status")?,
-    })
-}
-
-const TASK_SELECT: &str = r#"
-    SELECT id, tenant_id, created, modified, deleted, task_type, status, required_permission, priority,
-           title, instructions, assigned_user_id, created_by, completed_by, scheduled_for,
-           due_at, started_at, lease_expires_at, task_timeout_seconds, last_released_at,
-           release_count, completed_at, metadata_json
-    FROM work_tasks
-"#;
-
-pub async fn get_tasks(
-    db: &Db,
-    tenant_id: TenantId,
-    filters: WorkTaskFilters,
-) -> AppResult<Vec<WorkTask>> {
-    release_expired_tasks(db, tenant_id).await?;
-    let sql = format!(
-        r#"
-        {TASK_SELECT}
-        WHERE tenant_id = $1
-          AND ($2 OR deleted IS NULL)
-          AND ($3::TEXT IS NULL OR status = $3)
-          AND ($4::TEXT IS NULL OR task_type = $4)
-          AND ($5::BIGINT IS NULL OR assigned_user_id = $5)
-          AND (
-              $6::BIGINT IS NULL
-              OR EXISTS (SELECT 1 FROM cycle_count_item_location_tasks d WHERE d.tenant_id = work_tasks.tenant_id AND d.task_id = work_tasks.id AND d.location_id = $6)
-              OR EXISTS (SELECT 1 FROM cycle_count_location_tasks d WHERE d.tenant_id = work_tasks.tenant_id AND d.task_id = work_tasks.id AND d.location_id = $6)
-              OR EXISTS (SELECT 1 FROM break_master_pack_tasks d WHERE d.tenant_id = work_tasks.tenant_id AND d.task_id = work_tasks.id AND d.location_id = $6)
-          )
-          AND (
-              $7::BIGINT IS NULL
-              OR EXISTS (SELECT 1 FROM unpack_cancelled_order_tasks d WHERE d.tenant_id = work_tasks.tenant_id AND d.task_id = work_tasks.id AND d.order_id = $7)
-              OR EXISTS (SELECT 1 FROM cycle_count_item_location_tasks d WHERE d.tenant_id = work_tasks.tenant_id AND d.task_id = work_tasks.id AND d.order_id = $7)
-          )
-        ORDER BY COALESCE(scheduled_for, created), priority DESC, created, id
-        "#
-    );
-
-    let rows = sqlx::query(&sql)
-        .bind(tenant_id.get())
-        .bind(filters.show_deleted)
-        .bind(filters.status.map(|status| status.as_str().to_owned()))
-        .bind(
-            filters
-                .task_type
-                .map(|task_type| task_type.as_str().to_owned()),
-        )
-        .bind(filters.assigned_user_id)
-        .bind(filters.location_id)
-        .bind(filters.order_id)
-        .fetch_all(db)
-        .await?;
-    rows.iter().map(map_task).collect()
-}
-
-pub async fn get_unpack_cancelled_order_task_lines(
-    db: &Db,
-    tenant_id: TenantId,
-    task_id: i64,
-) -> AppResult<Vec<UnpackCancelledOrderTaskLine>> {
-    let rows = sqlx::query(
-        r#"
-        SELECT id, tenant_id, task_id, order_item_id, item_id, item_batch_id, inventory_balance_id,
-               license_plate_id, source_location_id, destination_location_id, expected_qty,
-               unpacked_qty, missing_qty, damaged_qty, status
-        FROM unpack_cancelled_order_task_lines
-        WHERE tenant_id = $1 AND task_id = $2
-        ORDER BY id
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(task_id)
-    .fetch_all(db)
-    .await?;
-    rows.iter()
-        .map(map_unpack_cancelled_order_task_line)
-        .collect()
-}
-
 async fn insert_task_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     task: NewWorkTask,
 ) -> AppResult<i64> {
+    if let Some(assigned_user_id) = task.assigned_user_id {
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))",
+        )
+        .bind(tenant_id.get())
+        .bind(assigned_user_id)
+        .execute(&mut **tx)
+        .await?;
+        let dimensions = TaskDimensions {
+            facility_id: task.facility_id,
+            inventory_owner_id: task.inventory_owner_id,
+        };
+        if !user_can_execute_task_tx(
+            tx,
+            tenant_id,
+            assigned_user_id,
+            dimensions,
+            &task.required_permission,
+        )
+        .await?
+        {
+            return Err(AppError::bad_request(
+                "assigned user cannot access the task facility or inventory owner",
+            ));
+        }
+    }
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO work_tasks (
-            tenant_id, created, modified, task_type, status, required_permission, priority, title,
-            instructions, assigned_user_id, created_by, scheduled_for, due_at,
-            task_timeout_seconds, metadata_json
+            tenant_id, facility_id, inventory_owner_id, created, modified, task_type, status,
+            required_permission, priority, title, instructions, assigned_user_id, created_by,
+            scheduled_for, due_at, task_timeout_seconds, metadata_json
         )
-        VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         RETURNING id
         "#,
     )
     .bind(tenant_id.get())
+    .bind(task.facility_id)
+    .bind(task.inventory_owner_id)
     .bind(now_iso())
     .bind(task.task_type.as_str())
     .bind(
@@ -237,9 +199,68 @@ pub async fn create_item_location_cycle_count_task(
     inventory_balance_id: Option<i64>,
     note: Option<&str>,
 ) -> AppResult<i64> {
-    let facility_id = facility_for_location(db, tenant_id, location_id).await?;
+    create_item_location_cycle_count_task_with_scope(
+        db,
+        tenant_id,
+        user_id,
+        None,
+        location_id,
+        item_id,
+        source,
+        order_id,
+        order_item_id,
+        inventory_balance_id,
+        note,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_item_location_cycle_count_task_with_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    user_id: i64,
+    scope_user_id: Option<i64>,
+    location_id: i64,
+    item_id: i64,
+    source: Option<&str>,
+    order_id: Option<i64>,
+    order_item_id: Option<i64>,
+    inventory_balance_id: Option<i64>,
+    note: Option<&str>,
+) -> AppResult<i64> {
+    let dimensions = item_location_cycle_count_dimensions(
+        db,
+        tenant_id,
+        location_id,
+        item_id,
+        order_id,
+        order_item_id,
+        inventory_balance_id,
+    )
+    .await?;
+    let facility_id = dimensions
+        .facility_id
+        .ok_or_else(|| AppError::internal("cycle count task is missing a facility"))?;
     ensure_active_item(db, tenant_id, item_id).await?;
     let mut tx = db.begin().await?;
+    if let Some(scope_user_id) = scope_user_id {
+        let current_scope =
+            lock_current_task_scope_tx(&mut tx, tenant_id, scope_user_id, None).await?;
+        if !dimensions.is_allowed_by(&current_scope) {
+            return Err(AppError::not_found("task references"));
+        }
+    }
+    lock_item_cycle_references_tx(
+        &mut tx,
+        tenant_id,
+        location_id,
+        item_id,
+        order_id,
+        order_item_id,
+        inventory_balance_id,
+    )
+    .await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT || ':' || $3::TEXT, 0))")
         .bind(tenant_id.get())
         .bind(location_id)
@@ -257,6 +278,8 @@ pub async fn create_item_location_cycle_count_task(
           AND task.deleted IS NULL
           AND task.task_type = 'cycle_count_item_location'
           AND task.status IN ('open', 'assigned', 'in_progress')
+          AND task.facility_id = $4
+          AND task.inventory_owner_id IS NOT DISTINCT FROM $5
           AND detail.location_id = $2
           AND detail.item_id = $3
         LIMIT 1
@@ -265,6 +288,8 @@ pub async fn create_item_location_cycle_count_task(
     .bind(tenant_id.get())
     .bind(location_id)
     .bind(item_id)
+    .bind(dimensions.facility_id)
+    .bind(dimensions.inventory_owner_id)
     .fetch_optional(&mut *tx)
     .await?;
     if let Some(existing) = existing {
@@ -282,6 +307,8 @@ pub async fn create_item_location_cycle_count_task(
         &mut tx,
         tenant_id,
         NewWorkTask {
+            facility_id: dimensions.facility_id,
+            inventory_owner_id: dimensions.inventory_owner_id,
             task_type: WorkTaskType::CycleCountItemLocation,
             title: "Cycle count item location".to_owned(),
             instructions: note.map(str::to_owned),
@@ -299,15 +326,16 @@ pub async fn create_item_location_cycle_count_task(
     sqlx::query(
         r#"
         INSERT INTO cycle_count_item_location_tasks (
-            tenant_id, task_id, facility_id, location_id, item_id, inventory_balance_id,
-            order_id, order_item_id, source, note
+            tenant_id, task_id, facility_id, inventory_owner_id, location_id, item_id,
+            inventory_balance_id, order_id, order_item_id, source, note
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         "#,
     )
     .bind(tenant_id.get())
     .bind(task_id)
     .bind(facility_id)
+    .bind(dimensions.inventory_owner_id)
     .bind(location_id)
     .bind(item_id)
     .bind(inventory_balance_id)
@@ -322,6 +350,47 @@ pub async fn create_item_location_cycle_count_task(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub async fn create_item_location_cycle_count_task_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    user_id: i64,
+    location_id: i64,
+    item_id: i64,
+    source: Option<&str>,
+    order_id: Option<i64>,
+    order_item_id: Option<i64>,
+    inventory_balance_id: Option<i64>,
+    note: Option<&str>,
+) -> AppResult<i64> {
+    let dimensions = item_location_cycle_count_dimensions(
+        db,
+        access.tenant_id,
+        location_id,
+        item_id,
+        order_id,
+        order_item_id,
+        inventory_balance_id,
+    )
+    .await
+    .map_err(concealed_task_reference)?;
+    require_dimensions_visible(access, dimensions)?;
+    create_item_location_cycle_count_task_with_scope(
+        db,
+        access.tenant_id,
+        user_id,
+        Some(access.user_id.get()),
+        location_id,
+        item_id,
+        source,
+        order_id,
+        order_item_id,
+        inventory_balance_id,
+        note,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn create_location_cycle_count_task(
     db: &Db,
     tenant_id: TenantId,
@@ -333,12 +402,58 @@ pub async fn create_location_cycle_count_task(
     due_at: Option<Timestamp>,
     instructions: Option<String>,
 ) -> AppResult<i64> {
+    create_location_cycle_count_task_with_scope(
+        db,
+        tenant_id,
+        user_id,
+        None,
+        location_id,
+        priority,
+        assigned_user_id,
+        scheduled_for,
+        due_at,
+        instructions,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_location_cycle_count_task_with_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    user_id: i64,
+    scope_user_id: Option<i64>,
+    location_id: i64,
+    priority: Option<i64>,
+    assigned_user_id: Option<i64>,
+    scheduled_for: Option<Timestamp>,
+    due_at: Option<Timestamp>,
+    instructions: Option<String>,
+) -> AppResult<i64> {
     let facility_id = facility_for_location(db, tenant_id, location_id).await?;
     let mut tx = db.begin().await?;
+    if let Some(scope_user_id) = scope_user_id {
+        let current_scope =
+            lock_current_task_scope_tx(&mut tx, tenant_id, scope_user_id, assigned_user_id).await?;
+        if !(TaskDimensions {
+            facility_id: Some(facility_id),
+            inventory_owner_id: None,
+        })
+        .is_allowed_by(&current_scope)
+        {
+            return Err(AppError::not_found("task references"));
+        }
+    }
+    let locked_facility_id = lock_active_location_tx(&mut tx, tenant_id, location_id).await?;
+    if locked_facility_id != facility_id {
+        return Err(AppError::conflict("location facility changed"));
+    }
     let task_id = insert_task_tx(
         &mut tx,
         tenant_id,
         NewWorkTask {
+            facility_id: Some(facility_id),
+            inventory_owner_id: None,
             task_type: WorkTaskType::CycleCountLocation,
             title: "Cycle count location".to_owned(),
             instructions,
@@ -367,6 +482,43 @@ pub async fn create_location_cycle_count_task(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub async fn create_location_cycle_count_task_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    user_id: i64,
+    location_id: i64,
+    priority: Option<i64>,
+    assigned_user_id: Option<i64>,
+    scheduled_for: Option<Timestamp>,
+    due_at: Option<Timestamp>,
+    instructions: Option<String>,
+) -> AppResult<i64> {
+    let facility_id = facility_for_location(db, access.tenant_id, location_id)
+        .await
+        .map_err(concealed_task_reference)?;
+    require_dimensions_visible(
+        access,
+        TaskDimensions {
+            facility_id: Some(facility_id),
+            inventory_owner_id: None,
+        },
+    )?;
+    create_location_cycle_count_task_with_scope(
+        db,
+        access.tenant_id,
+        user_id,
+        Some(access.user_id.get()),
+        location_id,
+        priority,
+        assigned_user_id,
+        scheduled_for,
+        due_at,
+        instructions,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn create_break_master_pack_task(
     db: &Db,
     tenant_id: TenantId,
@@ -381,37 +533,103 @@ pub async fn create_break_master_pack_task(
     due_at: Option<Timestamp>,
     instructions: Option<String>,
 ) -> AppResult<i64> {
+    create_break_master_pack_task_with_scope(
+        db,
+        tenant_id,
+        user_id,
+        None,
+        master_item_id,
+        single_item_id,
+        location_id,
+        qty,
+        priority,
+        assigned_user_id,
+        scheduled_for,
+        due_at,
+        instructions,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_break_master_pack_task_with_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    user_id: i64,
+    scope_user_id: Option<i64>,
+    master_item_id: i64,
+    single_item_id: i64,
+    location_id: i64,
+    qty: i64,
+    priority: Option<i64>,
+    assigned_user_id: Option<i64>,
+    scheduled_for: Option<Timestamp>,
+    due_at: Option<Timestamp>,
+    instructions: Option<String>,
+) -> AppResult<i64> {
     if qty <= 0 {
         return Err(AppError::bad_request("quantity must be positive"));
     }
-    let inner_qty: Option<i64> = sqlx::query_scalar(
+    let mut tx = db.begin().await?;
+    let current_scope = match scope_user_id {
+        Some(scope_user_id) => Some(
+            lock_current_task_scope_tx(&mut tx, tenant_id, scope_user_id, assigned_user_id).await?,
+        ),
+        None => None,
+    };
+    let pack: Option<(i64, i64)> = sqlx::query_as(
         r#"
-        SELECT inner_qty
-        FROM item_pack_links
-        WHERE tenant_id = $1
-          AND master_item_id = $2
-          AND single_item_id = $3
-          AND deleted IS NULL
-        ORDER BY inner_qty DESC
+        SELECT pack.inner_qty, location.facility_id
+        FROM item_pack_links pack
+        INNER JOIN items master
+            ON master.tenant_id = pack.tenant_id
+           AND master.id = pack.master_item_id
+           AND master.deleted IS NULL
+        INNER JOIN items single
+            ON single.tenant_id = pack.tenant_id
+           AND single.id = pack.single_item_id
+           AND single.deleted IS NULL
+        INNER JOIN locations location
+            ON location.tenant_id = pack.tenant_id
+           AND location.id = $4
+           AND location.deleted IS NULL
+           AND location.active
+        WHERE pack.tenant_id = $1
+          AND pack.master_item_id = $2
+          AND pack.single_item_id = $3
+          AND pack.deleted IS NULL
+        ORDER BY pack.inner_qty DESC
         LIMIT 1
+        FOR SHARE OF pack, master, single, location
         "#,
     )
     .bind(tenant_id.get())
     .bind(master_item_id)
     .bind(single_item_id)
-    .fetch_optional(db)
+    .bind(location_id)
+    .fetch_optional(&mut *tx)
     .await?;
-    let Some(inner_qty) = inner_qty else {
+    let Some((inner_qty, facility_id)) = pack else {
         return Err(AppError::bad_request(
-            "break master pack tasks require a master-to-single item pack link",
+            "break master pack tasks require active items, location, and pack link",
         ));
     };
-    let facility_id = facility_for_location(db, tenant_id, location_id).await?;
-    let mut tx = db.begin().await?;
+    if let Some(current_scope) = current_scope {
+        if !(TaskDimensions {
+            facility_id: Some(facility_id),
+            inventory_owner_id: None,
+        })
+        .is_allowed_by(&current_scope)
+        {
+            return Err(AppError::not_found("task references"));
+        }
+    }
     let task_id = insert_task_tx(
         &mut tx,
         tenant_id,
         NewWorkTask {
+            facility_id: Some(facility_id),
+            inventory_owner_id: None,
             task_type: WorkTaskType::BreakMasterPack,
             title: format!("Break {qty} master packs into {} singles", qty * inner_qty),
             instructions,
@@ -450,69 +668,187 @@ pub async fn create_break_master_pack_task(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn create_unpack_cancelled_order_task(
+pub async fn create_break_master_pack_task_in_scope(
     db: &Db,
-    tenant_id: TenantId,
-    user_id: Option<i64>,
-    order_id: i64,
+    access: &TenantAccess,
+    user_id: i64,
+    master_item_id: i64,
+    single_item_id: i64,
+    location_id: i64,
+    qty: i64,
     priority: Option<i64>,
     assigned_user_id: Option<i64>,
     scheduled_for: Option<Timestamp>,
     due_at: Option<Timestamp>,
     instructions: Option<String>,
 ) -> AppResult<i64> {
-    let status: Option<String> = sqlx::query_scalar(
-        "SELECT status FROM orders WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL",
+    let facility_id = facility_for_location(db, access.tenant_id, location_id)
+        .await
+        .map_err(concealed_task_reference)?;
+    require_dimensions_visible(
+        access,
+        TaskDimensions {
+            facility_id: Some(facility_id),
+            inventory_owner_id: None,
+        },
+    )?;
+    create_break_master_pack_task_with_scope(
+        db,
+        access.tenant_id,
+        user_id,
+        Some(access.user_id.get()),
+        master_item_id,
+        single_item_id,
+        location_id,
+        qty,
+        priority,
+        assigned_user_id,
+        scheduled_for,
+        due_at,
+        instructions,
     )
-    .bind(tenant_id.get())
-    .bind(order_id)
-    .fetch_optional(db)
-    .await?;
-    if status.as_deref() != Some("cancelled") {
-        return Err(AppError::bad_request(
-            "unpack cancelled order tasks require a cancelled order",
-        ));
-    }
+    .await
+}
 
+#[allow(clippy::too_many_arguments)]
+pub async fn create_unpack_cancelled_order_task(
+    db: &Db,
+    tenant_id: TenantId,
+    user_id: Option<i64>,
+    order_id: i64,
+    facility_id: i64,
+    priority: Option<i64>,
+    assigned_user_id: Option<i64>,
+    scheduled_for: Option<Timestamp>,
+    due_at: Option<Timestamp>,
+    instructions: Option<String>,
+) -> AppResult<i64> {
     let mut tx = db.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
         .bind(tenant_id.get())
         .bind(order_id)
         .execute(&mut *tx)
         .await?;
-    let existing: Option<i64> = sqlx::query_scalar(
+    let task_id = create_unpack_cancelled_order_task_tx(
+        &mut tx,
+        tenant_id,
+        user_id,
+        order_id,
+        facility_id,
+        priority,
+        assigned_user_id,
+        scheduled_for,
+        due_at,
+        instructions,
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(task_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_unpack_cancelled_order_task_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    user_id: Option<i64>,
+    order_id: i64,
+    facility_id: i64,
+    priority: Option<i64>,
+    assigned_user_id: Option<i64>,
+    scheduled_for: Option<Timestamp>,
+    due_at: Option<Timestamp>,
+    instructions: Option<String>,
+    scope: Option<&ScopeBindings>,
+) -> AppResult<i64> {
+    let order: Option<(String, i64)> = sqlx::query_as(
         r#"
-        SELECT task.id
+        SELECT orders.status, orders.inventory_owner_id
+        FROM orders
+        INNER JOIN inventory_owner_facilities assignment
+            ON assignment.tenant_id = orders.tenant_id
+           AND assignment.inventory_owner_id = orders.inventory_owner_id
+           AND assignment.facility_id = $3
+           AND assignment.deleted IS NULL
+        INNER JOIN facilities facility
+            ON facility.tenant_id = assignment.tenant_id
+           AND facility.id = assignment.facility_id
+           AND facility.deleted IS NULL
+        INNER JOIN inventory_owners inventory_owner
+            ON inventory_owner.tenant_id = orders.tenant_id
+           AND inventory_owner.id = orders.inventory_owner_id
+           AND inventory_owner.deleted IS NULL
+        WHERE orders.tenant_id = $1 AND orders.id = $2 AND orders.deleted IS NULL
+        FOR UPDATE OF orders
+        FOR SHARE OF assignment, facility, inventory_owner
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(order_id)
+    .bind(facility_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((status, inventory_owner_id)) = order else {
+        return Err(AppError::bad_request("order not found"));
+    };
+    if status != "cancelled" {
+        return Err(AppError::bad_request(
+            "unpack cancelled order tasks require a cancelled order",
+        ));
+    }
+    if scope.is_some_and(|scope| {
+        !(TaskDimensions {
+            facility_id: Some(facility_id),
+            inventory_owner_id: Some(inventory_owner_id),
+        })
+        .is_allowed_by(scope)
+    }) {
+        return Err(AppError::not_found("task references"));
+    }
+    lock_unpack_order_lines_tx(tx, tenant_id, inventory_owner_id, order_id).await?;
+
+    let existing: Option<(i64, i64, String, Option<Timestamp>)> = sqlx::query_as(
+        r#"
+        SELECT task.id, task.facility_id, task.status, task.deleted
         FROM work_tasks task
         INNER JOIN unpack_cancelled_order_tasks detail
             ON detail.tenant_id = task.tenant_id AND detail.task_id = task.id
         WHERE task.tenant_id = $1
-          AND task.deleted IS NULL
           AND task.task_type = 'unpack_cancelled_order'
-          AND task.status IN ('open', 'assigned', 'in_progress')
           AND detail.order_id = $2
         LIMIT 1
         "#,
     )
     .bind(tenant_id.get())
     .bind(order_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
-    if let Some(existing) = existing {
+    if let Some((existing, existing_facility_id, status, deleted)) = existing {
+        if existing_facility_id != facility_id {
+            return Err(AppError::conflict(
+                "cancelled order already has an unpack task in another facility",
+            ));
+        }
+        if deleted.is_some() || !matches!(status.as_str(), "open" | "assigned" | "in_progress") {
+            return Err(AppError::conflict(
+                "cancelled order already has terminal unpack work",
+            ));
+        }
         sqlx::query("UPDATE work_tasks SET modified = $1 WHERE tenant_id = $2 AND id = $3")
             .bind(now_iso())
             .bind(tenant_id.get())
             .bind(existing)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-        tx.commit().await?;
         return Ok(existing);
     }
 
     let task_id = insert_task_tx(
-        &mut tx,
+        tx,
         tenant_id,
         NewWorkTask {
+            facility_id: Some(facility_id),
+            inventory_owner_id: Some(inventory_owner_id),
             task_type: WorkTaskType::UnpackCancelledOrder,
             title: "Unpack cancelled order".to_owned(),
             instructions,
@@ -528,727 +864,179 @@ pub async fn create_unpack_cancelled_order_task(
     )
     .await?;
     sqlx::query(
-        "INSERT INTO unpack_cancelled_order_tasks (tenant_id, task_id, order_id) VALUES ($1, $2, $3)",
+        "INSERT INTO unpack_cancelled_order_tasks (tenant_id, facility_id, inventory_owner_id, task_id, order_id) VALUES ($1, $2, $3, $4, $5)",
     )
         .bind(tenant_id.get())
+        .bind(facility_id)
+        .bind(inventory_owner_id)
         .bind(task_id)
         .bind(order_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     sqlx::query(
         r#"
         INSERT INTO unpack_cancelled_order_task_lines (
-            tenant_id, task_id, order_item_id, item_id, item_batch_id, expected_qty
+            tenant_id, facility_id, inventory_owner_id, task_id, order_item_id, item_id,
+            item_batch_id, expected_qty
         )
-        SELECT $1, $2, oi.id, oi.item_id, oi.item_batch_id, oi.qty
+        SELECT $1, $2, $3, $4, oi.id, oi.item_id, oi.item_batch_id, oi.qty
         FROM order_items oi
-        WHERE oi.tenant_id = $1 AND oi.order_id = $3 AND oi.deleted IS NULL
+        WHERE oi.tenant_id = $1
+          AND oi.inventory_owner_id = $3
+          AND oi.order_id = $5
+          AND oi.deleted IS NULL
         "#,
     )
     .bind(tenant_id.get())
+    .bind(facility_id)
+    .bind(inventory_owner_id)
     .bind(task_id)
     .bind(order_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
+    .await?;
+    Ok(task_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_unpack_cancelled_order_task_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    user_id: Option<i64>,
+    order_id: i64,
+    facility_id: i64,
+    priority: Option<i64>,
+    assigned_user_id: Option<i64>,
+    scheduled_for: Option<Timestamp>,
+    due_at: Option<Timestamp>,
+    instructions: Option<String>,
+) -> AppResult<i64> {
+    let mut tx = db.begin().await?;
+    let current_scope = lock_current_task_scope_tx(
+        &mut tx,
+        access.tenant_id,
+        access.user_id.get(),
+        assigned_user_id,
+    )
+    .await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
+        .bind(access.tenant_id.get())
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    let task_id = create_unpack_cancelled_order_task_tx(
+        &mut tx,
+        access.tenant_id,
+        user_id,
+        order_id,
+        facility_id,
+        priority,
+        assigned_user_id,
+        scheduled_for,
+        due_at,
+        instructions,
+        Some(&current_scope),
+    )
     .await?;
     tx.commit().await?;
     Ok(task_id)
 }
 
-pub async fn assign_task(
+#[allow(clippy::too_many_arguments)]
+async fn item_location_cycle_count_dimensions(
     db: &Db,
     tenant_id: TenantId,
-    task_id: i64,
-    assigned_user_id: i64,
-) -> AppResult<bool> {
-    let mut tx = db.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
-        .bind(tenant_id.get())
-        .bind(assigned_user_id)
-        .execute(&mut *tx)
-        .await?;
-    let active: Option<i64> = sqlx::query_scalar(
-        r#"
-        SELECT id
-        FROM work_tasks
-        WHERE tenant_id = $1
-          AND assigned_user_id = $2
-          AND id <> $3
-          AND deleted IS NULL
-          AND status IN ('assigned', 'in_progress')
-        LIMIT 1
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(assigned_user_id)
-    .bind(task_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if active.is_some() {
-        return Ok(false);
-    }
-    let res = sqlx::query(
-        r#"
-        UPDATE work_tasks
-        SET assigned_user_id = $1, status = 'assigned', modified = $2
-        WHERE tenant_id = $3
-          AND id = $4
-          AND deleted IS NULL
-          AND status = 'open'
-        "#,
-    )
-    .bind(assigned_user_id)
-    .bind(now_iso())
-    .bind(tenant_id.get())
-    .bind(task_id)
-    .execute(&mut *tx)
-    .await?;
-    let assigned = res.rows_affected() > 0;
-    tx.commit().await?;
-    Ok(assigned)
-}
+    location_id: i64,
+    item_id: i64,
+    order_id: Option<i64>,
+    order_item_id: Option<i64>,
+    inventory_balance_id: Option<i64>,
+) -> AppResult<TaskDimensions> {
+    let facility_id = facility_for_location(db, tenant_id, location_id).await?;
+    let mut inventory_owner_id = None;
 
-pub async fn release_expired_tasks(db: &Db, tenant_id: TenantId) -> AppResult<u64> {
-    let now = now_iso();
-    let mut tx = db.begin().await?;
-    let task_ids = sqlx::query_scalar::<_, i64>(
-        r#"
-        UPDATE work_tasks
-        SET status = 'open',
-            assigned_user_id = NULL,
-            started_at = NULL,
-            lease_expires_at = NULL,
-            last_released_at = $1,
-            release_count = release_count + 1,
-            modified = $1
-        WHERE tenant_id = $2
-          AND deleted IS NULL
-          AND status IN ('assigned', 'in_progress')
-          AND lease_expires_at IS NOT NULL
-          AND lease_expires_at <= $1
-          AND completed_at IS NULL
-        RETURNING id
-        "#,
-    )
-    .bind(now)
-    .bind(tenant_id.get())
-    .fetch_all(&mut *tx)
-    .await?;
-    let released = task_ids.len() as u64;
-    for task_id in task_ids {
-        insert_progress_tx(
-            &mut tx, tenant_id, task_id, None, None, "expired", None, None, None, None, None,
+    if let Some(inventory_balance_id) = inventory_balance_id {
+        let balance: Option<(i64, i64, i64, i64)> = sqlx::query_as(
+            r#"
+            SELECT inventory_owner_id, facility_id, location_id, item_id
+            FROM inventory_balances
+            WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL
+            "#,
         )
+        .bind(tenant_id.get())
+        .bind(inventory_balance_id)
+        .fetch_optional(db)
         .await?;
+        let Some((owner_id, balance_facility_id, balance_location_id, balance_item_id)) = balance
+        else {
+            return Err(AppError::bad_request("inventory balance not found"));
+        };
+        if balance_facility_id != facility_id
+            || balance_location_id != location_id
+            || balance_item_id != item_id
+        {
+            return Err(AppError::bad_request(
+                "inventory balance does not match the task location and item",
+            ));
+        }
+        inventory_owner_id = Some(owner_id);
     }
-    tx.commit().await?;
-    Ok(released)
+
+    if let Some(order_id) = order_id {
+        let owner_id: Option<i64> = sqlx::query_scalar(
+            "SELECT inventory_owner_id FROM orders WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL",
+        )
+        .bind(tenant_id.get())
+        .bind(order_id)
+        .fetch_optional(db)
+        .await?;
+        merge_task_owner(&mut inventory_owner_id, owner_id, "order")?;
+    }
+
+    if let Some(order_item_id) = order_item_id {
+        let order_item: Option<(i64, i64, i64)> = sqlx::query_as(
+            r#"
+            SELECT inventory_owner_id, order_id, item_id
+            FROM order_items
+            WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(order_item_id)
+        .fetch_optional(db)
+        .await?;
+        let Some((owner_id, item_order_id, order_item_item_id)) = order_item else {
+            return Err(AppError::bad_request("order item not found"));
+        };
+        if order_id.is_some_and(|order_id| order_id != item_order_id)
+            || order_item_item_id != item_id
+        {
+            return Err(AppError::bad_request(
+                "order item does not match the task order and item",
+            ));
+        }
+        merge_task_owner(&mut inventory_owner_id, Some(owner_id), "order item")?;
+    }
+
+    Ok(TaskDimensions {
+        facility_id: Some(facility_id),
+        inventory_owner_id,
+    })
 }
 
-pub async fn start_next_task(
-    db: &Db,
-    tenant_id: TenantId,
-    user_id: i64,
-    task_type: Option<WorkTaskType>,
-) -> AppResult<Option<WorkTask>> {
-    release_expired_tasks(db, tenant_id).await?;
-
-    let permissions = permissions::get_user_permissions(db, tenant_id, user_id).await?;
-    let is_admin = permissions
-        .iter()
-        .any(|permission| permission.name.eq_ignore_ascii_case("admin"));
-    let allowed_permissions = permissions
-        .iter()
-        .map(|permission| permission.name.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    if !is_admin && allowed_permissions.is_empty() {
-        return Ok(None);
-    }
-
-    let mut tx = db.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
-        .bind(tenant_id.get())
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
-    let active: Option<i64> = sqlx::query_scalar(
-        r#"
-        SELECT id
-        FROM work_tasks
-        WHERE tenant_id = $1
-          AND deleted IS NULL
-          AND assigned_user_id = $2
-          AND status IN ('assigned', 'in_progress')
-          AND (lease_expires_at IS NULL OR lease_expires_at > $3)
-        LIMIT 1
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(user_id)
-    .bind(now_iso())
-    .fetch_optional(&mut *tx)
-    .await?;
-    if active.is_some() {
-        return Err(AppError::conflict(
-            "user already has an active task; abort or complete it first",
+fn merge_task_owner(
+    inventory_owner_id: &mut Option<i64>,
+    candidate: Option<i64>,
+    reference: &str,
+) -> AppResult<()> {
+    let candidate =
+        candidate.ok_or_else(|| AppError::bad_request(format!("{reference} not found")))?;
+    if inventory_owner_id.is_some_and(|owner_id| owner_id != candidate) {
+        return Err(AppError::bad_request(
+            "task references must belong to the same inventory owner",
         ));
     }
-
-    let now = now_iso();
-    let row = sqlx::query(
-        r#"
-        WITH candidate AS (
-            SELECT id
-            FROM work_tasks
-            WHERE tenant_id = $6
-              AND deleted IS NULL
-              AND status = 'open'
-              AND (scheduled_for IS NULL OR scheduled_for <= $1)
-              AND ($2 OR LOWER(required_permission) = ANY($3))
-              AND ($4::TEXT IS NULL OR task_type = $4)
-            ORDER BY priority DESC, due_at ASC NULLS LAST, COALESCE(scheduled_for, created), created, id
-            FOR UPDATE SKIP LOCKED
-            LIMIT 1
-        )
-        UPDATE work_tasks AS task
-        SET status = 'in_progress',
-            assigned_user_id = $5,
-            started_at = COALESCE(task.started_at, $1),
-            lease_expires_at = $1 + make_interval(secs => task.task_timeout_seconds::INT),
-            modified = $1
-        FROM candidate
-        WHERE task.tenant_id = $6 AND task.id = candidate.id
-        RETURNING task.id, task.tenant_id, task.created, task.modified, task.deleted, task.task_type, task.status,
-                  task.required_permission, task.priority, task.title, task.instructions,
-                  task.assigned_user_id, task.created_by, task.completed_by, task.scheduled_for,
-                  task.due_at, task.started_at, task.lease_expires_at, task.task_timeout_seconds,
-                  task.last_released_at, task.release_count, task.completed_at, task.metadata_json
-        "#,
-    )
-    .bind(now)
-    .bind(is_admin)
-    .bind(&allowed_permissions)
-    .bind(task_type.map(|task_type| task_type.as_str().to_owned()))
-    .bind(user_id)
-    .bind(tenant_id.get())
-    .fetch_optional(&mut *tx)
-    .await?;
-    if let Some(row) = row.as_ref() {
-        let task_id: i64 = row.try_get("id")?;
-        insert_progress_tx(
-            &mut tx,
-            tenant_id,
-            task_id,
-            None,
-            Some(user_id),
-            "started",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await?;
-    }
-    let task = row.as_ref().map(map_task).transpose()?;
-    tx.commit().await?;
-    Ok(task)
-}
-
-pub async fn start_task(
-    db: &Db,
-    tenant_id: TenantId,
-    task_id: i64,
-    user_id: i64,
-) -> AppResult<bool> {
-    release_expired_tasks(db, tenant_id).await?;
-    let now = now_iso();
-    let mut tx = db.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
-        .bind(tenant_id.get())
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
-    let active: Option<i64> = sqlx::query_scalar(
-        r#"
-        SELECT id
-        FROM work_tasks
-        WHERE tenant_id = $1
-          AND assigned_user_id = $2
-          AND id <> $3
-          AND deleted IS NULL
-          AND status IN ('assigned', 'in_progress')
-        LIMIT 1
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(user_id)
-    .bind(task_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if active.is_some() {
-        return Ok(false);
-    }
-    let res = sqlx::query(
-        r#"
-        UPDATE work_tasks
-        SET assigned_user_id = COALESCE(assigned_user_id, $1),
-            status = 'in_progress',
-            started_at = COALESCE(started_at, $2),
-            lease_expires_at = $2 + make_interval(secs => task_timeout_seconds::INT),
-            modified = $2
-        WHERE tenant_id = $3
-          AND id = $4
-          AND deleted IS NULL
-          AND status IN ('open', 'assigned')
-          AND (assigned_user_id IS NULL OR assigned_user_id = $1)
-        "#,
-    )
-    .bind(user_id)
-    .bind(now)
-    .bind(tenant_id.get())
-    .bind(task_id)
-    .execute(&mut *tx)
-    .await?;
-    if res.rows_affected() > 0 {
-        insert_progress_tx(
-            &mut tx,
-            tenant_id,
-            task_id,
-            None,
-            Some(user_id),
-            "started",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await?;
-    }
-    let started = res.rows_affected() > 0;
-    tx.commit().await?;
-    Ok(started)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn record_task_progress(
-    db: &Db,
-    tenant_id: TenantId,
-    user_id: i64,
-    task_id: i64,
-    task_line_id: Option<i64>,
-    action: WorkTaskProgressAction,
-    qty_completed: i64,
-    from_location_id: Option<i64>,
-    to_location_id: Option<i64>,
-    note: Option<&str>,
-) -> AppResult<bool> {
-    if qty_completed <= 0 {
-        return Err(AppError::bad_request("completed quantity must be positive"));
-    }
-    let mut tx = db.begin().await?;
-    let updated = record_task_progress_tx(
-        &mut tx,
-        tenant_id,
-        user_id,
-        task_id,
-        task_line_id,
-        action,
-        qty_completed,
-        from_location_id,
-        to_location_id,
-        note,
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(updated)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn record_task_progress_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    user_id: i64,
-    task_id: i64,
-    task_line_id: Option<i64>,
-    action: WorkTaskProgressAction,
-    qty_completed: i64,
-    from_location_id: Option<i64>,
-    to_location_id: Option<i64>,
-    note: Option<&str>,
-) -> AppResult<bool> {
-    let task_type = task_type_tx(tx, tenant_id, task_id).await?;
-    let updated = match task_type {
-        WorkTaskType::BreakMasterPack => {
-            if action != WorkTaskProgressAction::Progress || task_line_id.is_some() {
-                return Err(AppError::bad_request(
-                    "break master pack tasks only accept task progress",
-                ));
-            }
-            let res = sqlx::query(
-                r#"
-                UPDATE break_master_pack_tasks detail
-                SET master_qty_completed = master_qty_completed + $1
-                FROM work_tasks task
-                WHERE detail.tenant_id = task.tenant_id
-                  AND detail.task_id = task.id
-                  AND task.tenant_id = $2
-                  AND detail.task_id = $3
-                  AND task.deleted IS NULL
-                  AND task.status IN ('assigned', 'in_progress')
-                  AND task.assigned_user_id = $4
-                  AND detail.master_qty_completed + $1 <= detail.master_qty
-                "#,
-            )
-            .bind(qty_completed)
-            .bind(tenant_id.get())
-            .bind(task_id)
-            .bind(user_id)
-            .execute(&mut **tx)
-            .await?;
-            res.rows_affected() > 0
-        }
-        WorkTaskType::UnpackCancelledOrder => {
-            let task_line_id = task_line_id.ok_or_else(|| {
-                AppError::bad_request("unpack cancelled order progress requires a task line")
-            })?;
-            if action == WorkTaskProgressAction::Progress {
-                return Err(AppError::bad_request(
-                    "unpack cancelled order tasks require unpacked, missing, or damaged progress",
-                ));
-            }
-            let action = action.as_str();
-            let res = sqlx::query(
-                r#"
-                UPDATE unpack_cancelled_order_task_lines line
-                SET unpacked_qty = line.unpacked_qty + CASE WHEN $1 = 'unpacked' THEN $2 ELSE 0 END,
-                    missing_qty = line.missing_qty + CASE WHEN $1 = 'missing' THEN $2 ELSE 0 END,
-                    damaged_qty = line.damaged_qty + CASE WHEN $1 = 'damaged' THEN $2 ELSE 0 END,
-                    source_location_id = COALESCE(line.source_location_id, $5),
-                    destination_location_id = COALESCE($6, line.destination_location_id),
-                    status = CASE
-                        WHEN line.unpacked_qty + line.missing_qty + line.damaged_qty + $2 < line.expected_qty THEN 'partial'
-                        WHEN line.missing_qty + line.damaged_qty
-                             + CASE WHEN $1 IN ('missing', 'damaged') THEN $2 ELSE 0 END > 0 THEN 'exception'
-                        ELSE 'completed'
-                    END
-                FROM work_tasks task
-                WHERE line.tenant_id = task.tenant_id
-                  AND line.task_id = task.id
-                  AND task.tenant_id = $8
-                  AND line.id = $3
-                  AND line.task_id = $4
-                  AND task.deleted IS NULL
-                  AND task.status IN ('assigned', 'in_progress')
-                  AND task.assigned_user_id = $7
-                  AND line.status IN ('open', 'partial')
-                  AND line.unpacked_qty + line.missing_qty + line.damaged_qty + $2 <= line.expected_qty
-                "#,
-            )
-            .bind(action)
-            .bind(qty_completed)
-            .bind(task_line_id)
-            .bind(task_id)
-            .bind(from_location_id)
-            .bind(to_location_id)
-            .bind(user_id)
-            .bind(tenant_id.get())
-            .execute(&mut **tx)
-            .await?;
-            res.rows_affected() > 0
-        }
-        WorkTaskType::CycleCountItemLocation | WorkTaskType::CycleCountLocation => false,
-    };
-    if updated {
-        sqlx::query("UPDATE work_tasks SET modified = $1 WHERE tenant_id = $2 AND id = $3")
-            .bind(now_iso())
-            .bind(tenant_id.get())
-            .bind(task_id)
-            .execute(&mut **tx)
-            .await?;
-        insert_progress_tx(
-            tx,
-            tenant_id,
-            task_id,
-            task_line_id,
-            Some(user_id),
-            action.as_str(),
-            Some(qty_completed),
-            from_location_id,
-            to_location_id,
-            note,
-            None,
-        )
-        .await?;
-    }
-    Ok(updated)
-}
-
-pub async fn complete_task(
-    db: &Db,
-    tenant_id: TenantId,
-    task_id: i64,
-    user_id: i64,
-    qty_completed: Option<i64>,
-) -> AppResult<bool> {
-    if qty_completed.is_some_and(|quantity| quantity <= 0) {
-        return Err(AppError::bad_request("completed quantity must be positive"));
-    }
-    let mut tx = db.begin().await?;
-    if let Some(qty_completed) = qty_completed {
-        if !record_task_progress_tx(
-            &mut tx,
-            tenant_id,
-            user_id,
-            task_id,
-            None,
-            WorkTaskProgressAction::Progress,
-            qty_completed,
-            None,
-            None,
-            None,
-        )
-        .await?
-        {
-            return Ok(false);
-        }
-    }
-    let locked: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM work_tasks WHERE tenant_id = $1 AND id = $2 FOR UPDATE")
-            .bind(tenant_id.get())
-            .bind(task_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    if locked.is_none() {
-        return Ok(false);
-    }
-    let task_type = task_type_tx(&mut tx, tenant_id, task_id).await?;
-    let detail_complete = match task_type {
-        WorkTaskType::BreakMasterPack => {
-            let complete: bool = sqlx::query_scalar(
-                "SELECT master_qty_completed >= master_qty FROM break_master_pack_tasks WHERE tenant_id = $1 AND task_id = $2",
-            )
-            .bind(tenant_id.get())
-            .bind(task_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .unwrap_or(false);
-            complete
-        }
-        WorkTaskType::UnpackCancelledOrder => {
-            let open_count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM unpack_cancelled_order_task_lines WHERE tenant_id = $1 AND task_id = $2 AND status IN ('open', 'partial')",
-            )
-            .bind(tenant_id.get())
-            .bind(task_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            open_count == 0
-        }
-        _ => true,
-    };
-    if !detail_complete {
-        return Ok(false);
-    }
-
-    let now = now_iso();
-    let res = sqlx::query(
-        r#"
-        UPDATE work_tasks
-        SET status = 'completed',
-            completed_by = $1,
-            completed_at = $2,
-            lease_expires_at = NULL,
-            modified = $2
-        WHERE tenant_id = $3
-          AND id = $4
-          AND deleted IS NULL
-          AND status IN ('assigned', 'in_progress')
-          AND (assigned_user_id IS NULL OR assigned_user_id = $1)
-        "#,
-    )
-    .bind(user_id)
-    .bind(now)
-    .bind(tenant_id.get())
-    .bind(task_id)
-    .execute(&mut *tx)
-    .await?;
-    if res.rows_affected() > 0 {
-        insert_progress_tx(
-            &mut tx,
-            tenant_id,
-            task_id,
-            None,
-            Some(user_id),
-            "completed",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await?;
-    }
-    let completed = res.rows_affected() > 0;
-    tx.commit().await?;
-    Ok(completed)
-}
-
-pub async fn abort_task(
-    db: &Db,
-    tenant_id: TenantId,
-    task_id: i64,
-    user_id: i64,
-) -> AppResult<bool> {
-    let mut tx = db.begin().await?;
-    let res = sqlx::query(
-        r#"
-        UPDATE work_tasks
-        SET status = 'open',
-            assigned_user_id = NULL,
-            started_at = NULL,
-            lease_expires_at = NULL,
-            last_released_at = $1,
-            release_count = release_count + 1,
-            modified = $1
-        WHERE tenant_id = $2
-          AND id = $3
-          AND deleted IS NULL
-          AND status IN ('assigned', 'in_progress')
-          AND assigned_user_id = $4
-          AND completed_at IS NULL
-        "#,
-    )
-    .bind(now_iso())
-    .bind(tenant_id.get())
-    .bind(task_id)
-    .bind(user_id)
-    .execute(&mut *tx)
-    .await?;
-    if res.rows_affected() > 0 {
-        insert_progress_tx(
-            &mut tx,
-            tenant_id,
-            task_id,
-            None,
-            Some(user_id),
-            "aborted",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await?;
-    }
-    let aborted = res.rows_affected() > 0;
-    tx.commit().await?;
-    Ok(aborted)
-}
-
-pub async fn cancel_task(
-    db: &Db,
-    tenant_id: TenantId,
-    task_id: i64,
-    user_id: i64,
-) -> AppResult<bool> {
-    let mut tx = db.begin().await?;
-    let res = sqlx::query(
-        r#"
-        UPDATE work_tasks
-        SET status = 'cancelled',
-            completed_by = $1,
-            completed_at = $2,
-            lease_expires_at = NULL,
-            modified = $2
-        WHERE tenant_id = $3
-          AND id = $4
-          AND deleted IS NULL
-          AND status IN ('open', 'assigned', 'in_progress')
-        "#,
-    )
-    .bind(user_id)
-    .bind(now_iso())
-    .bind(tenant_id.get())
-    .bind(task_id)
-    .execute(&mut *tx)
-    .await?;
-    if res.rows_affected() > 0 {
-        insert_progress_tx(
-            &mut tx,
-            tenant_id,
-            task_id,
-            None,
-            Some(user_id),
-            "cancelled",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await?;
-    }
-    let cancelled = res.rows_affected() > 0;
-    tx.commit().await?;
-    Ok(cancelled)
-}
-
-async fn task_type_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    task_id: i64,
-) -> AppResult<WorkTaskType> {
-    let value: String = sqlx::query_scalar(
-        "SELECT task_type FROM work_tasks WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
-    )
-    .bind(tenant_id.get())
-    .bind(task_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or_else(|| AppError::bad_request("task not found"))?;
-    WorkTaskType::parse(&value)
-        .ok_or_else(|| AppError::internal(format!("invalid work task type in database: {value}")))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn insert_progress_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    task_id: i64,
-    task_line_id: Option<i64>,
-    user_id: Option<i64>,
-    action: &str,
-    qty_delta: Option<i64>,
-    from_location_id: Option<i64>,
-    to_location_id: Option<i64>,
-    note: Option<&str>,
-    metadata_json: Option<&str>,
-) -> AppResult<i64> {
-    let id: i64 = sqlx::query_scalar(
-        r#"
-        INSERT INTO work_task_progress (
-            tenant_id, created, task_id, task_line_id, user_id, action, qty_delta,
-            from_location_id, to_location_id, note, metadata_json
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        RETURNING id
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(now_iso())
-    .bind(task_id)
-    .bind(task_line_id)
-    .bind(user_id)
-    .bind(action)
-    .bind(qty_delta)
-    .bind(from_location_id)
-    .bind(to_location_id)
-    .bind(note)
-    .bind(metadata_json)
-    .fetch_one(&mut **tx)
-    .await?;
-    Ok(id)
+    *inventory_owner_id = Some(candidate);
+    Ok(())
 }
 
 async fn facility_for_location(db: &Db, tenant_id: TenantId, location_id: i64) -> AppResult<i64> {

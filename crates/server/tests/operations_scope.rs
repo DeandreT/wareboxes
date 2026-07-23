@@ -4,7 +4,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use common::*;
 use tower::ServiceExt;
-use wareboxes_core::models::{AuditLocationCount, AuditWave, Employee};
+use wareboxes_core::models::{AuditLocationCount, AuditWave, Employee, SiteScope};
 use wareboxes_server::auth::TENANT_ID_HEADER;
 use wareboxes_server::{routes, state::AppState};
 
@@ -43,34 +43,49 @@ async fn workforce_and_inventory_audits_are_tenant_isolated() {
     grant_admin(&fixture.db, tenant_a, operator.id, "operations-admin").await;
     grant_admin(&fixture.db, tenant_b, operator.id, "operations-admin").await;
 
+    let unrestricted_sites = SiteScope {
+        all_facilities: true,
+        facility_ids: Vec::new(),
+    };
+    let employee_facility_a = fixture.facility(tenant_a, "Employee Facility A").await;
+    let employee_facility_b = fixture.facility(tenant_b, "Employee Facility B").await;
+
     let employee_a = repo::employees::add_employee(
         &fixture.db,
         tenant_a,
-        "Alex",
-        "A",
-        "Counter",
-        "hourly",
-        Some("alex@example.test"),
-        None,
-        db::now_iso(),
+        &unrestricted_sites,
+        &repo::employees::NewEmployee {
+            first_name: "Alex",
+            last_name: "A",
+            title: "Counter",
+            employee_type: "hourly",
+            email: Some("alex@example.test"),
+            phone: None,
+            hired: db::now_iso(),
+            facility_ids: &[employee_facility_a],
+        },
     )
     .await
     .unwrap();
     let employee_b = repo::employees::add_employee(
         &fixture.db,
         tenant_b,
-        "Blair",
-        "B",
-        "Lead",
-        "salary",
-        Some("blair@example.test"),
-        None,
-        db::now_iso(),
+        &unrestricted_sites,
+        &repo::employees::NewEmployee {
+            first_name: "Blair",
+            last_name: "B",
+            title: "Lead",
+            employee_type: "salary",
+            email: Some("blair@example.test"),
+            phone: None,
+            hired: db::now_iso(),
+            facility_ids: &[employee_facility_b],
+        },
     )
     .await
     .unwrap();
     assert_eq!(
-        repo::employees::get_employees(&fixture.db, tenant_a, false)
+        repo::employees::get_employees_in_scope(&fixture.db, tenant_a, &unrestricted_sites, false,)
             .await
             .unwrap()
             .into_iter()
@@ -81,34 +96,85 @@ async fn workforce_and_inventory_audits_are_tenant_isolated() {
     assert!(!repo::employees::update_employee(
         &fixture.db,
         tenant_b,
+        &unrestricted_sites,
         employee_a,
-        Some("Cross tenant"),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        &repo::employees::EmployeeChanges {
+            first_name: Some("Cross tenant"),
+            last_name: None,
+            title: None,
+            employee_type: None,
+            email: None,
+            phone: None,
+            terminated: None,
+            facility_ids: None,
+        },
     )
     .await
     .unwrap());
-    assert!(
-        !repo::employees::set_employee_deleted(&fixture.db, tenant_b, employee_a, true)
-            .await
-            .unwrap()
-    );
-
-    let audit_a =
-        repo::audits::add_audit_wave(&fixture.db, tenant_a, operator.id, "Tenant A count", None)
-            .await
-            .unwrap();
-    let audit_b =
-        repo::audits::add_audit_wave(&fixture.db, tenant_b, operator.id, "Tenant B count", None)
-            .await
-            .unwrap();
-    assert!(!repo::audits::update_audit_wave(
+    assert!(!repo::employees::set_employee_deleted(
         &fixture.db,
         tenant_b,
+        &unrestricted_sites,
+        employee_a,
+        true,
+    )
+    .await
+    .unwrap());
+
+    let owner_a = fixture.inventory_owner(tenant_a, "Count Owner A").await;
+    let facility_a = fixture.facility(tenant_a, "Count Facility A").await;
+    let owner_b = fixture.inventory_owner(tenant_b, "Count Owner B").await;
+    let facility_b = fixture.facility(tenant_b, "Count Facility B").await;
+    for (tenant_id, owner_id, facility_id) in [
+        (tenant_a, owner_a, facility_a),
+        (tenant_b, owner_b, facility_b),
+    ] {
+        sqlx::query(
+            "INSERT INTO inventory_owner_facilities (tenant_id, created, inventory_owner_id, facility_id) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(tenant_id.get())
+        .bind(db::now_iso())
+        .bind(owner_id)
+        .bind(facility_id)
+        .execute(&fixture.db)
+        .await
+        .unwrap();
+    }
+    let access_a = repo::tenants::access_for_user(&fixture.db, operator.id, tenant_a)
+        .await
+        .unwrap()
+        .unwrap();
+    let access_b = repo::tenants::access_for_user(&fixture.db, operator.id, tenant_b)
+        .await
+        .unwrap()
+        .unwrap();
+    let audit_a = repo::audits::add_audit_wave(
+        &fixture.db,
+        &access_a,
+        operator.id,
+        facility_a,
+        owner_a,
+        "Tenant A count",
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let audit_b = repo::audits::add_audit_wave(
+        &fixture.db,
+        &access_b,
+        operator.id,
+        facility_b,
+        owner_b,
+        "Tenant B count",
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!repo::audits::update_audit_wave(
+        &fixture.db,
+        &access_b,
         audit_a,
         Some("Cross tenant"),
         None,
@@ -116,8 +182,6 @@ async fn workforce_and_inventory_audits_are_tenant_isolated() {
     .await
     .unwrap());
 
-    let owner_a = fixture.inventory_owner(tenant_a, "Count Owner A").await;
-    let facility_a = fixture.facility(tenant_a, "Count Facility A").await;
     let location_a = fixture.location(tenant_a, facility_a, "COUNT-A").await;
     let item_a = fixture.item(tenant_a, "Count Item A", "each").await;
     sqlx::query(
@@ -133,40 +197,43 @@ async fn workforce_and_inventory_audits_are_tenant_isolated() {
     sqlx::query(
         r#"
         INSERT INTO audit_location_counts (
-            tenant_id, created, audit_id, inventory_owner_id, location_id, item_id,
-            on_hand, count, approval_status
+            tenant_id, created, audit_id, inventory_owner_id, facility_id, location_id, item_id,
+            uom, on_hand, count, approval_status
         )
-        VALUES ($1, $2, $3, $4, $5, $6, 7, 6, 'pending')
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'each', 7, 6, 'pending')
         "#,
     )
     .bind(tenant_a.get())
     .bind(db::now_iso())
     .bind(audit_a)
     .bind(owner_a)
+    .bind(facility_a)
     .bind(location_a)
     .bind(item_a)
     .execute(&fixture.db)
     .await
     .unwrap();
-    let counts = repo::audits::get_location_counts(&fixture.db, tenant_a, audit_a)
+    let counts = repo::audits::get_location_counts(&fixture.db, &access_a, audit_a)
         .await
         .unwrap();
     assert_eq!(counts.len(), 1);
     assert_eq!(counts[0].tenant_id, tenant_a);
     assert_eq!(counts[0].inventory_owner_id, owner_a);
     assert!(
-        repo::audits::get_location_counts(&fixture.db, tenant_b, audit_a)
+        repo::audits::get_location_counts(&fixture.db, &access_b, audit_a)
             .await
             .unwrap()
             .is_empty()
     );
     assert!(sqlx::query(
-        "INSERT INTO audit_wave_items (tenant_id, created, item_id, audit_wave_id) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO audit_wave_items (tenant_id, created, item_id, audit_wave_id, inventory_owner_id, facility_id) VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(tenant_b.get())
     .bind(db::now_iso())
     .bind(item_a)
     .bind(audit_b)
+    .bind(owner_b)
+    .bind(facility_b)
     .execute(&fixture.db)
     .await
     .is_err());

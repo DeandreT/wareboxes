@@ -172,6 +172,68 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     .unwrap();
     assert_eq!(cycle_a, cycle_b);
 
+    let second_owner = repo::inventory_owners::add_inventory_owner(
+        &db,
+        tenant_id,
+        "Second Task Inventory Owner",
+        "task-owner-two@test.com",
+    )
+    .await
+    .unwrap();
+    let second_batch = repo::inventory::add_item_batch(
+        &db,
+        tenant_id,
+        second_owner,
+        master_item,
+        None,
+        Some("LOT-TASK-TWO"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo::inventory::receive_inventory(
+        &db,
+        tenant_id,
+        user.id,
+        second_batch,
+        freezer,
+        5,
+        None,
+        None,
+        Some("second owner task setup"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let second_balance = repo::inventory::get_balances(&db, tenant_id, false)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|balance| balance.item_batch_id == second_batch && balance.location_id == freezer)
+        .unwrap();
+    let second_owner_cycle = repo::tasks::create_item_location_cycle_count_task(
+        &db,
+        tenant_id,
+        user.id,
+        freezer,
+        master_item,
+        Some("pick_not_found"),
+        None,
+        None,
+        Some(second_balance.id),
+        Some("same location and item, different owner"),
+    )
+    .await
+    .unwrap();
+    assert_ne!(cycle_a, second_owner_cycle);
+    assert!(
+        repo::tasks::cancel_task(&db, tenant_id, second_owner_cycle, user.id)
+            .await
+            .unwrap()
+    );
+
     let err = repo::tasks::create_break_master_pack_task(
         &db,
         tenant_id,
@@ -348,7 +410,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
 }
 
 #[tokio::test]
-async fn cancelling_order_creates_unpack_task() {
+async fn cancelled_order_unpack_task_is_facility_scoped_and_deduplicated() {
     let fixture = Fixture::new().await;
     let db = &fixture.db;
 
@@ -357,6 +419,17 @@ async fn cancelling_order_creates_unpack_task() {
     let inventory_owner = fixture
         .inventory_owner(tenant_id, "Cancel Task InventoryOwner")
         .await;
+    let facility = fixture.facility(tenant_id, "Cancel Task Facility").await;
+    sqlx::query(
+        "INSERT INTO inventory_owner_facilities (tenant_id, created, inventory_owner_id, facility_id) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(tenant_id.get())
+    .bind(db::now_iso())
+    .bind(inventory_owner)
+    .bind(facility)
+    .execute(db)
+    .await
+    .unwrap();
     let item = fixture
         .item(tenant_id, "Cancelled Order Item", "each")
         .await;
@@ -364,31 +437,35 @@ async fn cancelling_order_creates_unpack_task() {
         .order(tenant_id, "CANCEL-TASK-1", inventory_owner)
         .await;
     let order_item_id = fixture.order_item(order_id, item, 3).await;
-    let update = OrderUpdate {
+    let access = repo::tenants::access_for_user(db, user.id, tenant_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let unpack_task =
+        repo::orders::cancel_order_with_unpack_task(db, &access, user.id, order_id, facility)
+            .await
+            .unwrap()
+            .unwrap();
+    let duplicate = repo::tasks::create_unpack_cancelled_order_task(
+        db,
+        tenant_id,
+        Some(user.id),
         order_id,
-        order_key: None,
-        rush: None,
-        status: Some(OrderStatus::Cancelled),
-        confirmed: None,
-        closed: None,
-        ship_by: None,
-        wave_id: None,
-        line1: None,
-        line2: None,
-        city: None,
-        state: None,
-        postal_code: None,
-        country: None,
-    };
-    assert!(
-        repo::orders::update_order_by_user(db, tenant_id, &update, user.id)
+        facility,
+        None,
+        None,
+        None,
+        None,
+        Some("Unpack cancelled order retry".to_owned()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(duplicate, unpack_task);
+    assert_eq!(
+        repo::orders::cancel_order_with_unpack_task(db, &access, user.id, order_id, facility,)
             .await
-            .unwrap()
-    );
-    assert!(
-        repo::orders::update_order_by_user(db, tenant_id, &update, user.id)
-            .await
-            .unwrap()
+            .unwrap(),
+        Some(unpack_task)
     );
 
     let tasks = repo::tasks::get_tasks(
@@ -406,7 +483,12 @@ async fn cancelling_order_creates_unpack_task() {
     .await
     .unwrap();
     assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].facility_id, Some(facility));
+    assert_eq!(tasks[0].inventory_owner_id, Some(inventory_owner));
     assert_eq!(tasks[0].created_by, Some(user.id));
+    assert!(!repo::orders::delete_order(db, tenant_id, order_id)
+        .await
+        .unwrap());
     let line: (i64, i64, i64, String) = sqlx::query_as(
         "SELECT id, order_item_id, expected_qty, status FROM unpack_cancelled_order_task_lines WHERE task_id = $1",
     )
@@ -467,6 +549,22 @@ async fn cancelling_order_creates_unpack_task() {
             .await
             .unwrap()
     );
+    assert!(matches!(
+        repo::tasks::create_unpack_cancelled_order_task(
+            db,
+            tenant_id,
+            Some(user.id),
+            order_id,
+            facility,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await,
+        Err(AppError::Core(CoreError::Conflict(_)))
+    ));
 }
 
 #[tokio::test]

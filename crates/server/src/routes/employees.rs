@@ -20,7 +20,13 @@ pub async fn list(
 ) -> AppResult<Json<Vec<Employee>>> {
     user.require_permission(&state.db, PERM).await?;
     Ok(Json(
-        repo::employees::get_employees(&state.db, user.tenant.tenant_id, q.show_deleted).await?,
+        repo::employees::get_employees_in_scope(
+            &state.db,
+            user.tenant.tenant_id,
+            &user.tenant.site_scope,
+            q.show_deleted,
+        )
+        .await?,
     ))
 }
 
@@ -31,17 +37,24 @@ pub async fn add(
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    for facility_id in &body.facility_ids {
+        user.require_facility(*facility_id)?;
+    }
     let hired = body.hired.unwrap_or_else(now_iso);
     let id = repo::employees::add_employee(
         &state.db,
         user.tenant.tenant_id,
-        &body.first_name,
-        &body.last_name,
-        &body.title,
-        &body.r#type,
-        body.email.as_deref(),
-        body.phone.as_deref(),
-        hired,
+        &user.tenant.site_scope,
+        &repo::employees::NewEmployee {
+            first_name: &body.first_name,
+            last_name: &body.last_name,
+            title: &body.title,
+            employee_type: &body.r#type,
+            email: body.email.as_deref(),
+            phone: body.phone.as_deref(),
+            hired,
+            facility_ids: &body.facility_ids,
+        },
     )
     .await?;
     Ok(Json(id))
@@ -54,17 +67,26 @@ pub async fn update(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    if let Some(facility_ids) = &body.facility_ids {
+        for facility_id in facility_ids {
+            user.require_facility(*facility_id)?;
+        }
+    }
     let ok = repo::employees::update_employee(
         &state.db,
         user.tenant.tenant_id,
+        &user.tenant.site_scope,
         body.employee_id,
-        body.first_name.as_deref(),
-        body.last_name.as_deref(),
-        body.title.as_deref(),
-        body.r#type.as_deref(),
-        body.email.as_deref(),
-        body.phone.as_deref(),
-        body.terminated,
+        &repo::employees::EmployeeChanges {
+            first_name: body.first_name.as_deref(),
+            last_name: body.last_name.as_deref(),
+            title: body.title.as_deref(),
+            employee_type: body.r#type.as_deref(),
+            email: body.email.as_deref(),
+            phone: body.phone.as_deref(),
+            terminated: body.terminated,
+            facility_ids: body.facility_ids.as_deref(),
+        },
     )
     .await?;
     Ok(Json(ok))
@@ -81,6 +103,7 @@ pub async fn delete(
         repo::employees::set_employee_deleted(
             &state.db,
             user.tenant.tenant_id,
+            &user.tenant.site_scope,
             body.employee_id,
             true,
         )
@@ -99,6 +122,7 @@ pub async fn restore(
         repo::employees::set_employee_deleted(
             &state.db,
             user.tenant.tenant_id,
+            &user.tenant.site_scope,
             body.employee_id,
             false,
         )
