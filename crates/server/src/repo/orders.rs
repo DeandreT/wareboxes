@@ -12,7 +12,7 @@ use wareboxes_core::models::{
 };
 use wareboxes_domain::{CommandContext, InventoryOwnerId, TenantId};
 
-use crate::db::{now_iso, Db};
+use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 use crate::repo::idempotency::{require_command_context, PreparedCommand};
@@ -425,6 +425,8 @@ async fn activity_for_order(
     tenant_id: TenantId,
     order_id: i64,
 ) -> AppResult<Vec<OrderActivity>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, deleted, order_id, action
@@ -437,9 +439,14 @@ async fn activity_for_order(
     )
     .bind(tenant_id.get())
     .bind(order_id)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.iter().map(map_order_activity).collect()
+    let activity = rows
+        .iter()
+        .map(map_order_activity)
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(activity)
 }
 
 pub async fn get_orders(db: &Db, tenant_id: TenantId) -> AppResult<Vec<Order>> {
@@ -1053,6 +1060,7 @@ async fn insert_order_activity_tx(
     order_id: i64,
     action: &str,
 ) -> AppResult<i64> {
+    bind_tenant_context(tx, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO order_activity

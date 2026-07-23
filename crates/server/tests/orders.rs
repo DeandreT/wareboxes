@@ -336,6 +336,7 @@ async fn concurrent_order_delete_and_restore_have_single_winners() {
     );
     assert_ne!(first.unwrap(), second.unwrap());
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let actions: Vec<String> = sqlx::query_scalar(
         r#"
         SELECT action
@@ -346,9 +347,10 @@ async fn concurrent_order_delete_and_restore_have_single_winners() {
     )
     .bind(tenant_id.get())
     .bind(order_id)
-    .fetch_all(&fixture.db)
+    .fetch_all(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(
         actions,
         vec!["created order", "deleted order", "restored order"]

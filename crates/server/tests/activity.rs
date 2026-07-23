@@ -48,13 +48,15 @@ async fn order_and_load_mutations_write_activity_history() {
         .await
         .unwrap());
 
+    let mut tx = tenant_tx(&db, tenant_id).await;
     let order_actions = sqlx::query_scalar::<_, String>(
         "SELECT action FROM order_activity WHERE order_id = $1 ORDER BY id",
     )
     .bind(order_id)
-    .fetch_all(&db)
+    .fetch_all(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(
         order_actions,
         vec![
@@ -124,13 +126,15 @@ async fn order_and_load_mutations_write_activity_history() {
             .unwrap()
     );
 
+    let mut tx = tenant_tx(&db, tenant_id).await;
     let load_actions = sqlx::query_scalar::<_, String>(
         "SELECT action FROM load_activity WHERE load_id = $1 ORDER BY id",
     )
     .bind(load_id)
-    .fetch_all(&db)
+    .fetch_all(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(
         load_actions,
         vec![

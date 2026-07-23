@@ -11,7 +11,7 @@ use wareboxes_core::models::{
 };
 use wareboxes_domain::TenantId;
 
-use crate::db::{now_iso, Db};
+use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::ScopeBindings;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
@@ -228,17 +228,20 @@ pub async fn get_loads(
 
     let mut orders = orders::orders_by_load(db, tenant_id).await?;
 
+    let mut activity_tx = db.begin().await?;
+    bind_tenant_context(&mut activity_tx, tenant_id).await?;
     let activity_rows = sqlx::query(
         "SELECT id, tenant_id, created, deleted, load_id, user_id, action, message, metadata_json FROM load_activity WHERE tenant_id = $1 AND deleted IS NULL ORDER BY id",
     )
     .bind(tenant_id.get())
-    .fetch_all(db)
+    .fetch_all(&mut *activity_tx)
     .await?;
     let mut activity: HashMap<i64, Vec<LoadActivity>> = HashMap::new();
     for r in &activity_rows {
         let event = map_activity(r)?;
         activity.entry(event.load_id).or_default().push(event);
     }
+    activity_tx.commit().await?;
 
     rows.iter()
         .map(|r| {
@@ -463,16 +466,19 @@ async fn get_load_with_scope(
 
     load.orders = orders::orders_for_load(db, tenant_id, load_id).await?;
 
+    let mut activity_tx = db.begin().await?;
+    bind_tenant_context(&mut activity_tx, tenant_id).await?;
     let activity_rows = sqlx::query(
         "SELECT id, tenant_id, created, deleted, load_id, user_id, action, message, metadata_json FROM load_activity WHERE tenant_id = $1 AND load_id = $2 AND deleted IS NULL ORDER BY id",
     )
     .bind(tenant_id.get())
     .bind(load_id)
-    .fetch_all(db)
+    .fetch_all(&mut *activity_tx)
     .await?;
     for r in &activity_rows {
         load.activity.push(map_activity(r)?);
     }
+    activity_tx.commit().await?;
 
     Ok(Some(load))
 }
@@ -1311,6 +1317,7 @@ async fn insert_activity_tx(
     message: Option<&str>,
     metadata_json: Option<&str>,
 ) -> AppResult<i64> {
+    bind_tenant_context(tx, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO load_activity (tenant_id, created, load_id, user_id, action, message, metadata_json) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
