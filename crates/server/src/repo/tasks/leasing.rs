@@ -1,7 +1,7 @@
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{CommandContext, TenantId};
 
-use crate::db::{now_iso, Db};
+use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::AppResult;
 use crate::repo::access::{current_scope_tx, lock_current_scope_tx, lock_user_tx};
 use crate::repo::idempotency::PreparedCommand;
@@ -34,6 +34,7 @@ async fn assign_task_with_scope(
         })
         .transpose()?;
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let mut lock_user_ids = vec![assigned_user_id];
     if let Some(scope_user_id) = scope_user_id {
         lock_user_ids.push(scope_user_id);
@@ -175,6 +176,7 @@ pub(super) async fn release_expired_tasks_with_scope(
         .map(|command| PreparedCommand::new(command, "task.release_expired.v1", &()))
         .transpose()?;
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let current_scope = match scope_user_id {
         Some(scope_user_id) => {
             Some(lock_current_scope_tx(&mut tx, tenant_id, scope_user_id).await?)
@@ -205,6 +207,7 @@ pub(super) async fn release_expired_tasks_tx(
     assigned_user_id: Option<i64>,
     scope: &ScopeBindings,
 ) -> AppResult<Vec<i64>> {
+    bind_tenant_context(tx, tenant_id).await?;
     let now = now_iso();
     let task_ids = sqlx::query_scalar::<_, i64>(
         r#"
@@ -252,6 +255,7 @@ pub(super) async fn release_inaccessible_active_tasks_tx(
     user_id: i64,
     scope: &ScopeBindings,
 ) -> AppResult<()> {
+    bind_tenant_context(tx, tenant_id).await?;
     let now = now_iso();
     let task_ids = sqlx::query_scalar::<_, i64>(
         r#"

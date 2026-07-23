@@ -4,7 +4,7 @@ use wareboxes_core::models::{
 };
 use wareboxes_domain::TenantId;
 
-use crate::db::Db;
+use crate::db::{bind_tenant_context, Db};
 use crate::error::{AppError, AppResult};
 
 use super::execution::task_is_accessible;
@@ -143,6 +143,8 @@ async fn get_tasks_with_scope(
         "#
     );
 
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(&sql)
         .bind(tenant_id.get())
         .bind(filters.show_deleted)
@@ -159,9 +161,11 @@ async fn get_tasks_with_scope(
         .bind(&scope.facility_ids)
         .bind(scope.all_inventory_owners)
         .bind(&scope.inventory_owner_ids)
-        .fetch_all(db)
+        .fetch_all(&mut *tx)
         .await?;
-    rows.iter().map(map_task).collect()
+    let tasks = rows.iter().map(map_task).collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(tasks)
 }
 
 pub async fn get_unpack_cancelled_order_task_lines(

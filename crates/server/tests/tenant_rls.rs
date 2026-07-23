@@ -163,6 +163,8 @@ async fn command_records_require_a_transaction_local_tenant_context() {
     for (table_name, policy_name) in [
         ("order_activity", "order_activity_tenant_isolation"),
         ("load_activity", "load_activity_tenant_isolation"),
+        ("work_tasks", "work_tasks_tenant_isolation"),
+        ("work_task_progress", "work_task_progress_tenant_isolation"),
     ] {
         sqlx::query(&format!(
             "ALTER POLICY {policy_name} ON {table_name} \

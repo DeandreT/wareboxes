@@ -2,7 +2,7 @@ use sqlx::Row;
 use wareboxes_core::models::{TenantAccess, WorkTask, WorkTaskProgressAction, WorkTaskType};
 use wareboxes_domain::{CommandContext, TenantId};
 
-use crate::db::{now_iso, Db};
+use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::permissions;
 use crate::repo::idempotency::PreparedCommand;
@@ -73,6 +73,7 @@ async fn start_next_task_with_scope(
     }
 
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let current_scope = match scope_user_id {
         Some(scope_user_id) => {
             Some(lock_current_scope_tx(&mut tx, tenant_id, scope_user_id).await?)
@@ -201,6 +202,7 @@ async fn require_current_task_replay_tx(
     task_id: i64,
     scope: &ScopeBindings,
 ) -> AppResult<()> {
+    bind_tenant_context(tx, tenant_id).await?;
     let row = sqlx::query(
         r#"
         SELECT facility_id, inventory_owner_id, assigned_user_id, status,
@@ -289,6 +291,7 @@ async fn start_task_with_scope(
         .transpose()?;
     let now = now_iso();
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let current_scope = match scope_user_id {
         Some(scope_user_id) => {
             let Some(scope) =
@@ -400,6 +403,7 @@ async fn lock_task_in_current_scope_tx(
     scope_user_id: i64,
     task_id: i64,
 ) -> AppResult<Option<ScopeBindings>> {
+    bind_tenant_context(tx, tenant_id).await?;
     let scope = lock_current_scope_tx(tx, tenant_id, scope_user_id).await?;
     let row = sqlx::query(
         r#"
@@ -431,6 +435,7 @@ async fn progress_locations_match_task_tx(
     from_location_id: Option<i64>,
     to_location_id: Option<i64>,
 ) -> AppResult<bool> {
+    bind_tenant_context(tx, tenant_id).await?;
     let mut location_ids = [from_location_id, to_location_id]
         .into_iter()
         .flatten()
@@ -532,6 +537,7 @@ async fn record_task_progress_with_scope(
         })
         .transpose()?;
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     if let Some(scope_user_id) = scope_user_id {
         let Some(scope) =
             lock_task_in_current_scope_tx(&mut tx, tenant_id, scope_user_id, task_id).await?
@@ -634,6 +640,7 @@ async fn record_task_progress_tx(
     to_location_id: Option<i64>,
     note: Option<&str>,
 ) -> AppResult<bool> {
+    bind_tenant_context(tx, tenant_id).await?;
     let task_type = task_type_tx(tx, tenant_id, task_id).await?;
     let updated = match task_type {
         WorkTaskType::BreakMasterPack => {
@@ -767,6 +774,7 @@ async fn complete_task_with_scope(
         .map(|command| PreparedCommand::new(command, "task.complete.v1", &(task_id, qty_completed)))
         .transpose()?;
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     if let Some(scope_user_id) = scope_user_id {
         if lock_task_in_current_scope_tx(&mut tx, tenant_id, scope_user_id, task_id)
             .await?
@@ -929,6 +937,7 @@ async fn abort_task_with_scope(
         .map(|command| PreparedCommand::new(command, "task.abort.v1", &task_id))
         .transpose()?;
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     if let Some(scope_user_id) = scope_user_id {
         if lock_task_in_current_scope_tx(&mut tx, tenant_id, scope_user_id, task_id)
             .await?
@@ -1035,6 +1044,7 @@ async fn cancel_task_with_scope(
         .map(|command| PreparedCommand::new(command, "task.cancel.v1", &task_id))
         .transpose()?;
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     if let Some(scope_user_id) = scope_user_id {
         if lock_task_in_current_scope_tx(&mut tx, tenant_id, scope_user_id, task_id)
             .await?
@@ -1121,6 +1131,7 @@ async fn task_type_tx(
     tenant_id: TenantId,
     task_id: i64,
 ) -> AppResult<WorkTaskType> {
+    bind_tenant_context(tx, tenant_id).await?;
     let value: String = sqlx::query_scalar(
         "SELECT task_type FROM work_tasks WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
     )
@@ -1147,6 +1158,7 @@ pub(super) async fn insert_progress_tx(
     note: Option<&str>,
     metadata_json: Option<&str>,
 ) -> AppResult<i64> {
+    bind_tenant_context(tx, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO work_task_progress (
@@ -1182,7 +1194,9 @@ pub(super) async fn task_is_accessible(
     task_id: i64,
 ) -> AppResult<bool> {
     let scope = ScopeBindings::for_access(access);
-    sqlx::query_scalar(
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    let accessible = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
             SELECT 1
@@ -1201,9 +1215,10 @@ pub(super) async fn task_is_accessible(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_one(db)
-    .await
-    .map_err(AppError::from)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(accessible)
 }
 
 pub(super) async fn task_assignment_requirements_tx(
@@ -1211,6 +1226,7 @@ pub(super) async fn task_assignment_requirements_tx(
     tenant_id: TenantId,
     task_id: i64,
 ) -> AppResult<Option<(TaskDimensions, String)>> {
+    bind_tenant_context(tx, tenant_id).await?;
     let row = sqlx::query(
         "SELECT facility_id, inventory_owner_id, required_permission FROM work_tasks WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
     )
