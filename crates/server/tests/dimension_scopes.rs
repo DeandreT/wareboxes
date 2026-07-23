@@ -114,6 +114,7 @@ async fn dimensions_are_tenant_scoped_and_item_creation_is_atomic() {
         .fetch_one(&fixture.db)
         .await
         .unwrap();
+    let admin_db = admin_db_for(&fixture.db).await;
     sqlx::query(
         r#"
         CREATE FUNCTION reject_dimension_test_item() RETURNS trigger AS $$
@@ -126,7 +127,7 @@ async fn dimensions_are_tenant_scoped_and_item_creation_is_atomic() {
         $$ LANGUAGE plpgsql;
         "#,
     )
-    .execute(&fixture.db)
+    .execute(&admin_db)
     .await
     .unwrap();
     sqlx::query(
@@ -136,9 +137,10 @@ async fn dimensions_are_tenant_scoped_and_item_creation_is_atomic() {
             FOR EACH ROW EXECUTE FUNCTION reject_dimension_test_item()
         "#,
     )
-    .execute(&fixture.db)
+    .execute(&admin_db)
     .await
     .unwrap();
+    admin_db.close().await;
     assert!(repo::items::add_item(
         &fixture.db,
         tenant_a,

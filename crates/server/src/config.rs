@@ -22,8 +22,10 @@ impl Default for SecurityConfig {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// `postgres://...` / `postgresql://...`.
+    /// Restricted application-role connection used for runtime requests.
     pub database_url: String,
+    /// Schema-owner connection used only for migrations and bootstrap provisioning.
+    pub migration_database_url: String,
     pub bind_addr: String,
     /// Optional bootstrap admin created on first startup if the users table is empty.
     pub bootstrap_admin_email: Option<String>,
@@ -34,7 +36,10 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://wareboxes:wareboxes@127.0.0.1:5433/wareboxes".to_string()
+            "postgres://wareboxes_app:wareboxes_app@127.0.0.1:5433/wareboxes".to_string()
+        });
+        let migration_database_url = env::var("MIGRATION_DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://wareboxes_admin:wareboxes_admin@127.0.0.1:5433/wareboxes".to_string()
         });
         let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
         let allow_public_registration = parse_bool_env("ALLOW_PUBLIC_REGISTRATION", false)?;
@@ -58,6 +63,7 @@ impl Config {
 
         Ok(Self {
             database_url,
+            migration_database_url,
             bind_addr,
             bootstrap_admin_email: env::var("BOOTSTRAP_ADMIN_EMAIL").ok(),
             bootstrap_admin_password: env::var("BOOTSTRAP_ADMIN_PASSWORD").ok(),

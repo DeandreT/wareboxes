@@ -34,19 +34,20 @@ printf '%s\n' "$deploy_public_key" > /home/deploy/.ssh/authorized_keys
 chown deploy:deploy /home/deploy/.ssh/authorized_keys
 chmod 0600 /home/deploy/.ssh/authorized_keys
 
-install -d -m 0755 /etc/wareboxes /opt/wareboxes/runtime /opt/wareboxes/releases
+install -d -m 0755 /etc/wareboxes /opt/wareboxes/runtime /opt/wareboxes/runtime/postgres-init /opt/wareboxes/releases
 install -d -m 0750 -o deploy -g deploy /var/lib/wareboxes/uploads
 install -d -m 0755 /opt/wareboxes/bootstrap/site
 
-if [ ! -f /etc/wareboxes/postgres_password ]; then
-  openssl rand -hex 32 > /etc/wareboxes/postgres_password
+if [ ! -f /etc/wareboxes/postgres_admin_password ]; then
+  openssl rand -hex 32 > /etc/wareboxes/postgres_admin_password
 fi
-chmod 0600 /etc/wareboxes/postgres_password
+if [ ! -f /etc/wareboxes/postgres_app_password ]; then
+  openssl rand -hex 32 > /etc/wareboxes/postgres_app_password
+fi
+chmod 0600 /etc/wareboxes/postgres_admin_password /etc/wareboxes/postgres_app_password
 
 if [ ! -f /etc/wareboxes/wareboxes.env ]; then
-  database_password="$(cat /etc/wareboxes/postgres_password)"
   cat > /etc/wareboxes/wareboxes.env <<EOF
-DATABASE_URL=postgres://wareboxes:${database_password}@127.0.0.1:5432/wareboxes
 BIND_ADDR=127.0.0.1:8080
 ALLOW_PUBLIC_REGISTRATION=false
 CORS_ALLOWED_ORIGINS=
@@ -54,6 +55,44 @@ MAX_REQUEST_BODY_BYTES=1048576
 RUST_LOG=info,wareboxes_server=info
 EOF
 fi
+
+set_env_value() {
+  local key="$1"
+  local value="$2"
+  local env_file="$3"
+  local replacement
+
+  replacement="$(mktemp)"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { found = 0 }
+    index($0, key "=") == 1 {
+      if (!found) {
+        print key "=" value
+        found = 1
+      }
+      next
+    }
+    { print }
+    END {
+      if (!found) {
+        print key "=" value
+      }
+    }
+  ' "$env_file" > "$replacement"
+  install -m 0640 "$replacement" "$env_file"
+  rm -f "$replacement"
+}
+
+database_admin_password="$(cat /etc/wareboxes/postgres_admin_password)"
+database_app_password="$(cat /etc/wareboxes/postgres_app_password)"
+set_env_value \
+  DATABASE_URL \
+  "postgres://wareboxes_app:${database_app_password}@127.0.0.1:5432/wareboxes" \
+  /etc/wareboxes/wareboxes.env
+set_env_value \
+  MIGRATION_DATABASE_URL \
+  "postgres://wareboxes_admin:${database_admin_password}@127.0.0.1:5432/wareboxes" \
+  /etc/wareboxes/wareboxes.env
 chown root:wareboxes /etc/wareboxes/wareboxes.env
 chmod 0640 /etc/wareboxes/wareboxes.env
 
@@ -62,6 +101,7 @@ chmod 0644 /etc/wareboxes/caddy.env
 
 install -m 0644 "$script_dir/Caddyfile" /etc/caddy/Caddyfile
 install -m 0644 "$script_dir/postgres.compose.yml" /opt/wareboxes/runtime/postgres.compose.yml
+install -m 0755 "$script_dir/postgres-init/001-create-app-role.sh" /opt/wareboxes/runtime/postgres-init/001-create-app-role.sh
 install -m 0644 "$script_dir/wareboxes.service" /etc/systemd/system/wareboxes.service
 install -m 0755 "$script_dir/wareboxes-deploy" /usr/local/sbin/wareboxes-deploy
 

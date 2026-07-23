@@ -13,7 +13,8 @@ Usage:
 
 The target database must contain at least one active tenant. The script uses the
 oldest active tenant and is replay-safe: existing WB-SEED-INV-* commands are left
-unchanged. Set DATABASE_URL to use local psql; otherwise Docker Compose is used.
+unchanged. Set MIGRATION_DATABASE_URL to use local psql; otherwise Docker Compose
+is used.
 USAGE
 }
 
@@ -37,16 +38,16 @@ if ! [[ "$count" =~ ^[0-9]+$ ]] || [ "$count" -lt 1 ]; then
 fi
 
 run_psql() {
-  if [ -n "${DATABASE_URL:-}" ] && command -v psql >/dev/null 2>&1; then
-    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -v inventory_count="$count"
+  if [ -n "${MIGRATION_DATABASE_URL:-}" ] && command -v psql >/dev/null 2>&1; then
+    psql "$MIGRATION_DATABASE_URL" -v ON_ERROR_STOP=1 -v inventory_count="$count"
     return
   fi
 
   if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-    echo "DATABASE_URL+psql or an available Docker daemon is required." >&2
+    echo "MIGRATION_DATABASE_URL+psql or an available Docker daemon is required." >&2
     exit 1
   fi
-  docker compose exec -T postgres psql -U wareboxes -d wareboxes \
+  docker compose exec -T postgres psql -U wareboxes_admin -d wareboxes \
     -v ON_ERROR_STOP=1 -v inventory_count="$count"
 }
 

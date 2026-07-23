@@ -111,6 +111,7 @@ async fn order_cancellation_commands_are_replay_safe() {
         response_json::<ErrorResponse>(missing_key).await.code,
         ErrorCode::IdempotencyKeyRequired
     );
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let untouched: (String, i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT orders.status,
@@ -128,9 +129,10 @@ async fn order_cancellation_commands_are_replay_safe() {
     )
     .bind(tenant_id.get())
     .bind(order)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(untouched, ("open".to_owned(), 0, 0, 0));
 
     let first = send(
@@ -153,6 +155,7 @@ async fn order_cancellation_commands_are_replay_safe() {
     let task_id = response_json::<i64>(first).await;
     assert_eq!(response_json::<i64>(replay).await, task_id);
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let state: (String, i64, i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT orders.status,
@@ -177,9 +180,10 @@ async fn order_cancellation_commands_are_replay_safe() {
     .bind(tenant_id.get())
     .bind(order)
     .bind(task_id)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(state, ("cancelled".to_owned(), 1, 1, 1, 1));
 
     let changed_payload = send(
@@ -244,6 +248,7 @@ async fn order_cancellation_commands_are_replay_safe() {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response_json::<i64>(response).await, task_id);
     }
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let effects: (i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT
@@ -257,9 +262,10 @@ async fn order_cancellation_commands_are_replay_safe() {
     )
     .bind(tenant_id.get())
     .bind(order)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(effects, (1, 1, 3));
 
     let direct_task = app
@@ -279,13 +285,15 @@ async fn order_cancellation_commands_are_replay_safe() {
         .unwrap();
     assert_eq!(direct_task.status(), StatusCode::OK);
     assert_eq!(response_json::<i64>(direct_task).await, task_id);
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let direct_task_command: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM command_idempotency_records WHERE tenant_id = $1 AND operation = 'task.create_unpack_cancelled_order.v1' AND idempotency_key = 'cancel-order-1'",
     )
     .bind(tenant_id.get())
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(direct_task_command, 1);
 
     repo::tenants::update_user_access_scope(
@@ -376,6 +384,7 @@ async fn failed_unpack_work_rolls_back_order_cancellation_command() {
         response_json::<ErrorResponse>(failed).await.code,
         ErrorCode::Conflict
     );
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let rolled_back: (String, i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT orders.status,
@@ -395,9 +404,10 @@ async fn failed_unpack_work_rolls_back_order_cancellation_command() {
     )
     .bind(tenant_id.get())
     .bind(order)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(rolled_back, ("open".to_owned(), 0, 0, 0));
 
     sqlx::query("UPDATE items SET deleted = NULL WHERE tenant_id = $1 AND id = $2")
@@ -409,6 +419,7 @@ async fn failed_unpack_work_rolls_back_order_cancellation_command() {
     let retry = send(&app, &token, tenant_id, Some("cancel-rollback-1"), body).await;
     assert_eq!(retry.status(), StatusCode::OK);
     response_json::<i64>(retry).await;
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let committed: (String, i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT orders.status,
@@ -428,8 +439,9 @@ async fn failed_unpack_work_rolls_back_order_cancellation_command() {
     )
     .bind(tenant_id.get())
     .bind(order)
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(committed, ("cancelled".to_owned(), 1, 1, 1));
 }

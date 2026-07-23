@@ -2,18 +2,20 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: wareboxes
-      POSTGRES_PASSWORD: wareboxes
+      POSTGRES_USER: wareboxes_admin
+      POSTGRES_PASSWORD: wareboxes_admin
       POSTGRES_DB: wareboxes
+      POSTGRES_APP_PASSWORD: wareboxes_app
     ports:
       - "5433:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wareboxes -d wareboxes"]
+      test: ["CMD-SHELL", "pg_isready -U wareboxes_admin -d wareboxes"]
       interval: 5s
       timeout: 5s
       retries: 10
     volumes:
       - wareboxes_pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres-init/001-create-app-role.sh:/docker-entrypoint-initdb.d/001-create-app-role.sh:ro
 
 volumes:
   wareboxes_pgdata:
