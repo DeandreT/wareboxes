@@ -31,7 +31,7 @@ struct RuntimeRole {
     has_database_temporary: bool,
     has_non_system_schema_create: bool,
     has_role_memberships: bool,
-    valid_tenant_policy_count: i64,
+    tenant_policy_contract_valid: bool,
     reconciliation_view_contract_valid: bool,
     preset_tenant_id: Option<String>,
     search_path: String,
@@ -249,7 +249,8 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                    WHERE membership.member = role.oid
                ) AS has_role_memberships,
                (
-                   SELECT COUNT(*)
+                   SELECT COUNT(*) > 0
+                      AND COUNT(*) = (SELECT COUNT(*) FROM expected_policy)
                    FROM expected_policy expected
                    JOIN pg_namespace policy_namespace
                      ON policy_namespace.nspname = 'public'
@@ -276,7 +277,7 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                            AND pg_get_expr(policy.polwithcheck, policy.polrelid) =
                                '(tenant_id = (NULLIF(current_setting(''wareboxes.tenant_id''::text, true), ''''::text))::bigint)'
                      )
-               ) AS valid_tenant_policy_count,
+               ) AS tenant_policy_contract_valid,
                EXISTS (
                    SELECT 1
                    FROM pg_class reconciliation_view
@@ -320,7 +321,7 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
         || role.has_database_temporary
         || role.has_non_system_schema_create
         || role.has_role_memberships
-        || role.valid_tenant_policy_count != 14
+        || !role.tenant_policy_contract_valid
         || !role.reconciliation_view_contract_valid
         || role.preset_tenant_id.is_some()
         || role.search_path != "pg_catalog, public"

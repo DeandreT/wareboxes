@@ -160,6 +160,30 @@ async fn command_records_require_a_transaction_local_tenant_context() {
     .unwrap();
     db::validate_runtime_role(&fixture.db).await.unwrap();
 
+    sqlx::query(
+        r#"
+        CREATE POLICY license_plates_unexpected_policy
+        ON license_plates
+        USING (
+            tenant_id =
+                NULLIF(current_setting('wareboxes.tenant_id', true), '')::BIGINT
+        )
+        WITH CHECK (
+            tenant_id =
+                NULLIF(current_setting('wareboxes.tenant_id', true), '')::BIGINT
+        )
+        "#,
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    assert!(db::validate_runtime_role(&fixture.db).await.is_err());
+    sqlx::query("DROP POLICY license_plates_unexpected_policy ON license_plates")
+        .execute(&admin_db)
+        .await
+        .unwrap();
+    db::validate_runtime_role(&fixture.db).await.unwrap();
+
     for (table_name, policy_name) in [
         ("order_activity", "order_activity_tenant_isolation"),
         ("load_activity", "load_activity_tenant_isolation"),
