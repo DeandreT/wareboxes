@@ -1,14 +1,15 @@
 use wareboxes_core::models::TenantAccess;
-use wareboxes_domain::TenantId;
+use wareboxes_domain::{CommandContext, TenantId};
 
 use crate::db::{now_iso, Db};
 use crate::error::AppResult;
 use crate::repo::access::{current_scope_tx, lock_current_scope_tx, lock_user_tx};
+use crate::repo::idempotency::PreparedCommand;
 
 use super::execution::{
     insert_progress_tx, task_assignment_requirements_tx, user_can_execute_task_tx,
 };
-use super::ScopeBindings;
+use super::{require_command_context, ScopeBindings};
 
 pub async fn assign_task(
     db: &Db,
@@ -16,7 +17,7 @@ pub async fn assign_task(
     task_id: i64,
     assigned_user_id: i64,
 ) -> AppResult<bool> {
-    assign_task_with_scope(db, tenant_id, task_id, assigned_user_id, None).await
+    assign_task_with_scope(db, tenant_id, task_id, assigned_user_id, None, None).await
 }
 
 async fn assign_task_with_scope(
@@ -25,7 +26,13 @@ async fn assign_task_with_scope(
     task_id: i64,
     assigned_user_id: i64,
     scope_user_id: Option<i64>,
+    command: Option<&CommandContext>,
 ) -> AppResult<bool> {
+    let prepared = command
+        .map(|command| {
+            PreparedCommand::new(command, "task.assign.v1", &(task_id, assigned_user_id))
+        })
+        .transpose()?;
     let mut tx = db.begin().await?;
     let mut lock_user_ids = vec![assigned_user_id];
     if let Some(scope_user_id) = scope_user_id {
@@ -50,6 +57,12 @@ async fn assign_task_with_scope(
         .is_some_and(|scope| !dimensions.is_allowed_by(scope))
     {
         return Ok(false);
+    }
+    if let Some(prepared) = prepared.as_ref() {
+        if let Some(assigned) = prepared.replayed::<bool>(&mut tx).await? {
+            tx.commit().await?;
+            return Ok(assigned);
+        }
     }
     if !user_can_execute_task_tx(
         &mut tx,
@@ -99,22 +112,33 @@ async fn assign_task_with_scope(
     .execute(&mut *tx)
     .await?;
     let assigned = res.rows_affected() > 0;
-    tx.commit().await?;
-    Ok(assigned)
+    if !assigned {
+        return Ok(false);
+    }
+    match prepared {
+        Some(prepared) => prepared.commit(tx, assigned).await,
+        None => {
+            tx.commit().await?;
+            Ok(assigned)
+        }
+    }
 }
 
 pub async fn assign_task_in_scope(
     db: &Db,
     access: &TenantAccess,
+    command: &CommandContext,
     task_id: i64,
     assigned_user_id: i64,
 ) -> AppResult<bool> {
+    require_command_context(access, command)?;
     assign_task_with_scope(
         db,
         access.tenant_id,
         task_id,
         assigned_user_id,
         Some(access.user_id.get()),
+        Some(command),
     )
     .await
 }
@@ -139,7 +163,6 @@ pub(super) async fn release_expired_tasks_with_scope(
     scope_user_id: Option<i64>,
     scope: &ScopeBindings,
 ) -> AppResult<u64> {
-    let now = now_iso();
     let mut tx = db.begin().await?;
     let current_scope = match scope_user_id {
         Some(scope_user_id) => {
@@ -148,6 +171,18 @@ pub(super) async fn release_expired_tasks_with_scope(
         None => None,
     };
     let scope = current_scope.as_ref().unwrap_or(scope);
+    let released = release_expired_tasks_tx(&mut tx, tenant_id, None, scope).await?;
+    tx.commit().await?;
+    Ok(released)
+}
+
+pub(super) async fn release_expired_tasks_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    assigned_user_id: Option<i64>,
+    scope: &ScopeBindings,
+) -> AppResult<u64> {
+    let now = now_iso();
     let task_ids = sqlx::query_scalar::<_, i64>(
         r#"
         UPDATE work_tasks
@@ -166,6 +201,7 @@ pub(super) async fn release_expired_tasks_with_scope(
           AND completed_at IS NULL
           AND ($3 OR facility_id = ANY($4))
           AND ($5 OR inventory_owner_id = ANY($6))
+          AND ($7::BIGINT IS NULL OR assigned_user_id = $7)
         RETURNING id
         "#,
     )
@@ -175,16 +211,16 @@ pub(super) async fn release_expired_tasks_with_scope(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(&mut *tx)
+    .bind(assigned_user_id)
+    .fetch_all(&mut **tx)
     .await?;
     let released = task_ids.len() as u64;
     for task_id in task_ids {
         insert_progress_tx(
-            &mut tx, tenant_id, task_id, None, None, "expired", None, None, None, None, None,
+            tx, tenant_id, task_id, None, None, "expired", None, None, None, None, None,
         )
         .await?;
     }
-    tx.commit().await?;
     Ok(released)
 }
 

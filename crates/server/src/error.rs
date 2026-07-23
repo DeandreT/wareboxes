@@ -38,6 +38,14 @@ impl AppError {
         Self::Core(CoreError::Conflict(message.into()))
     }
 
+    pub fn idempotency_key_reused() -> Self {
+        Self::Core(CoreError::IdempotencyKeyReused)
+    }
+
+    pub fn idempotency_key_required() -> Self {
+        Self::Core(CoreError::IdempotencyKeyRequired)
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Core(CoreError::Internal(message.into()))
     }
@@ -97,6 +105,18 @@ impl AppError {
                 StatusCode::CONFLICT,
                 ErrorCode::Conflict,
                 message,
+                Vec::new(),
+            ),
+            CoreError::IdempotencyKeyReused => (
+                StatusCode::CONFLICT,
+                ErrorCode::IdempotencyKeyReused,
+                "idempotency key was already used with a different request".into(),
+                Vec::new(),
+            ),
+            CoreError::IdempotencyKeyRequired => (
+                StatusCode::BAD_REQUEST,
+                ErrorCode::IdempotencyKeyRequired,
+                "idempotency key is required".into(),
                 Vec::new(),
             ),
             CoreError::BadRequest(message) => (

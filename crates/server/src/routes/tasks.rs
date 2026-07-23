@@ -13,6 +13,7 @@ use wareboxes_core::models::{
 use crate::auth::CurrentTenant;
 use crate::error::{AppError, AppResult};
 use crate::repo;
+use crate::request_context::IdempotencyKey;
 use crate::routes::validate;
 use crate::state::AppState;
 
@@ -175,13 +176,16 @@ pub async fn create_unpack_cancelled_order(
 pub async fn assign(
     State(state): State<AppState>,
     user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
     Json(body): Json<AssignWorkTask>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    let command = user.command_context(&idempotency_key);
     let ok = repo::tasks::assign_task_in_scope(
         &state.db,
         &user.tenant,
+        &command,
         body.task_id,
         body.assigned_user_id,
     )
@@ -195,30 +199,29 @@ pub async fn assign(
 pub async fn start_next(
     State(state): State<AppState>,
     user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
     Json(body): Json<StartNextWorkTask>,
 ) -> AppResult<Json<Option<WorkTask>>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    let command = user.command_context(&idempotency_key);
     Ok(Json(
-        repo::tasks::start_next_task_in_scope(
-            &state.db,
-            &user.tenant,
-            user.user.id,
-            body.task_type,
-        )
-        .await?,
+        repo::tasks::start_next_task_in_scope(&state.db, &user.tenant, &command, body.task_type)
+            .await?,
     ))
 }
 
 pub async fn start(
     State(state): State<AppState>,
     user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
     Json(body): Json<WorkTaskIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::tasks::start_task_in_scope(&state.db, &user.tenant, body.task_id, user.user.id)
-        .await?;
+    let command = user.command_context(&idempotency_key);
+    let ok =
+        repo::tasks::start_task_in_scope(&state.db, &user.tenant, &command, body.task_id).await?;
     if !ok {
         return Err(AppError::conflict("task cannot be started"));
     }
@@ -228,14 +231,16 @@ pub async fn start(
 pub async fn progress(
     State(state): State<AppState>,
     user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
     Json(body): Json<RecordWorkTaskProgress>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    let command = user.command_context(&idempotency_key);
     let ok = repo::tasks::record_task_progress_in_scope(
         &state.db,
         &user.tenant,
-        user.user.id,
+        &command,
         body.task_id,
         body.task_line_id,
         body.action,
@@ -254,15 +259,17 @@ pub async fn progress(
 pub async fn complete(
     State(state): State<AppState>,
     user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
     Json(body): Json<CompleteWorkTask>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
+    let command = user.command_context(&idempotency_key);
     let ok = repo::tasks::complete_task_in_scope(
         &state.db,
         &user.tenant,
+        &command,
         body.task_id,
-        user.user.id,
         body.qty_completed,
     )
     .await?;
@@ -275,12 +282,14 @@ pub async fn complete(
 pub async fn abort(
     State(state): State<AppState>,
     user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
     Json(body): Json<WorkTaskIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::tasks::abort_task_in_scope(&state.db, &user.tenant, body.task_id, user.user.id)
-        .await?;
+    let command = user.command_context(&idempotency_key);
+    let ok =
+        repo::tasks::abort_task_in_scope(&state.db, &user.tenant, &command, body.task_id).await?;
     if !ok {
         return Err(AppError::conflict("task cannot be aborted"));
     }
@@ -300,12 +309,14 @@ pub async fn release_expired(
 pub async fn cancel(
     State(state): State<AppState>,
     user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
     Json(body): Json<WorkTaskIdRequest>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::tasks::cancel_task_in_scope(&state.db, &user.tenant, body.task_id, user.user.id)
-        .await?;
+    let command = user.command_context(&idempotency_key);
+    let ok =
+        repo::tasks::cancel_task_in_scope(&state.db, &user.tenant, &command, body.task_id).await?;
     if !ok {
         return Err(AppError::conflict("task cannot be cancelled"));
     }

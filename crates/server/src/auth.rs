@@ -14,12 +14,13 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::{TenantAccess, User};
-use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
+use wareboxes_domain::{CommandContext, FacilityId, InventoryOwnerId, TenantId};
 
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::permissions;
 use crate::repo;
+use crate::request_context::{current_request_id_or_new, IdempotencyKey};
 use crate::state::AppState;
 
 const SESSION_TTL_DAYS: i64 = 30;
@@ -137,6 +138,15 @@ pub struct CurrentTenant {
 }
 
 impl CurrentTenant {
+    pub fn command_context(&self, idempotency_key: &IdempotencyKey) -> CommandContext {
+        CommandContext {
+            tenant_id: self.tenant.tenant_id,
+            actor_id: self.tenant.user_id,
+            request_id: current_request_id_or_new(),
+            idempotency_key: Some(idempotency_key.as_str().to_owned()),
+        }
+    }
+
     pub async fn require_permission(&self, db: &Db, permission: &str) -> AppResult<()> {
         if permissions::user_has_permission(db, self.tenant.tenant_id, self.user.id, permission)
             .await?

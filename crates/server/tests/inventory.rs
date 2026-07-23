@@ -123,7 +123,36 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     .unwrap_err();
     assert!(matches!(
         changed_retry,
-        AppError::Core(CoreError::Conflict(_))
+        AppError::Core(CoreError::IdempotencyKeyReused)
+    ));
+
+    let peer = auth::register_user(&db, "wms-peer@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO tenant_memberships (tenant_id, user_id) VALUES ($1, $2)")
+        .bind(tenant_id.get())
+        .bind(peer.id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let cross_actor_retry = repo::inventory::receive_inventory(
+        &db,
+        tenant_id,
+        peer.id,
+        batch,
+        receiving,
+        100,
+        None,
+        Some("initial receipt"),
+        Some("load"),
+        Some(42),
+        Some("receipt-42"),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        cross_actor_retry,
+        AppError::Core(CoreError::IdempotencyKeyReused)
     ));
 
     repo::inventory::move_inventory(
@@ -215,7 +244,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     .unwrap_err();
     assert!(matches!(
         changed_reservation_retry,
-        AppError::Core(CoreError::Conflict(_))
+        AppError::Core(CoreError::IdempotencyKeyReused)
     ));
     let balances = repo::inventory::get_balances(&db, tenant_id, false)
         .await
@@ -274,7 +303,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     .unwrap_err();
     assert!(matches!(
         changed_cancel_retry,
-        AppError::Core(CoreError::Conflict(_))
+        AppError::Core(CoreError::IdempotencyKeyReused)
     ));
     let balances = repo::inventory::get_balances(&db, tenant_id, false)
         .await
