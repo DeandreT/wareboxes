@@ -149,6 +149,7 @@ pub(crate) async fn ensure_location_accepts_batch_tx(
     location_id: i64,
     item_batch_id: i64,
 ) -> AppResult<()> {
+    bind_tenant_context(tx, tenant_id).await?;
     let incoming_item_id: i64 = sqlx::query_scalar(
         "SELECT item_id FROM item_batches WHERE tenant_id = $1 AND inventory_owner_id = $2 AND id = $3 AND deleted IS NULL",
     )
@@ -322,13 +323,25 @@ pub async fn set_item_batch_deleted(
     id: i64,
     deleted: bool,
 ) -> AppResult<bool> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
+    let batch_exists: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM item_batches WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
+    )
+    .bind(tenant_id.get())
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if batch_exists.is_none() {
+        return Ok(false);
+    }
     if deleted {
         let stocked: Option<i64> = sqlx::query_scalar(
             "SELECT id FROM inventory_balances WHERE tenant_id = $1 AND item_batch_id = $2 AND deleted IS NULL AND (qty_on_hand > 0 OR qty_reserved > 0) LIMIT 1",
         )
         .bind(tenant_id.get())
         .bind(id)
-        .fetch_optional(db)
+        .fetch_optional(&mut *tx)
         .await?;
         if stocked.is_some() {
             return Err(AppError::conflict(
@@ -340,8 +353,9 @@ pub async fn set_item_batch_deleted(
         .bind(if deleted { Some(now_iso()) } else { None })
         .bind(tenant_id.get())
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -368,6 +382,8 @@ async fn get_balances_with_scope(
     scope: &ScopeBindings,
     show_deleted: bool,
 ) -> AppResult<Vec<InventoryBalance>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT ib.id, ib.tenant_id, ib.inventory_owner_id, ib.created, ib.modified,
@@ -390,9 +406,14 @@ async fn get_balances_with_scope(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.iter().map(map_balance).collect()
+    let balances = rows
+        .iter()
+        .map(map_balance)
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(balances)
 }
 
 pub async fn get_reconciliation_issues(
@@ -628,6 +649,7 @@ pub async fn receive_inventory(
     let status = status.unwrap_or_default();
     let now = now_iso();
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
 
     let request_hash = inventory_journal::request_hash(&(
         user_id,
@@ -657,6 +679,7 @@ pub async fn receive_inventory(
         SELECT inventory_owner_id, item_id, uom
         FROM item_batches
         WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL
+        FOR SHARE
         "#,
     )
     .bind(tenant_id.get())
@@ -786,6 +809,7 @@ pub async fn move_inventory(
     let status = status.unwrap_or_default();
     let now = now_iso();
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
 
     let request_hash = inventory_journal::request_hash(&(
         user_id,
@@ -1010,6 +1034,7 @@ pub async fn split_move_inventory(
 
     let now = now_iso();
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
 
     let request_hash = inventory_journal::request_hash(&(
         user_id,

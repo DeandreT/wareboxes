@@ -935,6 +935,7 @@ pub async fn receive_line(
     }
     let now = now_iso();
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
 
     let request_hash = inventory_journal::request_hash(&(
         user_id,

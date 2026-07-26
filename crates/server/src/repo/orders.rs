@@ -195,6 +195,8 @@ async fn available_by_item_in_scope(
     tenant_id: TenantId,
     scope: &ScopeBindings,
 ) -> AppResult<HashMap<(i64, i64), i64>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT inv.inventory_owner_id AS inventory_owner_id, inv.item_id AS item_id,
@@ -213,7 +215,7 @@ async fn available_by_item_in_scope(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let mut map = HashMap::new();
     for r in &rows {
@@ -222,6 +224,7 @@ async fn available_by_item_in_scope(
             r.try_get("available_qty")?,
         );
     }
+    tx.commit().await?;
     Ok(map)
 }
 
