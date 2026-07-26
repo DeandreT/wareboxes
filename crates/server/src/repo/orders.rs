@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use sqlx::Row;
 use wareboxes_core::dto::{NewOrder, OrderPage, OrderUpdate, Paged, SummaryCount};
 use wareboxes_core::models::{
-    InventoryReservation, Order, OrderActivity, OrderItem, OrderStatus, OrderTrackingNumber,
-    ReservationStatus, TenantAccess,
+    AllocationStatus, InventoryAllocation, InventoryReservation, InventoryStatus, Order,
+    OrderActivity, OrderItem, OrderStatus, OrderTrackingNumber, ReservationStatus, TenantAccess,
 };
 use wareboxes_domain::{CommandContext, InventoryOwnerId, TenantId};
 
@@ -126,10 +126,45 @@ fn map_reservation(row: &sqlx::postgres::PgRow) -> AppResult<InventoryReservatio
         deleted: row.try_get("deleted")?,
         order_id: row.try_get("order_id")?,
         order_item_id: row.try_get("order_item_id")?,
+        facility_id: row.try_get("facility_id")?,
+        item_id: row.try_get("item_id")?,
+        uom: row.try_get("uom")?,
+        qty: row.try_get("qty")?,
+        status,
+        allocated_qty: row.try_get("allocated_qty")?,
+        allocations: Vec::new(),
+    })
+}
+
+fn map_allocation(row: &sqlx::postgres::PgRow) -> AppResult<InventoryAllocation> {
+    let inventory_status: String = row.try_get("inventory_status")?;
+    let inventory_status = InventoryStatus::parse(&inventory_status).ok_or_else(|| {
+        AppError::internal(format!(
+            "invalid inventory status in database: {inventory_status}"
+        ))
+    })?;
+    let status: String = row.try_get("status")?;
+    let status = AllocationStatus::parse(&status).ok_or_else(|| {
+        AppError::internal(format!("invalid allocation status in database: {status}"))
+    })?;
+    Ok(InventoryAllocation {
+        id: row.try_get("id")?,
+        tenant_id: TenantId::new(row.try_get("tenant_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        inventory_owner_id: InventoryOwnerId::new(row.try_get("inventory_owner_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        created: row.try_get("created")?,
+        modified: row.try_get("modified")?,
+        deleted: row.try_get("deleted")?,
+        reservation_id: row.try_get("reservation_id")?,
         inventory_balance_id: row.try_get("inventory_balance_id")?,
         facility_id: row.try_get("facility_id")?,
-        item_batch_id: row.try_get("item_batch_id")?,
         location_id: row.try_get("location_id")?,
+        license_plate_id: row.try_get("license_plate_id")?,
+        item_batch_id: row.try_get("item_batch_id")?,
+        item_id: row.try_get("item_id")?,
+        uom: row.try_get("uom")?,
+        inventory_status,
         qty: row.try_get("qty")?,
         status,
     })
@@ -236,18 +271,18 @@ async fn reserved_by_order_item(
 ) -> AppResult<HashMap<(i64, i64), i64>> {
     let rows = sqlx::query(
         r#"
-        SELECT r.order_id AS order_id,
-               ib.item_id AS item_id,
-               COALESCE(SUM(r.qty), 0)::BIGINT AS reserved_qty
-        FROM inventory_reservations r
-        INNER JOIN item_batches ib
-            ON ib.tenant_id = r.tenant_id
-           AND ib.inventory_owner_id = r.inventory_owner_id
-           AND ib.id = r.item_batch_id
-        WHERE r.tenant_id = $1
-          AND r.deleted IS NULL
-          AND r.status = 'reserved'
-        GROUP BY r.order_id, ib.item_id
+        SELECT reservation.order_id AS order_id,
+               allocation.item_id AS item_id,
+               COALESCE(SUM(allocation.qty), 0)::BIGINT AS reserved_qty
+        FROM inventory_allocations allocation
+        INNER JOIN inventory_reservations reservation
+            ON reservation.tenant_id = allocation.tenant_id
+           AND reservation.inventory_owner_id = allocation.inventory_owner_id
+           AND reservation.id = allocation.reservation_id
+        WHERE allocation.tenant_id = $1
+          AND allocation.deleted IS NULL
+          AND allocation.status = 'allocated'
+        GROUP BY reservation.order_id, allocation.item_id
         "#,
     )
     .bind(tenant_id.get())
@@ -359,21 +394,21 @@ async fn reserved_by_order_ids_in_scope(
     }
     let rows = sqlx::query(
         r#"
-        SELECT r.order_id AS order_id,
-               ib.item_id AS item_id,
-               COALESCE(SUM(r.qty), 0)::BIGINT AS reserved_qty
-        FROM inventory_reservations r
-        INNER JOIN item_batches ib
-            ON ib.tenant_id = r.tenant_id
-           AND ib.inventory_owner_id = r.inventory_owner_id
-           AND ib.id = r.item_batch_id
-        WHERE r.tenant_id = $1
-          AND r.deleted IS NULL
-          AND r.status = 'reserved'
-          AND r.order_id = ANY($2)
-          AND ($3 OR r.facility_id = ANY($4))
-          AND ($5 OR r.inventory_owner_id = ANY($6))
-        GROUP BY r.order_id, ib.item_id
+        SELECT reservation.order_id AS order_id,
+               allocation.item_id AS item_id,
+               COALESCE(SUM(allocation.qty), 0)::BIGINT AS reserved_qty
+        FROM inventory_allocations allocation
+        INNER JOIN inventory_reservations reservation
+            ON reservation.tenant_id = allocation.tenant_id
+           AND reservation.inventory_owner_id = allocation.inventory_owner_id
+           AND reservation.id = allocation.reservation_id
+        WHERE allocation.tenant_id = $1
+          AND allocation.deleted IS NULL
+          AND allocation.status = 'allocated'
+          AND reservation.order_id = ANY($2)
+          AND ($3 OR allocation.facility_id = ANY($4))
+          AND ($5 OR allocation.inventory_owner_id = ANY($6))
+        GROUP BY reservation.order_id, allocation.item_id
         "#,
     )
     .bind(tenant_id.get())
@@ -402,16 +437,28 @@ async fn reservations_for_order_in_scope(
 ) -> AppResult<Vec<InventoryReservation>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, tenant_id, inventory_owner_id, created, modified, deleted,
-               order_id, order_item_id, inventory_balance_id, facility_id,
-               item_batch_id, location_id, qty, status
-        FROM inventory_reservations
-        WHERE tenant_id = $1
-          AND deleted IS NULL
-          AND order_id = $2
-          AND ($3 OR facility_id = ANY($4))
-          AND ($5 OR inventory_owner_id = ANY($6))
-        ORDER BY id
+        SELECT reservation.id, reservation.tenant_id,
+               reservation.inventory_owner_id, reservation.created,
+               reservation.modified, reservation.deleted, reservation.order_id,
+               reservation.order_item_id, reservation.facility_id,
+               reservation.item_id, reservation.uom, reservation.qty,
+               reservation.status,
+               COALESCE(SUM(allocation.qty) FILTER (
+                   WHERE allocation.deleted IS NULL
+                     AND allocation.status = 'allocated'
+               ), 0)::BIGINT AS allocated_qty
+        FROM inventory_reservations reservation
+        LEFT JOIN inventory_allocations allocation
+            ON allocation.tenant_id = reservation.tenant_id
+           AND allocation.inventory_owner_id = reservation.inventory_owner_id
+           AND allocation.reservation_id = reservation.id
+        WHERE reservation.tenant_id = $1
+          AND reservation.deleted IS NULL
+          AND reservation.order_id = $2
+          AND ($3 OR reservation.facility_id = ANY($4))
+          AND ($5 OR reservation.inventory_owner_id = ANY($6))
+        GROUP BY reservation.id
+        ORDER BY reservation.id
         "#,
     )
     .bind(tenant_id.get())
@@ -422,10 +469,52 @@ async fn reservations_for_order_in_scope(
     .bind(&scope.inventory_owner_ids)
     .fetch_all(&mut **tx)
     .await?;
-    let reservations = rows
+    let mut reservations = rows
         .iter()
         .map(map_reservation)
         .collect::<AppResult<Vec<_>>>()?;
+    let reservation_ids = reservations
+        .iter()
+        .map(|reservation| reservation.id)
+        .collect::<Vec<_>>();
+    if !reservation_ids.is_empty() {
+        let allocation_rows = sqlx::query(
+            r#"
+            SELECT id, tenant_id, inventory_owner_id, created, modified, deleted,
+                   reservation_id, inventory_balance_id, facility_id, location_id,
+                   license_plate_id, item_batch_id, item_id, uom,
+                   inventory_status, qty, status
+            FROM inventory_allocations
+            WHERE tenant_id = $1
+              AND reservation_id = ANY($2)
+              AND deleted IS NULL
+              AND ($3 OR facility_id = ANY($4))
+              AND ($5 OR inventory_owner_id = ANY($6))
+            ORDER BY reservation_id, id
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(&reservation_ids)
+        .bind(scope.all_facilities)
+        .bind(&scope.facility_ids)
+        .bind(scope.all_inventory_owners)
+        .bind(&scope.inventory_owner_ids)
+        .fetch_all(&mut **tx)
+        .await?;
+        let mut allocations_by_reservation: HashMap<i64, Vec<InventoryAllocation>> = HashMap::new();
+        for row in &allocation_rows {
+            let allocation = map_allocation(row)?;
+            allocations_by_reservation
+                .entry(allocation.reservation_id)
+                .or_default()
+                .push(allocation);
+        }
+        for reservation in &mut reservations {
+            reservation.allocations = allocations_by_reservation
+                .remove(&reservation.id)
+                .unwrap_or_default();
+        }
+    }
     Ok(reservations)
 }
 
@@ -748,21 +837,23 @@ async fn order_summaries(
            AND oi.order_id = o.id
            AND oi.deleted IS NULL
         LEFT JOIN (
-            SELECT r.tenant_id AS tenant_id,
-                   r.inventory_owner_id AS inventory_owner_id,
-                   r.order_id AS order_id,
-                   ib.item_id AS item_id,
-                   COALESCE(SUM(r.qty), 0)::BIGINT AS reserved_qty
-            FROM inventory_reservations r
-            INNER JOIN item_batches ib
-                ON ib.tenant_id = r.tenant_id
-               AND ib.inventory_owner_id = r.inventory_owner_id
-               AND ib.id = r.item_batch_id
-            WHERE r.deleted IS NULL
-              AND r.status = 'reserved'
-              AND ($4 OR r.facility_id = ANY($5))
-              AND ($6 OR r.inventory_owner_id = ANY($7))
-            GROUP BY r.tenant_id, r.inventory_owner_id, r.order_id, ib.item_id
+            SELECT allocation.tenant_id AS tenant_id,
+                   allocation.inventory_owner_id AS inventory_owner_id,
+                   reservation.order_id AS order_id,
+                   allocation.item_id AS item_id,
+                   COALESCE(SUM(allocation.qty), 0)::BIGINT AS reserved_qty
+            FROM inventory_allocations allocation
+            INNER JOIN inventory_reservations reservation
+                ON reservation.tenant_id = allocation.tenant_id
+               AND reservation.inventory_owner_id =
+                   allocation.inventory_owner_id
+               AND reservation.id = allocation.reservation_id
+            WHERE allocation.deleted IS NULL
+              AND allocation.status = 'allocated'
+              AND ($4 OR allocation.facility_id = ANY($5))
+              AND ($6 OR allocation.inventory_owner_id = ANY($7))
+            GROUP BY allocation.tenant_id, allocation.inventory_owner_id,
+                     reservation.order_id, allocation.item_id
         ) res ON res.tenant_id = o.tenant_id
              AND res.inventory_owner_id = o.inventory_owner_id
              AND res.order_id = o.id

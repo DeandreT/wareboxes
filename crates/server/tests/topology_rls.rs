@@ -16,6 +16,12 @@ const SEQUENCES: [&str; 4] = [
     "inventory_owner_facilities_id_seq",
 ];
 
+const RESERVATION_TABLES: [&str; 2] = ["inventory_reservations", "inventory_allocations"];
+const RESERVATION_SEQUENCES: [&str; 2] = [
+    "inventory_reservations_id_seq",
+    "inventory_allocations_id_seq",
+];
+
 #[derive(Clone, Copy, Debug)]
 struct TopologyRefs {
     tenant_id: TenantId,
@@ -434,6 +440,40 @@ async fn assert_exact_runtime_privileges(db: &db::Db) {
             },
         ]
     );
+    let reservation_privileges: Vec<TablePrivileges> = sqlx::query_as(
+        r#"
+        SELECT table_name,
+               has_table_privilege(current_user, 'public.' || table_name, 'SELECT') AS can_select,
+               has_table_privilege(current_user, 'public.' || table_name, 'INSERT') AS can_insert,
+               has_table_privilege(current_user, 'public.' || table_name, 'UPDATE') AS can_update,
+               has_table_privilege(current_user, 'public.' || table_name, 'DELETE') AS can_delete,
+               has_table_privilege(current_user, 'public.' || table_name, 'TRUNCATE') AS can_truncate,
+               has_table_privilege(current_user, 'public.' || table_name, 'REFERENCES') AS can_reference,
+               has_table_privilege(current_user, 'public.' || table_name, 'TRIGGER') AS can_trigger
+        FROM unnest($1::TEXT[]) WITH ORDINALITY AS tables(table_name, ordinal)
+        ORDER BY ordinal
+        "#,
+    )
+    .bind(RESERVATION_TABLES.as_slice())
+    .fetch_all(db)
+    .await
+    .unwrap();
+    assert_eq!(
+        reservation_privileges,
+        RESERVATION_TABLES
+            .iter()
+            .map(|table| TablePrivileges {
+                table_name: (*table).to_owned(),
+                can_select: true,
+                can_insert: true,
+                can_update: true,
+                can_delete: false,
+                can_truncate: false,
+                can_reference: false,
+                can_trigger: false,
+            })
+            .collect::<Vec<_>>()
+    );
 
     let sequence_privileges: Vec<SequencePrivileges> = sqlx::query_as(
         r#"
@@ -455,6 +495,32 @@ async fn assert_exact_runtime_privileges(db: &db::Db) {
     assert_eq!(
         sequence_privileges,
         SEQUENCES
+            .iter()
+            .map(|sequence| SequencePrivileges {
+                sequence_name: (*sequence).to_owned(),
+                can_use: true,
+                can_select: false,
+                can_update: false,
+            })
+            .collect::<Vec<_>>()
+    );
+    let reservation_sequence_privileges: Vec<SequencePrivileges> = sqlx::query_as(
+        r#"
+        SELECT sequence_name,
+               has_sequence_privilege(current_user, 'public.' || sequence_name, 'USAGE') AS can_use,
+               has_sequence_privilege(current_user, 'public.' || sequence_name, 'SELECT') AS can_select,
+               has_sequence_privilege(current_user, 'public.' || sequence_name, 'UPDATE') AS can_update
+        FROM unnest($1::TEXT[]) WITH ORDINALITY AS sequences(sequence_name, ordinal)
+        ORDER BY ordinal
+        "#,
+    )
+    .bind(RESERVATION_SEQUENCES.as_slice())
+    .fetch_all(db)
+    .await
+    .unwrap();
+    assert_eq!(
+        reservation_sequence_privileges,
+        RESERVATION_SEQUENCES
             .iter()
             .map(|sequence| SequencePrivileges {
                 sequence_name: (*sequence).to_owned(),

@@ -256,24 +256,6 @@ async fn owner_facility_pair_is_enforced_across_inventory_boundaries() {
     assert!(error.to_string().contains("not active"));
     tx.rollback().await.unwrap();
 
-    let valid_balance_id: i64 = {
-        let mut tx = tenant_tx(&fixture.db, tenant_id).await;
-        let balance_id = sqlx::query_scalar(
-            r#"
-            SELECT id
-            FROM inventory_balances
-            WHERE tenant_id = $1 AND item_batch_id = $2 AND location_id = $3
-            "#,
-        )
-        .bind(tenant_id.get())
-        .bind(item_batch_id)
-        .bind(assigned_location_id)
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap();
-        tx.rollback().await.unwrap();
-        balance_id
-    };
     let order_id = fixture
         .order(
             tenant_id,
@@ -281,24 +263,25 @@ async fn owner_facility_pair_is_enforced_across_inventory_boundaries() {
             inventory_owner_id,
         )
         .await;
+    let order_item_id = fixture.order_item(tenant_id, order_id, item_id, 1).await;
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let error = sqlx::query(
         r#"
         INSERT INTO inventory_reservations (
-            tenant_id, inventory_owner_id, created, order_id,
-            inventory_balance_id, facility_id, item_batch_id, location_id, qty
+            tenant_id, inventory_owner_id, created, modified, created_by,
+            order_id, order_item_id, facility_id, item_id, uom, qty, status
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1)
+        VALUES ($1, $2, $3, $3, $4, $5, $6, $7, $8, 'each', 1, 'active')
         "#,
     )
     .bind(tenant_id.get())
     .bind(inventory_owner_id)
     .bind(db::now_iso())
+    .bind(user.id)
     .bind(order_id)
-    .bind(valid_balance_id)
+    .bind(order_item_id)
     .bind(unassigned_facility_id)
-    .bind(item_batch_id)
-    .bind(unassigned_location_id)
+    .bind(item_id)
     .execute(&mut *tx)
     .await
     .unwrap_err();
@@ -499,16 +482,23 @@ async fn owner_facility_pair_is_enforced_across_inventory_boundaries() {
             reservation_owner,
         )
         .await;
-    repo::inventory::reserve_inventory(
-        &fixture.db,
-        &repo::inventory::ReserveInventoryCommand {
+    let reservation_allocation = fixture
+        .allocated_reservation(
             tenant_id,
-            actor_user_id: user.id,
-            order_id: reservation_order,
-            order_item_id: None,
-            inventory_balance_id: reservation_balance_id,
-            qty: 1,
-            idempotency_key: "owner-facility-reservation-guard",
+            user.id,
+            reservation_order,
+            reservation_balance_id,
+            1,
+            "owner-facility-reservation-guard",
+        )
+        .await;
+    let access = default_tenant_for_user(&fixture.db, user.id).await.unwrap();
+    repo::inventory::cancel_inventory_allocation(
+        &fixture.db,
+        &access,
+        &repo::inventory::CancelInventoryAllocationCommand {
+            allocation_id: reservation_allocation.allocation_id,
+            idempotency_key: "owner-facility-reservation-guard-release",
         },
     )
     .await

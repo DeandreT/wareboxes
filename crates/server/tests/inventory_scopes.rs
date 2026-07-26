@@ -5,7 +5,7 @@ use axum::http::{header, Method, Request, StatusCode};
 use common::*;
 use serde_json::{json, Value};
 use tower::ServiceExt;
-use wareboxes_core::dto::UpdateUserAccessScope;
+use wareboxes_core::dto::{CancelInventoryReservationResult, UpdateUserAccessScope};
 use wareboxes_core::models::{
     InventoryBalance, InventoryReconciliationIssue, InventoryReservation, InventoryTransaction,
     ItemBatch,
@@ -57,6 +57,7 @@ async fn response_json<T: serde::de::DeserializeOwned>(response: axum::response:
 #[tokio::test]
 async fn inventory_routes_enforce_owner_and_facility_scopes() {
     let db = setup().await;
+    let fixture = Fixture { db: db.clone() };
     let administrator = auth::register_user(
         &db,
         "inventory-scope-admin@test.com",
@@ -290,30 +291,59 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         .find(|order| order.order_key == "INV-SCOPE-DENIED-ORDER")
         .unwrap()
         .id;
-    let allowed_reservation = repo::inventory::reserve_inventory(
+    let allowed_order_item = fixture.order_item(tenant_id, allowed_order, item, 3).await;
+    let denied_order_item = fixture.order_item(tenant_id, denied_order, item, 3).await;
+    let administrator_access = default_tenant_for_user(&db, administrator.id)
+        .await
+        .unwrap();
+    let allowed_reservation = repo::inventory::create_inventory_reservation(
         &db,
-        &repo::inventory::ReserveInventoryCommand {
-            tenant_id,
-            actor_user_id: administrator.id,
+        &administrator_access,
+        &repo::inventory::CreateInventoryReservationCommand {
             order_id: allowed_order,
-            order_item_id: None,
-            inventory_balance_id: allowed_balance_id,
+            order_item_id: allowed_order_item,
+            facility_id: allowed_facility,
             qty: 3,
             idempotency_key: "inventory-scope-allowed-reservation-setup",
         },
     )
     .await
-    .unwrap();
-    let denied_reservation = repo::inventory::reserve_inventory(
+    .unwrap()
+    .reservation_id;
+    repo::inventory::allocate_inventory(
         &db,
-        &repo::inventory::ReserveInventoryCommand {
-            tenant_id,
-            actor_user_id: administrator.id,
+        &administrator_access,
+        &repo::inventory::AllocateInventoryCommand {
+            reservation_id: allowed_reservation,
+            inventory_balance_id: allowed_balance_id,
+            qty: 3,
+            idempotency_key: "inventory-scope-allowed-allocation-setup",
+        },
+    )
+    .await
+    .unwrap();
+    let denied_reservation = repo::inventory::create_inventory_reservation(
+        &db,
+        &administrator_access,
+        &repo::inventory::CreateInventoryReservationCommand {
             order_id: denied_order,
-            order_item_id: None,
-            inventory_balance_id: denied_balance_id,
+            order_item_id: denied_order_item,
+            facility_id: denied_facility,
             qty: 3,
             idempotency_key: "inventory-scope-denied-reservation-setup",
+        },
+    )
+    .await
+    .unwrap()
+    .reservation_id;
+    repo::inventory::allocate_inventory(
+        &db,
+        &administrator_access,
+        &repo::inventory::AllocateInventoryCommand {
+            reservation_id: denied_reservation,
+            inventory_balance_id: denied_balance_id,
+            qty: 3,
+            idempotency_key: "inventory-scope-denied-allocation-setup",
         },
     )
     .await
@@ -554,32 +584,33 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         &token,
         tenant_id,
         Method::POST,
-        "/api/inventory/reservations/add",
+        "/api/inventory/reservations/create",
         Some(json!({
             "order_id": denied_order,
-            "inventory_balance_id": allowed_balance_id,
+            "order_item_id": denied_order_item,
+            "facility_id": denied_facility,
             "qty": 1,
             "idempotency_key": "inventory-scope-hidden-order-reservation"
         })),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
     let response = send_api(
         &app,
         &token,
         tenant_id,
         Method::POST,
-        "/api/inventory/reservations/add",
+        "/api/inventory/allocations/create",
         Some(json!({
-            "order_id": allowed_order,
+            "reservation_id": allowed_reservation,
             "inventory_balance_id": denied_balance_id,
             "qty": 1,
             "idempotency_key": "inventory-scope-hidden-balance-reservation"
         })),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
     let response = send_api(
         &app,
@@ -593,8 +624,7 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         })),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(!response_json::<bool>(response).await);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
     let response = send_api(
         &app,
@@ -627,7 +657,12 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(response_json::<bool>(response).await);
+    assert_eq!(
+        response_json::<CancelInventoryReservationResult>(response)
+            .await
+            .released_qty,
+        3
+    );
 
     let response = send_api(
         &app,
@@ -642,7 +677,12 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(response_json::<bool>(response).await);
+    assert_eq!(
+        response_json::<CancelInventoryReservationResult>(response)
+            .await
+            .released_qty,
+        3
+    );
 
     let balances = repo::inventory::get_balances(&db, tenant_id, false)
         .await

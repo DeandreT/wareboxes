@@ -41,6 +41,14 @@ impl ScopeBindings {
                 .collect(),
         }
     }
+
+    pub(crate) fn includes_facility(&self, facility_id: i64) -> bool {
+        self.all_facilities || self.facility_ids.contains(&facility_id)
+    }
+
+    pub(crate) fn includes_inventory_owner(&self, inventory_owner_id: i64) -> bool {
+        self.all_inventory_owners || self.inventory_owner_ids.contains(&inventory_owner_id)
+    }
 }
 
 pub(crate) async fn lock_user_tx(
@@ -301,10 +309,26 @@ pub async fn inventory_reservation_dimensions(
     .await
 }
 
+pub async fn inventory_allocation_dimensions(
+    db: &Db,
+    access: &TenantAccess,
+    allocation_id: i64,
+    include_deleted: bool,
+) -> AppResult<Option<OperationalDimensions>> {
+    inventory_dimensions(
+        db,
+        access,
+        InventoryRecord::Allocation(allocation_id),
+        include_deleted,
+    )
+    .await
+}
+
 #[derive(Debug, Clone, Copy)]
 enum InventoryRecord {
     Balance(i64),
     Reservation(i64),
+    Allocation(i64),
 }
 
 async fn inventory_dimensions(
@@ -331,6 +355,18 @@ async fn inventory_dimensions(
             r#"
             SELECT facility_id, inventory_owner_id
             FROM inventory_reservations
+            WHERE tenant_id = $1
+              AND id = $2
+              AND ($3 OR deleted IS NULL)
+              AND ($4 OR facility_id = ANY($5))
+              AND ($6 OR inventory_owner_id = ANY($7))
+            "#,
+            id,
+        ),
+        InventoryRecord::Allocation(id) => (
+            r#"
+            SELECT facility_id, inventory_owner_id
+            FROM inventory_allocations
             WHERE tenant_id = $1
               AND id = $2
               AND ($3 OR deleted IS NULL)

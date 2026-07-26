@@ -157,7 +157,19 @@ pub fn app(state: AppState) -> Router {
         .route("/inventory/moves", post(inventory::move_stock))
         .route("/inventory/moves/split", post(inventory::split_move_stock))
         .route("/inventory/reservations", get(inventory::list_reservations))
-        .route("/inventory/reservations/add", post(inventory::reserve))
+        .route(
+            "/inventory/reservations/create",
+            post(inventory::create_reservation),
+        )
+        .route("/inventory/allocations", get(inventory::list_allocations))
+        .route(
+            "/inventory/allocations/create",
+            post(inventory::create_allocation),
+        )
+        .route(
+            "/inventory/allocations/cancel",
+            post(inventory::cancel_allocation),
+        )
         .route(
             "/inventory/reservations/cancel",
             post(inventory::cancel_reservation),

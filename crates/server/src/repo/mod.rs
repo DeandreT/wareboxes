@@ -10,6 +10,7 @@ pub mod facilities;
 pub mod idempotency;
 pub mod integration_inbox;
 pub mod inventory;
+mod inventory_allocation;
 pub(crate) mod inventory_journal;
 pub mod inventory_owners;
 pub mod inventory_v1;

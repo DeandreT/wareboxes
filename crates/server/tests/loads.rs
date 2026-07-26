@@ -785,7 +785,8 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
 
 #[tokio::test]
 async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
-    let db = setup().await;
+    let fixture = Fixture::new().await;
+    let db = fixture.db.clone();
 
     let user = auth::register_user(&db, "lp-receiver@test.com", "supersecret", None, None)
         .await
@@ -996,20 +997,16 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         .find(|o| o.order_key == "LP-RES-1")
         .unwrap()
         .id;
-    repo::inventory::reserve_inventory(
-        &db,
-        &repo::inventory::ReserveInventoryCommand {
+    fixture
+        .allocated_reservation(
             tenant_id,
-            actor_user_id: user.id,
+            user.id,
             order_id,
-            order_item_id: None,
-            inventory_balance_id: moved.contents[0].inventory_balance_id,
-            qty: 1,
-            idempotency_key: "load-reservation-setup",
-        },
-    )
-    .await
-    .unwrap();
+            moved.contents[0].inventory_balance_id,
+            1,
+            "load-reservation-setup",
+        )
+        .await;
 
     let err = repo::license_plates::move_license_plate(
         &db,
