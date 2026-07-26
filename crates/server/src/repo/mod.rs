@@ -6,6 +6,7 @@ pub mod access;
 pub mod address;
 pub mod audits;
 pub mod employees;
+pub mod expected_receiving;
 pub mod facilities;
 pub mod idempotency;
 pub mod inbound_receipt;

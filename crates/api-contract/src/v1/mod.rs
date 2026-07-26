@@ -2,6 +2,7 @@
 
 mod cursor;
 mod error;
+mod expected_receiving;
 mod idempotency;
 mod inventory;
 mod license_plate_putaway;
@@ -14,6 +15,10 @@ pub use cursor::{
     DEFAULT_PAGE_LIMIT, MAX_CURSOR_LENGTH, MAX_PAGE_LIMIT,
 };
 pub use error::{ErrorReason, ErrorResponse, FieldViolation};
+pub use expected_receiving::{
+    ExpectedReceiptLine, ExpectedReceivingLoadStatus, ExpectedReceivingLocation,
+    ExpectedReceivingSessionResponse,
+};
 pub use idempotency::{
     IdempotencyKey, IdempotencyKeyError, IDEMPOTENCY_KEY_HEADER, MAX_IDEMPOTENCY_KEY_LENGTH,
 };
