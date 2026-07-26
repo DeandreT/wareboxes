@@ -450,6 +450,24 @@ pub async fn move_license_plate(
         ));
     }
 
+    let locked_balance_ids = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT id
+        FROM inventory_balances
+        WHERE tenant_id = $1
+          AND inventory_owner_id = $2
+          AND license_plate_id = $3
+          AND deleted IS NULL
+        ORDER BY id
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id)
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+
     let content_rows = sqlx::query(
         r#"
         SELECT id, facility_id, location_id, item_batch_id, status, qty_on_hand, qty_reserved
@@ -563,7 +581,7 @@ pub async fn move_license_plate(
         UPDATE inventory_balances
         SET facility_id = $1, location_id = $2, modified = $3
         WHERE tenant_id = $4 AND inventory_owner_id = $5
-          AND license_plate_id = $6 AND deleted IS NULL
+          AND license_plate_id = $6 AND id = ANY($7) AND deleted IS NULL
         "#,
     )
     .bind(destination_facility_id)
@@ -572,6 +590,7 @@ pub async fn move_license_plate(
     .bind(tenant_id.get())
     .bind(inventory_owner_id)
     .bind(id)
+    .bind(&locked_balance_ids)
     .execute(&mut *tx)
     .await?;
 
