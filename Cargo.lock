@@ -3854,6 +3854,7 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+ "wareboxes-api-contract",
  "wareboxes-barcodes",
  "wareboxes-core",
  "wareboxes-domain",

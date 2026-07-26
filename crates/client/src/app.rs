@@ -9,6 +9,7 @@ mod loads;
 mod loads_receiving;
 mod operations;
 mod panels;
+mod putaway;
 mod theme;
 mod workspaces;
 
@@ -32,6 +33,7 @@ use wareboxes_core::models::{
 };
 
 use crate::api::{ApiClient, ApiEvent, Screen};
+use crate::putaway_workflow::{PutawayApplyResult, PutawayWorkflowState};
 
 const LOCAL_BASE_URL: &str = "http://127.0.0.1:8080";
 const WORKSPACE_STORAGE_KEY: &str = "wareboxes_panel_workspaces_v1";
@@ -247,6 +249,7 @@ pub struct WareboxesApp {
     order_total: i64,
     order_limit: i64,
     order_offset: i64,
+    putaway: PutawayWorkflowState,
 }
 
 impl WareboxesApp {
@@ -332,13 +335,20 @@ impl WareboxesApp {
             order_total: 0,
             order_limit: DEFAULT_ORDER_PAGE_SIZE,
             order_offset: 0,
+            putaway: PutawayWorkflowState::default(),
         }
     }
 
     /// Request a screen's data and record when, so auto-refresh and the
     /// manual Refresh button share one cadence.
     fn fetch(&mut self, s: Screen) {
-        if s == Screen::Orders {
+        if s == Screen::Putaway {
+            if let Some(request) = self.putaway.begin_current(Self::new_putaway_request_id()) {
+                self.api.execute_putaway(request);
+            }
+            self.last_fetch.insert(s, self.now);
+            return;
+        } else if s == Screen::Orders {
             self.fetch_orders();
             self.api.get_list(Screen::InventoryOwners);
         } else if s == Screen::Loads {
@@ -421,6 +431,9 @@ impl WareboxesApp {
                     .is_some_and(|panel| panel.open)
             })
             .filter(|s| {
+                if *s == Screen::Putaway {
+                    return false;
+                }
                 self.now - self.last_fetch.get(s).copied().unwrap_or(f64::MIN)
                     >= Self::auto_refresh_secs(*s)
             })
@@ -552,8 +565,10 @@ impl WareboxesApp {
                     self.session = Some(*s);
                     let first = if self.has_perm("orders") {
                         Screen::Orders
+                    } else if self.has_perm("wms") {
+                        Screen::Putaway
                     } else {
-                        Screen::Users
+                        self.visible_screens().next().unwrap_or(Screen::Users)
                     };
                     self.set_panel_open(first, true);
                 }
@@ -578,6 +593,7 @@ impl WareboxesApp {
                     self.new_order_open = false;
                     self.new_item_open = false;
                     self.settings_open = false;
+                    self.putaway = PutawayWorkflowState::default();
                 }
                 ApiEvent::Users(u) => self.data.users = u,
                 ApiEvent::Roles(r) => self.data.roles = r,
@@ -673,6 +689,11 @@ impl WareboxesApp {
                 ApiEvent::LicensePlateLookup(lp) => self.data.license_plate_lookup = lp,
                 ApiEvent::Employees(e) => self.data.employees = e,
                 ApiEvent::Audits(a) => self.data.audits = a,
+                ApiEvent::Putaway(event) => {
+                    if let PutawayApplyResult::Completed(message) = self.putaway.apply(event) {
+                        self.toast(message, false, now);
+                    }
+                }
                 ApiEvent::ActionDone(msg, screen) => {
                     self.toast(msg, false, now);
                     self.fetch(screen);
@@ -1189,6 +1210,7 @@ impl WareboxesApp {
     ) -> (egui::Pos2, egui::Vec2) {
         let viewport = ctx.available_rect();
         let requested_size = match screen {
+            Screen::Putaway => egui::vec2(680.0, 640.0),
             Screen::Orders => egui::vec2(980.0, 620.0),
             Screen::Items => egui::vec2(920.0, 640.0),
             Screen::Loads | Screen::Inventory => egui::vec2(1080.0, 680.0),
@@ -1327,6 +1349,7 @@ impl WareboxesApp {
 
     fn render_screen(&mut self, s: Screen, ui: &mut egui::Ui) {
         match s {
+            Screen::Putaway => self.putaway_screen(ui),
             Screen::Orders => self.orders_screen(ui),
             Screen::Users => self.users_screen(ui),
             Screen::Roles => self.roles_screen(ui),

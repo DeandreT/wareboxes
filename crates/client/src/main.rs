@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod putaway_workflow;
 
 use app::WareboxesApp;
 
