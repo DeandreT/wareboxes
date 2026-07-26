@@ -3,10 +3,11 @@
 //! original `app/utils/*.ts` files.
 
 use serde::{Deserialize, Serialize};
-use validator::Validate;
+use validator::{Validate, ValidationError};
 
 use crate::models::{
-    InventoryStatus, LoadFileCategory, LoadStatus, LoadType, Order, TenantAccess, Timestamp, User,
+    InventoryHoldReason, InventoryStatus, LoadFileCategory, LoadStatus, LoadType, Order,
+    TenantAccess, Timestamp, User,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -944,6 +945,45 @@ pub struct CancelInventoryReservation {
     pub idempotency_key: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "validate_place_inventory_hold"))]
+pub struct PlaceInventoryHold {
+    #[validate(range(min = 1, message = "Invalid inventory balance ID"))]
+    pub inventory_balance_id: i64,
+    #[validate(range(min = 1, message = "Quantity must be positive"))]
+    pub qty: i64,
+    pub reason: InventoryHoldReason,
+    pub note: Option<String>,
+    pub reference_type: Option<String>,
+    pub reference_id: Option<i64>,
+}
+
+fn validate_place_inventory_hold(value: &PlaceInventoryHold) -> Result<(), ValidationError> {
+    if value.reason == InventoryHoldReason::Other
+        && !matches!(value.note.as_deref(), Some(note) if !note.trim().is_empty())
+    {
+        return Err(ValidationError::new("other_hold_reason_requires_note")
+            .with_message("A note is required when the hold reason is other".into()));
+    }
+
+    match (&value.reference_type, value.reference_id) {
+        (None, None) => Ok(()),
+        (Some(reference_type), Some(reference_id))
+            if !reference_type.trim().is_empty() && reference_id > 0 =>
+        {
+            Ok(())
+        }
+        _ => Err(ValidationError::new("invalid_hold_reference")
+            .with_message("Hold reference type and positive ID must be provided together".into())),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct ReleaseInventoryHold {
+    #[validate(range(min = 1, message = "Invalid inventory hold ID"))]
+    pub hold_id: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateInventoryReservationResult {
     pub reservation_id: i64,
@@ -963,5 +1003,16 @@ pub struct CancelInventoryAllocationResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CancelInventoryReservationResult {
     pub reservation_id: i64,
+    pub released_qty: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlaceInventoryHoldResult {
+    pub hold_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseInventoryHoldResult {
+    pub hold_id: i64,
     pub released_qty: i64,
 }

@@ -46,6 +46,7 @@ fn map_content(row: &sqlx::postgres::PgRow) -> AppResult<LicensePlateContent> {
         status: parse_inventory_status(row.try_get::<String, _>("status")?.as_str())?,
         qty_on_hand: row.try_get("qty_on_hand")?,
         qty_reserved: row.try_get("qty_reserved")?,
+        qty_held: row.try_get("qty_held")?,
     })
 }
 
@@ -61,12 +62,12 @@ async fn contents_by_license_plate(
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, license_plate_id, location_id,
-               item_batch_id, status, qty_on_hand, qty_reserved
+               item_batch_id, status, qty_on_hand, qty_reserved, qty_held
         FROM inventory_balances
         WHERE tenant_id = $1
           AND deleted IS NULL
           AND license_plate_id = ANY($2)
-          AND (qty_on_hand > 0 OR qty_reserved > 0)
+          AND (qty_on_hand > 0 OR qty_reserved > 0 OR qty_held > 0)
         ORDER BY license_plate_id, item_batch_id, status
         "#,
     )
@@ -470,7 +471,8 @@ pub async fn move_license_plate(
 
     let content_rows = sqlx::query(
         r#"
-        SELECT id, facility_id, location_id, item_batch_id, status, qty_on_hand, qty_reserved
+        SELECT id, facility_id, location_id, item_batch_id, status,
+               qty_on_hand, qty_reserved, qty_held
         FROM inventory_balances
         WHERE tenant_id = $1
           AND inventory_owner_id = $2
@@ -524,9 +526,10 @@ pub async fn move_license_plate(
     }
     for row in &content_rows {
         let qty_reserved: i64 = row.try_get("qty_reserved")?;
-        if qty_reserved > 0 {
+        let qty_held: i64 = row.try_get("qty_held")?;
+        if qty_reserved > 0 || qty_held > 0 {
             return Err(AppError::conflict(
-                "cannot move a license plate that contains reserved inventory",
+                "cannot move a license plate that contains reserved or held inventory",
             ));
         }
     }
@@ -649,7 +652,7 @@ pub async fn set_license_plate_deleted(
 
     if deleted {
         let stocked: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM inventory_balances WHERE tenant_id = $1 AND license_plate_id = $2 AND deleted IS NULL AND (qty_on_hand > 0 OR qty_reserved > 0) LIMIT 1",
+            "SELECT id FROM inventory_balances WHERE tenant_id = $1 AND license_plate_id = $2 AND deleted IS NULL AND (qty_on_hand > 0 OR qty_reserved > 0 OR qty_held > 0) LIMIT 1",
         )
         .bind(tenant_id.get())
         .bind(id)

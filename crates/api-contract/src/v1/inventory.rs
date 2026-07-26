@@ -18,6 +18,7 @@ pub enum InventoryBalanceStatus {
 pub struct InventoryQuantity {
     pub on_hand: i64,
     pub reserved: i64,
+    pub held: i64,
     pub available: i64,
 }
 
@@ -71,7 +72,8 @@ mod tests {
             quantity: InventoryQuantity {
                 on_hand: 12,
                 reserved: 2,
-                available: 10,
+                held: 1,
+                available: 9,
             },
         };
 
@@ -81,7 +83,7 @@ mod tests {
         assert!(value.get("created").is_none());
         assert!(value.get("modified").is_none());
         assert_eq!(value["status"], "available");
-        assert_eq!(value["quantity"]["available"], 10);
+        assert_eq!(value["quantity"]["available"], 9);
     }
 
     #[test]

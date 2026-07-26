@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 
 use common::*;
 use serde_json::json;
-use wareboxes_domain::{FacilityId, InventoryOwnerId};
+use wareboxes_core::models::InventoryHoldReason;
+use wareboxes_domain::{CommandContext, FacilityId, InventoryOwnerId};
 use wareboxes_server::repo::outbox::{self, NewOutboxEvent};
 
 async fn enqueue_test_event(
@@ -143,6 +144,68 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
     .await
     .unwrap();
     assert!(allocation.allocation_id > 0);
+    let hold_place_context = CommandContext {
+        tenant_id,
+        actor_id: access.user_id,
+        request_id: "request-outbox-hold-place".into(),
+        idempotency_key: Some("outbox-hold-place".into()),
+    };
+    let hold_place_command = repo::inventory::PlaceInventoryHoldCommand {
+        inventory_balance_id: balance_id,
+        qty: 2,
+        reason: InventoryHoldReason::QualityInspection,
+        note: Some("outbox lifecycle"),
+        reference_type: None,
+        reference_id: None,
+    };
+    let hold = repo::inventory::place_inventory_hold(
+        &fixture.db,
+        &access,
+        &hold_place_context,
+        &hold_place_command,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repo::inventory::place_inventory_hold(
+            &fixture.db,
+            &access,
+            &hold_place_context,
+            &hold_place_command,
+        )
+        .await
+        .unwrap(),
+        hold
+    );
+    let hold_release_context = CommandContext {
+        tenant_id,
+        actor_id: access.user_id,
+        request_id: "request-outbox-hold-release".into(),
+        idempotency_key: Some("outbox-hold-release".into()),
+    };
+    let hold_release_command = repo::inventory::ReleaseInventoryHoldCommand {
+        hold_id: hold.hold_id,
+    };
+    let released_hold = repo::inventory::release_inventory_hold(
+        &fixture.db,
+        &access,
+        &hold_release_context,
+        &hold_release_command,
+    )
+    .await
+    .unwrap();
+    assert_eq!(released_hold.released_qty, 2);
+    assert_eq!(
+        repo::inventory::release_inventory_hold(
+            &fixture.db,
+            &access,
+            &hold_release_context,
+            &hold_release_command,
+        )
+        .await
+        .unwrap(),
+        released_hold
+    );
     let cancel_command = repo::inventory::CancelInventoryReservationCommand {
         reservation_id: reservation.reservation_id,
         idempotency_key: "outbox-cancellation",
@@ -162,7 +225,7 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
     let events = outbox::get_events(&fixture.db, tenant_id, None, 100)
         .await
         .unwrap();
-    assert_eq!(events.len(), 5);
+    assert_eq!(events.len(), 7);
     assert_eq!(
         events
             .iter()
@@ -171,6 +234,8 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
         BTreeSet::from([
             "inventory.allocation.created",
             "inventory.allocation.released",
+            "inventory.hold.placed",
+            "inventory.hold.released",
             "inventory.reservation.cancelled",
             "inventory.reservation.created",
             "inventory.transaction.recorded",
@@ -218,15 +283,33 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
     )
     .await
     .unwrap();
+    let fourth_page = outbox::get_events(
+        &fixture.db,
+        tenant_id,
+        Some(third_page.last().unwrap().id),
+        2,
+    )
+    .await
+    .unwrap();
     assert_eq!(first_page.len(), 2);
     assert_eq!(second_page.len(), 2);
-    assert_eq!(third_page.len(), 1);
+    assert_eq!(third_page.len(), 2);
+    assert_eq!(fourth_page.len(), 1);
     let reservation_ordering_key = format!("inventory-reservation:{}", reservation.reservation_id);
     let allocation_ordering_key = format!("inventory-allocation:{}", allocation.allocation_id);
+    let hold_ordering_key = format!("inventory-hold:{}", hold.hold_id);
     assert_eq!(
         events
             .iter()
             .filter(|event| event.ordering_key == reservation_ordering_key)
+            .map(|event| event.aggregate_sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.ordering_key == hold_ordering_key)
             .map(|event| event.aggregate_sequence)
             .collect::<Vec<_>>(),
         vec![1, 2]
@@ -263,10 +346,12 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
     let ordering_a = ordering_a.unwrap();
     let ordering_b = ordering_b.unwrap();
     let first_claims = ordering_a.iter().chain(&ordering_b).collect::<Vec<_>>();
-    assert_eq!(first_claims.len(), 3);
+    assert_eq!(first_claims.len(), 4);
     assert!(first_claims.iter().all(|event| !matches!(
         event.event_type.as_str(),
-        "inventory.reservation.cancelled" | "inventory.allocation.released"
+        "inventory.reservation.cancelled"
+            | "inventory.allocation.released"
+            | "inventory.hold.released"
     )));
     let guarded_event = first_claims[0];
     assert!(!outbox::mark_published(
@@ -325,7 +410,7 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
     )
     .await
     .unwrap();
-    assert_eq!(second_claim.len(), 2);
+    assert_eq!(second_claim.len(), 3);
     assert_eq!(
         second_claim
             .iter()
@@ -333,6 +418,7 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([
             "inventory.allocation.released",
+            "inventory.hold.released",
             "inventory.reservation.cancelled",
         ])
     );
@@ -376,7 +462,7 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
             .await
             .unwrap()
             .len(),
-        5
+        7
     );
 
     let mut tamper_tx = tenant_tx(&fixture.db, tenant_id).await;
@@ -414,7 +500,7 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
             .await
             .unwrap()
             .len(),
-        5
+        7
     );
     assert_eq!(
         outbox::get_events(&fixture.db, other_tenant, None, 100)

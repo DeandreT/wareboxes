@@ -238,7 +238,15 @@ async fn available_by_item_in_scope(
     let rows = sqlx::query(
         r#"
         SELECT inv.inventory_owner_id AS inventory_owner_id, inv.item_id AS item_id,
-               COALESCE(SUM(GREATEST(inv.qty_on_hand - inv.qty_reserved, 0)), 0)::BIGINT AS available_qty
+               COALESCE(
+                   SUM(
+                       GREATEST(
+                           inv.qty_on_hand - inv.qty_reserved - inv.qty_held,
+                           0
+                       )
+                   ),
+                   0
+               )::BIGINT AS available_qty
         FROM inventory_balances inv
         WHERE inv.tenant_id = $1
           AND inv.deleted IS NULL

@@ -22,6 +22,7 @@ pub struct InventoryBalancePageRow {
     pub status: String,
     pub qty_on_hand: i64,
     pub qty_reserved: i64,
+    pub qty_held: i64,
 }
 
 /// Internal keyset page.
@@ -45,7 +46,8 @@ pub async fn get_inventory_balance_page(
         SELECT balance.id, balance.inventory_owner_id, balance.facility_id,
                facility.name AS facility_name, balance.location_id,
                balance.license_plate_id, balance.item_batch_id, balance.item_id,
-               balance.uom, balance.status, balance.qty_on_hand, balance.qty_reserved
+               balance.uom, balance.status, balance.qty_on_hand,
+               balance.qty_reserved, balance.qty_held
         FROM inventory_balances balance
         INNER JOIN facilities facility
             ON facility.tenant_id = balance.tenant_id
@@ -87,6 +89,7 @@ pub async fn get_inventory_balance_page(
                 status: row.try_get("status")?,
                 qty_on_hand: row.try_get("qty_on_hand")?,
                 qty_reserved: row.try_get("qty_reserved")?,
+                qty_held: row.try_get("qty_held")?,
             })
         })
         .collect::<AppResult<Vec<_>>>()?;

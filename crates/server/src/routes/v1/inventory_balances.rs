@@ -65,11 +65,17 @@ fn map_balance(
         "quarantine" => InventoryBalanceStatus::Quarantine,
         _ => return Err(V1Error::internal("unknown inventory balance status")),
     };
-    let available = row
+    let uncommitted = row
         .qty_on_hand
         .checked_sub(row.qty_reserved)
+        .and_then(|quantity| quantity.checked_sub(row.qty_held))
         .filter(|quantity| *quantity >= 0)
         .ok_or_else(|| V1Error::internal("invalid inventory balance quantities"))?;
+    let available = if status == InventoryBalanceStatus::Available {
+        uncommitted
+    } else {
+        0
+    };
 
     Ok(InventoryBalanceResponse {
         id: row.id,
@@ -85,6 +91,7 @@ fn map_balance(
         quantity: InventoryQuantity {
             on_hand: row.qty_on_hand,
             reserved: row.qty_reserved,
+            held: row.qty_held,
             available,
         },
     })

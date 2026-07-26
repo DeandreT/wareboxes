@@ -33,6 +33,7 @@ struct LockedBalance {
     status: InventoryStatus,
     qty_on_hand: i64,
     qty_reserved: i64,
+    qty_held: i64,
 }
 
 fn validated_note(note: Option<&str>) -> AppResult<Option<&str>> {
@@ -139,7 +140,8 @@ async fn lock_balance(
                batch.serial,
                balance.status,
                balance.qty_on_hand,
-               balance.qty_reserved
+               balance.qty_reserved,
+               balance.qty_held
         FROM inventory_balances balance
         INNER JOIN item_batches batch
           ON batch.tenant_id = balance.tenant_id
@@ -178,6 +180,7 @@ async fn lock_balance(
         status: parse_inventory_status(&row.try_get::<String, _>("status")?)?,
         qty_on_hand: row.try_get("qty_on_hand")?,
         qty_reserved: row.try_get("qty_reserved")?,
+        qty_held: row.try_get("qty_held")?,
     })
 }
 
@@ -221,9 +224,13 @@ pub async fn confirm_item_location_cycle_count_in_scope(
     )
     .await?;
     let balance = lock_balance(&mut tx, access.tenant_id, &target).await?;
-    if counted_quantity < balance.qty_reserved {
+    let committed_quantity = balance
+        .qty_reserved
+        .checked_add(balance.qty_held)
+        .ok_or_else(|| AppError::internal("inventory commitments are out of range"))?;
+    if counted_quantity < committed_quantity {
         return Err(AppError::conflict(
-            "counted quantity cannot be lower than reserved quantity",
+            "counted quantity cannot be lower than reserved and held quantity",
         ));
     }
     let variance_quantity = counted_quantity
@@ -289,6 +296,7 @@ pub async fn confirm_item_location_cycle_count_in_scope(
               AND deleted IS NULL
               AND qty_on_hand = $6
               AND qty_reserved = $7
+              AND qty_held = $8
             "#,
         )
         .bind(counted_quantity)
@@ -298,6 +306,7 @@ pub async fn confirm_item_location_cycle_count_in_scope(
         .bind(target.inventory_balance_id)
         .bind(balance.qty_on_hand)
         .bind(balance.qty_reserved)
+        .bind(balance.qty_held)
         .execute(&mut *tx)
         .await?;
         if updated.rows_affected() != 1 {
@@ -326,6 +335,7 @@ pub async fn confirm_item_location_cycle_count_in_scope(
         inventory_status: balance.status,
         previous_on_hand_quantity: balance.qty_on_hand,
         reserved_quantity: balance.qty_reserved,
+        held_quantity: balance.qty_held,
         counted_quantity,
         variance_quantity,
         inventory_transaction_id,
@@ -340,12 +350,12 @@ pub async fn confirm_item_location_cycle_count_in_scope(
             tenant_id, task_id, inventory_owner_id, facility_id, location_id,
             item_id, inventory_balance_id, item_batch_id, license_plate_id, uom,
             lot, expiration, serial, status, system_qty_on_hand,
-            system_qty_reserved, counted_qty, variance_qty,
+            system_qty_reserved, system_qty_held, counted_qty, variance_qty,
             inventory_transaction_id, confirmed_by, confirmed_at, note
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-            $15, $16, $17, $18, $19, $20, $21, $22
+            $15, $16, $17, $18, $19, $20, $21, $22, $23
         )
         "#,
     )
@@ -365,6 +375,7 @@ pub async fn confirm_item_location_cycle_count_in_scope(
     .bind(confirmation.inventory_status.as_str())
     .bind(confirmation.previous_on_hand_quantity)
     .bind(confirmation.reserved_quantity)
+    .bind(confirmation.held_quantity)
     .bind(confirmation.counted_quantity)
     .bind(confirmation.variance_quantity)
     .bind(confirmation.inventory_transaction_id)
@@ -434,6 +445,7 @@ pub async fn confirm_item_location_cycle_count_in_scope(
         "status": balance.status.as_str(),
         "previous_on_hand_quantity": balance.qty_on_hand,
         "reserved_quantity": balance.qty_reserved,
+        "held_quantity": balance.qty_held,
         "counted_quantity": counted_quantity,
         "variance_quantity": variance_quantity,
         "inventory_transaction_id": inventory_transaction_id,

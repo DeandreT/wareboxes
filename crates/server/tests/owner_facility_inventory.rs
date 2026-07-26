@@ -435,9 +435,133 @@ async fn owner_facility_pair_is_enforced_across_inventory_boundaries() {
         tenant_id,
         inventory_owner_id,
         assigned_facility_id,
-        "positive or reserved inventory",
+        "committed inventory",
     )
     .await;
+
+    let (hold_owner, hold_facility, hold_location) =
+        assigned_pair(&fixture, tenant_id, "HOLD-GUARD").await;
+    let hold_batch = repo::inventory::add_item_batch(
+        &fixture.db,
+        tenant_id,
+        hold_owner,
+        item_id,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo::inventory::receive_inventory(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        hold_batch,
+        hold_location,
+        2,
+        None,
+        None,
+        None,
+        None,
+        "owner-facility-hold-guard-receipt",
+    )
+    .await
+    .unwrap();
+    let hold_balance = repo::inventory::get_balances(&fixture.db, tenant_id, false)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|balance| balance.item_batch_id == hold_batch)
+        .unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let hold_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO inventory_holds (
+            tenant_id, inventory_owner_id, created, modified, created_by,
+            inventory_balance_id, facility_id, location_id, license_plate_id,
+            item_batch_id, item_id, uom, inventory_status, qty, reason_code,
+            note, status
+        )
+        VALUES (
+            $1, $2, $3, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+            1, 'regulatory', 'owner-facility retirement guard', 'active'
+        )
+        RETURNING id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(hold_owner)
+    .bind(db::now_iso())
+    .bind(user.id)
+    .bind(hold_balance.id)
+    .bind(hold_facility)
+    .bind(hold_location)
+    .bind(hold_balance.license_plate_id)
+    .bind(hold_batch)
+    .bind(item_id)
+    .bind(&hold_balance.uom)
+    .bind(hold_balance.status.as_str())
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_assignment_retirement_rejected(
+        &fixture.db,
+        tenant_id,
+        hold_owner,
+        hold_facility,
+        "active holds",
+    )
+    .await;
+
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let released_at = db::now_iso();
+    sqlx::query(
+        r#"
+        UPDATE inventory_holds
+        SET modified = $1, deleted = $1, released_at = $1,
+            released_by = $2, status = 'released'
+        WHERE tenant_id = $3 AND id = $4
+        "#,
+    )
+    .bind(released_at)
+    .bind(user.id)
+    .bind(tenant_id.get())
+    .bind(hold_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let admin_db = admin_db_for(&fixture.db).await;
+    sqlx::query("UPDATE inventory_balances SET qty_on_hand = 0 WHERE tenant_id = $1 AND id = $2")
+        .bind(tenant_id.get())
+        .bind(hold_balance.id)
+        .execute(&admin_db)
+        .await
+        .unwrap();
+    admin_db.close().await;
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    assert_eq!(
+        sqlx::query(
+            r#"
+            UPDATE inventory_owner_facilities
+            SET deleted = CURRENT_TIMESTAMP
+            WHERE tenant_id = $1
+              AND inventory_owner_id = $2
+              AND facility_id = $3
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(hold_owner)
+        .bind(hold_facility)
+        .execute(&mut *tx)
+        .await
+        .unwrap()
+        .rows_affected(),
+        1
+    );
+    tx.rollback().await.unwrap();
 
     let (reservation_owner, reservation_facility, reservation_location) =
         assigned_pair(&fixture, tenant_id, "RESERVATION-GUARD").await;
@@ -707,9 +831,7 @@ async fn owner_facility_pair_is_enforced_across_inventory_boundaries() {
         .unwrap()
         .unwrap_err();
     assert!(
-        retirement_error
-            .to_string()
-            .contains("positive or reserved inventory"),
+        retirement_error.to_string().contains("committed inventory"),
         "unexpected concurrent retirement error: {retirement_error}"
     );
 

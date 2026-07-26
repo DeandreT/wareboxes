@@ -17,6 +17,7 @@ use crate::db::{begin_tenant_transaction, bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 use crate::repo::inventory_journal;
+use crate::repo::inventory_locking::{balance_license_plate_hint, lock_license_plate};
 use crate::repo::outbox::{self, NewOutboxEvent};
 
 fn parse_inventory_status(s: &str) -> AppResult<InventoryStatus> {
@@ -606,11 +607,14 @@ pub async fn allocate_inventory(
         reservation.facility_id,
     )?;
 
+    let license_plate_id =
+        balance_license_plate_hint(&mut tx, tenant_id, command.inventory_balance_id).await?;
+    lock_license_plate(&mut tx, tenant_id, license_plate_id).await?;
     let balance = sqlx::query(
         r#"
         SELECT inventory_owner_id, facility_id, location_id, license_plate_id,
                item_batch_id, item_id, uom, status, qty_on_hand, qty_reserved,
-               deleted
+               qty_held, deleted
         FROM inventory_balances
         WHERE tenant_id = $1 AND id = $2
         FOR UPDATE
@@ -643,6 +647,11 @@ pub async fn allocate_inventory(
         return Ok(result);
     }
 
+    if balance.try_get::<Option<i64>, _>("license_plate_id")? != license_plate_id {
+        return Err(AppError::conflict(
+            "inventory balance license plate changed while acquiring locks",
+        ));
+    }
     let balance_status: String = balance.try_get("status")?;
     let balance_deleted: Option<Timestamp> = balance.try_get("deleted")?;
     let balance_item_id: i64 = balance.try_get("item_id")?;
@@ -682,14 +691,14 @@ pub async fn allocate_inventory(
     }
     let qty_on_hand: i64 = balance.try_get("qty_on_hand")?;
     let qty_reserved: i64 = balance.try_get("qty_reserved")?;
-    if qty_on_hand - qty_reserved < command.qty {
+    let qty_held: i64 = balance.try_get("qty_held")?;
+    if qty_on_hand - qty_reserved - qty_held < command.qty {
         return Err(AppError::conflict(
             "insufficient available inventory to allocate",
         ));
     }
 
     let location_id: i64 = balance.try_get("location_id")?;
-    let license_plate_id: Option<i64> = balance.try_get("license_plate_id")?;
     let item_batch_id: i64 = balance.try_get("item_batch_id")?;
     let allocation_id: i64 = sqlx::query_scalar(
         r#"

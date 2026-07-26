@@ -23,9 +23,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use wareboxes_core::dto::{SessionUser, SummaryCount};
 use wareboxes_core::models::{
-    AuditWave, Employee, Facility, InventoryBalance, InventoryOwner, InventoryTransaction, Item,
-    ItemBatch, LicensePlate, Load, LoadFileCategory, LoadLine, LoadLineStatus, LoadNote,
-    LoadStatus, LoadType, Location, Order, OrderStatus, Permission, Role, User,
+    AuditWave, Employee, Facility, InventoryBalance, InventoryHold, InventoryHoldReason,
+    InventoryHoldStatus, InventoryOwner, InventoryStatus, InventoryTransaction, Item, ItemBatch,
+    LicensePlate, Load, LoadFileCategory, LoadLine, LoadLineStatus, LoadNote, LoadStatus, LoadType,
+    Location, Order, OrderStatus, Permission, Role, User,
 };
 
 use crate::api::{ApiClient, ApiEvent, Screen};
@@ -202,6 +203,7 @@ struct Data {
     loads: Vec<Load>,
     item_batches: Vec<ItemBatch>,
     inventory_balances: Vec<InventoryBalance>,
+    inventory_holds: Vec<InventoryHold>,
     inventory_transactions: Vec<InventoryTransaction>,
     license_plates: Vec<LicensePlate>,
     license_plate_lookup: Option<LicensePlate>,
@@ -348,6 +350,7 @@ impl WareboxesApp {
         match s {
             Screen::Inventory => {
                 self.api.get_inventory_balances();
+                self.api.get_inventory_holds();
                 self.api.get_inventory_transactions();
                 self.api.get_list(Screen::InventoryOwners);
                 self.api.get_list(Screen::Items);
@@ -660,6 +663,7 @@ impl WareboxesApp {
                 }
                 ApiEvent::ItemBatches(b) => self.data.item_batches = b,
                 ApiEvent::InventoryBalances(b) => self.data.inventory_balances = b,
+                ApiEvent::InventoryHolds(holds) => self.data.inventory_holds = holds,
                 ApiEvent::InventoryTransactions(transactions) => {
                     self.data.inventory_transactions = transactions;
                 }
