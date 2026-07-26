@@ -6,6 +6,7 @@
 
 mod components;
 mod loads;
+mod loads_receiving;
 mod operations;
 mod panels;
 mod theme;

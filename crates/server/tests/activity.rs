@@ -117,7 +117,6 @@ async fn order_and_load_mutations_write_activity_history() {
         None,
         None,
         None,
-        None,
     )
     .await
     .unwrap());

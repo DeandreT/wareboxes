@@ -3,15 +3,18 @@ use axum::Json;
 use serde::Deserialize;
 use wareboxes_core::dto::{
     AddLoad, AddLoadFile, AddLoadLine, AddLoadNote, ArriveLoad, LoadFileIdRequest, LoadIdRequest,
-    LoadNoteIdRequest, LoadUpdate, ReceiveInboundLine, ReceiveLoadLine,
+    LoadNoteIdRequest, LoadUpdate, ReceiveExpectedInventory,
 };
-use wareboxes_core::models::{Load, LoadFileCategory, LoadStatus, LoadType, ReceiveLoadLineResult};
+use wareboxes_core::models::{
+    Load, LoadFileCategory, LoadStatus, LoadType, ReceiveExpectedInventoryResult,
+};
 
 use crate::auth::CurrentTenant;
 use crate::db::Db;
 use crate::error::{AppError, AppResult};
 use crate::permissions;
 use crate::repo;
+use crate::request_context::IdempotencyKey;
 use crate::routes::validate;
 use crate::state::AppState;
 
@@ -27,13 +30,6 @@ async fn require_active_load(
     repo::access::load_dimensions(db, &user.tenant, load_id, false)
         .await?
         .ok_or_else(|| AppError::not_found("load"))
-}
-
-fn require_active_load_child(
-    dimensions: Option<repo::access::OperationalDimensions>,
-    resource: &'static str,
-) -> AppResult<repo::access::OperationalDimensions> {
-    dimensions.ok_or_else(|| AppError::not_found(resource))
 }
 
 async fn require_active_location_in_facility(
@@ -160,7 +156,6 @@ pub async fn mobile_arrive(
         None,
         None,
         None,
-        None,
         body.arrival,
         None,
         None,
@@ -170,45 +165,38 @@ pub async fn mobile_arrive(
     Ok(Json(ok))
 }
 
-pub async fn mobile_receive_line(
+pub async fn receive_expected_inventory(
     State(state): State<AppState>,
     user: CurrentTenant,
     Path(load_line_id): Path<i64>,
-    Json(body): Json<ReceiveInboundLine>,
-) -> AppResult<Json<ReceiveLoadLineResult>> {
+    idempotency_key: IdempotencyKey,
+    Json(body): Json<ReceiveExpectedInventory>,
+) -> AppResult<Json<ReceiveExpectedInventoryResult>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let dimensions = require_active_load_child(
-        repo::access::load_line_dimensions(&state.db, &user.tenant, load_line_id).await?,
-        "load line",
-    )?;
-    require_active_location_in_facility(
-        &state.db,
-        user.tenant.tenant_id,
-        dimensions.facility_id.get(),
-        body.to_location_id,
-        "Receiving location",
-    )
-    .await?;
-    let id = repo::loads::receive_line(
-        &state.db,
-        user.tenant.tenant_id,
-        user.user.id,
-        load_line_id,
-        body.to_location_id,
-        body.received_qty,
-        body.rejected_qty,
-        body.missing_qty.unwrap_or(0),
-        body.license_plate_id,
-        body.license_plate_barcode.as_deref(),
-        body.lot.as_deref(),
-        body.serial.as_deref(),
-        body.expiration,
-        body.reason.as_deref(),
-        &body.idempotency_key,
-    )
-    .await?;
-    Ok(Json(id))
+    let context = user.command_context(&idempotency_key);
+    Ok(Json(
+        repo::inbound_receipt::receive_expected_inventory(
+            &state.db,
+            &user.tenant,
+            &context,
+            load_line_id,
+            &repo::inbound_receipt::ReceiveExpectedInventoryCommand {
+                receiving_location_id: body.receiving_location_id,
+                received_qty: body.received_qty,
+                rejected_qty: body.rejected_qty,
+                missing_qty: body.missing_qty,
+                license_plate_id: body.license_plate_id,
+                license_plate_barcode: body.license_plate_barcode.as_deref(),
+                lot: body.lot.as_deref(),
+                serial: body.serial.as_deref(),
+                expiration: body.expiration,
+                exception_reason: body.exception_reason,
+                exception_note: body.exception_note.as_deref(),
+            },
+        )
+        .await?,
+    ))
 }
 
 pub async fn add(
@@ -311,7 +299,6 @@ pub async fn update(
         body.arrival,
         body.departure,
         body.rejected,
-        body.receive_completed,
         body.closed,
     )
     .await?;
@@ -431,46 +418,6 @@ pub async fn add_line(
         body.lot.as_deref(),
         body.serial.as_deref(),
         body.expiration,
-    )
-    .await?;
-    Ok(Json(id))
-}
-
-pub async fn receive_line(
-    State(state): State<AppState>,
-    user: CurrentTenant,
-    Json(body): Json<ReceiveLoadLine>,
-) -> AppResult<Json<ReceiveLoadLineResult>> {
-    user.require_permission(&state.db, PERM).await?;
-    validate(&body)?;
-    let dimensions = require_active_load_child(
-        repo::access::load_line_dimensions(&state.db, &user.tenant, body.load_line_id).await?,
-        "load line",
-    )?;
-    require_active_location_in_facility(
-        &state.db,
-        user.tenant.tenant_id,
-        dimensions.facility_id.get(),
-        body.to_location_id,
-        "Receiving location",
-    )
-    .await?;
-    let id = repo::loads::receive_line(
-        &state.db,
-        user.tenant.tenant_id,
-        user.user.id,
-        body.load_line_id,
-        body.to_location_id,
-        body.received_qty,
-        body.rejected_qty,
-        body.missing_qty.unwrap_or(0),
-        body.license_plate_id,
-        body.license_plate_barcode.as_deref(),
-        body.lot.as_deref(),
-        body.serial.as_deref(),
-        body.expiration,
-        body.reason.as_deref(),
-        &body.idempotency_key,
     )
     .await?;
     Ok(Json(id))

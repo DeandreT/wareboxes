@@ -8,6 +8,7 @@ pub mod audits;
 pub mod employees;
 pub mod facilities;
 pub mod idempotency;
+pub mod inbound_receipt;
 pub mod integration_inbox;
 pub mod inventory;
 mod inventory_allocation;

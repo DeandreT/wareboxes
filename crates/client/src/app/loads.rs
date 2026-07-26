@@ -867,6 +867,7 @@ impl WareboxesApp {
                             }
                             for line in &load.lines {
                                 self.load_line_visual(ui, line);
+                                self.load_line_receipt_form(ui, load, line);
                                 ui.add_space(6.0);
                             }
                         }
@@ -917,17 +918,6 @@ impl WareboxesApp {
                             self.forms.drafts.insert(note_key, note);
                         });
                         ui.horizontal(|ui| {
-                            if load.r#type == LoadType::Inbound {
-                                let mut completed = load.receive_completed;
-                                if ui.checkbox(&mut completed, "Receive complete").changed() {
-                                    self.api.action(
-                                        "/api/loads/update",
-                                        json!({"load_id": load.id, "receive_completed": completed}),
-                                        Screen::Loads,
-                                        "Load updated",
-                                    );
-                                }
-                            }
                             if load.deleted.is_none() {
                                 self.delete_button(
                                     ui,

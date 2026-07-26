@@ -633,38 +633,6 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         &token,
         tenant_id,
         Method::POST,
-        "/api/inventory/receive",
-        Some(json!({
-            "item_batch_id": denied_batch,
-            "to_location_id": allowed_source,
-            "qty": 1,
-            "idempotency_key": "inventory-scope-hidden-batch-receipt"
-        })),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-    let response = send_api(
-        &app,
-        &token,
-        tenant_id,
-        Method::POST,
-        "/api/inventory/receive",
-        Some(json!({
-            "item_batch_id": allowed_batch,
-            "to_location_id": denied_location,
-            "qty": 1,
-            "idempotency_key": "inventory-scope-hidden-location-receipt"
-        })),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-    let response = send_api(
-        &app,
-        &token,
-        tenant_id,
-        Method::POST,
         "/api/inventory/moves",
         Some(json!({
             "item_batch_id": denied_batch,

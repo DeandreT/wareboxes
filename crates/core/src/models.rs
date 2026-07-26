@@ -1078,10 +1078,43 @@ pub struct LoadLine {
     pub status: LoadLineStatus,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundReceiptExceptionReason {
+    Damaged,
+    QualityRejected,
+    ShortShipment,
+    CountDiscrepancy,
+    WrongItem,
+    Other,
+}
+
+impl InboundReceiptExceptionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Damaged => "damaged",
+            Self::QualityRejected => "quality_rejected",
+            Self::ShortShipment => "short_shipment",
+            Self::CountDiscrepancy => "count_discrepancy",
+            Self::WrongItem => "wrong_item",
+            Self::Other => "other",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReceiveLoadLineResult {
+pub struct ReceiveExpectedInventoryResult {
+    pub load_id: i64,
     pub load_line_id: i64,
     pub inventory_transaction_id: Option<i64>,
+    pub item_batch_id: Option<i64>,
+    pub license_plate_id: Option<i64>,
+    pub load_status: LoadStatus,
+    pub line_status: LoadLineStatus,
+    pub cumulative_received_qty: i64,
+    pub cumulative_rejected_qty: i64,
+    pub cumulative_missing_qty: i64,
+    pub receive_completed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
