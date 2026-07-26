@@ -250,6 +250,10 @@ pub struct WareboxesApp {
     order_limit: i64,
     order_offset: i64,
     putaway: PutawayWorkflowState,
+    putaway_release_open: bool,
+    putaway_release_reason: wareboxes_api_contract::v1::PutawayClaimReleaseReason,
+    putaway_release_note: String,
+    putaway_release_error: Option<String>,
 }
 
 impl WareboxesApp {
@@ -336,6 +340,11 @@ impl WareboxesApp {
             order_limit: DEFAULT_ORDER_PAGE_SIZE,
             order_offset: 0,
             putaway: PutawayWorkflowState::default(),
+            putaway_release_open: false,
+            putaway_release_reason:
+                wareboxes_api_contract::v1::PutawayClaimReleaseReason::WorkInterrupted,
+            putaway_release_note: String::new(),
+            putaway_release_error: None,
         }
     }
 
@@ -343,6 +352,11 @@ impl WareboxesApp {
     /// manual Refresh button share one cadence.
     fn fetch(&mut self, s: Screen) {
         if s == Screen::Putaway {
+            self.putaway_release_open = false;
+            self.putaway_release_reason =
+                wareboxes_api_contract::v1::PutawayClaimReleaseReason::WorkInterrupted;
+            self.putaway_release_note.clear();
+            self.putaway_release_error = None;
             if let Some(request) = self.putaway.begin_current(Self::new_putaway_request_id()) {
                 self.api.execute_putaway(request);
             }
@@ -594,6 +608,11 @@ impl WareboxesApp {
                     self.new_item_open = false;
                     self.settings_open = false;
                     self.putaway = PutawayWorkflowState::default();
+                    self.putaway_release_open = false;
+                    self.putaway_release_reason =
+                        wareboxes_api_contract::v1::PutawayClaimReleaseReason::WorkInterrupted;
+                    self.putaway_release_note.clear();
+                    self.putaway_release_error = None;
                 }
                 ApiEvent::Users(u) => self.data.users = u,
                 ApiEvent::Roles(r) => self.data.roles = r,
@@ -690,7 +709,14 @@ impl WareboxesApp {
                 ApiEvent::Employees(e) => self.data.employees = e,
                 ApiEvent::Audits(a) => self.data.audits = a,
                 ApiEvent::Putaway(event) => {
-                    if let PutawayApplyResult::Completed(message) = self.putaway.apply(event) {
+                    if let PutawayApplyResult::Completed(message) =
+                        self.putaway.apply_at(event, now)
+                    {
+                        self.putaway_release_open = false;
+                        self.putaway_release_reason =
+                            wareboxes_api_contract::v1::PutawayClaimReleaseReason::WorkInterrupted;
+                        self.putaway_release_note.clear();
+                        self.putaway_release_error = None;
                         self.toast(message, false, now);
                     }
                 }
@@ -759,6 +785,14 @@ impl eframe::App for WareboxesApp {
         let now = ctx.input(|i| i.time);
         self.now = now;
         self.drain_events(now);
+        let putaway_visible = self
+            .active_workspace()
+            .panels
+            .get(&Screen::Putaway)
+            .is_some_and(|panel| panel.open);
+        if self.session.is_some() && putaway_visible {
+            self.drive_putaway_heartbeat(now);
+        }
         self.apply_visuals(ctx);
         self.toasts.retain(|t| now - t.created < 5.0);
 
@@ -1179,6 +1213,7 @@ impl WareboxesApp {
             .id(egui::Id::new(("panel", workspace_id, layout_generation, s)))
             .open(&mut open)
             .resizable(true)
+            .vscroll(s == Screen::Putaway)
             .constrain_to(panel_bounds)
             .default_pos(default_pos)
             .default_size(default_size)
