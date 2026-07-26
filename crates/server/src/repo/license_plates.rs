@@ -373,7 +373,7 @@ pub async fn move_license_plate(
     id: i64,
     to_location_id: i64,
     reason: Option<&str>,
-    idempotency_key: Option<&str>,
+    idempotency_key: &str,
 ) -> AppResult<i64> {
     let now = now_iso();
     let mut tx = db.begin().await?;
@@ -384,7 +384,7 @@ pub async fn move_license_plate(
         &mut tx,
         tenant_id,
         "move_license_plate",
-        idempotency_key,
+        Some(idempotency_key),
         &request_hash,
     )
     .await?
@@ -418,7 +418,7 @@ pub async fn move_license_plate(
             reference_id: Some(id),
             correlation_id: None,
             operation: "move_license_plate",
-            idempotency_key,
+            idempotency_key: Some(idempotency_key),
             request_hash: &request_hash,
             record_idempotency: true,
         },

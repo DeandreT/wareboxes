@@ -223,6 +223,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     .await
     .unwrap();
     for batch_id in [allowed_batch, second_allowed_batch] {
+        let idempotency_key = format!("task-scope-receipt-{batch_id}");
         repo::inventory::receive_inventory(
             &fixture.db,
             tenant_id,
@@ -234,7 +235,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
             Some("task scope setup"),
             None,
             None,
-            None,
+            &idempotency_key,
         )
         .await
         .unwrap();

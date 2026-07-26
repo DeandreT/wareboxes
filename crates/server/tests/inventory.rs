@@ -72,6 +72,20 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     .await
     .unwrap();
 
+    let missing_key = repo::inventory::receive_inventory(
+        &db, tenant_id, user.id, batch, receiving, 1, None, None, None, None, "",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        missing_key,
+        AppError::Core(CoreError::IdempotencyKeyRequired)
+    ));
+    assert!(repo::inventory::get_transactions(&db, tenant_id)
+        .await
+        .unwrap()
+        .is_empty());
+
     let receive_move = repo::inventory::receive_inventory(
         &db,
         tenant_id,
@@ -83,7 +97,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
         Some("initial receipt"),
         Some("load"),
         Some(42),
-        Some("receipt-42"),
+        "receipt-42",
     )
     .await
     .unwrap();
@@ -100,7 +114,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
         Some("initial receipt"),
         Some("load"),
         Some(42),
-        Some("receipt-42"),
+        "receipt-42",
     )
     .await
     .unwrap();
@@ -117,7 +131,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
         Some("initial receipt"),
         Some("load"),
         Some(42),
-        Some("receipt-42"),
+        "receipt-42",
     )
     .await
     .unwrap_err();
@@ -146,7 +160,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
         Some("initial receipt"),
         Some("load"),
         Some(42),
-        Some("receipt-42"),
+        "receipt-42",
     )
     .await
     .unwrap_err();
@@ -167,7 +181,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
         Some("replenishment"),
         None,
         None,
-        None,
+        "move-inventory-initial",
     )
     .await
     .unwrap();
@@ -189,7 +203,18 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     assert_eq!(pick_balance.qty_reserved, 0);
 
     let err = repo::inventory::move_inventory(
-        &db, tenant_id, user.id, batch, pick_face, receiving, 31, None, None, None, None, None,
+        &db,
+        tenant_id,
+        user.id,
+        batch,
+        pick_face,
+        receiving,
+        31,
+        None,
+        None,
+        None,
+        None,
+        "move-inventory-insufficient-unreserved",
     )
     .await
     .unwrap_err();
@@ -262,7 +287,18 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     assert_eq!(reservations[0].inventory_balance_id, pick_balance.id);
 
     let err = repo::inventory::move_inventory(
-        &db, tenant_id, user.id, batch, pick_face, receiving, 11, None, None, None, None, None,
+        &db,
+        tenant_id,
+        user.id,
+        batch,
+        pick_face,
+        receiving,
+        11,
+        None,
+        None,
+        None,
+        None,
+        "move-inventory-insufficient-reserved",
     )
     .await
     .unwrap_err();
@@ -355,7 +391,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
         Some("split putaway"),
         None,
         None,
-        Some("split-putaway-1"),
+        "split-putaway-1",
     )
     .await
     .unwrap();
@@ -490,7 +526,7 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
         None,
         None,
         None,
-        Some("tenant-a-receipt"),
+        "tenant-a-receipt",
     )
     .await
     .unwrap();
@@ -514,7 +550,7 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
         None,
         None,
         None,
-        Some("guessed-batch"),
+        "guessed-batch",
     )
     .await
     .is_err());
@@ -718,7 +754,7 @@ async fn concurrent_inventory_retries_apply_effects_once() {
                 Some("concurrent receipt"),
                 None,
                 None,
-                Some("concurrent-receipt-key"),
+                "concurrent-receipt-key",
             )
             .await
         });
@@ -748,7 +784,7 @@ async fn concurrent_inventory_retries_apply_effects_once() {
         None,
         None,
         None,
-        Some("move-all-key"),
+        "move-all-key",
     )
     .await
     .unwrap();
@@ -764,7 +800,7 @@ async fn concurrent_inventory_retries_apply_effects_once() {
         None,
         None,
         None,
-        Some("move-all-key"),
+        "move-all-key",
     )
     .await
     .unwrap();
@@ -934,6 +970,7 @@ async fn concurrent_initial_receipt_and_batch_deletion_preserve_batch_stock_inva
 
         let receipt_db = fixture.db.clone();
         let receipt_barrier = barrier.clone();
+        let receipt_key = format!("batch-delete-race-receipt-{attempt}");
         let actor_id = user.id;
         let receipt = tokio::spawn(async move {
             receipt_barrier.wait().await;
@@ -948,7 +985,7 @@ async fn concurrent_initial_receipt_and_batch_deletion_preserve_batch_stock_inva
                 Some("initial receipt racing batch deletion"),
                 None,
                 None,
-                None,
+                &receipt_key,
             )
             .await
         });
@@ -1100,33 +1137,84 @@ async fn inventory_rejects_mixed_lot_or_expiration_in_same_location() {
     .unwrap();
 
     repo::inventory::receive_inventory(
-        &db, tenant_id, user.id, lot_a, receiving, 10, None, None, None, None, None,
+        &db,
+        tenant_id,
+        user.id,
+        lot_a,
+        receiving,
+        10,
+        None,
+        None,
+        None,
+        None,
+        "location-restriction-receive-lot-a",
     )
     .await
     .unwrap();
 
     let err = repo::inventory::receive_inventory(
-        &db, tenant_id, user.id, lot_b, receiving, 5, None, None, None, None, None,
+        &db,
+        tenant_id,
+        user.id,
+        lot_b,
+        receiving,
+        5,
+        None,
+        None,
+        None,
+        None,
+        "location-restriction-receive-lot-b",
     )
     .await
     .unwrap_err();
     assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
 
     let err = repo::inventory::receive_inventory(
-        &db, tenant_id, user.id, exp_a, receiving, 5, None, None, None, None, None,
+        &db,
+        tenant_id,
+        user.id,
+        exp_a,
+        receiving,
+        5,
+        None,
+        None,
+        None,
+        None,
+        "location-restriction-receive-expired",
     )
     .await
     .unwrap_err();
     assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
 
     repo::inventory::receive_inventory(
-        &db, tenant_id, user.id, lot_b, reserve, 5, None, None, None, None, None,
+        &db,
+        tenant_id,
+        user.id,
+        lot_b,
+        reserve,
+        5,
+        None,
+        None,
+        None,
+        None,
+        "location-restriction-receive-reserve",
     )
     .await
     .unwrap();
 
     let err = repo::inventory::move_inventory(
-        &db, tenant_id, user.id, lot_b, reserve, receiving, 1, None, None, None, None, None,
+        &db,
+        tenant_id,
+        user.id,
+        lot_b,
+        reserve,
+        receiving,
+        1,
+        None,
+        None,
+        None,
+        None,
+        "location-restriction-move",
     )
     .await
     .unwrap_err();

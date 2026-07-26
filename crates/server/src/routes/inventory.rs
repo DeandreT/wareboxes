@@ -186,7 +186,7 @@ pub async fn receive(
         body.reason.as_deref(),
         body.reference_type.as_deref(),
         body.reference_id,
-        Some(&body.idempotency_key),
+        &body.idempotency_key,
     )
     .await?;
     Ok(Json(id))
@@ -235,7 +235,7 @@ pub async fn move_stock(
         body.reason.as_deref(),
         body.reference_type.as_deref(),
         body.reference_id,
-        Some(&body.idempotency_key),
+        &body.idempotency_key,
     )
     .await?;
     Ok(Json(id))
@@ -286,7 +286,7 @@ pub async fn split_move_stock(
         body.reason.as_deref(),
         body.reference_type.as_deref(),
         body.reference_id,
-        Some(&body.idempotency_key),
+        &body.idempotency_key,
     )
     .await?;
     Ok(Json(ids))

@@ -78,7 +78,7 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
         None,
         None,
         None,
-        Some("outbox-receipt"),
+        "outbox-receipt",
     )
     .await
     .unwrap();
@@ -93,7 +93,7 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
         None,
         None,
         None,
-        Some("outbox-receipt"),
+        "outbox-receipt",
     )
     .await
     .unwrap();

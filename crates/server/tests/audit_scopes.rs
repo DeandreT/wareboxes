@@ -155,7 +155,7 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
         Some("audit snapshot setup"),
         None,
         None,
-        None,
+        "audit-snapshot-receipt",
     )
     .await
     .unwrap();
@@ -188,7 +188,7 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
         Some("audit UOM isolation setup"),
         None,
         None,
-        None,
+        "audit-uom-isolation-receipt",
     )
     .await
     .unwrap();

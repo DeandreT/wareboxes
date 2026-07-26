@@ -247,7 +247,7 @@ async fn license_plates_are_owner_and_facility_scoped() {
         allowed_plate,
         denied_location,
         Some("invalid cross-facility move"),
-        Some("lpn-scope-cross-facility"),
+        "lpn-scope-cross-facility",
     )
     .await
     .unwrap_err();

@@ -215,7 +215,7 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         None,
         None,
         None,
-        Some("inventory-scope-allowed-receipt"),
+        "inventory-scope-allowed-receipt",
     )
     .await
     .unwrap();
@@ -230,7 +230,7 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         None,
         None,
         None,
-        Some("inventory-scope-denied-receipt"),
+        "inventory-scope-denied-receipt",
     )
     .await
     .unwrap();
@@ -322,7 +322,7 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         None,
         None,
         None,
-        Some("inventory-scope-cross-facility"),
+        "inventory-scope-cross-facility",
     )
     .await
     .unwrap_err();
