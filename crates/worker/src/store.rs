@@ -4,7 +4,9 @@ use anyhow::{bail, Context};
 use async_trait::async_trait;
 use wareboxes_domain::TenantId;
 use wareboxes_server::db::Db;
-use wareboxes_server::repo::outbox::{self, FailOutboxEvent, OutboxEvent};
+use wareboxes_server::repo::outbox::{self, DeliveryFailureClass, FailOutboxEvent, OutboxEvent};
+
+use crate::publisher::FailureClass;
 
 #[async_trait]
 pub trait OutboxStore: Send + Sync + 'static {
@@ -18,6 +20,7 @@ pub trait OutboxStore: Send + Sync + 'static {
         &self,
         tenant_id: TenantId,
         worker_id: &str,
+        publisher_name: &str,
         batch_size: i64,
         lease: Duration,
     ) -> anyhow::Result<Vec<OutboxEvent>>;
@@ -29,6 +32,7 @@ pub trait OutboxStore: Send + Sync + 'static {
         event: &OutboxEvent,
         worker_id: &str,
         error: &str,
+        failure_class: FailureClass,
         retry_after: Duration,
         max_attempts: i32,
     ) -> anyhow::Result<bool>;
@@ -83,6 +87,7 @@ impl OutboxStore for PostgresOutboxStore {
         &self,
         tenant_id: TenantId,
         worker_id: &str,
+        publisher_name: &str,
         batch_size: i64,
         lease: Duration,
     ) -> anyhow::Result<Vec<OutboxEvent>> {
@@ -90,6 +95,7 @@ impl OutboxStore for PostgresOutboxStore {
             &self.db,
             tenant_id,
             worker_id,
+            publisher_name,
             batch_size,
             duration_seconds(lease, "outbox lease")?,
         )
@@ -114,6 +120,7 @@ impl OutboxStore for PostgresOutboxStore {
         event: &OutboxEvent,
         worker_id: &str,
         error: &str,
+        failure_class: FailureClass,
         retry_after: Duration,
         max_attempts: i32,
     ) -> anyhow::Result<bool> {
@@ -124,6 +131,10 @@ impl OutboxStore for PostgresOutboxStore {
                 event_id: event.id,
                 worker_id,
                 claim_version: event.claim_version,
+                failure_class: match failure_class {
+                    FailureClass::Retryable => DeliveryFailureClass::Retryable,
+                    FailureClass::Permanent => DeliveryFailureClass::Permanent,
+                },
                 error,
                 retry_after_seconds: duration_seconds(retry_after, "outbox retry delay")?,
                 max_attempts,

@@ -259,6 +259,14 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "outbox_aggregate_sequences_tenant_isolation",
         ),
         ("outbox_events", "outbox_events_tenant_isolation"),
+        (
+            "outbox_delivery_attempts",
+            "outbox_delivery_attempts_tenant_isolation",
+        ),
+        (
+            "outbox_delivery_attempt_results",
+            "outbox_delivery_attempt_results_tenant_isolation",
+        ),
         ("order_activity", "order_activity_tenant_isolation"),
         ("load_activity", "load_activity_tenant_isolation"),
         ("work_tasks", "work_tasks_tenant_isolation"),
