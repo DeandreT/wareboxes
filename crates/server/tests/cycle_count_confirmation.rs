@@ -88,20 +88,16 @@ impl CycleCountFixture {
             let order_id = fixture
                 .order(tenant_id, &format!("COUNT-{suffix}-ORDER"), owner_id)
                 .await;
-            repo::inventory::reserve_inventory(
-                &fixture.db,
-                &repo::inventory::ReserveInventoryCommand {
+            fixture
+                .allocated_reservation(
                     tenant_id,
-                    actor_user_id: user.id,
+                    user.id,
                     order_id,
-                    order_item_id: None,
-                    inventory_balance_id: balance_id,
-                    qty: reserved,
-                    idempotency_key: &format!("cycle-count-{suffix}-reservation"),
-                },
-            )
-            .await
-            .unwrap();
+                    balance_id,
+                    reserved,
+                    &format!("cycle-count-{suffix}"),
+                )
+                .await;
         }
 
         let task_id = repo::tasks::create_item_location_cycle_count_task(

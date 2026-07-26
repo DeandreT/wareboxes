@@ -1,12 +1,14 @@
 use axum::extract::{Query, State};
 use axum::Json;
 use wareboxes_core::dto::{
-    AddItemBatch, ItemBatchIdRequest, MoveInventory, ReceiveInventory, ReservationIdRequest,
-    ReserveInventory, SplitMoveInventory,
+    AddItemBatch, AllocateInventory, AllocateInventoryResult, CancelInventoryAllocation,
+    CancelInventoryAllocationResult, CancelInventoryReservation, CancelInventoryReservationResult,
+    CreateInventoryReservation, CreateInventoryReservationResult, ItemBatchIdRequest,
+    MoveInventory, ReceiveInventory, SplitMoveInventory,
 };
 use wareboxes_core::models::{
-    InventoryBalance, InventoryReconciliationIssue, InventoryReservation, InventoryStatus,
-    InventoryTransaction, ItemBatch,
+    InventoryAllocation, InventoryBalance, InventoryReconciliationIssue, InventoryReservation,
+    InventoryStatus, InventoryTransaction, ItemBatch,
 };
 use wareboxes_domain::FacilityId;
 
@@ -303,75 +305,94 @@ pub async fn list_reservations(
     ))
 }
 
-pub async fn reserve(
+pub async fn list_allocations(
     State(state): State<AppState>,
     user: CurrentTenant,
-    Json(body): Json<ReserveInventory>,
-) -> AppResult<Json<i64>> {
+    Query(q): Query<ShowDeleted>,
+) -> AppResult<Json<Vec<InventoryAllocation>>> {
+    user.require_permission(&state.db, PERM).await?;
+    Ok(Json(
+        repo::inventory::get_allocations_in_scope(&state.db, &user.tenant, q.show_deleted).await?,
+    ))
+}
+
+pub async fn create_reservation(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Json(body): Json<CreateInventoryReservation>,
+) -> AppResult<Json<CreateInventoryReservationResult>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    if repo::access::inventory_balance_dimensions(
+    let result = repo::inventory::create_inventory_reservation(
         &state.db,
         &user.tenant,
-        body.inventory_balance_id,
-        true,
-    )
-    .await?
-    .is_none()
-    {
-        return Err(AppError::conflict(
-            "insufficient available inventory to reserve",
-        ));
-    }
-    if !repo::access::order_is_accessible(&state.db, &user.tenant, body.order_id, true).await? {
-        return Err(AppError::conflict(
-            "order and inventory balance must have the same tenant and inventory owner",
-        ));
-    }
-    let id = repo::inventory::reserve_inventory(
-        &state.db,
-        &repo::inventory::ReserveInventoryCommand {
-            tenant_id: user.tenant.tenant_id,
-            actor_user_id: user.user.id,
+        &repo::inventory::CreateInventoryReservationCommand {
             order_id: body.order_id,
             order_item_id: body.order_item_id,
+            facility_id: body.facility_id,
+            qty: body.qty,
+            idempotency_key: &body.idempotency_key,
+        },
+    )
+    .await?;
+    Ok(Json(result))
+}
+
+pub async fn create_allocation(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Json(body): Json<AllocateInventory>,
+) -> AppResult<Json<AllocateInventoryResult>> {
+    user.require_permission(&state.db, PERM).await?;
+    validate(&body)?;
+    let result = repo::inventory::allocate_inventory(
+        &state.db,
+        &user.tenant,
+        &repo::inventory::AllocateInventoryCommand {
+            reservation_id: body.reservation_id,
             inventory_balance_id: body.inventory_balance_id,
             qty: body.qty,
             idempotency_key: &body.idempotency_key,
         },
     )
     .await?;
-    Ok(Json(id))
+    Ok(Json(result))
+}
+
+pub async fn cancel_allocation(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Json(body): Json<CancelInventoryAllocation>,
+) -> AppResult<Json<CancelInventoryAllocationResult>> {
+    user.require_permission(&state.db, PERM).await?;
+    validate(&body)?;
+    let result = repo::inventory::cancel_inventory_allocation(
+        &state.db,
+        &user.tenant,
+        &repo::inventory::CancelInventoryAllocationCommand {
+            allocation_id: body.allocation_id,
+            idempotency_key: &body.idempotency_key,
+        },
+    )
+    .await?;
+    Ok(Json(result))
 }
 
 pub async fn cancel_reservation(
     State(state): State<AppState>,
     user: CurrentTenant,
-    Json(body): Json<ReservationIdRequest>,
-) -> AppResult<Json<bool>> {
+    Json(body): Json<CancelInventoryReservation>,
+) -> AppResult<Json<CancelInventoryReservationResult>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    if repo::access::inventory_reservation_dimensions(
+    let result = repo::inventory::cancel_inventory_reservation(
         &state.db,
         &user.tenant,
-        body.reservation_id,
-        true,
+        &repo::inventory::CancelInventoryReservationCommand {
+            reservation_id: body.reservation_id,
+            idempotency_key: &body.idempotency_key,
+        },
     )
-    .await?
-    .is_none()
-    {
-        return Ok(Json(false));
-    }
-    Ok(Json(
-        repo::inventory::cancel_reservation(
-            &state.db,
-            &repo::inventory::CancelReservationCommand {
-                tenant_id: user.tenant.tenant_id,
-                actor_user_id: user.user.id,
-                reservation_id: body.reservation_id,
-                idempotency_key: &body.idempotency_key,
-            },
-        )
-        .await?,
-    ))
+    .await?;
+    Ok(Json(result))
 }

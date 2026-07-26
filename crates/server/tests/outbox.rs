@@ -107,70 +107,70 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
         .unwrap()[0]
         .id;
     let order_id = fixture.order(tenant_id, "OUTBOX-ORDER", owner_id).await;
-    let reservation_id = repo::inventory::reserve_inventory(
+    let item_id = repo::inventory::get_balances(&fixture.db, tenant_id, false)
+        .await
+        .unwrap()[0]
+        .item_id;
+    let order_item_id = fixture.order_item(tenant_id, order_id, item_id, 4).await;
+    let access = default_tenant_for_user(&fixture.db, user.id).await.unwrap();
+    let reservation_command = repo::inventory::CreateInventoryReservationCommand {
+        order_id,
+        order_item_id,
+        facility_id,
+        qty: 4,
+        idempotency_key: "outbox-reservation",
+    };
+    let reservation =
+        repo::inventory::create_inventory_reservation(&fixture.db, &access, &reservation_command)
+            .await
+            .unwrap();
+    assert_eq!(
+        repo::inventory::create_inventory_reservation(&fixture.db, &access, &reservation_command,)
+            .await
+            .unwrap(),
+        reservation
+    );
+    let allocation = repo::inventory::allocate_inventory(
         &fixture.db,
-        &repo::inventory::ReserveInventoryCommand {
-            tenant_id,
-            actor_user_id: user.id,
-            order_id,
-            order_item_id: None,
+        &access,
+        &repo::inventory::AllocateInventoryCommand {
+            reservation_id: reservation.reservation_id,
             inventory_balance_id: balance_id,
             qty: 4,
-            idempotency_key: "outbox-reservation",
+            idempotency_key: "outbox-allocation",
         },
     )
     .await
     .unwrap();
+    assert!(allocation.allocation_id > 0);
+    let cancel_command = repo::inventory::CancelInventoryReservationCommand {
+        reservation_id: reservation.reservation_id,
+        idempotency_key: "outbox-cancellation",
+    };
+    let cancelled =
+        repo::inventory::cancel_inventory_reservation(&fixture.db, &access, &cancel_command)
+            .await
+            .unwrap();
+    assert_eq!(cancelled.released_qty, 4);
     assert_eq!(
-        repo::inventory::reserve_inventory(
-            &fixture.db,
-            &repo::inventory::ReserveInventoryCommand {
-                tenant_id,
-                actor_user_id: user.id,
-                order_id,
-                order_item_id: None,
-                inventory_balance_id: balance_id,
-                qty: 4,
-                idempotency_key: "outbox-reservation",
-            },
-        )
-        .await
-        .unwrap(),
-        reservation_id
+        repo::inventory::cancel_inventory_reservation(&fixture.db, &access, &cancel_command)
+            .await
+            .unwrap(),
+        cancelled
     );
-    assert!(repo::inventory::cancel_reservation(
-        &fixture.db,
-        &repo::inventory::CancelReservationCommand {
-            tenant_id,
-            actor_user_id: user.id,
-            reservation_id,
-            idempotency_key: "outbox-cancellation",
-        },
-    )
-    .await
-    .unwrap());
-    assert!(repo::inventory::cancel_reservation(
-        &fixture.db,
-        &repo::inventory::CancelReservationCommand {
-            tenant_id,
-            actor_user_id: user.id,
-            reservation_id,
-            idempotency_key: "outbox-cancellation",
-        },
-    )
-    .await
-    .unwrap());
 
     let events = outbox::get_events(&fixture.db, tenant_id, None, 100)
         .await
         .unwrap();
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 5);
     assert_eq!(
         events
             .iter()
             .map(|event| event.event_type.as_str())
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([
+            "inventory.allocation.created",
+            "inventory.allocation.released",
             "inventory.reservation.cancelled",
             "inventory.reservation.created",
             "inventory.transaction.recorded",
@@ -210,8 +210,35 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
     )
     .await
     .unwrap();
+    let third_page = outbox::get_events(
+        &fixture.db,
+        tenant_id,
+        Some(second_page.last().unwrap().id),
+        2,
+    )
+    .await
+    .unwrap();
     assert_eq!(first_page.len(), 2);
-    assert_eq!(second_page.len(), 1);
+    assert_eq!(second_page.len(), 2);
+    assert_eq!(third_page.len(), 1);
+    let reservation_ordering_key = format!("inventory-reservation:{}", reservation.reservation_id);
+    let allocation_ordering_key = format!("inventory-allocation:{}", allocation.allocation_id);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.ordering_key == reservation_ordering_key)
+            .map(|event| event.aggregate_sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.ordering_key == allocation_ordering_key)
+            .map(|event| event.aggregate_sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
 
     let other_user = fixture.user("outbox-other-tenant@test.com").await;
     let other_tenant = tenant_for_user(&fixture.db, other_user.id).await;
@@ -236,10 +263,11 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
     let ordering_a = ordering_a.unwrap();
     let ordering_b = ordering_b.unwrap();
     let first_claims = ordering_a.iter().chain(&ordering_b).collect::<Vec<_>>();
-    assert_eq!(first_claims.len(), 2);
-    assert!(first_claims
-        .iter()
-        .all(|event| event.event_type != "inventory.reservation.cancelled"));
+    assert_eq!(first_claims.len(), 3);
+    assert!(first_claims.iter().all(|event| !matches!(
+        event.event_type.as_str(),
+        "inventory.reservation.cancelled" | "inventory.allocation.released"
+    )));
     let guarded_event = first_claims[0];
     assert!(!outbox::mark_published(
         &fixture.db,
@@ -297,20 +325,28 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
     )
     .await
     .unwrap();
-    assert_eq!(second_claim.len(), 1);
+    assert_eq!(second_claim.len(), 2);
     assert_eq!(
-        second_claim[0].event_type,
-        "inventory.reservation.cancelled"
+        second_claim
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "inventory.allocation.released",
+            "inventory.reservation.cancelled",
+        ])
     );
-    assert!(outbox::mark_published(
-        &fixture.db,
-        tenant_id,
-        second_claim[0].id,
-        "ordering-worker-c",
-        second_claim[0].claim_version,
-    )
-    .await
-    .unwrap());
+    for event in &second_claim {
+        assert!(outbox::mark_published(
+            &fixture.db,
+            tenant_id,
+            event.id,
+            "ordering-worker-c",
+            event.claim_version,
+        )
+        .await
+        .unwrap());
+    }
 
     let mut rolled_back = fixture.db.begin().await.unwrap();
     let rollback_payload = json!({"rolled_back": true});
@@ -340,7 +376,7 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
             .await
             .unwrap()
             .len(),
-        3
+        5
     );
 
     let mut tamper_tx = tenant_tx(&fixture.db, tenant_id).await;
@@ -378,7 +414,7 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
             .await
             .unwrap()
             .len(),
-        3
+        5
     );
     assert_eq!(
         outbox::get_events(&fixture.db, other_tenant, None, 100)

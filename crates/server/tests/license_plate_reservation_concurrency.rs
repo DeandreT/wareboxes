@@ -38,9 +38,11 @@ async fn wait_until_balance_is_locked(db: &db::Db, tenant_id: TenantId, inventor
     .expect("license plate move locks its content balance");
 }
 
-fn assert_active_reservation_guard(error: &sqlx::Error) {
+fn assert_active_allocation_guard(error: &sqlx::Error) {
     assert!(
-        error.to_string().contains("active reservation"),
+        error
+            .to_string()
+            .contains("allocated inventory balance dimensions are immutable"),
         "unexpected balance dimension update error: {error}"
     );
 }
@@ -205,6 +207,21 @@ async fn license_plate_moves_and_reservations_serialize_balance_dimensions() {
     let order_id = fixture
         .order(tenant_id, "LP-RESERVATION-RACE-ORDER", inventory_owner_id)
         .await;
+    let order_item_id = fixture.order_item(tenant_id, order_id, item_id, 1).await;
+    let access = default_tenant_for_user(&fixture.db, user.id).await.unwrap();
+    let reservation = repo::inventory::create_inventory_reservation(
+        &fixture.db,
+        &access,
+        &repo::inventory::CreateInventoryReservationCommand {
+            order_id,
+            order_item_id,
+            facility_id,
+            qty: 1,
+            idempotency_key: "license-plate-reservation-race-reserve",
+        },
+    )
+    .await
+    .unwrap();
 
     let advisory_key = format!(
         "inventory-location-item:{tenant_id}:{inventory_owner_id}:{destination_location_id}:{item_id}"
@@ -238,34 +255,32 @@ async fn license_plate_moves_and_reservations_serialize_balance_dimensions() {
     move_started_rx.await.unwrap();
     wait_until_balance_is_locked(&fixture.db, tenant_id, inventory_balance_id).await;
 
-    let reservation_barrier = Arc::new(Barrier::new(2));
-    let spawned_reservation_barrier = Arc::clone(&reservation_barrier);
-    let reservation_db = fixture.db.clone();
-    let (reservation_started, reservation_started_rx) = oneshot::channel();
-    let mut reservation = tokio::spawn(async move {
-        spawned_reservation_barrier.wait().await;
-        reservation_started.send(()).unwrap();
-        repo::inventory::reserve_inventory(
-            &reservation_db,
-            &repo::inventory::ReserveInventoryCommand {
-                tenant_id,
-                actor_user_id: user.id,
-                order_id,
-                order_item_id: None,
+    let allocation_barrier = Arc::new(Barrier::new(2));
+    let spawned_allocation_barrier = Arc::clone(&allocation_barrier);
+    let allocation_db = fixture.db.clone();
+    let (allocation_started, allocation_started_rx) = oneshot::channel();
+    let mut allocation = tokio::spawn(async move {
+        spawned_allocation_barrier.wait().await;
+        allocation_started.send(()).unwrap();
+        repo::inventory::allocate_inventory(
+            &allocation_db,
+            &access,
+            &repo::inventory::AllocateInventoryCommand {
+                reservation_id: reservation.reservation_id,
                 inventory_balance_id,
                 qty: 1,
-                idempotency_key: "license-plate-reservation-race-reserve",
+                idempotency_key: "license-plate-reservation-race-allocation",
             },
         )
         .await
     });
-    reservation_barrier.wait().await;
-    reservation_started_rx.await.unwrap();
+    allocation_barrier.wait().await;
+    allocation_started_rx.await.unwrap();
     assert!(
-        timeout(Duration::from_millis(250), &mut reservation)
+        timeout(Duration::from_millis(250), &mut allocation)
             .await
             .is_err(),
-        "reservation committed while the license plate held the balance lock"
+        "allocation committed while the license plate held the balance lock"
     );
 
     move_blocker.commit().await.unwrap();
@@ -274,30 +289,31 @@ async fn license_plate_moves_and_reservations_serialize_balance_dimensions() {
         .expect("license plate move completes after its advisory lock is released")
         .unwrap()
         .unwrap();
-    let reservation_id = timeout(Duration::from_secs(3), reservation)
+    let allocation_id = timeout(Duration::from_secs(3), allocation)
         .await
-        .expect("reservation completes after the license plate move")
+        .expect("allocation completes after the license plate move")
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .allocation_id;
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
-    let (reservation_facility, reservation_location, reservation_batch): (i64, i64, i64) =
+    let (allocation_facility, allocation_location, allocation_batch): (i64, i64, i64) =
         sqlx::query_as(
             r#"
             SELECT facility_id, location_id, item_batch_id
-            FROM inventory_reservations
-            WHERE tenant_id = $1 AND id = $2 AND status = 'reserved'
+            FROM inventory_allocations
+            WHERE tenant_id = $1 AND id = $2 AND status = 'allocated'
             "#,
         )
         .bind(tenant_id.get())
-        .bind(reservation_id)
+        .bind(allocation_id)
         .fetch_one(&mut *tx)
         .await
         .unwrap();
     tx.rollback().await.unwrap();
-    assert_eq!(reservation_facility, facility_id);
-    assert_eq!(reservation_location, destination_location_id);
-    assert_eq!(reservation_batch, item_batch_id);
+    assert_eq!(allocation_facility, facility_id);
+    assert_eq!(allocation_location, destination_location_id);
+    assert_eq!(allocation_batch, item_batch_id);
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let error = sqlx::query(
@@ -313,7 +329,7 @@ async fn license_plate_moves_and_reservations_serialize_balance_dimensions() {
     .execute(&mut *tx)
     .await
     .unwrap_err();
-    assert_active_reservation_guard(&error);
+    assert_active_allocation_guard(&error);
     tx.rollback().await.unwrap();
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
@@ -331,7 +347,7 @@ async fn license_plate_moves_and_reservations_serialize_balance_dimensions() {
     .execute(&mut *tx)
     .await
     .unwrap_err();
-    assert_active_reservation_guard(&error);
+    assert_active_allocation_guard(&error);
     tx.rollback().await.unwrap();
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
@@ -349,33 +365,33 @@ async fn license_plate_moves_and_reservations_serialize_balance_dimensions() {
     .execute(&mut *tx)
     .await
     .unwrap_err();
-    assert_active_reservation_guard(&error);
+    assert_active_allocation_guard(&error);
     tx.rollback().await.unwrap();
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let dimensions_match: bool = sqlx::query_scalar(
         r#"
-        SELECT reservation.facility_id = balance.facility_id
-           AND reservation.location_id = balance.location_id
-           AND reservation.item_batch_id = balance.item_batch_id
+        SELECT allocation.facility_id = balance.facility_id
+           AND allocation.location_id = balance.location_id
+           AND allocation.item_batch_id = balance.item_batch_id
            AND balance.item_id = batch.item_id
-        FROM inventory_reservations reservation
+        FROM inventory_allocations allocation
         INNER JOIN inventory_balances balance
-            ON balance.tenant_id = reservation.tenant_id
-           AND balance.inventory_owner_id = reservation.inventory_owner_id
-           AND balance.id = reservation.inventory_balance_id
+            ON balance.tenant_id = allocation.tenant_id
+           AND balance.inventory_owner_id = allocation.inventory_owner_id
+           AND balance.id = allocation.inventory_balance_id
         INNER JOIN item_batches batch
             ON batch.tenant_id = balance.tenant_id
            AND batch.inventory_owner_id = balance.inventory_owner_id
            AND batch.id = balance.item_batch_id
-        WHERE reservation.tenant_id = $1
-          AND reservation.id = $2
-          AND reservation.deleted IS NULL
-          AND reservation.status = 'reserved'
+        WHERE allocation.tenant_id = $1
+          AND allocation.id = $2
+          AND allocation.deleted IS NULL
+          AND allocation.status = 'allocated'
         "#,
     )
     .bind(tenant_id.get())
-    .bind(reservation_id)
+    .bind(allocation_id)
     .fetch_one(&mut *tx)
     .await
     .unwrap();

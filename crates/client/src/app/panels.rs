@@ -626,13 +626,21 @@ impl WareboxesApp {
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
+            .column(Column::remainder().at_least(140.0))
+            .column(Column::auto().at_least(110.0))
             .column(Column::auto().at_least(90.0))
-            .column(Column::auto().at_least(100.0))
             .column(Column::auto().at_least(90.0))
             .column(Column::auto().at_least(90.0))
             .column(Column::remainder().at_least(120.0))
             .header(26.0, |mut header| {
-                for label in ["Batch", "Location", "Qty", "Status", "Created"] {
+                for label in [
+                    "Item",
+                    "Facility",
+                    "Demand",
+                    "Allocated",
+                    "Status",
+                    "Created",
+                ] {
                     header.col(|ui| {
                         ui.strong(label);
                     });
@@ -642,13 +650,19 @@ impl WareboxesApp {
                 body.rows(30.0, order.reservations.len(), |mut row| {
                     let reservation = &order.reservations[row.index()];
                     row.col(|ui| {
-                        ui.label(reservation.item_batch_id.to_string());
+                        ui.label(self.item_label(reservation.item_id));
                     });
                     row.col(|ui| {
-                        self.location_label_ui(ui, reservation.location_id);
+                        ui.label(self.facility_label(reservation.facility_id));
                     });
                     row.col(|ui| {
-                        ui.strong(reservation.qty.to_string());
+                        ui.strong(format!("{} {}", reservation.qty, reservation.uom));
+                    });
+                    row.col(|ui| {
+                        ui.label(format!(
+                            "{} / {}",
+                            reservation.allocated_qty, reservation.qty
+                        ));
                     });
                     row.col(|ui| {
                         ui.label(Self::title_case(&reservation.status.to_string()));

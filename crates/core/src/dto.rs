@@ -903,10 +903,23 @@ pub struct SplitMoveInventory {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct ReserveInventory {
+pub struct CreateInventoryReservation {
     #[validate(range(min = 1, message = "Invalid order ID"))]
     pub order_id: i64,
-    pub order_item_id: Option<i64>,
+    #[validate(range(min = 1, message = "Invalid order item ID"))]
+    pub order_item_id: i64,
+    #[validate(range(min = 1, message = "Invalid facility ID"))]
+    pub facility_id: i64,
+    #[validate(range(min = 1, message = "Quantity must be positive"))]
+    pub qty: i64,
+    #[validate(length(min = 1, max = 200, message = "Idempotency key is required"))]
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct AllocateInventory {
+    #[validate(range(min = 1, message = "Invalid reservation ID"))]
+    pub reservation_id: i64,
     #[validate(range(min = 1, message = "Invalid inventory balance ID"))]
     pub inventory_balance_id: i64,
     #[validate(range(min = 1, message = "Quantity must be positive"))]
@@ -916,9 +929,39 @@ pub struct ReserveInventory {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct ReservationIdRequest {
+pub struct CancelInventoryAllocation {
+    #[validate(range(min = 1, message = "Invalid inventory allocation ID"))]
+    pub allocation_id: i64,
+    #[validate(length(min = 1, max = 200, message = "Idempotency key is required"))]
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct CancelInventoryReservation {
     #[validate(range(min = 1, message = "Invalid reservation ID"))]
     pub reservation_id: i64,
     #[validate(length(min = 1, max = 200, message = "Idempotency key is required"))]
     pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateInventoryReservationResult {
+    pub reservation_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AllocateInventoryResult {
+    pub allocation_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CancelInventoryAllocationResult {
+    pub allocation_id: i64,
+    pub released_qty: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CancelInventoryReservationResult {
+    pub reservation_id: i64,
+    pub released_qty: i64,
 }

@@ -10,6 +10,7 @@ use wareboxes_server::{routes, state::AppState};
 #[tokio::test]
 async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     let db = setup().await;
+    let fixture = Fixture { db: db.clone() };
 
     let user = auth::register_user(&db, "wms@test.com", "supersecret", None, None)
         .await
@@ -234,45 +235,30 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
         .await
         .unwrap();
     let order_id = repo::orders::get_orders(&db, tenant_id).await.unwrap()[0].id;
-    let reservation = repo::inventory::reserve_inventory(
-        &db,
-        &repo::inventory::ReserveInventoryCommand {
-            tenant_id,
-            actor_user_id: user.id,
-            order_id,
-            order_item_id: None,
-            inventory_balance_id: pick_balance.id,
-            qty: 20,
-            idempotency_key: "reserve-inv-1",
-        },
-    )
-    .await
-    .unwrap();
-    let replayed_reservation = repo::inventory::reserve_inventory(
-        &db,
-        &repo::inventory::ReserveInventoryCommand {
-            tenant_id,
-            actor_user_id: user.id,
-            order_id,
-            order_item_id: None,
-            inventory_balance_id: pick_balance.id,
-            qty: 20,
-            idempotency_key: "reserve-inv-1",
-        },
-    )
-    .await
-    .unwrap();
+    let order_item_id = fixture.order_item(tenant_id, order_id, item, 20).await;
+    let access = default_tenant_for_user(&db, user.id).await.unwrap();
+    let reservation_command = repo::inventory::CreateInventoryReservationCommand {
+        order_id,
+        order_item_id,
+        facility_id: facility,
+        qty: 20,
+        idempotency_key: "reserve-inv-1",
+    };
+    let reservation =
+        repo::inventory::create_inventory_reservation(&db, &access, &reservation_command)
+            .await
+            .unwrap();
+    let replayed_reservation =
+        repo::inventory::create_inventory_reservation(&db, &access, &reservation_command)
+            .await
+            .unwrap();
     assert_eq!(replayed_reservation, reservation);
-    let changed_reservation_retry = repo::inventory::reserve_inventory(
+    let changed_reservation_retry = repo::inventory::create_inventory_reservation(
         &db,
-        &repo::inventory::ReserveInventoryCommand {
-            tenant_id,
-            actor_user_id: user.id,
-            order_id,
-            order_item_id: None,
-            inventory_balance_id: pick_balance.id,
+        &access,
+        &repo::inventory::CreateInventoryReservationCommand {
             qty: 19,
-            idempotency_key: "reserve-inv-1",
+            ..reservation_command
         },
     )
     .await
@@ -281,6 +267,18 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
         changed_reservation_retry,
         AppError::Core(CoreError::IdempotencyKeyReused)
     ));
+    let _allocation = repo::inventory::allocate_inventory(
+        &db,
+        &access,
+        &repo::inventory::AllocateInventoryCommand {
+            reservation_id: reservation.reservation_id,
+            inventory_balance_id: pick_balance.id,
+            qty: 20,
+            idempotency_key: "allocate-inv-1",
+        },
+    )
+    .await
+    .unwrap();
     let balances = repo::inventory::get_balances(&db, tenant_id, false)
         .await
         .unwrap();
@@ -294,7 +292,14 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
         .await
         .unwrap();
     assert_eq!(reservations.len(), 1);
-    assert_eq!(reservations[0].inventory_balance_id, pick_balance.id);
+    assert_eq!(reservations[0].allocated_qty, 20);
+    assert_eq!(
+        repo::inventory::get_allocations_in_scope(&db, &access, false)
+            .await
+            .unwrap()[0]
+            .inventory_balance_id,
+        pick_balance.id
+    );
 
     let err = repo::inventory::move_inventory(
         &db,
@@ -314,34 +319,38 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     .unwrap_err();
     assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
 
-    assert!(repo::inventory::cancel_reservation(
+    let cancel_command = repo::inventory::CancelInventoryReservationCommand {
+        reservation_id: reservation.reservation_id,
+        idempotency_key: "cancel-inv-1",
+    };
+    let cancelled = repo::inventory::cancel_inventory_reservation(&db, &access, &cancel_command)
+        .await
+        .unwrap();
+    assert_eq!(cancelled.released_qty, 20);
+    assert_eq!(
+        repo::inventory::cancel_inventory_reservation(&db, &access, &cancel_command)
+            .await
+            .unwrap(),
+        cancelled
+    );
+    let second_reservation = repo::inventory::create_inventory_reservation(
         &db,
-        &repo::inventory::CancelReservationCommand {
-            tenant_id,
-            actor_user_id: user.id,
-            reservation_id: reservation,
-            idempotency_key: "cancel-inv-1",
+        &access,
+        &repo::inventory::CreateInventoryReservationCommand {
+            order_id,
+            order_item_id,
+            facility_id: facility,
+            qty: 1,
+            idempotency_key: "reserve-inv-2",
         },
     )
     .await
-    .unwrap());
-    assert!(repo::inventory::cancel_reservation(
+    .unwrap();
+    let changed_cancel_retry = repo::inventory::cancel_inventory_reservation(
         &db,
-        &repo::inventory::CancelReservationCommand {
-            tenant_id,
-            actor_user_id: user.id,
-            reservation_id: reservation,
-            idempotency_key: "cancel-inv-1",
-        },
-    )
-    .await
-    .unwrap());
-    let changed_cancel_retry = repo::inventory::cancel_reservation(
-        &db,
-        &repo::inventory::CancelReservationCommand {
-            tenant_id,
-            actor_user_id: user.id,
-            reservation_id: reservation + 1,
+        &access,
+        &repo::inventory::CancelInventoryReservationCommand {
+            reservation_id: second_reservation.reservation_id,
             idempotency_key: "cancel-inv-1",
         },
     )
@@ -707,16 +716,36 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
         .unwrap()
         .pop()
         .unwrap();
-    let owner_mismatch = repo::inventory::reserve_inventory(
+    fixture
+        .assign_owner_to_facility(tenant_a, owner_b, facility)
+        .await;
+    let other_owner_order_item = fixture
+        .order_item(tenant_a, other_owner_order, balance.item_id, 1)
+        .await;
+    let access = default_tenant_for_user(&fixture.db, tenant_a_user.id)
+        .await
+        .unwrap();
+    let other_owner_reservation = repo::inventory::create_inventory_reservation(
         &fixture.db,
-        &repo::inventory::ReserveInventoryCommand {
-            tenant_id: tenant_a,
-            actor_user_id: tenant_a_user.id,
+        &access,
+        &repo::inventory::CreateInventoryReservationCommand {
             order_id: other_owner_order,
-            order_item_id: None,
-            inventory_balance_id: balance.id,
+            order_item_id: other_owner_order_item,
+            facility_id: facility,
             qty: 1,
             idempotency_key: "owner-mismatch-reservation",
+        },
+    )
+    .await
+    .unwrap();
+    let owner_mismatch = repo::inventory::allocate_inventory(
+        &fixture.db,
+        &access,
+        &repo::inventory::AllocateInventoryCommand {
+            reservation_id: other_owner_reservation.reservation_id,
+            inventory_balance_id: balance.id,
+            qty: 1,
+            idempotency_key: "owner-mismatch-allocation",
         },
     )
     .await
@@ -848,18 +877,24 @@ async fn concurrent_inventory_retries_apply_effects_once() {
     let order_id = fixture
         .order(tenant_id, "CONCURRENT-ORDER", inventory_owner)
         .await;
+    let order_item_id = fixture
+        .order_item(tenant_id, order_id, destination_balance.item_id, 10)
+        .await;
+    let access = default_tenant_for_user(&fixture.db, actor_id)
+        .await
+        .unwrap();
     let mut reservation_retries = tokio::task::JoinSet::new();
     for _ in 0..8 {
         let db = fixture.db.clone();
+        let access = access.clone();
         reservation_retries.spawn(async move {
-            repo::inventory::reserve_inventory(
+            repo::inventory::create_inventory_reservation(
                 &db,
-                &repo::inventory::ReserveInventoryCommand {
-                    tenant_id,
-                    actor_user_id: actor_id,
+                &access,
+                &repo::inventory::CreateInventoryReservationCommand {
                     order_id,
-                    order_item_id: None,
-                    inventory_balance_id: destination_balance_id,
+                    order_item_id,
+                    facility_id: destination_balance.facility_id,
                     qty: 10,
                     idempotency_key: "concurrent-reservation-key",
                 },
@@ -870,10 +905,33 @@ async fn concurrent_inventory_retries_apply_effects_once() {
 
     let mut reservation_ids = std::collections::BTreeSet::new();
     while let Some(result) = reservation_retries.join_next().await {
-        reservation_ids.insert(result.unwrap().unwrap());
+        reservation_ids.insert(result.unwrap().unwrap().reservation_id);
     }
     assert_eq!(reservation_ids.len(), 1);
     let reservation_id = *reservation_ids.first().unwrap();
+    let mut allocation_retries = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let db = fixture.db.clone();
+        let access = access.clone();
+        allocation_retries.spawn(async move {
+            repo::inventory::allocate_inventory(
+                &db,
+                &access,
+                &repo::inventory::AllocateInventoryCommand {
+                    reservation_id,
+                    inventory_balance_id: destination_balance_id,
+                    qty: 10,
+                    idempotency_key: "concurrent-allocation-key",
+                },
+            )
+            .await
+        });
+    }
+    let mut allocation_ids = std::collections::BTreeSet::new();
+    while let Some(result) = allocation_retries.join_next().await {
+        allocation_ids.insert(result.unwrap().unwrap().allocation_id);
+    }
+    assert_eq!(allocation_ids.len(), 1);
     let reservations = repo::inventory::get_reservations(&fixture.db, tenant_id, false)
         .await
         .unwrap();
@@ -889,12 +947,12 @@ async fn concurrent_inventory_retries_apply_effects_once() {
     let mut cancellation_retries = tokio::task::JoinSet::new();
     for _ in 0..8 {
         let db = fixture.db.clone();
+        let access = access.clone();
         cancellation_retries.spawn(async move {
-            repo::inventory::cancel_reservation(
+            repo::inventory::cancel_inventory_reservation(
                 &db,
-                &repo::inventory::CancelReservationCommand {
-                    tenant_id,
-                    actor_user_id: actor_id,
+                &access,
+                &repo::inventory::CancelInventoryReservationCommand {
                     reservation_id,
                     idempotency_key: "concurrent-cancellation-key",
                 },
@@ -903,7 +961,7 @@ async fn concurrent_inventory_retries_apply_effects_once() {
         });
     }
     while let Some(result) = cancellation_retries.join_next().await {
-        assert!(result.unwrap().unwrap());
+        assert_eq!(result.unwrap().unwrap().released_qty, 10);
     }
     let destination_balance = repo::inventory::get_balances(&fixture.db, tenant_id, false)
         .await

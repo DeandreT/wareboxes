@@ -241,6 +241,12 @@ pub struct Fixture {
     pub db: db::Db,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AllocatedReservation {
+    pub reservation_id: i64,
+    pub allocation_id: i64,
+}
+
 impl Fixture {
     pub async fn new() -> Self {
         Self { db: setup().await }
@@ -392,5 +398,85 @@ impl Fixture {
         .unwrap();
         tx.commit().await.unwrap();
         id
+    }
+
+    pub async fn allocated_reservation(
+        &self,
+        tenant_id: TenantId,
+        user_id: i64,
+        order_id: i64,
+        inventory_balance_id: i64,
+        qty: i64,
+        idempotency_key: &str,
+    ) -> AllocatedReservation {
+        let mut tx = tenant_tx(&self.db, tenant_id).await;
+        let (facility_id, item_id): (i64, i64) = sqlx::query_as(
+            r#"
+            SELECT facility_id, item_id
+            FROM inventory_balances
+            WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(inventory_balance_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        let order_item_id: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT id
+            FROM order_items
+            WHERE tenant_id = $1
+              AND order_id = $2
+              AND item_id = $3
+              AND deleted IS NULL
+            ORDER BY id
+            LIMIT 1
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(order_id)
+        .bind(item_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .unwrap()
+        .flatten();
+        tx.rollback().await.unwrap();
+        let order_item_id = match order_item_id {
+            Some(id) => id,
+            None => self.order_item(tenant_id, order_id, item_id, qty).await,
+        };
+        let access = default_tenant_for_user(&self.db, user_id)
+            .await
+            .expect("allocation actor has tenant access");
+        let reservation = repo::inventory::create_inventory_reservation(
+            &self.db,
+            &access,
+            &repo::inventory::CreateInventoryReservationCommand {
+                order_id,
+                order_item_id,
+                facility_id,
+                qty,
+                idempotency_key: &format!("{idempotency_key}-reservation"),
+            },
+        )
+        .await
+        .unwrap();
+        let allocation = repo::inventory::allocate_inventory(
+            &self.db,
+            &access,
+            &repo::inventory::AllocateInventoryCommand {
+                reservation_id: reservation.reservation_id,
+                inventory_balance_id,
+                qty,
+                idempotency_key: &format!("{idempotency_key}-allocation"),
+            },
+        )
+        .await
+        .unwrap();
+        AllocatedReservation {
+            reservation_id: reservation.reservation_id,
+            allocation_id: allocation.allocation_id,
+        }
     }
 }

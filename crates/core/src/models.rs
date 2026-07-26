@@ -522,13 +522,35 @@ pub struct InventoryReservation {
     pub modified: Option<Timestamp>,
     pub deleted: Option<Timestamp>,
     pub order_id: i64,
-    pub order_item_id: Option<i64>,
-    pub inventory_balance_id: i64,
+    pub order_item_id: i64,
     pub facility_id: i64,
-    pub item_batch_id: i64,
-    pub location_id: i64,
+    pub item_id: i64,
+    pub uom: String,
     pub qty: i64,
     pub status: ReservationStatus,
+    pub allocated_qty: i64,
+    pub allocations: Vec<InventoryAllocation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventoryAllocation {
+    pub id: i64,
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub created: Timestamp,
+    pub modified: Option<Timestamp>,
+    pub deleted: Option<Timestamp>,
+    pub reservation_id: i64,
+    pub inventory_balance_id: i64,
+    pub facility_id: i64,
+    pub location_id: i64,
+    pub license_plate_id: Option<i64>,
+    pub item_batch_id: i64,
+    pub item_id: i64,
+    pub uom: String,
+    pub inventory_status: InventoryStatus,
+    pub qty: i64,
+    pub status: AllocationStatus,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -615,21 +637,21 @@ impl_status_display!(InventoryTransactionType);
 #[serde(rename_all = "lowercase")]
 pub enum ReservationStatus {
     #[default]
-    Reserved,
+    Active,
     Cancelled,
     Fulfilled,
 }
 
 impl ReservationStatus {
     pub const ALL: [ReservationStatus; 3] = [
-        ReservationStatus::Reserved,
+        ReservationStatus::Active,
         ReservationStatus::Cancelled,
         ReservationStatus::Fulfilled,
     ];
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            ReservationStatus::Reserved => "reserved",
+            ReservationStatus::Active => "active",
             ReservationStatus::Cancelled => "cancelled",
             ReservationStatus::Fulfilled => "fulfilled",
         }
@@ -637,7 +659,7 @@ impl ReservationStatus {
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s.trim().to_ascii_lowercase().as_str() {
-            "reserved" => ReservationStatus::Reserved,
+            "active" => ReservationStatus::Active,
             "cancelled" => ReservationStatus::Cancelled,
             "fulfilled" => ReservationStatus::Fulfilled,
             _ => return None,
@@ -646,6 +668,42 @@ impl ReservationStatus {
 }
 
 impl_status_display!(ReservationStatus);
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AllocationStatus {
+    #[default]
+    Allocated,
+    Released,
+    Fulfilled,
+}
+
+impl AllocationStatus {
+    pub const ALL: [AllocationStatus; 3] = [
+        AllocationStatus::Allocated,
+        AllocationStatus::Released,
+        AllocationStatus::Fulfilled,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AllocationStatus::Allocated => "allocated",
+            AllocationStatus::Released => "released",
+            AllocationStatus::Fulfilled => "fulfilled",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "allocated" => AllocationStatus::Allocated,
+            "released" => AllocationStatus::Released,
+            "fulfilled" => AllocationStatus::Fulfilled,
+            _ => return None,
+        })
+    }
+}
+
+impl_status_display!(AllocationStatus);
 
 // ---------------------------------------------------------------------------
 // License plates
