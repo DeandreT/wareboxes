@@ -181,6 +181,13 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
             && event.schema_version == 1
             && event.payload.is_object()
     }));
+    let mut delete_unpublished_tx = tenant_tx(&fixture.db, tenant_id).await;
+    assert!(sqlx::query("DELETE FROM outbox_events WHERE id = $1")
+        .bind(events[0].id)
+        .execute(&mut *delete_unpublished_tx)
+        .await
+        .is_err());
+    delete_unpublished_tx.rollback().await.unwrap();
     let transaction_event = events
         .iter()
         .find(|event| event.event_type == "inventory.transaction.recorded")
@@ -724,6 +731,43 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
             .unwrap();
     keys_tx.rollback().await.unwrap();
     assert_eq!(retained_keys, 10);
+
+    let mut mutate_key_tx = tenant_tx(&fixture.db, tenant_id).await;
+    assert!(sqlx::query(
+        "UPDATE outbox_event_keys SET created = created + INTERVAL '1 second' WHERE event_key = $1",
+    )
+    .bind("worker-event-1")
+    .execute(&mut *mutate_key_tx)
+    .await
+    .is_err());
+    mutate_key_tx.rollback().await.unwrap();
+    let mut delete_key_tx = tenant_tx(&fixture.db, tenant_id).await;
+    assert!(
+        sqlx::query("DELETE FROM outbox_event_keys WHERE event_key = $1")
+            .bind("worker-event-1")
+            .execute(&mut *delete_key_tx)
+            .await
+            .is_err()
+    );
+    delete_key_tx.rollback().await.unwrap();
+    let mut rewind_sequence_tx = tenant_tx(&fixture.db, tenant_id).await;
+    assert!(sqlx::query(
+        "UPDATE outbox_aggregate_sequences SET last_sequence = last_sequence - 1 WHERE ordering_key = $1",
+    )
+    .bind("worker-event-1")
+    .execute(&mut *rewind_sequence_tx)
+    .await
+    .is_err());
+    rewind_sequence_tx.rollback().await.unwrap();
+    let mut delete_sequence_tx = tenant_tx(&fixture.db, tenant_id).await;
+    assert!(
+        sqlx::query("DELETE FROM outbox_aggregate_sequences WHERE ordering_key = $1")
+            .bind("worker-event-1")
+            .execute(&mut *delete_sequence_tx)
+            .await
+            .is_err()
+    );
+    delete_sequence_tx.rollback().await.unwrap();
 
     let duplicate_payload = json!({"duplicate": true});
     let mut duplicate_key_tx = fixture.db.begin().await.unwrap();
