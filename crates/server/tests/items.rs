@@ -3,7 +3,7 @@ mod common;
 use common::*;
 
 #[tokio::test]
-async fn barcode_uniqueness_allows_same_item_different_type_only() {
+async fn active_barcode_scanner_identity_is_unique_per_tenant() {
     let db = setup().await;
     let user = auth::register_user(&db, "items@test.com", "supersecret", None, None)
         .await
@@ -41,21 +41,25 @@ async fn barcode_uniqueness_allows_same_item_different_type_only() {
     .await
     .unwrap();
 
+    let blank = repo::items::add_barcode(&db, tenant_id, item_one, "   ", "code128", None)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        blank,
+        AppError::Db(sqlx::Error::Database(ref err))
+            if err.kind() == sqlx::error::ErrorKind::CheckViolation
+    ));
+
     let value = "036000291452";
     let code128 = repo::items::add_barcode(&db, tenant_id, item_one, value, "code128", None)
         .await
         .unwrap();
-    let upc = repo::items::add_barcode(&db, tenant_id, item_one, value, "upc-a", None)
-        .await
-        .unwrap();
-    assert_ne!(code128, upc);
-
-    let same_item_same_type =
-        repo::items::add_barcode(&db, tenant_id, item_one, value, "code128", None)
+    let same_item_different_type =
+        repo::items::add_barcode(&db, tenant_id, item_one, value, "upc-a", None)
             .await
             .unwrap_err();
     assert!(matches!(
-        same_item_same_type,
+        same_item_different_type,
         AppError::Db(sqlx::Error::Database(ref err))
             if err.kind() == sqlx::error::ErrorKind::UniqueViolation
     ));
@@ -75,9 +79,6 @@ async fn barcode_uniqueness_allows_same_item_different_type_only() {
             .await
             .unwrap()
     );
-    assert!(repo::items::set_barcode_deleted(&db, tenant_id, upc, true)
-        .await
-        .unwrap());
     assert!(
         repo::items::add_barcode(&db, tenant_id, item_two, value, "qr", None)
             .await

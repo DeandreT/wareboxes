@@ -1,6 +1,7 @@
 //! Version 1 public HTTP routes.
 
 mod error;
+mod expected_receiving;
 mod inventory_balances;
 mod license_plate_putaway;
 mod putaway;
@@ -15,6 +16,10 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/expected-receiving/loads/:load_id",
+            get(expected_receiving::get_session),
+        )
         .route("/inventory/balances", get(inventory_balances::list))
         .route(
             "/license-plate-putaway-tasks",
