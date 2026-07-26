@@ -3828,6 +3828,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wareboxes-api-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "wareboxes-barcodes"
 version = "0.1.0"
 
