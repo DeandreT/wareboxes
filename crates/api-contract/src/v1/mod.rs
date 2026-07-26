@@ -3,6 +3,7 @@
 mod cursor;
 mod error;
 mod idempotency;
+mod inventory;
 mod revision;
 
 pub use cursor::{
@@ -12,6 +13,10 @@ pub use cursor::{
 pub use error::{ErrorReason, ErrorResponse, FieldViolation};
 pub use idempotency::{
     IdempotencyKey, IdempotencyKeyError, IDEMPOTENCY_KEY_HEADER, MAX_IDEMPOTENCY_KEY_LENGTH,
+};
+pub use inventory::{
+    InventoryBalancePage, InventoryBalancePageRequest, InventoryBalanceResponse,
+    InventoryBalanceStatus, InventoryQuantity,
 };
 pub use revision::{Revision, RevisionError, RevisionPrecondition};
 
