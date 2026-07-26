@@ -488,14 +488,16 @@ async fn employee_routes_and_repositories_enforce_facility_scope() {
         &[retiring_facility, remaining_facility],
     )
     .await;
+    let admin_db = admin_db_for(&db).await;
     sqlx::query(
         "UPDATE facilities SET deleted = clock_timestamp() WHERE tenant_id = $1 AND id = $2",
     )
     .bind(tenant_id.get())
     .bind(retiring_facility)
-    .execute(&db)
+    .execute(&admin_db)
     .await
     .unwrap();
+    admin_db.close().await;
     let reassigned_employee =
         repo::employees::get_employees_in_scope(&db, tenant_id, &unrestricted_scope, false)
             .await
@@ -521,8 +523,8 @@ async fn employee_routes_and_repositories_enforce_facility_scope() {
         &[concurrent_facility_a, concurrent_facility_b],
     )
     .await;
-    let mut tx_a = db.begin().await.unwrap();
-    let mut tx_b = db.begin().await.unwrap();
+    let mut tx_a = tenant_tx(&db, tenant_id).await;
+    let mut tx_b = tenant_tx(&db, tenant_id).await;
     sqlx::query(
         "UPDATE employee_facilities SET deleted = clock_timestamp() WHERE tenant_id = $1 AND employee_id = $2 AND facility_id = $3",
     )

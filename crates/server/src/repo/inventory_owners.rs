@@ -2,12 +2,12 @@
 
 use std::collections::HashMap;
 
-use sqlx::Row;
+use sqlx::{Postgres, Row, Transaction};
 use wareboxes_core::models::{Facility, InventoryOwner, OwnerScope, SiteScope};
 use wareboxes_core::CoreError;
 use wareboxes_domain::TenantId;
 
-use crate::db::{bind_tenant_context, now_iso, Db};
+use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::{AppError, AppResult};
 
 fn map_inventory_owner(row: &sqlx::postgres::PgRow) -> AppResult<InventoryOwner> {
@@ -24,7 +24,7 @@ fn map_inventory_owner(row: &sqlx::postgres::PgRow) -> AppResult<InventoryOwner>
 }
 
 async fn facilities_by_inventory_owner(
-    db: &Db,
+    tx: &mut Transaction<'_, Postgres>,
     tenant_id: TenantId,
 ) -> AppResult<HashMap<i64, Vec<Facility>>> {
     let rows = sqlx::query(
@@ -33,12 +33,13 @@ async fn facilities_by_inventory_owner(
                w.id AS id, w.tenant_id AS tenant_id, w.created AS created, w.deleted AS deleted,
                w.name AS name, w.address_id AS address_id
         FROM inventory_owner_facilities aw
-        INNER JOIN facilities w ON w.id = aw.facility_id
+        INNER JOIN facilities w
+            ON w.tenant_id = aw.tenant_id AND w.id = aw.facility_id
         WHERE aw.tenant_id = $1 AND aw.deleted IS NULL AND w.deleted IS NULL
         "#,
     )
     .bind(tenant_id.get())
-    .fetch_all(db)
+    .fetch_all(&mut **tx)
     .await?;
     let mut map: HashMap<i64, Vec<Facility>> = HashMap::new();
     for r in &rows {
@@ -57,7 +58,7 @@ async fn facilities_by_inventory_owner(
 }
 
 async fn facilities_by_inventory_owner_in_scope(
-    db: &Db,
+    tx: &mut Transaction<'_, Postgres>,
     tenant_id: TenantId,
     site_scope: &SiteScope,
 ) -> AppResult<HashMap<i64, Vec<Facility>>> {
@@ -85,7 +86,7 @@ async fn facilities_by_inventory_owner_in_scope(
     .bind(tenant_id.get())
     .bind(site_scope.all_facilities)
     .bind(&facility_ids)
-    .fetch_all(db)
+    .fetch_all(&mut **tx)
     .await?;
     let mut facilities = HashMap::<i64, Vec<Facility>>::new();
     for row in &rows {
@@ -111,6 +112,7 @@ pub async fn get_inventory_owners(
     tenant_id: TenantId,
     show_deleted: bool,
 ) -> AppResult<Vec<InventoryOwner>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, created, deleted, name, email
@@ -121,16 +123,19 @@ pub async fn get_inventory_owners(
     )
     .bind(tenant_id.get())
     .bind(show_deleted)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    let mut wh = facilities_by_inventory_owner(db, tenant_id).await?;
-    rows.iter()
+    let mut wh = facilities_by_inventory_owner(&mut tx, tenant_id).await?;
+    let inventory_owners = rows
+        .iter()
         .map(|r| {
             let mut a = map_inventory_owner(r)?;
             a.inventory_owner_facilities = wh.remove(&a.id).unwrap_or_default();
             Ok(a)
         })
-        .collect()
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(inventory_owners)
 }
 
 pub async fn get_inventory_owners_in_scope(
@@ -145,6 +150,7 @@ pub async fn get_inventory_owners_in_scope(
         .iter()
         .map(|id| id.get())
         .collect::<Vec<_>>();
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, created, deleted, name, email
@@ -159,17 +165,21 @@ pub async fn get_inventory_owners_in_scope(
     .bind(show_deleted)
     .bind(owner_scope.all_inventory_owners)
     .bind(&inventory_owner_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    let mut facilities = facilities_by_inventory_owner_in_scope(db, tenant_id, site_scope).await?;
-    rows.iter()
+    let mut facilities =
+        facilities_by_inventory_owner_in_scope(&mut tx, tenant_id, site_scope).await?;
+    let inventory_owners = rows
+        .iter()
         .map(|row| {
             let mut inventory_owner = map_inventory_owner(row)?;
             inventory_owner.inventory_owner_facilities =
                 facilities.remove(&inventory_owner.id).unwrap_or_default();
             Ok(inventory_owner)
         })
-        .collect()
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(inventory_owners)
 }
 
 pub async fn active_inventory_owner_exists(
@@ -177,13 +187,15 @@ pub async fn active_inventory_owner_exists(
     tenant_id: TenantId,
     id: i64,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM inventory_owners WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL)",
     )
     .bind(tenant_id.get())
     .bind(id)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(exists)
 }
 
@@ -193,6 +205,7 @@ pub async fn add_inventory_owner(
     name: &str,
     email: &str,
 ) -> AppResult<i64> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO inventory_owners (tenant_id, name, email, created) VALUES ($1, $2, $3, $4) RETURNING id",
     )
@@ -200,8 +213,9 @@ pub async fn add_inventory_owner(
     .bind(name)
     .bind(email)
     .bind(now_iso())
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(id)
 }
 
@@ -212,6 +226,7 @@ pub async fn update_inventory_owner(
     name: Option<&str>,
     email: Option<&str>,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         "UPDATE inventory_owners SET name = COALESCE($1, name), email = COALESCE($2, email) WHERE tenant_id = $3 AND id = $4",
     )
@@ -219,8 +234,9 @@ pub async fn update_inventory_owner(
     .bind(email)
     .bind(tenant_id.get())
     .bind(id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -237,6 +253,7 @@ pub async fn update_inventory_owner_in_scope(
         .iter()
         .map(|owner_id| owner_id.get())
         .collect::<Vec<_>>();
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let result = sqlx::query(
         r#"
         UPDATE inventory_owners
@@ -252,16 +269,16 @@ pub async fn update_inventory_owner_in_scope(
     .bind(id)
     .bind(owner_scope.all_inventory_owners)
     .bind(&inventory_owner_ids)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
 /// Refuses if the inventory owner still has orders that are not
 /// shipped or cancelled.
 pub async fn delete_inventory_owner(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
-    let mut tx = db.begin().await?;
-    bind_tenant_context(&mut tx, tenant_id).await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let open: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM orders
@@ -303,12 +320,14 @@ pub async fn delete_inventory_owner_in_scope(
 }
 
 pub async fn restore_inventory_owner(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res =
         sqlx::query("UPDATE inventory_owners SET deleted = NULL WHERE tenant_id = $1 AND id = $2")
             .bind(tenant_id.get())
             .bind(id)
-            .execute(db)
+            .execute(&mut *tx)
             .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -323,6 +342,7 @@ pub async fn restore_inventory_owner_in_scope(
         .iter()
         .map(|owner_id| owner_id.get())
         .collect::<Vec<_>>();
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let result = sqlx::query(
         r#"
         UPDATE inventory_owners
@@ -336,8 +356,9 @@ pub async fn restore_inventory_owner_in_scope(
     .bind(id)
     .bind(owner_scope.all_inventory_owners)
     .bind(&inventory_owner_ids)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -352,6 +373,7 @@ pub async fn active_inventory_owner_exists_in_scope(
         .iter()
         .map(|owner_id| owner_id.get())
         .collect::<Vec<_>>();
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let exists: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
@@ -368,7 +390,8 @@ pub async fn active_inventory_owner_exists_in_scope(
     .bind(id)
     .bind(owner_scope.all_inventory_owners)
     .bind(&inventory_owner_ids)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(exists)
 }

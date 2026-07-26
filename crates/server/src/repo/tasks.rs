@@ -928,7 +928,7 @@ pub(crate) async fn create_unpack_cancelled_order_task_tx(
            AND inventory_owner.deleted IS NULL
         WHERE orders.tenant_id = $1 AND orders.id = $2 AND orders.deleted IS NULL
         FOR UPDATE OF orders
-        FOR SHARE OF assignment, facility, inventory_owner
+        FOR SHARE OF inventory_owner
         "#,
     )
     .bind(tenant_id.get())

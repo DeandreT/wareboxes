@@ -222,11 +222,11 @@ async fn command_records_require_a_transaction_local_tenant_context() {
     db::validate_runtime_role(&fixture.db).await.unwrap();
 
     for statement in [
-        "ALTER TABLE locations ENABLE ROW LEVEL SECURITY",
-        "ALTER TABLE locations FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE employees ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE employees FORCE ROW LEVEL SECURITY",
         r#"
-        CREATE POLICY locations_tenant_isolation
-        ON locations
+        CREATE POLICY employees_tenant_isolation
+        ON employees
         USING (
             tenant_id =
                 NULLIF(current_setting('wareboxes.tenant_id', true), '')::BIGINT
@@ -241,15 +241,22 @@ async fn command_records_require_a_transaction_local_tenant_context() {
     }
     assert!(db::validate_runtime_role(&fixture.db).await.is_err());
     for statement in [
-        "DROP POLICY locations_tenant_isolation ON locations",
-        "ALTER TABLE locations NO FORCE ROW LEVEL SECURITY",
-        "ALTER TABLE locations DISABLE ROW LEVEL SECURITY",
+        "DROP POLICY employees_tenant_isolation ON employees",
+        "ALTER TABLE employees NO FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE employees DISABLE ROW LEVEL SECURITY",
     ] {
         sqlx::query(statement).execute(&admin_db).await.unwrap();
     }
     db::validate_runtime_role(&fixture.db).await.unwrap();
 
     for (table_name, policy_name) in [
+        ("facilities", "facilities_tenant_isolation"),
+        ("locations", "locations_tenant_isolation"),
+        ("inventory_owners", "inventory_owners_tenant_isolation"),
+        (
+            "inventory_owner_facilities",
+            "inventory_owner_facilities_tenant_isolation",
+        ),
         ("dims", "dims_tenant_isolation"),
         ("items", "items_tenant_isolation"),
         ("skus", "skus_tenant_isolation"),

@@ -33,7 +33,7 @@ async fn lock_wave_dependencies_tx(
            AND assignment.deleted IS NULL
         WHERE wave.tenant_id = $1 AND wave.id = $2
         FOR UPDATE OF wave
-        FOR SHARE OF facility, inventory_owner, assignment
+        FOR SHARE OF inventory_owner
         "#,
     )
     .bind(tenant_id.get())
@@ -87,7 +87,7 @@ async fn lock_count_dependencies_tx(
            AND owner_item.deleted IS NULL
         WHERE count.tenant_id = $1 AND count.id = $2
         FOR UPDATE OF count
-        FOR SHARE OF wave, facility, inventory_owner, assignment, location, item, owner_item
+        FOR SHARE OF wave, inventory_owner, location, item, owner_item
         "#,
     )
     .bind(tenant_id.get())
@@ -222,7 +222,7 @@ pub async fn add_audit_wave(
     name: &str,
     description: Option<&str>,
 ) -> AppResult<Option<i64>> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, access.user_id.get()).await?;
     let dependencies = sqlx::query(
         r#"
@@ -242,7 +242,7 @@ pub async fn add_audit_wave(
           AND facility.deleted IS NULL
           AND ($4 OR facility.id = ANY($5))
           AND ($6 OR inventory_owner.id = ANY($7))
-        FOR SHARE OF facility, assignment, inventory_owner
+        FOR SHARE OF inventory_owner
         "#,
     )
     .bind(access.tenant_id.get())
@@ -516,7 +516,7 @@ pub async fn add_location_count(
               )
           )
         FOR UPDATE OF wave
-        FOR SHARE OF facility, inventory_owner, owner_facility, location, item, owner_item
+        FOR SHARE OF inventory_owner, location, item, owner_item
         "#,
     )
     .bind(access.tenant_id.get())

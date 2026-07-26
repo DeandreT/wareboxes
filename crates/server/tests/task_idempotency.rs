@@ -724,16 +724,9 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     let owner = fixture
         .inventory_owner(tenant_id, "Creation Replay Owner")
         .await;
-    sqlx::query(
-        "INSERT INTO inventory_owner_facilities (tenant_id, created, inventory_owner_id, facility_id) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(tenant_id.get())
-    .bind(db::now_iso())
-    .bind(owner)
-    .bind(facility)
-    .execute(&fixture.db)
-    .await
-    .unwrap();
+    fixture
+        .assign_owner_to_facility(tenant_id, owner, facility)
+        .await;
     let batch = repo::inventory::add_item_batch(
         &fixture.db,
         tenant_id,

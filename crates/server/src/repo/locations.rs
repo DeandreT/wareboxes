@@ -5,7 +5,7 @@ use sqlx::Row;
 use wareboxes_core::models::{Location, SiteScope};
 use wareboxes_domain::TenantId;
 
-use crate::db::{now_iso, Db};
+use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::AppResult;
 
 fn map(row: &sqlx::postgres::PgRow) -> AppResult<Location> {
@@ -32,6 +32,7 @@ pub async fn get_locations(
     tenant_id: TenantId,
     show_deleted: bool,
 ) -> AppResult<Vec<Location>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT l.id, l.tenant_id, l.created, l.deleted, l.facility_id,
@@ -46,9 +47,11 @@ pub async fn get_locations(
     )
     .bind(tenant_id.get())
     .bind(show_deleted)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.iter().map(map).collect()
+    let locations = rows.iter().map(map).collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(locations)
 }
 
 pub async fn get_locations_in_scope(
@@ -62,6 +65,7 @@ pub async fn get_locations_in_scope(
         .iter()
         .map(|id| id.get())
         .collect::<Vec<_>>();
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT location.id, location.tenant_id, location.created, location.deleted,
@@ -82,19 +86,23 @@ pub async fn get_locations_in_scope(
     .bind(show_deleted)
     .bind(site_scope.all_facilities)
     .bind(&facility_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.iter().map(map).collect()
+    let locations = rows.iter().map(map).collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(locations)
 }
 
 pub async fn active_location_exists(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM locations WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL)",
     )
     .bind(tenant_id.get())
     .bind(id)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(exists)
 }
 
@@ -109,6 +117,7 @@ pub async fn active_location_exists_in_scope(
         .iter()
         .map(|facility_id| facility_id.get())
         .collect::<Vec<_>>();
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let exists: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
@@ -125,8 +134,9 @@ pub async fn active_location_exists_in_scope(
     .bind(id)
     .bind(site_scope.all_facilities)
     .bind(&facility_ids)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(exists)
 }
 
@@ -136,6 +146,7 @@ pub async fn active_location_exists_in_facility(
     facility_id: i64,
     id: i64,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let exists: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
@@ -151,8 +162,9 @@ pub async fn active_location_exists_in_facility(
     .bind(tenant_id.get())
     .bind(facility_id)
     .bind(id)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(exists)
 }
 
@@ -167,6 +179,7 @@ pub async fn active_location_facility_in_scope(
         .iter()
         .map(|facility_id| facility_id.get())
         .collect::<Vec<_>>();
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let facility_id = sqlx::query_scalar(
         r#"
         SELECT facility_id
@@ -181,8 +194,9 @@ pub async fn active_location_facility_in_scope(
     .bind(id)
     .bind(site_scope.all_facilities)
     .bind(&facility_ids)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(facility_id)
 }
 
@@ -191,13 +205,15 @@ pub async fn location_active_state(
     tenant_id: TenantId,
     id: i64,
 ) -> AppResult<Option<bool>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let active = sqlx::query_scalar(
         "SELECT active FROM locations WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL",
     )
     .bind(tenant_id.get())
     .bind(id)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(active)
 }
 
@@ -214,6 +230,7 @@ pub async fn add_location(
     pickable: bool,
     receivable: bool,
 ) -> AppResult<i64> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO locations
@@ -232,8 +249,9 @@ pub async fn add_location(
     .bind(active)
     .bind(pickable)
     .bind(receivable)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(id)
 }
 
@@ -250,6 +268,7 @@ pub async fn update_location(
     pickable: Option<bool>,
     receivable: Option<bool>,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         r#"
         UPDATE locations
@@ -272,8 +291,9 @@ pub async fn update_location(
     .bind(receivable)
     .bind(tenant_id.get())
     .bind(id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -296,6 +316,7 @@ pub async fn update_location_in_scope(
         .iter()
         .map(|facility_id| facility_id.get())
         .collect::<Vec<_>>();
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let result = sqlx::query(
         r#"
         UPDATE locations
@@ -322,8 +343,9 @@ pub async fn update_location_in_scope(
     .bind(id)
     .bind(site_scope.all_facilities)
     .bind(&facility_ids)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -333,12 +355,14 @@ pub async fn set_location_deleted(
     id: i64,
     deleted: bool,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query("UPDATE locations SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(if deleted { Some(now_iso()) } else { None })
         .bind(tenant_id.get())
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -354,6 +378,7 @@ pub async fn set_location_deleted_in_scope(
         .iter()
         .map(|facility_id| facility_id.get())
         .collect::<Vec<_>>();
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let result = sqlx::query(
         r#"
         UPDATE locations
@@ -368,7 +393,8 @@ pub async fn set_location_deleted_in_scope(
     .bind(id)
     .bind(site_scope.all_facilities)
     .bind(&facility_ids)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }

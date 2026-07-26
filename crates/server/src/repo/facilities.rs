@@ -5,7 +5,7 @@ use sqlx::Row;
 use wareboxes_core::models::{Facility, SiteScope};
 use wareboxes_domain::TenantId;
 
-use crate::db::{now_iso, Db};
+use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::AppResult;
 
 fn map(row: &sqlx::postgres::PgRow) -> AppResult<Facility> {
@@ -25,6 +25,7 @@ pub async fn get_facilities(
     tenant_id: TenantId,
     show_deleted: bool,
 ) -> AppResult<Vec<Facility>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, created, deleted, name, address_id
@@ -35,9 +36,11 @@ pub async fn get_facilities(
     )
     .bind(tenant_id.get())
     .bind(show_deleted)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.iter().map(map).collect()
+    let facilities = rows.iter().map(map).collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(facilities)
 }
 
 pub async fn get_facilities_in_scope(
@@ -51,6 +54,7 @@ pub async fn get_facilities_in_scope(
         .iter()
         .map(|id| id.get())
         .collect::<Vec<_>>();
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, created, deleted, name, address_id
@@ -65,19 +69,23 @@ pub async fn get_facilities_in_scope(
     .bind(show_deleted)
     .bind(site_scope.all_facilities)
     .bind(&facility_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.iter().map(map).collect()
+    let facilities = rows.iter().map(map).collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(facilities)
 }
 
 pub async fn active_facility_exists(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM facilities WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL)",
     )
     .bind(tenant_id.get())
     .bind(id)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(exists)
 }
 
@@ -92,6 +100,7 @@ pub async fn active_facility_exists_in_scope(
         .iter()
         .map(|facility_id| facility_id.get())
         .collect::<Vec<_>>();
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let exists: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
@@ -108,21 +117,24 @@ pub async fn active_facility_exists_in_scope(
     .bind(id)
     .bind(site_scope.all_facilities)
     .bind(&facility_ids)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(exists)
 }
 
 /// Not part of the original app; provided so the data set is usable for
 /// testing and future inventory owner to facility linking.
 pub async fn add_facility(db: &Db, tenant_id: TenantId, name: &str) -> AppResult<i64> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO facilities (tenant_id, name, created) VALUES ($1, $2, $3) RETURNING id",
     )
     .bind(tenant_id.get())
     .bind(name)
     .bind(now_iso())
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(id)
 }

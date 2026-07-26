@@ -435,16 +435,9 @@ async fn cancelled_order_unpack_task_is_facility_scoped_and_deduplicated() {
         .inventory_owner(tenant_id, "Cancel Task InventoryOwner")
         .await;
     let facility = fixture.facility(tenant_id, "Cancel Task Facility").await;
-    sqlx::query(
-        "INSERT INTO inventory_owner_facilities (tenant_id, created, inventory_owner_id, facility_id) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(tenant_id.get())
-    .bind(db::now_iso())
-    .bind(inventory_owner)
-    .bind(facility)
-    .execute(db)
-    .await
-    .unwrap();
+    fixture
+        .assign_owner_to_facility(tenant_id, inventory_owner, facility)
+        .await;
     let item = fixture
         .item(tenant_id, "Cancelled Order Item", "each")
         .await;

@@ -3,7 +3,7 @@ use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::{OwnerScope, SiteScope, TenantAccess, TenantStatus};
 use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId, UserId};
 
-use crate::db::Db;
+use crate::db::{begin_tenant_transaction, Db};
 use crate::error::{AppError, AppResult};
 
 use super::access::ScopeBindings;
@@ -219,7 +219,7 @@ pub async fn update_user_access_scope(
     scope: &UpdateUserAccessScope,
 ) -> AppResult<bool> {
     validate_scope_request(scope)?;
-    let mut transaction = db.begin().await?;
+    let mut transaction = begin_tenant_transaction(db, tenant_id).await?;
 
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
         .bind(tenant_id.get())
