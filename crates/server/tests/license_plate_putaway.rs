@@ -722,7 +722,7 @@ async fn whole_license_plate_putaway_is_atomic_replay_safe_and_rejects_content_d
         r#"
         SELECT
             COUNT(*) FILTER (
-                WHERE event_type = 'inbound.expected_inventory.received'
+                WHERE event_type = 'inbound.expected_receipt.confirmed'
                   AND payload ->> 'license_plate_id' = $2::TEXT
             ),
             COUNT(*) FILTER (

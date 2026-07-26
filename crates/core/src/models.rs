@@ -1115,6 +1115,7 @@ pub struct ReceiveExpectedInventoryResult {
     pub cumulative_received_qty: i64,
     pub cumulative_rejected_qty: i64,
     pub cumulative_missing_qty: i64,
+    pub remaining_quantity: i64,
     pub receive_completed: bool,
 }
 

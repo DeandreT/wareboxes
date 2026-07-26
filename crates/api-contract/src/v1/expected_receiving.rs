@@ -50,6 +50,85 @@ pub struct ExpectedReceivingSessionResponse {
     pub lines: Vec<ExpectedReceiptLine>,
 }
 
+/// Operator disposition recorded by one expected-receipt command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpectedReceiptDisposition {
+    Received,
+    Rejected,
+    Missing,
+}
+
+/// Typed reason for rejecting or marking expected inventory missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpectedReceiptExceptionReason {
+    Damaged,
+    QualityRejected,
+    ShortShipment,
+    CountDiscrepancy,
+    WrongItem,
+    Other,
+}
+
+/// Resolves one positive quantity against an expected receipt line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "disposition", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConfirmExpectedReceiptRequest {
+    Received {
+        item_barcode: String,
+        receiving_location_barcode: String,
+        quantity: i64,
+        license_plate_barcode: Option<String>,
+        lot: Option<String>,
+        serial: Option<String>,
+        expiration: Option<String>,
+    },
+    Rejected {
+        item_barcode: String,
+        quantity: i64,
+        reason: ExpectedReceiptExceptionReason,
+        note: Option<String>,
+    },
+    Missing {
+        quantity: i64,
+        reason: ExpectedReceiptExceptionReason,
+        note: Option<String>,
+    },
+}
+
+/// Cumulative resolution state for one expected receipt line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpectedReceiptLineStatus {
+    Pending,
+    Partial,
+    Received,
+    Rejected,
+    Missing,
+}
+
+/// Result of atomically resolving one expected-receipt quantity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectedReceiptConfirmationResponse {
+    pub load_id: i64,
+    pub load_line_id: i64,
+    pub disposition: ExpectedReceiptDisposition,
+    pub quantity: i64,
+    pub inventory_transaction_id: Option<i64>,
+    pub inventory_balance_id: Option<i64>,
+    pub item_batch_id: Option<i64>,
+    pub license_plate_id: Option<i64>,
+    pub line_status: ExpectedReceiptLineStatus,
+    pub load_status: ExpectedReceivingLoadStatus,
+    pub cumulative_received_quantity: i64,
+    pub cumulative_rejected_quantity: i64,
+    pub cumulative_missing_quantity: i64,
+    pub remaining_quantity: i64,
+    pub receive_completed: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -186,5 +265,186 @@ mod tests {
             r#""received""#
         );
         assert!(serde_json::from_str::<ExpectedReceivingLoadStatus>(r#""scheduled""#).is_err());
+    }
+
+    #[test]
+    fn received_confirmation_request_has_an_exact_contract() {
+        let request = ConfirmExpectedReceiptRequest::Received {
+            item_barcode: "0012345678905".into(),
+            receiving_location_barcode: "DOCK-04".into(),
+            quantity: 4,
+            license_plate_barcode: Some("LP-1004".into()),
+            lot: Some("LOT-07".into()),
+            serial: None,
+            expiration: Some("2027-07-26T00:00:00+00:00".into()),
+        };
+        let value = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "disposition": "received",
+                "item_barcode": "0012345678905",
+                "receiving_location_barcode": "DOCK-04",
+                "quantity": 4,
+                "license_plate_barcode": "LP-1004",
+                "lot": "LOT-07",
+                "serial": null,
+                "expiration": "2027-07-26T00:00:00+00:00"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ConfirmExpectedReceiptRequest>(value).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn rejected_confirmation_request_has_an_exact_contract() {
+        let request = ConfirmExpectedReceiptRequest::Rejected {
+            item_barcode: "CASE-66".into(),
+            quantity: 2,
+            reason: ExpectedReceiptExceptionReason::QualityRejected,
+            note: Some("Seal was broken".into()),
+        };
+        let value = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "disposition": "rejected",
+                "item_barcode": "CASE-66",
+                "quantity": 2,
+                "reason": "quality_rejected",
+                "note": "Seal was broken"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ConfirmExpectedReceiptRequest>(value).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn missing_confirmation_request_has_an_exact_contract() {
+        let request = ConfirmExpectedReceiptRequest::Missing {
+            quantity: 3,
+            reason: ExpectedReceiptExceptionReason::ShortShipment,
+            note: None,
+        };
+        let value = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "disposition": "missing",
+                "quantity": 3,
+                "reason": "short_shipment",
+                "note": null
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ConfirmExpectedReceiptRequest>(value).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn confirmation_request_rejects_unknown_and_impossible_stock_fields() {
+        assert!(
+            serde_json::from_value::<ConfirmExpectedReceiptRequest>(json!({
+                "disposition": "received",
+                "item_barcode": "CASE-66",
+                "receiving_location_barcode": "DOCK-04",
+                "quantity": 1,
+                "license_plate_barcode": null,
+                "lot": null,
+                "serial": null,
+                "expiration": null,
+                "tenant_id": 99
+            }))
+            .is_err()
+        );
+
+        assert!(
+            serde_json::from_value::<ConfirmExpectedReceiptRequest>(json!({
+                "disposition": "rejected",
+                "item_barcode": "CASE-66",
+                "quantity": 1,
+                "reason": "damaged",
+                "note": null,
+                "receiving_location_barcode": "DOCK-04",
+                "license_plate_barcode": "LP-1004"
+            }))
+            .is_err()
+        );
+
+        assert!(
+            serde_json::from_value::<ConfirmExpectedReceiptRequest>(json!({
+                "disposition": "missing",
+                "quantity": 1,
+                "reason": "short_shipment",
+                "note": null,
+                "item_barcode": "CASE-66",
+                "lot": "LOT-07"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn expected_receipt_confirmation_response_has_an_exact_public_contract() {
+        let response = ExpectedReceiptConfirmationResponse {
+            load_id: 11,
+            load_line_id: 55,
+            disposition: ExpectedReceiptDisposition::Received,
+            quantity: 4,
+            inventory_transaction_id: Some(77),
+            inventory_balance_id: Some(88),
+            item_batch_id: Some(99),
+            license_plate_id: Some(111),
+            line_status: ExpectedReceiptLineStatus::Partial,
+            load_status: ExpectedReceivingLoadStatus::Receiving,
+            cumulative_received_quantity: 4,
+            cumulative_rejected_quantity: 1,
+            cumulative_missing_quantity: 0,
+            remaining_quantity: 7,
+            receive_completed: false,
+        };
+        let value = serde_json::to_value(&response).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "load_id": 11,
+                "load_line_id": 55,
+                "disposition": "received",
+                "quantity": 4,
+                "inventory_transaction_id": 77,
+                "inventory_balance_id": 88,
+                "item_batch_id": 99,
+                "license_plate_id": 111,
+                "line_status": "partial",
+                "load_status": "receiving",
+                "cumulative_received_quantity": 4,
+                "cumulative_rejected_quantity": 1,
+                "cumulative_missing_quantity": 0,
+                "remaining_quantity": 7,
+                "receive_completed": false
+            })
+        );
+        for field in [
+            "tenant_id",
+            "created",
+            "deleted",
+            "actor_user_id",
+            "request_hash",
+            "idempotency_key",
+        ] {
+            assert!(
+                value.get(field).is_none(),
+                "unexpected confirmation field {field}"
+            );
+        }
     }
 }

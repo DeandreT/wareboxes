@@ -16,8 +16,9 @@ pub use cursor::{
 };
 pub use error::{ErrorReason, ErrorResponse, FieldViolation};
 pub use expected_receiving::{
-    ExpectedReceiptLine, ExpectedReceivingLoadStatus, ExpectedReceivingLocation,
-    ExpectedReceivingSessionResponse,
+    ConfirmExpectedReceiptRequest, ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
+    ExpectedReceiptExceptionReason, ExpectedReceiptLine, ExpectedReceiptLineStatus,
+    ExpectedReceivingLoadStatus, ExpectedReceivingLocation, ExpectedReceivingSessionResponse,
 };
 pub use idempotency::{
     IdempotencyKey, IdempotencyKeyError, IDEMPOTENCY_KEY_HEADER, MAX_IDEMPOTENCY_KEY_LENGTH,

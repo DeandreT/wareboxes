@@ -272,7 +272,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     assert!(load_row
         .activity
         .iter()
-        .any(|a| a.action == "expected_inventory_received"));
+        .any(|a| a.action == "expected_receipt_confirmed"));
 
     let balances = repo::inventory::get_balances(&db, tenant_id, false)
         .await
