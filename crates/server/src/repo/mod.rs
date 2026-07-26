@@ -12,6 +12,7 @@ pub mod integration_inbox;
 pub mod inventory;
 pub(crate) mod inventory_journal;
 pub mod inventory_owners;
+pub mod inventory_v1;
 pub mod items;
 pub mod license_plates;
 pub mod loads;

@@ -27,6 +27,7 @@ pub mod permissions;
 pub mod roles;
 pub mod tasks;
 pub mod users;
+pub mod v1;
 
 /// Validate a request body the same way the Zod `safeParse` did, surfacing
 /// per-field messages.
@@ -216,6 +217,7 @@ pub fn app(state: AppState) -> Router {
     let mut app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .nest("/api", api)
+        .nest(wareboxes_api_contract::v1::API_PREFIX, v1::router())
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
                 let request_id = request
