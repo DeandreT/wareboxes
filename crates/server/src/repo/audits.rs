@@ -5,7 +5,7 @@ use wareboxes_core::dto::{AddAuditLocationCount, AuditLocationCountUpdate};
 use wareboxes_core::models::{AuditApprovalStatus, AuditLocationCount, AuditWave, TenantAccess};
 use wareboxes_domain::TenantId;
 
-use crate::db::{bind_tenant_context, now_iso, Db};
+use crate::db::{begin_tenant_transaction, bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 
@@ -337,7 +337,7 @@ pub async fn set_audit_wave_deleted(
     id: i64,
     deleted: bool,
 ) -> AppResult<bool> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, access.user_id.get()).await?;
     if !deleted
         && (!lock_wave_dependencies_tx(&mut tx, access.tenant_id, id).await?
@@ -657,7 +657,7 @@ pub async fn update_location_count(
     access: &TenantAccess,
     update: &AuditLocationCountUpdate,
 ) -> AppResult<bool> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, access.user_id.get()).await?;
     if !lock_count_dependencies_tx(&mut tx, access.tenant_id, update.audit_location_count_id)
         .await?
@@ -735,7 +735,7 @@ pub async fn set_location_count_deleted(
     expected_revision: i64,
     deleted: bool,
 ) -> AppResult<bool> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, access.user_id.get()).await?;
     let row = sqlx::query(
         r#"

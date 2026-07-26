@@ -184,6 +184,7 @@ async fn workforce_and_inventory_audits_are_tenant_isolated() {
 
     let location_a = fixture.location(tenant_a, facility_a, "COUNT-A").await;
     let item_a = fixture.item(tenant_a, "Count Item A", "each").await;
+    let mut tx = tenant_tx(&fixture.db, tenant_a).await;
     sqlx::query(
         "INSERT INTO inventory_owner_items (tenant_id, created, inventory_owner_id, item_id) VALUES ($1, $2, $3, $4)",
     )
@@ -191,9 +192,10 @@ async fn workforce_and_inventory_audits_are_tenant_isolated() {
     .bind(db::now_iso())
     .bind(owner_a)
     .bind(item_a)
-    .execute(&fixture.db)
+    .execute(&mut *tx)
     .await
     .unwrap();
+    tx.commit().await.unwrap();
     sqlx::query(
         r#"
         INSERT INTO audit_location_counts (

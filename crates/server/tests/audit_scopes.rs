@@ -80,6 +80,7 @@ async fn assign_item_to_owner(
     inventory_owner_id: i64,
     item_id: i64,
 ) {
+    let mut tx = tenant_tx(db, tenant_id).await;
     sqlx::query(
         r#"
         INSERT INTO inventory_owner_items
@@ -91,9 +92,10 @@ async fn assign_item_to_owner(
     .bind(db::now_iso())
     .bind(inventory_owner_id)
     .bind(item_id)
-    .execute(db)
+    .execute(&mut *tx)
     .await
     .unwrap();
+    tx.commit().await.unwrap();
 }
 
 #[tokio::test]
@@ -159,12 +161,14 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
     )
     .await
     .unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("UPDATE items SET packaging_unit = 'case' WHERE tenant_id = $1 AND id = $2")
         .bind(tenant_id.get())
         .bind(allowed_item)
-        .execute(&fixture.db)
+        .execute(&mut *tx)
         .await
         .unwrap();
+    tx.commit().await.unwrap();
     let case_batch = repo::inventory::add_item_batch(
         &fixture.db,
         tenant_id,
@@ -192,12 +196,14 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
     )
     .await
     .unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("UPDATE items SET packaging_unit = 'each' WHERE tenant_id = $1 AND id = $2")
         .bind(tenant_id.get())
         .bind(allowed_item)
-        .execute(&fixture.db)
+        .execute(&mut *tx)
         .await
         .unwrap();
+    tx.commit().await.unwrap();
 
     let unrestricted = repo::tenants::access_for_user(&fixture.db, operator.id, tenant_id)
         .await
@@ -658,23 +664,27 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
             .await
             .unwrap()
     );
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("UPDATE items SET deleted = clock_timestamp() WHERE tenant_id = $1 AND id = $2")
         .bind(tenant_id.get())
         .bind(allowed_item)
-        .execute(&fixture.db)
+        .execute(&mut *tx)
         .await
         .unwrap();
+    tx.commit().await.unwrap();
     assert!(
         !repo::audits::set_audit_wave_deleted(&fixture.db, &restricted, allowed_wave, false,)
             .await
             .unwrap()
     );
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("UPDATE items SET deleted = NULL WHERE tenant_id = $1 AND id = $2")
         .bind(tenant_id.get())
         .bind(allowed_item)
-        .execute(&fixture.db)
+        .execute(&mut *tx)
         .await
         .unwrap();
+    tx.commit().await.unwrap();
     assert!(
         repo::audits::set_audit_wave_deleted(&fixture.db, &restricted, allowed_wave, false,)
             .await

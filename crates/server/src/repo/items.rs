@@ -6,7 +6,7 @@ use sqlx::Row;
 use wareboxes_core::models::{Barcode, Item, ItemPackLink, Sku};
 use wareboxes_domain::TenantId;
 
-use crate::db::{now_iso, Db};
+use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::{AppError, AppResult};
 
 fn map_tenant_id(row: &sqlx::postgres::PgRow) -> AppResult<TenantId> {
@@ -32,12 +32,15 @@ fn map_item(row: &sqlx::postgres::PgRow) -> AppResult<Item> {
     })
 }
 
-async fn skus_by_item(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i64, Vec<Sku>>> {
+async fn skus_by_item(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+) -> AppResult<HashMap<i64, Vec<Sku>>> {
     let rows = sqlx::query(
         "SELECT id, tenant_id, created, deleted, name, item_id, notes FROM skus WHERE tenant_id = $1 AND deleted IS NULL",
     )
     .bind(tenant_id.get())
-    .fetch_all(db)
+    .fetch_all(&mut **tx)
     .await?;
     let mut map: HashMap<i64, Vec<Sku>> = HashMap::new();
     for r in &rows {
@@ -55,12 +58,15 @@ async fn skus_by_item(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i64, Ve
     Ok(map)
 }
 
-async fn barcodes_by_item(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i64, Vec<Barcode>>> {
+async fn barcodes_by_item(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+) -> AppResult<HashMap<i64, Vec<Barcode>>> {
     let rows = sqlx::query(
         "SELECT id, tenant_id, created, deleted, name, type, item_id, notes FROM barcodes WHERE tenant_id = $1 AND deleted IS NULL",
     )
     .bind(tenant_id.get())
-    .fetch_all(db)
+    .fetch_all(&mut **tx)
     .await?;
     let mut map: HashMap<i64, Vec<Barcode>> = HashMap::new();
     for r in &rows {
@@ -80,6 +86,7 @@ async fn barcodes_by_item(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i64
 }
 
 pub async fn get_items(db: &Db, tenant_id: TenantId, show_deleted: bool) -> AppResult<Vec<Item>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, created, deleted, description, notes, packaging_unit,
@@ -91,29 +98,49 @@ pub async fn get_items(db: &Db, tenant_id: TenantId, show_deleted: bool) -> AppR
     )
     .bind(tenant_id.get())
     .bind(show_deleted)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    let mut skus = skus_by_item(db, tenant_id).await?;
-    let mut barcodes = barcodes_by_item(db, tenant_id).await?;
-    rows.iter()
+    let mut skus = skus_by_item(&mut tx, tenant_id).await?;
+    let mut barcodes = barcodes_by_item(&mut tx, tenant_id).await?;
+    let items = rows
+        .iter()
         .map(|r| {
             let mut it = map_item(r)?;
             it.skus = skus.remove(&it.id).unwrap_or_default();
             it.barcodes = barcodes.remove(&it.id).unwrap_or_default();
             Ok(it)
         })
-        .collect()
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(items)
 }
 
 pub async fn active_item_exists(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM items WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL)",
     )
     .bind(tenant_id.get())
     .bind(id)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(exists)
+}
+
+async fn lock_active_item_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    item_id: i64,
+) -> AppResult<bool> {
+    let item = sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM items WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL FOR SHARE",
+    )
+    .bind(tenant_id.get())
+    .bind(item_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(item.is_some())
 }
 
 fn map_item_pack_link(row: &sqlx::postgres::PgRow) -> AppResult<ItemPackLink> {
@@ -134,6 +161,7 @@ pub async fn get_item_pack_links(
     tenant_id: TenantId,
     show_deleted: bool,
 ) -> AppResult<Vec<ItemPackLink>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, created, deleted, master_item_id, single_item_id, inner_qty, notes
@@ -144,9 +172,14 @@ pub async fn get_item_pack_links(
     )
     .bind(tenant_id.get())
     .bind(show_deleted)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.iter().map(map_item_pack_link).collect()
+    let links = rows
+        .iter()
+        .map(map_item_pack_link)
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(links)
 }
 
 pub async fn add_item_pack_link(
@@ -165,9 +198,24 @@ pub async fn add_item_pack_link(
     if inner_qty <= 1 {
         return Err(AppError::bad_request("inner quantity must be at least 2"));
     }
-    if !active_item_exists(db, tenant_id, master_item_id).await?
-        || !active_item_exists(db, tenant_id, single_item_id).await?
-    {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    let item_ids = [master_item_id, single_item_id];
+    let active_items = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT id
+        FROM items
+        WHERE tenant_id = $1
+          AND id = ANY($2)
+          AND deleted IS NULL
+        ORDER BY id
+        FOR SHARE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(item_ids.as_slice())
+    .fetch_all(&mut *tx)
+    .await?;
+    if active_items.len() != 2 {
         return Err(AppError::bad_request("item not found"));
     }
     let id: i64 = sqlx::query_scalar(
@@ -183,8 +231,9 @@ pub async fn add_item_pack_link(
     .bind(single_item_id)
     .bind(inner_qty)
     .bind(notes)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(id)
 }
 
@@ -194,13 +243,15 @@ pub async fn set_item_pack_link_deleted(
     id: i64,
     deleted: bool,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res =
         sqlx::query("UPDATE item_pack_links SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
             .bind(if deleted { Some(now_iso()) } else { None })
             .bind(tenant_id.get())
             .bind(id)
-            .execute(db)
+            .execute(&mut *tx)
             .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -219,7 +270,7 @@ pub async fn add_item(
     weight_uom: Option<&str>,
 ) -> AppResult<i64> {
     let now = now_iso();
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let dims_id: i64 = sqlx::query_scalar(
         "INSERT INTO dims (tenant_id, created, length, width, height, length_uom, weight, weight_uom) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
     )
@@ -256,6 +307,7 @@ pub async fn update_item(
     notes: Option<&str>,
     packaging_unit: Option<&str>,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         r#"
         UPDATE items
@@ -270,8 +322,9 @@ pub async fn update_item(
     .bind(packaging_unit)
     .bind(tenant_id.get())
     .bind(id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -281,12 +334,14 @@ pub async fn set_item_deleted(
     id: i64,
     deleted: bool,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query("UPDATE items SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(if deleted { Some(now_iso()) } else { None })
         .bind(tenant_id.get())
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -297,6 +352,10 @@ pub async fn add_sku(
     name: &str,
     notes: Option<&str>,
 ) -> AppResult<i64> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    if !lock_active_item_tx(&mut tx, tenant_id, item_id).await? {
+        return Err(AppError::bad_request("item not found"));
+    }
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO skus (tenant_id, created, name, item_id, notes) VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
@@ -305,8 +364,9 @@ pub async fn add_sku(
     .bind(name)
     .bind(item_id)
     .bind(notes)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(id)
 }
 
@@ -318,6 +378,10 @@ pub async fn add_barcode(
     barcode_type: &str,
     notes: Option<&str>,
 ) -> AppResult<i64> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    if !lock_active_item_tx(&mut tx, tenant_id, item_id).await? {
+        return Err(AppError::bad_request("item not found"));
+    }
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO barcodes (tenant_id, created, name, type, item_id, notes) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
@@ -327,8 +391,9 @@ pub async fn add_barcode(
     .bind(barcode_type)
     .bind(item_id)
     .bind(notes)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(id)
 }
 
@@ -337,13 +402,15 @@ pub async fn active_barcode_item_by_name(
     tenant_id: TenantId,
     name: &str,
 ) -> AppResult<Option<i64>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let item_id = sqlx::query_scalar(
         "SELECT item_id FROM barcodes WHERE tenant_id = $1 AND deleted IS NULL AND lower(name) = lower($2) LIMIT 1",
     )
     .bind(tenant_id.get())
     .bind(name)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(item_id)
 }
 
@@ -353,11 +420,13 @@ pub async fn set_barcode_deleted(
     id: i64,
     deleted: bool,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query("UPDATE barcodes SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(if deleted { Some(now_iso()) } else { None })
         .bind(tenant_id.get())
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }

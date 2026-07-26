@@ -121,6 +121,15 @@ pub async fn bind_tenant_context(
     }
 }
 
+pub async fn begin_tenant_transaction(
+    db: &Db,
+    tenant_id: TenantId,
+) -> AppResult<Transaction<'_, Postgres>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
+    Ok(tx)
+}
+
 pub async fn validate_runtime_role(pool: &Db) -> anyhow::Result<()> {
     let mut connection = pool.acquire().await?;
     validate_runtime_connection(&mut connection).await
@@ -153,17 +162,11 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 ('audit_wave_items'),
                 ('audit_wave_locations'),
                 ('audit_waves'),
-                ('barcodes'),
-                ('dims'),
                 ('employee_facilities'),
                 ('employees'),
                 ('facilities'),
                 ('inventory_owner_facilities'),
-                ('inventory_owner_items'),
                 ('inventory_owners'),
-                ('item_batches'),
-                ('item_pack_links'),
-                ('items'),
                 ('load_files'),
                 ('load_lines'),
                 ('load_notes'),
@@ -174,7 +177,6 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 ('pick_waves'),
                 ('role_permissions'),
                 ('roles'),
-                ('skus'),
                 ('tenant_memberships'),
                 ('user_facilities'),
                 ('user_inventory_owners'),
@@ -182,6 +184,34 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
         ),
         expected_policy(table_name, policy_name) AS (
             VALUES
+                (
+                    'dims',
+                    'dims_tenant_isolation'
+                ),
+                (
+                    'items',
+                    'items_tenant_isolation'
+                ),
+                (
+                    'skus',
+                    'skus_tenant_isolation'
+                ),
+                (
+                    'barcodes',
+                    'barcodes_tenant_isolation'
+                ),
+                (
+                    'item_pack_links',
+                    'item_pack_links_tenant_isolation'
+                ),
+                (
+                    'inventory_owner_items',
+                    'inventory_owner_items_tenant_isolation'
+                ),
+                (
+                    'item_batches',
+                    'item_batches_tenant_isolation'
+                ),
                 (
                     'command_idempotency_records',
                     'command_idempotency_records_tenant_isolation'

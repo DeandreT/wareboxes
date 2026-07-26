@@ -15,37 +15,48 @@ async fn dimensions_are_tenant_scoped_and_item_creation_is_atomic() {
     let item_b = fixture
         .item(tenant_b, "Tenant B Dimension Item", "each")
         .await;
+    let mut tx = tenant_tx(&fixture.db, tenant_a).await;
     let dims_a: i64 =
         sqlx::query_scalar("SELECT dims_id FROM items WHERE tenant_id = $1 AND id = $2")
             .bind(tenant_a.get())
             .bind(item_a)
-            .fetch_one(&fixture.db)
+            .fetch_one(&mut *tx)
             .await
             .unwrap();
+    let dimension_tenant_a: i64 = sqlx::query_scalar("SELECT tenant_id FROM dims WHERE id = $1")
+        .bind(dims_a)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_b).await;
     let dims_b: i64 =
         sqlx::query_scalar("SELECT dims_id FROM items WHERE tenant_id = $1 AND id = $2")
             .bind(tenant_b.get())
             .bind(item_b)
-            .fetch_one(&fixture.db)
+            .fetch_one(&mut *tx)
             .await
             .unwrap();
-    let dimension_tenants: Vec<i64> =
-        sqlx::query_scalar("SELECT tenant_id FROM dims WHERE id = ANY($1) ORDER BY tenant_id")
-            .bind(vec![dims_a, dims_b])
-            .fetch_all(&fixture.db)
-            .await
-            .unwrap();
-    assert_eq!(dimension_tenants, vec![tenant_a.get(), tenant_b.get()]);
+    let dimension_tenant_b: i64 = sqlx::query_scalar("SELECT tenant_id FROM dims WHERE id = $1")
+        .bind(dims_b)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(dimension_tenant_a, tenant_a.get());
+    assert_eq!(dimension_tenant_b, tenant_b.get());
 
+    let mut tx = tenant_tx(&fixture.db, tenant_a).await;
     assert!(
         sqlx::query("UPDATE items SET dims_id = $1 WHERE tenant_id = $2 AND id = $3")
             .bind(dims_b)
             .bind(tenant_a.get())
             .bind(item_a)
-            .execute(&fixture.db)
+            .execute(&mut *tx)
             .await
             .is_err()
     );
+    tx.rollback().await.unwrap();
 
     let owner_a = fixture.inventory_owner(tenant_a, "Dimension Owner A").await;
     let facility_a = fixture.facility(tenant_a, "Dimension Facility A").await;
@@ -114,10 +125,12 @@ async fn dimensions_are_tenant_scoped_and_item_creation_is_atomic() {
     .unwrap();
     assert_eq!(catalog, (true, 1, 1));
 
+    let mut tx = tenant_tx(&fixture.db, tenant_a).await;
     let dimensions_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dims")
-        .fetch_one(&fixture.db)
+        .fetch_one(&mut *tx)
         .await
         .unwrap();
+    tx.rollback().await.unwrap();
     let admin_db = admin_db_for(&fixture.db).await;
     sqlx::query(
         r#"
@@ -160,9 +173,11 @@ async fn dimensions_are_tenant_scoped_and_item_creation_is_atomic() {
     )
     .await
     .is_err());
+    let mut tx = tenant_tx(&fixture.db, tenant_a).await;
     let dimensions_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dims")
-        .fetch_one(&fixture.db)
+        .fetch_one(&mut *tx)
         .await
         .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(dimensions_after, dimensions_before);
 }

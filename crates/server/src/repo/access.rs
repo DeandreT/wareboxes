@@ -2,7 +2,7 @@ use sqlx::Row;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
 
-use crate::db::{bind_tenant_context, Db};
+use crate::db::{begin_tenant_transaction, bind_tenant_context, Db};
 use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone)]
@@ -173,6 +173,7 @@ pub async fn item_batch_owner(
     include_deleted: bool,
 ) -> AppResult<Option<InventoryOwnerId>> {
     let scope = ScopeBindings::for_access(access);
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let owner_id = sqlx::query_scalar(
         r#"
         SELECT inventory_owner_id
@@ -188,11 +189,13 @@ pub async fn item_batch_owner(
     .bind(include_deleted)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
-    owner_id
+    let owner_id = owner_id
         .map(|id| InventoryOwnerId::new(id).map_err(|error| AppError::internal(error.to_string())))
-        .transpose()
+        .transpose()?;
+    tx.commit().await?;
+    Ok(owner_id)
 }
 
 pub async fn license_plate_dimensions(

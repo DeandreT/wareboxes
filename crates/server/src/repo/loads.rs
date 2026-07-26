@@ -11,7 +11,7 @@ use wareboxes_core::models::{
 };
 use wareboxes_domain::TenantId;
 
-use crate::db::{bind_tenant_context, now_iso, Db};
+use crate::db::{begin_tenant_transaction, bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::ScopeBindings;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
@@ -512,7 +512,7 @@ pub async fn add_load(
     appointment_time: Option<Timestamp>,
 ) -> AppResult<i64> {
     let now = now_iso();
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO loads
@@ -844,7 +844,7 @@ pub async fn add_line(
     if expected_qty <= 0 {
         return Err(AppError::bad_request("expected quantity must be positive"));
     }
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let load_status: Option<String> = sqlx::query_scalar(
         r#"
         SELECT load.status
