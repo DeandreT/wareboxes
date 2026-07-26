@@ -734,6 +734,40 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     .execute(&fixture.db)
     .await
     .unwrap();
+    let batch = repo::inventory::add_item_batch(
+        &fixture.db,
+        tenant_id,
+        owner,
+        single,
+        None,
+        Some("CREATE-REPLAY-LOT"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo::inventory::receive_inventory(
+        &fixture.db,
+        tenant_id,
+        worker.id,
+        batch,
+        location,
+        4,
+        None,
+        Some("task creation replay setup"),
+        None,
+        None,
+        "task-creation-replay-receipt",
+    )
+    .await
+    .unwrap();
+    let inventory_balance_id = repo::inventory::get_balances(&fixture.db, tenant_id, false)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|balance| balance.item_batch_id == batch)
+        .unwrap()
+        .id;
     let order = fixture.order(tenant_id, "CREATE-REPLAY-ORDER", owner).await;
     fixture.order_item(tenant_id, order, single, 3).await;
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
@@ -748,7 +782,12 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     let cases = [
         (
             "/api/tasks/cycle-counts/item-location/add",
-            json!({"location_id": location, "item_id": single, "source": "manual"}),
+            json!({
+                "location_id": location,
+                "item_id": single,
+                "inventory_balance_id": inventory_balance_id,
+                "source": "manual"
+            }),
         ),
         (
             "/api/tasks/cycle-counts/location/add",
@@ -820,7 +859,12 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     for (uri, body) in [
         (
             cases[0].0,
-            json!({"location_id": location, "item_id": single, "source": "changed"}),
+            json!({
+                "location_id": location,
+                "item_id": single,
+                "inventory_balance_id": inventory_balance_id,
+                "source": "changed"
+            }),
         ),
         (cases[1].0, json!({"location_id": location, "priority": 32})),
         (

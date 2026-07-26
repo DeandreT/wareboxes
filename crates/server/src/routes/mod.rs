@@ -164,6 +164,10 @@ pub fn app(state: AppState) -> Router {
             post(tasks::create_item_location_cycle_count),
         )
         .route(
+            "/tasks/cycle-counts/item-location/confirm",
+            post(tasks::confirm_item_location_cycle_count),
+        )
+        .route(
             "/tasks/cycle-counts/location/add",
             post(tasks::create_location_cycle_count),
         )

@@ -14,11 +14,13 @@ use references::{
     lock_active_location_tx, lock_item_cycle_references_tx, lock_unpack_order_lines_tx,
 };
 
+mod cycle_count;
 mod execution;
 mod leasing;
 mod queries;
 mod references;
 
+pub use cycle_count::*;
 pub use execution::*;
 pub use leasing::*;
 pub use queries::*;
@@ -220,7 +222,7 @@ pub async fn create_item_location_cycle_count_task(
     source: Option<&str>,
     order_id: Option<i64>,
     order_item_id: Option<i64>,
-    inventory_balance_id: Option<i64>,
+    inventory_balance_id: i64,
     note: Option<&str>,
 ) -> AppResult<i64> {
     create_item_location_cycle_count_task_with_scope(
@@ -251,7 +253,7 @@ async fn create_item_location_cycle_count_task_with_scope(
     source: Option<&str>,
     order_id: Option<i64>,
     order_item_id: Option<i64>,
-    inventory_balance_id: Option<i64>,
+    inventory_balance_id: i64,
     note: Option<&str>,
     command: Option<&CommandContext>,
 ) -> AppResult<i64> {
@@ -355,6 +357,7 @@ async fn create_item_location_cycle_count_task_with_scope(
           AND task.inventory_owner_id IS NOT DISTINCT FROM $5
           AND detail.location_id = $2
           AND detail.item_id = $3
+          AND detail.inventory_balance_id = $6
         LIMIT 1
         "#,
     )
@@ -363,6 +366,7 @@ async fn create_item_location_cycle_count_task_with_scope(
     .bind(item_id)
     .bind(dimensions.facility_id)
     .bind(dimensions.inventory_owner_id)
+    .bind(inventory_balance_id)
     .fetch_optional(&mut *tx)
     .await?;
     if let Some(existing) = existing {
@@ -442,7 +446,7 @@ pub async fn create_item_location_cycle_count_task_in_scope(
     source: Option<&str>,
     order_id: Option<i64>,
     order_item_id: Option<i64>,
-    inventory_balance_id: Option<i64>,
+    inventory_balance_id: i64,
     note: Option<&str>,
 ) -> AppResult<i64> {
     require_command_context(access, command)?;
@@ -1117,7 +1121,7 @@ async fn item_location_cycle_count_dimensions_tx(
     item_id: i64,
     order_id: Option<i64>,
     order_item_id: Option<i64>,
-    inventory_balance_id: Option<i64>,
+    inventory_balance_id: i64,
 ) -> AppResult<TaskDimensions> {
     let facility_id: i64 = sqlx::query_scalar(
         "SELECT facility_id FROM locations WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL AND active",
@@ -1127,34 +1131,30 @@ async fn item_location_cycle_count_dimensions_tx(
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| AppError::bad_request("location not found"))?;
-    let mut inventory_owner_id = None;
-
-    if let Some(inventory_balance_id) = inventory_balance_id {
-        let balance: Option<(i64, i64, i64, i64)> = sqlx::query_as(
-            r#"
-            SELECT inventory_owner_id, facility_id, location_id, item_id
-            FROM inventory_balances
-            WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL
-            "#,
-        )
-        .bind(tenant_id.get())
-        .bind(inventory_balance_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-        let Some((owner_id, balance_facility_id, balance_location_id, balance_item_id)) = balance
-        else {
-            return Err(AppError::bad_request("inventory balance not found"));
-        };
-        if balance_facility_id != facility_id
-            || balance_location_id != location_id
-            || balance_item_id != item_id
-        {
-            return Err(AppError::bad_request(
-                "inventory balance does not match the task location and item",
-            ));
-        }
-        inventory_owner_id = Some(owner_id);
+    let balance: Option<(i64, i64, i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT inventory_owner_id, facility_id, location_id, item_id
+        FROM inventory_balances
+        WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_balance_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((owner_id, balance_facility_id, balance_location_id, balance_item_id)) = balance
+    else {
+        return Err(AppError::bad_request("inventory balance not found"));
+    };
+    if balance_facility_id != facility_id
+        || balance_location_id != location_id
+        || balance_item_id != item_id
+    {
+        return Err(AppError::bad_request(
+            "inventory balance does not match the task location and item",
+        ));
     }
+    let mut inventory_owner_id = Some(owner_id);
 
     if let Some(order_id) = order_id {
         let owner_id: Option<i64> = sqlx::query_scalar(

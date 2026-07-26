@@ -753,7 +753,23 @@ pub struct CreateItemLocationCycleCountTask {
     pub source: Option<String>,
     pub order_id: Option<i64>,
     pub order_item_id: Option<i64>,
-    pub inventory_balance_id: Option<i64>,
+    #[validate(range(min = 1, message = "Invalid inventory balance ID"))]
+    pub inventory_balance_id: i64,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmItemLocationCycleCount {
+    #[validate(range(min = 1, message = "Invalid task ID"))]
+    pub task_id: i64,
+    #[validate(range(min = 0, message = "Counted quantity cannot be negative"))]
+    pub counted_quantity: i64,
+    #[validate(length(
+        min = 1,
+        max = 1000,
+        message = "Note must contain between 1 and 1000 characters"
+    ))]
     pub note: Option<String>,
 }
 

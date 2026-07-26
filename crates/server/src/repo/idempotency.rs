@@ -202,10 +202,28 @@ impl<'a> PreparedCommand<'a> {
         .await
     }
 
+    pub(crate) fn request_hash(&self) -> &str {
+        &self.request_hash
+    }
+
+    pub(crate) fn idempotency_key(&self) -> &str {
+        self.idempotency_key
+    }
+
     pub(crate) async fn commit<T: Serialize>(
+        &self,
+        tx: sqlx::Transaction<'_, sqlx::Postgres>,
+        result: T,
+    ) -> AppResult<T> {
+        self.commit_with_inventory_transaction(tx, result, None)
+            .await
+    }
+
+    pub(crate) async fn commit_with_inventory_transaction<T: Serialize>(
         &self,
         mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
         result: T,
+        inventory_transaction_id: Option<i64>,
     ) -> AppResult<T> {
         record_result(
             &mut tx,
@@ -214,7 +232,7 @@ impl<'a> PreparedCommand<'a> {
             self.idempotency_key,
             &self.request_hash,
             &result,
-            None,
+            inventory_transaction_id,
             Some(self.context.actor_id.get()),
             Some(&self.context.request_id),
         )
