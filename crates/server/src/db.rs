@@ -162,14 +162,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 ('audit_wave_items'),
                 ('audit_wave_locations'),
                 ('audit_waves'),
-                ('permissions'),
                 ('pick_waves'),
-                ('role_permissions'),
-                ('roles'),
                 ('tenant_memberships'),
                 ('user_facilities'),
-                ('user_inventory_owners'),
-                ('user_roles')
+                ('user_inventory_owners')
         ),
         expected_policy(table_name, policy_name) AS (
             VALUES
@@ -200,6 +196,22 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'load_orders',
                     'load_orders_tenant_isolation'
+                ),
+                (
+                    'roles',
+                    'roles_tenant_isolation'
+                ),
+                (
+                    'permissions',
+                    'permissions_tenant_isolation'
+                ),
+                (
+                    'user_roles',
+                    'user_roles_tenant_isolation'
+                ),
+                (
+                    'role_permissions',
+                    'role_permissions_tenant_isolation'
                 ),
                 (
                     'facilities',

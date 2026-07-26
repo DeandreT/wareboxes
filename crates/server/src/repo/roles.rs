@@ -9,7 +9,7 @@ use wareboxes_core::models::{Permission, Role};
 use wareboxes_core::CoreError;
 use wareboxes_domain::TenantId;
 
-use crate::db::{now_iso, Db};
+use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::{AppError, AppResult};
 
 fn map_role(row: &sqlx::postgres::PgRow) -> AppResult<Role> {
@@ -28,12 +28,15 @@ fn map_role(row: &sqlx::postgres::PgRow) -> AppResult<Role> {
 }
 
 /// Every non-deleted role (used as the graph for closure computation).
-async fn load_all(db: &Db, tenant_id: TenantId) -> AppResult<Vec<Role>> {
+async fn load_all_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+) -> AppResult<Vec<Role>> {
     let rows = sqlx::query(
         "SELECT id, created, deleted, name, description, parent_id, self_user_id FROM roles WHERE tenant_id = $1 AND deleted IS NULL",
     )
     .bind(tenant_id.get())
-    .fetch_all(db)
+    .fetch_all(&mut **tx)
     .await?;
     rows.iter().map(map_role).collect()
 }
@@ -69,7 +72,7 @@ fn descendants(id: i64, children_of: &HashMap<i64, Vec<i64>>) -> Vec<i64> {
 }
 
 async fn role_permission_map(
-    db: &Db,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
 ) -> AppResult<HashMap<i64, Vec<Permission>>> {
     let rows = sqlx::query(
@@ -84,7 +87,7 @@ async fn role_permission_map(
         "#,
     )
     .bind(tenant_id.get())
-    .fetch_all(db)
+    .fetch_all(&mut **tx)
     .await?;
     let mut map: HashMap<i64, Vec<Permission>> = HashMap::new();
     for r in &rows {
@@ -108,7 +111,8 @@ pub async fn get_roles(
     show_deleted: bool,
     show_self_role: bool,
 ) -> AppResult<Vec<Role>> {
-    let all = load_all(db, tenant_id).await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    let all = load_all_tx(&mut tx, tenant_id).await?;
     let by_id: HashMap<i64, Role> = all.iter().map(|r| (r.id, r.clone())).collect();
     let parent_of: HashMap<i64, Option<i64>> = all.iter().map(|r| (r.id, r.parent_id)).collect();
     let mut children_of: HashMap<i64, Vec<i64>> = HashMap::new();
@@ -117,16 +121,17 @@ pub async fn get_roles(
             children_of.entry(p).or_default().push(r.id);
         }
     }
-    let perm_map = role_permission_map(db, tenant_id).await?;
+    let perm_map = role_permission_map(&mut tx, tenant_id).await?;
 
     // Base set is read separately so show_deleted is honoured for the rows
     // themselves while closures still resolve against all live roles.
     let base_sql = "SELECT id, created, deleted, name, description, parent_id, self_user_id FROM roles WHERE tenant_id = $1";
     let base_rows = sqlx::query(base_sql)
         .bind(tenant_id.get())
-        .fetch_all(db)
+        .fetch_all(&mut *tx)
         .await?;
     let mut roles: Vec<Role> = base_rows.iter().map(map_role).collect::<AppResult<_>>()?;
+    tx.commit().await?;
 
     roles
         .retain(|r| (show_deleted || r.deleted.is_none()) && (show_self_role || !r.is_self_role()));
@@ -169,6 +174,7 @@ pub async fn add_role(
     name: &str,
     description: Option<&str>,
 ) -> AppResult<i64> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO roles (tenant_id, name, description, created) VALUES ($1, $2, $3, $4) RETURNING id",
     )
@@ -176,8 +182,9 @@ pub async fn add_role(
     .bind(name)
     .bind(description)
     .bind(now_iso())
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(id)
 }
 
@@ -193,6 +200,7 @@ pub async fn update_role(
             "No data to update".into(),
         )));
     }
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         "UPDATE roles SET name = COALESCE($1, name), description = COALESCE($2, description) WHERE tenant_id = $3 AND id = $4 AND self_user_id IS NULL",
     )
@@ -200,8 +208,9 @@ pub async fn update_role(
     .bind(description)
     .bind(tenant_id.get())
     .bind(id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -211,14 +220,16 @@ pub async fn set_role_deleted(
     id: i64,
     deleted: bool,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         "UPDATE roles SET deleted = $1 WHERE tenant_id = $2 AND id = $3 AND self_user_id IS NULL",
     )
     .bind(if deleted { Some(now_iso()) } else { None })
     .bind(tenant_id.get())
     .bind(id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -229,6 +240,7 @@ pub async fn add_role_to_user(
     user_id: i64,
     role_id: i64,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let row: Option<i64> = sqlx::query_scalar(
         r#"
         INSERT INTO user_roles (tenant_id, user_id, role_id, created)
@@ -253,8 +265,9 @@ pub async fn add_role_to_user(
     .bind(user_id)
     .bind(role_id)
     .bind(now_iso())
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(row.is_some())
 }
 
@@ -265,6 +278,7 @@ pub async fn delete_user_role(
     user_id: i64,
     role_id: i64,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let self_user_id: Option<i64> = sqlx::query_scalar(
         r#"
         SELECT r.self_user_id
@@ -276,7 +290,7 @@ pub async fn delete_user_role(
     .bind(tenant_id.get())
     .bind(user_id)
     .bind(role_id)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?
     .flatten();
     if self_user_id.is_some() {
@@ -291,8 +305,9 @@ pub async fn delete_user_role(
     .bind(tenant_id.get())
     .bind(user_id)
     .bind(role_id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -302,6 +317,7 @@ pub async fn add_role_permission(
     role_id: i64,
     permission_id: i64,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let row: Option<i64> = sqlx::query_scalar(
         r#"
         INSERT INTO role_permissions (tenant_id, role_id, permission_id, created)
@@ -323,8 +339,9 @@ pub async fn add_role_permission(
     .bind(role_id)
     .bind(permission_id)
     .bind(now_iso())
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(row.is_some())
 }
 
@@ -334,6 +351,7 @@ pub async fn delete_role_permission(
     role_id: i64,
     permission_id: i64,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         "UPDATE role_permissions SET deleted = $1 WHERE tenant_id = $2 AND role_id = $3 AND permission_id = $4",
     )
@@ -341,8 +359,9 @@ pub async fn delete_role_permission(
     .bind(tenant_id.get())
     .bind(role_id)
     .bind(permission_id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -359,7 +378,12 @@ pub async fn add_role_relationship(
             "Parent and child roles cannot be the same".into(),
         )));
     }
-    let all = load_all(db, tenant_id).await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('role-hierarchy:' || $1::TEXT, 0))")
+        .bind(tenant_id.get())
+        .execute(&mut *tx)
+        .await?;
+    let all = load_all_tx(&mut tx, tenant_id).await?;
     let parent_of: HashMap<i64, Option<i64>> = all.iter().map(|r| (r.id, r.parent_id)).collect();
     let mut children_of: HashMap<i64, Vec<i64>> = HashMap::new();
     for r in &all {
@@ -396,8 +420,9 @@ pub async fn add_role_relationship(
     .bind(parent_id)
     .bind(tenant_id.get())
     .bind(child_id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -406,12 +431,14 @@ pub async fn delete_role_relationship(
     tenant_id: TenantId,
     child_id: i64,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         "UPDATE roles SET parent_id = NULL WHERE tenant_id = $1 AND id = $2 AND self_user_id IS NULL",
     )
         .bind(tenant_id.get())
         .bind(child_id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }

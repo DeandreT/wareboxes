@@ -4,7 +4,7 @@ use sqlx::Row;
 use wareboxes_core::models::Permission;
 use wareboxes_domain::TenantId;
 
-use crate::db::{now_iso, Db};
+use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::AppResult;
 
 fn map(row: &sqlx::postgres::PgRow) -> AppResult<Permission> {
@@ -22,13 +22,19 @@ pub async fn get_permissions(
     tenant_id: TenantId,
     show_deleted: bool,
 ) -> AppResult<Vec<Permission>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let sql = if show_deleted {
         "SELECT id, created, deleted, name, description FROM permissions WHERE tenant_id = $1 ORDER BY created DESC"
     } else {
         "SELECT id, created, deleted, name, description FROM permissions WHERE tenant_id = $1 AND deleted IS NULL ORDER BY created DESC"
     };
-    let rows = sqlx::query(sql).bind(tenant_id.get()).fetch_all(db).await?;
-    rows.iter().map(map).collect()
+    let rows = sqlx::query(sql)
+        .bind(tenant_id.get())
+        .fetch_all(&mut *tx)
+        .await?;
+    let permissions = rows.iter().map(map).collect();
+    tx.commit().await?;
+    permissions
 }
 
 pub async fn find_by_name(
@@ -36,14 +42,17 @@ pub async fn find_by_name(
     tenant_id: TenantId,
     name: &str,
 ) -> AppResult<Option<Permission>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let row = sqlx::query(
         "SELECT id, created, deleted, name, description FROM permissions WHERE tenant_id = $1 AND name = $2",
     )
     .bind(tenant_id.get())
     .bind(name)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
-    row.as_ref().map(map).transpose()
+    let permission = row.as_ref().map(map).transpose()?;
+    tx.commit().await?;
+    Ok(permission)
 }
 
 /// Insert, or if the (unique) name already exists, revive it. Mirrors the
@@ -54,23 +63,23 @@ pub async fn add_permission(
     name: &str,
     description: Option<&str>,
 ) -> AppResult<i64> {
-    if let Some(existing) = find_by_name(db, tenant_id, name).await? {
-        sqlx::query("UPDATE permissions SET deleted = NULL WHERE tenant_id = $1 AND id = $2")
-            .bind(tenant_id.get())
-            .bind(existing.id)
-            .execute(db)
-            .await?;
-        return Ok(existing.id);
-    }
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO permissions (tenant_id, name, description, created) VALUES ($1, $2, $3, $4) RETURNING id",
+        r#"
+        INSERT INTO permissions (tenant_id, name, description, created)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (tenant_id, name) DO UPDATE
+        SET deleted = NULL
+        RETURNING id
+        "#,
     )
     .bind(tenant_id.get())
     .bind(name)
     .bind(description)
     .bind(now_iso())
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(id)
 }
 
@@ -81,6 +90,7 @@ pub async fn update_permission(
     name: Option<&str>,
     description: Option<&str>,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         r#"
         UPDATE permissions
@@ -93,17 +103,20 @@ pub async fn update_permission(
     .bind(description)
     .bind(tenant_id.get())
     .bind(id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
 pub async fn set_deleted(db: &Db, tenant_id: TenantId, id: i64, deleted: bool) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query("UPDATE permissions SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(if deleted { Some(now_iso()) } else { None })
         .bind(tenant_id.get())
         .bind(id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }

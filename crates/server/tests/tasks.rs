@@ -662,13 +662,15 @@ async fn task_queue_is_tenant_isolated_and_claims_once() {
 
     let worker_a = fixture.user("task-scope-worker-a@test.com").await;
     let worker_b = fixture.user("task-scope-worker-b@test.com").await;
+    let mut tx = tenant_tx(&fixture.db, tenant_a).await;
     let role_id: i64 = sqlx::query_scalar(
         "SELECT id FROM roles WHERE tenant_id = $1 AND name = 'task-scope-operator@test.com-wms'",
     )
     .bind(tenant_a.get())
-    .fetch_one(&fixture.db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.commit().await.unwrap();
     for worker in [&worker_a, &worker_b] {
         sqlx::query(
             "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
