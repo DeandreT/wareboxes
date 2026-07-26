@@ -364,6 +364,7 @@ pub async fn load_dimensions(
     include_deleted: bool,
 ) -> AppResult<Option<OperationalDimensions>> {
     let scope = ScopeBindings::for_access(access);
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let row = sqlx::query(
         r#"
         SELECT facility_id, inventory_owner_id
@@ -382,9 +383,11 @@ pub async fn load_dimensions(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
-    row.as_ref().map(dimensions_from_row).transpose()
+    let dimensions = row.as_ref().map(dimensions_from_row).transpose()?;
+    tx.commit().await?;
+    Ok(dimensions)
 }
 
 pub async fn load_line_dimensions(
@@ -425,6 +428,7 @@ async fn load_child_dimensions(
     child_id: i64,
 ) -> AppResult<Option<OperationalDimensions>> {
     let scope = ScopeBindings::for_access(access);
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let sql = match child {
         LoadChild::Line => {
             r#"
@@ -476,7 +480,9 @@ async fn load_child_dimensions(
         .bind(&scope.facility_ids)
         .bind(scope.all_inventory_owners)
         .bind(&scope.inventory_owner_ids)
-        .fetch_optional(db)
+        .fetch_optional(&mut *tx)
         .await?;
-    row.as_ref().map(dimensions_from_row).transpose()
+    let dimensions = row.as_ref().map(dimensions_from_row).transpose()?;
+    tx.commit().await?;
+    Ok(dimensions)
 }

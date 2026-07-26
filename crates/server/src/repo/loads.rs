@@ -492,13 +492,15 @@ async fn get_load_with_scope(
 }
 
 pub async fn active_load_exists(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM loads WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL)",
     )
     .bind(tenant_id.get())
     .bind(id)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(exists)
 }
 
@@ -584,7 +586,7 @@ pub async fn update_load(
     receive_completed: Option<bool>,
     mut closed: Option<Timestamp>,
 ) -> AppResult<bool> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let current: Option<String> = sqlx::query_scalar(
         "SELECT status FROM loads WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL FOR UPDATE",
     )
@@ -712,7 +714,7 @@ pub async fn set_load_deleted(
     id: i64,
     deleted: bool,
 ) -> AppResult<bool> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         r#"
         UPDATE loads SET deleted = $1
@@ -753,7 +755,7 @@ pub async fn add_note(
     load_id: i64,
     note: &str,
 ) -> AppResult<i64> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let id: Option<i64> = sqlx::query_scalar(
         r#"
         INSERT INTO load_notes (tenant_id, created, load_id, note)
@@ -791,7 +793,7 @@ pub async fn set_load_note_deleted(
     note_id: i64,
     deleted: bool,
 ) -> AppResult<bool> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let load_id: Option<i64> = sqlx::query_scalar(
         r#"
         SELECT load_id FROM load_notes
@@ -1356,7 +1358,7 @@ pub async fn add_file(
     content_type: Option<&str>,
     category: LoadFileCategory,
 ) -> AppResult<i64> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let id: Option<i64> = sqlx::query_scalar(
         r#"
         INSERT INTO load_files
@@ -1397,14 +1399,17 @@ pub async fn add_file(
 }
 
 pub async fn get_file(db: &Db, tenant_id: TenantId, file_id: i64) -> AppResult<Option<LoadFile>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let row = sqlx::query(
         "SELECT id, tenant_id, created, deleted, load_id, original_name, name, path, content_type, category FROM load_files WHERE tenant_id = $1 AND id = $2",
     )
     .bind(tenant_id.get())
     .bind(file_id)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
-    row.as_ref().map(map_file).transpose()
+    let file = row.as_ref().map(map_file).transpose()?;
+    tx.commit().await?;
+    Ok(file)
 }
 
 pub async fn delete_file(
@@ -1413,7 +1418,7 @@ pub async fn delete_file(
     user_id: i64,
     file_id: i64,
 ) -> AppResult<bool> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let load_id: Option<i64> = sqlx::query_scalar(
         "SELECT load_id FROM load_files WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL FOR UPDATE",
     )
