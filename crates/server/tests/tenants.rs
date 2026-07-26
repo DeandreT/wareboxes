@@ -27,8 +27,8 @@ async fn registrations_receive_distinct_default_tenants() {
         .await
         .unwrap();
 
-    let first_access = repo::tenants::list_for_user(&db, first.id).await.unwrap();
-    let second_access = repo::tenants::list_for_user(&db, second.id).await.unwrap();
+    let first_access = tenant_accesses_for_user(&db, first.id).await;
+    let second_access = tenant_accesses_for_user(&db, second.id).await;
 
     assert_eq!(first_access.len(), 1);
     assert_eq!(second_access.len(), 1);
@@ -53,10 +53,8 @@ async fn membership_queries_do_not_return_other_tenants() {
         .await
         .unwrap();
 
-    let owner_tenant = repo::tenants::list_for_user(&db, owner.id).await.unwrap()[0].tenant_id;
-    let outsider_access = repo::tenants::list_for_user(&db, outsider.id)
-        .await
-        .unwrap();
+    let owner_tenant = tenant_accesses_for_user(&db, owner.id).await[0].tenant_id;
+    let outsider_access = tenant_accesses_for_user(&db, outsider.id).await;
 
     assert!(outsider_access
         .iter()
@@ -72,14 +70,8 @@ async fn selected_tenant_context_requires_an_active_membership() {
     let outsider = auth::register_user(&db, "other@test.com", "supersecret", None, None)
         .await
         .unwrap();
-    let member_tenant = repo::tenants::default_for_user(&db, member.id)
-        .await
-        .unwrap()
-        .unwrap();
-    let outsider_tenant = repo::tenants::default_for_user(&db, outsider.id)
-        .await
-        .unwrap()
-        .unwrap();
+    let member_tenant = default_tenant_for_user(&db, member.id).await.unwrap();
+    let outsider_tenant = default_tenant_for_user(&db, outsider.id).await.unwrap();
     let token = auth::create_session(&db, member.id).await.unwrap();
     let state = AppState::new(db.clone());
 
@@ -123,14 +115,8 @@ async fn tenant_context_route_rejects_cross_tenant_requests() {
     let outsider = auth::register_user(&db, "route-other@test.com", "supersecret", None, None)
         .await
         .unwrap();
-    let member_tenant = repo::tenants::default_for_user(&db, member.id)
-        .await
-        .unwrap()
-        .unwrap();
-    let outsider_tenant = repo::tenants::default_for_user(&db, outsider.id)
-        .await
-        .unwrap()
-        .unwrap();
+    let member_tenant = default_tenant_for_user(&db, member.id).await.unwrap();
+    let outsider_tenant = default_tenant_for_user(&db, outsider.id).await.unwrap();
     let token = auth::create_session(&db, member.id).await.unwrap();
     let app = routes::app(AppState::new(db));
 
@@ -239,14 +225,16 @@ async fn owner_and_facility_master_data_is_tenant_scoped() {
 
     // Give one operator access to both tenants to prove the selected header,
     // rather than the identity alone, controls the HTTP result set.
+    let mut membership_tx = tenant_tx(&db, second_tenant).await;
     sqlx::query(
         "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
     )
     .bind(second_tenant.get())
     .bind(operator.id)
-    .execute(&db)
+    .execute(&mut *membership_tx)
     .await
     .unwrap();
+    membership_tx.commit().await.unwrap();
     let permission = repo::permissions::add_permission(&db, second_tenant, "admin", Some("Admin"))
         .await
         .unwrap();
@@ -371,14 +359,16 @@ async fn locations_are_tenant_scoped_for_repositories_and_routes() {
             .unwrap()
     );
 
+    let mut membership_tx = tenant_tx(&db, second_tenant).await;
     sqlx::query(
         "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
     )
     .bind(second_tenant.get())
     .bind(operator.id)
-    .execute(&db)
+    .execute(&mut *membership_tx)
     .await
     .unwrap();
+    membership_tx.commit().await.unwrap();
     let permission = repo::permissions::add_permission(&db, second_tenant, "wms", Some("WMS"))
         .await
         .unwrap();
@@ -533,14 +523,16 @@ async fn item_catalog_is_tenant_scoped_for_repositories_and_routes() {
         AppError::Core(CoreError::BadRequest(_))
     ));
 
+    let mut membership_tx = tenant_tx(&db, second_tenant).await;
     sqlx::query(
         "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
     )
     .bind(second_tenant.get())
     .bind(operator.id)
-    .execute(&db)
+    .execute(&mut *membership_tx)
     .await
     .unwrap();
+    membership_tx.commit().await.unwrap();
     let permission = repo::permissions::add_permission(&db, second_tenant, "wms", Some("WMS"))
         .await
         .unwrap();

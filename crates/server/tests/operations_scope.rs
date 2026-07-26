@@ -32,14 +32,16 @@ async fn workforce_and_inventory_audits_are_tenant_isolated() {
     let tenant_a = tenant_for_user(&fixture.db, operator.id).await;
     let tenant_b_user = fixture.user("operations-scope-b@test.com").await;
     let tenant_b = tenant_for_user(&fixture.db, tenant_b_user.id).await;
+    let mut membership_tx = tenant_tx(&fixture.db, tenant_b).await;
     sqlx::query(
         "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
     )
     .bind(tenant_b.get())
     .bind(operator.id)
-    .execute(&fixture.db)
+    .execute(&mut *membership_tx)
     .await
     .unwrap();
+    membership_tx.commit().await.unwrap();
     grant_admin(&fixture.db, tenant_a, operator.id, "operations-admin").await;
     grant_admin(&fixture.db, tenant_b, operator.id, "operations-admin").await;
 

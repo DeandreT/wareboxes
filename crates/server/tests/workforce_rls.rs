@@ -131,13 +131,15 @@ async fn workforce_refs(fixture: &Fixture, email: &str, key: &str) -> WorkforceR
 }
 
 async fn assert_repository_workforce(db: &db::Db, refs: WorkforceRefs) {
+    let mut tx = tenant_tx(db, refs.tenant_id).await;
     let user_id: i64 = sqlx::query_scalar(
         "SELECT user_id FROM tenant_memberships WHERE tenant_id = $1 ORDER BY id LIMIT 1",
     )
     .bind(refs.tenant_id.get())
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.commit().await.unwrap();
     let access = repo::tenants::access_for_user(db, user_id, refs.tenant_id)
         .await
         .unwrap()

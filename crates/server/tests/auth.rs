@@ -13,6 +13,7 @@ use wareboxes_server::{routes, state::AppState};
 #[tokio::test]
 async fn auth_and_hierarchical_rbac() {
     let db = setup().await;
+    let admin_db = admin_db_for(&db).await;
 
     let user = auth::register_user(&db, "admin@test.com", "supersecret", None, None)
         .await
@@ -32,7 +33,7 @@ async fn auth_and_hierarchical_rbac() {
     let token = auth::create_session(&db, user.id).await.unwrap();
     let stored_token: String = sqlx::query_scalar("SELECT token FROM sessions WHERE user_id = $1")
         .bind(user.id)
-        .fetch_one(&db)
+        .fetch_one(&admin_db)
         .await
         .unwrap();
     assert_ne!(stored_token, token);
@@ -41,7 +42,7 @@ async fn auth_and_hierarchical_rbac() {
     let remaining_sessions: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE user_id = $1")
             .bind(user.id)
-            .fetch_one(&db)
+            .fetch_one(&admin_db)
             .await
             .unwrap();
     assert_eq!(remaining_sessions, 0);
@@ -99,14 +100,16 @@ async fn auth_and_hierarchical_rbac() {
         .await
         .unwrap();
     let other_tenant = tenant_for_user(&db, other_user.id).await;
+    let mut membership_tx = tenant_tx(&db, other_tenant).await;
     sqlx::query(
         "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
     )
     .bind(other_tenant.get())
     .bind(user.id)
-    .execute(&db)
+    .execute(&mut *membership_tx)
     .await
     .unwrap();
+    membership_tx.commit().await.unwrap();
     assert!(
         !permissions::user_has_permission(&db, other_tenant, user.id, "orders")
             .await
@@ -192,14 +195,16 @@ async fn auth_and_hierarchical_rbac() {
         .into_iter()
         .find(|r| r.name == "admin@test.com")
         .unwrap();
+    let mut membership_tx = tenant_tx(&db, tenant_id).await;
     sqlx::query(
         "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
     )
     .bind(tenant_id.get())
     .bind(other_user.id)
-    .execute(&db)
+    .execute(&mut *membership_tx)
     .await
     .unwrap();
+    membership_tx.commit().await.unwrap();
     assert!(
         !repo::roles::add_role_to_user(&db, tenant_id, other_user.id, self_role.id)
             .await

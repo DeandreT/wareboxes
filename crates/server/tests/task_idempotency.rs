@@ -402,12 +402,14 @@ async fn task_commands_replay_results_without_repeating_work() {
     );
 
     let peer = fixture.user("task-idempotency-peer@test.com").await;
+    let mut membership_tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("INSERT INTO tenant_memberships (tenant_id, user_id) VALUES ($1, $2)")
         .bind(tenant_id.get())
         .bind(peer.id)
-        .execute(&fixture.db)
+        .execute(&mut *membership_tx)
         .await
         .unwrap();
+    membership_tx.commit().await.unwrap();
     grant_wms(&fixture.db, tenant_id, peer.id, "idempotency-peer").await;
     let peer_token = auth::create_session(&fixture.db, peer.id).await.unwrap();
     let actor_mismatch = send(

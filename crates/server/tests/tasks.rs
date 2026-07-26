@@ -20,14 +20,16 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
+    let mut membership_tx = tenant_tx(&db, tenant_id).await;
     sqlx::query(
         "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
     )
     .bind(tenant_id.get())
     .bind(assignee.id)
-    .execute(&db)
+    .execute(&mut *membership_tx)
     .await
     .unwrap();
+    membership_tx.commit().await.unwrap();
     let wms_perm = repo::permissions::add_permission(&db, tenant_id, "wms", Some("WMS"))
         .await
         .unwrap();
@@ -594,14 +596,16 @@ async fn task_queue_is_tenant_isolated_and_claims_once() {
     let tenant_a = tenant_for_user(&fixture.db, operator.id).await;
     let second_tenant_user = fixture.user("task-scope-tenant-b@test.com").await;
     let tenant_b = tenant_for_user(&fixture.db, second_tenant_user.id).await;
+    let mut membership_tx = tenant_tx(&fixture.db, tenant_b).await;
     sqlx::query(
         "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
     )
     .bind(tenant_b.get())
     .bind(operator.id)
-    .execute(&fixture.db)
+    .execute(&mut *membership_tx)
     .await
     .unwrap();
+    membership_tx.commit().await.unwrap();
 
     let facility_a = fixture.facility(tenant_a, "Task Scope Facility A").await;
     let facility_b = fixture.facility(tenant_b, "Task Scope Facility B").await;
@@ -672,14 +676,16 @@ async fn task_queue_is_tenant_isolated_and_claims_once() {
     .unwrap();
     tx.commit().await.unwrap();
     for worker in [&worker_a, &worker_b] {
+        let mut membership_tx = tenant_tx(&fixture.db, tenant_a).await;
         sqlx::query(
             "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
         )
         .bind(tenant_a.get())
         .bind(worker.id)
-        .execute(&fixture.db)
+        .execute(&mut *membership_tx)
         .await
         .unwrap();
+        membership_tx.commit().await.unwrap();
         repo::roles::add_role_to_user(&fixture.db, tenant_a, worker.id, role_id)
             .await
             .unwrap();

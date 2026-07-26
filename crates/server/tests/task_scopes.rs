@@ -98,12 +98,14 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     let administrator = fixture.wms_user("task-scope-admin@test.com").await;
     let operator = fixture.user("task-scope-worker@test.com").await;
     let tenant_id = tenant_for_user(&fixture.db, administrator.id).await;
+    let mut membership_tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("INSERT INTO tenant_memberships (tenant_id, user_id) VALUES ($1, $2)")
         .bind(tenant_id.get())
         .bind(operator.id)
-        .execute(&fixture.db)
+        .execute(&mut *membership_tx)
         .await
         .unwrap();
+    membership_tx.commit().await.unwrap();
     let wms_permission = repo::permissions::find_by_name(&fixture.db, tenant_id, "wms")
         .await
         .unwrap()
@@ -415,12 +417,14 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     );
 
     let unqualified = fixture.user("task-no-permission@test.com").await;
+    let mut membership_tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("INSERT INTO tenant_memberships (tenant_id, user_id) VALUES ($1, $2)")
         .bind(tenant_id.get())
         .bind(unqualified.id)
-        .execute(&fixture.db)
+        .execute(&mut *membership_tx)
         .await
         .unwrap();
+    membership_tx.commit().await.unwrap();
     assert!(
         !repo::tasks::assign_task(&fixture.db, tenant_id, allowed_claim, unqualified.id,)
             .await

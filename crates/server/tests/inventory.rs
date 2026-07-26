@@ -143,12 +143,14 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     let peer = auth::register_user(&db, "wms-peer@test.com", "supersecret", None, None)
         .await
         .unwrap();
+    let mut membership_tx = tenant_tx(&db, tenant_id).await;
     sqlx::query("INSERT INTO tenant_memberships (tenant_id, user_id) VALUES ($1, $2)")
         .bind(tenant_id.get())
         .bind(peer.id)
-        .execute(&db)
+        .execute(&mut *membership_tx)
         .await
         .unwrap();
+    membership_tx.commit().await.unwrap();
     let cross_actor_retry = repo::inventory::receive_inventory(
         &db,
         tenant_id,
