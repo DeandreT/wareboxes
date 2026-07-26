@@ -395,14 +395,16 @@ async fn order_cancellation_commands_are_replay_safe() {
     );
 
     let other_actor = fixture.user("order-cancel-replay-actor@test.com").await;
+    let mut membership_tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query(
         "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
     )
     .bind(tenant_id.get())
     .bind(other_actor.id)
-    .execute(&fixture.db)
+    .execute(&mut *membership_tx)
     .await
     .unwrap();
+    membership_tx.commit().await.unwrap();
     repo::roles::add_role_to_user(&fixture.db, tenant_id, other_actor.id, orders_role)
         .await
         .unwrap();

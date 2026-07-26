@@ -65,10 +65,18 @@ async fn bootstrap_admin(pool: &db::Db, cfg: &Config) -> anyhow::Result<()> {
     }
 
     let user = auth::register_user(pool, email, password, Some("Admin"), None).await?;
-    let tenant_id = repo::tenants::default_for_user(pool, user.id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("bootstrap admin has no tenant"))?
-        .tenant_id;
+    let token = auth::create_session(pool, user.id).await?;
+    let tenant_result = match auth::default_tenant_for_session(pool, &token).await {
+        Ok(Some(tenant)) => Ok(tenant),
+        Ok(None) => Err(anyhow::anyhow!("bootstrap admin has no tenant")),
+        Err(error) => Err(error.into()),
+    };
+    let cleanup_result = auth::destroy_session(pool, &token).await;
+    let tenant_id = match (tenant_result, cleanup_result) {
+        (Ok(tenant), Ok(())) => tenant.tenant_id,
+        (Err(error), _) => return Err(error),
+        (Ok(_), Err(error)) => return Err(error.into()),
+    };
     let perm_id =
         repo::permissions::add_permission(pool, tenant_id, "admin", Some("Admin permission"))
             .await?;

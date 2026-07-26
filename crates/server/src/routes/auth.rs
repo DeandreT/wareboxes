@@ -17,19 +17,26 @@ pub async fn login(
     let user = auth::verify_credentials(&state.db, &body.email, &body.password)
         .await?
         .ok_or_else(AppError::unauthorized)?;
-    let active_tenant = crate::repo::tenants::default_for_user(&state.db, user.id)
-        .await?
-        .ok_or_else(AppError::forbidden)?;
-    let user =
-        crate::repo::users::enrich_for_tenant(&state.db, active_tenant.tenant_id, user).await?;
     let token = auth::create_session(&state.db, user.id).await?;
-    let settings = crate::repo::settings::get_user_settings(&state.db, user.id).await?;
-    Ok(Json(SessionUser {
-        token,
-        user,
-        active_tenant,
-        settings,
-    }))
+    let response = async {
+        let active_tenant = auth::default_tenant_for_session(&state.db, &token)
+            .await?
+            .ok_or_else(AppError::forbidden)?;
+        let user =
+            crate::repo::users::enrich_for_tenant(&state.db, active_tenant.tenant_id, user).await?;
+        let settings = crate::repo::settings::get_user_settings(&state.db, user.id).await?;
+        Ok(Json(SessionUser {
+            token: token.clone(),
+            user,
+            active_tenant,
+            settings,
+        }))
+    };
+    let response = response.await;
+    if response.is_err() {
+        let _ = auth::destroy_session(&state.db, &token).await;
+    }
+    response
 }
 
 pub async fn register(
@@ -48,17 +55,24 @@ pub async fn register(
         body.last_name.as_deref(),
     )
     .await?;
-    let active_tenant = crate::repo::tenants::default_for_user(&state.db, user.id)
-        .await?
-        .ok_or_else(|| AppError::internal("registered user has no active tenant"))?;
     let token = auth::create_session(&state.db, user.id).await?;
-    let settings = crate::repo::settings::get_user_settings(&state.db, user.id).await?;
-    Ok(Json(SessionUser {
-        token,
-        user,
-        active_tenant,
-        settings,
-    }))
+    let response = async {
+        let active_tenant = auth::default_tenant_for_session(&state.db, &token)
+            .await?
+            .ok_or_else(|| AppError::internal("registered user has no active tenant"))?;
+        let settings = crate::repo::settings::get_user_settings(&state.db, user.id).await?;
+        Ok(Json(SessionUser {
+            token: token.clone(),
+            user,
+            active_tenant,
+            settings,
+        }))
+    };
+    let response = response.await;
+    if response.is_err() {
+        let _ = auth::destroy_session(&state.db, &token).await;
+    }
+    response
 }
 
 pub async fn logout(
@@ -85,7 +99,7 @@ pub async fn tenants(
     user: CurrentUser,
 ) -> AppResult<Json<Vec<TenantAccess>>> {
     Ok(Json(
-        crate::repo::tenants::list_for_user(&state.db, user.user.id).await?,
+        crate::repo::tenants::list_for_session(&state.db, &user.session_token_hash).await?,
     ))
 }
 

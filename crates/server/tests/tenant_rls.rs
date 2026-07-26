@@ -221,35 +221,13 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         .unwrap();
     db::validate_runtime_role(&fixture.db).await.unwrap();
 
-    for statement in [
-        "ALTER TABLE tenant_memberships ENABLE ROW LEVEL SECURITY",
-        "ALTER TABLE tenant_memberships FORCE ROW LEVEL SECURITY",
-        r#"
-        CREATE POLICY tenant_memberships_tenant_isolation
-        ON tenant_memberships
-        USING (
-            tenant_id =
-                NULLIF(current_setting('wareboxes.tenant_id', true), '')::BIGINT
-        )
-        WITH CHECK (
-            tenant_id =
-                NULLIF(current_setting('wareboxes.tenant_id', true), '')::BIGINT
-        )
-        "#,
-    ] {
-        sqlx::query(statement).execute(&admin_db).await.unwrap();
-    }
-    assert!(db::validate_runtime_role(&fixture.db).await.is_err());
-    for statement in [
-        "DROP POLICY tenant_memberships_tenant_isolation ON tenant_memberships",
-        "ALTER TABLE tenant_memberships NO FORCE ROW LEVEL SECURITY",
-        "ALTER TABLE tenant_memberships DISABLE ROW LEVEL SECURITY",
-    ] {
-        sqlx::query(statement).execute(&admin_db).await.unwrap();
-    }
-    db::validate_runtime_role(&fixture.db).await.unwrap();
-
     for (table_name, policy_name) in [
+        ("tenant_memberships", "tenant_memberships_tenant_isolation"),
+        ("user_facilities", "user_facilities_tenant_isolation"),
+        (
+            "user_inventory_owners",
+            "user_inventory_owners_tenant_isolation",
+        ),
         ("employees", "employees_tenant_isolation"),
         (
             "employee_facilities",
@@ -377,6 +355,76 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         .unwrap();
         db::validate_runtime_role(&fixture.db).await.unwrap();
     }
+
+    sqlx::query(
+        r#"
+        ALTER POLICY tenant_memberships_session_visibility
+        ON tenant_memberships
+        USING (true)
+        "#,
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    assert!(db::validate_runtime_role(&fixture.db).await.is_err());
+    sqlx::query(
+        r#"
+        ALTER POLICY tenant_memberships_session_visibility
+        ON tenant_memberships
+        USING (
+            user_id = session_user_id(
+                NULLIF(
+                    current_setting('wareboxes.session_token_hash', true),
+                    ''
+                )
+            )
+        )
+        "#,
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    db::validate_runtime_role(&fixture.db).await.unwrap();
+
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION session_user_id(token_hash TEXT)
+        RETURNS BIGINT
+        LANGUAGE SQL
+        STABLE
+        SECURITY DEFINER
+        SET search_path = pg_catalog, public
+        AS $$
+            SELECT session.user_id
+            FROM public.sessions session
+            WHERE session.token = token_hash
+        $$
+        "#,
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    assert!(db::validate_runtime_role(&fixture.db).await.is_err());
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION session_user_id(token_hash TEXT)
+        RETURNS BIGINT
+        LANGUAGE SQL
+        STABLE
+        SECURITY DEFINER
+        SET search_path = pg_catalog, public
+        AS $$
+            SELECT session.user_id
+            FROM public.sessions session
+            WHERE session.token = token_hash
+              AND session.expires > CURRENT_TIMESTAMP
+        $$
+        "#,
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    db::validate_runtime_role(&fixture.db).await.unwrap();
 
     let reconciliation_definition: String = sqlx::query_scalar(
         "SELECT pg_get_viewdef('public.inventory_reconciliation'::REGCLASS, true)",

@@ -144,14 +144,16 @@ async fn order_aggregate_is_isolated_by_selected_tenant() {
     let tenant_a = tenant_for_user(&fixture.db, operator.id).await;
     let second_user = fixture.user("order-scope-second@test.com").await;
     let tenant_b = tenant_for_user(&fixture.db, second_user.id).await;
+    let mut membership_tx = tenant_tx(&fixture.db, tenant_b).await;
     sqlx::query(
         "INSERT INTO tenant_memberships (tenant_id, user_id, is_default) VALUES ($1, $2, FALSE)",
     )
     .bind(tenant_b.get())
     .bind(operator.id)
-    .execute(&fixture.db)
+    .execute(&mut *membership_tx)
     .await
     .unwrap();
+    membership_tx.commit().await.unwrap();
 
     let permission =
         repo::permissions::add_permission(&fixture.db, tenant_a, "orders", Some("Orders"))

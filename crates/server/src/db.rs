@@ -31,9 +31,11 @@ struct RuntimeRole {
     has_database_temporary: bool,
     has_non_system_schema_create: bool,
     has_role_memberships: bool,
+    session_function_contract_valid: bool,
     tenant_policy_contract_valid: bool,
     reconciliation_view_contract_valid: bool,
     preset_tenant_id: Option<String>,
+    preset_session_token_hash: Option<String>,
     search_path: String,
     in_recovery: bool,
     transaction_read_only: bool,
@@ -103,6 +105,15 @@ pub async fn bind_tenant_context(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: TenantId,
 ) -> AppResult<()> {
+    let session_token_hash: Option<String> = sqlx::query_scalar(
+        "SELECT NULLIF(current_setting('wareboxes.session_token_hash', true), '')",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    if session_token_hash.is_some() {
+        return Err(AppError::forbidden());
+    }
+
     let tenant_id = tenant_id.to_string();
     let current: Option<String> =
         sqlx::query_scalar("SELECT NULLIF(current_setting('wareboxes.tenant_id', true), '')")
@@ -130,6 +141,51 @@ pub async fn begin_tenant_transaction(
     Ok(tx)
 }
 
+pub async fn bind_session_context(
+    tx: &mut Transaction<'_, Postgres>,
+    token_hash: &str,
+) -> AppResult<()> {
+    if token_hash.is_empty() {
+        return Err(AppError::forbidden());
+    }
+
+    let tenant_id: Option<String> =
+        sqlx::query_scalar("SELECT NULLIF(current_setting('wareboxes.tenant_id', true), '')")
+            .fetch_one(&mut **tx)
+            .await?;
+    if tenant_id.is_some() {
+        return Err(AppError::forbidden());
+    }
+
+    let current: Option<String> = sqlx::query_scalar(
+        "SELECT NULLIF(current_setting('wareboxes.session_token_hash', true), '')",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    match current.as_deref() {
+        None => {
+            sqlx::query_scalar::<_, String>(
+                "SELECT set_config('wareboxes.session_token_hash', $1, true)",
+            )
+            .bind(token_hash)
+            .fetch_one(&mut **tx)
+            .await?;
+            Ok(())
+        }
+        Some(current) if current == token_hash => Ok(()),
+        Some(_) => Err(AppError::forbidden()),
+    }
+}
+
+pub async fn begin_session_transaction<'a>(
+    db: &'a Db,
+    token_hash: &str,
+) -> AppResult<Transaction<'a, Postgres>> {
+    let mut tx = db.begin().await?;
+    bind_session_context(&mut tx, token_hash).await?;
+    Ok(tx)
+}
+
 pub async fn validate_runtime_role(pool: &Db) -> anyhow::Result<()> {
     let mut connection = pool.acquire().await?;
     validate_runtime_connection(&mut connection).await
@@ -154,14 +210,50 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
             WHERE tenant_namespace.nspname = 'public'
               AND tenant_class.relkind IN ('r', 'p')
         ),
-        tenant_policy_debt(table_name) AS (
+        expected_session_function(
+            function_name,
+            argument_types,
+            result_type,
+            volatility,
+            function_body
+        ) AS (
             VALUES
-                ('tenant_memberships'),
-                ('user_facilities'),
-                ('user_inventory_owners')
+                (
+                    'session_user_id',
+                    'text',
+                    'bigint',
+                    's',
+                    'SELECT session.user_id FROM public.sessions session WHERE session.token = token_hash AND session.expires > CURRENT_TIMESTAMP'
+                ),
+                (
+                    'create_session_record',
+                    'text, bigint',
+                    'void',
+                    'v',
+                    'INSERT INTO public.sessions (token, user_id, created, expires) VALUES ( token_hash, user_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL ''30 days'' )'
+                ),
+                (
+                    'destroy_session_record',
+                    'text',
+                    'void',
+                    'v',
+                    'DELETE FROM public.sessions WHERE token = token_hash'
+                )
         ),
         expected_policy(table_name, policy_name) AS (
             VALUES
+                (
+                    'tenant_memberships',
+                    'tenant_memberships_tenant_isolation'
+                ),
+                (
+                    'user_facilities',
+                    'user_facilities_tenant_isolation'
+                ),
+                (
+                    'user_inventory_owners',
+                    'user_inventory_owners_tenant_isolation'
+                ),
                 (
                     'employees',
                     'employees_tenant_isolation'
@@ -387,17 +479,25 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'outbox_delivery_attempt_results_tenant_isolation'
                 )
         ),
+        expected_session_policy(table_name, policy_name) AS (
+            VALUES
+                (
+                    'tenant_memberships',
+                    'tenant_memberships_session_visibility'
+                ),
+                (
+                    'user_facilities',
+                    'user_facilities_session_visibility'
+                ),
+                (
+                    'user_inventory_owners',
+                    'user_inventory_owners_session_visibility'
+                )
+        ),
         tenant_table_classification AS (
             SELECT
                 (SELECT COUNT(*) FROM tenant_table) =
-                    (SELECT COUNT(*) FROM expected_policy) +
-                    (SELECT COUNT(*) FROM tenant_policy_debt)
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM expected_policy expected
-                    JOIN tenant_policy_debt debt
-                      ON debt.table_name = expected.table_name
-                )
+                    (SELECT COUNT(*) FROM expected_policy)
                 AND NOT EXISTS (
                     SELECT 1
                     FROM expected_policy expected
@@ -407,30 +507,11 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 )
                 AND NOT EXISTS (
                     SELECT 1
-                    FROM tenant_policy_debt debt
-                    LEFT JOIN tenant_table tenant
-                      ON tenant.table_name = debt.table_name
-                    WHERE tenant.oid IS NULL
-                       OR tenant.relrowsecurity
-                       OR tenant.relforcerowsecurity
-                       OR EXISTS (
-                           SELECT 1
-                           FROM pg_policy policy
-                           WHERE policy.polrelid = tenant.oid
-                       )
-                )
-                AND NOT EXISTS (
-                    SELECT 1
                     FROM tenant_table tenant
                     WHERE NOT EXISTS (
                               SELECT 1
                               FROM expected_policy expected
                               WHERE expected.table_name = tenant.table_name
-                          )
-                      AND NOT EXISTS (
-                              SELECT 1
-                              FROM tenant_policy_debt debt
-                              WHERE debt.table_name = tenant.table_name
                           )
                 ) AS valid
         )
@@ -495,6 +576,69 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                    WHERE membership.member = role.oid
                ) AS has_role_memberships,
                (
+                   SELECT COUNT(*) = (
+                              SELECT COUNT(*)
+                              FROM expected_session_function
+                          )
+                      AND BOOL_AND(
+                              session_function.prosecdef
+                          AND session_language.lanname = 'sql'
+                          AND session_function.provolatile::TEXT =
+                              expected.volatility
+                          AND session_function.proconfig =
+                              ARRAY['search_path=pg_catalog, public']
+                          AND format_type(
+                                  session_function.prorettype,
+                                  NULL
+                              ) = expected.result_type
+                          AND btrim(
+                                  regexp_replace(
+                                      session_function.prosrc,
+                                      '\s+',
+                                      ' ',
+                                      'g'
+                                  )
+                              ) = expected.function_body
+                          AND session_function.proowner =
+                              session_table.relowner
+                          AND session_function.proowner <> role.oid
+                          AND has_function_privilege(
+                                  role.oid,
+                                  session_function.oid,
+                                  'EXECUTE'
+                              )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM aclexplode(
+                                  COALESCE(
+                                      session_function.proacl,
+                                      acldefault(
+                                          'f',
+                                          session_function.proowner
+                                      )
+                                  )
+                              ) function_acl
+                              WHERE function_acl.grantee = 0
+                                AND function_acl.privilege_type = 'EXECUTE'
+                          )
+                      )
+                   FROM expected_session_function expected
+                   JOIN pg_namespace session_namespace
+                     ON session_namespace.nspname = 'public'
+                   JOIN pg_proc session_function
+                     ON session_function.pronamespace =
+                        session_namespace.oid
+                    AND session_function.proname =
+                        expected.function_name
+                    AND oidvectortypes(session_function.proargtypes) =
+                        expected.argument_types
+                   JOIN pg_language session_language
+                     ON session_language.oid = session_function.prolang
+                   JOIN pg_class session_table
+                     ON session_table.relnamespace = session_namespace.oid
+                    AND session_table.relname = 'sessions'
+               ) AS session_function_contract_valid,
+               (
                    SELECT COUNT(*) > 0
                       AND COUNT(*) = (SELECT COUNT(*) FROM expected_policy)
                       AND (SELECT valid FROM tenant_table_classification)
@@ -510,7 +654,11 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                          SELECT COUNT(*)
                          FROM pg_policy policy
                          WHERE policy.polrelid = protected_table.oid
-                     ) = 1
+                     ) = 1 + (
+                         SELECT COUNT(*)
+                         FROM expected_session_policy session_policy
+                         WHERE session_policy.table_name = expected.table_name
+                     )
                      AND EXISTS (
                          SELECT 1
                          FROM pg_policy policy
@@ -523,6 +671,26 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                                '(tenant_id = (NULLIF(current_setting(''wareboxes.tenant_id''::text, true), ''''::text))::bigint)'
                            AND pg_get_expr(policy.polwithcheck, policy.polrelid) =
                                '(tenant_id = (NULLIF(current_setting(''wareboxes.tenant_id''::text, true), ''''::text))::bigint)'
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM expected_session_policy session_policy
+                         WHERE session_policy.table_name = expected.table_name
+                           AND NOT EXISTS (
+                               SELECT 1
+                               FROM pg_policy policy
+                               WHERE policy.polrelid = protected_table.oid
+                                 AND policy.polname = session_policy.policy_name
+                                 AND policy.polcmd = 'r'
+                                 AND policy.polpermissive
+                                 AND policy.polroles = ARRAY[0::OID]
+                                 AND pg_get_expr(
+                                     policy.polqual,
+                                     policy.polrelid
+                                 ) =
+                                     '(user_id = session_user_id(NULLIF(current_setting(''wareboxes.session_token_hash''::text, true), ''''::text)))'
+                                 AND policy.polwithcheck IS NULL
+                           )
                      )
                ) AS tenant_policy_contract_valid,
                EXISTS (
@@ -543,6 +711,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                ) AS reconciliation_view_contract_valid,
                NULLIF(current_setting('wareboxes.tenant_id', true), '')
                    AS preset_tenant_id,
+               NULLIF(
+                   current_setting('wareboxes.session_token_hash', true),
+                   ''
+               ) AS preset_session_token_hash,
                current_setting('search_path') AS search_path,
                pg_is_in_recovery() AS in_recovery,
                current_setting('transaction_read_only')::BOOLEAN
@@ -568,9 +740,11 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
         || role.has_database_temporary
         || role.has_non_system_schema_create
         || role.has_role_memberships
+        || !role.session_function_contract_valid
         || !role.tenant_policy_contract_valid
         || !role.reconciliation_view_contract_valid
         || role.preset_tenant_id.is_some()
+        || role.preset_session_token_hash.is_some()
         || role.search_path != "pg_catalog, public"
         || role.in_recovery
         || role.transaction_read_only

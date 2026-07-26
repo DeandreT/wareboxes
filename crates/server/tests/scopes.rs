@@ -70,12 +70,14 @@ async fn selected_resource_scopes_are_projected_and_enforced() {
         .unwrap();
     let tenant_id = tenant_for_user(&db, administrator.id).await;
 
+    let mut membership_tx = tenant_tx(&db, tenant_id).await;
     sqlx::query("INSERT INTO tenant_memberships (tenant_id, user_id) VALUES ($1, $2)")
         .bind(tenant_id.get())
         .bind(operator.id)
-        .execute(&db)
+        .execute(&mut *membership_tx)
         .await
         .unwrap();
+    membership_tx.commit().await.unwrap();
 
     let admin_permission =
         repo::permissions::add_permission(&db, tenant_id, "admin", Some("Admin"))
@@ -336,12 +338,14 @@ async fn scope_replacement_is_atomic_and_delegation_cannot_escalate() {
     .unwrap();
     let tenant_id = tenant_for_user(&db, administrator.id).await;
     let outsider_tenant_id = tenant_for_user(&db, outsider.id).await;
+    let mut membership_tx = tenant_tx(&db, tenant_id).await;
     sqlx::query("INSERT INTO tenant_memberships (tenant_id, user_id) VALUES ($1, $2)")
         .bind(tenant_id.get())
         .bind(operator.id)
-        .execute(&db)
+        .execute(&mut *membership_tx)
         .await
         .unwrap();
+    membership_tx.commit().await.unwrap();
 
     let admin_permission =
         repo::permissions::add_permission(&db, tenant_id, "admin", Some("Admin"))

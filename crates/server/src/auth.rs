@@ -11,7 +11,6 @@ use axum::http::request::Parts;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use sha2::{Digest, Sha256};
-use sqlx::Row;
 use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::{TenantAccess, User};
 use wareboxes_domain::{CommandContext, FacilityId, InventoryOwnerId, TenantId};
@@ -23,7 +22,6 @@ use crate::repo;
 use crate::request_context::{current_request_id_or_new, IdempotencyKey};
 use crate::state::AppState;
 
-const SESSION_TTL_DAYS: i64 = 30;
 pub const TENANT_ID_HEADER: &str = "x-wareboxes-tenant-id";
 
 pub fn hash_password(password: &str) -> AppResult<String> {
@@ -58,13 +56,9 @@ fn session_token_hash(token: &str) -> String {
 pub async fn create_session(db: &Db, user_id: i64) -> AppResult<String> {
     let token = random_token();
     let token_hash = session_token_hash(&token);
-    let now = chrono::Utc::now();
-    let expires = now + chrono::Duration::days(SESSION_TTL_DAYS);
-    sqlx::query("INSERT INTO sessions (token, user_id, created, expires) VALUES ($1, $2, $3, $4)")
+    sqlx::query("SELECT create_session_record($1, $2)")
         .bind(token_hash)
         .bind(user_id)
-        .bind(now)
-        .bind(expires)
         .execute(db)
         .await?;
     Ok(token)
@@ -72,7 +66,7 @@ pub async fn create_session(db: &Db, user_id: i64) -> AppResult<String> {
 
 pub async fn destroy_session(db: &Db, token: &str) -> AppResult<()> {
     let token_hash = session_token_hash(token);
-    sqlx::query("DELETE FROM sessions WHERE token = $1")
+    sqlx::query("SELECT destroy_session_record($1)")
         .bind(token_hash)
         .execute(db)
         .await?;
@@ -81,23 +75,29 @@ pub async fn destroy_session(db: &Db, token: &str) -> AppResult<()> {
 
 async fn user_id_for_token(db: &Db, token: &str) -> AppResult<Option<i64>> {
     let token_hash = session_token_hash(token);
-    let row = sqlx::query("SELECT user_id, expires FROM sessions WHERE token = $1")
+    let user_id: Option<i64> = sqlx::query_scalar("SELECT session_user_id($1)")
         .bind(token_hash)
-        .fetch_optional(db)
-        .await?;
-    let Some(row) = row else { return Ok(None) };
-    let expires: chrono::DateTime<chrono::Utc> = row.try_get("expires")?;
-    if expires < chrono::Utc::now() {
+        .fetch_one(db)
+        .await
+        .map_err(AppError::from)?;
+    if user_id.is_none() {
         destroy_session(db, token).await?;
-        return Ok(None);
     }
-    Ok(Some(row.try_get("user_id")?))
+    Ok(user_id)
 }
 
-/// Authenticated principal. Loading it also lazily provisions the per-user
-/// "self role" exactly like the original `userHasPermission`.
+pub async fn tenant_accesses_for_session(db: &Db, token: &str) -> AppResult<Vec<TenantAccess>> {
+    repo::tenants::list_for_session(db, &session_token_hash(token)).await
+}
+
+pub async fn default_tenant_for_session(db: &Db, token: &str) -> AppResult<Option<TenantAccess>> {
+    repo::tenants::default_for_session(db, &session_token_hash(token)).await
+}
+
+/// Authenticated principal backed by an active opaque session.
 pub struct CurrentUser {
     pub user: User,
+    pub(crate) session_token_hash: String,
 }
 
 #[async_trait::async_trait]
@@ -124,7 +124,10 @@ impl FromRequestParts<AppState> for CurrentUser {
             .await?
             .ok_or_else(AppError::unauthorized)?;
 
-        Ok(CurrentUser { user })
+        Ok(CurrentUser {
+            user,
+            session_token_hash: session_token_hash(&token),
+        })
     }
 }
 
@@ -276,7 +279,7 @@ pub async fn register_user(
     .execute(db)
     .await?;
 
-    let tenant_id = repo::tenants::ensure_default_for_user(db, user_id, email).await?;
+    let tenant_id = repo::tenants::provision_default_tenant(db, user_id, email).await?;
     permissions::ensure_self_role(db, tenant_id, user_id, email).await?;
 
     let user = repo::users::get_user_by_id(db, user_id, true)

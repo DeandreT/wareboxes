@@ -3,7 +3,7 @@ use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::{OwnerScope, SiteScope, TenantAccess, TenantStatus};
 use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId, UserId};
 
-use crate::db::{begin_tenant_transaction, Db};
+use crate::db::{begin_session_transaction, begin_tenant_transaction, bind_tenant_context, Db};
 use crate::error::{AppError, AppResult};
 
 use super::access::ScopeBindings;
@@ -41,7 +41,8 @@ fn tenant_access_from_row(row: &sqlx::postgres::PgRow) -> AppResult<TenantAccess
     })
 }
 
-pub async fn list_for_user(db: &Db, user_id: i64) -> AppResult<Vec<TenantAccess>> {
+pub async fn list_for_session(db: &Db, token_hash: &str) -> AppResult<Vec<TenantAccess>> {
+    let mut tx = begin_session_transaction(db, token_hash).await?;
     let rows = sqlx::query(
         r#"
         SELECT
@@ -71,21 +72,24 @@ pub async fn list_for_user(db: &Db, user_id: i64) -> AppResult<Vec<TenantAccess>
             tenant.status
         FROM tenant_memberships membership
         JOIN tenants tenant ON tenant.id = membership.tenant_id
-        WHERE membership.user_id = $1
+        WHERE membership.user_id = session_user_id($1)
           AND membership.deleted IS NULL
           AND tenant.deleted IS NULL
           AND tenant.status = 'active'
         ORDER BY membership.is_default DESC, tenant.name, tenant.id
         "#,
     )
-    .bind(user_id)
-    .fetch_all(db)
+    .bind(token_hash)
+    .fetch_all(&mut *tx)
     .await?;
 
-    rows.iter().map(tenant_access_from_row).collect()
+    let access = rows.iter().map(tenant_access_from_row).collect();
+    tx.commit().await?;
+    access
 }
 
-pub async fn default_for_user(db: &Db, user_id: i64) -> AppResult<Option<TenantAccess>> {
+pub async fn default_for_session(db: &Db, token_hash: &str) -> AppResult<Option<TenantAccess>> {
+    let mut tx = begin_session_transaction(db, token_hash).await?;
     let row = sqlx::query(
         r#"
         SELECT
@@ -115,7 +119,7 @@ pub async fn default_for_user(db: &Db, user_id: i64) -> AppResult<Option<TenantA
             tenant.status
         FROM tenant_memberships membership
         JOIN tenants tenant ON tenant.id = membership.tenant_id
-        WHERE membership.user_id = $1
+        WHERE membership.user_id = session_user_id($1)
           AND membership.deleted IS NULL
           AND tenant.deleted IS NULL
           AND tenant.status = 'active'
@@ -123,11 +127,13 @@ pub async fn default_for_user(db: &Db, user_id: i64) -> AppResult<Option<TenantA
         LIMIT 1
         "#,
     )
-    .bind(user_id)
-    .fetch_optional(db)
+    .bind(token_hash)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    row.as_ref().map(tenant_access_from_row).transpose()
+    let access = row.as_ref().map(tenant_access_from_row).transpose()?;
+    tx.commit().await?;
+    Ok(access)
 }
 
 pub async fn access_for_user(
@@ -135,6 +141,7 @@ pub async fn access_for_user(
     user_id: i64,
     tenant_id: TenantId,
 ) -> AppResult<Option<TenantAccess>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let row = sqlx::query(
         r#"
         SELECT
@@ -173,10 +180,12 @@ pub async fn access_for_user(
     )
     .bind(user_id)
     .bind(tenant_id.get())
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    row.as_ref().map(tenant_access_from_row).transpose()
+    let access = row.as_ref().map(tenant_access_from_row).transpose()?;
+    tx.commit().await?;
+    Ok(access)
 }
 
 fn validate_scope_request(scope: &UpdateUserAccessScope) -> AppResult<()> {
@@ -364,7 +373,7 @@ pub async fn update_user_access_scope(
     Ok(true)
 }
 
-pub async fn ensure_default_for_user(
+pub async fn provision_default_tenant(
     db: &Db,
     user_id: i64,
     tenant_name: &str,
@@ -380,22 +389,6 @@ pub async fn ensure_default_for_user(
     .execute(&mut *transaction)
     .await?;
 
-    let existing: Option<i64> = sqlx::query_scalar(
-        r#"
-        SELECT tenant_id
-        FROM tenant_memberships
-        WHERE user_id = $1 AND deleted IS NULL AND is_default
-        "#,
-    )
-    .bind(user_id)
-    .fetch_optional(&mut *transaction)
-    .await?;
-
-    if let Some(tenant_id) = existing {
-        transaction.commit().await?;
-        return TenantId::new(tenant_id).map_err(|error| AppError::internal(error.to_string()));
-    }
-
     let slug = format!("tenant-{user_id}");
     let tenant_id: i64 = sqlx::query_scalar(
         r#"
@@ -410,6 +403,9 @@ pub async fn ensure_default_for_user(
     .bind(tenant_name)
     .fetch_one(&mut *transaction)
     .await?;
+    let tenant_id =
+        TenantId::new(tenant_id).map_err(|error| AppError::internal(error.to_string()))?;
+    bind_tenant_context(&mut transaction, tenant_id).await?;
 
     sqlx::query(
         r#"
@@ -419,11 +415,11 @@ pub async fn ensure_default_for_user(
         SET deleted = NULL, is_default = TRUE
         "#,
     )
-    .bind(tenant_id)
+    .bind(tenant_id.get())
     .bind(user_id)
     .execute(&mut *transaction)
     .await?;
 
     transaction.commit().await?;
-    TenantId::new(tenant_id).map_err(|error| AppError::internal(error.to_string()))
+    Ok(tenant_id)
 }

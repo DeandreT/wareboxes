@@ -161,11 +161,30 @@ pub async fn privileged_session_as_app(db: &db::Db) -> db::Db {
 }
 
 pub async fn tenant_for_user(db: &db::Db, user_id: i64) -> TenantId {
-    repo::tenants::default_for_user(db, user_id)
+    default_tenant_for_user(db, user_id)
         .await
-        .unwrap()
         .expect("registered test user has a tenant")
         .tenant_id
+}
+
+pub async fn default_tenant_for_user(
+    db: &db::Db,
+    user_id: i64,
+) -> Option<wareboxes_core::models::TenantAccess> {
+    let token = auth::create_session(db, user_id).await.unwrap();
+    let access = auth::default_tenant_for_session(db, &token).await.unwrap();
+    auth::destroy_session(db, &token).await.unwrap();
+    access
+}
+
+pub async fn tenant_accesses_for_user(
+    db: &db::Db,
+    user_id: i64,
+) -> Vec<wareboxes_core::models::TenantAccess> {
+    let token = auth::create_session(db, user_id).await.unwrap();
+    let access = auth::tenant_accesses_for_session(db, &token).await.unwrap();
+    auth::destroy_session(db, &token).await.unwrap();
+    access
 }
 
 async fn template_database(base_url: &str) -> String {
