@@ -170,9 +170,6 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 ('load_orders'),
                 ('loads'),
                 ('locations'),
-                ('outbox_aggregate_sequences'),
-                ('outbox_event_keys'),
-                ('outbox_events'),
                 ('permissions'),
                 ('pick_waves'),
                 ('role_permissions'),
@@ -260,6 +257,18 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'order_items',
                     'order_items_tenant_isolation'
+                ),
+                (
+                    'outbox_event_keys',
+                    'outbox_event_keys_tenant_isolation'
+                ),
+                (
+                    'outbox_aggregate_sequences',
+                    'outbox_aggregate_sequences_tenant_isolation'
+                ),
+                (
+                    'outbox_events',
+                    'outbox_events_tenant_isolation'
                 )
         ),
         tenant_table_classification AS (

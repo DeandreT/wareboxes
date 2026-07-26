@@ -5,7 +5,7 @@ use sqlx::{Postgres, Row, Transaction};
 use wareboxes_core::models::Timestamp;
 use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
 
-use crate::db::Db;
+use crate::db::{bind_tenant_context, Db};
 use crate::error::{AppError, AppResult};
 
 pub struct NewOutboxEvent<'a> {
@@ -173,6 +173,7 @@ pub async fn enqueue(
     }
     let payload = serde_json::to_string(event.payload)
         .map_err(|error| AppError::internal(format!("encoding outbox payload: {error}")))?;
+    bind_tenant_context(tx, event.tenant_id).await?;
 
     sqlx::query(
         r#"
@@ -270,17 +271,22 @@ pub async fn get_events(
     let sql = format!(
         "SELECT {EVENT_COLUMNS} FROM outbox_events WHERE tenant_id = $1 AND id > $2 ORDER BY id LIMIT $3"
     );
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(&sql)
         .bind(tenant_id.get())
         .bind(after_id.unwrap_or(0))
         .bind(limit)
-        .fetch_all(db)
+        .fetch_all(&mut *tx)
         .await?;
-    rows.iter().map(map_event).collect()
+    let events = rows.iter().map(map_event).collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(events)
 }
 
 pub async fn claim_events(
     db: &Db,
+    tenant_id: TenantId,
     worker_id: &str,
     batch_size: i64,
     lease_seconds: i64,
@@ -300,7 +306,8 @@ pub async fn claim_events(
         WITH candidates AS (
             SELECT event.id
             FROM outbox_events event
-            WHERE event.published_at IS NULL
+            WHERE event.tenant_id = $1
+              AND event.published_at IS NULL
               AND event.dead_lettered_at IS NULL
               AND event.discarded_at IS NULL
               AND event.available_at <= clock_timestamp()
@@ -319,12 +326,12 @@ pub async fn claim_events(
               )
             ORDER BY event.available_at, event.id
             FOR UPDATE OF event SKIP LOCKED
-            LIMIT $2
+            LIMIT $3
         )
         UPDATE outbox_events event
         SET claimed_at = clock_timestamp(),
-            claimed_by = $3,
-            lease_expires_at = clock_timestamp() + ($1::BIGINT * INTERVAL '1 second'),
+            claimed_by = $4,
+            lease_expires_at = clock_timestamp() + ($2::BIGINT * INTERVAL '1 second'),
             claim_version = event.claim_version + 1,
             attempts = event.attempts + 1
         FROM candidates
@@ -332,14 +339,18 @@ pub async fn claim_events(
         RETURNING {CLAIMED_EVENT_COLUMNS}
         "#,
     );
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(&sql)
+        .bind(tenant_id.get())
         .bind(lease_seconds)
         .bind(batch_size)
         .bind(worker_id)
-        .fetch_all(db)
+        .fetch_all(&mut *tx)
         .await?;
     let mut events = rows.iter().map(map_event).collect::<AppResult<Vec<_>>>()?;
     events.sort_by_key(|event| event.id);
+    tx.commit().await?;
     Ok(events)
 }
 
@@ -351,6 +362,8 @@ pub async fn mark_published(
     claim_version: i64,
 ) -> AppResult<bool> {
     required_text(worker_id, "worker ID")?;
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let result = sqlx::query(
         r#"
         UPDATE outbox_events
@@ -369,8 +382,9 @@ pub async fn mark_published(
     .bind(event_id)
     .bind(worker_id)
     .bind(claim_version)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() == 1)
 }
 
@@ -397,6 +411,8 @@ pub async fn mark_failed(db: &Db, failure: &FailOutboxEvent<'_>) -> AppResult<bo
             "outbox maximum attempts must be positive",
         ));
     }
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, failure.tenant_id).await?;
     let result = sqlx::query(
         r#"
         UPDATE outbox_events
@@ -428,12 +444,15 @@ pub async fn mark_failed(db: &Db, failure: &FailOutboxEvent<'_>) -> AppResult<bo
     .bind(failure.event_id)
     .bind(failure.worker_id)
     .bind(failure.claim_version)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() == 1)
 }
 
 pub async fn replay_dead_letter(db: &Db, tenant_id: TenantId, event_id: i64) -> AppResult<bool> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let result = sqlx::query(
         r#"
         UPDATE outbox_events
@@ -447,8 +466,9 @@ pub async fn replay_dead_letter(db: &Db, tenant_id: TenantId, event_id: i64) -> 
     )
     .bind(tenant_id.get())
     .bind(event_id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() == 1)
 }
 
@@ -460,6 +480,8 @@ pub async fn discard_dead_letter(
     reason: &str,
 ) -> AppResult<bool> {
     required_text(reason, "discard reason")?;
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let result = sqlx::query(
         r#"
         UPDATE outbox_events
@@ -476,12 +498,18 @@ pub async fn discard_dead_letter(
     .bind(user_id)
     .bind(tenant_id.get())
     .bind(event_id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() == 1)
 }
 
-pub async fn purge_published(db: &Db, retention_seconds: i64, batch_size: i64) -> AppResult<u64> {
+pub async fn purge_published(
+    db: &Db,
+    tenant_id: TenantId,
+    retention_seconds: i64,
+    batch_size: i64,
+) -> AppResult<u64> {
     if retention_seconds < 0 {
         return Err(AppError::bad_request(
             "outbox retention period cannot be negative",
@@ -492,26 +520,32 @@ pub async fn purge_published(db: &Db, retention_seconds: i64, batch_size: i64) -
             "outbox purge batch size must be between 1 and 10000",
         ));
     }
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let result = sqlx::query(
         r#"
         WITH expired AS (
             SELECT id
             FROM outbox_events
-            WHERE COALESCE(published_at, discarded_at) IS NOT NULL
+            WHERE tenant_id = $1
+              AND COALESCE(published_at, discarded_at) IS NOT NULL
               AND COALESCE(published_at, discarded_at)
-                  <= clock_timestamp() - ($1::BIGINT * INTERVAL '1 second')
+                  <= clock_timestamp() - ($2::BIGINT * INTERVAL '1 second')
             ORDER BY COALESCE(published_at, discarded_at), id
             FOR UPDATE SKIP LOCKED
-            LIMIT $2
+            LIMIT $3
         )
         DELETE FROM outbox_events event
         USING expired
-        WHERE event.id = expired.id
+        WHERE event.tenant_id = $1
+          AND event.id = expired.id
         "#,
     )
+    .bind(tenant_id.get())
     .bind(retention_seconds)
     .bind(batch_size)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
