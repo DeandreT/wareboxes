@@ -5,7 +5,7 @@ use wareboxes_core::dto::{AddAuditLocationCount, AuditLocationCountUpdate};
 use wareboxes_core::models::{AuditApprovalStatus, AuditLocationCount, AuditWave, TenantAccess};
 use wareboxes_domain::TenantId;
 
-use crate::db::{begin_tenant_transaction, bind_tenant_context, now_iso, Db};
+use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 
@@ -190,6 +190,7 @@ pub async fn get_audit_waves(
     show_deleted: bool,
 ) -> AppResult<Vec<AuditWave>> {
     let scope = ScopeBindings::for_access(access);
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, facility_id, inventory_owner_id, created, deleted,
@@ -208,9 +209,11 @@ pub async fn get_audit_waves(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.iter().map(map_wave).collect()
+    let waves = rows.iter().map(map_wave).collect();
+    tx.commit().await?;
+    waves
 }
 
 pub async fn add_audit_wave(
@@ -304,7 +307,7 @@ pub async fn update_audit_wave(
     name: Option<&str>,
     description: Option<&str>,
 ) -> AppResult<bool> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, access.user_id.get()).await?;
     let result = sqlx::query(
         r#"
@@ -427,6 +430,7 @@ pub async fn get_location_counts(
     audit_id: i64,
 ) -> AppResult<Vec<AuditLocationCount>> {
     let scope = ScopeBindings::for_access(access);
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT count.id, count.tenant_id, count.created, count.deleted, count.started,
@@ -454,9 +458,11 @@ pub async fn get_location_counts(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.iter().map(map_count).collect()
+    let counts = rows.iter().map(map_count).collect();
+    tx.commit().await?;
+    counts
 }
 
 pub async fn add_location_count(
@@ -464,8 +470,7 @@ pub async fn add_location_count(
     access: &TenantAccess,
     count: &AddAuditLocationCount,
 ) -> AppResult<Option<i64>> {
-    let mut tx = db.begin().await?;
-    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, access.user_id.get()).await?;
     let dependencies = sqlx::query_as::<_, (i64, i64, bool)>(
         r#"

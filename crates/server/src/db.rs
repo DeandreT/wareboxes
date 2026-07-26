@@ -156,12 +156,6 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
         ),
         tenant_policy_debt(table_name) AS (
             VALUES
-                ('audit_location_counts'),
-                ('audit_wave_assignments'),
-                ('audit_wave_inventory_owners'),
-                ('audit_wave_items'),
-                ('audit_wave_locations'),
-                ('audit_waves'),
                 ('pick_waves'),
                 ('tenant_memberships'),
                 ('user_facilities'),
@@ -212,6 +206,30 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'role_permissions',
                     'role_permissions_tenant_isolation'
+                ),
+                (
+                    'audit_waves',
+                    'audit_waves_tenant_isolation'
+                ),
+                (
+                    'audit_location_counts',
+                    'audit_location_counts_tenant_isolation'
+                ),
+                (
+                    'audit_wave_items',
+                    'audit_wave_items_tenant_isolation'
+                ),
+                (
+                    'audit_wave_inventory_owners',
+                    'audit_wave_inventory_owners_tenant_isolation'
+                ),
+                (
+                    'audit_wave_locations',
+                    'audit_wave_locations_tenant_isolation'
+                ),
+                (
+                    'audit_wave_assignments',
+                    'audit_wave_assignments_tenant_isolation'
                 ),
                 (
                     'facilities',
