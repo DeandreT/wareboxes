@@ -24,9 +24,10 @@ use serde_json::{json, Value};
 use wareboxes_core::dto::{SessionUser, SummaryCount};
 use wareboxes_core::models::{
     AuditWave, Employee, Facility, InventoryBalance, InventoryHold, InventoryHoldReason,
-    InventoryHoldStatus, InventoryOwner, InventoryStatus, InventoryTransaction, Item, ItemBatch,
-    LicensePlate, Load, LoadFileCategory, LoadLine, LoadLineStatus, LoadNote, LoadStatus, LoadType,
-    Location, Order, OrderStatus, Permission, Role, User,
+    InventoryHoldStatus, InventoryOwner, InventoryStatus, InventoryStatusChangeReason,
+    InventoryTransaction, Item, ItemBatch, LicensePlate, Load, LoadFileCategory, LoadLine,
+    LoadLineStatus, LoadNote, LoadStatus, LoadType, Location, Order, OrderStatus, Permission, Role,
+    User,
 };
 
 use crate::api::{ApiClient, ApiEvent, Screen};

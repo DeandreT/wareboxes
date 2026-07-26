@@ -15,6 +15,7 @@ mod inventory_hold;
 pub(crate) mod inventory_journal;
 mod inventory_locking;
 pub mod inventory_owners;
+mod inventory_status_change;
 pub mod inventory_v1;
 pub mod items;
 pub mod license_plates;

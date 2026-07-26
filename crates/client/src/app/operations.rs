@@ -12,6 +12,10 @@ fn allocatable_quantity(balance: &InventoryBalance) -> i64 {
     }
 }
 
+fn status_change_quantity(balance: &InventoryBalance) -> i64 {
+    balance.qty_on_hand - balance.qty_reserved - balance.qty_held
+}
+
 impl WareboxesApp {
     // ---- Inventory -------------------------------------------------------
     pub(super) fn inventory_screen(&mut self, ui: &mut egui::Ui) {
@@ -656,6 +660,208 @@ impl WareboxesApp {
                 .drafts
                 .insert(destination_count_key, destination_count.to_string());
         });
+        ui.separator();
+        self.inventory_status_change_action(ui);
+    }
+
+    fn inventory_status_change_action(&mut self, ui: &mut egui::Ui) {
+        let balance_options = self
+            .data
+            .inventory_balances
+            .iter()
+            .filter(|balance| balance.deleted.is_none() && status_change_quantity(balance) > 0)
+            .map(|balance| {
+                (
+                    balance.id,
+                    format!(
+                        "{} | {} | {} | {} uncommitted",
+                        self.item_batch_label(balance.item_batch_id),
+                        self.location_label(balance.location_id),
+                        Self::inventory_status_label(balance.status),
+                        status_change_quantity(balance),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let balance_key = "inventory:status-change:balance".to_owned();
+        let qty_key = "inventory:status-change:qty".to_owned();
+        let reason_key = "inventory:status-change:reason".to_owned();
+        let target_key = "inventory:status-change:target".to_owned();
+        let note_key = "inventory:status-change:note".to_owned();
+        let mut balance = self
+            .forms
+            .drafts
+            .get(&balance_key)
+            .cloned()
+            .unwrap_or_default();
+        let mut qty = self.forms.drafts.get(&qty_key).cloned().unwrap_or_default();
+        let mut reason = self
+            .forms
+            .drafts
+            .get(&reason_key)
+            .and_then(|value| InventoryStatusChangeReason::parse(value))
+            .unwrap_or(InventoryStatusChangeReason::QualityInspection);
+        let mut target = self
+            .forms
+            .drafts
+            .get(&target_key)
+            .and_then(|value| InventoryStatus::parse(value))
+            .unwrap_or(InventoryStatus::Quarantine);
+        let mut note = self
+            .forms
+            .drafts
+            .get(&note_key)
+            .cloned()
+            .unwrap_or_default();
+
+        ui.collapsing("Change inventory status", |ui| {
+            if balance_options.is_empty() {
+                ui.weak("No uncommitted inventory is available.");
+                return;
+            }
+            let mut selected_balance_id = None;
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Balance");
+                selected_balance_id = Self::entity_picker(
+                    ui,
+                    "inventory_status_change_balance",
+                    &mut balance,
+                    &balance_options,
+                    "Search balance",
+                )
+                .or_else(|| Self::selected_entity_id(&balance, &balance_options));
+                ui.label("Quantity");
+                ui.add_sized([80.0, 24.0], egui::TextEdit::singleline(&mut qty));
+            });
+
+            let source_status = selected_balance_id.and_then(|id| {
+                self.data
+                    .inventory_balances
+                    .iter()
+                    .find(|candidate| candidate.id == id)
+                    .map(|candidate| candidate.status)
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Reason");
+                egui::ComboBox::from_id_source("inventory_status_change_reason")
+                    .selected_text(Self::title_case(&reason.as_str().replace('_', " ")))
+                    .show_ui(ui, |ui| {
+                        for option in InventoryStatusChangeReason::ALL {
+                            ui.selectable_value(
+                                &mut reason,
+                                option,
+                                Self::title_case(&option.as_str().replace('_', " ")),
+                            );
+                        }
+                    });
+            });
+            let allowed_targets = InventoryStatus::ALL
+                .into_iter()
+                .filter(|status| {
+                    Some(*status) != source_status && reason.allows_target_status(*status)
+                })
+                .collect::<Vec<_>>();
+            if !allowed_targets.contains(&target) {
+                target = allowed_targets
+                    .first()
+                    .copied()
+                    .unwrap_or(InventoryStatus::Quarantine);
+            }
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Target");
+                egui::ComboBox::from_id_source("inventory_status_change_target")
+                    .selected_text(Self::inventory_status_label(target))
+                    .show_ui(ui, |ui| {
+                        for option in &allowed_targets {
+                            ui.selectable_value(
+                                &mut target,
+                                *option,
+                                Self::inventory_status_label(*option),
+                            );
+                        }
+                    });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Note");
+                ui.add_sized(
+                    [360.0, 24.0],
+                    egui::TextEdit::singleline(&mut note).hint_text("Optional"),
+                );
+                if ui.button("Apply status").clicked() {
+                    let quantity = qty.trim().parse::<i64>().ok().filter(|value| *value > 0);
+                    let selected_balance = selected_balance_id.and_then(|id| {
+                        self.data
+                            .inventory_balances
+                            .iter()
+                            .find(|candidate| candidate.id == id)
+                    });
+                    let note_value = (!note.trim().is_empty()).then(|| note.trim().to_owned());
+                    match (selected_balance, quantity) {
+                        (Some(source), Some(quantity))
+                            if quantity <= status_change_quantity(source)
+                                && target != source.status
+                                && reason.allows_target_status(target)
+                                && (reason != InventoryStatusChangeReason::Other
+                                    || note_value.is_some()) =>
+                        {
+                            self.api.action(
+                                "/api/inventory/status-changes",
+                                json!({
+                                    "inventory_balance_id": source.id,
+                                    "qty": quantity,
+                                    "to_status": target.as_str(),
+                                    "reason": reason.as_str(),
+                                    "note": note_value,
+                                    "reference_type": null,
+                                    "reference_id": null,
+                                }),
+                                Screen::Inventory,
+                                "Inventory status changed",
+                            );
+                            qty.clear();
+                            note.clear();
+                        }
+                        (_, None) => {
+                            self.toast("Enter a positive status quantity", true, self.now);
+                        }
+                        (None, _) => {
+                            self.toast("Choose an inventory balance", true, self.now);
+                        }
+                        (Some(source), Some(_))
+                            if target == source.status || !reason.allows_target_status(target) =>
+                        {
+                            self.toast("Choose an allowed target status", true, self.now);
+                        }
+                        (Some(source), Some(quantity))
+                            if quantity > status_change_quantity(source) =>
+                        {
+                            self.toast(
+                                format!(
+                                    "Only {} units are uncommitted",
+                                    status_change_quantity(source)
+                                ),
+                                true,
+                                self.now,
+                            );
+                        }
+                        _ => {
+                            self.toast("A note is required for an other reason", true, self.now);
+                        }
+                    }
+                }
+            });
+        });
+
+        self.forms.drafts.insert(balance_key, balance);
+        self.forms.drafts.insert(qty_key, qty);
+        self.forms
+            .drafts
+            .insert(reason_key, reason.as_str().to_owned());
+        self.forms
+            .drafts
+            .insert(target_key, target.as_str().to_owned());
+        self.forms.drafts.insert(note_key, note);
     }
 
     fn inventory_balances_tab(&mut self, ui: &mut egui::Ui) {
@@ -1171,12 +1377,25 @@ impl WareboxesApp {
     fn inventory_journal_tab(&mut self, ui: &mut egui::Ui) {
         ui.heading("Inventory Journal");
         for transaction in &self.data.inventory_transactions {
+            let reason = transaction
+                .reason
+                .as_deref()
+                .map(|value| Self::title_case(&value.replace('_', " ")))
+                .unwrap_or_else(|| "-".to_owned());
+            let reference = match (&transaction.reference_type, transaction.reference_id) {
+                (Some(reference_type), Some(reference_id)) => {
+                    format!("{reference_type}:{reference_id}")
+                }
+                _ => "-".to_owned(),
+            };
             ui.strong(format!(
-                "#{} {} | owner {} | {}",
+                "#{} {} | owner {} | {} | reason {} | reference {}",
                 transaction.id,
                 transaction.transaction_type,
                 transaction.inventory_owner_id,
-                transaction.operation
+                transaction.operation,
+                reason,
+                reference,
             ));
             for entry in &transaction.entries {
                 ui.label(format!(
@@ -1657,7 +1876,7 @@ impl WareboxesApp {
 
 #[cfg(test)]
 mod tests {
-    use super::allocatable_quantity;
+    use super::{allocatable_quantity, status_change_quantity};
     use chrono::Utc;
     use wareboxes_core::models::{InventoryBalance, InventoryStatus};
     use wareboxes_domain::{InventoryOwnerId, TenantId};
@@ -1696,6 +1915,13 @@ mod tests {
             InventoryStatus::Quarantine,
         ] {
             assert_eq!(allocatable_quantity(&balance(status)), 0);
+        }
+    }
+
+    #[test]
+    fn every_status_exposes_only_uncommitted_quantity_for_status_changes() {
+        for status in InventoryStatus::ALL {
+            assert_eq!(status_change_quantity(&balance(status)), 7);
         }
     }
 }

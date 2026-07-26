@@ -447,6 +447,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'inventory_holds_tenant_isolation'
                 ),
                 (
+                    'inventory_status_transitions',
+                    'inventory_status_transitions_tenant_isolation'
+                ),
+                (
                     'order_tracking_numbers',
                     'order_tracking_numbers_tenant_isolation'
                 ),

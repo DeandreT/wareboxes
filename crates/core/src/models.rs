@@ -715,22 +715,109 @@ impl InventoryStatus {
 
 impl_status_display!(InventoryStatus);
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryStatusChangeReason {
+    QualityInspection,
+    DamageSuspected,
+    DamageConfirmed,
+    InspectionPassed,
+    InventoryDiscrepancy,
+    DiscrepancyResolved,
+    RegulatoryRestriction,
+    RegulatoryRelease,
+    CustomerRequest,
+    CustomerRelease,
+    Other,
+}
+
+impl InventoryStatusChangeReason {
+    pub const ALL: [Self; 11] = [
+        Self::QualityInspection,
+        Self::DamageSuspected,
+        Self::DamageConfirmed,
+        Self::InspectionPassed,
+        Self::InventoryDiscrepancy,
+        Self::DiscrepancyResolved,
+        Self::RegulatoryRestriction,
+        Self::RegulatoryRelease,
+        Self::CustomerRequest,
+        Self::CustomerRelease,
+        Self::Other,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::QualityInspection => "quality_inspection",
+            Self::DamageSuspected => "damage_suspected",
+            Self::DamageConfirmed => "damage_confirmed",
+            Self::InspectionPassed => "inspection_passed",
+            Self::InventoryDiscrepancy => "inventory_discrepancy",
+            Self::DiscrepancyResolved => "discrepancy_resolved",
+            Self::RegulatoryRestriction => "regulatory_restriction",
+            Self::RegulatoryRelease => "regulatory_release",
+            Self::CustomerRequest => "customer_request",
+            Self::CustomerRelease => "customer_release",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value.trim().to_ascii_lowercase().as_str() {
+            "quality_inspection" => Self::QualityInspection,
+            "damage_suspected" => Self::DamageSuspected,
+            "damage_confirmed" => Self::DamageConfirmed,
+            "inspection_passed" => Self::InspectionPassed,
+            "inventory_discrepancy" => Self::InventoryDiscrepancy,
+            "discrepancy_resolved" => Self::DiscrepancyResolved,
+            "regulatory_restriction" => Self::RegulatoryRestriction,
+            "regulatory_release" => Self::RegulatoryRelease,
+            "customer_request" => Self::CustomerRequest,
+            "customer_release" => Self::CustomerRelease,
+            "other" => Self::Other,
+            _ => return None,
+        })
+    }
+
+    pub fn allows_target_status(self, status: InventoryStatus) -> bool {
+        match self {
+            Self::QualityInspection
+            | Self::DamageSuspected
+            | Self::InventoryDiscrepancy
+            | Self::RegulatoryRestriction
+            | Self::CustomerRequest => {
+                matches!(status, InventoryStatus::Hold | InventoryStatus::Quarantine)
+            }
+            Self::DamageConfirmed => status == InventoryStatus::Damaged,
+            Self::InspectionPassed
+            | Self::DiscrepancyResolved
+            | Self::RegulatoryRelease
+            | Self::CustomerRelease => status == InventoryStatus::Available,
+            Self::Other => true,
+        }
+    }
+}
+
+impl_status_display!(InventoryStatusChangeReason);
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum InventoryTransactionType {
     #[default]
     Receive,
     Move,
     Adjust,
     Ship,
+    StatusChange,
 }
 
 impl InventoryTransactionType {
-    pub const ALL: [InventoryTransactionType; 4] = [
+    pub const ALL: [InventoryTransactionType; 5] = [
         InventoryTransactionType::Receive,
         InventoryTransactionType::Move,
         InventoryTransactionType::Adjust,
         InventoryTransactionType::Ship,
+        InventoryTransactionType::StatusChange,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -739,6 +826,7 @@ impl InventoryTransactionType {
             InventoryTransactionType::Move => "move",
             InventoryTransactionType::Adjust => "adjust",
             InventoryTransactionType::Ship => "ship",
+            InventoryTransactionType::StatusChange => "status_change",
         }
     }
 
@@ -748,12 +836,68 @@ impl InventoryTransactionType {
             "move" => InventoryTransactionType::Move,
             "adjust" => InventoryTransactionType::Adjust,
             "ship" => InventoryTransactionType::Ship,
+            "status_change" => InventoryTransactionType::StatusChange,
             _ => return None,
         })
     }
 }
 
 impl_status_display!(InventoryTransactionType);
+
+#[cfg(test)]
+mod inventory_status_change_model_tests {
+    use super::{InventoryStatusChangeReason, InventoryTransactionType};
+
+    #[test]
+    fn status_change_transaction_type_uses_snake_case_wire_value() {
+        let value = InventoryTransactionType::StatusChange;
+
+        assert_eq!(value.as_str(), "status_change");
+        assert_eq!(value.to_string(), "status_change");
+        assert_eq!(
+            InventoryTransactionType::parse(" STATUS_CHANGE "),
+            Some(value)
+        );
+        assert_eq!(serde_json::to_string(&value).unwrap(), r#""status_change""#);
+        assert_eq!(
+            serde_json::from_str::<InventoryTransactionType>(r#""status_change""#).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn status_change_reasons_round_trip_through_wire_values() {
+        for reason in InventoryStatusChangeReason::ALL {
+            assert_eq!(
+                InventoryStatusChangeReason::parse(reason.as_str()),
+                Some(reason)
+            );
+            assert_eq!(reason.to_string(), reason.as_str());
+            assert_eq!(
+                serde_json::from_str::<InventoryStatusChangeReason>(
+                    &serde_json::to_string(&reason).unwrap()
+                )
+                .unwrap(),
+                reason
+            );
+        }
+    }
+
+    #[test]
+    fn status_change_reasons_limit_target_dispositions() {
+        assert!(InventoryStatusChangeReason::QualityInspection
+            .allows_target_status(super::InventoryStatus::Quarantine));
+        assert!(!InventoryStatusChangeReason::QualityInspection
+            .allows_target_status(super::InventoryStatus::Damaged));
+        assert!(InventoryStatusChangeReason::DamageConfirmed
+            .allows_target_status(super::InventoryStatus::Damaged));
+        assert!(InventoryStatusChangeReason::InspectionPassed
+            .allows_target_status(super::InventoryStatus::Available));
+        assert!(
+            InventoryStatusChangeReason::Other.allows_target_status(super::InventoryStatus::Hold)
+        );
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]

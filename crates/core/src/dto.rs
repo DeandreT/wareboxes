@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
 use crate::models::{
-    InventoryHoldReason, InventoryStatus, LoadFileCategory, LoadStatus, LoadType, Order,
-    TenantAccess, Timestamp, User,
+    InventoryHoldReason, InventoryStatus, InventoryStatusChangeReason, LoadFileCategory,
+    LoadStatus, LoadType, Order, TenantAccess, Timestamp, User,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -946,6 +946,69 @@ pub struct CancelInventoryReservation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+#[validate(schema(function = "validate_change_inventory_status"))]
+pub struct ChangeInventoryStatus {
+    #[validate(range(min = 1, message = "Invalid inventory balance ID"))]
+    pub inventory_balance_id: i64,
+    #[validate(range(min = 1, message = "Quantity must be positive"))]
+    pub qty: i64,
+    pub to_status: InventoryStatus,
+    pub reason: InventoryStatusChangeReason,
+    #[validate(length(
+        min = 1,
+        max = 1000,
+        message = "Note must contain between 1 and 1000 characters"
+    ))]
+    pub note: Option<String>,
+    #[validate(length(
+        min = 1,
+        max = 100,
+        message = "Reference type must contain between 1 and 100 characters"
+    ))]
+    pub reference_type: Option<String>,
+    pub reference_id: Option<i64>,
+}
+
+fn validate_change_inventory_status(value: &ChangeInventoryStatus) -> Result<(), ValidationError> {
+    if let Some(note) = value.note.as_deref() {
+        if note.trim() != note || note.is_empty() {
+            return Err(ValidationError::new("invalid_status_change_note")
+                .with_message("Status change note must be trimmed and nonempty".into()));
+        }
+    }
+    if value.reason == InventoryStatusChangeReason::Other && value.note.is_none() {
+        return Err(
+            ValidationError::new("other_status_change_reason_requires_note")
+                .with_message("A note is required when the status change reason is other".into()),
+        );
+    }
+    if !value.reason.allows_target_status(value.to_status) {
+        return Err(
+            ValidationError::new("status_change_reason_target_mismatch").with_message(
+                "Status change reason does not permit the requested target status".into(),
+            ),
+        );
+    }
+
+    match (&value.reference_type, value.reference_id) {
+        (None, None) => Ok(()),
+        (Some(reference_type), Some(reference_id))
+            if reference_type.trim() == reference_type
+                && !reference_type.is_empty()
+                && reference_id > 0 =>
+        {
+            Ok(())
+        }
+        _ => Err(
+            ValidationError::new("invalid_status_change_reference").with_message(
+                "Status change reference type and positive ID must be provided together".into(),
+            ),
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 #[validate(schema(function = "validate_place_inventory_hold"))]
 pub struct PlaceInventoryHold {
     #[validate(range(min = 1, message = "Invalid inventory balance ID"))]
@@ -1015,4 +1078,106 @@ pub struct PlaceInventoryHoldResult {
 pub struct ReleaseInventoryHoldResult {
     pub hold_id: i64,
     pub released_qty: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChangeInventoryStatusResult {
+    pub inventory_transaction_id: i64,
+    pub source_inventory_balance_id: i64,
+    pub target_inventory_balance_id: i64,
+    pub qty: i64,
+    pub from_status: InventoryStatus,
+    pub to_status: InventoryStatus,
+}
+
+#[cfg(test)]
+mod inventory_status_change_dto_tests {
+    use super::*;
+
+    fn valid_request() -> ChangeInventoryStatus {
+        ChangeInventoryStatus {
+            inventory_balance_id: 42,
+            qty: 5,
+            to_status: InventoryStatus::Quarantine,
+            reason: InventoryStatusChangeReason::QualityInspection,
+            note: Some("Awaiting inspection".into()),
+            reference_type: Some("receipt".into()),
+            reference_id: Some(81),
+        }
+    }
+
+    #[test]
+    fn status_change_request_uses_header_idempotency_contract() {
+        let request = valid_request();
+        request.validate().unwrap();
+
+        let value = serde_json::to_value(request).unwrap();
+        assert!(value.get("idempotency_key").is_none());
+        assert_eq!(value["to_status"], "quarantine");
+        assert_eq!(value["reason"], "quality_inspection");
+        assert!(
+            serde_json::from_value::<ChangeInventoryStatus>(serde_json::json!({
+                "inventory_balance_id": 42,
+                "qty": 5,
+                "to_status": "quarantine",
+                "reason": "quality_inspection",
+                "note": "Awaiting inspection",
+                "reference_type": "receipt",
+                "reference_id": 81,
+                "idempotency_key": "must-be-a-header"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn status_change_request_validates_quantity_note_and_reference() {
+        let invalid_quantities = [
+            ChangeInventoryStatus {
+                inventory_balance_id: 0,
+                ..valid_request()
+            },
+            ChangeInventoryStatus {
+                qty: 0,
+                ..valid_request()
+            },
+        ];
+        for request in invalid_quantities {
+            assert!(request.validate().is_err());
+        }
+
+        assert!(ChangeInventoryStatus {
+            reason: InventoryStatusChangeReason::Other,
+            note: None,
+            ..valid_request()
+        }
+        .validate()
+        .is_err());
+        assert!(ChangeInventoryStatus {
+            note: Some(" untrimmed".into()),
+            ..valid_request()
+        }
+        .validate()
+        .is_err());
+        assert!(ChangeInventoryStatus {
+            to_status: InventoryStatus::Damaged,
+            reason: InventoryStatusChangeReason::QualityInspection,
+            ..valid_request()
+        }
+        .validate()
+        .is_err());
+        assert!(ChangeInventoryStatus {
+            reference_id: None,
+            ..valid_request()
+        }
+        .validate()
+        .is_err());
+        assert!(ChangeInventoryStatus {
+            reference_type: None,
+            ..valid_request()
+        }
+        .validate()
+        .is_err());
+    }
 }
