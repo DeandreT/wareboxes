@@ -1438,6 +1438,7 @@ pub enum WorkTaskType {
     BreakMasterPack,
     UnpackCancelledOrder,
     Putaway,
+    LicensePlatePutaway,
 }
 
 impl WorkTaskType {
@@ -1448,6 +1449,7 @@ impl WorkTaskType {
             WorkTaskType::BreakMasterPack => "break_master_pack",
             WorkTaskType::UnpackCancelledOrder => "unpack_cancelled_order",
             WorkTaskType::Putaway => "putaway",
+            WorkTaskType::LicensePlatePutaway => "license_plate_putaway",
         }
     }
 
@@ -1458,6 +1460,7 @@ impl WorkTaskType {
             "break_master_pack" => WorkTaskType::BreakMasterPack,
             "unpack_cancelled_order" => WorkTaskType::UnpackCancelledOrder,
             "putaway" => WorkTaskType::Putaway,
+            "license_plate_putaway" => WorkTaskType::LicensePlatePutaway,
             _ => return None,
         })
     }
@@ -1577,6 +1580,23 @@ pub struct PutawayConfirmation {
     pub inventory_status: InventoryStatus,
     pub quantity: i64,
     pub inventory_transaction_id: i64,
+    pub confirmed_by: i64,
+    pub confirmed_at: Timestamp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LicensePlatePutawayConfirmation {
+    pub tenant_id: TenantId,
+    pub task_id: i64,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub license_plate_id: i64,
+    pub license_plate_barcode: String,
+    pub source_location_id: i64,
+    pub destination_location_id: i64,
+    pub destination_location_barcode: String,
+    pub inventory_transaction_id: i64,
+    pub moved_balance_count: i64,
     pub confirmed_by: i64,
     pub confirmed_at: Timestamp,
 }

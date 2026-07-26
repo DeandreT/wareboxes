@@ -302,6 +302,18 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         ("putaway_tasks", "putaway_tasks_tenant_isolation"),
         ("putaway_results", "putaway_results_tenant_isolation"),
         (
+            "license_plate_putaway_tasks",
+            "license_plate_putaway_tasks_tenant_isolation",
+        ),
+        (
+            "license_plate_putaway_task_contents",
+            "license_plate_putaway_task_contents_tenant_isolation",
+        ),
+        (
+            "license_plate_putaway_results",
+            "license_plate_putaway_results_tenant_isolation",
+        ),
+        (
             "cycle_count_item_location_tasks",
             "cycle_count_item_location_tasks_tenant_isolation",
         ),

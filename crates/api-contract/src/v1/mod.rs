@@ -4,6 +4,7 @@ mod cursor;
 mod error;
 mod idempotency;
 mod inventory;
+mod license_plate_putaway;
 mod putaway;
 mod revision;
 
@@ -18,6 +19,10 @@ pub use idempotency::{
 pub use inventory::{
     InventoryBalancePage, InventoryBalancePageRequest, InventoryBalanceResponse,
     InventoryBalanceStatus, InventoryQuantity,
+};
+pub use license_plate_putaway::{
+    ConfirmLicensePlatePutawayRequest, CreateLicensePlatePutawayTaskRequest,
+    CreateLicensePlatePutawayTaskResponse, LicensePlatePutawayConfirmationResponse,
 };
 pub use putaway::{
     ConfirmPutawayRequest, CreatePutawayTaskRequest, CreatePutawayTaskResponse,
