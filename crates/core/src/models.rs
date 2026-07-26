@@ -1207,10 +1207,36 @@ pub struct CycleCountItemLocationTask {
     pub facility_id: i64,
     pub location_id: i64,
     pub item_id: i64,
-    pub inventory_balance_id: Option<i64>,
+    pub inventory_balance_id: i64,
     pub order_id: Option<i64>,
     pub order_item_id: Option<i64>,
     pub source: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ItemLocationCycleCountConfirmation {
+    pub tenant_id: TenantId,
+    pub task_id: i64,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub location_id: i64,
+    pub inventory_balance_id: i64,
+    pub license_plate_id: Option<i64>,
+    pub item_batch_id: i64,
+    pub item_id: i64,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub expiration: Option<Timestamp>,
+    pub serial: Option<String>,
+    pub inventory_status: InventoryStatus,
+    pub previous_on_hand_quantity: i64,
+    pub reserved_quantity: i64,
+    pub counted_quantity: i64,
+    pub variance_quantity: i64,
+    pub inventory_transaction_id: Option<i64>,
+    pub confirmed_by: i64,
+    pub confirmed_at: Timestamp,
     pub note: Option<String>,
 }
 

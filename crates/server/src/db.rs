@@ -227,6 +227,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'cycle_count_item_location_tasks_tenant_isolation'
                 ),
                 (
+                    'cycle_count_item_location_results',
+                    'cycle_count_item_location_results_tenant_isolation'
+                ),
+                (
                     'cycle_count_location_tasks',
                     'cycle_count_location_tasks_tenant_isolation'
                 ),

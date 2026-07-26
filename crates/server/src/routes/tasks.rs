@@ -2,12 +2,13 @@ use axum::extract::{Query, State};
 use axum::Json;
 use serde::Deserialize;
 use wareboxes_core::dto::{
-    AssignWorkTask, CompleteWorkTask, CreateBreakMasterPackTask, CreateItemLocationCycleCountTask,
-    CreateLocationCycleCountTask, CreateUnpackCancelledOrderTask, RecordWorkTaskProgress,
-    StartNextWorkTask, WorkTaskIdRequest,
+    AssignWorkTask, CompleteWorkTask, ConfirmItemLocationCycleCount, CreateBreakMasterPackTask,
+    CreateItemLocationCycleCountTask, CreateLocationCycleCountTask, CreateUnpackCancelledOrderTask,
+    RecordWorkTaskProgress, StartNextWorkTask, WorkTaskIdRequest,
 };
 use wareboxes_core::models::{
-    UnpackCancelledOrderTaskLine, WorkTask, WorkTaskStatus, WorkTaskType,
+    ItemLocationCycleCountConfirmation, UnpackCancelledOrderTaskLine, WorkTask, WorkTaskStatus,
+    WorkTaskType,
 };
 
 use crate::auth::CurrentTenant;
@@ -122,6 +123,28 @@ pub async fn create_location_cycle_count(
             body.scheduled_for,
             body.due_at,
             body.instructions,
+        )
+        .await?,
+    ))
+}
+
+pub async fn confirm_item_location_cycle_count(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Json(body): Json<ConfirmItemLocationCycleCount>,
+) -> AppResult<Json<ItemLocationCycleCountConfirmation>> {
+    user.require_permission(&state.db, PERM).await?;
+    validate(&body)?;
+    let command = user.command_context(&idempotency_key);
+    Ok(Json(
+        repo::tasks::confirm_item_location_cycle_count_in_scope(
+            &state.db,
+            &user.tenant,
+            &command,
+            body.task_id,
+            body.counted_quantity,
+            body.note.as_deref(),
         )
         .await?,
     ))

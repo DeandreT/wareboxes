@@ -31,7 +31,7 @@ pub(super) async fn lock_item_cycle_references_tx(
     item_id: i64,
     order_id: Option<i64>,
     order_item_id: Option<i64>,
-    inventory_balance_id: Option<i64>,
+    inventory_balance_id: i64,
 ) -> AppResult<()> {
     lock_active_location_tx(tx, tenant_id, location_id).await?;
     let item: Option<i64> = sqlx::query_scalar(
@@ -68,17 +68,15 @@ pub(super) async fn lock_item_cycle_references_tx(
             return Err(AppError::bad_request("order item not found"));
         }
     }
-    if let Some(inventory_balance_id) = inventory_balance_id {
-        let found: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM inventory_balances WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL FOR SHARE",
-        )
-        .bind(tenant_id.get())
-        .bind(inventory_balance_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-        if found.is_none() {
-            return Err(AppError::bad_request("inventory balance not found"));
-        }
+    let found: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM inventory_balances WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL FOR SHARE",
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_balance_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if found.is_none() {
+        return Err(AppError::bad_request("inventory balance not found"));
     }
     Ok(())
 }

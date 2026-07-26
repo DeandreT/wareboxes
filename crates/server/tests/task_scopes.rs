@@ -314,7 +314,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         Some("scope test"),
         None,
         None,
-        Some(allowed_balance.id),
+        allowed_balance.id,
         Some("claimable allowed task"),
     )
     .await
@@ -328,7 +328,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         Some("scope test"),
         None,
         None,
-        Some(second_allowed_balance.id),
+        second_allowed_balance.id,
         Some("expired allowed task"),
     )
     .await
@@ -462,7 +462,11 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     let concealed_references = [
         (
             "/api/tasks/cycle-counts/item-location/add",
-            json!({"location_id": denied_location, "item_id": item}),
+            json!({
+                "location_id": denied_location,
+                "item_id": item,
+                "inventory_balance_id": i64::MAX
+            }),
         ),
         (
             "/api/tasks/cycle-counts/location/add",
@@ -483,7 +487,11 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         ),
         (
             "/api/tasks/cycle-counts/item-location/add",
-            json!({"location_id": foreign_location, "item_id": foreign_item}),
+            json!({
+                "location_id": foreign_location,
+                "item_id": foreign_item,
+                "inventory_balance_id": i64::MAX
+            }),
         ),
         (
             "/api/tasks/cycle-counts/location/add",
@@ -504,7 +512,11 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         ),
         (
             "/api/tasks/cycle-counts/item-location/add",
-            json!({"location_id": i64::MAX, "item_id": i64::MAX}),
+            json!({
+                "location_id": i64::MAX,
+                "item_id": i64::MAX,
+                "inventory_balance_id": i64::MAX
+            }),
         ),
         (
             "/api/tasks/cycle-counts/location/add",

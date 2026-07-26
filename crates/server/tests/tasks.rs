@@ -152,7 +152,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
         Some("pick_not_found"),
         None,
         None,
-        Some(balance.id),
+        balance.id,
         Some("picker could not find item"),
     )
     .await
@@ -166,7 +166,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
         Some("pick_not_found"),
         None,
         None,
-        Some(balance.id),
+        balance.id,
         Some("same item/location should reuse open task"),
     )
     .await
@@ -223,7 +223,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
         Some("pick_not_found"),
         None,
         None,
-        Some(second_balance.id),
+        second_balance.id,
         Some("same location and item, different owner"),
     )
     .await
