@@ -141,6 +141,8 @@ pub async fn order_is_accessible(
     include_deleted: bool,
 ) -> AppResult<bool> {
     let scope = ScopeBindings::for_access(access);
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
     let exists = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
@@ -158,8 +160,9 @@ pub async fn order_is_accessible(
     .bind(include_deleted)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(exists)
 }
 

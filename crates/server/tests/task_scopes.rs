@@ -254,7 +254,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     let allowed_order = fixture
         .order(tenant_id, "TASK-SCOPE-ALLOWED-ORDER", allowed_owner)
         .await;
-    fixture.order_item(allowed_order, item, 2).await;
+    fixture.order_item(tenant_id, allowed_order, item, 2).await;
     cancel_order(
         &fixture.db,
         tenant_id,
@@ -266,7 +266,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     let denied_order = fixture
         .order(tenant_id, "TASK-SCOPE-DENIED-ORDER", denied_owner)
         .await;
-    fixture.order_item(denied_order, item, 2).await;
+    fixture.order_item(tenant_id, denied_order, item, 2).await;
     cancel_order(
         &fixture.db,
         tenant_id,

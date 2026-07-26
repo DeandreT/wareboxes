@@ -321,23 +321,33 @@ impl Fixture {
             .id
     }
 
-    pub async fn order_item(&self, order_id: i64, item_id: i64, qty: i64) -> i64 {
-        sqlx::query_scalar(
+    pub async fn order_item(
+        &self,
+        tenant_id: TenantId,
+        order_id: i64,
+        item_id: i64,
+        qty: i64,
+    ) -> i64 {
+        let mut tx = tenant_tx(&self.db, tenant_id).await;
+        let id = sqlx::query_scalar(
             r#"
             INSERT INTO order_items
                 (tenant_id, inventory_owner_id, created, qty, item_id, order_id)
             SELECT tenant_id, inventory_owner_id, $1, $2, $3, id
             FROM orders
-            WHERE id = $4
+            WHERE tenant_id = $4 AND id = $5
             RETURNING id
             "#,
         )
         .bind(db::now_iso())
         .bind(qty)
         .bind(item_id)
+        .bind(tenant_id.get())
         .bind(order_id)
-        .fetch_one(&self.db)
+        .fetch_one(&mut *tx)
         .await
-        .unwrap()
+        .unwrap();
+        tx.commit().await.unwrap();
+        id
     }
 }

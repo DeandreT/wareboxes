@@ -147,7 +147,6 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
         ),
         tenant_policy_debt(table_name) AS (
             VALUES
-                ('addresses'),
                 ('audit_location_counts'),
                 ('audit_wave_assignments'),
                 ('audit_wave_inventory_owners'),
@@ -171,8 +170,6 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 ('load_orders'),
                 ('loads'),
                 ('locations'),
-                ('order_items'),
-                ('orders'),
                 ('outbox_aggregate_sequences'),
                 ('outbox_event_keys'),
                 ('outbox_events'),
@@ -251,6 +248,18 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'inventory_balances',
                     'inventory_balances_tenant_isolation'
+                ),
+                (
+                    'addresses',
+                    'addresses_tenant_isolation'
+                ),
+                (
+                    'orders',
+                    'orders_tenant_isolation'
+                ),
+                (
+                    'order_items',
+                    'order_items_tenant_isolation'
                 )
         ),
         tenant_table_classification AS (

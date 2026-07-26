@@ -1,4 +1,4 @@
-use crate::db::now_iso;
+use crate::db::{bind_tenant_context, now_iso};
 use crate::error::AppResult;
 use wareboxes_domain::TenantId;
 
@@ -13,6 +13,7 @@ pub async fn insert_address_tx(
     postal_code: Option<&str>,
     country: Option<&str>,
 ) -> AppResult<i64> {
+    bind_tenant_context(tx, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO addresses (tenant_id, created, line1, line2, city, state, postal_code, country)
