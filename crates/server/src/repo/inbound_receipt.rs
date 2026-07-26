@@ -232,6 +232,7 @@ async fn enqueue_receipt_event(
         "load_line_id": result.load_line_id,
         "inventory_transaction_id": result.inventory_transaction_id,
         "item_batch_id": result.item_batch_id,
+        "inventory_balance_id": result.inventory_balance_id,
         "license_plate_id": result.license_plate_id,
         "inventory_owner_id": owner_facility.inventory_owner_id,
         "facility_id": owner_facility.facility_id,
@@ -405,6 +406,7 @@ pub async fn receive_expected_inventory(
 
     let mut inventory_transaction_id = None;
     let mut item_batch_id = None;
+    let mut inventory_balance_id = None;
     let mut resolved_license_plate_id = None;
 
     if receipt.received_qty > 0 {
@@ -528,7 +530,7 @@ pub async fn receive_expected_inventory(
         inventory_transaction_id = Some(transaction_id);
 
         if let Some(license_plate_id) = resolved_license_plate_id {
-            sqlx::query(
+            let balance_id = sqlx::query_scalar(
                 r#"
                 INSERT INTO inventory_balances
                     (tenant_id, inventory_owner_id, created, modified, facility_id,
@@ -543,6 +545,7 @@ pub async fn receive_expected_inventory(
                     qty_on_hand = inventory_balances.qty_on_hand + excluded.qty_on_hand,
                     modified = excluded.modified,
                     deleted = NULL
+                RETURNING id
                 "#,
             )
             .bind(access.tenant_id.get())
@@ -556,10 +559,11 @@ pub async fn receive_expected_inventory(
             .bind(item_id)
             .bind(&uom)
             .bind(receipt.received_qty)
-            .execute(&mut *tx)
+            .fetch_one(&mut *tx)
             .await?;
+            inventory_balance_id = Some(balance_id);
         } else {
-            sqlx::query(
+            let balance_id = sqlx::query_scalar(
                 r#"
                 INSERT INTO inventory_balances
                     (tenant_id, inventory_owner_id, created, modified, facility_id,
@@ -574,6 +578,7 @@ pub async fn receive_expected_inventory(
                     qty_on_hand = inventory_balances.qty_on_hand + excluded.qty_on_hand,
                     modified = excluded.modified,
                     deleted = NULL
+                RETURNING id
                 "#,
             )
             .bind(access.tenant_id.get())
@@ -586,8 +591,9 @@ pub async fn receive_expected_inventory(
             .bind(item_id)
             .bind(&uom)
             .bind(receipt.received_qty)
-            .execute(&mut *tx)
+            .fetch_one(&mut *tx)
             .await?;
+            inventory_balance_id = Some(balance_id);
         }
 
         inventory_journal::append_entry(
@@ -679,6 +685,7 @@ pub async fn receive_expected_inventory(
         "receiving_location_id": receipt.receiving_location_id,
         "license_plate_id": resolved_license_plate_id,
         "item_batch_id": item_batch_id,
+        "inventory_balance_id": inventory_balance_id,
         "received_qty": receipt.received_qty,
         "rejected_qty": receipt.rejected_qty,
         "missing_qty": receipt.missing_qty,
@@ -707,6 +714,7 @@ pub async fn receive_expected_inventory(
         load_line_id,
         inventory_transaction_id,
         item_batch_id,
+        inventory_balance_id,
         license_plate_id: resolved_license_plate_id,
         load_status: next_load_status,
         line_status,

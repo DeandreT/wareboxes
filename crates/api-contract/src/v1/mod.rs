@@ -4,6 +4,7 @@ mod cursor;
 mod error;
 mod idempotency;
 mod inventory;
+mod putaway;
 mod revision;
 
 pub use cursor::{
@@ -17,6 +18,10 @@ pub use idempotency::{
 pub use inventory::{
     InventoryBalancePage, InventoryBalancePageRequest, InventoryBalanceResponse,
     InventoryBalanceStatus, InventoryQuantity,
+};
+pub use putaway::{
+    ConfirmPutawayRequest, CreatePutawayTaskRequest, CreatePutawayTaskResponse,
+    PutawayConfirmationResponse,
 };
 pub use revision::{Revision, RevisionError, RevisionPrecondition};
 

@@ -735,6 +735,38 @@ pub struct CompleteWorkTask {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePutawayTask {
+    #[validate(range(min = 1, message = "Invalid source inventory balance ID"))]
+    pub source_inventory_balance_id: i64,
+    #[validate(range(min = 1, message = "Invalid destination location ID"))]
+    pub destination_location_id: i64,
+    #[validate(range(min = 1, message = "Quantity must be positive"))]
+    pub quantity: i64,
+    #[validate(range(min = 0, message = "Priority must be zero or greater"))]
+    pub priority: Option<i64>,
+    #[validate(range(min = 1, message = "Invalid user ID"))]
+    pub assigned_user_id: Option<i64>,
+    pub scheduled_for: Option<Timestamp>,
+    pub due_at: Option<Timestamp>,
+    #[validate(length(
+        min = 1,
+        max = 1000,
+        message = "Instructions must contain between 1 and 1000 characters"
+    ))]
+    pub instructions: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmPutaway {
+    #[validate(range(min = 1, message = "Invalid task ID"))]
+    pub task_id: i64,
+    #[validate(range(min = 1, message = "Invalid destination location ID"))]
+    pub destination_location_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct CreateItemLocationCycleCountTask {
     #[validate(range(min = 1, message = "Invalid location ID"))]
     pub location_id: i64,

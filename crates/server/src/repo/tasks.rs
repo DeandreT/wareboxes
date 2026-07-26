@@ -17,12 +17,14 @@ use references::{
 mod cycle_count;
 mod execution;
 mod leasing;
+mod putaway;
 mod queries;
 mod references;
 
 pub use cycle_count::*;
 pub use execution::*;
 pub use leasing::*;
+pub use putaway::*;
 pub use queries::*;
 
 pub(crate) async fn release_tasks_outside_scope_tx(
@@ -138,6 +140,7 @@ fn task_timeout_seconds(task_type: WorkTaskType) -> i64 {
         WorkTaskType::CycleCountLocation => 60 * 60,
         WorkTaskType::BreakMasterPack => 45 * 60,
         WorkTaskType::UnpackCancelledOrder => 30 * 60,
+        WorkTaskType::Putaway => 30 * 60,
     }
 }
 
