@@ -576,31 +576,6 @@ pub struct AddLoadLine {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-#[serde(deny_unknown_fields)]
-pub struct ReceiveExpectedInventory {
-    #[validate(range(min = 1, message = "Invalid receiving location ID"))]
-    pub receiving_location_id: Option<i64>,
-    #[validate(range(min = 0, message = "Received quantity cannot be negative"))]
-    pub received_qty: i64,
-    #[validate(range(min = 0, message = "Rejected quantity cannot be negative"))]
-    pub rejected_qty: i64,
-    #[validate(range(min = 0, message = "Missing quantity cannot be negative"))]
-    pub missing_qty: i64,
-    #[validate(range(min = 1, message = "Invalid license plate ID"))]
-    pub license_plate_id: Option<i64>,
-    #[validate(length(min = 1, max = 200, message = "Invalid license plate barcode"))]
-    pub license_plate_barcode: Option<String>,
-    #[validate(length(min = 1, max = 200, message = "Invalid lot"))]
-    pub lot: Option<String>,
-    #[validate(length(min = 1, max = 200, message = "Invalid serial"))]
-    pub serial: Option<String>,
-    pub expiration: Option<Timestamp>,
-    pub exception_reason: Option<crate::models::InboundReceiptExceptionReason>,
-    #[validate(length(min = 1, max = 1000, message = "Invalid exception note"))]
-    pub exception_note: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct AddLoadFile {
     #[validate(range(min = 1, message = "Invalid load ID"))]
     pub load_id: i64,

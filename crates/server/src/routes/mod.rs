@@ -139,10 +139,6 @@ pub fn app(state: AppState) -> Router {
             "/mobile/inbound/loads/:load_id/arrive",
             post(loads::mobile_arrive),
         )
-        .route(
-            "/inbound/load-lines/:load_line_id/receipts",
-            post(loads::receive_expected_inventory),
-        )
         .route("/inventory/batches", get(inventory::list_batches))
         .route("/inventory/batches/add", post(inventory::add_batch))
         .route("/inventory/batches/delete", post(inventory::delete_batch))

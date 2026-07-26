@@ -1,17 +1,26 @@
 use axum::extract::{Path, State};
 use axum::Json;
+use chrono::{DateTime, Utc};
 use wareboxes_api_contract::v1::{
-    ExpectedReceiptLine, ExpectedReceivingLoadStatus, ExpectedReceivingLocation,
-    ExpectedReceivingSessionResponse,
+    ConfirmExpectedReceiptRequest, ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
+    ExpectedReceiptExceptionReason, ExpectedReceiptLine, ExpectedReceiptLineStatus,
+    ExpectedReceivingLoadStatus, ExpectedReceivingLocation, ExpectedReceivingSessionResponse,
+};
+use wareboxes_core::models::{
+    InboundReceiptExceptionReason, LoadLineStatus, LoadStatus, ReceiveExpectedInventoryResult,
 };
 
 use super::error::{V1Error, V1Result};
 use crate::auth::CurrentTenant;
 use crate::error::AppError;
 use crate::repo;
+use crate::request_context::IdempotencyKey;
 use crate::state::AppState;
 
 const PERMISSION: &str = "wms";
+const MAX_BARCODE_LENGTH: usize = 200;
+const MAX_DIMENSION_LENGTH: usize = 200;
+const MAX_NOTE_LENGTH: usize = 1_000;
 
 pub async fn get_session(
     State(state): State<AppState>,
@@ -25,6 +34,241 @@ pub async fn get_session(
             .await?;
 
     Ok(Json(map_session(session)))
+}
+
+pub async fn confirm(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(load_line_id): Path<i64>,
+    Json(body): Json<ConfirmExpectedReceiptRequest>,
+) -> V1Result<Json<ExpectedReceiptConfirmationResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    require_positive(load_line_id, "load line ID")?;
+    validate_confirmation(&body)?;
+    let mapped = map_confirmation(&body)?;
+    let context = user.command_context(&idempotency_key);
+    let result = repo::inbound_receipt::confirm_expected_receipt(
+        &state.db,
+        &user.tenant,
+        &context,
+        load_line_id,
+        &mapped.command,
+    )
+    .await?;
+
+    Ok(Json(map_confirmation_result(
+        result,
+        mapped.disposition,
+        mapped.quantity,
+    )?))
+}
+
+struct MappedConfirmation<'a> {
+    command: repo::inbound_receipt::ConfirmExpectedReceiptCommand<'a>,
+    disposition: ExpectedReceiptDisposition,
+    quantity: i64,
+}
+
+fn map_confirmation(body: &ConfirmExpectedReceiptRequest) -> V1Result<MappedConfirmation<'_>> {
+    Ok(match body {
+        ConfirmExpectedReceiptRequest::Received {
+            item_barcode,
+            receiving_location_barcode,
+            quantity,
+            license_plate_barcode,
+            lot,
+            serial,
+            expiration,
+        } => MappedConfirmation {
+            command: repo::inbound_receipt::ConfirmExpectedReceiptCommand::Received {
+                item_barcode,
+                receiving_location_barcode,
+                quantity: *quantity,
+                license_plate_barcode: license_plate_barcode.as_deref(),
+                lot: lot.as_deref(),
+                serial: serial.as_deref(),
+                expiration: parse_timestamp(expiration.as_deref(), "expiration")?,
+            },
+            disposition: ExpectedReceiptDisposition::Received,
+            quantity: *quantity,
+        },
+        ConfirmExpectedReceiptRequest::Rejected {
+            item_barcode,
+            quantity,
+            reason,
+            note,
+        } => MappedConfirmation {
+            command: repo::inbound_receipt::ConfirmExpectedReceiptCommand::Rejected {
+                item_barcode,
+                quantity: *quantity,
+                reason: map_exception_reason(*reason),
+                note: note.as_deref(),
+            },
+            disposition: ExpectedReceiptDisposition::Rejected,
+            quantity: *quantity,
+        },
+        ConfirmExpectedReceiptRequest::Missing {
+            quantity,
+            reason,
+            note,
+        } => MappedConfirmation {
+            command: repo::inbound_receipt::ConfirmExpectedReceiptCommand::Missing {
+                quantity: *quantity,
+                reason: map_exception_reason(*reason),
+                note: note.as_deref(),
+            },
+            disposition: ExpectedReceiptDisposition::Missing,
+            quantity: *quantity,
+        },
+    })
+}
+
+fn map_confirmation_result(
+    result: ReceiveExpectedInventoryResult,
+    disposition: ExpectedReceiptDisposition,
+    quantity: i64,
+) -> V1Result<ExpectedReceiptConfirmationResponse> {
+    Ok(ExpectedReceiptConfirmationResponse {
+        load_id: result.load_id,
+        load_line_id: result.load_line_id,
+        disposition,
+        quantity,
+        inventory_transaction_id: result.inventory_transaction_id,
+        inventory_balance_id: result.inventory_balance_id,
+        item_batch_id: result.item_batch_id,
+        license_plate_id: result.license_plate_id,
+        line_status: map_line_status(result.line_status),
+        load_status: map_load_status(result.load_status)?,
+        cumulative_received_quantity: result.cumulative_received_qty,
+        cumulative_rejected_quantity: result.cumulative_rejected_qty,
+        cumulative_missing_quantity: result.cumulative_missing_qty,
+        remaining_quantity: result.remaining_quantity,
+        receive_completed: result.receive_completed,
+    })
+}
+
+fn validate_confirmation(body: &ConfirmExpectedReceiptRequest) -> V1Result<()> {
+    let quantity = match body {
+        ConfirmExpectedReceiptRequest::Received {
+            item_barcode,
+            receiving_location_barcode,
+            quantity,
+            license_plate_barcode,
+            lot,
+            serial,
+            ..
+        } => {
+            validate_required_text(item_barcode, "item_barcode", MAX_BARCODE_LENGTH)?;
+            validate_required_text(
+                receiving_location_barcode,
+                "receiving_location_barcode",
+                MAX_BARCODE_LENGTH,
+            )?;
+            validate_optional_text(
+                license_plate_barcode.as_deref(),
+                "license_plate_barcode",
+                MAX_BARCODE_LENGTH,
+            )?;
+            validate_optional_text(lot.as_deref(), "lot", MAX_DIMENSION_LENGTH)?;
+            validate_optional_text(serial.as_deref(), "serial", MAX_DIMENSION_LENGTH)?;
+            *quantity
+        }
+        ConfirmExpectedReceiptRequest::Rejected {
+            item_barcode,
+            quantity,
+            reason,
+            note,
+        } => {
+            validate_required_text(item_barcode, "item_barcode", MAX_BARCODE_LENGTH)?;
+            validate_exception(*reason, note.as_deref())?;
+            *quantity
+        }
+        ConfirmExpectedReceiptRequest::Missing {
+            quantity,
+            reason,
+            note,
+        } => {
+            validate_exception(*reason, note.as_deref())?;
+            *quantity
+        }
+    };
+    require_positive(quantity, "quantity")
+}
+
+fn validate_exception(reason: ExpectedReceiptExceptionReason, note: Option<&str>) -> V1Result<()> {
+    validate_optional_text(note, "note", MAX_NOTE_LENGTH)?;
+    if reason == ExpectedReceiptExceptionReason::Other && note.is_none() {
+        return Err(invalid("note is required when reason is other"));
+    }
+    Ok(())
+}
+
+fn validate_required_text(value: &str, field: &str, maximum: usize) -> V1Result<()> {
+    if value.trim() != value || value.is_empty() {
+        return Err(invalid(format!("{field} must be trimmed and nonempty")));
+    }
+    if value.chars().count() > maximum {
+        return Err(invalid(format!(
+            "{field} cannot exceed {maximum} characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_optional_text(value: Option<&str>, field: &str, maximum: usize) -> V1Result<()> {
+    if let Some(value) = value {
+        validate_required_text(value, field, maximum)?;
+    }
+    Ok(())
+}
+
+fn parse_timestamp(value: Option<&str>, field: &str) -> V1Result<Option<DateTime<Utc>>> {
+    value
+        .map(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .map(|timestamp| timestamp.with_timezone(&Utc))
+                .map_err(|_| invalid(format!("{field} must be an RFC 3339 timestamp")))
+        })
+        .transpose()
+}
+
+fn map_exception_reason(reason: ExpectedReceiptExceptionReason) -> InboundReceiptExceptionReason {
+    match reason {
+        ExpectedReceiptExceptionReason::Damaged => InboundReceiptExceptionReason::Damaged,
+        ExpectedReceiptExceptionReason::QualityRejected => {
+            InboundReceiptExceptionReason::QualityRejected
+        }
+        ExpectedReceiptExceptionReason::ShortShipment => {
+            InboundReceiptExceptionReason::ShortShipment
+        }
+        ExpectedReceiptExceptionReason::CountDiscrepancy => {
+            InboundReceiptExceptionReason::CountDiscrepancy
+        }
+        ExpectedReceiptExceptionReason::WrongItem => InboundReceiptExceptionReason::WrongItem,
+        ExpectedReceiptExceptionReason::Other => InboundReceiptExceptionReason::Other,
+    }
+}
+
+fn map_line_status(status: LoadLineStatus) -> ExpectedReceiptLineStatus {
+    match status {
+        LoadLineStatus::Pending => ExpectedReceiptLineStatus::Pending,
+        LoadLineStatus::Partial => ExpectedReceiptLineStatus::Partial,
+        LoadLineStatus::Received => ExpectedReceiptLineStatus::Received,
+        LoadLineStatus::Rejected => ExpectedReceiptLineStatus::Rejected,
+        LoadLineStatus::Missing => ExpectedReceiptLineStatus::Missing,
+    }
+}
+
+fn map_load_status(status: LoadStatus) -> V1Result<ExpectedReceivingLoadStatus> {
+    match status {
+        LoadStatus::Arrived => Ok(ExpectedReceivingLoadStatus::Arrived),
+        LoadStatus::Receiving => Ok(ExpectedReceivingLoadStatus::Receiving),
+        LoadStatus::Received => Ok(ExpectedReceivingLoadStatus::Received),
+        _ => Err(V1Error::internal(
+            "expected receipt returned an invalid load status",
+        )),
+    }
 }
 
 fn map_session(

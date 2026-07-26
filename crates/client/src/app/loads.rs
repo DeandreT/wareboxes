@@ -867,7 +867,6 @@ impl WareboxesApp {
                             }
                             for line in &load.lines {
                                 self.load_line_visual(ui, line);
-                                self.load_line_receipt_form(ui, load, line);
                                 ui.add_space(6.0);
                             }
                         }

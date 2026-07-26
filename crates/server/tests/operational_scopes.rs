@@ -62,26 +62,6 @@ fn api_request(
     request.body(body).unwrap()
 }
 
-fn expected_receipt_request(
-    token: &str,
-    tenant_id: TenantId,
-    load_line_id: i64,
-    idempotency_key: &str,
-    body: Value,
-) -> Request<Body> {
-    let mut request = api_request(
-        token,
-        tenant_id,
-        Method::POST,
-        &format!("/api/inbound/load-lines/{load_line_id}/receipts"),
-        Some(body),
-    );
-    request
-        .headers_mut()
-        .insert(IDEMPOTENCY_KEY_HEADER, idempotency_key.parse().unwrap());
-    request
-}
-
 async fn response_json<T: serde::de::DeserializeOwned>(response: axum::response::Response) -> T {
     let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()
@@ -252,34 +232,6 @@ async fn order_and_load_workflows_enforce_owner_and_facility_scopes() {
         None,
         None,
         Some(denied_location),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let allowed_line = repo::loads::add_line(
-        &db,
-        tenant_id,
-        administrator.id,
-        allowed_load,
-        item,
-        None,
-        5,
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let denied_line = repo::loads::add_line(
-        &db,
-        tenant_id,
-        administrator.id,
-        denied_load,
-        item,
-        None,
-        5,
-        None,
         None,
         None,
     )
@@ -516,41 +468,6 @@ async fn order_and_load_workflows_enforce_owner_and_facility_scopes() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!response_json::<bool>(response).await);
-
-    let response = app
-        .clone()
-        .oneshot(expected_receipt_request(
-            &token,
-            tenant_id,
-            denied_line,
-            "denied-line-receipt",
-            json!({
-                "receiving_location_id": denied_location,
-                "received_qty": 1,
-                "rejected_qty": 0,
-                "missing_qty": 0
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-
-    let response = app
-        .oneshot(expected_receipt_request(
-            &token,
-            tenant_id,
-            allowed_line,
-            "cross-facility-receipt",
-            json!({
-                "receiving_location_id": denied_location,
-                "received_qty": 1,
-                "rejected_qty": 0,
-                "missing_qty": 0
-            }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let denied_order = repo::orders::get_order(&db, tenant_id, denied_order)
         .await

@@ -3,18 +3,15 @@ use axum::Json;
 use serde::Deserialize;
 use wareboxes_core::dto::{
     AddLoad, AddLoadFile, AddLoadLine, AddLoadNote, ArriveLoad, LoadFileIdRequest, LoadIdRequest,
-    LoadNoteIdRequest, LoadUpdate, ReceiveExpectedInventory,
+    LoadNoteIdRequest, LoadUpdate,
 };
-use wareboxes_core::models::{
-    Load, LoadFileCategory, LoadStatus, LoadType, ReceiveExpectedInventoryResult,
-};
+use wareboxes_core::models::{Load, LoadFileCategory, LoadStatus, LoadType};
 
 use crate::auth::CurrentTenant;
 use crate::db::Db;
 use crate::error::{AppError, AppResult};
 use crate::permissions;
 use crate::repo;
-use crate::request_context::IdempotencyKey;
 use crate::routes::validate;
 use crate::state::AppState;
 
@@ -163,40 +160,6 @@ pub async fn mobile_arrive(
     )
     .await?;
     Ok(Json(ok))
-}
-
-pub async fn receive_expected_inventory(
-    State(state): State<AppState>,
-    user: CurrentTenant,
-    Path(load_line_id): Path<i64>,
-    idempotency_key: IdempotencyKey,
-    Json(body): Json<ReceiveExpectedInventory>,
-) -> AppResult<Json<ReceiveExpectedInventoryResult>> {
-    user.require_permission(&state.db, PERM).await?;
-    validate(&body)?;
-    let context = user.command_context(&idempotency_key);
-    Ok(Json(
-        repo::inbound_receipt::receive_expected_inventory(
-            &state.db,
-            &user.tenant,
-            &context,
-            load_line_id,
-            &repo::inbound_receipt::ReceiveExpectedInventoryCommand {
-                receiving_location_id: body.receiving_location_id,
-                received_qty: body.received_qty,
-                rejected_qty: body.rejected_qty,
-                missing_qty: body.missing_qty,
-                license_plate_id: body.license_plate_id,
-                license_plate_barcode: body.license_plate_barcode.as_deref(),
-                lot: body.lot.as_deref(),
-                serial: body.serial.as_deref(),
-                expiration: body.expiration,
-                exception_reason: body.exception_reason,
-                exception_note: body.exception_note.as_deref(),
-            },
-        )
-        .await?,
-    ))
 }
 
 pub async fn add(

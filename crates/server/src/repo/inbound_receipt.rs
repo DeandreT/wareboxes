@@ -16,7 +16,8 @@ use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, Journal
 use crate::repo::outbox::{self, NewOutboxEvent};
 use crate::repo::{inventory, license_plates};
 
-const OPERATION: &str = "inbound.receive_expected_inventory.v1";
+const INTERNAL_OPERATION: &str = "inbound.receive_expected_inventory.v1";
+const SCANNER_OPERATION: &str = "inbound.confirm_expected_receipt.v1";
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct ReceiveExpectedInventoryCommand<'a> {
@@ -34,6 +35,31 @@ pub struct ReceiveExpectedInventoryCommand<'a> {
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
+#[serde(tag = "disposition", rename_all = "snake_case")]
+pub enum ConfirmExpectedReceiptCommand<'a> {
+    Received {
+        item_barcode: &'a str,
+        receiving_location_barcode: &'a str,
+        quantity: i64,
+        license_plate_barcode: Option<&'a str>,
+        lot: Option<&'a str>,
+        serial: Option<&'a str>,
+        expiration: Option<Timestamp>,
+    },
+    Rejected {
+        item_barcode: &'a str,
+        quantity: i64,
+        reason: InboundReceiptExceptionReason,
+        note: Option<&'a str>,
+    },
+    Missing {
+        quantity: i64,
+        reason: InboundReceiptExceptionReason,
+        note: Option<&'a str>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
 struct ValidatedReceipt<'a> {
     receiving_location_id: Option<i64>,
     received_qty: i64,
@@ -46,6 +72,13 @@ struct ValidatedReceipt<'a> {
     expiration: Option<Timestamp>,
     exception_reason: Option<InboundReceiptExceptionReason>,
     exception_note: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct ValidatedScannerReceipt<'a> {
+    receipt: ValidatedReceipt<'a>,
+    item_barcode: Option<&'a str>,
+    receiving_location_barcode: Option<&'a str>,
 }
 
 fn validated_optional_text<'a>(
@@ -161,6 +194,127 @@ fn validate_command<'a>(
     })
 }
 
+fn required_text<'a>(value: &'a str, label: &str, maximum_characters: usize) -> AppResult<&'a str> {
+    validated_optional_text(Some(value), label, maximum_characters)?
+        .ok_or_else(|| AppError::internal(format!("validated {label} is missing")))
+}
+
+fn validate_scanner_command<'a>(
+    command: &'a ConfirmExpectedReceiptCommand<'a>,
+) -> AppResult<ValidatedScannerReceipt<'a>> {
+    match command {
+        ConfirmExpectedReceiptCommand::Received {
+            item_barcode,
+            receiving_location_barcode,
+            quantity,
+            license_plate_barcode,
+            lot,
+            serial,
+            expiration,
+        } => {
+            require_positive_quantity(*quantity)?;
+            Ok(ValidatedScannerReceipt {
+                receipt: ValidatedReceipt {
+                    receiving_location_id: None,
+                    received_qty: *quantity,
+                    rejected_qty: 0,
+                    missing_qty: 0,
+                    license_plate_id: None,
+                    license_plate_barcode: validated_optional_text(
+                        *license_plate_barcode,
+                        "license plate barcode",
+                        200,
+                    )?,
+                    lot: validated_optional_text(*lot, "lot", 200)?,
+                    serial: validated_optional_text(*serial, "serial", 200)?,
+                    expiration: *expiration,
+                    exception_reason: None,
+                    exception_note: None,
+                },
+                item_barcode: Some(required_text(item_barcode, "item barcode", 200)?),
+                receiving_location_barcode: Some(required_text(
+                    receiving_location_barcode,
+                    "receiving location barcode",
+                    200,
+                )?),
+            })
+        }
+        ConfirmExpectedReceiptCommand::Rejected {
+            item_barcode,
+            quantity,
+            reason,
+            note,
+        } => {
+            require_positive_quantity(*quantity)?;
+            let note = validated_optional_text(*note, "exception note", 1_000)?;
+            require_other_note(*reason, note)?;
+            Ok(ValidatedScannerReceipt {
+                receipt: ValidatedReceipt {
+                    receiving_location_id: None,
+                    received_qty: 0,
+                    rejected_qty: *quantity,
+                    missing_qty: 0,
+                    license_plate_id: None,
+                    license_plate_barcode: None,
+                    lot: None,
+                    serial: None,
+                    expiration: None,
+                    exception_reason: Some(*reason),
+                    exception_note: note,
+                },
+                item_barcode: Some(required_text(item_barcode, "item barcode", 200)?),
+                receiving_location_barcode: None,
+            })
+        }
+        ConfirmExpectedReceiptCommand::Missing {
+            quantity,
+            reason,
+            note,
+        } => {
+            require_positive_quantity(*quantity)?;
+            let note = validated_optional_text(*note, "exception note", 1_000)?;
+            require_other_note(*reason, note)?;
+            Ok(ValidatedScannerReceipt {
+                receipt: ValidatedReceipt {
+                    receiving_location_id: None,
+                    received_qty: 0,
+                    rejected_qty: 0,
+                    missing_qty: *quantity,
+                    license_plate_id: None,
+                    license_plate_barcode: None,
+                    lot: None,
+                    serial: None,
+                    expiration: None,
+                    exception_reason: Some(*reason),
+                    exception_note: note,
+                },
+                item_barcode: None,
+                receiving_location_barcode: None,
+            })
+        }
+    }
+}
+
+fn require_positive_quantity(quantity: i64) -> AppResult<()> {
+    if quantity > 0 {
+        Ok(())
+    } else {
+        Err(AppError::bad_request(
+            "expected receipt quantity must be positive",
+        ))
+    }
+}
+
+fn require_other_note(reason: InboundReceiptExceptionReason, note: Option<&str>) -> AppResult<()> {
+    if reason == InboundReceiptExceptionReason::Other && note.is_none() {
+        Err(AppError::bad_request(
+            "exception note is required when the reason is other",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn load_line_status(expected: i64, received: i64, rejected: i64, missing: i64) -> LoadLineStatus {
     if received + rejected + missing >= expected {
         if received > 0 {
@@ -216,6 +370,74 @@ fn compatible_expiration(
     }
 }
 
+async fn require_expected_item_barcode(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    item_id: i64,
+    item_barcode: &str,
+) -> AppResult<()> {
+    let barcode_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT id
+        FROM barcodes
+        WHERE tenant_id = $1
+          AND item_id = $2
+          AND deleted IS NULL
+          AND lower(name) = lower($3)
+        FOR SHARE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(item_id)
+    .bind(item_barcode)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if barcode_id.is_some() {
+        Ok(())
+    } else {
+        Err(AppError::conflict(
+            "item barcode does not match the expected receipt line",
+        ))
+    }
+}
+
+async fn require_expected_receiving_location(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    facility_id: i64,
+    dock_door_location_id: Option<i64>,
+    receiving_location_barcode: &str,
+) -> AppResult<i64> {
+    let Some(dock_door_location_id) = dock_door_location_id else {
+        return Err(AppError::conflict("load has no receiving dock assigned"));
+    };
+    sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM locations
+        WHERE tenant_id = $1
+          AND id = $2
+          AND facility_id = $3
+          AND deleted IS NULL
+          AND active
+          AND receivable
+          AND barcode = $4
+        FOR SHARE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(dock_door_location_id)
+    .bind(facility_id)
+    .bind(receiving_location_barcode)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| {
+        AppError::conflict(
+            "receiving location barcode does not match the load's active receiving dock",
+        )
+    })
+}
+
 async fn enqueue_receipt_event(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
@@ -227,9 +449,11 @@ async fn enqueue_receipt_event(
 ) -> AppResult<()> {
     let event_identity = request_hash(&(prepared.idempotency_key(), prepared.request_hash()))?;
     let event_key = format!("inbound-expected-receipt:{event_identity}");
+    let disposition = receipt_disposition(receipt);
     let payload = serde_json::json!({
         "load_id": result.load_id,
         "load_line_id": result.load_line_id,
+        "disposition": disposition,
         "inventory_transaction_id": result.inventory_transaction_id,
         "item_batch_id": result.item_batch_id,
         "inventory_balance_id": result.inventory_balance_id,
@@ -244,6 +468,7 @@ async fn enqueue_receipt_event(
         "exception_note": receipt.exception_note,
         "load_status": result.load_status.as_str(),
         "line_status": result.line_status.as_str(),
+        "remaining_quantity": result.remaining_quantity,
         "receive_completed": result.receive_completed,
     });
     outbox::enqueue(
@@ -258,7 +483,7 @@ async fn enqueue_receipt_event(
             aggregate_id: &event_identity,
             ordering_key: &event_key,
             aggregate_sequence: 1,
-            event_type: "inbound.expected_inventory.received",
+            event_type: "inbound.expected_receipt.confirmed",
             schema_version: 1,
             payload: &payload,
             occurred_at: now_iso(),
@@ -266,6 +491,16 @@ async fn enqueue_receipt_event(
     )
     .await
     .map(|_| ())
+}
+
+fn receipt_disposition(receipt: &ValidatedReceipt<'_>) -> &'static str {
+    if receipt.received_qty > 0 {
+        "received"
+    } else if receipt.rejected_qty > 0 {
+        "rejected"
+    } else {
+        "missing"
+    }
 }
 
 pub async fn receive_expected_inventory(
@@ -280,7 +515,58 @@ pub async fn receive_expected_inventory(
         return Err(AppError::bad_request("load line ID must be positive"));
     }
     let receipt = validate_command(command)?;
-    let prepared = PreparedCommand::new(context, OPERATION, &(load_line_id, receipt))?;
+    let prepared = PreparedCommand::new(context, INTERNAL_OPERATION, &(load_line_id, receipt))?;
+    execute_expected_receipt(
+        db,
+        access,
+        context,
+        load_line_id,
+        receipt,
+        None,
+        prepared,
+        INTERNAL_OPERATION,
+    )
+    .await
+}
+
+pub async fn confirm_expected_receipt(
+    db: &Db,
+    access: &TenantAccess,
+    context: &CommandContext,
+    load_line_id: i64,
+    command: &ConfirmExpectedReceiptCommand<'_>,
+) -> AppResult<ReceiveExpectedInventoryResult> {
+    require_command_context(access, context)?;
+    if load_line_id <= 0 {
+        return Err(AppError::bad_request("load line ID must be positive"));
+    }
+    let scanner_receipt = validate_scanner_command(command)?;
+    let prepared =
+        PreparedCommand::new(context, SCANNER_OPERATION, &(load_line_id, scanner_receipt))?;
+    execute_expected_receipt(
+        db,
+        access,
+        context,
+        load_line_id,
+        scanner_receipt.receipt,
+        Some(scanner_receipt),
+        prepared,
+        SCANNER_OPERATION,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_expected_receipt(
+    db: &Db,
+    access: &TenantAccess,
+    context: &CommandContext,
+    load_line_id: i64,
+    mut receipt: ValidatedReceipt<'_>,
+    scanner_receipt: Option<ValidatedScannerReceipt<'_>>,
+    prepared: PreparedCommand<'_>,
+    operation: &'static str,
+) -> AppResult<ReceiveExpectedInventoryResult> {
     let now = now_iso();
     let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, context.actor_id.get()).await?;
@@ -303,7 +589,7 @@ pub async fn receive_expected_inventory(
     let load_row = sqlx::query(
         r#"
         SELECT status AS load_status, type AS load_type, facility_id,
-               inventory_owner_id
+               inventory_owner_id, dock_door_location_id
         FROM loads
         WHERE tenant_id = $1
           AND id = $2
@@ -321,12 +607,11 @@ pub async fn receive_expected_inventory(
         r#"
         SELECT ll.item_id, ll.expected_qty, ll.received_qty, ll.rejected_qty,
                ll.missing_qty, ll.lot, ll.serial, ll.expiration,
-               item.packaging_unit AS uom
+               item.packaging_unit AS uom, item.deleted AS item_deleted
         FROM load_lines ll
         INNER JOIN items item
             ON item.tenant_id = ll.tenant_id
            AND item.id = ll.item_id
-           AND item.deleted IS NULL
         WHERE ll.tenant_id = $1
           AND ll.id = $2
           AND ll.load_id = $3
@@ -345,8 +630,6 @@ pub async fn receive_expected_inventory(
     let facility_id: i64 = load_row.try_get("facility_id")?;
     require_scope(&scope, inventory_owner_id, facility_id)?;
     let owner_facility = inventory_journal::owner_facility_scope(inventory_owner_id, facility_id)?;
-    inventory_journal::lock_active_owner_facility_tx(&mut tx, access.tenant_id, owner_facility)
-        .await?;
 
     if let Some(result) = prepared
         .replayed::<ReceiveExpectedInventoryResult>(&mut tx)
@@ -354,6 +637,17 @@ pub async fn receive_expected_inventory(
     {
         tx.commit().await?;
         return Ok(result);
+    }
+
+    inventory_journal::lock_active_owner_facility_tx(&mut tx, access.tenant_id, owner_facility)
+        .await?;
+    if line_row
+        .try_get::<Option<Timestamp>, _>("item_deleted")?
+        .is_some()
+    {
+        return Err(AppError::conflict(
+            "expected receipt line item is no longer active",
+        ));
     }
 
     let load_type = LoadType::parse(&load_row.try_get::<String, _>("load_type")?)
@@ -369,6 +663,30 @@ pub async fn receive_expected_inventory(
         return Err(AppError::conflict(
             "load must be arrived before receiving can begin",
         ));
+    }
+
+    if let Some(scanner_receipt) = scanner_receipt {
+        if let Some(item_barcode) = scanner_receipt.item_barcode {
+            require_expected_item_barcode(
+                &mut tx,
+                access.tenant_id,
+                line_row.try_get("item_id")?,
+                item_barcode,
+            )
+            .await?;
+        }
+        if let Some(receiving_location_barcode) = scanner_receipt.receiving_location_barcode {
+            receipt.receiving_location_id = Some(
+                require_expected_receiving_location(
+                    &mut tx,
+                    access.tenant_id,
+                    facility_id,
+                    load_row.try_get("dock_door_location_id")?,
+                    receiving_location_barcode,
+                )
+                .await?,
+            );
+        }
     }
 
     let expected_qty: i64 = line_row.try_get("expected_qty")?;
@@ -512,7 +830,7 @@ pub async fn receive_expected_inventory(
                 reference_type: Some("load_line"),
                 reference_id: Some(load_line_id),
                 correlation_id: Some(&context.request_id),
-                operation: OPERATION,
+                operation,
                 idempotency_key: Some(prepared.idempotency_key()),
                 request_hash: prepared.request_hash(),
                 record_idempotency: false,
@@ -682,6 +1000,7 @@ pub async fn receive_expected_inventory(
 
     let activity_metadata = serde_json::to_string(&serde_json::json!({
         "load_line_id": load_line_id,
+        "disposition": receipt_disposition(&receipt),
         "receiving_location_id": receipt.receiving_location_id,
         "license_plate_id": resolved_license_plate_id,
         "item_batch_id": item_batch_id,
@@ -697,8 +1016,8 @@ pub async fn receive_expected_inventory(
         r#"
         INSERT INTO load_activity
             (tenant_id, created, load_id, user_id, action, message, metadata_json)
-        VALUES ($1, $2, $3, $4, 'expected_inventory_received',
-                'expected inventory receipt recorded', $5)
+        VALUES ($1, $2, $3, $4, 'expected_receipt_confirmed',
+                'expected receipt confirmation recorded', $5)
         "#,
     )
     .bind(access.tenant_id.get())
@@ -721,6 +1040,7 @@ pub async fn receive_expected_inventory(
         cumulative_received_qty,
         cumulative_rejected_qty,
         cumulative_missing_qty,
+        remaining_quantity: expected_qty - cumulative_resolved_qty,
         receive_completed,
     };
     enqueue_receipt_event(

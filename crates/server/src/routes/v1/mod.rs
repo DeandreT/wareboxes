@@ -20,6 +20,10 @@ pub fn router() -> Router<AppState> {
             "/expected-receiving/loads/:load_id",
             get(expected_receiving::get_session),
         )
+        .route(
+            "/expected-receiving/lines/:load_line_id/confirmations",
+            post(expected_receiving::confirm),
+        )
         .route("/inventory/balances", get(inventory_balances::list))
         .route(
             "/license-plate-putaway-tasks",
