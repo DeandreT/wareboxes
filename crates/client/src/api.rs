@@ -2,6 +2,8 @@
 //! delivers results back to the egui app over an `mpsc` channel, requesting a
 //! repaint on completion.
 
+pub(crate) mod putaway;
+
 use std::sync::mpsc::Sender;
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -13,6 +15,8 @@ use wareboxes_core::models::{
     User,
 };
 use wareboxes_domain::TenantId;
+
+pub use putaway::{PutawayCommand, PutawayRequest, PutawayTransportEvent, PutawayTransportOutcome};
 
 #[derive(Debug)]
 pub enum ApiEvent {
@@ -41,6 +45,7 @@ pub enum ApiEvent {
     LicensePlateLookup(Option<LicensePlate>),
     Employees(Vec<Employee>),
     Audits(Vec<AuditWave>),
+    Putaway(PutawayTransportEvent),
     /// A mutation succeeded; carries a toast message + the screen to refresh.
     ActionDone(String, Screen),
     SettingsSaved(UserSettings),
@@ -50,6 +55,7 @@ pub enum ApiEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Screen {
+    Putaway,
     Orders,
     Users,
     Roles,
@@ -66,7 +72,8 @@ pub enum Screen {
 }
 
 impl Screen {
-    pub const ALL: [Screen; 13] = [
+    pub const ALL: [Screen; 14] = [
+        Screen::Putaway,
         Screen::Orders,
         Screen::Items,
         Screen::Locations,
@@ -84,6 +91,7 @@ impl Screen {
 
     pub fn title(self) -> &'static str {
         match self {
+            Screen::Putaway => "Putaway",
             Screen::Orders => "Orders",
             Screen::Users => "Users",
             Screen::Roles => "Roles",
@@ -103,6 +111,7 @@ impl Screen {
     /// Permission required to see the panel.
     pub fn permission(self) -> &'static str {
         match self {
+            Screen::Putaway => "wms",
             Screen::Orders => "orders",
             Screen::Items
             | Screen::Locations
@@ -146,8 +155,8 @@ impl ApiClient {
     }
 
     fn authenticated_headers(&self, request_headers: ehttp::Headers) -> ehttp::Headers {
-        let mut headers = self.headers();
-        headers.headers.extend(request_headers.headers);
+        let mut headers = request_headers;
+        headers.headers.extend(self.headers().headers);
         headers
     }
 
@@ -225,6 +234,7 @@ impl ApiClient {
 
     pub fn get_list(&self, screen: Screen) {
         let path = match screen {
+            Screen::Putaway => return,
             Screen::Orders => "/api/orders",
             Screen::Users => "/api/users",
             Screen::Roles => "/api/roles?show_self=true",
@@ -241,6 +251,7 @@ impl ApiClient {
         };
         let req = ehttp::Request::get(self.url(path));
         match screen {
+            Screen::Putaway => {}
             Screen::Orders => self.get_orders_page(100, 0, None, None),
             Screen::Users => self.send::<Vec<User>, _>(req, ApiEvent::Users),
             Screen::Roles => self.send::<Vec<Role>, _>(req, ApiEvent::Roles),
@@ -398,5 +409,6 @@ mod tests {
 
         assert_eq!(headers.get("Authorization"), Some("Bearer session-token"));
         assert_eq!(headers.get("Idempotency-Key"), Some("hold-command-1"));
+        assert_eq!(headers.get("Content-Type"), Some("application/json"));
     }
 }
