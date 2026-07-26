@@ -7,7 +7,9 @@ use axum::http::{header, Request, StatusCode};
 use common::*;
 use tokio::time::{sleep, timeout};
 use tower::ServiceExt;
-use wareboxes_core::models::{InventoryHoldReason, InventoryTransactionType, TenantAccess};
+use wareboxes_core::models::{
+    InboundReceiptExceptionReason, InventoryHoldReason, InventoryTransactionType, TenantAccess,
+};
 use wareboxes_domain::CommandContext;
 use wareboxes_server::auth::TENANT_ID_HEADER;
 use wareboxes_server::request_context::IDEMPOTENCY_KEY_HEADER;
@@ -586,24 +588,23 @@ async fn license_plate_cycle_count_locks_plate_before_balance() {
     fixture
         .assign_owner_to_facility(tenant_id, inventory_owner_id, facility_id)
         .await;
-    let location_id = fixture
-        .location(tenant_id, facility_id, "CYCLE-COUNT-LP-LOCK")
-        .await;
-    let item_id = fixture
-        .item(tenant_id, "Cycle Count LP Lock Item", "each")
-        .await;
-    let item_batch_id = repo::inventory::add_item_batch(
+    let location_id = repo::locations::add_location(
         &fixture.db,
         tenant_id,
-        inventory_owner_id,
-        item_id,
+        facility_id,
         None,
-        Some("CYCLE-COUNT-LP-LOCK-LOT"),
-        None,
-        None,
+        Some("CYCLE-COUNT-LP-LOCK"),
+        Some("Cycle Count LP Lock"),
+        "dock",
+        true,
+        false,
+        true,
     )
     .await
     .unwrap();
+    let item_id = fixture
+        .item(tenant_id, "Cycle Count LP Lock Item", "each")
+        .await;
     let license_plate_id = repo::license_plates::add_license_plate(
         &fixture.db,
         tenant_id,
@@ -614,85 +615,103 @@ async fn license_plate_cycle_count_locks_plate_before_balance() {
     .await
     .unwrap();
 
+    let load_id = repo::loads::add_load(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        facility_id,
+        inventory_owner_id,
+        LoadType::Inbound,
+        Some("CYCLE-COUNT-LP-LOCK-RECEIPT"),
+        None,
+        None,
+        None,
+        None,
+        Some(location_id),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let load_line_id = repo::loads::add_line(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        load_id,
+        item_id,
+        None,
+        10,
+        Some("CYCLE-COUNT-LP-LOCK-LOT"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo::loads::update_load(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        load_id,
+        Some(LoadStatus::Arrived),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let access = default_tenant_for_user(&fixture.db, user.id).await.unwrap();
+    repo::inbound_receipt::receive_expected_inventory(
+        &fixture.db,
+        &access,
+        &CycleCountFixture::command(&access, "cycle-count-lp-lock-receipt"),
+        load_line_id,
+        &repo::inbound_receipt::ReceiveExpectedInventoryCommand {
+            receiving_location_id: Some(location_id),
+            received_qty: 10,
+            rejected_qty: 0,
+            missing_qty: 0,
+            license_plate_id: Some(license_plate_id),
+            license_plate_barcode: None,
+            lot: Some("CYCLE-COUNT-LP-LOCK-LOT"),
+            serial: None,
+            expiration: None,
+            exception_reason: None::<InboundReceiptExceptionReason>,
+            exception_note: None,
+        },
+    )
+    .await
+    .unwrap();
     let mut setup_tx = tenant_tx(&fixture.db, tenant_id).await;
-    sqlx::query(
-        r#"
-        UPDATE license_plates
-        SET location_id = $1
-        WHERE tenant_id = $2 AND id = $3
-        "#,
-    )
-    .bind(location_id)
-    .bind(tenant_id.get())
-    .bind(license_plate_id)
-    .execute(&mut *setup_tx)
-    .await
-    .unwrap();
-    let receipt_transaction_id: i64 = sqlx::query_scalar(
-        r#"
-        INSERT INTO inventory_transactions (
-            tenant_id, inventory_owner_id, created, actor_user_id,
-            transaction_type, operation, idempotency_key, request_hash
-        )
-        VALUES ($1, $2, $3, $4, 'receive', $5, $5, $5)
-        RETURNING id
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(inventory_owner_id)
-    .bind(db::now_iso())
-    .bind(user.id)
-    .bind("cycle-count-license-plate-lock-receipt")
-    .fetch_one(&mut *setup_tx)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO inventory_entries (
-            tenant_id, inventory_owner_id, transaction_id, created, facility_id,
-            location_id, license_plate_id, item_batch_id, item_id, uom, lot,
-            expiration, serial, status, quantity_delta
-        )
-        SELECT $1, batch.inventory_owner_id, $2, $3, $4, $5, $6, batch.id,
-               batch.item_id, batch.uom, batch.lot, batch.expiration, batch.serial,
-               'available', 10
-        FROM item_batches batch
-        WHERE batch.tenant_id = $1 AND batch.id = $7
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(receipt_transaction_id)
-    .bind(db::now_iso())
-    .bind(facility_id)
-    .bind(location_id)
-    .bind(license_plate_id)
-    .bind(item_batch_id)
-    .execute(&mut *setup_tx)
-    .await
-    .unwrap();
     let inventory_balance_id: i64 = sqlx::query_scalar(
         r#"
-        INSERT INTO inventory_balances (
-            tenant_id, inventory_owner_id, created, facility_id, location_id,
-            license_plate_id, item_batch_id, item_id, uom, status,
-            qty_on_hand, qty_reserved
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'each', 'available', 10, 0)
-        RETURNING id
+        SELECT id
+        FROM inventory_balances
+        WHERE tenant_id = $1
+          AND inventory_owner_id = $2
+          AND license_plate_id = $3
+          AND item_id = $4
+          AND deleted IS NULL
         "#,
     )
     .bind(tenant_id.get())
     .bind(inventory_owner_id)
-    .bind(db::now_iso())
-    .bind(facility_id)
-    .bind(location_id)
     .bind(license_plate_id)
-    .bind(item_batch_id)
     .bind(item_id)
     .fetch_one(&mut *setup_tx)
     .await
     .unwrap();
-    setup_tx.commit().await.unwrap();
+    setup_tx.rollback().await.unwrap();
 
     let task_id = repo::tasks::create_item_location_cycle_count_task(
         &fixture.db,
@@ -708,7 +727,6 @@ async fn license_plate_cycle_count_locks_plate_before_balance() {
     )
     .await
     .unwrap();
-    let access = default_tenant_for_user(&fixture.db, user.id).await.unwrap();
     let start_context = CycleCountFixture::command(&access, "cycle-count-lp-lock-start");
     assert!(
         repo::tasks::start_task_in_scope(&fixture.db, &access, &start_context, task_id)

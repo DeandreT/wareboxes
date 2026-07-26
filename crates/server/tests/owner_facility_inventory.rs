@@ -493,12 +493,24 @@ async fn owner_facility_pair_is_enforced_across_inventory_boundaries() {
     .unwrap();
     tx.commit().await.unwrap();
     let admin_db = admin_db_for(&fixture.db).await;
+    sqlx::query(
+        "ALTER TABLE inventory_balances DISABLE TRIGGER inventory_balances_capture_projection_change",
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
     sqlx::query("UPDATE inventory_balances SET qty_on_hand = 0 WHERE tenant_id = $1 AND id = $2")
         .bind(tenant_id.get())
         .bind(hold_balance.id)
         .execute(&admin_db)
         .await
         .unwrap();
+    sqlx::query(
+        "ALTER TABLE inventory_balances ENABLE TRIGGER inventory_balances_capture_projection_change",
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
     admin_db.close().await;
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     assert_eq!(
@@ -588,10 +600,22 @@ async fn owner_facility_pair_is_enforced_across_inventory_boundaries() {
     .unwrap();
     let admin_db = admin_db_for(&fixture.db).await;
     sqlx::query(
+        "ALTER TABLE inventory_balances DISABLE TRIGGER inventory_balances_capture_projection_change",
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    sqlx::query(
         "UPDATE inventory_balances SET qty_on_hand = 0, qty_reserved = 0 WHERE tenant_id = $1 AND id = $2",
     )
     .bind(tenant_id.get())
     .bind(reservation_balance_id)
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "ALTER TABLE inventory_balances ENABLE TRIGGER inventory_balances_capture_projection_change",
+    )
     .execute(&admin_db)
     .await
     .unwrap();
@@ -695,6 +719,13 @@ async fn owner_facility_pair_is_enforced_across_inventory_boundaries() {
     .bind(db::now_iso())
     .bind(user.id)
     .bind("owner-facility-concurrent-receipt")
+    .fetch_one(&mut *inventory_tx)
+    .await
+    .unwrap();
+    sqlx::query_scalar::<_, String>(
+        "SELECT set_config('wareboxes.inventory_transaction_id', $1, true)",
+    )
+    .bind(concurrent_transaction_id.to_string())
     .fetch_one(&mut *inventory_tx)
     .await
     .unwrap();

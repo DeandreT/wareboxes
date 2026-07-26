@@ -6,7 +6,7 @@ use std::time::Duration;
 use common::*;
 use tokio::sync::{oneshot, Barrier};
 use tokio::time::{sleep, timeout};
-use wareboxes_core::models::InventoryHoldReason;
+use wareboxes_core::models::{InboundReceiptExceptionReason, InventoryHoldReason};
 use wareboxes_domain::CommandContext;
 
 async fn wait_until_balance_is_locked(db: &db::Db, tenant_id: TenantId, inventory_balance_id: i64) {
@@ -65,9 +65,20 @@ async fn license_plate_moves_serialize_allocations_and_holds() {
     fixture
         .assign_owner_to_facility(tenant_id, inventory_owner_id, facility_id)
         .await;
-    let source_location_id = fixture
-        .location(tenant_id, facility_id, "LP-RACE-SOURCE")
-        .await;
+    let source_location_id = repo::locations::add_location(
+        &fixture.db,
+        tenant_id,
+        facility_id,
+        None,
+        Some("LP-RACE-SOURCE"),
+        Some("LP Race Source"),
+        "dock",
+        true,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
     let destination_location_id = fixture
         .location(tenant_id, facility_id, "LP-RACE-DESTINATION")
         .await;
@@ -84,18 +95,6 @@ async fn license_plate_moves_serialize_allocations_and_holds() {
     let item_id = fixture
         .item(tenant_id, "LP Reservation Race Item", "each")
         .await;
-    let item_batch_id = repo::inventory::add_item_batch(
-        &fixture.db,
-        tenant_id,
-        inventory_owner_id,
-        item_id,
-        None,
-        Some("LP-RACE-LOT"),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
     let other_item_id = fixture
         .item(tenant_id, "LP Reservation Other Item", "each")
         .await;
@@ -121,96 +120,114 @@ async fn license_plate_moves_serialize_allocations_and_holds() {
     .await
     .unwrap();
 
+    let load_id = repo::loads::add_load(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        facility_id,
+        inventory_owner_id,
+        LoadType::Inbound,
+        Some("LP-RESERVATION-RACE-RECEIPT"),
+        None,
+        None,
+        None,
+        None,
+        Some(source_location_id),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let load_line_id = repo::loads::add_line(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        load_id,
+        item_id,
+        None,
+        5,
+        Some("LP-RACE-LOT"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo::loads::update_load(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        load_id,
+        Some(LoadStatus::Arrived),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let access = default_tenant_for_user(&fixture.db, user.id).await.unwrap();
+    let receipt = repo::inbound_receipt::receive_expected_inventory(
+        &fixture.db,
+        &access,
+        &CommandContext {
+            tenant_id,
+            actor_id: access.user_id,
+            request_id: "request-license-plate-reservation-race-receipt".into(),
+            idempotency_key: Some("license-plate-reservation-race-receipt".into()),
+        },
+        load_line_id,
+        &repo::inbound_receipt::ReceiveExpectedInventoryCommand {
+            receiving_location_id: Some(source_location_id),
+            received_qty: 5,
+            rejected_qty: 0,
+            missing_qty: 0,
+            license_plate_id: Some(license_plate_id),
+            license_plate_barcode: None,
+            lot: Some("LP-RACE-LOT"),
+            serial: None,
+            expiration: None,
+            exception_reason: None::<InboundReceiptExceptionReason>,
+            exception_note: None,
+        },
+    )
+    .await
+    .unwrap();
+    let item_batch_id = receipt.item_batch_id.unwrap();
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
-    sqlx::query(
-        r#"
-        UPDATE license_plates
-        SET location_id = $1
-        WHERE tenant_id = $2
-          AND inventory_owner_id = $3
-          AND id = $4
-        "#,
-    )
-    .bind(source_location_id)
-    .bind(tenant_id.get())
-    .bind(inventory_owner_id)
-    .bind(license_plate_id)
-    .execute(&mut *tx)
-    .await
-    .unwrap();
-    let receive_transaction_id: i64 = sqlx::query_scalar(
-        r#"
-        INSERT INTO inventory_transactions (
-            tenant_id, inventory_owner_id, created, actor_user_id,
-            transaction_type, operation, idempotency_key, request_hash
-        )
-        VALUES ($1, $2, $3, $4, 'receive', $5, $5, $5)
-        RETURNING id
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(inventory_owner_id)
-    .bind(db::now_iso())
-    .bind(user.id)
-    .bind("license-plate-reservation-race-receipt")
-    .fetch_one(&mut *tx)
-    .await
-    .unwrap();
-    sqlx::query(
-        r#"
-        INSERT INTO inventory_entries (
-            tenant_id, inventory_owner_id, transaction_id, created, facility_id,
-            location_id, license_plate_id, item_batch_id, item_id, uom, lot,
-            expiration, serial, status, quantity_delta
-        )
-        SELECT $1, batch.inventory_owner_id, $2, $3, $4, $5, $6, batch.id,
-               batch.item_id, batch.uom, batch.lot, batch.expiration, batch.serial,
-               'available', 5
-        FROM item_batches batch
-        WHERE batch.tenant_id = $1 AND batch.id = $7
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(receive_transaction_id)
-    .bind(db::now_iso())
-    .bind(facility_id)
-    .bind(source_location_id)
-    .bind(license_plate_id)
-    .bind(item_batch_id)
-    .execute(&mut *tx)
-    .await
-    .unwrap();
     let inventory_balance_id: i64 = sqlx::query_scalar(
         r#"
-        INSERT INTO inventory_balances (
-            tenant_id, inventory_owner_id, created, facility_id, location_id,
-            license_plate_id, item_batch_id, item_id, uom, status,
-            qty_on_hand, qty_reserved
-        )
-        VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, 'each', 'available', 5, 0
-        )
-        RETURNING id
+        SELECT id
+        FROM inventory_balances
+        WHERE tenant_id = $1
+          AND inventory_owner_id = $2
+          AND license_plate_id = $3
+          AND item_batch_id = $4
+          AND deleted IS NULL
         "#,
     )
     .bind(tenant_id.get())
     .bind(inventory_owner_id)
-    .bind(db::now_iso())
-    .bind(facility_id)
-    .bind(source_location_id)
     .bind(license_plate_id)
     .bind(item_batch_id)
-    .bind(item_id)
     .fetch_one(&mut *tx)
     .await
     .unwrap();
-    tx.commit().await.unwrap();
+    tx.rollback().await.unwrap();
 
     let order_id = fixture
         .order(tenant_id, "LP-RESERVATION-RACE-ORDER", inventory_owner_id)
         .await;
     let order_item_id = fixture.order_item(tenant_id, order_id, item_id, 1).await;
-    let access = default_tenant_for_user(&fixture.db, user.id).await.unwrap();
     let reservation = repo::inventory::create_inventory_reservation(
         &fixture.db,
         &access,

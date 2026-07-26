@@ -23,17 +23,8 @@ async fn inventory_balances_require_a_transaction_local_tenant_context() {
     let refs_a = balance_refs(&fixture, tenant_a, "Balance RLS A").await;
     let refs_b = balance_refs(&fixture, tenant_b, "Balance RLS B").await;
 
-    let mut tenant_a_tx = tenant_tx(&fixture.db, tenant_a).await;
-    let balance_a = insert_balance(&mut tenant_a_tx, refs_a, refs_a.source_location_id, 10)
-        .await
-        .unwrap();
-    tenant_a_tx.commit().await.unwrap();
-
-    let mut tenant_b_tx = tenant_tx(&fixture.db, tenant_b).await;
-    let balance_b = insert_balance(&mut tenant_b_tx, refs_b, refs_b.source_location_id, 20)
-        .await
-        .unwrap();
-    tenant_b_tx.commit().await.unwrap();
+    let balance_a = receive_balance(&fixture, user_a.id, refs_a, 10, "balance-rls-a").await;
+    let balance_b = receive_balance(&fixture, user_b.id, refs_b, 20, "balance-rls-b").await;
     let source_a = snapshot(&fixture.db, tenant_a, balance_a).await;
     let source_b = snapshot(&fixture.db, tenant_b, balance_b).await;
 
@@ -51,13 +42,11 @@ async fn inventory_balances_require_a_transaction_local_tenant_context() {
             .unwrap()
             .rows_affected();
     assert_eq!(unbound_updates, 0);
-    let unbound_deletes = sqlx::query("DELETE FROM inventory_balances WHERE id = $1")
+    assert!(sqlx::query("DELETE FROM inventory_balances WHERE id = $1")
         .bind(balance_a)
         .execute(&fixture.db)
         .await
-        .unwrap()
-        .rows_affected();
-    assert_eq!(unbound_deletes, 0);
+        .is_err());
 
     let mut unbound_tx = fixture.db.begin().await.unwrap();
     assert!(
@@ -69,6 +58,16 @@ async fn inventory_balances_require_a_transaction_local_tenant_context() {
     let mut unbound_tx = fixture.db.begin().await.unwrap();
     assert!(upsert_balance(&mut unbound_tx, refs_a, 5).await.is_err());
     unbound_tx.rollback().await.unwrap();
+
+    let mut tenant_a_tx = tenant_tx(&fixture.db, tenant_a).await;
+    assert!(sqlx::query(
+        "UPDATE inventory_balances SET qty_on_hand = qty_on_hand + 1 WHERE id = $1"
+    )
+    .bind(balance_a)
+    .execute(&mut *tenant_a_tx)
+    .await
+    .is_err());
+    tenant_a_tx.rollback().await.unwrap();
 
     let mut tenant_b_tx = tenant_tx(&fixture.db, tenant_b).await;
     let visible_ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM inventory_balances ORDER BY id")
@@ -84,13 +83,13 @@ async fn inventory_balances_require_a_transaction_local_tenant_context() {
             .unwrap()
             .rows_affected();
     assert_eq!(guessed_updates, 0);
-    let guessed_deletes = sqlx::query("DELETE FROM inventory_balances WHERE id = $1")
+    assert!(sqlx::query("DELETE FROM inventory_balances WHERE id = $1")
         .bind(balance_a)
         .execute(&mut *tenant_b_tx)
         .await
-        .unwrap()
-        .rows_affected();
-    assert_eq!(guessed_deletes, 0);
+        .is_err());
+    tenant_b_tx.rollback().await.unwrap();
+    let mut tenant_b_tx = tenant_tx(&fixture.db, tenant_b).await;
     assert!(
         insert_balance(&mut tenant_b_tx, refs_a, refs_a.target_location_id, 5)
             .await
@@ -124,6 +123,52 @@ async fn inventory_balances_require_a_transaction_local_tenant_context() {
     .is_err());
     assert_eq!(snapshot(&fixture.db, tenant_a, balance_a).await, source_a);
     assert_eq!(snapshot(&fixture.db, tenant_b, balance_b).await, source_b);
+}
+
+async fn receive_balance(
+    fixture: &Fixture,
+    user_id: i64,
+    refs: BalanceRefs,
+    qty: i64,
+    idempotency_key: &str,
+) -> i64 {
+    repo::inventory::receive_inventory(
+        &fixture.db,
+        refs.tenant_id,
+        user_id,
+        refs.item_batch_id,
+        refs.source_location_id,
+        qty,
+        None,
+        Some("inventory balance RLS fixture"),
+        None,
+        None,
+        idempotency_key,
+    )
+    .await
+    .unwrap();
+
+    let mut tx = tenant_tx(&fixture.db, refs.tenant_id).await;
+    let balance_id = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM inventory_balances
+        WHERE tenant_id = $1
+          AND inventory_owner_id = $2
+          AND location_id = $3
+          AND item_batch_id = $4
+          AND deleted IS NULL
+        "#,
+    )
+    .bind(refs.tenant_id.get())
+    .bind(refs.inventory_owner_id)
+    .bind(refs.source_location_id)
+    .bind(refs.item_batch_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    balance_id
 }
 
 async fn balance_refs(fixture: &Fixture, tenant_id: TenantId, name: &str) -> BalanceRefs {

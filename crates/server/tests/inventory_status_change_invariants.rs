@@ -206,6 +206,18 @@ async fn assert_exact_runtime_acls(db: &db::Db) {
             &["UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"],
         ),
         (
+            "inventory_projection_changes",
+            &["SELECT"],
+            &[
+                "INSERT",
+                "UPDATE",
+                "DELETE",
+                "TRUNCATE",
+                "REFERENCES",
+                "TRIGGER",
+            ],
+        ),
+        (
             "inventory_balances",
             &["SELECT", "INSERT", "UPDATE"],
             &["DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"],
@@ -278,6 +290,19 @@ async fn assert_exact_runtime_acls(db: &db::Db) {
         assert!(usage, "wareboxes_app must have USAGE on {sequence}");
         assert!(!select, "wareboxes_app must not have SELECT on {sequence}");
         assert!(!update, "wareboxes_app must not have UPDATE on {sequence}");
+    }
+    for privilege in ["USAGE", "SELECT", "UPDATE"] {
+        let granted: bool =
+            sqlx::query_scalar("SELECT has_sequence_privilege('wareboxes_app', $1, $2)")
+                .bind("inventory_projection_changes_id_seq")
+                .bind(privilege)
+                .fetch_one(&admin_db)
+                .await
+                .unwrap();
+        assert!(
+            !granted,
+            "wareboxes_app must not have {privilege} on inventory_projection_changes_id_seq"
+        );
     }
     admin_db.close().await;
 }

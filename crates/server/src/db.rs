@@ -391,6 +391,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'inventory_entries_tenant_isolation'
                 ),
                 (
+                    'inventory_projection_changes',
+                    'inventory_projection_changes_tenant_isolation'
+                ),
+                (
                     'license_plates',
                     'license_plates_tenant_isolation'
                 ),

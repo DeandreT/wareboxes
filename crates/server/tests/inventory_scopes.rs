@@ -807,13 +807,24 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         .unwrap();
     assert!(denied_reservation_record.deleted.is_none());
 
-    let mut balance_tx = tenant_tx(&db, tenant_id).await;
+    let admin_db = admin_db_for(&db).await;
+    sqlx::query(
+        "ALTER TABLE inventory_balances DISABLE TRIGGER inventory_balances_capture_projection_change",
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
     sqlx::query("UPDATE inventory_balances SET qty_on_hand = qty_on_hand + 1 WHERE id = ANY($1)")
         .bind(vec![allowed_balance_id, denied_balance_id])
-        .execute(&mut *balance_tx)
+        .execute(&admin_db)
         .await
         .unwrap();
-    balance_tx.commit().await.unwrap();
+    sqlx::query(
+        "ALTER TABLE inventory_balances ENABLE TRIGGER inventory_balances_capture_projection_change",
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
     let unscoped_issues = repo::inventory::get_reconciliation_issues(&db, tenant_id)
         .await
         .unwrap();
@@ -834,13 +845,24 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
     assert_eq!(issues[0].facility_id, allowed_facility);
     assert_eq!(issues[0].inventory_owner_id.get(), allowed_owner);
 
-    let mut balance_tx = tenant_tx(&db, tenant_id).await;
+    sqlx::query(
+        "ALTER TABLE inventory_balances DISABLE TRIGGER inventory_balances_capture_projection_change",
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
     sqlx::query("UPDATE inventory_balances SET qty_on_hand = qty_on_hand - 1 WHERE id = ANY($1)")
         .bind(vec![allowed_balance_id, denied_balance_id])
-        .execute(&mut *balance_tx)
+        .execute(&admin_db)
         .await
         .unwrap();
-    balance_tx.commit().await.unwrap();
+    sqlx::query(
+        "ALTER TABLE inventory_balances ENABLE TRIGGER inventory_balances_capture_projection_change",
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    admin_db.close().await;
     assert!(repo::inventory::get_reconciliation_issues(&db, tenant_id)
         .await
         .unwrap()

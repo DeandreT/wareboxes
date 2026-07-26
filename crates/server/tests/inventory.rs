@@ -587,13 +587,24 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
         .unwrap();
     let transaction_id = tenant_a_transactions[0].id;
     let entry_id = tenant_a_transactions[0].entries[0].id;
-    let mut tenant_a_tx = tenant_tx(&fixture.db, tenant_a).await;
+    let admin_db = admin_db_for(&fixture.db).await;
+    sqlx::query(
+        "ALTER TABLE inventory_balances DISABLE TRIGGER inventory_balances_capture_projection_change",
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
     sqlx::query("UPDATE inventory_balances SET qty_on_hand = qty_on_hand + 1 WHERE tenant_id = $1")
         .bind(tenant_a.get())
-        .execute(&mut *tenant_a_tx)
+        .execute(&admin_db)
         .await
         .unwrap();
-    tenant_a_tx.commit().await.unwrap();
+    sqlx::query(
+        "ALTER TABLE inventory_balances ENABLE TRIGGER inventory_balances_capture_projection_change",
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
 
     let unbound_visibility: (i64, i64, i64) = sqlx::query_as(
         r#"
@@ -633,21 +644,20 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
     .await
     .unwrap();
     assert_eq!(tenant_b_visibility, (0, 0, 0));
-    let cross_tenant_updates =
+    assert!(
         sqlx::query("UPDATE inventory_transactions SET reason = 'cross-tenant' WHERE id = $1")
             .bind(transaction_id)
             .execute(&mut *tenant_b_tx)
             .await
-            .unwrap()
-            .rows_affected();
-    assert_eq!(cross_tenant_updates, 0);
-    let cross_tenant_deletes = sqlx::query("DELETE FROM inventory_entries WHERE id = $1")
+            .is_err()
+    );
+    tenant_b_tx.rollback().await.unwrap();
+    let mut tenant_b_tx = tenant_tx(&fixture.db, tenant_b).await;
+    assert!(sqlx::query("DELETE FROM inventory_entries WHERE id = $1")
         .bind(entry_id)
         .execute(&mut *tenant_b_tx)
         .await
-        .unwrap()
-        .rows_affected();
-    assert_eq!(cross_tenant_deletes, 0);
+        .is_err());
     tenant_b_tx.rollback().await.unwrap();
 
     let mut unbound_tx = fixture.db.begin().await.unwrap();
@@ -702,13 +712,24 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
             .unwrap()
             .is_empty()
     );
-    let mut tenant_a_tx = tenant_tx(&fixture.db, tenant_a).await;
+    sqlx::query(
+        "ALTER TABLE inventory_balances DISABLE TRIGGER inventory_balances_capture_projection_change",
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
     sqlx::query("UPDATE inventory_balances SET qty_on_hand = qty_on_hand - 1 WHERE tenant_id = $1")
         .bind(tenant_a.get())
-        .execute(&mut *tenant_a_tx)
+        .execute(&admin_db)
         .await
         .unwrap();
-    tenant_a_tx.commit().await.unwrap();
+    sqlx::query(
+        "ALTER TABLE inventory_balances ENABLE TRIGGER inventory_balances_capture_projection_change",
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    admin_db.close().await;
 
     let other_owner_order = fixture.order(tenant_a, "OTHER-OWNER-ORDER", owner_b).await;
     let balance = repo::inventory::get_balances(&fixture.db, tenant_a, false)

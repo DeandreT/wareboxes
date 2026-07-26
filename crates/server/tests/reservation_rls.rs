@@ -141,29 +141,41 @@ async fn reservation_refs(
         .order(tenant_id, &format!("{name} Order"), inventory_owner_id)
         .await;
     let order_item_id = fixture.order_item(tenant_id, order_id, item_id, 10).await;
+    repo::inventory::receive_inventory(
+        &fixture.db,
+        tenant_id,
+        user_id,
+        item_batch_id,
+        location_id,
+        10,
+        None,
+        Some("reservation RLS fixture"),
+        None,
+        None,
+        &format!("reservation-rls-receipt-{tenant_id}"),
+    )
+    .await
+    .unwrap();
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let inventory_balance_id = sqlx::query_scalar(
         r#"
-        INSERT INTO inventory_balances (
-            tenant_id, inventory_owner_id, created, modified, facility_id,
-            location_id, item_batch_id, item_id, uom, status,
-            qty_on_hand, qty_reserved
-        )
-        VALUES ($1, $2, $3, $3, $4, $5, $6, $7, 'each', 'available', 10, 0)
-        RETURNING id
+        SELECT id
+        FROM inventory_balances
+        WHERE tenant_id = $1
+          AND inventory_owner_id = $2
+          AND location_id = $3
+          AND item_batch_id = $4
+          AND deleted IS NULL
         "#,
     )
     .bind(tenant_id.get())
     .bind(inventory_owner_id)
-    .bind(db::now_iso())
-    .bind(facility_id)
     .bind(location_id)
     .bind(item_batch_id)
-    .bind(item_id)
     .fetch_one(&mut *tx)
     .await
     .unwrap();
-    tx.commit().await.unwrap();
+    tx.rollback().await.unwrap();
     ReservationRefs {
         tenant_id,
         user_id,
