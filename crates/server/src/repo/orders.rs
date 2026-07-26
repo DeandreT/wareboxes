@@ -136,7 +136,10 @@ fn map_reservation(row: &sqlx::postgres::PgRow) -> AppResult<InventoryReservatio
     })
 }
 
-async fn items_by_order(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i64, Vec<OrderItem>>> {
+async fn items_by_order(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+) -> AppResult<HashMap<i64, Vec<OrderItem>>> {
     let rows = sqlx::query(
         r#"
         SELECT oi.id, oi.tenant_id, oi.inventory_owner_id, oi.created, oi.deleted,
@@ -147,7 +150,7 @@ async fn items_by_order(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i64, 
         "#,
     )
     .bind(tenant_id.get())
-    .fetch_all(db)
+    .fetch_all(&mut **tx)
     .await?;
     let mut map: HashMap<i64, Vec<OrderItem>> = HashMap::new();
     for r in &rows {
@@ -158,7 +161,7 @@ async fn items_by_order(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i64, 
 }
 
 async fn items_by_order_ids(
-    db: &Db,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     order_ids: &[i64],
 ) -> AppResult<HashMap<i64, Vec<OrderItem>>> {
@@ -176,7 +179,7 @@ async fn items_by_order_ids(
     )
     .bind(tenant_id.get())
     .bind(order_ids)
-    .fetch_all(db)
+    .fetch_all(&mut **tx)
     .await?;
     let mut map: HashMap<i64, Vec<OrderItem>> = HashMap::new();
     for r in &rows {
@@ -186,17 +189,18 @@ async fn items_by_order_ids(
     Ok(map)
 }
 
-async fn available_by_item(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<(i64, i64), i64>> {
-    available_by_item_in_scope(db, tenant_id, &ScopeBindings::unrestricted()).await
+async fn available_by_item(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+) -> AppResult<HashMap<(i64, i64), i64>> {
+    available_by_item_in_scope(tx, tenant_id, &ScopeBindings::unrestricted()).await
 }
 
 async fn available_by_item_in_scope(
-    db: &Db,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     scope: &ScopeBindings,
 ) -> AppResult<HashMap<(i64, i64), i64>> {
-    let mut tx = db.begin().await?;
-    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT inv.inventory_owner_id AS inventory_owner_id, inv.item_id AS item_id,
@@ -215,7 +219,7 @@ async fn available_by_item_in_scope(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     let mut map = HashMap::new();
     for r in &rows {
@@ -224,16 +228,13 @@ async fn available_by_item_in_scope(
             r.try_get("available_qty")?,
         );
     }
-    tx.commit().await?;
     Ok(map)
 }
 
 async fn reserved_by_order_item(
-    db: &Db,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
 ) -> AppResult<HashMap<(i64, i64), i64>> {
-    let mut tx = db.begin().await?;
-    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT r.order_id AS order_id,
@@ -251,7 +252,7 @@ async fn reserved_by_order_item(
         "#,
     )
     .bind(tenant_id.get())
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     let mut map = HashMap::new();
     for r in &rows {
@@ -260,7 +261,6 @@ async fn reserved_by_order_item(
             r.try_get("reserved_qty")?,
         );
     }
-    tx.commit().await?;
     Ok(map)
 }
 
@@ -297,11 +297,9 @@ fn apply_order_stock_state(
 }
 
 async fn tracking_by_order(
-    db: &Db,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
 ) -> AppResult<HashMap<i64, Vec<OrderTrackingNumber>>> {
-    let mut tx = db.begin().await?;
-    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, deleted, order_id,
@@ -312,27 +310,24 @@ async fn tracking_by_order(
         "#,
     )
     .bind(tenant_id.get())
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     let mut map: HashMap<i64, Vec<OrderTrackingNumber>> = HashMap::new();
     for r in &rows {
         let oid = r.try_get("order_id")?;
         map.entry(oid).or_default().push(map_tracking_number(r)?);
     }
-    tx.commit().await?;
     Ok(map)
 }
 
 async fn tracking_by_order_ids(
-    db: &Db,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     order_ids: &[i64],
 ) -> AppResult<HashMap<i64, Vec<OrderTrackingNumber>>> {
     if order_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let mut tx = db.begin().await?;
-    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, deleted, order_id,
@@ -344,19 +339,18 @@ async fn tracking_by_order_ids(
     )
     .bind(tenant_id.get())
     .bind(order_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     let mut map: HashMap<i64, Vec<OrderTrackingNumber>> = HashMap::new();
     for r in &rows {
         let oid = r.try_get("order_id")?;
         map.entry(oid).or_default().push(map_tracking_number(r)?);
     }
-    tx.commit().await?;
     Ok(map)
 }
 
 async fn reserved_by_order_ids_in_scope(
-    db: &Db,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     order_ids: &[i64],
     scope: &ScopeBindings,
@@ -364,8 +358,6 @@ async fn reserved_by_order_ids_in_scope(
     if order_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let mut tx = db.begin().await?;
-    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT r.order_id AS order_id,
@@ -391,7 +383,7 @@ async fn reserved_by_order_ids_in_scope(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     let mut map = HashMap::new();
     for r in &rows {
@@ -400,18 +392,15 @@ async fn reserved_by_order_ids_in_scope(
             r.try_get("reserved_qty")?,
         );
     }
-    tx.commit().await?;
     Ok(map)
 }
 
 async fn reservations_for_order_in_scope(
-    db: &Db,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     order_id: i64,
     scope: &ScopeBindings,
 ) -> AppResult<Vec<InventoryReservation>> {
-    let mut tx = db.begin().await?;
-    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, modified, deleted,
@@ -432,23 +421,20 @@ async fn reservations_for_order_in_scope(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     let reservations = rows
         .iter()
         .map(map_reservation)
         .collect::<AppResult<Vec<_>>>()?;
-    tx.commit().await?;
     Ok(reservations)
 }
 
 async fn activity_for_order(
-    db: &Db,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     order_id: i64,
 ) -> AppResult<Vec<OrderActivity>> {
-    let mut tx = db.begin().await?;
-    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, deleted, order_id, action
@@ -461,17 +447,18 @@ async fn activity_for_order(
     )
     .bind(tenant_id.get())
     .bind(order_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     let activity = rows
         .iter()
         .map(map_order_activity)
         .collect::<AppResult<Vec<_>>>()?;
-    tx.commit().await?;
     Ok(activity)
 }
 
 pub async fn get_orders(db: &Db, tenant_id: TenantId) -> AppResult<Vec<Order>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT o.id AS id, o.tenant_id AS tenant_id, o.order_key AS order_key, o.created AS created,
@@ -490,13 +477,14 @@ pub async fn get_orders(db: &Db, tenant_id: TenantId) -> AppResult<Vec<Order>> {
         "#,
     )
     .bind(tenant_id.get())
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    let mut items = items_by_order(db, tenant_id).await?;
-    let mut tracking = tracking_by_order(db, tenant_id).await?;
-    let available = available_by_item(db, tenant_id).await?;
-    let reserved = reserved_by_order_item(db, tenant_id).await?;
-    rows.iter()
+    let mut items = items_by_order(&mut tx, tenant_id).await?;
+    let mut tracking = tracking_by_order(&mut tx, tenant_id).await?;
+    let available = available_by_item(&mut tx, tenant_id).await?;
+    let reserved = reserved_by_order_item(&mut tx, tenant_id).await?;
+    let orders = rows
+        .iter()
         .map(|r| {
             let mut o = map_order(r)?;
             o.order_items = items.remove(&o.id).unwrap_or_default();
@@ -504,7 +492,9 @@ pub async fn get_orders(db: &Db, tenant_id: TenantId) -> AppResult<Vec<Order>> {
             apply_order_stock_state(&mut o, &available, &reserved);
             Ok(o)
         })
-        .collect()
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(orders)
 }
 
 pub async fn get_orders_page(
@@ -558,6 +548,8 @@ async fn get_orders_page_with_scope(
     scope: &ScopeBindings,
     parameters: OrderPageParameters<'_>,
 ) -> AppResult<OrderPage> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let status_text = parameters.status.map(|status| status.as_str().to_owned());
     let search_pattern = parameters
         .search
@@ -565,7 +557,7 @@ async fn get_orders_page_with_scope(
         .filter(|value| !value.is_empty())
         .map(|value| format!("%{value}%"));
     let summaries = order_summaries(
-        db,
+        &mut tx,
         tenant_id,
         scope,
         status_text.as_deref(),
@@ -599,7 +591,7 @@ async fn get_orders_page_with_scope(
     .bind(search_pattern.as_deref())
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
 
     let rows = sqlx::query(
@@ -639,24 +631,26 @@ async fn get_orders_page_with_scope(
     .bind(&scope.inventory_owner_ids)
     .bind(parameters.limit)
     .bind(parameters.offset)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
 
     let mut orders = rows.iter().map(map_order).collect::<AppResult<Vec<_>>>()?;
     let order_ids = orders.iter().map(|order| order.id).collect::<Vec<_>>();
-    let mut items = items_by_order_ids(db, tenant_id, &order_ids).await?;
-    let mut tracking = tracking_by_order_ids(db, tenant_id, &order_ids).await?;
-    let available = available_by_item_in_scope(db, tenant_id, scope).await?;
-    let reserved = reserved_by_order_ids_in_scope(db, tenant_id, &order_ids, scope).await?;
+    let mut items = items_by_order_ids(&mut tx, tenant_id, &order_ids).await?;
+    let mut tracking = tracking_by_order_ids(&mut tx, tenant_id, &order_ids).await?;
+    let available = available_by_item_in_scope(&mut tx, tenant_id, scope).await?;
+    let reserved = reserved_by_order_ids_in_scope(&mut tx, tenant_id, &order_ids, scope).await?;
     for order in &mut orders {
         order.order_items = items.remove(&order.id).unwrap_or_default();
         order.tracking_numbers = tracking.remove(&order.id).unwrap_or_default();
         apply_order_stock_state(order, &available, &reserved);
     }
-    Ok(OrderPage {
+    let page = OrderPage {
         page: Paged::new(orders, total, parameters.limit, parameters.offset),
         summaries,
-    })
+    };
+    tx.commit().await?;
+    Ok(page)
 }
 
 pub async fn get_order(db: &Db, tenant_id: TenantId, order_id: i64) -> AppResult<Option<Order>> {
@@ -678,6 +672,8 @@ async fn get_order_with_scope(
     order_id: i64,
     scope: &ScopeBindings,
 ) -> AppResult<Option<Order>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let row = sqlx::query(
         r#"
         SELECT o.id AS id, o.tenant_id AS tenant_id, o.order_key AS order_key, o.created AS created,
@@ -701,39 +697,40 @@ async fn get_order_with_scope(
     .bind(order_id)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
 
     let Some(row) = row else {
+        tx.commit().await?;
         return Ok(None);
     };
 
     let mut order = map_order(&row)?;
     let order_ids = [order.id];
-    let mut items = items_by_order_ids(db, tenant_id, &order_ids).await?;
-    let mut tracking = tracking_by_order_ids(db, tenant_id, &order_ids).await?;
-    let available = available_by_item_in_scope(db, tenant_id, scope).await?;
-    let reserved = reserved_by_order_ids_in_scope(db, tenant_id, &order_ids, scope).await?;
+    let mut items = items_by_order_ids(&mut tx, tenant_id, &order_ids).await?;
+    let mut tracking = tracking_by_order_ids(&mut tx, tenant_id, &order_ids).await?;
+    let available = available_by_item_in_scope(&mut tx, tenant_id, scope).await?;
+    let reserved = reserved_by_order_ids_in_scope(&mut tx, tenant_id, &order_ids, scope).await?;
 
     order.order_items = items.remove(&order.id).unwrap_or_default();
     order.tracking_numbers = tracking.remove(&order.id).unwrap_or_default();
-    order.reservations = reservations_for_order_in_scope(db, tenant_id, order.id, scope).await?;
-    order.activity = activity_for_order(db, tenant_id, order.id).await?;
+    order.reservations =
+        reservations_for_order_in_scope(&mut tx, tenant_id, order.id, scope).await?;
+    order.activity = activity_for_order(&mut tx, tenant_id, order.id).await?;
     apply_order_stock_state(&mut order, &available, &reserved);
 
+    tx.commit().await?;
     Ok(Some(order))
 }
 
 async fn order_summaries(
-    db: &Db,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     scope: &ScopeBindings,
     status: Option<&str>,
     search: Option<&str>,
 ) -> AppResult<Vec<SummaryCount>> {
-    let available = available_by_item_in_scope(db, tenant_id, scope).await?;
-    let mut tx = db.begin().await?;
-    bind_tenant_context(&mut tx, tenant_id).await?;
+    let available = available_by_item_in_scope(tx, tenant_id, scope).await?;
     let rows = sqlx::query(
         r#"
         SELECT o.id AS order_id,
@@ -795,7 +792,7 @@ async fn order_summaries(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
 
     #[derive(Default)]
@@ -872,11 +869,12 @@ async fn order_summaries(
         count,
     })
     .collect::<Vec<_>>();
-    tx.commit().await?;
     Ok(summaries)
 }
 
 pub async fn orders_by_load(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i64, Vec<Order>>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT lo.load_id AS load_id,
@@ -902,12 +900,12 @@ pub async fn orders_by_load(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i
         "#,
     )
     .bind(tenant_id.get())
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    let items = items_by_order(db, tenant_id).await?;
-    let tracking = tracking_by_order(db, tenant_id).await?;
-    let available = available_by_item(db, tenant_id).await?;
-    let reserved = reserved_by_order_item(db, tenant_id).await?;
+    let items = items_by_order(&mut tx, tenant_id).await?;
+    let tracking = tracking_by_order(&mut tx, tenant_id).await?;
+    let available = available_by_item(&mut tx, tenant_id).await?;
+    let reserved = reserved_by_order_item(&mut tx, tenant_id).await?;
     let mut by_load: HashMap<i64, Vec<Order>> = HashMap::new();
     for r in &rows {
         let load_id = r.try_get("load_id")?;
@@ -917,10 +915,13 @@ pub async fn orders_by_load(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i
         apply_order_stock_state(&mut order, &available, &reserved);
         by_load.entry(load_id).or_default().push(order);
     }
+    tx.commit().await?;
     Ok(by_load)
 }
 
 pub async fn orders_for_load(db: &Db, tenant_id: TenantId, load_id: i64) -> AppResult<Vec<Order>> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT o.id AS id, o.tenant_id AS tenant_id, o.order_key AS order_key, o.created AS created,
@@ -947,96 +948,32 @@ pub async fn orders_for_load(db: &Db, tenant_id: TenantId, load_id: i64) -> AppR
     )
     .bind(tenant_id.get())
     .bind(load_id)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let mut orders = rows.iter().map(map_order).collect::<AppResult<Vec<_>>>()?;
     if orders.is_empty() {
+        tx.commit().await?;
         return Ok(orders);
     }
 
     let order_ids = orders.iter().map(|order| order.id).collect::<Vec<_>>();
-    let item_rows = sqlx::query(
-        r#"
-        SELECT oi.id, oi.tenant_id, oi.inventory_owner_id, oi.created, oi.deleted,
-               oi.qty, oi.item_id, i.description AS item_description, oi.order_id, oi.item_batch_id
-        FROM order_items oi
-        LEFT JOIN items i ON i.tenant_id = oi.tenant_id AND i.id = oi.item_id
-        WHERE oi.tenant_id = $1 AND oi.deleted IS NULL AND oi.order_id = ANY($2)
-        "#,
+    let mut items = items_by_order_ids(&mut tx, tenant_id, &order_ids).await?;
+    let mut tracking = tracking_by_order_ids(&mut tx, tenant_id, &order_ids).await?;
+    let available = available_by_item(&mut tx, tenant_id).await?;
+    let reserved = reserved_by_order_ids_in_scope(
+        &mut tx,
+        tenant_id,
+        &order_ids,
+        &ScopeBindings::unrestricted(),
     )
-    .bind(tenant_id.get())
-    .bind(&order_ids)
-    .fetch_all(db)
     .await?;
-    let mut items: HashMap<i64, Vec<OrderItem>> = HashMap::new();
-    for r in &item_rows {
-        let oid = r.try_get("order_id")?;
-        items.entry(oid).or_default().push(map_order_item(r)?);
-    }
-
-    let mut tracking_tx = db.begin().await?;
-    bind_tenant_context(&mut tracking_tx, tenant_id).await?;
-    let tracking_rows = sqlx::query(
-        r#"
-        SELECT id, tenant_id, inventory_owner_id, created, deleted, order_id,
-               tracking_number, carrier, service
-        FROM order_tracking_numbers
-        WHERE tenant_id = $1 AND deleted IS NULL AND order_id = ANY($2)
-        ORDER BY id
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(&order_ids)
-    .fetch_all(&mut *tracking_tx)
-    .await?;
-    tracking_tx.commit().await?;
-    let mut tracking: HashMap<i64, Vec<OrderTrackingNumber>> = HashMap::new();
-    for r in &tracking_rows {
-        let oid = r.try_get("order_id")?;
-        tracking
-            .entry(oid)
-            .or_default()
-            .push(map_tracking_number(r)?);
-    }
-
-    let available = available_by_item(db, tenant_id).await?;
-    let mut reservation_tx = db.begin().await?;
-    bind_tenant_context(&mut reservation_tx, tenant_id).await?;
-    let reserved_rows = sqlx::query(
-        r#"
-        SELECT r.order_id AS order_id,
-               ib.item_id AS item_id,
-               COALESCE(SUM(r.qty), 0)::BIGINT AS reserved_qty
-        FROM inventory_reservations r
-        INNER JOIN item_batches ib
-            ON ib.tenant_id = r.tenant_id
-           AND ib.inventory_owner_id = r.inventory_owner_id
-           AND ib.id = r.item_batch_id
-        WHERE r.tenant_id = $1
-          AND r.deleted IS NULL
-          AND r.status = 'reserved'
-          AND r.order_id = ANY($2)
-        GROUP BY r.order_id, ib.item_id
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(&order_ids)
-    .fetch_all(&mut *reservation_tx)
-    .await?;
-    reservation_tx.commit().await?;
-    let mut reserved = HashMap::new();
-    for r in &reserved_rows {
-        reserved.insert(
-            (r.try_get("order_id")?, r.try_get("item_id")?),
-            r.try_get("reserved_qty")?,
-        );
-    }
 
     for order in &mut orders {
         order.order_items = items.remove(&order.id).unwrap_or_default();
         order.tracking_numbers = tracking.remove(&order.id).unwrap_or_default();
         apply_order_stock_state(order, &available, &reserved);
     }
+    tx.commit().await?;
     Ok(orders)
 }
 
@@ -1044,6 +981,7 @@ pub async fn add_order(db: &Db, tenant_id: TenantId, o: &NewOrder) -> AppResult<
     let inventory_owner_id = InventoryOwnerId::new(o.inventory_owner_id)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let address_id = address::insert_address_tx(
         &mut tx,
         tenant_id,
@@ -1129,6 +1067,29 @@ async fn update_order_inner(db: &Db, tenant_id: TenantId, u: &OrderUpdate) -> Ap
         || u.country.is_some();
 
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
+    let lock_sql = format!(
+        r#"
+        SELECT inventory_owner_id
+        FROM orders
+        WHERE tenant_id = $1
+          AND id = $2
+          AND deleted IS NULL
+          AND status IN {MUTABLE}
+          AND status <> 'cancelled'
+        FOR UPDATE
+        "#
+    );
+    let inventory_owner_id: Option<i64> = sqlx::query_scalar(&lock_sql)
+        .bind(tenant_id.get())
+        .bind(u.order_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(inventory_owner_id) = inventory_owner_id else {
+        tx.commit().await?;
+        return Ok(false);
+    };
+
     let new_address_id = if has_address {
         Some(
             address::insert_address_tx(
@@ -1147,7 +1108,7 @@ async fn update_order_inner(db: &Db, tenant_id: TenantId, u: &OrderUpdate) -> Ap
         None
     };
 
-    let sql = format!(
+    let updated_inventory_owner_id: Option<i64> = sqlx::query_scalar(
         r#"
         UPDATE orders SET
             order_key = COALESCE($1, order_key),
@@ -1160,38 +1121,35 @@ async fn update_order_inner(db: &Db, tenant_id: TenantId, u: &OrderUpdate) -> Ap
             address_id = COALESCE($8, address_id)
         WHERE tenant_id = $9
           AND id = $10
-          AND deleted IS NULL
-          AND status IN {MUTABLE}
-          AND status <> 'cancelled'
         RETURNING inventory_owner_id
-        "#
-    );
-    let inventory_owner_id: Option<i64> = sqlx::query_scalar(&sql)
-        .bind(u.order_key.as_deref())
-        .bind(u.status.map(|s| s.as_str()))
-        .bind(u.rush)
-        .bind(u.confirmed)
-        .bind(u.closed)
-        .bind(u.ship_by)
-        .bind(u.wave_id)
-        .bind(new_address_id)
-        .bind(tenant_id.get())
-        .bind(u.order_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    if let Some(inventory_owner_id) = inventory_owner_id {
-        let action = u
-            .status
-            .map(|status| format!("updated order status to {status}"))
-            .unwrap_or_else(|| "updated order".to_owned());
-        let inventory_owner_id = InventoryOwnerId::new(inventory_owner_id)
-            .map_err(|error| AppError::internal(error.to_string()))?;
-        insert_order_activity_tx(&mut tx, tenant_id, inventory_owner_id, u.order_id, &action)
-            .await?;
+        "#,
+    )
+    .bind(u.order_key.as_deref())
+    .bind(u.status.map(|s| s.as_str()))
+    .bind(u.rush)
+    .bind(u.confirmed)
+    .bind(u.closed)
+    .bind(u.ship_by)
+    .bind(u.wave_id)
+    .bind(new_address_id)
+    .bind(tenant_id.get())
+    .bind(u.order_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if updated_inventory_owner_id != Some(inventory_owner_id) {
+        return Err(AppError::internal(
+            "locked order was not updated inside the same transaction",
+        ));
     }
-    let changed = inventory_owner_id.is_some();
+    let action = u
+        .status
+        .map(|status| format!("updated order status to {status}"))
+        .unwrap_or_else(|| "updated order".to_owned());
+    let inventory_owner_id = InventoryOwnerId::new(inventory_owner_id)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    insert_order_activity_tx(&mut tx, tenant_id, inventory_owner_id, u.order_id, &action).await?;
     tx.commit().await?;
-    Ok(changed)
+    Ok(true)
 }
 
 pub async fn cancel_order_with_unpack_task(
@@ -1204,6 +1162,7 @@ pub async fn cancel_order_with_unpack_task(
     require_command_context(access, command)?;
     let prepared = PreparedCommand::new(command, "order.cancel.v1", &(order_id, facility_id))?;
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, command.actor_id.get()).await?;
     if !scope.all_facilities && !scope.facility_ids.contains(&facility_id) {
         return Err(AppError::forbidden());
@@ -1323,6 +1282,7 @@ pub async fn delete_order(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bo
 
 pub async fn restore_order(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let inventory_owner_id: Option<i64> = sqlx::query_scalar(
         r#"
         UPDATE orders

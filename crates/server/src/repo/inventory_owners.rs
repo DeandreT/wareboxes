@@ -7,7 +7,7 @@ use wareboxes_core::models::{Facility, InventoryOwner, OwnerScope, SiteScope};
 use wareboxes_core::CoreError;
 use wareboxes_domain::TenantId;
 
-use crate::db::{now_iso, Db};
+use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 
 fn map_inventory_owner(row: &sqlx::postgres::PgRow) -> AppResult<InventoryOwner> {
@@ -260,6 +260,8 @@ pub async fn update_inventory_owner_in_scope(
 /// Refuses if the inventory owner still has orders that are not
 /// shipped or cancelled.
 pub async fn delete_inventory_owner(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
     let open: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM orders
@@ -270,7 +272,7 @@ pub async fn delete_inventory_owner(db: &Db, tenant_id: TenantId, id: i64) -> Ap
     )
     .bind(id)
     .bind(tenant_id.get())
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
     if open > 0 {
         return Err(AppError::Core(CoreError::Conflict(
@@ -282,8 +284,9 @@ pub async fn delete_inventory_owner(db: &Db, tenant_id: TenantId, id: i64) -> Ap
             .bind(now_iso())
             .bind(tenant_id.get())
             .bind(id)
-            .execute(db)
+            .execute(&mut *tx)
             .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 

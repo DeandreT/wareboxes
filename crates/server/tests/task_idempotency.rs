@@ -762,13 +762,15 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     .await
     .unwrap();
     let order = fixture.order(tenant_id, "CREATE-REPLAY-ORDER", owner).await;
-    fixture.order_item(order, single, 3).await;
+    fixture.order_item(tenant_id, order, single, 3).await;
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("UPDATE orders SET status = 'cancelled' WHERE tenant_id = $1 AND id = $2")
         .bind(tenant_id.get())
         .bind(order)
-        .execute(&fixture.db)
+        .execute(&mut *tx)
         .await
         .unwrap();
+    tx.commit().await.unwrap();
 
     let cases = [
         (

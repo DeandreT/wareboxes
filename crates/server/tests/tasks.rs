@@ -441,7 +441,7 @@ async fn cancelled_order_unpack_task_is_facility_scoped_and_deduplicated() {
     let order_id = fixture
         .order(tenant_id, "CANCEL-TASK-1", inventory_owner)
         .await;
-    let order_item_id = fixture.order_item(order_id, item, 3).await;
+    let order_item_id = fixture.order_item(tenant_id, order_id, item, 3).await;
     let access = repo::tenants::access_for_user(db, user.id, tenant_id)
         .await
         .unwrap()
