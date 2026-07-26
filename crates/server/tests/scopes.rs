@@ -60,7 +60,8 @@ async fn response_json<T: serde::de::DeserializeOwned>(response: axum::response:
 
 #[tokio::test]
 async fn selected_resource_scopes_are_projected_and_enforced() {
-    let db = setup().await;
+    let fixture = Fixture::new().await;
+    let db = fixture.db.clone();
     let administrator = auth::register_user(&db, "scope-admin@test.com", "supersecret", None, None)
         .await
         .unwrap();
@@ -123,19 +124,9 @@ async fn selected_resource_scopes_are_projected_and_enforced() {
     .await
     .unwrap();
     for facility_id in [allowed_facility, denied_facility] {
-        sqlx::query(
-            r#"
-            INSERT INTO inventory_owner_facilities
-                (tenant_id, created, inventory_owner_id, facility_id)
-            VALUES ($1, CURRENT_TIMESTAMP, $2, $3)
-            "#,
-        )
-        .bind(tenant_id.get())
-        .bind(allowed_owner)
-        .bind(facility_id)
-        .execute(&db)
-        .await
-        .unwrap();
+        fixture
+            .assign_owner_to_facility(tenant_id, allowed_owner, facility_id)
+            .await;
     }
     let allowed_location = repo::locations::add_location(
         &db,

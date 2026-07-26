@@ -52,28 +52,6 @@ async fn response_json<T: serde::de::DeserializeOwned>(response: axum::response:
     serde_json::from_slice(&body).unwrap()
 }
 
-async fn assign_owner_to_facility(
-    db: &db::Db,
-    tenant_id: TenantId,
-    inventory_owner_id: i64,
-    facility_id: i64,
-) {
-    sqlx::query(
-        r#"
-        INSERT INTO inventory_owner_facilities
-            (tenant_id, created, inventory_owner_id, facility_id)
-        VALUES ($1, $2, $3, $4)
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(db::now_iso())
-    .bind(inventory_owner_id)
-    .bind(facility_id)
-    .execute(db)
-    .await
-    .unwrap();
-}
-
 async fn assign_item_to_owner(
     db: &db::Db,
     tenant_id: TenantId,
@@ -120,8 +98,12 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
     let denied_owner = fixture
         .inventory_owner(tenant_id, "Denied Audit Owner")
         .await;
-    assign_owner_to_facility(&fixture.db, tenant_id, allowed_owner, allowed_facility).await;
-    assign_owner_to_facility(&fixture.db, tenant_id, denied_owner, denied_facility).await;
+    fixture
+        .assign_owner_to_facility(tenant_id, allowed_owner, allowed_facility)
+        .await;
+    fixture
+        .assign_owner_to_facility(tenant_id, denied_owner, denied_facility)
+        .await;
 
     let allowed_location = fixture
         .location(tenant_id, allowed_facility, "AUDIT-ALLOWED")
@@ -561,6 +543,7 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
         .unwrap();
     assert!(response_json::<bool>(response).await);
 
+    let admin_db = admin_db_for(&fixture.db).await;
     sqlx::query(
         r#"
         UPDATE inventory_owner_facilities
@@ -571,7 +554,7 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
     .bind(tenant_id.get())
     .bind(allowed_owner)
     .bind(allowed_facility)
-    .execute(&fixture.db)
+    .execute(&admin_db)
     .await
     .unwrap();
 
@@ -608,7 +591,7 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
     .bind(tenant_id.get())
     .bind(allowed_owner)
     .bind(allowed_facility)
-    .execute(&fixture.db)
+    .execute(&admin_db)
     .await
     .unwrap();
     assert!(
@@ -621,7 +604,7 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
     )
     .bind(tenant_id.get())
     .bind(allowed_location)
-    .execute(&fixture.db)
+    .execute(&admin_db)
     .await
     .unwrap();
     assert!(!repo::audits::set_location_count_deleted(
@@ -636,9 +619,10 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
     sqlx::query("UPDATE locations SET deleted = NULL WHERE tenant_id = $1 AND id = $2")
         .bind(tenant_id.get())
         .bind(allowed_location)
-        .execute(&fixture.db)
+        .execute(&admin_db)
         .await
         .unwrap();
+    admin_db.close().await;
     assert!(repo::audits::set_location_count_deleted(
         &fixture.db,
         &restricted,

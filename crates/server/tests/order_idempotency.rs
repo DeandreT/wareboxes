@@ -113,24 +113,6 @@ async fn grant_orders(db: &db::Db, tenant_id: TenantId, user_id: i64, suffix: &s
     role
 }
 
-async fn assign_owner_to_facility(
-    db: &db::Db,
-    tenant_id: TenantId,
-    inventory_owner_id: i64,
-    facility_id: i64,
-) {
-    sqlx::query(
-        "INSERT INTO inventory_owner_facilities (tenant_id, created, inventory_owner_id, facility_id) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(tenant_id.get())
-    .bind(db::now_iso())
-    .bind(inventory_owner_id)
-    .bind(facility_id)
-    .execute(db)
-    .await
-    .unwrap();
-}
-
 #[tokio::test]
 async fn order_metadata_updates_are_replay_safe_and_scope_checked() {
     let fixture = Fixture::new().await;
@@ -309,7 +291,9 @@ async fn order_cancellation_commands_are_replay_safe() {
     let owner = fixture
         .inventory_owner(tenant_id, "Cancel Replay Owner")
         .await;
-    assign_owner_to_facility(&fixture.db, tenant_id, owner, facility).await;
+    fixture
+        .assign_owner_to_facility(tenant_id, owner, facility)
+        .await;
     let item = fixture.item(tenant_id, "Cancel Replay Item", "each").await;
     let order = fixture.order(tenant_id, "CANCEL-REPLAY-1", owner).await;
     fixture.order_item(tenant_id, order, item, 4).await;
@@ -568,7 +552,9 @@ async fn failed_unpack_work_rolls_back_order_cancellation_command() {
     let owner = fixture
         .inventory_owner(tenant_id, "Cancel Rollback Owner")
         .await;
-    assign_owner_to_facility(&fixture.db, tenant_id, owner, facility).await;
+    fixture
+        .assign_owner_to_facility(tenant_id, owner, facility)
+        .await;
     let item = fixture
         .item(tenant_id, "Cancel Rollback Item", "each")
         .await;

@@ -162,6 +162,7 @@ pub async fn get_loads(
     show_deleted: bool,
     show_deleted_notes: bool,
 ) -> AppResult<Vec<Load>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT l.id, l.tenant_id, l.created, l.deleted, l.facility_id, facility.name AS facility_name,
@@ -180,7 +181,7 @@ pub async fn get_loads(
     )
     .bind(tenant_id.get())
     .bind(show_deleted)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
 
     let note_rows = sqlx::query(
@@ -188,7 +189,7 @@ pub async fn get_loads(
     )
     .bind(tenant_id.get())
     .bind(show_deleted_notes)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let mut notes: HashMap<i64, Vec<LoadNote>> = HashMap::new();
     for r in &note_rows {
@@ -200,7 +201,7 @@ pub async fn get_loads(
         "SELECT id, tenant_id, created, deleted, load_id, original_name, name, path, content_type, category FROM load_files WHERE tenant_id = $1 AND deleted IS NULL",
     )
     .bind(tenant_id.get())
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let mut files: HashMap<i64, Vec<LoadFile>> = HashMap::new();
     for r in &file_rows {
@@ -218,13 +219,14 @@ pub async fn get_loads(
         "#,
     )
     .bind(tenant_id.get())
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let mut lines: HashMap<i64, Vec<LoadLine>> = HashMap::new();
     for r in &line_rows {
         let line = map_line(r)?;
         lines.entry(line.load_id).or_default().push(line);
     }
+    tx.commit().await?;
 
     let mut orders = orders::orders_by_load(db, tenant_id).await?;
 
@@ -293,6 +295,7 @@ async fn get_load_summaries_with_scope(
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<Load>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT l.id, l.tenant_id, l.created, l.deleted, l.facility_id, facility.name AS facility_name,
@@ -321,13 +324,14 @@ async fn get_load_summaries_with_scope(
         .bind(&scope.inventory_owner_ids)
         .bind(limit)
         .bind(offset)
-        .fetch_all(db)
+        .fetch_all(&mut *tx)
         .await?;
     let load_ids = rows
         .iter()
         .map(|r| r.try_get("id"))
         .collect::<Result<Vec<i64>, _>>()?;
     if load_ids.is_empty() {
+        tx.commit().await?;
         return Ok(Vec::new());
     }
 
@@ -342,13 +346,14 @@ async fn get_load_summaries_with_scope(
     )
     .bind(tenant_id.get())
     .bind(&load_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     let mut lines: HashMap<i64, Vec<LoadLine>> = HashMap::new();
     for r in &line_rows {
         let line = map_line(r)?;
         lines.entry(line.load_id).or_default().push(line);
     }
+    tx.commit().await?;
 
     rows.iter()
         .map(|r| {
@@ -392,6 +397,7 @@ async fn get_load_with_scope(
     load_id: i64,
     show_deleted_notes: bool,
 ) -> AppResult<Option<Load>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let row = sqlx::query(
         r#"
         SELECT l.id, l.tenant_id, l.created, l.deleted, l.facility_id, facility.name AS facility_name,
@@ -417,9 +423,10 @@ async fn get_load_with_scope(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {
+        tx.commit().await?;
         return Ok(None);
     };
     let mut load = map_load(&row)?;
@@ -430,7 +437,7 @@ async fn get_load_with_scope(
     .bind(tenant_id.get())
     .bind(load_id)
     .bind(show_deleted_notes)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     for r in &note_rows {
         load.notes.push(map_note(r)?);
@@ -441,7 +448,7 @@ async fn get_load_with_scope(
     )
     .bind(tenant_id.get())
     .bind(load_id)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     for r in &file_rows {
         load.files.push(map_file(r)?);
@@ -458,11 +465,12 @@ async fn get_load_with_scope(
     )
     .bind(tenant_id.get())
     .bind(load_id)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
     for r in &line_rows {
         load.lines.push(map_line(r)?);
     }
+    tx.commit().await?;
 
     load.orders = orders::orders_for_load(db, tenant_id, load_id).await?;
 

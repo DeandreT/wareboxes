@@ -60,16 +60,9 @@ async fn dimensions_are_tenant_scoped_and_item_creation_is_atomic() {
 
     let owner_a = fixture.inventory_owner(tenant_a, "Dimension Owner A").await;
     let facility_a = fixture.facility(tenant_a, "Dimension Facility A").await;
-    sqlx::query(
-        "INSERT INTO inventory_owner_facilities (tenant_id, created, inventory_owner_id, facility_id) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(tenant_a.get())
-    .bind(db::now_iso())
-    .bind(owner_a)
-    .bind(facility_a)
-    .execute(&fixture.db)
-    .await
-    .unwrap();
+    fixture
+        .assign_owner_to_facility(tenant_a, owner_a, facility_a)
+        .await;
     let plate_a = repo::license_plates::add_license_plate(
         &fixture.db,
         tenant_a,

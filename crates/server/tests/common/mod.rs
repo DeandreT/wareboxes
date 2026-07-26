@@ -273,6 +273,30 @@ impl Fixture {
             .unwrap()
     }
 
+    pub async fn assign_owner_to_facility(
+        &self,
+        tenant_id: TenantId,
+        inventory_owner_id: i64,
+        facility_id: i64,
+    ) {
+        let admin_db = admin_db_for(&self.db).await;
+        sqlx::query(
+            r#"
+            INSERT INTO inventory_owner_facilities
+                (tenant_id, created, inventory_owner_id, facility_id)
+            VALUES ($1, $2, $3, $4)
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(db::now_iso())
+        .bind(inventory_owner_id)
+        .bind(facility_id)
+        .execute(&admin_db)
+        .await
+        .unwrap();
+        admin_db.close().await;
+    }
+
     pub async fn location(&self, tenant_id: TenantId, facility_id: i64, scan_code: &str) -> i64 {
         repo::locations::add_location(
             &self.db,

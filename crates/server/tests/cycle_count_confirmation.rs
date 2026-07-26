@@ -43,20 +43,9 @@ impl CycleCountFixture {
         let owner_id = fixture
             .inventory_owner(tenant_id, &format!("Cycle Count {suffix} Owner"))
             .await;
-        sqlx::query(
-            r#"
-            INSERT INTO inventory_owner_facilities
-                (tenant_id, created, inventory_owner_id, facility_id)
-            VALUES ($1, $2, $3, $4)
-            "#,
-        )
-        .bind(tenant_id.get())
-        .bind(db::now_iso())
-        .bind(owner_id)
-        .bind(facility_id)
-        .execute(&fixture.db)
-        .await
-        .unwrap();
+        fixture
+            .assign_owner_to_facility(tenant_id, owner_id, facility_id)
+            .await;
         let item_id = fixture
             .item(tenant_id, &format!("Cycle Count {suffix} Item"), "each")
             .await;

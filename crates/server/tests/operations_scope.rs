@@ -129,16 +129,9 @@ async fn workforce_and_inventory_audits_are_tenant_isolated() {
         (tenant_a, owner_a, facility_a),
         (tenant_b, owner_b, facility_b),
     ] {
-        sqlx::query(
-            "INSERT INTO inventory_owner_facilities (tenant_id, created, inventory_owner_id, facility_id) VALUES ($1, $2, $3, $4)",
-        )
-        .bind(tenant_id.get())
-        .bind(db::now_iso())
-        .bind(owner_id)
-        .bind(facility_id)
-        .execute(&fixture.db)
-        .await
-        .unwrap();
+        fixture
+            .assign_owner_to_facility(tenant_id, owner_id, facility_id)
+            .await;
     }
     let access_a = repo::tenants::access_for_user(&fixture.db, operator.id, tenant_a)
         .await

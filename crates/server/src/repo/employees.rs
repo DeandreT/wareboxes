@@ -4,7 +4,7 @@ use sqlx::{Postgres, Row, Transaction};
 use wareboxes_core::models::{Employee, SiteScope, Timestamp};
 use wareboxes_domain::{FacilityId, TenantId};
 
-use crate::db::Db;
+use crate::db::{begin_tenant_transaction, Db};
 use crate::error::{AppError, AppResult};
 
 const EMPLOYEE_COLUMNS: &str = r#"
@@ -107,7 +107,6 @@ async fn lock_active_facilities(
         SELECT id
         FROM facilities
         WHERE tenant_id = $1 AND id = ANY($2) AND deleted IS NULL
-        FOR SHARE
         "#,
     )
     .bind(tenant_id.get())
@@ -213,14 +212,17 @@ pub async fn get_employees_in_scope(
         ORDER BY employee.id
         "#,
     );
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(&sql)
         .bind(tenant_id.get())
         .bind(show_deleted)
         .bind(site_scope.all_facilities)
         .bind(&facility_ids)
-        .fetch_all(db)
+        .fetch_all(&mut *tx)
         .await?;
-    rows.iter().map(map).collect()
+    let employees = rows.iter().map(map).collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(employees)
 }
 
 pub struct NewEmployee<'a> {
@@ -240,7 +242,7 @@ pub async fn add_employee(
     site_scope: &SiteScope,
     employee: &NewEmployee<'_>,
 ) -> AppResult<i64> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     lock_active_facilities(&mut tx, tenant_id, site_scope, employee.facility_ids).await?;
 
     let id: i64 = sqlx::query_scalar(
@@ -296,7 +298,7 @@ pub async fn update_employee(
     employee_id: i64,
     changes: &EmployeeChanges<'_>,
 ) -> AppResult<bool> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     if !lock_mutable_employee(&mut tx, tenant_id, site_scope, employee_id).await? {
         tx.rollback().await?;
         return Ok(false);
@@ -370,7 +372,7 @@ pub async fn set_employee_deleted(
     employee_id: i64,
     deleted: bool,
 ) -> AppResult<bool> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     if !lock_mutable_employee(&mut tx, tenant_id, site_scope, employee_id).await? {
         tx.rollback().await?;
         return Ok(false);

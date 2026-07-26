@@ -16,12 +16,15 @@ async fn facilities_listing_filters_deleted() {
     let gone = repo::facilities::add_facility(&db, tenant_id, "Old DC")
         .await
         .unwrap();
-    sqlx::query("UPDATE facilities SET deleted = $1 WHERE id = $2")
+    let admin_db = admin_db_for(&db).await;
+    sqlx::query("UPDATE facilities SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(db::now_iso())
+        .bind(tenant_id.get())
         .bind(gone)
-        .execute(&db)
+        .execute(&admin_db)
         .await
         .unwrap();
+    admin_db.close().await;
 
     let active = repo::facilities::get_facilities(&db, tenant_id, false)
         .await
@@ -49,12 +52,15 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     let deleted_facility = repo::facilities::add_facility(&db, tenant_id, "Deleted DC")
         .await
         .unwrap();
-    sqlx::query("UPDATE facilities SET deleted = $1 WHERE id = $2")
+    let admin_db = admin_db_for(&db).await;
+    sqlx::query("UPDATE facilities SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(db::now_iso())
+        .bind(tenant_id.get())
         .bind(deleted_facility)
-        .execute(&db)
+        .execute(&admin_db)
         .await
         .unwrap();
+    admin_db.close().await;
 
     let inventory_owner = repo::inventory_owners::add_inventory_owner(
         &db,
