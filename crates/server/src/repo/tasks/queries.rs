@@ -131,6 +131,7 @@ async fn get_tasks_with_scope(
               OR EXISTS (SELECT 1 FROM cycle_count_item_location_tasks d WHERE d.tenant_id = work_tasks.tenant_id AND d.task_id = work_tasks.id AND d.location_id = $6)
               OR EXISTS (SELECT 1 FROM cycle_count_location_tasks d WHERE d.tenant_id = work_tasks.tenant_id AND d.task_id = work_tasks.id AND d.location_id = $6)
               OR EXISTS (SELECT 1 FROM break_master_pack_tasks d WHERE d.tenant_id = work_tasks.tenant_id AND d.task_id = work_tasks.id AND d.location_id = $6)
+              OR EXISTS (SELECT 1 FROM putaway_tasks d WHERE d.tenant_id = work_tasks.tenant_id AND d.task_id = work_tasks.id AND (d.source_location_id = $6 OR d.destination_location_id = $6))
           )
           AND (
               $7::BIGINT IS NULL

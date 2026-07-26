@@ -1107,6 +1107,7 @@ pub struct ReceiveExpectedInventoryResult {
     pub load_id: i64,
     pub load_line_id: i64,
     pub inventory_transaction_id: Option<i64>,
+    pub inventory_balance_id: Option<i64>,
     pub item_batch_id: Option<i64>,
     pub license_plate_id: Option<i64>,
     pub load_status: LoadStatus,
@@ -1436,6 +1437,7 @@ pub enum WorkTaskType {
     CycleCountLocation,
     BreakMasterPack,
     UnpackCancelledOrder,
+    Putaway,
 }
 
 impl WorkTaskType {
@@ -1445,6 +1447,7 @@ impl WorkTaskType {
             WorkTaskType::CycleCountLocation => "cycle_count_location",
             WorkTaskType::BreakMasterPack => "break_master_pack",
             WorkTaskType::UnpackCancelledOrder => "unpack_cancelled_order",
+            WorkTaskType::Putaway => "putaway",
         }
     }
 
@@ -1454,6 +1457,7 @@ impl WorkTaskType {
             "cycle_count_location" => WorkTaskType::CycleCountLocation,
             "break_master_pack" => WorkTaskType::BreakMasterPack,
             "unpack_cancelled_order" => WorkTaskType::UnpackCancelledOrder,
+            "putaway" => WorkTaskType::Putaway,
             _ => return None,
         })
     }
@@ -1556,6 +1560,25 @@ pub struct WorkTask {
     pub release_count: i64,
     pub completed_at: Option<Timestamp>,
     pub metadata_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PutawayConfirmation {
+    pub tenant_id: TenantId,
+    pub task_id: i64,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub source_inventory_balance_id: i64,
+    pub destination_inventory_balance_id: i64,
+    pub source_location_id: i64,
+    pub destination_location_id: i64,
+    pub item_batch_id: i64,
+    pub item_id: i64,
+    pub inventory_status: InventoryStatus,
+    pub quantity: i64,
+    pub inventory_transaction_id: i64,
+    pub confirmed_by: i64,
+    pub confirmed_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

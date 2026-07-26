@@ -276,6 +276,7 @@ async fn canonical_expected_receipt_contract_is_replay_safe_and_fail_closed() {
             load_id,
             load_line_id: replay_line_id,
             inventory_transaction_id: first.inventory_transaction_id,
+            inventory_balance_id: first.inventory_balance_id,
             item_batch_id: first.item_batch_id,
             license_plate_id: None,
             load_status: LoadStatus::Receiving,
@@ -287,6 +288,7 @@ async fn canonical_expected_receipt_contract_is_replay_safe_and_fail_closed() {
         }
     );
     assert!(first.inventory_transaction_id.is_some());
+    assert!(first.inventory_balance_id.is_some());
     assert!(first.item_batch_id.is_some());
 
     let effects_after_first = receipt_effects(&fixture.db, tenant_id, replay_line_id).await;
