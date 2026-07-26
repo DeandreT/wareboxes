@@ -1,6 +1,7 @@
 mod common;
 
 use common::*;
+use wareboxes_domain::CommandContext;
 
 #[tokio::test]
 async fn order_and_load_mutations_write_activity_history() {
@@ -25,12 +26,8 @@ async fn order_and_load_mutations_write_activity_history() {
     let update = OrderUpdate {
         order_id,
         order_key: None,
-        status: Some(OrderStatus::Held),
-        rush: None,
-        confirmed: None,
-        closed: None,
+        rush: Some(true),
         ship_by: None,
-        wave_id: None,
         line1: None,
         line2: None,
         city: None,
@@ -38,9 +35,21 @@ async fn order_and_load_mutations_write_activity_history() {
         postal_code: None,
         country: None,
     };
-    assert!(repo::orders::update_order(&db, tenant_id, &update)
+    let access = repo::tenants::access_for_user(&db, user.id, tenant_id)
         .await
-        .unwrap());
+        .unwrap()
+        .unwrap();
+    let command = CommandContext {
+        tenant_id,
+        actor_id: access.user_id,
+        request_id: "activity-order-update".to_owned(),
+        idempotency_key: Some("activity-order-update".to_owned()),
+    };
+    assert!(
+        repo::orders::update_order_metadata(&db, &access, &command, &update)
+            .await
+            .unwrap()
+    );
     assert!(repo::orders::delete_order(&db, tenant_id, order_id)
         .await
         .unwrap());
@@ -61,7 +70,7 @@ async fn order_and_load_mutations_write_activity_history() {
         order_actions,
         vec![
             "created order",
-            "updated order status to held",
+            "updated order metadata",
             "deleted order",
             "restored order",
         ]

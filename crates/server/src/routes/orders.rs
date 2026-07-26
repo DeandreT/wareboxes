@@ -81,14 +81,13 @@ pub async fn add(
 pub async fn update(
     State(state): State<AppState>,
     user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
     Json(body): Json<OrderUpdate>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    if !repo::access::order_is_accessible(&state.db, &user.tenant, body.order_id, false).await? {
-        return Ok(Json(false));
-    }
-    let ok = repo::orders::update_order(&state.db, user.tenant.tenant_id, &body).await?;
+    let command = user.command_context(&idempotency_key);
+    let ok = repo::orders::update_order_metadata(&state.db, &user.tenant, &command, &body).await?;
     Ok(Json(ok))
 }
 

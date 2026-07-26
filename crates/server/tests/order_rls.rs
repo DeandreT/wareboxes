@@ -1,6 +1,7 @@
 mod common;
 
 use common::*;
+use wareboxes_domain::CommandContext;
 
 #[derive(Clone, Copy)]
 struct OrderRefs {
@@ -141,12 +142,8 @@ async fn order_aggregate_requires_a_transaction_local_tenant_context() {
     let guessed_update = OrderUpdate {
         order_id: refs_a.order_id,
         order_key: None,
-        status: None,
         rush: None,
-        confirmed: None,
-        closed: None,
         ship_by: None,
-        wave_id: None,
         line1: Some("Must not be inserted".to_owned()),
         line2: None,
         city: None,
@@ -154,11 +151,24 @@ async fn order_aggregate_requires_a_transaction_local_tenant_context() {
         postal_code: None,
         country: None,
     };
-    assert!(
-        !repo::orders::update_order(&fixture.db, tenant_b, &guessed_update)
-            .await
-            .unwrap()
-    );
+    let tenant_b_access = repo::tenants::access_for_user(&fixture.db, user_b.id, tenant_b)
+        .await
+        .unwrap()
+        .unwrap();
+    let command = CommandContext {
+        tenant_id: tenant_b,
+        actor_id: tenant_b_access.user_id,
+        request_id: "order-rls-guessed-update".to_owned(),
+        idempotency_key: Some("order-rls-guessed-update".to_owned()),
+    };
+    assert!(!repo::orders::update_order_metadata(
+        &fixture.db,
+        &tenant_b_access,
+        &command,
+        &guessed_update
+    )
+    .await
+    .unwrap());
     assert_eq!(
         address_count(&fixture.db, tenant_b).await,
         tenant_b_address_count

@@ -8,6 +8,7 @@ use tower::ServiceExt;
 use wareboxes_core::dto::{OrderPage, UpdateUserAccessScope};
 use wareboxes_core::models::{Load, LoadFileCategory, LoadType, Order};
 use wareboxes_server::auth::TENANT_ID_HEADER;
+use wareboxes_server::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_server::routes;
 use wareboxes_server::state::AppState;
 
@@ -323,17 +324,18 @@ async fn order_and_load_workflows_enforce_owner_and_facility_scopes() {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(response_json::<Option<Order>>(response).await.is_none());
 
-    let response = app
-        .clone()
-        .oneshot(api_request(
-            &token,
-            tenant_id,
-            Method::POST,
-            "/api/orders/update",
-            Some(json!({"order_id": denied_order, "rush": true})),
-        ))
-        .await
-        .unwrap();
+    let mut update_request = api_request(
+        &token,
+        tenant_id,
+        Method::POST,
+        "/api/orders/update",
+        Some(json!({"order_id": denied_order, "rush": true})),
+    );
+    update_request.headers_mut().insert(
+        IDEMPOTENCY_KEY_HEADER,
+        "operational-scope-order-update".parse().unwrap(),
+    );
+    let response = app.clone().oneshot(update_request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!response_json::<bool>(response).await);
 
