@@ -428,7 +428,8 @@ async fn employee_routes_and_repositories_enforce_facility_scope() {
     assert_eq!(denied_employee.first_name, "Denied");
     assert_eq!(denied_employee.facility_ids, vec![denied_facility]);
 
-    assert!(sqlx::query(
+    let mut tx = tenant_tx(&db, tenant_id).await;
+    sqlx::query(
         r#"
         UPDATE employee_facilities
         SET employee_id = $1
@@ -438,10 +439,13 @@ async fn employee_routes_and_repositories_enforce_facility_scope() {
     .bind(route_employee.id)
     .bind(tenant_id.get())
     .bind(denied_employee.id)
-    .execute(&db)
+    .execute(&mut *tx)
     .await
-    .is_err());
-    assert!(sqlx::query(
+    .unwrap();
+    assert!(tx.commit().await.is_err());
+
+    let mut tx = tenant_tx(&db, tenant_id).await;
+    sqlx::query(
         r#"
         UPDATE employee_facilities
         SET deleted = clock_timestamp()
@@ -450,18 +454,24 @@ async fn employee_routes_and_repositories_enforce_facility_scope() {
     )
     .bind(tenant_id.get())
     .bind(denied_employee.id)
-    .execute(&db)
+    .execute(&mut *tx)
     .await
-    .is_err());
+    .unwrap();
+    assert!(tx.commit().await.is_err());
+
+    let admin_db = admin_db_for(&db).await;
     assert!(sqlx::query(
         "UPDATE facilities SET deleted = clock_timestamp() WHERE tenant_id = $1 AND id = $2",
     )
     .bind(tenant_id.get())
     .bind(denied_facility)
-    .execute(&db)
+    .execute(&admin_db)
     .await
     .is_err());
-    assert!(sqlx::query(
+    admin_db.close().await;
+
+    let mut tx = tenant_tx(&db, tenant_id).await;
+    sqlx::query(
         r#"
         INSERT INTO employees
             (tenant_id, created, first_name, last_name, title, type, hired)
@@ -469,9 +479,10 @@ async fn employee_routes_and_repositories_enforce_facility_scope() {
         "#,
     )
     .bind(tenant_id.get())
-    .execute(&db)
+    .execute(&mut *tx)
     .await
-    .is_err());
+    .unwrap();
+    assert!(tx.commit().await.is_err());
 
     let retiring_facility = repo::facilities::add_facility(&db, tenant_id, "Retiring Employee DC")
         .await
@@ -545,13 +556,15 @@ async fn employee_routes_and_repositories_enforce_facility_scope() {
     .unwrap();
     let (commit_a, commit_b) = tokio::join!(tx_a.commit(), tx_b.commit());
     assert_ne!(commit_a.is_ok(), commit_b.is_ok());
+    let mut tx = tenant_tx(&db, tenant_id).await;
     let active_assignments: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM employee_facilities WHERE tenant_id = $1 AND employee_id = $2 AND deleted IS NULL",
     )
     .bind(tenant_id.get())
     .bind(concurrent_employee)
-    .fetch_one(&db)
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
+    tx.rollback().await.unwrap();
     assert_eq!(active_assignments, 1);
 }
