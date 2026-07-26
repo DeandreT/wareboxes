@@ -187,6 +187,14 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'command_idempotency_records_tenant_isolation'
                 ),
                 (
+                    'integration_inbox_receipts',
+                    'integration_inbox_receipts_tenant_isolation'
+                ),
+                (
+                    'integration_inbox_keys',
+                    'integration_inbox_keys_tenant_isolation'
+                ),
+                (
                     'inventory_transactions',
                     'inventory_transactions_tenant_isolation'
                 ),

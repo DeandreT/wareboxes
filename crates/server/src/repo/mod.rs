@@ -8,6 +8,7 @@ pub mod audits;
 pub mod employees;
 pub mod facilities;
 pub mod idempotency;
+pub mod integration_inbox;
 pub mod inventory;
 pub(crate) mod inventory_journal;
 pub mod inventory_owners;
