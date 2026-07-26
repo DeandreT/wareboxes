@@ -118,6 +118,7 @@ where
             .claim(
                 tenant_id,
                 &self.worker_id,
+                self.publisher.name(),
                 self.config.batch_size,
                 self.config.lease,
             )
@@ -221,7 +222,14 @@ where
             };
             let diagnostic = bounded_diagnostic(error.code, &error.message);
             if !store
-                .mark_failed(&event, &worker_id, &diagnostic, retry_after, max_attempts)
+                .mark_failed(
+                    &event,
+                    &worker_id,
+                    &diagnostic,
+                    failure_class,
+                    retry_after,
+                    max_attempts,
+                )
                 .await?
             {
                 return Ok(EventOutcome::LostClaim);
@@ -275,6 +283,7 @@ async fn record_runtime_failure<S: OutboxStore>(
             event,
             worker_id,
             &diagnostic,
+            FailureClass::Retryable,
             config.retry_delay,
             config.max_attempts,
         )
@@ -375,6 +384,7 @@ mod tests {
             &self,
             tenant_id: TenantId,
             _worker_id: &str,
+            _publisher_name: &str,
             batch_size: i64,
             _lease: Duration,
         ) -> anyhow::Result<Vec<OutboxEvent>> {
@@ -408,6 +418,7 @@ mod tests {
             event: &OutboxEvent,
             _worker_id: &str,
             error: &str,
+            _failure_class: FailureClass,
             retry_after: Duration,
             max_attempts: i32,
         ) -> anyhow::Result<bool> {

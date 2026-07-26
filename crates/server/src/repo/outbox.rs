@@ -56,12 +56,80 @@ pub struct OutboxEvent {
     pub published_at: Option<Timestamp>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryFailureClass {
+    Retryable,
+    Permanent,
+}
+
+impl DeliveryFailureClass {
+    fn as_database_value(self) -> &'static str {
+        match self {
+            Self::Retryable => "retryable",
+            Self::Permanent => "permanent",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryAttemptOutcome {
+    Published,
+    RetryScheduled,
+    PermanentFailure,
+    RetryExhausted,
+    LeaseLost,
+}
+
+impl DeliveryAttemptOutcome {
+    fn from_database_value(value: &str) -> AppResult<Self> {
+        match value {
+            "published" => Ok(Self::Published),
+            "retry_scheduled" => Ok(Self::RetryScheduled),
+            "permanent_failure" => Ok(Self::PermanentFailure),
+            "retry_exhausted" => Ok(Self::RetryExhausted),
+            "lease_lost" => Ok(Self::LeaseLost),
+            _ => Err(AppError::internal(format!(
+                "database returned an invalid delivery attempt outcome: {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryAttempt {
+    pub tenant_id: TenantId,
+    pub outbox_event_id: i64,
+    pub event_key: String,
+    pub event_type: String,
+    pub claim_version: i64,
+    pub replay_count: i32,
+    pub attempt_number: i32,
+    pub worker_id: String,
+    pub publisher_name: String,
+    pub claimed_at: Timestamp,
+    pub lease_expires_at: Timestamp,
+    pub outcome: Option<DeliveryAttemptOutcome>,
+    pub completed_at: Option<Timestamp>,
+    pub error: Option<String>,
+    pub retry_after_seconds: Option<i64>,
+}
+
 fn required_text(value: &str, label: &str) -> AppResult<()> {
     if value.trim().is_empty() {
         Err(AppError::bad_request(format!("{label} cannot be blank")))
     } else {
         Ok(())
     }
+}
+
+fn bounded_text(value: &str, label: &str, maximum_characters: usize) -> AppResult<()> {
+    required_text(value, label)?;
+    if value.chars().count() > maximum_characters {
+        return Err(AppError::bad_request(format!(
+            "{label} cannot exceed {maximum_characters} characters"
+        )));
+    }
+    Ok(())
 }
 
 fn map_event(row: &sqlx::postgres::PgRow) -> AppResult<OutboxEvent> {
@@ -109,6 +177,32 @@ fn map_event(row: &sqlx::postgres::PgRow) -> AppResult<OutboxEvent> {
         discard_reason: row.try_get("discard_reason")?,
         discarded_by_user_id: row.try_get("discarded_by_user_id")?,
         published_at: row.try_get("published_at")?,
+    })
+}
+
+fn map_delivery_attempt(row: &sqlx::postgres::PgRow) -> AppResult<DeliveryAttempt> {
+    let outcome = row
+        .try_get::<Option<String>, _>("outcome")?
+        .as_deref()
+        .map(DeliveryAttemptOutcome::from_database_value)
+        .transpose()?;
+    Ok(DeliveryAttempt {
+        tenant_id: TenantId::new(row.try_get("tenant_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        outbox_event_id: row.try_get("outbox_event_id")?,
+        event_key: row.try_get("event_key")?,
+        event_type: row.try_get("event_type")?,
+        claim_version: row.try_get("claim_version")?,
+        replay_count: row.try_get("replay_count")?,
+        attempt_number: row.try_get("attempt_number")?,
+        worker_id: row.try_get("worker_id")?,
+        publisher_name: row.try_get("publisher_name")?,
+        claimed_at: row.try_get("claimed_at")?,
+        lease_expires_at: row.try_get("lease_expires_at")?,
+        outcome,
+        completed_at: row.try_get("completed_at")?,
+        error: row.try_get("error")?,
+        retry_after_seconds: row.try_get("retry_after_seconds")?,
     })
 }
 
@@ -284,14 +378,73 @@ pub async fn get_events(
     Ok(events)
 }
 
+pub async fn get_delivery_attempts(
+    db: &Db,
+    tenant_id: TenantId,
+    outbox_event_id: i64,
+    limit: i64,
+) -> AppResult<Vec<DeliveryAttempt>> {
+    if outbox_event_id <= 0 {
+        return Err(AppError::bad_request("outbox event ID must be positive"));
+    }
+    if !(1..=1_000).contains(&limit) {
+        return Err(AppError::bad_request(
+            "delivery attempt history limit must be between 1 and 1000",
+        ));
+    }
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, tenant_id).await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT attempt.tenant_id,
+               attempt.outbox_event_id,
+               attempt.event_key,
+               attempt.event_type,
+               attempt.claim_version,
+               attempt.replay_count,
+               attempt.attempt_number,
+               attempt.worker_id,
+               attempt.publisher_name,
+               attempt.claimed_at,
+               attempt.lease_expires_at,
+               result.outcome,
+               result.completed_at,
+               result.error,
+               result.retry_after_seconds
+        FROM outbox_delivery_attempts attempt
+        LEFT JOIN outbox_delivery_attempt_results result
+          ON result.tenant_id = attempt.tenant_id
+         AND result.outbox_event_id = attempt.outbox_event_id
+         AND result.claim_version = attempt.claim_version
+        WHERE attempt.tenant_id = $1
+          AND attempt.outbox_event_id = $2
+        ORDER BY attempt.claim_version
+        LIMIT $3
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(outbox_event_id)
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await?;
+    let attempts = rows
+        .iter()
+        .map(map_delivery_attempt)
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(attempts)
+}
+
 pub async fn claim_events(
     db: &Db,
     tenant_id: TenantId,
     worker_id: &str,
+    publisher_name: &str,
     batch_size: i64,
     lease_seconds: i64,
 ) -> AppResult<Vec<OutboxEvent>> {
-    required_text(worker_id, "worker ID")?;
+    bounded_text(worker_id, "worker ID", 200)?;
+    bounded_text(publisher_name, "publisher name", 200)?;
     if !(1..=1_000).contains(&batch_size) {
         return Err(AppError::bad_request(
             "outbox batch size must be between 1 and 1000",
@@ -350,8 +503,93 @@ pub async fn claim_events(
         .await?;
     let mut events = rows.iter().map(map_event).collect::<AppResult<Vec<_>>>()?;
     events.sort_by_key(|event| event.id);
+    if !events.is_empty() {
+        let event_ids = events.iter().map(|event| event.id).collect::<Vec<_>>();
+        let result = sqlx::query(
+            r#"
+            INSERT INTO outbox_delivery_attempts
+                (tenant_id, outbox_event_id, event_key, event_type,
+                 claim_version, replay_count, attempt_number, worker_id,
+                 publisher_name, claimed_at, lease_expires_at)
+            SELECT event.tenant_id,
+                   event.id,
+                   event.event_key,
+                   event.event_type,
+                   event.claim_version,
+                   event.replay_count,
+                   event.attempts,
+                   event.claimed_by,
+                   $4,
+                   event.claimed_at,
+                   event.lease_expires_at
+            FROM outbox_events event
+            WHERE event.tenant_id = $1
+              AND event.claimed_by = $2
+              AND event.id = ANY($3)
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(worker_id)
+        .bind(&event_ids)
+        .bind(publisher_name)
+        .execute(&mut *tx)
+        .await?;
+        let expected_rows = u64::try_from(events.len())
+            .map_err(|_| AppError::internal("claimed event count exceeds u64"))?;
+        if result.rows_affected() != expected_rows {
+            return Err(AppError::internal(
+                "delivery attempt journal did not record every claimed event",
+            ));
+        }
+    }
     tx.commit().await?;
     Ok(events)
+}
+
+struct RecordDeliveryResult<'a> {
+    tenant_id: TenantId,
+    event_id: i64,
+    worker_id: &'a str,
+    claim_version: i64,
+    outcome: &'a str,
+    error: Option<&'a str>,
+    retry_after_seconds: Option<i64>,
+}
+
+async fn record_delivery_result(
+    tx: &mut Transaction<'_, Postgres>,
+    result: &RecordDeliveryResult<'_>,
+) -> AppResult<u64> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO outbox_delivery_attempt_results
+            (tenant_id, outbox_event_id, claim_version, outcome, completed_at,
+             error, retry_after_seconds)
+        SELECT attempt.tenant_id,
+               attempt.outbox_event_id,
+               attempt.claim_version,
+               $5,
+               clock_timestamp(),
+               $6,
+               $7
+        FROM outbox_delivery_attempts attempt
+        WHERE attempt.tenant_id = $1
+          AND attempt.outbox_event_id = $2
+          AND attempt.worker_id = $3
+          AND attempt.claim_version = $4
+        ON CONFLICT (tenant_id, outbox_event_id, claim_version) DO NOTHING
+        "#,
+    )
+    .bind(result.tenant_id.get())
+    .bind(result.event_id)
+    .bind(result.worker_id)
+    .bind(result.claim_version)
+    .bind(result.outcome)
+    .bind(result.error)
+    .bind(result.retry_after_seconds)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 pub async fn mark_published(
@@ -361,7 +599,7 @@ pub async fn mark_published(
     worker_id: &str,
     claim_version: i64,
 ) -> AppResult<bool> {
-    required_text(worker_id, "worker ID")?;
+    bounded_text(worker_id, "worker ID", 200)?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
     let result = sqlx::query(
@@ -384,8 +622,27 @@ pub async fn mark_published(
     .bind(claim_version)
     .execute(&mut *tx)
     .await?;
+    let published = result.rows_affected() == 1;
+    let journal_rows = record_delivery_result(
+        &mut tx,
+        &RecordDeliveryResult {
+            tenant_id,
+            event_id,
+            worker_id,
+            claim_version,
+            outcome: if published { "published" } else { "lease_lost" },
+            error: None,
+            retry_after_seconds: None,
+        },
+    )
+    .await?;
+    if published && journal_rows != 1 {
+        return Err(AppError::internal(
+            "published event is missing its delivery attempt result",
+        ));
+    }
     tx.commit().await?;
-    Ok(result.rows_affected() == 1)
+    Ok(published)
 }
 
 pub struct FailOutboxEvent<'a> {
@@ -393,14 +650,15 @@ pub struct FailOutboxEvent<'a> {
     pub event_id: i64,
     pub worker_id: &'a str,
     pub claim_version: i64,
+    pub failure_class: DeliveryFailureClass,
     pub error: &'a str,
     pub retry_after_seconds: i64,
     pub max_attempts: i32,
 }
 
 pub async fn mark_failed(db: &Db, failure: &FailOutboxEvent<'_>) -> AppResult<bool> {
-    required_text(failure.worker_id, "worker ID")?;
-    required_text(failure.error, "delivery error")?;
+    bounded_text(failure.worker_id, "worker ID", 200)?;
+    bounded_text(failure.error, "delivery error", 4_000)?;
     if failure.retry_after_seconds < 0 {
         return Err(AppError::bad_request(
             "outbox retry delay cannot be negative",
@@ -413,30 +671,33 @@ pub async fn mark_failed(db: &Db, failure: &FailOutboxEvent<'_>) -> AppResult<bo
     }
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, failure.tenant_id).await?;
-    let result = sqlx::query(
+    let result: Option<i32> = sqlx::query_scalar(
         r#"
         UPDATE outbox_events
         SET available_at = CASE
-                WHEN attempts >= $1 THEN available_at
-                ELSE clock_timestamp() + ($2::BIGINT * INTERVAL '1 second')
+                WHEN $1 = 'permanent' OR attempts >= $2 THEN available_at
+                ELSE clock_timestamp() + ($3::BIGINT * INTERVAL '1 second')
             END,
             claimed_at = NULL,
             claimed_by = NULL,
             lease_expires_at = NULL,
-            last_error = $3,
+            last_error = $4,
             dead_lettered_at = CASE
-                WHEN attempts >= $1 THEN clock_timestamp()
+                WHEN $1 = 'permanent' OR attempts >= $2
+                    THEN clock_timestamp()
                 ELSE NULL
             END
-        WHERE tenant_id = $4
-          AND id = $5
-          AND claimed_by = $6
-          AND claim_version = $7
+        WHERE tenant_id = $5
+          AND id = $6
+          AND claimed_by = $7
+          AND claim_version = $8
           AND dead_lettered_at IS NULL
           AND discarded_at IS NULL
           AND published_at IS NULL
+        RETURNING attempts
         "#,
     )
+    .bind(failure.failure_class.as_database_value())
     .bind(failure.max_attempts)
     .bind(failure.retry_after_seconds)
     .bind(failure.error.trim())
@@ -444,10 +705,37 @@ pub async fn mark_failed(db: &Db, failure: &FailOutboxEvent<'_>) -> AppResult<bo
     .bind(failure.event_id)
     .bind(failure.worker_id)
     .bind(failure.claim_version)
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+    let outcome = match (failure.failure_class, result) {
+        (_, None) => "lease_lost",
+        (DeliveryFailureClass::Permanent, Some(_)) => "permanent_failure",
+        (DeliveryFailureClass::Retryable, Some(attempts)) if attempts >= failure.max_attempts => {
+            "retry_exhausted"
+        }
+        (DeliveryFailureClass::Retryable, Some(_)) => "retry_scheduled",
+    };
+    let retry_after_seconds = (outcome == "retry_scheduled").then_some(failure.retry_after_seconds);
+    let journal_rows = record_delivery_result(
+        &mut tx,
+        &RecordDeliveryResult {
+            tenant_id: failure.tenant_id,
+            event_id: failure.event_id,
+            worker_id: failure.worker_id,
+            claim_version: failure.claim_version,
+            outcome,
+            error: Some(failure.error.trim()),
+            retry_after_seconds,
+        },
+    )
+    .await?;
+    if result.is_some() && journal_rows != 1 {
+        return Err(AppError::internal(
+            "failed event is missing its delivery attempt result",
+        ));
+    }
     tx.commit().await?;
-    Ok(result.rows_affected() == 1)
+    Ok(result.is_some())
 }
 
 pub async fn replay_dead_letter(db: &Db, tenant_id: TenantId, event_id: i64) -> AppResult<bool> {

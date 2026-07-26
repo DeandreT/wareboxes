@@ -132,12 +132,14 @@ async fn outbox_storage_and_workers_are_tenant_isolated() {
     tenant_b_tx.rollback().await.unwrap();
     assert_eq!(snapshot(&fixture.db, &refs_a).await, source_a);
 
-    let claimed_a = outbox::claim_events(&fixture.db, tenant_a, "worker-a", 10, 60)
-        .await
-        .unwrap();
-    let claimed_b = outbox::claim_events(&fixture.db, tenant_b, "worker-b", 10, 60)
-        .await
-        .unwrap();
+    let claimed_a =
+        outbox::claim_events(&fixture.db, tenant_a, "worker-a", "test-publisher", 10, 60)
+            .await
+            .unwrap();
+    let claimed_b =
+        outbox::claim_events(&fixture.db, tenant_b, "worker-b", "test-publisher", 10, 60)
+            .await
+            .unwrap();
     assert_eq!(
         claimed_a.iter().map(|event| event.id).collect::<Vec<_>>(),
         vec![refs_a.event_id]
@@ -154,6 +156,7 @@ async fn outbox_storage_and_workers_are_tenant_isolated() {
             event_id: refs_a.event_id,
             worker_id: "worker-a",
             claim_version: claimed_a[0].claim_version,
+            failure_class: outbox::DeliveryFailureClass::Permanent,
             error: "dead-letter isolation test",
             retry_after_seconds: 0,
             max_attempts: 1,
@@ -181,9 +184,10 @@ async fn outbox_storage_and_workers_are_tenant_isolated() {
             .unwrap()
     );
 
-    let replayed_a = outbox::claim_events(&fixture.db, tenant_a, "replay-a", 1, 60)
-        .await
-        .unwrap();
+    let replayed_a =
+        outbox::claim_events(&fixture.db, tenant_a, "replay-a", "test-publisher", 1, 60)
+            .await
+            .unwrap();
     assert_eq!(replayed_a[0].id, refs_a.event_id);
     assert!(outbox::mark_published(
         &fixture.db,

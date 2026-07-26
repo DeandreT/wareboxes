@@ -269,6 +269,14 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'outbox_events',
                     'outbox_events_tenant_isolation'
+                ),
+                (
+                    'outbox_delivery_attempts',
+                    'outbox_delivery_attempts_tenant_isolation'
+                ),
+                (
+                    'outbox_delivery_attempt_results',
+                    'outbox_delivery_attempt_results_tenant_isolation'
                 )
         ),
         tenant_table_classification AS (
