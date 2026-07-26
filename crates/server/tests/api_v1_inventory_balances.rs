@@ -4,8 +4,11 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use common::*;
 use tower::ServiceExt;
-use wareboxes_api_contract::v1::{ErrorReason, ErrorResponse, InventoryBalancePage};
+use wareboxes_api_contract::v1::{
+    ErrorReason, ErrorResponse, InventoryBalancePage, InventoryBalanceStatus,
+};
 use wareboxes_core::dto::UpdateUserAccessScope;
+use wareboxes_core::models::InventoryStatus;
 use wareboxes_server::auth::TENANT_ID_HEADER;
 use wareboxes_server::{routes, state::AppState};
 
@@ -32,6 +35,7 @@ async fn receive_balance(
     inventory_owner_id: i64,
     location_id: i64,
     item_key: &str,
+    status: InventoryStatus,
 ) -> i64 {
     let item_id = fixture.item(tenant_id, item_key, "each").await;
     let item_batch_id = repo::inventory::add_item_batch(
@@ -53,7 +57,7 @@ async fn receive_balance(
         item_batch_id,
         location_id,
         10,
-        None,
+        Some(status),
         None,
         Some("v1-contract-test"),
         None,
@@ -122,6 +126,7 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
         allowed_owner,
         allowed_location,
         "V1 First Item",
+        InventoryStatus::Available,
     )
     .await;
     let denied_item = receive_balance(
@@ -131,6 +136,7 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
         denied_owner,
         denied_location,
         "V1 Denied Item",
+        InventoryStatus::Available,
     )
     .await;
     let second_item = receive_balance(
@@ -140,8 +146,95 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
         allowed_owner,
         allowed_location,
         "V1 Second Item",
+        InventoryStatus::Damaged,
     )
     .await;
+
+    let first_balance = repo::inventory::get_balances(&fixture.db, tenant_id, false)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|balance| balance.item_id == first_item)
+        .unwrap();
+    let second_balance = repo::inventory::get_balances(&fixture.db, tenant_id, false)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|balance| balance.item_id == second_item)
+        .unwrap();
+    let order_id = fixture
+        .order(tenant_id, "V1-BALANCE-COMMITMENTS", allowed_owner)
+        .await;
+    fixture
+        .allocated_reservation(
+            tenant_id,
+            administrator.id,
+            order_id,
+            first_balance.id,
+            2,
+            "v1-balance-allocation",
+        )
+        .await;
+    let mut hold_tx = tenant_tx(&fixture.db, tenant_id).await;
+    sqlx::query(
+        r#"
+        INSERT INTO inventory_holds (
+            tenant_id, inventory_owner_id, created, modified, created_by,
+            inventory_balance_id, facility_id, location_id, license_plate_id,
+            item_batch_id, item_id, uom, inventory_status, qty, reason_code,
+            note, status
+        )
+        VALUES (
+            $1, $2, $3, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+            3, 'quality_inspection', 'v1 quantity projection', 'active'
+        )
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(first_balance.inventory_owner_id.get())
+    .bind(db::now_iso())
+    .bind(administrator.id)
+    .bind(first_balance.id)
+    .bind(first_balance.facility_id)
+    .bind(first_balance.location_id)
+    .bind(first_balance.license_plate_id)
+    .bind(first_balance.item_batch_id)
+    .bind(first_balance.item_id)
+    .bind(&first_balance.uom)
+    .bind(first_balance.status.as_str())
+    .execute(&mut *hold_tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO inventory_holds (
+            tenant_id, inventory_owner_id, created, modified, created_by,
+            inventory_balance_id, facility_id, location_id, license_plate_id,
+            item_batch_id, item_id, uom, inventory_status, qty, reason_code,
+            note, status
+        )
+        VALUES (
+            $1, $2, $3, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+            3, 'damage_suspected', 'non-available quantity projection', 'active'
+        )
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(second_balance.inventory_owner_id.get())
+    .bind(db::now_iso())
+    .bind(administrator.id)
+    .bind(second_balance.id)
+    .bind(second_balance.facility_id)
+    .bind(second_balance.location_id)
+    .bind(second_balance.license_plate_id)
+    .bind(second_balance.item_batch_id)
+    .bind(second_balance.item_id)
+    .bind(&second_balance.uom)
+    .bind(second_balance.status.as_str())
+    .execute(&mut *hold_tx)
+    .await
+    .unwrap();
+    hold_tx.commit().await.unwrap();
 
     assert!(repo::tenants::update_user_access_scope(
         &fixture.db,
@@ -178,6 +271,10 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
     assert_eq!(first_page.items.len(), 1);
     assert_eq!(first_page.items[0].item_id, first_item);
     assert_eq!(first_page.items[0].facility_id, allowed_facility);
+    assert_eq!(first_page.items[0].quantity.on_hand, 10);
+    assert_eq!(first_page.items[0].quantity.reserved, 2);
+    assert_eq!(first_page.items[0].quantity.held, 3);
+    assert_eq!(first_page.items[0].quantity.available, 5);
     assert!(first_page.next_cursor.is_some());
     let item_json = &first_json["items"][0];
     for persistence_field in ["tenant_id", "deleted", "created", "modified"] {
@@ -208,6 +305,11 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
             .collect::<Vec<_>>(),
         vec![second_item]
     );
+    assert_eq!(second_page.items[0].status, InventoryBalanceStatus::Damaged);
+    assert_eq!(second_page.items[0].quantity.on_hand, 10);
+    assert_eq!(second_page.items[0].quantity.reserved, 0);
+    assert_eq!(second_page.items[0].quantity.held, 3);
+    assert_eq!(second_page.items[0].quantity.available, 0);
     assert!(second_page.next_cursor.is_none());
     assert!(!second_page
         .items

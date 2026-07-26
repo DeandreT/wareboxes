@@ -1,6 +1,7 @@
 //! Inventory commands, immutable journal reads, and balance projections.
 
 pub use super::inventory_allocation::*;
+pub use super::inventory_hold::*;
 
 use std::collections::HashMap;
 
@@ -68,6 +69,7 @@ fn map_balance(row: &sqlx::postgres::PgRow) -> AppResult<InventoryBalance> {
         status: parse_inventory_status(row.try_get::<String, _>("status")?.as_str())?,
         qty_on_hand: row.try_get("qty_on_hand")?,
         qty_reserved: row.try_get("qty_reserved")?,
+        qty_held: row.try_get("qty_held")?,
     })
 }
 
@@ -128,6 +130,7 @@ struct LockedLooseBalance {
     status: String,
     qty_on_hand: i64,
     qty_reserved: i64,
+    qty_held: i64,
     active: bool,
 }
 
@@ -142,7 +145,7 @@ async fn lock_loose_balance_positions_tx(
     let rows = sqlx::query(
         r#"
         SELECT id, inventory_owner_id, facility_id, location_id, item_batch_id,
-               item_id, uom, status, qty_on_hand, qty_reserved,
+               item_id, uom, status, qty_on_hand, qty_reserved, qty_held,
                deleted IS NULL AS active
         FROM inventory_balances
         WHERE tenant_id = $1
@@ -174,6 +177,7 @@ async fn lock_loose_balance_positions_tx(
                 status: row.try_get("status")?,
                 qty_on_hand: row.try_get("qty_on_hand")?,
                 qty_reserved: row.try_get("qty_reserved")?,
+                qty_held: row.try_get("qty_held")?,
                 active: row.try_get("active")?,
             })
         })
@@ -378,7 +382,7 @@ pub async fn set_item_batch_deleted(
     }
     if deleted {
         let stocked: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM inventory_balances WHERE tenant_id = $1 AND item_batch_id = $2 AND deleted IS NULL AND (qty_on_hand > 0 OR qty_reserved > 0) LIMIT 1",
+            "SELECT id FROM inventory_balances WHERE tenant_id = $1 AND item_batch_id = $2 AND deleted IS NULL AND (qty_on_hand > 0 OR qty_reserved > 0 OR qty_held > 0) LIMIT 1",
         )
         .bind(tenant_id.get())
         .bind(id)
@@ -430,7 +434,7 @@ async fn get_balances_with_scope(
         SELECT ib.id, ib.tenant_id, ib.inventory_owner_id, ib.created, ib.modified,
                ib.deleted, ib.facility_id, facility.name AS facility_name,
                ib.location_id, ib.license_plate_id, ib.item_batch_id, ib.item_id,
-               ib.uom, ib.status, ib.qty_on_hand, ib.qty_reserved
+               ib.uom, ib.status, ib.qty_on_hand, ib.qty_reserved, ib.qty_held
         FROM inventory_balances ib
         INNER JOIN facilities facility
             ON facility.tenant_id = ib.tenant_id AND facility.id = ib.facility_id
@@ -839,7 +843,8 @@ pub async fn move_inventory(
     let uom = source.uom.clone();
     let qty_on_hand = source.qty_on_hand;
     let qty_reserved = source.qty_reserved;
-    if qty_on_hand - qty_reserved < qty {
+    let qty_held = source.qty_held;
+    if qty_on_hand - qty_reserved - qty_held < qty {
         return Err(AppError::conflict(
             "insufficient available inventory at source location",
         ));
@@ -906,7 +911,7 @@ pub async fn move_inventory(
           AND status = $7
           AND license_plate_id IS NULL
           AND deleted IS NULL
-          AND qty_on_hand - qty_reserved >= $8
+          AND qty_on_hand - qty_reserved - qty_held >= $8
         "#,
     )
     .bind(qty)
@@ -1088,6 +1093,7 @@ pub async fn split_move_inventory(
     let parsed_status = parse_inventory_status(&status)?;
     let qty_on_hand = source.qty_on_hand;
     let qty_reserved = source.qty_reserved;
+    let qty_held = source.qty_held;
     if destinations
         .iter()
         .any(|(to_location_id, _)| *to_location_id == from_location_id)
@@ -1096,7 +1102,7 @@ pub async fn split_move_inventory(
             "source and destination locations must differ",
         ));
     }
-    if qty_on_hand - qty_reserved < total_qty {
+    if qty_on_hand - qty_reserved - qty_held < total_qty {
         return Err(AppError::conflict(
             "insufficient available inventory at source location",
         ));
@@ -1162,7 +1168,7 @@ pub async fn split_move_inventory(
         WHERE id = $3
           AND license_plate_id IS NULL
           AND deleted IS NULL
-          AND qty_on_hand - qty_reserved >= $4
+          AND qty_on_hand - qty_reserved - qty_held >= $4
         "#,
     )
     .bind(total_qty)

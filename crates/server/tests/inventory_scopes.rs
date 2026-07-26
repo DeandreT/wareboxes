@@ -5,12 +5,16 @@ use axum::http::{header, Method, Request, StatusCode};
 use common::*;
 use serde_json::{json, Value};
 use tower::ServiceExt;
-use wareboxes_core::dto::{CancelInventoryReservationResult, UpdateUserAccessScope};
-use wareboxes_core::models::{
-    InventoryBalance, InventoryReconciliationIssue, InventoryReservation, InventoryTransaction,
-    ItemBatch,
+use wareboxes_core::dto::{
+    CancelInventoryReservationResult, ReleaseInventoryHoldResult, UpdateUserAccessScope,
 };
+use wareboxes_core::models::{
+    InventoryBalance, InventoryHold, InventoryHoldReason, InventoryHoldReconciliationIssue,
+    InventoryReconciliationIssue, InventoryReservation, InventoryTransaction, ItemBatch,
+};
+use wareboxes_domain::CommandContext;
 use wareboxes_server::auth::TENANT_ID_HEADER;
+use wareboxes_server::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_server::{routes, state::AppState};
 
 fn api_request(
@@ -28,6 +32,9 @@ fn api_request(
     let body = match body {
         Some(body) => {
             request = request.header(header::CONTENT_TYPE, "application/json");
+            if let Some(idempotency_key) = body.get("idempotency_key").and_then(Value::as_str) {
+                request = request.header(IDEMPOTENCY_KEY_HEADER, idempotency_key);
+            }
             Body::from(serde_json::to_vec(&body).unwrap())
         }
         None => Body::empty(),
@@ -322,6 +329,46 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
     )
     .await
     .unwrap();
+    let allowed_hold = repo::inventory::place_inventory_hold(
+        &db,
+        &administrator_access,
+        &CommandContext {
+            tenant_id,
+            actor_id: administrator_access.user_id,
+            request_id: "request-inventory-scope-allowed-hold-setup".into(),
+            idempotency_key: Some("inventory-scope-allowed-hold-setup".into()),
+        },
+        &repo::inventory::PlaceInventoryHoldCommand {
+            inventory_balance_id: allowed_balance_id,
+            qty: 2,
+            reason: InventoryHoldReason::QualityInspection,
+            note: None,
+            reference_type: None,
+            reference_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let denied_hold = repo::inventory::place_inventory_hold(
+        &db,
+        &administrator_access,
+        &CommandContext {
+            tenant_id,
+            actor_id: administrator_access.user_id,
+            request_id: "request-inventory-scope-denied-hold-setup".into(),
+            idempotency_key: Some("inventory-scope-denied-hold-setup".into()),
+        },
+        &repo::inventory::PlaceInventoryHoldCommand {
+            inventory_balance_id: denied_balance_id,
+            qty: 2,
+            reason: InventoryHoldReason::Regulatory,
+            note: None,
+            reference_type: None,
+            reference_id: None,
+        },
+    )
+    .await
+    .unwrap();
     let denied_reservation = repo::inventory::create_inventory_reservation(
         &db,
         &administrator_access,
@@ -475,6 +522,36 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         &app,
         &token,
         tenant_id,
+        Method::GET,
+        "/api/inventory/holds",
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let holds = response_json::<Vec<InventoryHold>>(response).await;
+    assert_eq!(holds.len(), 1);
+    assert_eq!(holds[0].id, allowed_hold.hold_id);
+
+    let response = send_api(
+        &app,
+        &token,
+        tenant_id,
+        Method::GET,
+        "/api/inventory/holds/reconciliation",
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response_json::<Vec<InventoryHoldReconciliationIssue>>(response)
+            .await
+            .is_empty()
+    );
+
+    let response = send_api(
+        &app,
+        &token,
+        tenant_id,
         Method::POST,
         "/api/inventory/batches/add",
         Some(json!({
@@ -485,6 +562,59 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = send_api(
+        &app,
+        &token,
+        tenant_id,
+        Method::POST,
+        "/api/inventory/holds/place",
+        Some(json!({
+            "inventory_balance_id": denied_balance_id,
+            "qty": 1,
+            "reason": "customer_request",
+            "note": null,
+            "reference_type": null,
+            "reference_id": null,
+            "idempotency_key": "inventory-scope-hidden-hold-place"
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = send_api(
+        &app,
+        &token,
+        tenant_id,
+        Method::POST,
+        "/api/inventory/holds/release",
+        Some(json!({
+            "hold_id": denied_hold.hold_id,
+            "idempotency_key": "inventory-scope-hidden-hold-release"
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = send_api(
+        &app,
+        &token,
+        tenant_id,
+        Method::POST,
+        "/api/inventory/holds/release",
+        Some(json!({
+            "hold_id": allowed_hold.hold_id,
+            "idempotency_key": "inventory-scope-allowed-hold-release"
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response_json::<ReleaseInventoryHoldResult>(response)
+            .await
+            .released_qty,
+        2
+    );
 
     let response = send_api(
         &app,

@@ -6,6 +6,8 @@ use std::time::Duration;
 use common::*;
 use tokio::sync::{oneshot, Barrier};
 use tokio::time::{sleep, timeout};
+use wareboxes_core::models::InventoryHoldReason;
+use wareboxes_domain::CommandContext;
 
 async fn wait_until_balance_is_locked(db: &db::Db, tenant_id: TenantId, inventory_balance_id: i64) {
     timeout(Duration::from_secs(2), async {
@@ -38,17 +40,17 @@ async fn wait_until_balance_is_locked(db: &db::Db, tenant_id: TenantId, inventor
     .expect("license plate move locks its content balance");
 }
 
-fn assert_active_allocation_guard(error: &sqlx::Error) {
+fn assert_commitment_dimension_guard(error: &sqlx::Error) {
     assert!(
         error
             .to_string()
-            .contains("allocated inventory balance dimensions are immutable"),
+            .contains("committed inventory balance dimensions are immutable"),
         "unexpected balance dimension update error: {error}"
     );
 }
 
 #[tokio::test]
-async fn license_plate_moves_and_reservations_serialize_balance_dimensions() {
+async fn license_plate_moves_serialize_allocations_and_holds() {
     let fixture = Fixture::new().await;
     let user = fixture
         .wms_user("license-plate-reservation-race@test.local")
@@ -222,6 +224,7 @@ async fn license_plate_moves_and_reservations_serialize_balance_dimensions() {
     )
     .await
     .unwrap();
+    let reservation_id = reservation.reservation_id;
 
     let advisory_key = format!(
         "inventory-location-item:{tenant_id}:{inventory_owner_id}:{destination_location_id}:{item_id}"
@@ -266,7 +269,7 @@ async fn license_plate_moves_and_reservations_serialize_balance_dimensions() {
             &allocation_db,
             &access,
             &repo::inventory::AllocateInventoryCommand {
-                reservation_id: reservation.reservation_id,
+                reservation_id,
                 inventory_balance_id,
                 qty: 1,
                 idempotency_key: "license-plate-reservation-race-allocation",
@@ -329,7 +332,7 @@ async fn license_plate_moves_and_reservations_serialize_balance_dimensions() {
     .execute(&mut *tx)
     .await
     .unwrap_err();
-    assert_active_allocation_guard(&error);
+    assert_commitment_dimension_guard(&error);
     tx.rollback().await.unwrap();
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
@@ -347,7 +350,7 @@ async fn license_plate_moves_and_reservations_serialize_balance_dimensions() {
     .execute(&mut *tx)
     .await
     .unwrap_err();
-    assert_active_allocation_guard(&error);
+    assert_commitment_dimension_guard(&error);
     tx.rollback().await.unwrap();
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
@@ -365,7 +368,7 @@ async fn license_plate_moves_and_reservations_serialize_balance_dimensions() {
     .execute(&mut *tx)
     .await
     .unwrap_err();
-    assert_active_allocation_guard(&error);
+    assert_commitment_dimension_guard(&error);
     tx.rollback().await.unwrap();
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
@@ -397,4 +400,304 @@ async fn license_plate_moves_and_reservations_serialize_balance_dimensions() {
     .unwrap();
     tx.rollback().await.unwrap();
     assert!(dimensions_match);
+
+    let access = default_tenant_for_user(&fixture.db, user.id).await.unwrap();
+    repo::inventory::cancel_inventory_allocation(
+        &fixture.db,
+        &access,
+        &repo::inventory::CancelInventoryAllocationCommand {
+            allocation_id,
+            idempotency_key: "license-plate-hold-release-allocation",
+        },
+    )
+    .await
+    .unwrap();
+
+    let allocation_move_barrier = Arc::new(Barrier::new(3));
+    let allocation_db = fixture.db.clone();
+    let allocation_access = access.clone();
+    let allocation_barrier = Arc::clone(&allocation_move_barrier);
+    let allocation_attempt = tokio::spawn(async move {
+        allocation_barrier.wait().await;
+        repo::inventory::allocate_inventory(
+            &allocation_db,
+            &allocation_access,
+            &repo::inventory::AllocateInventoryCommand {
+                reservation_id,
+                inventory_balance_id,
+                qty: 1,
+                idempotency_key: "license-plate-allocation-first-race",
+            },
+        )
+        .await
+    });
+    let move_db = fixture.db.clone();
+    let move_barrier = Arc::clone(&allocation_move_barrier);
+    let move_attempt = tokio::spawn(async move {
+        move_barrier.wait().await;
+        repo::license_plates::move_license_plate(
+            &move_db,
+            tenant_id,
+            user.id,
+            license_plate_id,
+            source_location_id,
+            Some("concurrent allocation"),
+            "license-plate-allocation-first-move",
+        )
+        .await
+    });
+    allocation_move_barrier.wait().await;
+    let (allocation_result, move_result) = timeout(Duration::from_secs(3), async {
+        (
+            allocation_attempt.await.unwrap(),
+            move_attempt.await.unwrap(),
+        )
+    })
+    .await
+    .expect("allocation and license plate move serialize without deadlock");
+    let allocation_id = allocation_result.unwrap().allocation_id;
+    let expected_location_id = match move_result {
+        Ok(_) => source_location_id,
+        Err(AppError::Core(CoreError::Conflict(message))) => {
+            assert!(message.contains("reserved or held inventory"));
+            destination_location_id
+        }
+        Err(error) => panic!("unexpected concurrent license plate move error: {error:?}"),
+    };
+
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let (allocation_location_id, balance_location_id, qty_reserved): (i64, i64, i64) =
+        sqlx::query_as(
+            r#"
+            SELECT allocation.location_id, balance.location_id, balance.qty_reserved
+            FROM inventory_allocations allocation
+            INNER JOIN inventory_balances balance
+                ON balance.tenant_id = allocation.tenant_id
+               AND balance.inventory_owner_id = allocation.inventory_owner_id
+               AND balance.id = allocation.inventory_balance_id
+            WHERE allocation.tenant_id = $1
+              AND allocation.id = $2
+              AND allocation.deleted IS NULL
+              AND allocation.status = 'allocated'
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(allocation_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(allocation_location_id, expected_location_id);
+    assert_eq!(balance_location_id, expected_location_id);
+    assert_eq!(qty_reserved, 1);
+
+    repo::inventory::cancel_inventory_allocation(
+        &fixture.db,
+        &access,
+        &repo::inventory::CancelInventoryAllocationCommand {
+            allocation_id,
+            idempotency_key: "license-plate-allocation-first-cancel",
+        },
+    )
+    .await
+    .unwrap();
+    if expected_location_id == source_location_id {
+        repo::license_plates::move_license_plate(
+            &fixture.db,
+            tenant_id,
+            user.id,
+            license_plate_id,
+            destination_location_id,
+            Some("restore hold race origin"),
+            "license-plate-allocation-first-restore",
+        )
+        .await
+        .unwrap();
+    }
+
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let hold_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO inventory_holds (
+            tenant_id, inventory_owner_id, created, modified, created_by,
+            inventory_balance_id, facility_id, location_id, license_plate_id,
+            item_batch_id, item_id, uom, inventory_status, qty, reason_code,
+            note, status
+        )
+        SELECT balance.tenant_id, balance.inventory_owner_id, $1, $1, $2,
+               balance.id, balance.facility_id, balance.location_id,
+               balance.license_plate_id, balance.item_batch_id, balance.item_id,
+               balance.uom, balance.status, 1, 'quality_inspection',
+               'license plate movement guard', 'active'
+        FROM inventory_balances balance
+        WHERE balance.tenant_id = $3 AND balance.id = $4
+        RETURNING id
+        "#,
+    )
+    .bind(db::now_iso())
+    .bind(user.id)
+    .bind(tenant_id.get())
+    .bind(inventory_balance_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    let (qty_reserved, qty_held): (i64, i64) = sqlx::query_as(
+        "SELECT qty_reserved, qty_held FROM inventory_balances WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_balance_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!((qty_reserved, qty_held), (0, 1));
+
+    let held_move = repo::license_plates::move_license_plate(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        license_plate_id,
+        source_location_id,
+        Some("held inventory must remain fixed"),
+        "license-plate-held-move",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        held_move,
+        AppError::Core(CoreError::Conflict(ref message))
+            if message.contains("reserved or held inventory")
+    ));
+
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let dimension_error = sqlx::query(
+        "UPDATE inventory_balances SET location_id = $1 WHERE tenant_id = $2 AND id = $3",
+    )
+    .bind(source_location_id)
+    .bind(tenant_id.get())
+    .bind(inventory_balance_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap_err();
+    assert!(dimension_error
+        .to_string()
+        .contains("committed inventory balance dimensions are immutable"));
+    tx.rollback().await.unwrap();
+
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let released_at = db::now_iso();
+    sqlx::query(
+        r#"
+        UPDATE inventory_holds
+        SET modified = $1, deleted = $1, released_at = $1,
+            released_by = $2, status = 'released'
+        WHERE tenant_id = $3 AND id = $4
+        "#,
+    )
+    .bind(released_at)
+    .bind(user.id)
+    .bind(tenant_id.get())
+    .bind(hold_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    repo::license_plates::move_license_plate(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        license_plate_id,
+        source_location_id,
+        Some("full hold release permits movement"),
+        "license-plate-released-hold-move",
+    )
+    .await
+    .unwrap();
+
+    let race_barrier = Arc::new(Barrier::new(3));
+    let hold_db = fixture.db.clone();
+    let hold_access = access.clone();
+    let hold_barrier = Arc::clone(&race_barrier);
+    let hold_attempt = tokio::spawn(async move {
+        hold_barrier.wait().await;
+        repo::inventory::place_inventory_hold(
+            &hold_db,
+            &hold_access,
+            &CommandContext {
+                tenant_id: hold_access.tenant_id,
+                actor_id: hold_access.user_id,
+                request_id: "request-license-plate-hold-move-race".into(),
+                idempotency_key: Some("license-plate-hold-move-race".into()),
+            },
+            &repo::inventory::PlaceInventoryHoldCommand {
+                inventory_balance_id,
+                qty: 1,
+                reason: InventoryHoldReason::Regulatory,
+                note: Some("concurrent movement restriction"),
+                reference_type: None,
+                reference_id: None,
+            },
+        )
+        .await
+    });
+    let move_db = fixture.db.clone();
+    let move_barrier = Arc::clone(&race_barrier);
+    let move_attempt = tokio::spawn(async move {
+        move_barrier.wait().await;
+        repo::license_plates::move_license_plate(
+            &move_db,
+            tenant_id,
+            user.id,
+            license_plate_id,
+            destination_location_id,
+            Some("concurrent hold placement"),
+            "license-plate-hold-move-race",
+        )
+        .await
+    });
+    race_barrier.wait().await;
+    let (hold_result, move_result) = timeout(Duration::from_secs(3), async {
+        (hold_attempt.await.unwrap(), move_attempt.await.unwrap())
+    })
+    .await
+    .expect("hold placement and license plate move serialize without deadlock");
+    let hold_id = hold_result.unwrap().hold_id;
+    let expected_location_id = match move_result {
+        Ok(_) => destination_location_id,
+        Err(AppError::Core(CoreError::Conflict(message))) => {
+            assert!(message.contains("reserved or held inventory"));
+            source_location_id
+        }
+        Err(error) => panic!("unexpected concurrent license plate move error: {error:?}"),
+    };
+
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let (hold_location_id, balance_location_id, qty_reserved, qty_held, hold_status): (
+        i64,
+        i64,
+        i64,
+        i64,
+        String,
+    ) = sqlx::query_as(
+        r#"
+        SELECT hold.location_id, balance.location_id,
+               balance.qty_reserved, balance.qty_held, hold.status
+        FROM inventory_holds hold
+        INNER JOIN inventory_balances balance
+            ON balance.tenant_id = hold.tenant_id
+           AND balance.inventory_owner_id = hold.inventory_owner_id
+           AND balance.id = hold.inventory_balance_id
+        WHERE hold.tenant_id = $1 AND hold.id = $2
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(hold_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(hold_location_id, expected_location_id);
+    assert_eq!(balance_location_id, expected_location_id);
+    assert_eq!((qty_reserved, qty_held), (0, 1));
+    assert_eq!(hold_status, "active");
 }

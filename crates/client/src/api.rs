@@ -8,8 +8,9 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use wareboxes_core::dto::{ErrorResponse, OrderPage, SessionUser, UserSettings};
 use wareboxes_core::models::{
-    AuditWave, Employee, Facility, InventoryBalance, InventoryOwner, InventoryTransaction, Item,
-    ItemBatch, LicensePlate, Load, Location, Order, Permission, Role, User,
+    AuditWave, Employee, Facility, InventoryBalance, InventoryHold, InventoryOwner,
+    InventoryTransaction, Item, ItemBatch, LicensePlate, Load, Location, Order, Permission, Role,
+    User,
 };
 use wareboxes_domain::TenantId;
 
@@ -34,6 +35,7 @@ pub enum ApiEvent {
     LoadDetail(Load),
     ItemBatches(Vec<ItemBatch>),
     InventoryBalances(Vec<InventoryBalance>),
+    InventoryHolds(Vec<InventoryHold>),
     InventoryTransactions(Vec<InventoryTransaction>),
     LicensePlates(Vec<LicensePlate>),
     LicensePlateLookup(Option<LicensePlate>),
@@ -143,6 +145,12 @@ impl ApiClient {
         h
     }
 
+    fn authenticated_headers(&self, request_headers: ehttp::Headers) -> ehttp::Headers {
+        let mut headers = self.headers();
+        headers.headers.extend(request_headers.headers);
+        headers
+    }
+
     /// Fire a request and hand the decoded payload to `on_ok`, or surface a
     /// unified error event from the HTTP status and error body.
     fn send<T, F>(&self, mut req: ehttp::Request, on_ok: F)
@@ -150,7 +158,7 @@ impl ApiClient {
         T: DeserializeOwned + 'static,
         F: FnOnce(T) -> ApiEvent + Send + 'static,
     {
-        req.headers = self.headers();
+        req.headers = self.authenticated_headers(req.headers);
         let tx = self.tx.clone();
         let ctx = self.ctx.clone();
         ehttp::fetch(req, move |res| {
@@ -263,6 +271,11 @@ impl ApiClient {
         self.send::<Vec<InventoryBalance>, _>(req, ApiEvent::InventoryBalances);
     }
 
+    pub fn get_inventory_holds(&self) {
+        let req = ehttp::Request::get(self.url("/api/inventory/holds"));
+        self.send::<Vec<InventoryHold>, _>(req, ApiEvent::InventoryHolds);
+    }
+
     pub fn get_orders_page(
         &self,
         limit: i64,
@@ -328,7 +341,9 @@ impl ApiClient {
     /// POST a JSON action and, on success, emit `ActionDone` so the caller can
     /// toast + refresh the originating screen.
     pub fn action(&self, path: &str, body: Value, refresh: Screen, msg: &str) {
-        let req = ehttp::Request::post(self.url(path), body.to_string().into_bytes());
+        let mut req = ehttp::Request::post(self.url(path), body.to_string().into_bytes());
+        req.headers
+            .insert("Idempotency-Key", uuid::Uuid::new_v4().to_string());
         let msg = msg.to_string();
         self.send::<Value, _>(req, move |value| {
             if value == Value::Bool(false) {
@@ -368,5 +383,20 @@ mod tests {
         let headers = client.headers();
         assert_eq!(headers.get("Authorization"), Some("Bearer session-token"));
         assert_eq!(headers.get("X-Wareboxes-Tenant-Id"), Some("42"));
+    }
+
+    #[test]
+    fn authenticated_headers_preserve_command_idempotency() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut client =
+            ApiClient::new("http://localhost".to_owned(), tx, egui::Context::default());
+        client.token = Some("session-token".to_owned());
+        let mut request_headers = ehttp::Headers::default();
+        request_headers.insert("Idempotency-Key", "hold-command-1");
+
+        let headers = client.authenticated_headers(request_headers);
+
+        assert_eq!(headers.get("Authorization"), Some("Bearer session-token"));
+        assert_eq!(headers.get("Idempotency-Key"), Some("hold-command-1"));
     }
 }

@@ -324,11 +324,21 @@ pub async fn inventory_allocation_dimensions(
     .await
 }
 
+pub async fn inventory_hold_dimensions(
+    db: &Db,
+    access: &TenantAccess,
+    hold_id: i64,
+    include_deleted: bool,
+) -> AppResult<Option<OperationalDimensions>> {
+    inventory_dimensions(db, access, InventoryRecord::Hold(hold_id), include_deleted).await
+}
+
 #[derive(Debug, Clone, Copy)]
 enum InventoryRecord {
     Balance(i64),
     Reservation(i64),
     Allocation(i64),
+    Hold(i64),
 }
 
 async fn inventory_dimensions(
@@ -367,6 +377,18 @@ async fn inventory_dimensions(
             r#"
             SELECT facility_id, inventory_owner_id
             FROM inventory_allocations
+            WHERE tenant_id = $1
+              AND id = $2
+              AND ($3 OR deleted IS NULL)
+              AND ($4 OR facility_id = ANY($5))
+              AND ($6 OR inventory_owner_id = ANY($7))
+            "#,
+            id,
+        ),
+        InventoryRecord::Hold(id) => (
+            r#"
+            SELECT facility_id, inventory_owner_id
+            FROM inventory_holds
             WHERE tenant_id = $1
               AND id = $2
               AND ($3 OR deleted IS NULL)

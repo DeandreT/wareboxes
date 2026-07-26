@@ -416,16 +416,16 @@ impl WareboxesApp {
             .iter()
             .filter(|balance| balance.deleted.is_none())
             .filter(|balance| balance.license_plate_id.is_none())
-            .filter(|balance| balance.qty_on_hand - balance.qty_reserved > 0)
+            .filter(|balance| balance.qty_on_hand - balance.qty_reserved - balance.qty_held > 0)
             .filter(|balance| self.item_id_for_batch(balance.item_batch_id) == Some(item_id))
             .map(|balance| {
-                let available = balance.qty_on_hand - balance.qty_reserved;
+                let movable = balance.qty_on_hand - balance.qty_reserved - balance.qty_held;
                 (
                     balance.id,
                     format!(
-                        "{} - {} available - {} - {}",
+                        "{} - {} movable - {} - {}",
                         self.location_label(balance.location_id),
-                        available,
+                        movable,
                         Self::inventory_status_label(balance.status),
                         self.item_batch_label(balance.item_batch_id),
                     ),

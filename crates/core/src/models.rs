@@ -458,6 +458,7 @@ pub struct InventoryBalance {
     pub status: InventoryStatus,
     pub qty_on_hand: i64,
     pub qty_reserved: i64,
+    pub qty_held: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -474,6 +475,27 @@ pub struct InventoryReconciliationIssue {
     pub journal_qty: i64,
     pub projected_qty: i64,
     pub variance: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventoryHoldReconciliationIssue {
+    pub inventory_balance_id: i64,
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub location_id: i64,
+    pub license_plate_id: Option<i64>,
+    pub item_batch_id: i64,
+    pub item_id: i64,
+    pub uom: String,
+    pub inventory_status: InventoryStatus,
+    pub qty_on_hand: i64,
+    pub qty_reserved: i64,
+    pub allocated_qty: i64,
+    pub qty_held: i64,
+    pub held_qty: i64,
+    pub overcommitted_qty: i64,
+    pub issue_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -552,6 +574,106 @@ pub struct InventoryAllocation {
     pub qty: i64,
     pub status: AllocationStatus,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventoryHold {
+    pub id: i64,
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub created: Timestamp,
+    pub modified: Option<Timestamp>,
+    pub deleted: Option<Timestamp>,
+    pub created_by: i64,
+    pub released_by: Option<i64>,
+    pub released_at: Option<Timestamp>,
+    pub inventory_balance_id: i64,
+    pub facility_id: i64,
+    pub location_id: i64,
+    pub license_plate_id: Option<i64>,
+    pub item_batch_id: i64,
+    pub item_id: i64,
+    pub uom: String,
+    pub inventory_status: InventoryStatus,
+    pub qty: i64,
+    pub reason: InventoryHoldReason,
+    pub note: Option<String>,
+    pub reference_type: Option<String>,
+    pub reference_id: Option<i64>,
+    pub status: InventoryHoldStatus,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryHoldReason {
+    QualityInspection,
+    DamageSuspected,
+    InventoryDiscrepancy,
+    Regulatory,
+    CustomerRequest,
+    Other,
+}
+
+impl InventoryHoldReason {
+    pub const ALL: [Self; 6] = [
+        Self::QualityInspection,
+        Self::DamageSuspected,
+        Self::InventoryDiscrepancy,
+        Self::Regulatory,
+        Self::CustomerRequest,
+        Self::Other,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::QualityInspection => "quality_inspection",
+            Self::DamageSuspected => "damage_suspected",
+            Self::InventoryDiscrepancy => "inventory_discrepancy",
+            Self::Regulatory => "regulatory",
+            Self::CustomerRequest => "customer_request",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "quality_inspection" => Self::QualityInspection,
+            "damage_suspected" => Self::DamageSuspected,
+            "inventory_discrepancy" => Self::InventoryDiscrepancy,
+            "regulatory" => Self::Regulatory,
+            "customer_request" => Self::CustomerRequest,
+            "other" => Self::Other,
+            _ => return None,
+        })
+    }
+}
+
+impl_status_display!(InventoryHoldReason);
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryHoldStatus {
+    Active,
+    Released,
+}
+
+impl InventoryHoldStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Released => "released",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "active" => Self::Active,
+            "released" => Self::Released,
+            _ => return None,
+        })
+    }
+}
+
+impl_status_display!(InventoryHoldStatus);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -734,6 +856,7 @@ pub struct LicensePlateContent {
     pub status: InventoryStatus,
     pub qty_on_hand: i64,
     pub qty_reserved: i64,
+    pub qty_held: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -1290,6 +1413,7 @@ pub struct ItemLocationCycleCountConfirmation {
     pub inventory_status: InventoryStatus,
     pub previous_on_hand_quantity: i64,
     pub reserved_quantity: i64,
+    pub held_quantity: i64,
     pub counted_quantity: i64,
     pub variance_quantity: i64,
     pub inventory_transaction_id: Option<i64>,

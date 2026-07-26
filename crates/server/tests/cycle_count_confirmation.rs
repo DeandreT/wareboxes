@@ -4,7 +4,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use common::*;
 use tower::ServiceExt;
-use wareboxes_core::models::{InventoryTransactionType, TenantAccess};
+use wareboxes_core::models::{InventoryHoldReason, InventoryTransactionType, TenantAccess};
 use wareboxes_domain::CommandContext;
 use wareboxes_server::auth::TENANT_ID_HEADER;
 use wareboxes_server::request_context::IDEMPOTENCY_KEY_HEADER;
@@ -156,6 +156,35 @@ impl CycleCountFixture {
         (balance.qty_on_hand, balance.qty_reserved)
     }
 
+    async fn place_hold(&self, qty: i64) -> i64 {
+        repo::inventory::place_inventory_hold(
+            &self.fixture.db,
+            &self.access,
+            &Self::command(&self.access, "place-cycle-count-hold"),
+            &repo::inventory::PlaceInventoryHoldCommand {
+                inventory_balance_id: self.balance_id,
+                qty,
+                reason: InventoryHoldReason::InventoryDiscrepancy,
+                note: Some("cycle count restriction"),
+                reference_type: None,
+                reference_id: None,
+            },
+        )
+        .await
+        .unwrap()
+        .hold_id
+    }
+
+    async fn held_quantity(&self) -> i64 {
+        repo::inventory::get_balances(&self.fixture.db, self.access.tenant_id, false)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|balance| balance.id == self.balance_id)
+            .unwrap()
+            .qty_held
+    }
+
     async fn effect_counts(&self) -> (i64, i64, i64, i64, i64, i64, i64) {
         let mut tx = tenant_tx(&self.fixture.db, self.access.tenant_id).await;
         let counts = sqlx::query_as(
@@ -226,6 +255,14 @@ impl CycleCountFixture {
         .await
         .unwrap()
         .is_empty());
+        let mut tx = tenant_tx(&self.fixture.db, self.access.tenant_id).await;
+        let hold_issues: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM inventory_hold_reconciliation")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(hold_issues, 0);
     }
 }
 
@@ -391,6 +428,74 @@ async fn count_below_reserved_quantity_rolls_back_every_effect() {
             .len(),
         transaction_count_before
     );
+    count.assert_reconciled().await;
+}
+
+#[tokio::test]
+async fn count_below_held_quantity_rolls_back_until_full_release() {
+    let count = CycleCountFixture::new("held", 10, 0).await;
+    let hold_id = count.place_hold(6).await;
+    let command = CycleCountFixture::command(&count.access, "confirm-below-held");
+    let transaction_count_before =
+        repo::inventory::get_transactions(&count.fixture.db, count.access.tenant_id)
+            .await
+            .unwrap()
+            .len();
+
+    let error = repo::tasks::confirm_item_location_cycle_count_in_scope(
+        &count.fixture.db,
+        &count.access,
+        &command,
+        count.task_id,
+        5,
+        Some("physical count is below held quantity"),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(error, AppError::Core(CoreError::Conflict(_))));
+    assert_eq!(count.balance_quantities().await, (10, 0));
+    assert_eq!(count.held_quantity().await, 6);
+    assert_eq!(count.task_status().await, "in_progress");
+    assert_eq!(count.effect_counts().await, (0, 0, 0, 0, 0, 0, 0));
+    assert_eq!(
+        repo::inventory::get_transactions(&count.fixture.db, count.access.tenant_id)
+            .await
+            .unwrap()
+            .len(),
+        transaction_count_before
+    );
+    count.assert_reconciled().await;
+
+    let released = repo::inventory::release_inventory_hold(
+        &count.fixture.db,
+        &count.access,
+        &CycleCountFixture::command(&count.access, "release-cycle-count-hold"),
+        &repo::inventory::ReleaseInventoryHoldCommand { hold_id },
+    )
+    .await
+    .unwrap();
+    assert_eq!(released.released_qty, 6);
+    assert_eq!(count.held_quantity().await, 0);
+
+    let confirmation = repo::tasks::confirm_item_location_cycle_count_in_scope(
+        &count.fixture.db,
+        &count.access,
+        &command,
+        count.task_id,
+        5,
+        Some("hold released after investigation"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(confirmation.previous_on_hand_quantity, 10);
+    assert_eq!(confirmation.held_quantity, 0);
+    assert_eq!(confirmation.counted_quantity, 5);
+    assert_eq!(confirmation.variance_quantity, -5);
+    assert_eq!(count.balance_quantities().await, (5, 0));
+    assert_eq!(count.held_quantity().await, 0);
+    assert_eq!(count.task_status().await, "completed");
+    assert_eq!(count.effect_counts().await, (1, 1, 1, 1, 1, 1, 1));
     count.assert_reconciled().await;
 }
 

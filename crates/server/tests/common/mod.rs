@@ -242,6 +242,25 @@ pub struct Fixture {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct ReceivedBalanceSetup<'a> {
+    pub inventory_owner_id: i64,
+    pub facility_id: i64,
+    pub item_id: i64,
+    pub qty: i64,
+    pub key: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ReceivedBalance {
+    pub balance_id: i64,
+    pub inventory_owner_id: i64,
+    pub facility_id: i64,
+    pub location_id: i64,
+    pub item_batch_id: i64,
+    pub item_id: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct AllocatedReservation {
     pub reservation_id: i64,
     pub allocation_id: i64,
@@ -400,7 +419,72 @@ impl Fixture {
         id
     }
 
-    pub async fn allocated_reservation(
+    pub async fn received_balance(
+        &self,
+        access: &wareboxes_core::models::TenantAccess,
+        setup: ReceivedBalanceSetup<'_>,
+    ) -> ReceivedBalance {
+        let location_id = self
+            .location(access.tenant_id, setup.facility_id, setup.key)
+            .await;
+        let item_batch_id = repo::inventory::add_item_batch(
+            &self.db,
+            access.tenant_id,
+            setup.inventory_owner_id,
+            setup.item_id,
+            None,
+            Some(setup.key),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo::inventory::receive_inventory(
+            &self.db,
+            access.tenant_id,
+            access.user_id.get(),
+            item_batch_id,
+            location_id,
+            setup.qty,
+            None,
+            Some("received balance fixture"),
+            None,
+            None,
+            &format!("{}-receipt", setup.key),
+        )
+        .await
+        .unwrap();
+        let mut tx = tenant_tx(&self.db, access.tenant_id).await;
+        let balance_id = sqlx::query_scalar(
+            r#"
+            SELECT id
+            FROM inventory_balances
+            WHERE tenant_id = $1
+              AND inventory_owner_id = $2
+              AND location_id = $3
+              AND item_batch_id = $4
+              AND deleted IS NULL
+            "#,
+        )
+        .bind(access.tenant_id.get())
+        .bind(setup.inventory_owner_id)
+        .bind(location_id)
+        .bind(item_batch_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        ReceivedBalance {
+            balance_id,
+            inventory_owner_id: setup.inventory_owner_id,
+            facility_id: setup.facility_id,
+            location_id,
+            item_batch_id,
+            item_id: setup.item_id,
+        }
+    }
+
+    pub async fn reservation_for_balance(
         &self,
         tenant_id: TenantId,
         user_id: i64,
@@ -408,7 +492,7 @@ impl Fixture {
         inventory_balance_id: i64,
         qty: i64,
         idempotency_key: &str,
-    ) -> AllocatedReservation {
+    ) -> i64 {
         let mut tx = tenant_tx(&self.db, tenant_id).await;
         let (facility_id, item_id): (i64, i64) = sqlx::query_as(
             r#"
@@ -462,11 +546,36 @@ impl Fixture {
         )
         .await
         .unwrap();
+        reservation.reservation_id
+    }
+
+    pub async fn allocated_reservation(
+        &self,
+        tenant_id: TenantId,
+        user_id: i64,
+        order_id: i64,
+        inventory_balance_id: i64,
+        qty: i64,
+        idempotency_key: &str,
+    ) -> AllocatedReservation {
+        let reservation_id = self
+            .reservation_for_balance(
+                tenant_id,
+                user_id,
+                order_id,
+                inventory_balance_id,
+                qty,
+                &format!("{idempotency_key}-reservation"),
+            )
+            .await;
+        let access = default_tenant_for_user(&self.db, user_id)
+            .await
+            .expect("allocation actor has tenant access");
         let allocation = repo::inventory::allocate_inventory(
             &self.db,
             &access,
             &repo::inventory::AllocateInventoryCommand {
-                reservation_id: reservation.reservation_id,
+                reservation_id,
                 inventory_balance_id,
                 qty,
                 idempotency_key: &format!("{idempotency_key}-allocation"),
@@ -475,7 +584,7 @@ impl Fixture {
         .await
         .unwrap();
         AllocatedReservation {
-            reservation_id: reservation.reservation_id,
+            reservation_id,
             allocation_id: allocation.allocation_id,
         }
     }

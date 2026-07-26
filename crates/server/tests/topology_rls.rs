@@ -16,10 +16,15 @@ const SEQUENCES: [&str; 4] = [
     "inventory_owner_facilities_id_seq",
 ];
 
-const RESERVATION_TABLES: [&str; 2] = ["inventory_reservations", "inventory_allocations"];
-const RESERVATION_SEQUENCES: [&str; 2] = [
+const INVENTORY_COMMITMENT_TABLES: [&str; 3] = [
+    "inventory_reservations",
+    "inventory_allocations",
+    "inventory_holds",
+];
+const INVENTORY_COMMITMENT_SEQUENCES: [&str; 3] = [
     "inventory_reservations_id_seq",
     "inventory_allocations_id_seq",
+    "inventory_holds_id_seq",
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -454,13 +459,13 @@ async fn assert_exact_runtime_privileges(db: &db::Db) {
         ORDER BY ordinal
         "#,
     )
-    .bind(RESERVATION_TABLES.as_slice())
+    .bind(INVENTORY_COMMITMENT_TABLES.as_slice())
     .fetch_all(db)
     .await
     .unwrap();
     assert_eq!(
         reservation_privileges,
-        RESERVATION_TABLES
+        INVENTORY_COMMITMENT_TABLES
             .iter()
             .map(|table| TablePrivileges {
                 table_name: (*table).to_owned(),
@@ -514,13 +519,13 @@ async fn assert_exact_runtime_privileges(db: &db::Db) {
         ORDER BY ordinal
         "#,
     )
-    .bind(RESERVATION_SEQUENCES.as_slice())
+    .bind(INVENTORY_COMMITMENT_SEQUENCES.as_slice())
     .fetch_all(db)
     .await
     .unwrap();
     assert_eq!(
         reservation_sequence_privileges,
-        RESERVATION_SEQUENCES
+        INVENTORY_COMMITMENT_SEQUENCES
             .iter()
             .map(|sequence| SequencePrivileges {
                 sequence_name: (*sequence).to_owned(),

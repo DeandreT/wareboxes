@@ -4,11 +4,13 @@ use wareboxes_core::dto::{
     AddItemBatch, AllocateInventory, AllocateInventoryResult, CancelInventoryAllocation,
     CancelInventoryAllocationResult, CancelInventoryReservation, CancelInventoryReservationResult,
     CreateInventoryReservation, CreateInventoryReservationResult, ItemBatchIdRequest,
-    MoveInventory, ReceiveInventory, SplitMoveInventory,
+    MoveInventory, PlaceInventoryHold, PlaceInventoryHoldResult, ReceiveInventory,
+    ReleaseInventoryHold, ReleaseInventoryHoldResult, SplitMoveInventory,
 };
 use wareboxes_core::models::{
-    InventoryAllocation, InventoryBalance, InventoryReconciliationIssue, InventoryReservation,
-    InventoryStatus, InventoryTransaction, ItemBatch,
+    InventoryAllocation, InventoryBalance, InventoryHold, InventoryHoldReconciliationIssue,
+    InventoryReconciliationIssue, InventoryReservation, InventoryStatus, InventoryTransaction,
+    ItemBatch,
 };
 use wareboxes_domain::FacilityId;
 
@@ -16,6 +18,7 @@ use crate::auth::CurrentTenant;
 use crate::db::Db;
 use crate::error::{AppError, AppResult};
 use crate::repo;
+use crate::request_context::IdempotencyKey;
 use crate::routes::users::ShowDeleted;
 use crate::routes::validate;
 use crate::state::AppState;
@@ -313,6 +316,78 @@ pub async fn list_allocations(
     user.require_permission(&state.db, PERM).await?;
     Ok(Json(
         repo::inventory::get_allocations_in_scope(&state.db, &user.tenant, q.show_deleted).await?,
+    ))
+}
+
+pub async fn list_holds(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Query(q): Query<ShowDeleted>,
+) -> AppResult<Json<Vec<InventoryHold>>> {
+    user.require_permission(&state.db, PERM).await?;
+    Ok(Json(
+        repo::inventory::get_inventory_holds_in_scope(&state.db, &user.tenant, q.show_deleted)
+            .await?,
+    ))
+}
+
+pub async fn list_hold_reconciliation_issues(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+) -> AppResult<Json<Vec<InventoryHoldReconciliationIssue>>> {
+    user.require_permission(&state.db, PERM).await?;
+    Ok(Json(
+        repo::inventory::get_inventory_hold_reconciliation_issues_in_scope(&state.db, &user.tenant)
+            .await?,
+    ))
+}
+
+pub async fn place_hold(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Json(body): Json<PlaceInventoryHold>,
+) -> AppResult<Json<PlaceInventoryHoldResult>> {
+    user.require_permission(&state.db, PERM).await?;
+    validate(&body)?;
+    let context = user.command_context(&idempotency_key);
+    Ok(Json(
+        repo::inventory::place_inventory_hold(
+            &state.db,
+            &user.tenant,
+            &context,
+            &repo::inventory::PlaceInventoryHoldCommand {
+                inventory_balance_id: body.inventory_balance_id,
+                qty: body.qty,
+                reason: body.reason,
+                note: body.note.as_deref(),
+                reference_type: body.reference_type.as_deref(),
+                reference_id: body.reference_id,
+            },
+        )
+        .await?,
+    ))
+}
+
+pub async fn release_hold(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Json(body): Json<ReleaseInventoryHold>,
+) -> AppResult<Json<ReleaseInventoryHoldResult>> {
+    user.require_permission(&state.db, PERM).await?;
+    validate(&body)?;
+    let context = user.command_context(&idempotency_key);
+    Ok(Json(
+        repo::inventory::release_inventory_hold(
+            &state.db,
+            &user.tenant,
+            &context,
+            &repo::inventory::ReleaseInventoryHoldCommand {
+                hold_id: body.hold_id,
+            },
+        )
+        .await?,
     ))
 }
 

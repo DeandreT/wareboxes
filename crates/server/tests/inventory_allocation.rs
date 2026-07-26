@@ -6,7 +6,7 @@ use std::time::Duration;
 use common::*;
 use tokio::sync::Barrier;
 use tokio::time::timeout;
-use wareboxes_core::models::{AllocationStatus, ReservationStatus, TenantAccess};
+use wareboxes_core::models::{AllocationStatus, ReservationStatus};
 
 fn assert_boundary_rejection(error: AppError) {
     assert!(
@@ -16,92 +16,6 @@ fn assert_boundary_rejection(error: AppError) {
         ),
         "unexpected inventory boundary error: {error:?}"
     );
-}
-
-async fn balance_id(
-    db: &db::Db,
-    tenant_id: TenantId,
-    inventory_owner_id: i64,
-    location_id: i64,
-    item_batch_id: i64,
-) -> i64 {
-    let mut tx = tenant_tx(db, tenant_id).await;
-    let id = sqlx::query_scalar(
-        r#"
-        SELECT id
-        FROM inventory_balances
-        WHERE tenant_id = $1
-          AND inventory_owner_id = $2
-          AND location_id = $3
-          AND item_batch_id = $4
-          AND deleted IS NULL
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(inventory_owner_id)
-    .bind(location_id)
-    .bind(item_batch_id)
-    .fetch_one(&mut *tx)
-    .await
-    .unwrap();
-    tx.rollback().await.unwrap();
-    id
-}
-
-struct BalanceSetup<'a> {
-    inventory_owner_id: i64,
-    facility_id: i64,
-    key: &'a str,
-    item_id: i64,
-    qty: i64,
-}
-
-async fn receive_balance(
-    fixture: &Fixture,
-    access: &TenantAccess,
-    setup: BalanceSetup<'_>,
-) -> (i64, i64) {
-    let location_id = fixture
-        .location(access.tenant_id, setup.facility_id, setup.key)
-        .await;
-    let item_batch_id = repo::inventory::add_item_batch(
-        &fixture.db,
-        access.tenant_id,
-        setup.inventory_owner_id,
-        setup.item_id,
-        None,
-        Some(setup.key),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    repo::inventory::receive_inventory(
-        &fixture.db,
-        access.tenant_id,
-        access.user_id.get(),
-        item_batch_id,
-        location_id,
-        setup.qty,
-        None,
-        Some("allocation fixture receipt"),
-        None,
-        None,
-        &format!("{}-receipt", setup.key),
-    )
-    .await
-    .unwrap();
-    (
-        balance_id(
-            &fixture.db,
-            access.tenant_id,
-            setup.inventory_owner_id,
-            location_id,
-            item_batch_id,
-        )
-        .await,
-        location_id,
-    )
 }
 
 async fn assert_allocation_reconciliation(db: &db::Db, tenant_id: TenantId) {
@@ -125,8 +39,14 @@ async fn assert_allocation_reconciliation(db: &db::Db, tenant_id: TenantId) {
     .fetch_one(&mut *tx)
     .await
     .unwrap();
+    let commitment_mismatches: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM inventory_hold_reconciliation")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
     tx.rollback().await.unwrap();
     assert_eq!(mismatches, 0);
+    assert_eq!(commitment_mismatches, 0);
     assert!(repo::inventory::get_reconciliation_issues(db, tenant_id)
         .await
         .unwrap()
@@ -152,42 +72,45 @@ async fn soft_reservations_and_concrete_allocations_preserve_demand_and_stock() 
     let order_id = fixture.order(tenant_id, "ALLOCATION-ORDER", owner_id).await;
     let order_item_id = fixture.order_item(tenant_id, order_id, item_id, 20).await;
 
-    let (balance_a, _) = receive_balance(
-        &fixture,
-        &access,
-        BalanceSetup {
-            inventory_owner_id: owner_id,
-            facility_id,
-            key: "ALLOCATION-A",
-            item_id,
-            qty: 6,
-        },
-    )
-    .await;
-    let (balance_b, _) = receive_balance(
-        &fixture,
-        &access,
-        BalanceSetup {
-            inventory_owner_id: owner_id,
-            facility_id,
-            key: "ALLOCATION-B",
-            item_id,
-            qty: 10,
-        },
-    )
-    .await;
-    let (other_facility_balance, _) = receive_balance(
-        &fixture,
-        &access,
-        BalanceSetup {
-            inventory_owner_id: owner_id,
-            facility_id: other_facility_id,
-            key: "ALLOCATION-OTHER-FACILITY",
-            item_id,
-            qty: 10,
-        },
-    )
-    .await;
+    let balance_a = fixture
+        .received_balance(
+            &access,
+            ReceivedBalanceSetup {
+                inventory_owner_id: owner_id,
+                facility_id,
+                key: "ALLOCATION-A",
+                item_id,
+                qty: 6,
+            },
+        )
+        .await
+        .balance_id;
+    let balance_b = fixture
+        .received_balance(
+            &access,
+            ReceivedBalanceSetup {
+                inventory_owner_id: owner_id,
+                facility_id,
+                key: "ALLOCATION-B",
+                item_id,
+                qty: 10,
+            },
+        )
+        .await
+        .balance_id;
+    let other_facility_balance = fixture
+        .received_balance(
+            &access,
+            ReceivedBalanceSetup {
+                inventory_owner_id: owner_id,
+                facility_id: other_facility_id,
+                key: "ALLOCATION-OTHER-FACILITY",
+                item_id,
+                qty: 10,
+            },
+        )
+        .await
+        .balance_id;
 
     let other_owner_id = fixture
         .inventory_owner(tenant_id, "Other Allocation Owner")
@@ -195,18 +118,19 @@ async fn soft_reservations_and_concrete_allocations_preserve_demand_and_stock() 
     fixture
         .assign_owner_to_facility(tenant_id, other_owner_id, facility_id)
         .await;
-    let (other_owner_balance, _) = receive_balance(
-        &fixture,
-        &access,
-        BalanceSetup {
-            inventory_owner_id: other_owner_id,
-            facility_id,
-            key: "ALLOCATION-OTHER-OWNER",
-            item_id,
-            qty: 10,
-        },
-    )
-    .await;
+    let other_owner_balance = fixture
+        .received_balance(
+            &access,
+            ReceivedBalanceSetup {
+                inventory_owner_id: other_owner_id,
+                facility_id,
+                key: "ALLOCATION-OTHER-OWNER",
+                item_id,
+                qty: 10,
+            },
+        )
+        .await
+        .balance_id;
 
     let other_user = fixture
         .wms_user("inventory-allocation-other@test.local")
@@ -234,18 +158,19 @@ async fn soft_reservations_and_concrete_allocations_preserve_demand_and_stock() 
             "each",
         )
         .await;
-    let (other_tenant_balance, _) = receive_balance(
-        &fixture,
-        &other_access,
-        BalanceSetup {
-            inventory_owner_id: other_tenant_owner,
-            facility_id: other_tenant_facility,
-            key: "ALLOCATION-CROSS-TENANT",
-            item_id: other_tenant_item,
-            qty: 10,
-        },
-    )
-    .await;
+    let other_tenant_balance = fixture
+        .received_balance(
+            &other_access,
+            ReceivedBalanceSetup {
+                inventory_owner_id: other_tenant_owner,
+                facility_id: other_tenant_facility,
+                key: "ALLOCATION-CROSS-TENANT",
+                item_id: other_tenant_item,
+                qty: 10,
+            },
+        )
+        .await
+        .balance_id;
 
     let reservation_command = repo::inventory::CreateInventoryReservationCommand {
         order_id,

@@ -1,6 +1,16 @@
 use super::*;
 
-type FacilityInventoryTotals = (i64, i64, BTreeSet<i64>, usize);
+type LocationInventoryTotals = (i64, i64, i64, i64, usize);
+type FacilityInventoryTotals = (i64, i64, i64, i64, BTreeSet<i64>, usize);
+type ItemInventoryTotals = (i64, i64, i64, i64, BTreeSet<i64>, BTreeSet<i64>);
+
+fn allocatable_quantity(balance: &InventoryBalance) -> i64 {
+    if balance.status == InventoryStatus::Available {
+        balance.qty_on_hand - balance.qty_reserved - balance.qty_held
+    } else {
+        0
+    }
+}
 
 impl WareboxesApp {
     // ---- Inventory -------------------------------------------------------
@@ -19,6 +29,20 @@ impl WareboxesApp {
             .filter(|balance| balance.deleted.is_none())
             .map(|balance| balance.qty_reserved)
             .sum();
+        let total_held: i64 = self
+            .data
+            .inventory_balances
+            .iter()
+            .filter(|balance| balance.deleted.is_none())
+            .map(|balance| balance.qty_held)
+            .sum();
+        let total_available: i64 = self
+            .data
+            .inventory_balances
+            .iter()
+            .filter(|balance| balance.deleted.is_none())
+            .map(allocatable_quantity)
+            .sum();
         ui.horizontal_wrapped(|ui| {
             Self::summary_badge(ui, "On Hand", total_on_hand, Self::success_text_color(ui));
             Self::summary_badge(
@@ -29,8 +53,14 @@ impl WareboxesApp {
             );
             Self::summary_badge(
                 ui,
+                "Held",
+                total_held,
+                Self::inventory_status_color(ui, InventoryStatus::Hold),
+            );
+            Self::summary_badge(
+                ui,
                 "Available",
-                total_on_hand - total_reserved,
+                total_available,
                 Self::load_status_color(LoadStatus::Received),
             );
         });
@@ -49,6 +79,7 @@ impl WareboxesApp {
             ("location", "By Location"),
             ("facility", "By Facility"),
             ("item", "By Item"),
+            ("holds", "Holds"),
             ("journal", "Journal"),
         ];
         if !inventory_tabs.iter().any(|(value, _)| *value == tab) {
@@ -67,6 +98,7 @@ impl WareboxesApp {
             "location" => self.inventory_location_summary_tab(ui),
             "facility" => self.inventory_facility_summary_tab(ui),
             "item" => self.inventory_item_summary_tab(ui),
+            "holds" => self.inventory_holds_tab(ui),
             "journal" => self.inventory_journal_tab(ui),
             _ => self.inventory_actions_tab(ui),
         }
@@ -240,7 +272,7 @@ impl WareboxesApp {
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new("2. Pick source").strong());
                         if source_options.is_empty() {
-                            ui.weak("No available loose inventory for this item.");
+                            ui.weak("No movable loose inventory for this item.");
                             None
                         } else {
                             let picked = Self::entity_picker(
@@ -268,7 +300,9 @@ impl WareboxesApp {
                                         .iter()
                                         .find(|balance| balance.id == *balance_id)
                                     {
-                                        let available = balance.qty_on_hand - balance.qty_reserved;
+                                        let movable = balance.qty_on_hand
+                                            - balance.qty_reserved
+                                            - balance.qty_held;
                                         let color = Self::inventory_status_color(ui, balance.status);
                                         let selected = picked == Some(*balance_id);
                                         let fill = if selected {
@@ -312,8 +346,8 @@ impl WareboxesApp {
                                                         Self::inventory_status_label(balance.status),
                                                     );
                                                     ui.label(format!(
-                                                        "{available} available / {} reserved",
-                                                        balance.qty_reserved
+                                                        "{movable} movable / {} reserved / {} held",
+                                                        balance.qty_reserved, balance.qty_held
                                                     ));
                                                 });
                                             });
@@ -485,10 +519,11 @@ impl WareboxesApp {
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new("4. Review and move").strong());
                         if let Some(balance) = &selected_balance {
-                            let available = balance.qty_on_hand - balance.qty_reserved;
+                            let movable =
+                                balance.qty_on_hand - balance.qty_reserved - balance.qty_held;
                             let color = Self::inventory_status_color(ui, balance.status);
                             ui.horizontal_wrapped(|ui| {
-                                Self::summary_badge(ui, "Available", available, color);
+                                Self::summary_badge(ui, "Movable", movable, color);
                                 Self::summary_badge(
                                     ui,
                                     "Planned",
@@ -498,8 +533,8 @@ impl WareboxesApp {
                                 Self::summary_badge(
                                     ui,
                                     "Remaining",
-                                    available - planned_total,
-                                    if planned_total > available {
+                                    movable - planned_total,
+                                    if planned_total > movable {
                                         Self::danger_text_color(ui)
                                     } else {
                                         Self::success_text_color(ui)
@@ -559,12 +594,17 @@ impl WareboxesApp {
                                         );
                                     }
                                     Some(balance)
-                                        if planned_total > balance.qty_on_hand - balance.qty_reserved =>
+                                        if planned_total
+                                            > balance.qty_on_hand
+                                                - balance.qty_reserved
+                                                - balance.qty_held =>
                                     {
                                         self.toast(
                                             format!(
-                                                "Only {} units are available to move",
-                                                balance.qty_on_hand - balance.qty_reserved
+                                                "Only {} units are movable",
+                                                balance.qty_on_hand
+                                                    - balance.qty_reserved
+                                                    - balance.qty_held
                                             ),
                                             true,
                                             self.now,
@@ -634,6 +674,7 @@ impl WareboxesApp {
             .column(Column::auto().at_least(80.0))
             .column(Column::auto().at_least(80.0))
             .column(Column::auto().at_least(80.0))
+            .column(Column::auto().at_least(80.0))
             .header(24.0, |mut h| {
                 for label in [
                     "ID",
@@ -642,6 +683,7 @@ impl WareboxesApp {
                     "Status",
                     "On hand",
                     "Reserved",
+                    "Held",
                     "Available",
                 ] {
                     h.col(|ui| {
@@ -671,7 +713,10 @@ impl WareboxesApp {
                         ui.label(balance.qty_reserved.to_string());
                     });
                     row.col(|ui| {
-                        ui.strong((balance.qty_on_hand - balance.qty_reserved).to_string());
+                        ui.label(balance.qty_held.to_string());
+                    });
+                    row.col(|ui| {
+                        ui.strong(allocatable_quantity(&balance).to_string());
                     });
                 });
             });
@@ -679,7 +724,7 @@ impl WareboxesApp {
 
     fn inventory_location_summary_tab(&self, ui: &mut egui::Ui) {
         ui.heading("On Hand by Location");
-        let mut totals: BTreeMap<(i64, i64), (i64, i64, usize)> = BTreeMap::new();
+        let mut totals: BTreeMap<(i64, i64), LocationInventoryTotals> = BTreeMap::new();
         for balance in self
             .data
             .inventory_balances
@@ -692,7 +737,9 @@ impl WareboxesApp {
             let entry = totals.entry((item_id, balance.location_id)).or_default();
             entry.0 += balance.qty_on_hand;
             entry.1 += balance.qty_reserved;
-            entry.2 += 1;
+            entry.2 += balance.qty_held;
+            entry.3 += allocatable_quantity(balance);
+            entry.4 += 1;
         }
         let rows = totals.into_iter().collect::<Vec<_>>();
         TableBuilder::new(ui)
@@ -706,6 +753,7 @@ impl WareboxesApp {
             .column(Column::auto().at_least(90.0))
             .column(Column::auto().at_least(90.0))
             .column(Column::auto().at_least(90.0))
+            .column(Column::auto().at_least(90.0))
             .header(24.0, |mut h| {
                 for label in [
                     "Item",
@@ -713,6 +761,7 @@ impl WareboxesApp {
                     "Balances",
                     "On hand",
                     "Reserved",
+                    "Held",
                     "Available",
                 ] {
                     h.col(|ui| {
@@ -722,8 +771,10 @@ impl WareboxesApp {
             })
             .body(|body| {
                 body.rows(28.0, rows.len(), |mut row| {
-                    let ((item_id, location_id), (on_hand, reserved, balance_count)) =
-                        rows[row.index()];
+                    let (
+                        (item_id, location_id),
+                        (on_hand, reserved, held, available, balance_count),
+                    ) = rows[row.index()];
                     row.col(|ui| {
                         ui.label(self.item_label(item_id));
                     });
@@ -740,7 +791,10 @@ impl WareboxesApp {
                         ui.label(reserved.to_string());
                     });
                     row.col(|ui| {
-                        ui.strong((on_hand - reserved).to_string());
+                        ui.label(held.to_string());
+                    });
+                    row.col(|ui| {
+                        ui.strong(available.to_string());
                     });
                 });
             });
@@ -761,8 +815,10 @@ impl WareboxesApp {
             let entry = totals.entry((item_id, balance.facility_id)).or_default();
             entry.0 += balance.qty_on_hand;
             entry.1 += balance.qty_reserved;
-            entry.2.insert(balance.location_id);
-            entry.3 += 1;
+            entry.2 += balance.qty_held;
+            entry.3 += allocatable_quantity(balance);
+            entry.4.insert(balance.location_id);
+            entry.5 += 1;
         }
         let rows = totals.into_iter().collect::<Vec<_>>();
         TableBuilder::new(ui)
@@ -777,6 +833,7 @@ impl WareboxesApp {
             .column(Column::auto().at_least(90.0))
             .column(Column::auto().at_least(90.0))
             .column(Column::auto().at_least(90.0))
+            .column(Column::auto().at_least(90.0))
             .header(24.0, |mut h| {
                 for label in [
                     "Item",
@@ -785,6 +842,7 @@ impl WareboxesApp {
                     "Balances",
                     "On hand",
                     "Reserved",
+                    "Held",
                     "Available",
                 ] {
                     h.col(|ui| {
@@ -794,8 +852,10 @@ impl WareboxesApp {
             })
             .body(|body| {
                 body.rows(28.0, rows.len(), |mut row| {
-                    let ((item_id, facility_id), (on_hand, reserved, locations, balance_count)) =
-                        &rows[row.index()];
+                    let (
+                        (item_id, facility_id),
+                        (on_hand, reserved, held, available, locations, balance_count),
+                    ) = &rows[row.index()];
                     row.col(|ui| {
                         ui.label(self.item_label(*item_id));
                     });
@@ -815,7 +875,10 @@ impl WareboxesApp {
                         ui.label(reserved.to_string());
                     });
                     row.col(|ui| {
-                        ui.strong((on_hand - reserved).to_string());
+                        ui.label(held.to_string());
+                    });
+                    row.col(|ui| {
+                        ui.strong(available.to_string());
                     });
                 });
             });
@@ -829,7 +892,7 @@ impl WareboxesApp {
             .iter()
             .map(|batch| (batch.id, batch.item_id))
             .collect::<HashMap<_, _>>();
-        let mut totals: BTreeMap<i64, (i64, i64, BTreeSet<i64>, BTreeSet<i64>)> = BTreeMap::new();
+        let mut totals: BTreeMap<i64, ItemInventoryTotals> = BTreeMap::new();
         for balance in self
             .data
             .inventory_balances
@@ -842,8 +905,10 @@ impl WareboxesApp {
             let entry = totals.entry(item_id).or_default();
             entry.0 += balance.qty_on_hand;
             entry.1 += balance.qty_reserved;
-            entry.2.insert(balance.item_batch_id);
-            entry.3.insert(balance.location_id);
+            entry.2 += balance.qty_held;
+            entry.3 += allocatable_quantity(balance);
+            entry.4.insert(balance.item_batch_id);
+            entry.5.insert(balance.location_id);
         }
         let rows = totals.into_iter().collect::<Vec<_>>();
         TableBuilder::new(ui)
@@ -857,6 +922,7 @@ impl WareboxesApp {
             .column(Column::auto().at_least(90.0))
             .column(Column::auto().at_least(90.0))
             .column(Column::auto().at_least(90.0))
+            .column(Column::auto().at_least(90.0))
             .header(24.0, |mut h| {
                 for label in [
                     "Item",
@@ -864,6 +930,7 @@ impl WareboxesApp {
                     "Locations",
                     "On hand",
                     "Reserved",
+                    "Held",
                     "Available",
                 ] {
                     h.col(|ui| {
@@ -873,7 +940,8 @@ impl WareboxesApp {
             })
             .body(|body| {
                 body.rows(28.0, rows.len(), |mut row| {
-                    let (item_id, (on_hand, reserved, batches, locations)) = &rows[row.index()];
+                    let (item_id, (on_hand, reserved, held, available, batches, locations)) =
+                        &rows[row.index()];
                     row.col(|ui| {
                         ui.label(self.item_label(*item_id));
                     });
@@ -890,7 +958,211 @@ impl WareboxesApp {
                         ui.label(reserved.to_string());
                     });
                     row.col(|ui| {
-                        ui.strong((on_hand - reserved).to_string());
+                        ui.label(held.to_string());
+                    });
+                    row.col(|ui| {
+                        ui.strong(available.to_string());
+                    });
+                });
+            });
+    }
+
+    fn inventory_holds_tab(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Inventory Holds");
+
+        let balance_options = self
+            .data
+            .inventory_balances
+            .iter()
+            .filter(|balance| {
+                balance.deleted.is_none()
+                    && balance.qty_on_hand - balance.qty_reserved - balance.qty_held > 0
+            })
+            .map(|balance| {
+                (
+                    balance.id,
+                    format!(
+                        "{} | {} | {} uncommitted",
+                        self.item_label(
+                            self.item_id_for_batch(balance.item_batch_id)
+                                .unwrap_or_default()
+                        ),
+                        self.location_label(balance.location_id),
+                        balance.qty_on_hand - balance.qty_reserved - balance.qty_held
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        let balance_key = "inventory:hold:balance".to_owned();
+        let qty_key = "inventory:hold:qty".to_owned();
+        let reason_key = "inventory:hold:reason".to_owned();
+        let note_key = "inventory:hold:note".to_owned();
+        let mut balance = self
+            .forms
+            .drafts
+            .get(&balance_key)
+            .cloned()
+            .unwrap_or_default();
+        let mut qty = self.forms.drafts.get(&qty_key).cloned().unwrap_or_default();
+        let mut reason = self
+            .forms
+            .drafts
+            .get(&reason_key)
+            .and_then(|value| InventoryHoldReason::parse(value))
+            .unwrap_or(InventoryHoldReason::QualityInspection);
+        let mut note = self
+            .forms
+            .drafts
+            .get(&note_key)
+            .cloned()
+            .unwrap_or_default();
+
+        ui.collapsing("Place inventory hold", |ui| {
+            if balance_options.is_empty() {
+                ui.weak("No uncommitted inventory is available.");
+                return;
+            }
+            let mut selected_balance_id = None;
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Balance");
+                selected_balance_id = Self::entity_picker(
+                    ui,
+                    "inventory_hold_balance",
+                    &mut balance,
+                    &balance_options,
+                    "Search balance",
+                )
+                .or_else(|| Self::selected_entity_id(&balance, &balance_options));
+                ui.label("Quantity");
+                ui.add_sized([80.0, 24.0], egui::TextEdit::singleline(&mut qty));
+                ui.label("Reason");
+                egui::ComboBox::from_id_source("inventory_hold_reason")
+                    .selected_text(Self::title_case(&reason.as_str().replace('_', " ")))
+                    .show_ui(ui, |ui| {
+                        for option in InventoryHoldReason::ALL {
+                            ui.selectable_value(
+                                &mut reason,
+                                option,
+                                Self::title_case(&option.as_str().replace('_', " ")),
+                            );
+                        }
+                    });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Note");
+                ui.add_sized(
+                    [360.0, 24.0],
+                    egui::TextEdit::singleline(&mut note).hint_text("Optional"),
+                );
+                if ui.button("Place hold").clicked() {
+                    let quantity = qty.trim().parse::<i64>().ok().filter(|value| *value > 0);
+                    let note_value = (!note.trim().is_empty()).then(|| note.trim().to_owned());
+                    match (selected_balance_id, quantity) {
+                        (Some(inventory_balance_id), Some(quantity))
+                            if reason != InventoryHoldReason::Other || note_value.is_some() =>
+                        {
+                            self.api.action(
+                                "/api/inventory/holds/place",
+                                json!({
+                                    "inventory_balance_id": inventory_balance_id,
+                                    "qty": quantity,
+                                    "reason": reason.as_str(),
+                                    "note": note_value,
+                                    "reference_type": null,
+                                    "reference_id": null
+                                }),
+                                Screen::Inventory,
+                                "Inventory hold placed",
+                            );
+                            self.forms.drafts.remove(&qty_key);
+                            self.forms.drafts.remove(&note_key);
+                            qty.clear();
+                            note.clear();
+                        }
+                        (_, None) => {
+                            self.toast("Enter a positive hold quantity", true, self.now);
+                        }
+                        (None, _) => {
+                            self.toast("Choose an inventory balance", true, self.now);
+                        }
+                        _ => {
+                            self.toast("A note is required for an other reason", true, self.now);
+                        }
+                    }
+                }
+            });
+        });
+        self.forms.drafts.insert(balance_key, balance);
+        self.forms.drafts.insert(qty_key, qty);
+        self.forms
+            .drafts
+            .insert(reason_key, reason.as_str().to_owned());
+        self.forms.drafts.insert(note_key, note);
+
+        ui.separator();
+        let holds = self
+            .data
+            .inventory_holds
+            .iter()
+            .filter(|hold| hold.status == InventoryHoldStatus::Active)
+            .cloned()
+            .collect::<Vec<_>>();
+        if holds.is_empty() {
+            ui.weak("No active inventory holds.");
+            return;
+        }
+
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .auto_shrink([false, false])
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::auto().at_least(55.0))
+            .column(Column::remainder().at_least(180.0).clip(true))
+            .column(Column::initial(170.0).at_least(120.0).clip(true))
+            .column(Column::auto().at_least(70.0))
+            .column(Column::initial(150.0).at_least(110.0).clip(true))
+            .column(Column::remainder().at_least(180.0).clip(true))
+            .column(Column::auto().at_least(80.0))
+            .header(24.0, |mut header| {
+                for label in [
+                    "ID", "Item", "Location", "Quantity", "Reason", "Note", "Action",
+                ] {
+                    header.col(|ui| {
+                        ui.strong(label);
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(28.0, holds.len(), |mut row| {
+                    let hold = &holds[row.index()];
+                    row.col(|ui| {
+                        ui.label(hold.id.to_string());
+                    });
+                    row.col(|ui| {
+                        ui.label(self.item_label(hold.item_id));
+                    });
+                    row.col(|ui| {
+                        self.location_label_ui(ui, hold.location_id);
+                    });
+                    row.col(|ui| {
+                        ui.label(format!("{} {}", hold.qty, hold.uom));
+                    });
+                    row.col(|ui| {
+                        ui.label(Self::title_case(&hold.reason.as_str().replace('_', " ")));
+                    });
+                    row.col(|ui| {
+                        ui.label(hold.note.as_deref().unwrap_or("-"));
+                    });
+                    row.col(|ui| {
+                        if ui.button("Release").clicked() {
+                            self.api.action(
+                                "/api/inventory/holds/release",
+                                json!({ "hold_id": hold.id }),
+                                Screen::Inventory,
+                                "Inventory hold released",
+                            );
+                        }
                     });
                 });
             });
@@ -1017,11 +1289,12 @@ impl WareboxesApp {
                     for content in &lp.contents {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(format!(
-                                "batch {} status {} on hand {} reserved {} at loc",
+                                "batch {} status {} on hand {} reserved {} held {} at loc",
                                 content.item_batch_id,
                                 content.status,
                                 content.qty_on_hand,
                                 content.qty_reserved,
+                                content.qty_held,
                             ));
                             self.location_label_ui(ui, content.location_id);
                         });
@@ -1058,12 +1331,13 @@ impl WareboxesApp {
                         for content in &lp.contents {
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(format!(
-                                    "balance {} batch {} status {}: on hand {}, reserved {}, loc",
+                                    "balance {} batch {} status {}: on hand {}, reserved {}, held {}, loc",
                                     content.inventory_balance_id,
                                     content.item_batch_id,
                                     content.status,
                                     content.qty_on_hand,
                                     content.qty_reserved,
+                                    content.qty_held,
                                 ));
                                 self.location_label_ui(ui, content.location_id);
                             });
@@ -1378,5 +1652,50 @@ impl WareboxesApp {
                     });
                 }
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::allocatable_quantity;
+    use chrono::Utc;
+    use wareboxes_core::models::{InventoryBalance, InventoryStatus};
+    use wareboxes_domain::{InventoryOwnerId, TenantId};
+
+    fn balance(status: InventoryStatus) -> InventoryBalance {
+        InventoryBalance {
+            id: 1,
+            tenant_id: TenantId::new(1).unwrap(),
+            inventory_owner_id: InventoryOwnerId::new(1).unwrap(),
+            created: Utc::now(),
+            modified: None,
+            deleted: None,
+            facility_id: 1,
+            facility_name: Some("Test Facility".to_owned()),
+            location_id: 1,
+            license_plate_id: None,
+            item_batch_id: 1,
+            item_id: 1,
+            uom: "each".to_owned(),
+            status,
+            qty_on_hand: 10,
+            qty_reserved: 2,
+            qty_held: 1,
+        }
+    }
+
+    #[test]
+    fn only_available_status_contributes_allocatable_inventory() {
+        assert_eq!(
+            allocatable_quantity(&balance(InventoryStatus::Available)),
+            7
+        );
+        for status in [
+            InventoryStatus::Hold,
+            InventoryStatus::Damaged,
+            InventoryStatus::Quarantine,
+        ] {
+            assert_eq!(allocatable_quantity(&balance(status)), 0);
+        }
     }
 }

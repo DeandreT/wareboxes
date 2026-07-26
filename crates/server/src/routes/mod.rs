@@ -162,6 +162,13 @@ pub fn app(state: AppState) -> Router {
             post(inventory::create_reservation),
         )
         .route("/inventory/allocations", get(inventory::list_allocations))
+        .route("/inventory/holds", get(inventory::list_holds))
+        .route(
+            "/inventory/holds/reconciliation",
+            get(inventory::list_hold_reconciliation_issues),
+        )
+        .route("/inventory/holds/place", post(inventory::place_hold))
+        .route("/inventory/holds/release", post(inventory::release_hold))
         .route(
             "/inventory/allocations/create",
             post(inventory::create_allocation),
