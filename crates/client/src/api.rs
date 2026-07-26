@@ -2,9 +2,6 @@
 //! delivers results back to the egui app over an `mpsc` channel, requesting a
 //! repaint on completion.
 
-pub(crate) mod expected_receiving;
-pub(crate) mod putaway;
-
 use std::sync::mpsc::Sender;
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -16,12 +13,6 @@ use wareboxes_core::models::{
     User,
 };
 use wareboxes_domain::TenantId;
-
-pub use expected_receiving::{
-    ExpectedReceivingCommand, ExpectedReceivingRequest, ExpectedReceivingTransportEvent,
-    ExpectedReceivingTransportOutcome,
-};
-pub use putaway::{PutawayCommand, PutawayRequest, PutawayTransportEvent, PutawayTransportOutcome};
 
 #[derive(Debug)]
 pub enum ApiEvent {
@@ -50,8 +41,6 @@ pub enum ApiEvent {
     LicensePlateLookup(Option<LicensePlate>),
     Employees(Vec<Employee>),
     Audits(Vec<AuditWave>),
-    ExpectedReceiving(ExpectedReceivingTransportEvent),
-    Putaway(PutawayTransportEvent),
     /// A mutation succeeded; carries a toast message + the screen to refresh.
     ActionDone(String, Screen),
     SettingsSaved(UserSettings),
@@ -61,8 +50,6 @@ pub enum ApiEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Screen {
-    Receiving,
-    Putaway,
     Orders,
     Users,
     Roles,
@@ -79,9 +66,7 @@ pub enum Screen {
 }
 
 impl Screen {
-    pub const ALL: [Screen; 15] = [
-        Screen::Receiving,
-        Screen::Putaway,
+    pub const ALL: [Screen; 13] = [
         Screen::Orders,
         Screen::Items,
         Screen::Locations,
@@ -99,8 +84,6 @@ impl Screen {
 
     pub fn title(self) -> &'static str {
         match self {
-            Screen::Receiving => "Receiving",
-            Screen::Putaway => "Putaway",
             Screen::Orders => "Orders",
             Screen::Users => "Users",
             Screen::Roles => "Roles",
@@ -120,7 +103,6 @@ impl Screen {
     /// Permission required to see the panel.
     pub fn permission(self) -> &'static str {
         match self {
-            Screen::Receiving | Screen::Putaway => "wms",
             Screen::Orders => "orders",
             Screen::Items
             | Screen::Locations
@@ -243,7 +225,6 @@ impl ApiClient {
 
     pub fn get_list(&self, screen: Screen) {
         let path = match screen {
-            Screen::Receiving | Screen::Putaway => return,
             Screen::Orders => "/api/orders",
             Screen::Users => "/api/users",
             Screen::Roles => "/api/roles?show_self=true",
@@ -260,7 +241,6 @@ impl ApiClient {
         };
         let req = ehttp::Request::get(self.url(path));
         match screen {
-            Screen::Receiving | Screen::Putaway => {}
             Screen::Orders => self.get_orders_page(100, 0, None, None),
             Screen::Users => self.send::<Vec<User>, _>(req, ApiEvent::Users),
             Screen::Roles => self.send::<Vec<Role>, _>(req, ApiEvent::Roles),
