@@ -156,7 +156,6 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
         ),
         tenant_policy_debt(table_name) AS (
             VALUES
-                ('pick_waves'),
                 ('tenant_memberships'),
                 ('user_facilities'),
                 ('user_inventory_owners')
@@ -230,6 +229,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'audit_wave_assignments',
                     'audit_wave_assignments_tenant_isolation'
+                ),
+                (
+                    'pick_waves',
+                    'pick_waves_tenant_isolation'
                 ),
                 (
                     'facilities',
