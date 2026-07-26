@@ -30,8 +30,10 @@ pub use putaway::{
     PutawayConfirmationResponse,
 };
 pub use putaway_claim::{
-    ClaimNextPutawayRequest, ClaimPutawayByIdRequest, PutawayClaimDestinationLocation,
-    PutawayClaimResponse, PutawayClaimSourceLocation, PutawayClaimWork, PutawayWorkflow,
+    ClaimNextPutawayRequest, ClaimPutawayByIdRequest, HeartbeatPutawayClaimRequest,
+    PutawayClaimDestinationLocation, PutawayClaimHeartbeatResponse, PutawayClaimReleaseReason,
+    PutawayClaimReleaseResponse, PutawayClaimResponse, PutawayClaimSourceLocation,
+    PutawayClaimWork, PutawayWorkflow, ReleasePutawayClaimRequest,
 };
 pub use revision::{Revision, RevisionError, RevisionPrecondition};
 

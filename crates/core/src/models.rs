@@ -1617,6 +1617,53 @@ pub struct PutawayClaim {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PutawayClaimHeartbeat {
+    pub tenant_id: TenantId,
+    pub task_id: i64,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub heartbeat_by: i64,
+    pub heartbeat_at: Timestamp,
+    pub previous_lease_expires_at: Timestamp,
+    pub lease_expires_at: Timestamp,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PutawayClaimReleaseReason {
+    WorkInterrupted,
+    EquipmentUnavailable,
+    DestinationBlocked,
+    SafetyIssue,
+    Other,
+}
+
+impl PutawayClaimReleaseReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PutawayClaimReleaseReason::WorkInterrupted => "work_interrupted",
+            PutawayClaimReleaseReason::EquipmentUnavailable => "equipment_unavailable",
+            PutawayClaimReleaseReason::DestinationBlocked => "destination_blocked",
+            PutawayClaimReleaseReason::SafetyIssue => "safety_issue",
+            PutawayClaimReleaseReason::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PutawayClaimRelease {
+    pub tenant_id: TenantId,
+    pub task_id: i64,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub released_by: i64,
+    pub released_at: Timestamp,
+    pub release_count: i64,
+    pub reason: PutawayClaimReleaseReason,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PutawayConfirmation {
     pub tenant_id: TenantId,
     pub task_id: i64,
