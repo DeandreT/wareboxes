@@ -50,6 +50,9 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
     let tenant_id = tenant_for_user(&fixture.db, user.id).await;
     let owner_id = fixture.inventory_owner(tenant_id, "Outbox Owner").await;
     let facility_id = fixture.facility(tenant_id, "Outbox DC").await;
+    fixture
+        .assign_owner_to_facility(tenant_id, owner_id, facility_id)
+        .await;
     let location_id = fixture
         .location(tenant_id, facility_id, "OUTBOX-RECEIVING")
         .await;
@@ -354,6 +357,9 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
         .inventory_owner(other_tenant, "Other Tenant Owner")
         .await;
     let other_facility = fixture.facility(other_tenant, "Other Tenant DC").await;
+    fixture
+        .assign_owner_to_facility(other_tenant, other_owner, other_facility)
+        .await;
     enqueue_test_event(
         &fixture.db,
         other_tenant,
@@ -416,6 +422,9 @@ async fn delivery_attempt_history_is_atomic_immutable_and_claim_fenced() {
         .inventory_owner(tenant_id, "Attempt History Owner")
         .await;
     let facility_id = fixture.facility(tenant_id, "Attempt History DC").await;
+    fixture
+        .assign_owner_to_facility(tenant_id, owner_id, facility_id)
+        .await;
     let event_id = enqueue_test_event(
         &fixture.db,
         tenant_id,
@@ -639,6 +648,9 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
     let tenant_id = tenant_for_user(&fixture.db, user.id).await;
     let owner_id = fixture.inventory_owner(tenant_id, "Worker Owner").await;
     let facility_id = fixture.facility(tenant_id, "Worker DC").await;
+    fixture
+        .assign_owner_to_facility(tenant_id, owner_id, facility_id)
+        .await;
 
     for event_number in 1..=6 {
         let event_key = format!("worker-event-{event_number}");
@@ -795,6 +807,30 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
     .await
     .unwrap();
     expire_tx.commit().await.unwrap();
+    assert!(!outbox::mark_published(
+        &fixture.db,
+        tenant_id,
+        stale_event_id,
+        "same-worker",
+        stale_claim[0].claim_version,
+    )
+    .await
+    .unwrap());
+    assert!(!outbox::mark_failed(
+        &fixture.db,
+        &outbox::FailOutboxEvent {
+            tenant_id,
+            event_id: stale_event_id,
+            worker_id: "same-worker",
+            claim_version: stale_claim[0].claim_version,
+            failure_class: outbox::DeliveryFailureClass::Retryable,
+            error: "expired lease",
+            retry_after_seconds: 0,
+            max_attempts: 3,
+        },
+    )
+    .await
+    .unwrap());
     let recovered = outbox::claim_events(
         &fixture.db,
         tenant_id,

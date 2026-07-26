@@ -234,12 +234,13 @@ pub async fn confirm_item_location_cycle_count_in_scope(
     let inventory_transaction_id = if variance_quantity == 0 {
         None
     } else {
+        let owner_facility =
+            inventory_journal::owner_facility_scope(target.inventory_owner_id, target.facility_id)?;
         let transaction_id = match inventory_journal::begin_transaction(
             &mut tx,
             &JournalCommand {
                 tenant_id: access.tenant_id,
-                inventory_owner_id: target.inventory_owner_id,
-                facility_id: target.facility_id,
+                owner_facility,
                 actor_user_id: command.actor_id.get(),
                 transaction_type: InventoryTransactionType::Adjust,
                 reason: Some("cycle count confirmation"),
@@ -265,10 +266,9 @@ pub async fn confirm_item_location_cycle_count_in_scope(
         inventory_journal::append_entry(
             &mut tx,
             access.tenant_id,
-            target.inventory_owner_id,
+            owner_facility,
             transaction_id,
             &JournalEntry {
-                facility_id: target.facility_id,
                 location_id: target.location_id,
                 license_plate_id: balance.license_plate_id,
                 item_batch_id: balance.item_batch_id,

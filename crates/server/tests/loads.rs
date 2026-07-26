@@ -40,6 +40,14 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     )
     .await
     .unwrap();
+    assert!(repo::inventory_owners::replace_inventory_owner_facilities(
+        &db,
+        tenant_id,
+        inventory_owner,
+        &[facility],
+    )
+    .await
+    .unwrap());
     let item = repo::items::add_item(
         &db, tenant_id, "Cases", None, "case", None, None, None, None, None, None,
     )
@@ -347,6 +355,9 @@ async fn concurrent_load_receipts_preserve_every_accepted_quantity() {
     .await
     .unwrap();
     let inventory_owner = fixture.inventory_owner(tenant_id, "Concurrent Owner").await;
+    fixture
+        .assign_owner_to_facility(tenant_id, inventory_owner, facility)
+        .await;
     let item = fixture.item(tenant_id, "Concurrent Cases", "case").await;
     let load = repo::loads::add_load(
         &fixture.db,
@@ -509,6 +520,9 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
     .await
     .unwrap();
     let owner = fixture.inventory_owner(tenant_a, "Scoped Load Owner").await;
+    fixture
+        .assign_owner_to_facility(tenant_a, owner, facility)
+        .await;
     let item = fixture.item(tenant_a, "Scoped Load Item", "case").await;
     let load_id = repo::loads::add_load(
         &fixture.db,
@@ -812,6 +826,14 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         repo::inventory_owners::add_inventory_owner(&db, tenant_id, "LP Customer", "lp@test.com")
             .await
             .unwrap();
+    assert!(repo::inventory_owners::replace_inventory_owner_facilities(
+        &db,
+        tenant_id,
+        inventory_owner,
+        &[facility],
+    )
+    .await
+    .unwrap());
     let item = repo::items::add_item(
         &db,
         tenant_id,

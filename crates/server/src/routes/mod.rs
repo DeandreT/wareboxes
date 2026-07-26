@@ -74,6 +74,10 @@ pub fn app(state: AppState) -> Router {
         .route("/inventory-owners", get(inventory_owners::list))
         .route("/inventory-owners/add", post(inventory_owners::add))
         .route("/inventory-owners/update", post(inventory_owners::update))
+        .route(
+            "/inventory-owners/facilities",
+            post(inventory_owners::replace_facilities),
+        )
         .route("/inventory-owners/delete", post(inventory_owners::delete))
         .route("/inventory-owners/restore", post(inventory_owners::restore))
         // facilities (read-only, mirrors the original getFacilities)

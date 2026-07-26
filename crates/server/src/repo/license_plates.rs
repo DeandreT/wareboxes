@@ -205,6 +205,8 @@ pub async fn add_license_plate(
 ) -> AppResult<i64> {
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
+    let owner_facility = inventory_journal::owner_facility_scope(inventory_owner_id, facility_id)?;
+    inventory_journal::lock_active_owner_facility_tx(&mut tx, tenant_id, owner_facility).await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO license_plates (tenant_id, inventory_owner_id, created, barcode, facility_id) VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
@@ -243,6 +245,8 @@ pub async fn find_or_create_license_plate_tx(
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| AppError::bad_request("license plate location was not found or is inactive"))?;
+    let owner_facility = inventory_journal::owner_facility_scope(inventory_owner_id, facility_id)?;
+    inventory_journal::lock_active_owner_facility_tx(tx, tenant_id, owner_facility).await?;
 
     let (id, plate_owner_id, plate_facility_id, current_location) = match (
         license_plate_id,
@@ -404,13 +408,14 @@ pub async fn move_license_plate(
     let inventory_owner_id: i64 = plate.try_get("inventory_owner_id")?;
     let plate_facility_id: i64 = plate.try_get("facility_id")?;
     let plate_location: Option<i64> = plate.try_get("location_id")?;
+    let owner_facility =
+        inventory_journal::owner_facility_scope(inventory_owner_id, plate_facility_id)?;
 
     let transaction_id = match inventory_journal::begin_transaction(
         &mut tx,
         &JournalCommand {
             tenant_id,
-            inventory_owner_id,
-            facility_id: plate_facility_id,
+            owner_facility,
             actor_user_id: user_id,
             transaction_type: InventoryTransactionType::Move,
             reason,
@@ -586,10 +591,9 @@ pub async fn move_license_plate(
             inventory_journal::append_entry(
                 &mut tx,
                 tenant_id,
-                inventory_owner_id,
+                owner_facility,
                 transaction_id,
                 &JournalEntry {
-                    facility_id: source_facility_id,
                     location_id,
                     license_plate_id: Some(id),
                     item_batch_id,

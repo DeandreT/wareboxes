@@ -611,6 +611,7 @@ pub async fn mark_published(
           AND id = $2
           AND claimed_by = $3
           AND claim_version = $4
+          AND lease_expires_at > clock_timestamp()
           AND dead_lettered_at IS NULL
           AND discarded_at IS NULL
           AND published_at IS NULL
@@ -691,6 +692,7 @@ pub async fn mark_failed(db: &Db, failure: &FailOutboxEvent<'_>) -> AppResult<bo
           AND id = $6
           AND claimed_by = $7
           AND claim_version = $8
+          AND lease_expires_at > clock_timestamp()
           AND dead_lettered_at IS NULL
           AND discarded_at IS NULL
           AND published_at IS NULL

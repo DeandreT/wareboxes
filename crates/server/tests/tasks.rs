@@ -111,6 +111,14 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     )
     .await
     .unwrap();
+    assert!(repo::inventory_owners::replace_inventory_owner_facilities(
+        &db,
+        tenant_id,
+        inventory_owner,
+        &[facility],
+    )
+    .await
+    .unwrap());
     let batch = repo::inventory::add_item_batch(
         &db,
         tenant_id,
@@ -183,6 +191,14 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     )
     .await
     .unwrap();
+    assert!(repo::inventory_owners::replace_inventory_owner_facilities(
+        &db,
+        tenant_id,
+        second_owner,
+        &[facility],
+    )
+    .await
+    .unwrap());
     let second_batch = repo::inventory::add_item_batch(
         &db,
         tenant_id,

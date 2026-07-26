@@ -1,6 +1,9 @@
 use axum::extract::{Query, State};
 use axum::Json;
-use wareboxes_core::dto::{AddInventoryOwner, InventoryOwnerIdRequest, InventoryOwnerUpdate};
+use wareboxes_core::dto::{
+    AddInventoryOwner, InventoryOwnerIdRequest, InventoryOwnerUpdate,
+    ReplaceInventoryOwnerFacilities,
+};
 use wareboxes_core::models::InventoryOwner;
 
 use crate::auth::CurrentTenant;
@@ -68,6 +71,28 @@ pub async fn update(
     )
     .await?;
     Ok(Json(ok))
+}
+
+pub async fn replace_facilities(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Json(body): Json<ReplaceInventoryOwnerFacilities>,
+) -> AppResult<Json<bool>> {
+    user.require_permission(&state.db, PERM).await?;
+    validate(&body)?;
+    user.require_inventory_owner(body.inventory_owner_id)?;
+    for facility_id in &body.facility_ids {
+        user.require_facility(*facility_id)?;
+    }
+    Ok(Json(
+        repo::inventory_owners::replace_inventory_owner_facilities(
+            &state.db,
+            user.tenant.tenant_id,
+            body.inventory_owner_id,
+            &body.facility_ids,
+        )
+        .await?,
+    ))
 }
 
 pub async fn delete(

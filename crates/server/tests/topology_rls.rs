@@ -87,9 +87,16 @@ async fn topology_requires_tenant_context_and_exact_runtime_privileges() {
     );
     assert_eq!(
         allowed_update_counts(&mut tenant_b_tx, refs_a).await,
-        [0, 0]
+        [0, 0, 0]
     );
     tenant_b_tx.rollback().await.unwrap();
+
+    let mut tenant_a_tx = tenant_tx(&fixture.db, tenant_a).await;
+    assert_eq!(
+        allowed_update_counts(&mut tenant_a_tx, refs_a).await,
+        [1, 1, 1]
+    );
+    tenant_a_tx.rollback().await.unwrap();
 
     assert_acl_restricted_updates_fail(&fixture.db, refs_a).await;
     assert_deletes_fail(&fixture.db, refs_a).await;
@@ -226,7 +233,7 @@ async fn visible_ids(
 async fn allowed_update_counts(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     refs: TopologyRefs,
-) -> [u64; 2] {
+) -> [u64; 3] {
     let location = sqlx::query("UPDATE locations SET name = name WHERE id = $1")
         .bind(refs.location_ids[0])
         .execute(&mut **tx)
@@ -239,27 +246,27 @@ async fn allowed_update_counts(
         .await
         .unwrap()
         .rows_affected();
-    [location, owner]
+    let assignment =
+        sqlx::query("UPDATE inventory_owner_facilities SET deleted = deleted WHERE id = $1")
+            .bind(refs.assignment_id)
+            .execute(&mut **tx)
+            .await
+            .unwrap()
+            .rows_affected();
+    [location, owner, assignment]
 }
 
 async fn assert_acl_restricted_updates_fail(db: &db::Db, refs: TopologyRefs) {
-    for (table, id) in [
-        ("facilities", refs.facility_ids[0]),
-        ("inventory_owner_facilities", refs.assignment_id),
-    ] {
-        let mut tx = tenant_tx(db, refs.tenant_id).await;
-        assert!(
-            sqlx::query(&format!(
-                "UPDATE {table} SET deleted = deleted WHERE id = $1"
-            ))
-            .bind(id)
+    let mut tx = tenant_tx(db, refs.tenant_id).await;
+    assert!(
+        sqlx::query("UPDATE facilities SET deleted = deleted WHERE id = $1")
+            .bind(refs.facility_ids[0])
             .execute(&mut *tx)
             .await
             .is_err(),
-            "{table} must not be updateable by the runtime role"
-        );
-        tx.rollback().await.unwrap();
-    }
+        "facilities must not be updateable by the runtime role"
+    );
+    tx.rollback().await.unwrap();
 }
 
 async fn assert_deletes_fail(db: &db::Db, refs: TopologyRefs) {
@@ -418,8 +425,8 @@ async fn assert_exact_runtime_privileges(db: &db::Db) {
             TablePrivileges {
                 table_name: "inventory_owner_facilities".into(),
                 can_select: true,
-                can_insert: false,
-                can_update: false,
+                can_insert: true,
+                can_update: true,
                 can_delete: false,
                 can_truncate: false,
                 can_reference: false,
@@ -449,10 +456,9 @@ async fn assert_exact_runtime_privileges(db: &db::Db) {
         sequence_privileges,
         SEQUENCES
             .iter()
-            .enumerate()
-            .map(|(index, sequence)| SequencePrivileges {
+            .map(|sequence| SequencePrivileges {
                 sequence_name: (*sequence).to_owned(),
-                can_use: index < 3,
+                can_use: true,
                 can_select: false,
                 can_update: false,
             })

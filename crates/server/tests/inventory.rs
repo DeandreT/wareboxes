@@ -59,6 +59,14 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     )
     .await
     .unwrap();
+    repo::inventory_owners::replace_inventory_owner_facilities(
+        &db,
+        tenant_id,
+        inventory_owner,
+        &[facility],
+    )
+    .await
+    .unwrap();
     let batch = repo::inventory::add_item_batch(
         &db,
         tenant_id,
@@ -504,6 +512,14 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
     let location = fixture.location(tenant_a, facility, "TENANT-A-BIN").await;
     let owner_a = fixture.inventory_owner(tenant_a, "Owner A").await;
     let owner_b = fixture.inventory_owner(tenant_a, "Owner B").await;
+    repo::inventory_owners::replace_inventory_owner_facilities(
+        &fixture.db,
+        tenant_a,
+        owner_a,
+        &[facility],
+    )
+    .await
+    .unwrap();
     let item = fixture.item(tenant_a, "Tenant A Item", "each").await;
     let batch = repo::inventory::add_item_batch(
         &fixture.db,
@@ -720,6 +736,14 @@ async fn concurrent_inventory_retries_apply_effects_once() {
         .inventory_owner(tenant_id, "Concurrency Owner")
         .await;
     let facility = fixture.facility(tenant_id, "Concurrency DC").await;
+    repo::inventory_owners::replace_inventory_owner_facilities(
+        &fixture.db,
+        tenant_id,
+        inventory_owner,
+        &[facility],
+    )
+    .await
+    .unwrap();
     let receiving = fixture
         .location(tenant_id, facility, "CONCURRENT-RECEIVING")
         .await;
@@ -948,6 +972,14 @@ async fn concurrent_initial_receipt_and_batch_deletion_preserve_batch_stock_inva
         .inventory_owner(tenant_id, "Batch Delete Race Owner")
         .await;
     let facility = fixture.facility(tenant_id, "Batch Delete Race DC").await;
+    repo::inventory_owners::replace_inventory_owner_facilities(
+        &fixture.db,
+        tenant_id,
+        inventory_owner,
+        &[facility],
+    )
+    .await
+    .unwrap();
     let receiving = fixture
         .location(tenant_id, facility, "BATCH-DELETE-RACE-RECEIVING")
         .await;
@@ -1098,6 +1130,14 @@ async fn inventory_rejects_mixed_lot_or_expiration_in_same_location() {
         tenant_id,
         "Lot Guard Owner",
         "lot-owner@test.com",
+    )
+    .await
+    .unwrap();
+    repo::inventory_owners::replace_inventory_owner_facilities(
+        &db,
+        tenant_id,
+        inventory_owner,
+        &[facility],
     )
     .await
     .unwrap();

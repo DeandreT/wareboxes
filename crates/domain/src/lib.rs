@@ -60,6 +60,21 @@ positive_id!(InventoryOwnerId, "inventory owner ID");
 positive_id!(FacilityId, "facility ID");
 positive_id!(UserId, "user ID");
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OwnerFacilityScope {
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: FacilityId,
+}
+
+impl OwnerFacilityScope {
+    pub const fn new(inventory_owner_id: InventoryOwnerId, facility_id: FacilityId) -> Self {
+        Self {
+            inventory_owner_id,
+            facility_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandContext {
     pub tenant_id: TenantId,

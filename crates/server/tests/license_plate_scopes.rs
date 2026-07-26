@@ -163,6 +163,22 @@ async fn license_plates_are_owner_and_facility_scoped() {
     )
     .await
     .unwrap();
+    assert!(repo::inventory_owners::replace_inventory_owner_facilities(
+        &db,
+        tenant_id,
+        allowed_owner,
+        &[allowed_facility, denied_facility],
+    )
+    .await
+    .unwrap());
+    assert!(repo::inventory_owners::replace_inventory_owner_facilities(
+        &db,
+        tenant_id,
+        denied_owner,
+        &[allowed_facility],
+    )
+    .await
+    .unwrap());
 
     let allowed_plate = repo::license_plates::add_license_plate(
         &db,
@@ -556,6 +572,12 @@ async fn license_plates_require_a_transaction_local_tenant_context() {
         .await;
     let facility_b = fixture
         .facility(tenant_b, "License Plate RLS Facility B")
+        .await;
+    fixture
+        .assign_owner_to_facility(tenant_a, owner_a, facility_a)
+        .await;
+    fixture
+        .assign_owner_to_facility(tenant_b, owner_b, facility_b)
         .await;
     let location_b = fixture
         .location(tenant_b, facility_b, "LICENSE-PLATE-RLS-BIN-B")
