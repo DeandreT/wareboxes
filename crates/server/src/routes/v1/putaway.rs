@@ -14,6 +14,7 @@ use crate::request_context::IdempotencyKey;
 use crate::state::AppState;
 
 const PERMISSION: &str = "wms";
+const MAX_BARCODE_LENGTH: usize = 200;
 const MAX_INSTRUCTIONS_LENGTH: usize = 1_000;
 
 pub async fn create(
@@ -73,14 +74,17 @@ pub async fn confirm(
 ) -> V1Result<Json<PutawayConfirmationResponse>> {
     user.require_permission(&state.db, PERMISSION).await?;
     require_positive(task_id, "task ID")?;
-    require_positive(body.destination_location_id, "destination location ID")?;
+    validate_barcode(
+        &body.destination_location_barcode,
+        "destination_location_barcode",
+    )?;
     let context = user.command_context(&idempotency_key);
     let confirmation = repo::tasks::confirm_putaway_in_scope(
         &state.db,
         &user.tenant,
         &context,
         task_id,
-        body.destination_location_id,
+        &body.destination_location_barcode,
     )
     .await?;
 
@@ -93,6 +97,7 @@ pub async fn confirm(
         destination_inventory_balance_id: confirmation.destination_inventory_balance_id,
         source_location_id: confirmation.source_location_id,
         destination_location_id: confirmation.destination_location_id,
+        destination_location_barcode: confirmation.destination_location_barcode,
         item_batch_id: confirmation.item_batch_id,
         item_id: confirmation.item_id,
         quantity: confirmation.quantity,
@@ -122,6 +127,18 @@ fn parse_timestamp(value: Option<&str>, field: &str) -> V1Result<Option<DateTime
     DateTime::parse_from_rfc3339(value)
         .map(|timestamp| Some(timestamp.with_timezone(&Utc)))
         .map_err(|_| invalid(format!("{field} must be an RFC3339 timestamp")))
+}
+
+fn validate_barcode(value: &str, field: &str) -> V1Result<()> {
+    if value.trim() != value || value.is_empty() {
+        return Err(invalid(format!("{field} must be trimmed and nonempty")));
+    }
+    if value.chars().count() > MAX_BARCODE_LENGTH {
+        return Err(invalid(format!(
+            "{field} cannot exceed {MAX_BARCODE_LENGTH} characters"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_instructions(instructions: Option<&str>) -> V1Result<()> {

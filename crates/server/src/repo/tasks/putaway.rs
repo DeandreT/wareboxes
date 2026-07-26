@@ -99,6 +99,20 @@ fn validate_creation(
     Ok(())
 }
 
+fn validate_scanned_barcode(value: &str) -> AppResult<()> {
+    if value.trim() != value || value.is_empty() {
+        return Err(AppError::bad_request(
+            "destination location barcode must be trimmed and nonempty",
+        ));
+    }
+    if value.chars().count() > 200 {
+        return Err(AppError::bad_request(
+            "destination location barcode cannot exceed 200 characters",
+        ));
+    }
+    Ok(())
+}
+
 async fn lock_source_for_creation(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: wareboxes_domain::TenantId,
@@ -175,10 +189,10 @@ async fn lock_destination(
     tenant_id: wareboxes_domain::TenantId,
     destination_location_id: i64,
     facility_id: i64,
-) -> AppResult<()> {
-    let destination: Option<i64> = sqlx::query_scalar(
+) -> AppResult<String> {
+    let destination: Option<String> = sqlx::query_scalar(
         r#"
-        SELECT id
+        SELECT barcode
         FROM locations
         WHERE tenant_id = $1
           AND id = $2
@@ -186,6 +200,8 @@ async fn lock_destination(
           AND deleted IS NULL
           AND active
           AND NOT receivable
+          AND barcode IS NOT NULL
+          AND btrim(barcode) <> ''
         FOR SHARE
         "#,
     )
@@ -194,12 +210,11 @@ async fn lock_destination(
     .bind(facility_id)
     .fetch_optional(&mut **tx)
     .await?;
-    if destination.is_none() {
-        return Err(AppError::conflict(
+    destination.ok_or_else(|| {
+        AppError::conflict(
             "putaway destination must be an active storage location in the source facility",
-        ));
-    }
-    Ok(())
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -501,21 +516,17 @@ pub async fn confirm_putaway_in_scope(
     access: &TenantAccess,
     command: &CommandContext,
     task_id: i64,
-    scanned_destination_location_id: i64,
+    scanned_destination_location_barcode: &str,
 ) -> AppResult<PutawayConfirmation> {
     require_command_context(access, command)?;
     if task_id <= 0 {
         return Err(AppError::bad_request("putaway task ID must be positive"));
     }
-    if scanned_destination_location_id <= 0 {
-        return Err(AppError::bad_request(
-            "scanned destination location ID must be positive",
-        ));
-    }
+    validate_scanned_barcode(scanned_destination_location_barcode)?;
     let prepared = PreparedCommand::new(
         command,
         CONFIRM_OPERATION,
-        &(task_id, scanned_destination_location_id),
+        &(task_id, scanned_destination_location_barcode),
     )?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
@@ -529,18 +540,18 @@ pub async fn confirm_putaway_in_scope(
 
     let target =
         lock_putaway_target(&mut tx, access, task_id, command.actor_id.get(), &scope).await?;
-    if target.destination_location_id != scanned_destination_location_id {
-        return Err(AppError::conflict(
-            "scanned destination does not match the directed putaway location",
-        ));
-    }
-    lock_destination(
+    let destination_location_barcode = lock_destination(
         &mut tx,
         access.tenant_id,
         target.destination_location_id,
         target.facility_id,
     )
     .await?;
+    if destination_location_barcode != scanned_destination_location_barcode {
+        return Err(AppError::conflict(
+            "scanned destination does not match the directed putaway location",
+        ));
+    }
     let balances = lock_putaway_balances(&mut tx, access.tenant_id, &target).await?;
     let source = balances
         .iter()
@@ -712,6 +723,7 @@ pub async fn confirm_putaway_in_scope(
         destination_inventory_balance_id,
         source_location_id: target.source_location_id,
         destination_location_id: target.destination_location_id,
+        destination_location_barcode,
         item_batch_id: target.item_batch_id,
         item_id: target.item_id,
         inventory_status: target.status,
@@ -731,6 +743,7 @@ pub async fn confirm_putaway_in_scope(
             destination_inventory_balance_id,
             source_location_id,
             destination_location_id,
+            destination_location_barcode,
             item_batch_id,
             item_id,
             inventory_status,
@@ -741,7 +754,7 @@ pub async fn confirm_putaway_in_scope(
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-            $14, $15
+            $14, $15, $16
         )
         "#,
     )
@@ -753,6 +766,7 @@ pub async fn confirm_putaway_in_scope(
     .bind(destination_inventory_balance_id)
     .bind(target.source_location_id)
     .bind(target.destination_location_id)
+    .bind(&result.destination_location_barcode)
     .bind(target.item_batch_id)
     .bind(target.item_id)
     .bind(target.status.as_str())

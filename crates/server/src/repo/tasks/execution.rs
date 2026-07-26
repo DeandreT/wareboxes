@@ -233,7 +233,7 @@ async fn require_current_task_replay_tx(
     let lease_is_current: Option<bool> = row.try_get("lease_is_current")?;
     if assigned_user_id != Some(user_id)
         || !matches!(status.as_str(), "assigned" | "in_progress")
-        || lease_is_current == Some(false)
+        || lease_is_current != Some(true)
     {
         return Err(AppError::conflict("task claim is no longer active"));
     }
@@ -315,6 +315,9 @@ async fn start_task_with_scope(
     let scope = current_scope.as_ref().unwrap_or(scope);
     if let Some(prepared) = prepared.as_ref() {
         if let Some(started) = prepared.replayed::<bool>(&mut tx).await? {
+            if started {
+                require_current_task_replay_tx(&mut tx, tenant_id, user_id, task_id, scope).await?;
+            }
             tx.commit().await?;
             return Ok(started);
         }

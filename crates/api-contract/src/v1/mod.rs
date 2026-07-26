@@ -6,6 +6,7 @@ mod idempotency;
 mod inventory;
 mod license_plate_putaway;
 mod putaway;
+mod putaway_claim;
 mod revision;
 
 pub use cursor::{
@@ -27,6 +28,10 @@ pub use license_plate_putaway::{
 pub use putaway::{
     ConfirmPutawayRequest, CreatePutawayTaskRequest, CreatePutawayTaskResponse,
     PutawayConfirmationResponse,
+};
+pub use putaway_claim::{
+    ClaimNextPutawayRequest, ClaimPutawayByIdRequest, PutawayClaimDestinationLocation,
+    PutawayClaimResponse, PutawayClaimSourceLocation, PutawayClaimWork, PutawayWorkflow,
 };
 pub use revision::{Revision, RevisionError, RevisionPrecondition};
 
