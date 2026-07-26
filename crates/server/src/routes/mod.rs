@@ -169,6 +169,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/inventory/holds/place", post(inventory::place_hold))
         .route("/inventory/holds/release", post(inventory::release_hold))
+        .route("/inventory/status-changes", post(inventory::change_status))
         .route(
             "/inventory/allocations/create",
             post(inventory::create_allocation),

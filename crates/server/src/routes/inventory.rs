@@ -3,9 +3,10 @@ use axum::Json;
 use wareboxes_core::dto::{
     AddItemBatch, AllocateInventory, AllocateInventoryResult, CancelInventoryAllocation,
     CancelInventoryAllocationResult, CancelInventoryReservation, CancelInventoryReservationResult,
-    CreateInventoryReservation, CreateInventoryReservationResult, ItemBatchIdRequest,
-    MoveInventory, PlaceInventoryHold, PlaceInventoryHoldResult, ReceiveInventory,
-    ReleaseInventoryHold, ReleaseInventoryHoldResult, SplitMoveInventory,
+    ChangeInventoryStatus, ChangeInventoryStatusResult, CreateInventoryReservation,
+    CreateInventoryReservationResult, ItemBatchIdRequest, MoveInventory, PlaceInventoryHold,
+    PlaceInventoryHoldResult, ReceiveInventory, ReleaseInventoryHold, ReleaseInventoryHoldResult,
+    SplitMoveInventory,
 };
 use wareboxes_core::models::{
     InventoryAllocation, InventoryBalance, InventoryHold, InventoryHoldReconciliationIssue,
@@ -385,6 +386,34 @@ pub async fn release_hold(
             &context,
             &repo::inventory::ReleaseInventoryHoldCommand {
                 hold_id: body.hold_id,
+            },
+        )
+        .await?,
+    ))
+}
+
+pub async fn change_status(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Json(body): Json<ChangeInventoryStatus>,
+) -> AppResult<Json<ChangeInventoryStatusResult>> {
+    user.require_permission(&state.db, PERM).await?;
+    validate(&body)?;
+    let context = user.command_context(&idempotency_key);
+    Ok(Json(
+        repo::inventory::change_inventory_status(
+            &state.db,
+            &user.tenant,
+            &context,
+            &repo::inventory::ChangeInventoryStatusCommand {
+                inventory_balance_id: body.inventory_balance_id,
+                qty: body.qty,
+                to_status: body.to_status,
+                reason: body.reason,
+                note: body.note.as_deref(),
+                reference_type: body.reference_type.as_deref(),
+                reference_id: body.reference_id,
             },
         )
         .await?,

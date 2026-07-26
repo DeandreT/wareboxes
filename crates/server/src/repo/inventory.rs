@@ -2,6 +2,7 @@
 
 pub use super::inventory_allocation::*;
 pub use super::inventory_hold::*;
+pub use super::inventory_status_change::*;
 
 use std::collections::HashMap;
 
