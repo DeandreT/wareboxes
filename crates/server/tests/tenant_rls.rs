@@ -222,11 +222,11 @@ async fn command_records_require_a_transaction_local_tenant_context() {
     db::validate_runtime_role(&fixture.db).await.unwrap();
 
     for statement in [
-        "ALTER TABLE loads ENABLE ROW LEVEL SECURITY",
-        "ALTER TABLE loads FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE audit_waves ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE audit_waves FORCE ROW LEVEL SECURITY",
         r#"
-        CREATE POLICY loads_tenant_isolation
-        ON loads
+        CREATE POLICY audit_waves_tenant_isolation
+        ON audit_waves
         USING (
             tenant_id =
                 NULLIF(current_setting('wareboxes.tenant_id', true), '')::BIGINT
@@ -241,9 +241,9 @@ async fn command_records_require_a_transaction_local_tenant_context() {
     }
     assert!(db::validate_runtime_role(&fixture.db).await.is_err());
     for statement in [
-        "DROP POLICY loads_tenant_isolation ON loads",
-        "ALTER TABLE loads NO FORCE ROW LEVEL SECURITY",
-        "ALTER TABLE loads DISABLE ROW LEVEL SECURITY",
+        "DROP POLICY audit_waves_tenant_isolation ON audit_waves",
+        "ALTER TABLE audit_waves NO FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE audit_waves DISABLE ROW LEVEL SECURITY",
     ] {
         sqlx::query(statement).execute(&admin_db).await.unwrap();
     }
@@ -255,6 +255,11 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "employee_facilities",
             "employee_facilities_tenant_isolation",
         ),
+        ("loads", "loads_tenant_isolation"),
+        ("load_lines", "load_lines_tenant_isolation"),
+        ("load_notes", "load_notes_tenant_isolation"),
+        ("load_files", "load_files_tenant_isolation"),
+        ("load_orders", "load_orders_tenant_isolation"),
         ("facilities", "facilities_tenant_isolation"),
         ("locations", "locations_tenant_isolation"),
         ("inventory_owners", "inventory_owners_tenant_isolation"),

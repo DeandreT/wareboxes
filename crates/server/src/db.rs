@@ -162,11 +162,6 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 ('audit_wave_items'),
                 ('audit_wave_locations'),
                 ('audit_waves'),
-                ('load_files'),
-                ('load_lines'),
-                ('load_notes'),
-                ('load_orders'),
-                ('loads'),
                 ('permissions'),
                 ('pick_waves'),
                 ('role_permissions'),
@@ -185,6 +180,26 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'employee_facilities',
                     'employee_facilities_tenant_isolation'
+                ),
+                (
+                    'loads',
+                    'loads_tenant_isolation'
+                ),
+                (
+                    'load_lines',
+                    'load_lines_tenant_isolation'
+                ),
+                (
+                    'load_notes',
+                    'load_notes_tenant_isolation'
+                ),
+                (
+                    'load_files',
+                    'load_files_tenant_isolation'
+                ),
+                (
+                    'load_orders',
+                    'load_orders_tenant_isolation'
                 ),
                 (
                     'facilities',

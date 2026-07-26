@@ -380,11 +380,14 @@ async fn concurrent_load_receipts_preserve_every_accepted_quantity() {
     )
     .await
     .unwrap();
-    sqlx::query("UPDATE loads SET status = 'arrived' WHERE id = $1")
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    sqlx::query("UPDATE loads SET status = 'arrived' WHERE tenant_id = $1 AND id = $2")
+        .bind(tenant_id.get())
         .bind(load)
-        .execute(&fixture.db)
+        .execute(&mut *tx)
         .await
         .unwrap();
+    tx.commit().await.unwrap();
 
     let receipt_a = repo::loads::receive_line(
         &fixture.db,
@@ -555,6 +558,7 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
     .await
     .unwrap();
     let tenant_a_order = fixture.order(tenant_a, "SCOPED-LOAD-ORDER-A", owner).await;
+    let admin_db = admin_db_for(&fixture.db).await;
     sqlx::query(
         "INSERT INTO load_orders (tenant_id, inventory_owner_id, created, load_id, order_id) VALUES ($1, $2, $3, $4, $5)",
     )
@@ -563,7 +567,7 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
     .bind(db::now_iso())
     .bind(load_id)
     .bind(tenant_a_order)
-    .execute(&fixture.db)
+    .execute(&admin_db)
     .await
     .unwrap();
     let tenant_b_owner = fixture
@@ -580,7 +584,7 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
     .bind(db::now_iso())
     .bind(load_id)
     .bind(tenant_b_order)
-    .execute(&fixture.db)
+    .execute(&admin_db)
     .await
     .is_err());
 
