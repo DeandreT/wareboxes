@@ -206,8 +206,8 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
     let other_user = fixture.user("outbox-other-tenant@test.com").await;
     let other_tenant = tenant_for_user(&fixture.db, other_user.id).await;
     let (ordering_a, ordering_b) = tokio::join!(
-        outbox::claim_events(&fixture.db, "ordering-worker-a", 10, 60),
-        outbox::claim_events(&fixture.db, "ordering-worker-b", 10, 60),
+        outbox::claim_events(&fixture.db, tenant_id, "ordering-worker-a", 10, 60),
+        outbox::claim_events(&fixture.db, tenant_id, "ordering-worker-b", 10, 60),
     );
     let ordering_a = ordering_a.unwrap();
     let ordering_b = ordering_b.unwrap();
@@ -262,7 +262,7 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
         .await
         .unwrap());
     }
-    let second_claim = outbox::claim_events(&fixture.db, "ordering-worker-c", 10, 60)
+    let second_claim = outbox::claim_events(&fixture.db, tenant_id, "ordering-worker-c", 10, 60)
         .await
         .unwrap();
     assert_eq!(second_claim.len(), 1);
@@ -311,13 +311,15 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
         3
     );
 
+    let mut tamper_tx = tenant_tx(&fixture.db, tenant_id).await;
     assert!(
         sqlx::query("UPDATE outbox_events SET event_type = 'tampered' WHERE id = $1")
             .bind(events[0].id)
-            .execute(&fixture.db)
+            .execute(&mut *tamper_tx)
             .await
             .is_err()
     );
+    tamper_tx.rollback().await.unwrap();
 
     let other_owner = fixture
         .inventory_owner(other_tenant, "Other Tenant Owner")
@@ -398,8 +400,8 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
     }
 
     let (worker_a, worker_b) = tokio::join!(
-        outbox::claim_events(&fixture.db, "worker-a", 3, 60),
-        outbox::claim_events(&fixture.db, "worker-b", 3, 60),
+        outbox::claim_events(&fixture.db, tenant_id, "worker-a", 3, 60),
+        outbox::claim_events(&fixture.db, tenant_id, "worker-b", 3, 60),
     );
     let worker_a = worker_a.unwrap();
     let worker_b = worker_b.unwrap();
@@ -468,7 +470,7 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
         .unwrap());
     }
 
-    let retried = outbox::claim_events(&fixture.db, "worker-c", 1, 60)
+    let retried = outbox::claim_events(&fixture.db, tenant_id, "worker-c", 1, 60)
         .await
         .unwrap();
     assert_eq!(retried.len(), 1);
@@ -506,22 +508,26 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
         ("stale-worker-event", "stale-worker-event", 1),
     )
     .await;
-    let stale_claim = outbox::claim_events(&fixture.db, "same-worker", 1, 60)
+    let stale_claim = outbox::claim_events(&fixture.db, tenant_id, "same-worker", 1, 60)
         .await
         .unwrap();
     assert_eq!(stale_claim[0].id, stale_event_id);
-    assert!(outbox::claim_events(&fixture.db, "same-worker", 1, 1)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        outbox::claim_events(&fixture.db, tenant_id, "same-worker", 1, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let mut expire_tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query(
         "UPDATE outbox_events SET lease_expires_at = clock_timestamp() - INTERVAL '1 second' WHERE id = $1",
     )
     .bind(stale_event_id)
-    .execute(&fixture.db)
+    .execute(&mut *expire_tx)
     .await
     .unwrap();
-    let recovered = outbox::claim_events(&fixture.db, "same-worker", 1, 300)
+    expire_tx.commit().await.unwrap();
+    let recovered = outbox::claim_events(&fixture.db, tenant_id, "same-worker", 1, 300)
         .await
         .unwrap();
     assert_eq!(recovered.len(), 1);
@@ -556,7 +562,7 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
         ("poison-worker-event", "poison-worker-event", 1),
     )
     .await;
-    let poison_claim = outbox::claim_events(&fixture.db, "poison-worker", 1, 60)
+    let poison_claim = outbox::claim_events(&fixture.db, tenant_id, "poison-worker", 1, 60)
         .await
         .unwrap();
     assert_eq!(poison_claim[0].id, poison_event_id);
@@ -574,10 +580,12 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
     )
     .await
     .unwrap());
-    assert!(outbox::claim_events(&fixture.db, "idle-worker", 10, 60)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        outbox::claim_events(&fixture.db, tenant_id, "idle-worker", 10, 60)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let poison_event = outbox::get_events(&fixture.db, tenant_id, Some(stale_event_id), 10)
         .await
         .unwrap()
@@ -591,7 +599,7 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
             .await
             .unwrap()
     );
-    let replayed_poison = outbox::claim_events(&fixture.db, "replay-worker", 1, 60)
+    let replayed_poison = outbox::claim_events(&fixture.db, tenant_id, "replay-worker", 1, 60)
         .await
         .unwrap();
     assert_eq!(replayed_poison[0].id, poison_event_id);
@@ -625,7 +633,7 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
         ("discard-sequence-2", "discard-ordering-key", 2),
     )
     .await;
-    let blocked_first = outbox::claim_events(&fixture.db, "discard-worker", 10, 60)
+    let blocked_first = outbox::claim_events(&fixture.db, tenant_id, "discard-worker", 10, 60)
         .await
         .unwrap();
     assert_eq!(blocked_first.len(), 1);
@@ -644,10 +652,12 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
     )
     .await
     .unwrap());
-    assert!(outbox::claim_events(&fixture.db, "blocked-worker", 10, 60)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        outbox::claim_events(&fixture.db, tenant_id, "blocked-worker", 10, 60)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(outbox::discard_dead_letter(
         &fixture.db,
         tenant_id,
@@ -657,7 +667,7 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
     )
     .await
     .unwrap());
-    let unblocked = outbox::claim_events(&fixture.db, "unblocked-worker", 10, 60)
+    let unblocked = outbox::claim_events(&fixture.db, tenant_id, "unblocked-worker", 10, 60)
         .await
         .unwrap();
     assert_eq!(unblocked.len(), 1);
@@ -688,12 +698,16 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
         discarded.discard_reason.as_deref(),
         Some("destination was permanently decommissioned")
     );
-    assert!(outbox::claim_events(&fixture.db, "idle-worker", 10, 60)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        outbox::claim_events(&fixture.db, tenant_id, "idle-worker", 10, 60)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
-        outbox::purge_published(&fixture.db, 0, 100).await.unwrap(),
+        outbox::purge_published(&fixture.db, tenant_id, 0, 100)
+            .await
+            .unwrap(),
         10
     );
     assert!(outbox::get_events(&fixture.db, tenant_id, None, 100)
@@ -701,12 +715,14 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
         .unwrap()
         .is_empty());
 
+    let mut keys_tx = tenant_tx(&fixture.db, tenant_id).await;
     let retained_keys: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM outbox_event_keys WHERE tenant_id = $1")
             .bind(tenant_id.get())
-            .fetch_one(&fixture.db)
+            .fetch_one(&mut *keys_tx)
             .await
             .unwrap();
+    keys_tx.rollback().await.unwrap();
     assert_eq!(retained_keys, 10);
 
     let duplicate_payload = json!({"duplicate": true});
