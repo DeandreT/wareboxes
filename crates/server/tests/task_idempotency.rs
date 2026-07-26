@@ -188,137 +188,63 @@ async fn task_commands_replay_results_without_repeating_work() {
     .fetch_one(&mut *tx)
     .await
     .unwrap();
-    tx.rollback().await.unwrap();
-    assert_eq!(started_events, 1);
-
-    let progress_body = json!({
-        "task_id": task_id,
-        "action": "progress",
-        "qty_completed": 2,
-        "from_location_id": task_location
-    });
-    let (first_progress, second_progress) = tokio::join!(
-        send(
-            &app,
-            &token,
-            tenant_id,
-            "/api/tasks/progress",
-            Some("progress-pack-1"),
-            progress_body.clone(),
-        ),
-        send(
-            &app,
-            &token,
-            tenant_id,
-            "/api/tasks/progress",
-            Some("progress-pack-1"),
-            progress_body,
-        ),
-    );
-    for response in [first_progress, second_progress] {
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(response_json::<bool>(response).await);
-    }
-    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
-    let progress_state: (i64, i64) = sqlx::query_as(
+    let inventory_effects_before: (i64, i64, i64, i64) = sqlx::query_as(
         r#"
-        SELECT detail.master_qty_completed, COUNT(progress.id)
-        FROM break_master_pack_tasks detail
-        LEFT JOIN work_task_progress progress
-          ON progress.tenant_id = detail.tenant_id
-         AND progress.task_id = detail.task_id
-         AND progress.action = 'progress'
-        WHERE detail.tenant_id = $1 AND detail.task_id = $2
-        GROUP BY detail.master_qty_completed
+        SELECT (SELECT COUNT(*) FROM inventory_transactions),
+               (SELECT COUNT(*) FROM inventory_entries),
+               (SELECT COUNT(*) FROM inventory_balances),
+               (SELECT COUNT(*) FROM outbox_events)
         "#,
     )
-    .bind(tenant_id.get())
-    .bind(task_id)
     .fetch_one(&mut *tx)
     .await
     .unwrap();
     tx.rollback().await.unwrap();
-    assert_eq!(progress_state, (2, 1));
+    assert_eq!(started_events, 1);
 
-    sqlx::query("UPDATE locations SET active = FALSE WHERE tenant_id = $1 AND id = $2")
-        .bind(tenant_id.get())
-        .bind(task_location)
-        .execute(&fixture.db)
-        .await
-        .unwrap();
-    let replay_after_location_change = send(
-        &app,
-        &token,
-        tenant_id,
-        "/api/tasks/progress",
-        Some("progress-pack-1"),
-        json!({
-            "task_id": task_id,
-            "action": "progress",
-            "qty_completed": 2,
-            "from_location_id": task_location
-        }),
-    )
-    .await;
-    assert_eq!(replay_after_location_change.status(), StatusCode::OK);
-    assert!(response_json::<bool>(replay_after_location_change).await);
-
-    let changed = send(
-        &app,
-        &token,
-        tenant_id,
-        "/api/tasks/progress",
-        Some("progress-pack-1"),
-        json!({
-            "task_id": task_id,
-            "action": "progress",
-            "qty_completed": 1,
-            "from_location_id": task_location
-        }),
-    )
-    .await;
-    assert_eq!(changed.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        response_json::<ErrorResponse>(changed).await.code,
-        ErrorCode::IdempotencyKeyReused
-    );
-
-    let completion_body = json!({"task_id": task_id, "qty_completed": 3});
-    let (first_completion, second_completion) = tokio::join!(
-        send(
-            &app,
-            &token,
-            tenant_id,
-            "/api/tasks/complete",
-            Some("complete-pack-1"),
-            completion_body.clone(),
+    for (uri, key, body) in [
+        (
+            "/api/tasks/progress",
+            "progress-pack-1",
+            json!({
+                "task_id": task_id,
+                "action": "progress",
+                "qty_completed": 2,
+                "from_location_id": task_location
+            }),
         ),
-        send(
-            &app,
-            &token,
-            tenant_id,
+        (
             "/api/tasks/complete",
-            Some("complete-pack-1"),
-            completion_body,
+            "complete-pack-1",
+            json!({"task_id": task_id, "qty_completed": 3}),
         ),
-    );
-    for response in [first_completion, second_completion] {
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(response_json::<bool>(response).await);
+    ] {
+        let response = send(&app, &token, tenant_id, uri, Some(key), body).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json::<ErrorResponse>(response).await.code,
+            ErrorCode::Conflict
+        );
     }
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
-    let completed_state: (i64, String, i64, i64) = sqlx::query_as(
+    let blocked_state: (i64, String, i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT detail.master_qty_completed, task.status,
                COUNT(progress.id) FILTER (WHERE progress.action = 'progress'),
-               COUNT(progress.id) FILTER (WHERE progress.action = 'completed')
+               COUNT(progress.id) FILTER (WHERE progress.action = 'completed'),
+               (
+                   SELECT COUNT(*)
+                   FROM command_idempotency_records command
+                   WHERE command.tenant_id = task.tenant_id
+                     AND command.operation IN ('task.progress.v1', 'task.complete.v1')
+               )
         FROM break_master_pack_tasks detail
         INNER JOIN work_tasks task
           ON task.tenant_id = detail.tenant_id AND task.id = detail.task_id
         LEFT JOIN work_task_progress progress
           ON progress.tenant_id = task.tenant_id AND progress.task_id = task.id
         WHERE task.tenant_id = $1 AND task.id = $2
-        GROUP BY detail.master_qty_completed, task.status
+        GROUP BY detail.master_qty_completed, task.status, task.tenant_id
         "#,
     )
     .bind(tenant_id.get())
@@ -326,8 +252,31 @@ async fn task_commands_replay_results_without_repeating_work() {
     .fetch_one(&mut *tx)
     .await
     .unwrap();
+    let inventory_effects_after: (i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT (SELECT COUNT(*) FROM inventory_transactions),
+               (SELECT COUNT(*) FROM inventory_entries),
+               (SELECT COUNT(*) FROM inventory_balances),
+               (SELECT COUNT(*) FROM outbox_events)
+        "#,
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
     tx.rollback().await.unwrap();
-    assert_eq!(completed_state, (5, "completed".into(), 2, 1));
+    assert_eq!(blocked_state, (0, "in_progress".into(), 0, 0, 0));
+    assert_eq!(inventory_effects_after, inventory_effects_before);
+    assert!(
+        repo::inventory::get_reconciliation_issues(&fixture.db, tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo::tasks::abort_task(&fixture.db, tenant_id, task_id, worker.id)
+            .await
+            .unwrap()
+    );
 
     let location = fixture
         .location(tenant_id, facility, "IDEMPOTENCY-COUNT")
@@ -372,6 +321,29 @@ async fn task_commands_replay_results_without_repeating_work() {
         .unwrap();
     assert_eq!(first_task, second_task);
     assert_eq!(first_task.id, next_task);
+    for (uri, key, body) in [
+        (
+            "/api/tasks/progress",
+            "progress-count-1",
+            json!({
+                "task_id": next_task,
+                "action": "progress",
+                "qty_completed": 1
+            }),
+        ),
+        (
+            "/api/tasks/complete",
+            "complete-count-1",
+            json!({"task_id": next_task}),
+        ),
+    ] {
+        let response = send(&app, &token, tenant_id, uri, Some(key), body).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json::<ErrorResponse>(response).await.code,
+            ErrorCode::Conflict
+        );
+    }
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let next_started_events: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM work_task_progress WHERE tenant_id = $1 AND task_id = $2 AND action = 'started'",
@@ -458,7 +430,8 @@ async fn task_commands_replay_results_without_repeating_work() {
         r#"
         SELECT actor_user_id, request_id
         FROM command_idempotency_records
-        WHERE tenant_id = $1 AND operation = 'task.progress.v1' AND idempotency_key = 'progress-pack-1'
+        WHERE tenant_id = $1 AND operation = 'task.start.v1'
+          AND idempotency_key = 'start-pack-1'
         "#,
     )
     .bind(tenant_id.get())

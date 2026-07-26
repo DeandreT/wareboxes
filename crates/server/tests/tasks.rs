@@ -296,45 +296,51 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     assert_eq!(started.assigned_user_id, Some(assignee.id));
     assert_eq!(started.status, WorkTaskStatus::InProgress);
     assert!(started.lease_expires_at.is_some());
-    assert!(
-        repo::tasks::complete_task(&db, tenant_id, cycle_a, assignee.id, None)
-            .await
-            .unwrap()
-    );
+    assert!(matches!(
+        repo::tasks::complete_task(&db, tenant_id, cycle_a, assignee.id, None).await,
+        Err(AppError::Core(CoreError::Conflict(_)))
+    ));
+    assert!(repo::tasks::cancel_task(&db, tenant_id, cycle_a, user.id)
+        .await
+        .unwrap());
 
     let started = repo::tasks::start_next_task(&db, tenant_id, assignee.id, None)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(started.id, break_task);
-    assert!(!repo::tasks::record_task_progress(
-        &db,
-        tenant_id,
-        user.id,
-        break_task,
-        None,
-        WorkTaskProgressAction::Progress,
-        1,
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap());
-    assert!(repo::tasks::record_task_progress(
-        &db,
-        tenant_id,
-        assignee.id,
-        break_task,
-        None,
-        WorkTaskProgressAction::Progress,
-        1,
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap());
+    assert!(matches!(
+        repo::tasks::record_task_progress(
+            &db,
+            tenant_id,
+            user.id,
+            break_task,
+            None,
+            WorkTaskProgressAction::Progress,
+            1,
+            None,
+            None,
+            None,
+        )
+        .await,
+        Err(AppError::Core(CoreError::Conflict(_)))
+    ));
+    assert!(matches!(
+        repo::tasks::record_task_progress(
+            &db,
+            tenant_id,
+            assignee.id,
+            break_task,
+            None,
+            WorkTaskProgressAction::Progress,
+            1,
+            None,
+            None,
+            None,
+        )
+        .await,
+        Err(AppError::Core(CoreError::Conflict(_)))
+    ));
     assert!(
         repo::tasks::abort_task(&db, tenant_id, break_task, assignee.id)
             .await
@@ -367,15 +373,19 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     .await
     .unwrap();
     tx.rollback().await.unwrap();
-    assert_eq!(master_qty_completed, 1);
+    assert_eq!(master_qty_completed, 0);
 
     let restarted = repo::tasks::start_next_task(&db, tenant_id, assignee.id, None)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(restarted.id, break_task);
+    assert!(matches!(
+        repo::tasks::complete_task(&db, tenant_id, break_task, assignee.id, Some(1)).await,
+        Err(AppError::Core(CoreError::Conflict(_)))
+    ));
     assert!(
-        repo::tasks::complete_task(&db, tenant_id, break_task, assignee.id, Some(1))
+        repo::tasks::abort_task(&db, tenant_id, break_task, assignee.id)
             .await
             .unwrap()
     );
@@ -397,7 +407,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     assert!(tasks.iter().any(|task| {
         task.id == cycle_a
             && task.task_type == WorkTaskType::CycleCountItemLocation
-            && task.status == WorkTaskStatus::Completed
+            && task.status == WorkTaskStatus::Cancelled
     }));
     assert!(tasks
         .iter()
@@ -532,39 +542,26 @@ async fn cancelled_order_unpack_task_is_facility_scoped_and_deduplicated() {
     assert!(repo::tasks::start_task(db, tenant_id, tasks[0].id, user.id)
         .await
         .unwrap());
-    assert!(repo::tasks::record_task_progress(
-        db,
-        tenant_id,
-        user.id,
-        tasks[0].id,
-        Some(line.0),
-        WorkTaskProgressAction::Unpacked,
-        2,
-        None,
-        None,
-        Some("first two unpacked"),
-    )
-    .await
-    .unwrap());
-    assert!(
-        !repo::tasks::complete_task(db, tenant_id, tasks[0].id, user.id, None)
-            .await
-            .unwrap()
-    );
-    assert!(repo::tasks::record_task_progress(
-        db,
-        tenant_id,
-        user.id,
-        tasks[0].id,
-        Some(line.0),
-        WorkTaskProgressAction::Missing,
-        1,
-        None,
-        None,
-        Some("one missing from cancelled order"),
-    )
-    .await
-    .unwrap());
+    assert!(matches!(
+        repo::tasks::record_task_progress(
+            db,
+            tenant_id,
+            user.id,
+            tasks[0].id,
+            Some(line.0),
+            WorkTaskProgressAction::Unpacked,
+            2,
+            None,
+            None,
+            Some("first two unpacked"),
+        )
+        .await,
+        Err(AppError::Core(CoreError::Conflict(_)))
+    ));
+    assert!(matches!(
+        repo::tasks::complete_task(db, tenant_id, tasks[0].id, user.id, None).await,
+        Err(AppError::Core(CoreError::Conflict(_)))
+    ));
     let mut tx = tenant_tx(db, tenant_id).await;
     let line: (i64, i64, i64, String) = sqlx::query_as(
         "SELECT unpacked_qty, missing_qty, damaged_qty, status FROM unpack_cancelled_order_task_lines WHERE id = $1",
@@ -574,13 +571,11 @@ async fn cancelled_order_unpack_task_is_facility_scoped_and_deduplicated() {
     .await
     .unwrap();
     tx.rollback().await.unwrap();
-    assert_eq!(line, (2, 1, 0, "exception".to_owned()));
-    assert!(
-        repo::tasks::complete_task(db, tenant_id, tasks[0].id, user.id, None)
-            .await
-            .unwrap()
-    );
-    assert!(matches!(
+    assert_eq!(line, (0, 0, 0, "open".to_owned()));
+    assert!(repo::tasks::abort_task(db, tenant_id, tasks[0].id, user.id)
+        .await
+        .unwrap());
+    assert_eq!(
         repo::tasks::create_unpack_cancelled_order_task(
             db,
             tenant_id,
@@ -593,9 +588,10 @@ async fn cancelled_order_unpack_task_is_facility_scoped_and_deduplicated() {
             None,
             None,
         )
-        .await,
-        Err(AppError::Core(CoreError::Conflict(_)))
-    ));
+        .await
+        .unwrap(),
+        tasks[0].id
+    );
 }
 
 #[tokio::test]
