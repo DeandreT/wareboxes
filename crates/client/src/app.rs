@@ -5,6 +5,7 @@
 //! panels can also be popped out into native OS windows (egui multi-viewport).
 
 mod components;
+mod expected_receiving;
 mod loads;
 mod operations;
 mod panels;
@@ -32,6 +33,9 @@ use wareboxes_core::models::{
 };
 
 use crate::api::{ApiClient, ApiEvent, Screen};
+use crate::expected_receiving_workflow::{
+    ExpectedReceivingActivity, ExpectedReceivingApplyResult, ExpectedReceivingWorkflowState,
+};
 use crate::putaway_workflow::{PutawayApplyResult, PutawayWorkflowState};
 
 const LOCAL_BASE_URL: &str = "http://127.0.0.1:8080";
@@ -248,6 +252,7 @@ pub struct WareboxesApp {
     order_total: i64,
     order_limit: i64,
     order_offset: i64,
+    expected_receiving: ExpectedReceivingWorkflowState,
     putaway: PutawayWorkflowState,
     putaway_release_open: bool,
     putaway_release_reason: wareboxes_api_contract::v1::PutawayClaimReleaseReason,
@@ -338,6 +343,7 @@ impl WareboxesApp {
             order_total: 0,
             order_limit: DEFAULT_ORDER_PAGE_SIZE,
             order_offset: 0,
+            expected_receiving: ExpectedReceivingWorkflowState::default(),
             putaway: PutawayWorkflowState::default(),
             putaway_release_open: false,
             putaway_release_reason:
@@ -350,7 +356,18 @@ impl WareboxesApp {
     /// Request a screen's data and record when, so auto-refresh and the
     /// manual Refresh button share one cadence.
     fn fetch(&mut self, s: Screen) {
-        if s == Screen::Putaway {
+        if s == Screen::Receiving {
+            if self.expected_receiving.activity() == ExpectedReceivingActivity::Uninitialized {
+                self.expected_receiving.reset_for_next_load();
+            } else if let Some(request) = self
+                .expected_receiving
+                .reconcile(Self::new_expected_receiving_request_id())
+            {
+                self.api.execute_expected_receiving(request);
+            }
+            self.last_fetch.insert(s, self.now);
+            return;
+        } else if s == Screen::Putaway {
             self.putaway_release_open = false;
             self.putaway_release_reason =
                 wareboxes_api_contract::v1::PutawayClaimReleaseReason::WorkInterrupted;
@@ -444,7 +461,7 @@ impl WareboxesApp {
                     .is_some_and(|panel| panel.open)
             })
             .filter(|s| {
-                if *s == Screen::Putaway {
+                if matches!(*s, Screen::Receiving | Screen::Putaway) {
                     return false;
                 }
                 self.now - self.last_fetch.get(s).copied().unwrap_or(f64::MIN)
@@ -576,10 +593,11 @@ impl WareboxesApp {
                     self.api.tenant_id = Some(s.active_tenant.tenant_id);
                     self.light_mode = s.settings.light_mode;
                     self.session = Some(*s);
+                    self.expected_receiving.reset_for_next_load();
                     let first = if self.has_perm("orders") {
                         Screen::Orders
                     } else if self.has_perm("wms") {
-                        Screen::Putaway
+                        Screen::Receiving
                     } else {
                         self.visible_screens().next().unwrap_or(Screen::Users)
                     };
@@ -606,6 +624,7 @@ impl WareboxesApp {
                     self.new_order_open = false;
                     self.new_item_open = false;
                     self.settings_open = false;
+                    self.expected_receiving = ExpectedReceivingWorkflowState::default();
                     self.putaway = PutawayWorkflowState::default();
                     self.putaway_release_open = false;
                     self.putaway_release_reason =
@@ -707,6 +726,21 @@ impl WareboxesApp {
                 ApiEvent::LicensePlateLookup(lp) => self.data.license_plate_lookup = lp,
                 ApiEvent::Employees(e) => self.data.employees = e,
                 ApiEvent::Audits(a) => self.data.audits = a,
+                ApiEvent::ExpectedReceiving(event) => match self.expected_receiving.apply(event) {
+                    ExpectedReceivingApplyResult::ReloadRequired(_) => {
+                        if let Some(request) = self
+                            .expected_receiving
+                            .reconcile(Self::new_expected_receiving_request_id())
+                        {
+                            self.api.execute_expected_receiving(request);
+                        }
+                    }
+                    ExpectedReceivingApplyResult::Completed(message) => {
+                        self.toast(message, false, now);
+                    }
+                    ExpectedReceivingApplyResult::Applied
+                    | ExpectedReceivingApplyResult::Ignored => {}
+                },
                 ApiEvent::Putaway(event) => {
                     if let PutawayApplyResult::Completed(message) =
                         self.putaway.apply_at(event, now)
@@ -784,6 +818,9 @@ impl eframe::App for WareboxesApp {
         let now = ctx.input(|i| i.time);
         self.now = now;
         self.drain_events(now);
+        if self.session.is_some() && self.expected_receiving.tick(now) {
+            ctx.request_repaint();
+        }
         let putaway_visible = self
             .active_workspace()
             .panels
@@ -1244,7 +1281,7 @@ impl WareboxesApp {
     ) -> (egui::Pos2, egui::Vec2) {
         let viewport = ctx.available_rect();
         let requested_size = match screen {
-            Screen::Putaway => egui::vec2(680.0, 640.0),
+            Screen::Receiving | Screen::Putaway => egui::vec2(680.0, 640.0),
             Screen::Orders => egui::vec2(980.0, 620.0),
             Screen::Items => egui::vec2(920.0, 640.0),
             Screen::Loads | Screen::Inventory => egui::vec2(1080.0, 680.0),
@@ -1383,6 +1420,7 @@ impl WareboxesApp {
 
     fn render_screen(&mut self, s: Screen, ui: &mut egui::Ui) {
         match s {
+            Screen::Receiving => self.expected_receiving_screen(ui),
             Screen::Putaway => self.putaway_screen(ui),
             Screen::Orders => self.orders_screen(ui),
             Screen::Users => self.users_screen(ui),
