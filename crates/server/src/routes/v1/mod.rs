@@ -4,6 +4,7 @@ mod error;
 mod inventory_balances;
 mod license_plate_putaway;
 mod putaway;
+mod putaway_claims;
 
 use axum::middleware;
 use axum::routing::{get, post};
@@ -26,6 +27,12 @@ pub fn router() -> Router<AppState> {
         .route(
             "/putaway-tasks/:task_id/confirmations",
             post(putaway::confirm),
+        )
+        .route("/putaway-claims/next", post(putaway_claims::claim_next))
+        .route("/putaway-claims/current", get(putaway_claims::current))
+        .route(
+            "/putaway-claims/:task_id",
+            post(putaway_claims::claim_by_id),
         )
         .layer(middleware::map_response(error::normalize_error_response))
 }

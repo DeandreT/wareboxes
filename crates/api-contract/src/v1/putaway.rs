@@ -27,10 +27,10 @@ pub struct CreatePutawayTaskResponse {
 }
 
 /// Confirms the scanned destination for a directed putaway task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfirmPutawayRequest {
-    pub destination_location_id: i64,
+    pub destination_location_barcode: String,
 }
 
 /// Result of atomically completing a directed loose-inventory putaway.
@@ -45,10 +45,37 @@ pub struct PutawayConfirmationResponse {
     pub destination_inventory_balance_id: i64,
     pub source_location_id: i64,
     pub destination_location_id: i64,
+    pub destination_location_barcode: String,
     pub item_batch_id: i64,
     pub item_id: i64,
     pub quantity: i64,
     pub inventory_status: String,
     pub confirmed_by: i64,
     pub confirmed_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn putaway_confirmation_requires_only_the_scanned_destination_barcode() {
+        assert_eq!(
+            serde_json::from_str::<ConfirmPutawayRequest>(
+                r#"{"destination_location_barcode":"A-01-01"}"#
+            )
+            .unwrap(),
+            ConfirmPutawayRequest {
+                destination_location_barcode: "A-01-01".into(),
+            }
+        );
+        assert!(
+            serde_json::from_str::<ConfirmPutawayRequest>(r#"{"destination_location_id":42}"#)
+                .is_err()
+        );
+        assert!(serde_json::from_str::<ConfirmPutawayRequest>(
+            r#"{"destination_location_barcode":"A-01-01","task_id":4}"#
+        )
+        .is_err());
+    }
 }

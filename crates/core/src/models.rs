@@ -1566,6 +1566,57 @@ pub struct WorkTask {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PutawayClaimSourceLocation {
+    pub location_id: i64,
+    pub barcode: Option<String>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PutawayClaimDestinationLocation {
+    pub location_id: i64,
+    pub barcode: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PutawayClaimWork {
+    Loose {
+        source_inventory_balance_id: i64,
+        item_batch_id: i64,
+        item_id: i64,
+        item_description: Option<String>,
+        uom: String,
+        lot: Option<String>,
+        serial: Option<String>,
+        expiration: Option<Timestamp>,
+        inventory_status: InventoryStatus,
+        quantity: i64,
+    },
+    LicensePlate {
+        license_plate_id: i64,
+        license_plate_barcode: String,
+        planned_balance_count: i64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PutawayClaim {
+    pub tenant_id: TenantId,
+    pub task_id: i64,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub priority: i64,
+    pub instructions: Option<String>,
+    pub due_at: Option<Timestamp>,
+    pub lease_expires_at: Timestamp,
+    pub source_location: PutawayClaimSourceLocation,
+    pub destination_location: PutawayClaimDestinationLocation,
+    pub work: PutawayClaimWork,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PutawayConfirmation {
     pub tenant_id: TenantId,
     pub task_id: i64,
@@ -1575,6 +1626,7 @@ pub struct PutawayConfirmation {
     pub destination_inventory_balance_id: i64,
     pub source_location_id: i64,
     pub destination_location_id: i64,
+    pub destination_location_barcode: String,
     pub item_batch_id: i64,
     pub item_id: i64,
     pub inventory_status: InventoryStatus,

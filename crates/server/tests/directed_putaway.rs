@@ -98,7 +98,7 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
     let destination_location_id = fixture
         .location(tenant_id, facility_id, "PUTAWAY-A-01")
         .await;
-    let wrong_destination_location_id = fixture
+    let _wrong_destination_location_id = fixture
         .location(tenant_id, facility_id, "PUTAWAY-A-02")
         .await;
     let item_id = fixture.item(tenant_id, "Putaway Item", "case").await;
@@ -258,7 +258,7 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
         tenant_id,
         &format!("/api/v1/putaway-tasks/{}/confirmations", created.task_id),
         "putaway-wrong-scan",
-        json!({"destination_location_id": wrong_destination_location_id}),
+        json!({"destination_location_barcode": "PUTAWAY-A-02"}),
     )
     .await;
     let wrong_scan_status = wrong_scan.status();
@@ -276,7 +276,7 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
         tenant_id,
         &confirmation_uri,
         "putaway-confirm",
-        json!({"destination_location_id": destination_location_id}),
+        json!({"destination_location_barcode": "PUTAWAY-A-01"}),
     )
     .await;
     assert_eq!(confirmed.status(), StatusCode::OK);
@@ -288,6 +288,7 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
     );
     assert_eq!(confirmed.source_location_id, receiving_location_id);
     assert_eq!(confirmed.destination_location_id, destination_location_id);
+    assert_eq!(confirmed.destination_location_barcode, "PUTAWAY-A-01");
     assert_eq!(confirmed.quantity, 6);
     assert_eq!(confirmed.inventory_status, "available");
 
@@ -297,7 +298,7 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
         tenant_id,
         &confirmation_uri,
         "putaway-confirm",
-        json!({"destination_location_id": destination_location_id}),
+        json!({"destination_location_barcode": "PUTAWAY-A-01"}),
     )
     .await;
     assert_eq!(replayed_confirmation.status(), StatusCode::OK);
@@ -431,7 +432,7 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
             blocked_task.task_id
         ),
         "putaway-confirm-blocked",
-        json!({"destination_location_id": destination_location_id}),
+        json!({"destination_location_barcode": "PUTAWAY-A-01"}),
     )
     .await;
     assert_eq!(blocked_confirmation.status(), StatusCode::CONFLICT);

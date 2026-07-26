@@ -540,7 +540,7 @@ async fn putaway_scope_denials_replays_and_rls_leave_no_hidden_effects() {
         tenant_id,
         &confirmation_uri,
         "putaway-scope-confirm",
-        json!({"destination_location_id": allowed_destination}),
+        json!({"destination_location_barcode": "PUTAWAY-SCOPE-DESTINATION"}),
     )
     .await;
     assert_eq!(denied_confirmation.status(), StatusCode::NOT_FOUND);
@@ -584,7 +584,7 @@ async fn putaway_scope_denials_replays_and_rls_leave_no_hidden_effects() {
         tenant_id,
         &confirmation_uri,
         "putaway-scope-confirm",
-        json!({"destination_location_id": allowed_destination}),
+        json!({"destination_location_barcode": "PUTAWAY-SCOPE-DESTINATION"}),
     )
     .await;
     assert_eq!(confirmation.status(), StatusCode::OK);
@@ -606,7 +606,7 @@ async fn putaway_scope_denials_replays_and_rls_leave_no_hidden_effects() {
         tenant_id,
         &confirmation_uri,
         "putaway-scope-confirm",
-        json!({"destination_location_id": allowed_destination}),
+        json!({"destination_location_barcode": "PUTAWAY-SCOPE-DESTINATION"}),
     )
     .await;
     assert_eq!(concealed_replay.status(), StatusCode::NOT_FOUND);
