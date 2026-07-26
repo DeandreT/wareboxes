@@ -418,6 +418,27 @@ pub async fn move_license_plate(
     let plate_location: Option<i64> = plate.try_get("location_id")?;
     let owner_facility =
         inventory_journal::owner_facility_scope(inventory_owner_id, plate_facility_id)?;
+    let active_putaway: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT task_id
+        FROM license_plate_putaway_tasks
+        WHERE tenant_id = $1
+          AND inventory_owner_id = $2
+          AND license_plate_id = $3
+          AND closed_at IS NULL
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id)
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if active_putaway.is_some() {
+        return Err(AppError::conflict(
+            "license plate has active directed putaway work",
+        ));
+    }
 
     let transaction_id = match inventory_journal::begin_transaction(
         &mut tx,
@@ -478,7 +499,7 @@ pub async fn move_license_plate(
 
     let content_rows = sqlx::query(
         r#"
-        SELECT id, facility_id, location_id, item_batch_id, status,
+        SELECT id, facility_id, location_id, item_batch_id, item_id, status,
                qty_on_hand, qty_reserved, qty_held
         FROM inventory_balances
         WHERE tenant_id = $1
@@ -574,8 +595,18 @@ pub async fn move_license_plate(
         ));
     }
 
-    for row in &content_rows {
-        let item_batch_id: i64 = row.try_get("item_batch_id")?;
+    let mut compatible_batches = content_rows
+        .iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<i64, _>("item_id")?,
+                row.try_get::<i64, _>("item_batch_id")?,
+            ))
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    compatible_batches.sort_unstable();
+    compatible_batches.dedup();
+    for (_, item_batch_id) in compatible_batches {
         inventory::ensure_location_accepts_batch_tx(
             &mut tx,
             tenant_id,
