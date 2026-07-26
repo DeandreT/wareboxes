@@ -2,8 +2,6 @@ use crate::db::now_iso;
 use crate::error::AppResult;
 use wareboxes_domain::TenantId;
 
-/// Insert an address row from order-shipping fields and return its id.
-/// Mirrors the `db.insert(addresses)` calls in `app/utils/orders.ts`.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_address_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
