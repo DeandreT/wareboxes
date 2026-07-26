@@ -142,6 +142,70 @@ fn map_reservation(row: &sqlx::postgres::PgRow) -> AppResult<InventoryReservatio
     })
 }
 
+#[derive(Debug)]
+struct LockedLooseBalance {
+    id: i64,
+    inventory_owner_id: i64,
+    facility_id: i64,
+    location_id: i64,
+    item_batch_id: i64,
+    item_id: i64,
+    uom: String,
+    status: String,
+    qty_on_hand: i64,
+    qty_reserved: i64,
+    active: bool,
+}
+
+async fn lock_loose_balance_positions_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    item_batch_id: i64,
+    status: &str,
+    location_ids: &[i64],
+) -> AppResult<Vec<LockedLooseBalance>> {
+    bind_tenant_context(tx, tenant_id).await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, inventory_owner_id, facility_id, location_id, item_batch_id,
+               item_id, uom, status, qty_on_hand, qty_reserved,
+               deleted IS NULL AS active
+        FROM inventory_balances
+        WHERE tenant_id = $1
+          AND item_batch_id = $2
+          AND status = $3
+          AND location_id = ANY($4)
+          AND license_plate_id IS NULL
+        ORDER BY id
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(item_batch_id)
+    .bind(status)
+    .bind(location_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    rows.iter()
+        .map(|row| {
+            Ok(LockedLooseBalance {
+                id: row.try_get("id")?,
+                inventory_owner_id: row.try_get("inventory_owner_id")?,
+                facility_id: row.try_get("facility_id")?,
+                location_id: row.try_get("location_id")?,
+                item_batch_id: row.try_get("item_batch_id")?,
+                item_id: row.try_get("item_id")?,
+                uom: row.try_get("uom")?,
+                status: row.try_get("status")?,
+                qty_on_hand: row.try_get("qty_on_hand")?,
+                qty_reserved: row.try_get("qty_reserved")?,
+                active: row.try_get("active")?,
+            })
+        })
+        .collect()
+}
+
 pub(crate) async fn ensure_location_accepts_batch_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
@@ -837,32 +901,24 @@ pub async fn move_inventory(
         return Ok(transaction_id);
     }
 
-    let source = sqlx::query(
-        r#"
-        SELECT inventory_owner_id, facility_id, item_id, uom, qty_on_hand, qty_reserved
-        FROM inventory_balances
-        WHERE tenant_id = $1
-          AND location_id = $2
-          AND item_batch_id = $3
-          AND status = $4
-          AND license_plate_id IS NULL
-          AND deleted IS NULL
-        FOR UPDATE
-        "#,
+    let locked_balances = lock_loose_balance_positions_tx(
+        &mut tx,
+        tenant_id,
+        item_batch_id,
+        status.as_str(),
+        &[from_location_id, to_location_id],
     )
-    .bind(tenant_id.get())
-    .bind(from_location_id)
-    .bind(item_batch_id)
-    .bind(status.as_str())
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| AppError::conflict("source inventory balance was not found"))?;
-    let inventory_owner_id: i64 = source.try_get("inventory_owner_id")?;
-    let source_facility_id: i64 = source.try_get("facility_id")?;
-    let item_id: i64 = source.try_get("item_id")?;
-    let uom: String = source.try_get("uom")?;
-    let qty_on_hand: i64 = source.try_get("qty_on_hand")?;
-    let qty_reserved: i64 = source.try_get("qty_reserved")?;
+    .await?;
+    let source = locked_balances
+        .iter()
+        .find(|balance| balance.location_id == from_location_id && balance.active)
+        .ok_or_else(|| AppError::conflict("source inventory balance was not found"))?;
+    let inventory_owner_id = source.inventory_owner_id;
+    let source_facility_id = source.facility_id;
+    let item_id = source.item_id;
+    let uom = source.uom.clone();
+    let qty_on_hand = source.qty_on_hand;
+    let qty_reserved = source.qty_reserved;
     if qty_on_hand - qty_reserved < qty {
         return Err(AppError::conflict(
             "insufficient available inventory at source location",
@@ -1033,6 +1089,8 @@ pub async fn split_move_inventory(
             .checked_add(*qty)
             .ok_or_else(|| AppError::bad_request("move quantity is too large"))?;
     }
+    let mut ordered_destinations = destinations.to_vec();
+    ordered_destinations.sort_unstable_by_key(|(location_id, _)| *location_id);
 
     let now = now_iso();
     let mut tx = db.begin().await?;
@@ -1059,13 +1117,11 @@ pub async fn split_move_inventory(
         return Ok(transaction_id);
     }
 
-    let Some(source) = sqlx::query(
+    let Some(source_hint) = sqlx::query(
         r#"
-        SELECT id, inventory_owner_id, facility_id, location_id, license_plate_id,
-               item_batch_id, item_id, uom, status, qty_on_hand, qty_reserved
+        SELECT location_id, license_plate_id, item_batch_id, status
         FROM inventory_balances
         WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL
-        FOR UPDATE
         "#,
     )
     .bind(tenant_id.get())
@@ -1076,22 +1132,42 @@ pub async fn split_move_inventory(
         return Err(AppError::conflict("source inventory balance was not found"));
     };
 
-    let from_location_id: i64 = source.try_get("location_id")?;
-    let inventory_owner_id: i64 = source.try_get("inventory_owner_id")?;
-    let source_facility_id: i64 = source.try_get("facility_id")?;
-    let license_plate_id: Option<i64> = source.try_get("license_plate_id")?;
-    let item_batch_id: i64 = source.try_get("item_batch_id")?;
-    let item_id: i64 = source.try_get("item_id")?;
-    let uom: String = source.try_get("uom")?;
-    let status: String = source.try_get("status")?;
-    let parsed_status = parse_inventory_status(&status)?;
-    let qty_on_hand: i64 = source.try_get("qty_on_hand")?;
-    let qty_reserved: i64 = source.try_get("qty_reserved")?;
-    if license_plate_id.is_some() {
+    let hinted_from_location_id: i64 = source_hint.try_get("location_id")?;
+    let hinted_license_plate_id: Option<i64> = source_hint.try_get("license_plate_id")?;
+    if hinted_license_plate_id.is_some() {
         return Err(AppError::conflict(
             "use the License Plates panel to move license-plated stock",
         ));
     }
+    let hinted_item_batch_id: i64 = source_hint.try_get("item_batch_id")?;
+    let hinted_status: String = source_hint.try_get("status")?;
+    let mut affected_location_ids = destination_ids.iter().copied().collect::<Vec<_>>();
+    affected_location_ids.push(hinted_from_location_id);
+    affected_location_ids.sort_unstable();
+    affected_location_ids.dedup();
+
+    let locked_balances = lock_loose_balance_positions_tx(
+        &mut tx,
+        tenant_id,
+        hinted_item_batch_id,
+        &hinted_status,
+        &affected_location_ids,
+    )
+    .await?;
+    let source = locked_balances
+        .iter()
+        .find(|balance| balance.id == from_inventory_balance_id && balance.active)
+        .ok_or_else(|| AppError::conflict("source inventory balance was not found"))?;
+    let from_location_id = source.location_id;
+    let inventory_owner_id = source.inventory_owner_id;
+    let source_facility_id = source.facility_id;
+    let item_batch_id = source.item_batch_id;
+    let item_id = source.item_id;
+    let uom = source.uom.clone();
+    let status = source.status.clone();
+    let parsed_status = parse_inventory_status(&status)?;
+    let qty_on_hand = source.qty_on_hand;
+    let qty_reserved = source.qty_reserved;
     if destinations
         .iter()
         .any(|(to_location_id, _)| *to_location_id == from_location_id)
@@ -1196,7 +1272,7 @@ pub async fn split_move_inventory(
     )
     .await?;
 
-    for (to_location_id, qty) in destinations {
+    for (to_location_id, qty) in &ordered_destinations {
         ensure_location_accepts_batch_tx(
             &mut tx,
             tenant_id,
