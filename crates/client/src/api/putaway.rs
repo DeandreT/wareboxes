@@ -1,7 +1,10 @@
 use wareboxes_api_contract::v1::{
     ClaimNextPutawayRequest, ClaimPutawayByIdRequest, ConfirmLicensePlatePutawayRequest,
-    ConfirmPutawayRequest, ErrorResponse, LicensePlatePutawayConfirmationResponse,
-    PutawayClaimResponse, PutawayConfirmationResponse, PutawayWorkflow, IDEMPOTENCY_KEY_HEADER,
+    ConfirmPutawayRequest, ErrorResponse, HeartbeatPutawayClaimRequest,
+    LicensePlatePutawayConfirmationResponse, PutawayClaimHeartbeatResponse,
+    PutawayClaimReleaseReason, PutawayClaimReleaseResponse, PutawayClaimResponse,
+    PutawayConfirmationResponse, PutawayWorkflow, ReleasePutawayClaimRequest,
+    IDEMPOTENCY_KEY_HEADER,
 };
 
 use super::{ApiClient, ApiEvent};
@@ -15,6 +18,16 @@ pub enum PutawayCommand {
     },
     ClaimById {
         task_id: i64,
+        idempotency_key: String,
+    },
+    Heartbeat {
+        task_id: i64,
+        idempotency_key: String,
+    },
+    Release {
+        task_id: i64,
+        reason: PutawayClaimReleaseReason,
+        note: Option<String>,
         idempotency_key: String,
     },
     ConfirmLoose {
@@ -41,6 +54,12 @@ impl PutawayCommand {
             | Self::ClaimById {
                 idempotency_key, ..
             }
+            | Self::Heartbeat {
+                idempotency_key, ..
+            }
+            | Self::Release {
+                idempotency_key, ..
+            }
             | Self::ConfirmLoose {
                 idempotency_key, ..
             }
@@ -61,6 +80,8 @@ pub struct PutawayRequest {
 pub enum PutawayTransportOutcome {
     Current(Option<PutawayClaimResponse>),
     Claimed(Option<PutawayClaimResponse>),
+    Heartbeat(PutawayClaimHeartbeatResponse),
+    Released(PutawayClaimReleaseResponse),
     LooseConfirmed(PutawayConfirmationResponse),
     LicensePlateConfirmed(LicensePlatePutawayConfirmationResponse),
 }
@@ -148,6 +169,39 @@ fn build_request(base_url: &str, command: &PutawayCommand) -> Result<ehttp::Requ
                 Some(idempotency_key.as_str()),
             )
         }
+        PutawayCommand::Heartbeat {
+            task_id,
+            idempotency_key,
+        } => {
+            let body = serde_json::to_vec(&HeartbeatPutawayClaimRequest::default())
+                .map_err(|error| format!("could not encode putaway heartbeat: {error}"))?;
+            (
+                ehttp::Request::post(
+                    format!("{base_url}/api/v1/putaway-claims/{task_id}/heartbeats"),
+                    body,
+                ),
+                Some(idempotency_key.as_str()),
+            )
+        }
+        PutawayCommand::Release {
+            task_id,
+            reason,
+            note,
+            idempotency_key,
+        } => {
+            let body = serde_json::to_vec(&ReleasePutawayClaimRequest {
+                reason: *reason,
+                note: note.clone(),
+            })
+            .map_err(|error| format!("could not encode putaway release: {error}"))?;
+            (
+                ehttp::Request::post(
+                    format!("{base_url}/api/v1/putaway-claims/{task_id}/releases"),
+                    body,
+                ),
+                Some(idempotency_key.as_str()),
+            )
+        }
         PutawayCommand::ConfirmLoose {
             task_id,
             destination_location_barcode,
@@ -225,6 +279,12 @@ fn decode_response(
         PutawayCommand::ClaimById { .. } => serde_json::from_slice(&response.bytes)
             .map(Some)
             .map(PutawayTransportOutcome::Claimed)
+            .map_err(|error| decode_failure(response.status, error)),
+        PutawayCommand::Heartbeat { .. } => serde_json::from_slice(&response.bytes)
+            .map(PutawayTransportOutcome::Heartbeat)
+            .map_err(|error| decode_failure(response.status, error)),
+        PutawayCommand::Release { .. } => serde_json::from_slice(&response.bytes)
+            .map(PutawayTransportOutcome::Released)
             .map_err(|error| decode_failure(response.status, error)),
         PutawayCommand::ConfirmLoose { .. } => serde_json::from_slice(&response.bytes)
             .map(PutawayTransportOutcome::LooseConfirmed)
@@ -323,5 +383,45 @@ mod tests {
             Some("selected-key-81")
         );
         assert_eq!(request.body, b"{}");
+    }
+
+    #[test]
+    fn lifecycle_requests_preserve_exact_key_and_typed_body() {
+        let heartbeat = PutawayCommand::Heartbeat {
+            task_id: 91,
+            idempotency_key: "heartbeat-key-91".into(),
+        };
+        let heartbeat_request = build_request("https://wms.test", &heartbeat).unwrap();
+        assert_eq!(
+            heartbeat_request.url,
+            "https://wms.test/api/v1/putaway-claims/91/heartbeats"
+        );
+        assert_eq!(heartbeat_request.body, b"{}");
+        assert_eq!(
+            heartbeat_request.headers.get(IDEMPOTENCY_KEY_HEADER),
+            Some("heartbeat-key-91")
+        );
+
+        let release = PutawayCommand::Release {
+            task_id: 91,
+            reason: PutawayClaimReleaseReason::DestinationBlocked,
+            note: Some("Rack inspection".into()),
+            idempotency_key: "release-key-91".into(),
+        };
+        let first = build_request("https://wms.test", &release).unwrap();
+        let retry = build_request("https://wms.test", &release).unwrap();
+        assert_eq!(first.url, retry.url);
+        assert_eq!(first.body, retry.body);
+        assert_eq!(
+            retry.headers.get(IDEMPOTENCY_KEY_HEADER),
+            Some("release-key-91")
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&retry.body).unwrap(),
+            serde_json::json!({
+                "reason": "destination_blocked",
+                "note": "Rack inspection"
+            })
+        );
     }
 }

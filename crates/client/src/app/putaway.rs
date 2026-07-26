@@ -1,11 +1,12 @@
-use wareboxes_api_contract::v1::{PutawayClaimResponse, PutawayClaimWork, PutawayWorkflow};
+use wareboxes_api_contract::v1::{
+    PutawayClaimReleaseReason, PutawayClaimResponse, PutawayClaimWork, PutawayWorkflow,
+};
 
 use super::*;
 use crate::putaway_workflow::{PutawayActivity, PutawayScanStage};
 
 impl WareboxesApp {
     pub(super) fn putaway_screen(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_width(320.0);
         ui.horizontal(|ui| {
             ui.label(Self::icon(Icon::ScanBarcode).color(Self::accent_color(ui)));
             ui.heading("Directed putaway");
@@ -31,7 +32,7 @@ impl WareboxesApp {
                 ui.horizontal(|ui| {
                     ui.add(egui::Spinner::new().size(18.0));
                     ui.strong(if self.putaway.claim().is_some() {
-                        "Submitting confirmation"
+                        "Updating putaway work"
                     } else {
                         "Loading putaway work"
                     });
@@ -171,6 +172,23 @@ impl WareboxesApp {
     }
 
     fn putaway_active_work(&mut self, ui: &mut egui::Ui, claim: &PutawayClaimResponse) {
+        ui.horizontal(|ui| {
+            ui.weak(format!(
+                "Owner #{} | Facility #{}",
+                claim.inventory_owner_id, claim.facility_id
+            ));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.putaway.activity() == PutawayActivity::Ready
+                    && ui.button("Release work").clicked()
+                {
+                    self.putaway_release_reason = PutawayClaimReleaseReason::WorkInterrupted;
+                    self.putaway_release_note.clear();
+                    self.putaway_release_open = true;
+                    self.putaway_release_error = None;
+                }
+            });
+        });
+        ui.add_space(6.0);
         self.putaway_location_band(
             ui,
             "SOURCE",
@@ -192,6 +210,19 @@ impl WareboxesApp {
             ui.label(egui::RichText::new(instructions).strong());
         }
         ui.add_space(14.0);
+
+        if let Some(error) = self.putaway.heartbeat_error() {
+            ui.colored_label(
+                Self::order_summary_color(ui, "processing"),
+                format!("Claim renewal retrying: {error}"),
+            );
+            ui.add_space(8.0);
+        }
+
+        if self.putaway_release_open {
+            self.putaway_release_form(ui);
+            return;
+        }
 
         let Some(stage) = self.putaway.expected_scan() else {
             return;
@@ -234,6 +265,84 @@ impl WareboxesApp {
             if let Some(request) = request {
                 self.api.execute_putaway(request);
             }
+        }
+    }
+
+    fn putaway_release_form(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::none()
+            .fill(ui.visuals().faint_bg_color)
+            .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+            .rounding(egui::Rounding::same(4.0))
+            .show(ui, |ui| {
+                ui.strong("Release work to queue");
+                ui.add_space(6.0);
+                egui::ComboBox::from_id_source("putaway_release_reason")
+                    .selected_text(Self::putaway_release_reason_label(
+                        self.putaway_release_reason,
+                    ))
+                    .show_ui(ui, |ui| {
+                        for reason in [
+                            PutawayClaimReleaseReason::WorkInterrupted,
+                            PutawayClaimReleaseReason::EquipmentUnavailable,
+                            PutawayClaimReleaseReason::DestinationBlocked,
+                            PutawayClaimReleaseReason::SafetyIssue,
+                            PutawayClaimReleaseReason::Other,
+                        ] {
+                            ui.selectable_value(
+                                &mut self.putaway_release_reason,
+                                reason,
+                                Self::putaway_release_reason_label(reason),
+                            );
+                        }
+                    });
+                ui.add_space(5.0);
+                ui.add_sized(
+                    [ui.available_width().min(520.0), 54.0],
+                    egui::TextEdit::multiline(&mut self.putaway_release_note)
+                        .char_limit(500)
+                        .hint_text(
+                            if self.putaway_release_reason == PutawayClaimReleaseReason::Other {
+                                "Reason note (required)"
+                            } else {
+                                "Note (optional)"
+                            },
+                        ),
+                );
+                if let Some(error) = self.putaway_release_error.as_deref() {
+                    ui.colored_label(Self::danger_text_color(ui), error);
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.putaway_release_open = false;
+                        self.putaway_release_reason = PutawayClaimReleaseReason::WorkInterrupted;
+                        self.putaway_release_note.clear();
+                        self.putaway_release_error = None;
+                    }
+                    if ui.button("Release").clicked() {
+                        self.submit_putaway_release();
+                    }
+                });
+            });
+    }
+
+    fn submit_putaway_release(&mut self) {
+        let trimmed = self.putaway_release_note.trim();
+        if self.putaway_release_reason == PutawayClaimReleaseReason::Other && trimmed.is_empty() {
+            self.putaway_release_error = Some("A note is required for Other".into());
+            return;
+        }
+        let note = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+        let request = self.putaway.begin_release(
+            Self::new_putaway_request_id(),
+            Self::new_putaway_idempotency_key("release"),
+            self.putaway_release_reason,
+            note,
+        );
+        if let Some(request) = request {
+            self.putaway_release_open = false;
+            self.putaway_release_error = None;
+            self.api.execute_putaway(request);
         }
     }
 
@@ -326,5 +435,26 @@ impl WareboxesApp {
 
     fn new_putaway_idempotency_key(operation: &str) -> String {
         format!("rf-putaway-{operation}-{}", uuid::Uuid::new_v4())
+    }
+
+    pub(super) fn drive_putaway_heartbeat(&mut self, now: f64) {
+        let request = self.putaway.poll_heartbeat(
+            now,
+            Self::new_putaway_request_id(),
+            Self::new_putaway_idempotency_key("heartbeat"),
+        );
+        if let Some(request) = request {
+            self.api.execute_putaway(request);
+        }
+    }
+
+    fn putaway_release_reason_label(reason: PutawayClaimReleaseReason) -> &'static str {
+        match reason {
+            PutawayClaimReleaseReason::WorkInterrupted => "Work interrupted",
+            PutawayClaimReleaseReason::EquipmentUnavailable => "Equipment unavailable",
+            PutawayClaimReleaseReason::DestinationBlocked => "Destination blocked",
+            PutawayClaimReleaseReason::SafetyIssue => "Safety issue",
+            PutawayClaimReleaseReason::Other => "Other",
+        }
     }
 }
