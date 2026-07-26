@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::models::{
-    InventoryStatus, LoadFileCategory, LoadStatus, LoadType, Order, OrderStatus, TenantAccess,
-    Timestamp, User,
+    InventoryStatus, LoadFileCategory, LoadStatus, LoadType, Order, TenantAccess, Timestamp, User,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -264,16 +263,13 @@ pub struct NewOrder {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct OrderUpdate {
     #[validate(range(min = 1, message = "Invalid order ID"))]
     pub order_id: i64,
     pub order_key: Option<String>,
-    pub status: Option<OrderStatus>,
     pub rush: Option<bool>,
-    pub confirmed: Option<Timestamp>,
-    pub closed: Option<Timestamp>,
     pub ship_by: Option<Timestamp>,
-    pub wave_id: Option<i64>,
     pub line1: Option<String>,
     pub line2: Option<String>,
     pub city: Option<String>,

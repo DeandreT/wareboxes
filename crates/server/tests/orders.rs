@@ -42,32 +42,14 @@ async fn order_status_guards_and_soft_delete() {
             .unwrap()
     );
     let id2 = repo::orders::get_orders(db, tenant_id).await.unwrap()[0].id;
-    let to_shipped = OrderUpdate {
-        order_id: id2,
-        order_key: None,
-        status: Some(OrderStatus::Shipped),
-        rush: None,
-        confirmed: None,
-        closed: None,
-        ship_by: None,
-        wave_id: None,
-        line1: None,
-        line2: None,
-        city: None,
-        state: None,
-        postal_code: None,
-        country: None,
-    };
-    // 'open' -> allowed.
-    assert!(repo::orders::update_order(db, tenant_id, &to_shipped)
+    let mut tx = tenant_tx(db, tenant_id).await;
+    sqlx::query("UPDATE orders SET status = 'shipped' WHERE tenant_id = $1 AND id = $2")
+        .bind(tenant_id.get())
+        .bind(id2)
+        .execute(&mut *tx)
         .await
-        .unwrap());
-    // Now 'shipped': further update is rejected by the status guard.
-    let mut again = to_shipped.clone();
-    again.status = Some(OrderStatus::Held);
-    assert!(!repo::orders::update_order(db, tenant_id, &again)
-        .await
-        .unwrap());
+        .unwrap();
+    tx.commit().await.unwrap();
     assert!(!repo::orders::delete_order(db, tenant_id, id2)
         .await
         .unwrap());
@@ -140,25 +122,14 @@ async fn inventory_owner_delete_blocked_by_open_orders() {
 
     // Ship the order, then deletion is allowed.
     let oid = repo::orders::get_orders(&db, tenant_id).await.unwrap()[0].id;
-    let upd = OrderUpdate {
-        order_id: oid,
-        order_key: None,
-        status: Some(OrderStatus::Shipped),
-        rush: None,
-        confirmed: None,
-        closed: None,
-        ship_by: None,
-        wave_id: None,
-        line1: None,
-        line2: None,
-        city: None,
-        state: None,
-        postal_code: None,
-        country: None,
-    };
-    assert!(repo::orders::update_order(&db, tenant_id, &upd)
+    let mut tx = tenant_tx(&db, tenant_id).await;
+    sqlx::query("UPDATE orders SET status = 'shipped' WHERE tenant_id = $1 AND id = $2")
+        .bind(tenant_id.get())
+        .bind(oid)
+        .execute(&mut *tx)
         .await
-        .unwrap());
+        .unwrap();
+    tx.commit().await.unwrap();
     assert!(
         repo::inventory_owners::delete_inventory_owner(&db, tenant_id, acc)
             .await

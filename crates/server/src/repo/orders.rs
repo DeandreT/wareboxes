@@ -1,6 +1,5 @@
-//! Ported from `app/utils/orders.ts`. Update/delete keep the original status
-//! guards: an order is only mutable while `cancelled|held|open|void`, and only
-//! deletable while additionally not closed and not confirmed.
+//! Order queries and commands. Metadata updates are limited to orders whose
+//! workflow state is still mutable; workflow transitions use dedicated commands.
 
 use std::collections::HashMap;
 
@@ -1049,58 +1048,105 @@ async fn insert_order_activity_tx(
     Ok(id)
 }
 
-pub async fn update_order(db: &Db, tenant_id: TenantId, u: &OrderUpdate) -> AppResult<bool> {
-    update_order_inner(db, tenant_id, u).await
-}
-
-async fn update_order_inner(db: &Db, tenant_id: TenantId, u: &OrderUpdate) -> AppResult<bool> {
-    if matches!(u.status, Some(OrderStatus::Cancelled)) {
+pub async fn update_order_metadata(
+    db: &Db,
+    access: &TenantAccess,
+    command: &CommandContext,
+    update: &OrderUpdate,
+) -> AppResult<bool> {
+    require_command_context(access, command)?;
+    let has_address = update.line1.is_some()
+        || update.line2.is_some()
+        || update.city.is_some()
+        || update.state.is_some()
+        || update.postal_code.is_some()
+        || update.country.is_some();
+    if update.order_key.is_none()
+        && update.rush.is_none()
+        && update.ship_by.is_none()
+        && !has_address
+    {
         return Err(AppError::bad_request(
-            "cancel orders with the facility-qualified cancellation command",
+            "at least one order metadata field is required",
         ));
     }
-    let has_address = u.line1.is_some()
-        || u.line2.is_some()
-        || u.city.is_some()
-        || u.state.is_some()
-        || u.postal_code.is_some()
-        || u.country.is_some();
+    if update
+        .order_key
+        .as_ref()
+        .is_some_and(|order_key| order_key.trim().is_empty() || order_key.chars().count() > 200)
+    {
+        return Err(AppError::bad_request(
+            "order key must be nonblank and cannot exceed 200 characters",
+        ));
+    }
 
+    let prepared = PreparedCommand::new(command, "order.update_metadata.v1", update)?;
+    let tenant_id = access.tenant_id;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
+    let scope = lock_current_scope_tx(&mut tx, tenant_id, command.actor_id.get()).await?;
+    if let Some(updated) = prepared.replayed::<bool>(&mut tx).await? {
+        if updated {
+            require_replayed_order_visible_tx(&mut tx, tenant_id, update.order_id, &scope).await?;
+        }
+        tx.commit().await?;
+        return Ok(updated);
+    }
     let lock_sql = format!(
         r#"
-        SELECT inventory_owner_id
+        SELECT orders.inventory_owner_id,
+               address.line1 AS current_line1,
+               address.line2 AS current_line2,
+               address.city AS current_city,
+               address.state AS current_state,
+               address.postal_code AS current_postal_code,
+               address.country AS current_country
         FROM orders
-        WHERE tenant_id = $1
-          AND id = $2
-          AND deleted IS NULL
-          AND status IN {MUTABLE}
-          AND status <> 'cancelled'
-        FOR UPDATE
+        INNER JOIN addresses address
+            ON address.tenant_id = orders.tenant_id
+           AND address.id = orders.address_id
+        WHERE orders.tenant_id = $1
+          AND orders.id = $2
+          AND orders.deleted IS NULL
+          AND orders.status IN {MUTABLE}
+          AND orders.status <> 'cancelled'
+          AND ($3 OR orders.inventory_owner_id = ANY($4))
+        FOR UPDATE OF orders
         "#
     );
-    let inventory_owner_id: Option<i64> = sqlx::query_scalar(&lock_sql)
+    let order = sqlx::query(&lock_sql)
         .bind(tenant_id.get())
-        .bind(u.order_id)
+        .bind(update.order_id)
+        .bind(scope.all_inventory_owners)
+        .bind(&scope.inventory_owner_ids)
         .fetch_optional(&mut *tx)
         .await?;
-    let Some(inventory_owner_id) = inventory_owner_id else {
-        tx.commit().await?;
+    let Some(order) = order else {
+        tx.rollback().await?;
         return Ok(false);
     };
+    let inventory_owner_id: i64 = order.try_get("inventory_owner_id")?;
 
     let new_address_id = if has_address {
+        let current_line1: String = order.try_get("current_line1")?;
+        let current_line2: Option<String> = order.try_get("current_line2")?;
+        let current_city: Option<String> = order.try_get("current_city")?;
+        let current_state: Option<String> = order.try_get("current_state")?;
+        let current_postal_code: Option<String> = order.try_get("current_postal_code")?;
+        let current_country: String = order.try_get("current_country")?;
         Some(
             address::insert_address_tx(
                 &mut tx,
                 tenant_id,
-                u.line1.as_deref(),
-                u.line2.as_deref(),
-                u.city.as_deref(),
-                u.state.as_deref(),
-                u.postal_code.as_deref(),
-                u.country.as_deref(),
+                Some(update.line1.as_deref().unwrap_or(&current_line1)),
+                update.line2.as_deref().or(current_line2.as_deref()),
+                update.city.as_deref().or(current_city.as_deref()),
+                update.state.as_deref().or(current_state.as_deref()),
+                update
+                    .postal_code
+                    .as_deref()
+                    .or(current_postal_code.as_deref()),
+                Some(update.country.as_deref().unwrap_or(&current_country)),
             )
             .await?,
         )
@@ -1112,28 +1158,20 @@ async fn update_order_inner(db: &Db, tenant_id: TenantId, u: &OrderUpdate) -> Ap
         r#"
         UPDATE orders SET
             order_key = COALESCE($1, order_key),
-            status = COALESCE($2, status),
-            rush = COALESCE($3, rush),
-            confirmed = COALESCE($4, confirmed),
-            closed = COALESCE($5, closed),
-            ship_by = COALESCE($6, ship_by),
-            wave_id = COALESCE($7, wave_id),
-            address_id = COALESCE($8, address_id)
-        WHERE tenant_id = $9
-          AND id = $10
+            rush = COALESCE($2, rush),
+            ship_by = COALESCE($3, ship_by),
+            address_id = COALESCE($4, address_id)
+        WHERE tenant_id = $5
+          AND id = $6
         RETURNING inventory_owner_id
         "#,
     )
-    .bind(u.order_key.as_deref())
-    .bind(u.status.map(|s| s.as_str()))
-    .bind(u.rush)
-    .bind(u.confirmed)
-    .bind(u.closed)
-    .bind(u.ship_by)
-    .bind(u.wave_id)
+    .bind(update.order_key.as_deref())
+    .bind(update.rush)
+    .bind(update.ship_by)
     .bind(new_address_id)
     .bind(tenant_id.get())
-    .bind(u.order_id)
+    .bind(update.order_id)
     .fetch_optional(&mut *tx)
     .await?;
     if updated_inventory_owner_id != Some(inventory_owner_id) {
@@ -1141,15 +1179,45 @@ async fn update_order_inner(db: &Db, tenant_id: TenantId, u: &OrderUpdate) -> Ap
             "locked order was not updated inside the same transaction",
         ));
     }
-    let action = u
-        .status
-        .map(|status| format!("updated order status to {status}"))
-        .unwrap_or_else(|| "updated order".to_owned());
     let inventory_owner_id = InventoryOwnerId::new(inventory_owner_id)
         .map_err(|error| AppError::internal(error.to_string()))?;
-    insert_order_activity_tx(&mut tx, tenant_id, inventory_owner_id, u.order_id, &action).await?;
-    tx.commit().await?;
-    Ok(true)
+    insert_order_activity_tx(
+        &mut tx,
+        tenant_id,
+        inventory_owner_id,
+        update.order_id,
+        "updated order metadata",
+    )
+    .await?;
+    prepared.commit(tx, true).await
+}
+
+async fn require_replayed_order_visible_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    order_id: i64,
+    scope: &ScopeBindings,
+) -> AppResult<()> {
+    let inventory_owner_id: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT inventory_owner_id
+        FROM orders
+        WHERE tenant_id = $1 AND id = $2
+        FOR SHARE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(order_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(inventory_owner_id) = inventory_owner_id else {
+        return Err(AppError::not_found("order"));
+    };
+    if scope.all_inventory_owners || scope.inventory_owner_ids.contains(&inventory_owner_id) {
+        Ok(())
+    } else {
+        Err(AppError::not_found("order"))
+    }
 }
 
 pub async fn cancel_order_with_unpack_task(
