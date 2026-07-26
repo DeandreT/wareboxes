@@ -10,7 +10,7 @@ use wareboxes_core::models::{
 };
 use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
 
-use crate::db::{bind_tenant_context, now_iso, Db};
+use crate::db::{begin_tenant_transaction, bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::ScopeBindings;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
@@ -226,6 +226,7 @@ async fn get_item_batches_with_scope(
     scope: &ScopeBindings,
     show_deleted: bool,
 ) -> AppResult<Vec<ItemBatch>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT id, tenant_id, inventory_owner_id, created, deleted, item_id, uom,
@@ -241,9 +242,11 @@ async fn get_item_batches_with_scope(
     .bind(show_deleted)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.iter().map(map_batch).collect()
+    let batches = rows.iter().map(map_batch).collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(batches)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -257,7 +260,7 @@ pub async fn add_item_batch(
     serial: Option<&str>,
     expiration: Option<Timestamp>,
 ) -> AppResult<i64> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let owner_item_link = sqlx::query(
         r#"
         INSERT INTO inventory_owner_items

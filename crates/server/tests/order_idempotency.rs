@@ -574,13 +574,15 @@ async fn failed_unpack_work_rolls_back_order_cancellation_command() {
         .await;
     let order = fixture.order(tenant_id, "CANCEL-ROLLBACK-1", owner).await;
     fixture.order_item(tenant_id, order, item, 2).await;
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("UPDATE items SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(db::now_iso())
         .bind(tenant_id.get())
         .bind(item)
-        .execute(&fixture.db)
+        .execute(&mut *tx)
         .await
         .unwrap();
+    tx.commit().await.unwrap();
     let body = json!({"order_id": order, "facility_id": facility});
 
     let failed = send(
@@ -622,12 +624,14 @@ async fn failed_unpack_work_rolls_back_order_cancellation_command() {
     tx.rollback().await.unwrap();
     assert_eq!(rolled_back, ("open".to_owned(), 0, 0, 0));
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("UPDATE items SET deleted = NULL WHERE tenant_id = $1 AND id = $2")
         .bind(tenant_id.get())
         .bind(item)
-        .execute(&fixture.db)
+        .execute(&mut *tx)
         .await
         .unwrap();
+    tx.commit().await.unwrap();
     let retry = send(&app, &token, tenant_id, Some("cancel-rollback-1"), body).await;
     assert_eq!(retry.status(), StatusCode::OK);
     response_json::<i64>(retry).await;
