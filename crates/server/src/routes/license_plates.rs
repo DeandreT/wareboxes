@@ -182,7 +182,7 @@ pub async fn move_plate(
             body.license_plate_id,
             body.to_location_id,
             body.reason.as_deref(),
-            Some(&body.idempotency_key),
+            &body.idempotency_key,
         )
         .await?,
     ))

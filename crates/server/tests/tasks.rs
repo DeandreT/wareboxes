@@ -132,7 +132,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
         Some("task setup"),
         None,
         None,
-        None,
+        "task-setup-receipt",
     )
     .await
     .unwrap();
@@ -204,7 +204,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
         None,
         Some("second owner task setup"),
         None,
-        None,
+        "second-owner-task-setup-receipt",
     )
     .await
     .unwrap();

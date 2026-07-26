@@ -641,7 +641,7 @@ pub async fn receive_inventory(
     reason: Option<&str>,
     reference_type: Option<&str>,
     reference_id: Option<i64>,
-    idempotency_key: Option<&str>,
+    idempotency_key: &str,
 ) -> AppResult<i64> {
     if qty <= 0 {
         return Err(AppError::bad_request("quantity must be positive"));
@@ -665,7 +665,7 @@ pub async fn receive_inventory(
         &mut tx,
         tenant_id,
         "receive_inventory",
-        idempotency_key,
+        Some(idempotency_key),
         &request_hash,
     )
     .await?
@@ -712,7 +712,7 @@ pub async fn receive_inventory(
             reference_id,
             correlation_id: None,
             operation: "receive_inventory",
-            idempotency_key,
+            idempotency_key: Some(idempotency_key),
             request_hash: &request_hash,
             record_idempotency: true,
         },
@@ -795,7 +795,7 @@ pub async fn move_inventory(
     reason: Option<&str>,
     reference_type: Option<&str>,
     reference_id: Option<i64>,
-    idempotency_key: Option<&str>,
+    idempotency_key: &str,
 ) -> AppResult<i64> {
     if qty <= 0 {
         return Err(AppError::bad_request("quantity must be positive"));
@@ -826,7 +826,7 @@ pub async fn move_inventory(
         &mut tx,
         tenant_id,
         "move_inventory",
-        idempotency_key,
+        Some(idempotency_key),
         &request_hash,
     )
     .await?
@@ -893,7 +893,7 @@ pub async fn move_inventory(
             reference_id,
             correlation_id: None,
             operation: "move_inventory",
-            idempotency_key,
+            idempotency_key: Some(idempotency_key),
             request_hash: &request_hash,
             record_idempotency: true,
         },
@@ -1005,7 +1005,7 @@ pub async fn split_move_inventory(
     reason: Option<&str>,
     reference_type: Option<&str>,
     reference_id: Option<i64>,
-    idempotency_key: Option<&str>,
+    idempotency_key: &str,
 ) -> AppResult<i64> {
     if destinations.is_empty() {
         return Err(AppError::bad_request(
@@ -1048,7 +1048,7 @@ pub async fn split_move_inventory(
         &mut tx,
         tenant_id,
         "split_move_inventory",
-        idempotency_key,
+        Some(idempotency_key),
         &request_hash,
     )
     .await?
@@ -1142,7 +1142,7 @@ pub async fn split_move_inventory(
             reference_id,
             correlation_id: None,
             operation: "split_move_inventory",
-            idempotency_key,
+            idempotency_key: Some(idempotency_key),
             request_hash: &request_hash,
             record_idempotency: true,
         },

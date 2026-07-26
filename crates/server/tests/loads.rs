@@ -932,7 +932,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         plate.id,
         reserve,
         Some("putaway"),
-        Some("lp-move-1"),
+        "lp-move-1",
     )
     .await
     .unwrap();
@@ -945,7 +945,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         plate.id,
         reserve,
         Some("putaway"),
-        Some("lp-move-1"),
+        "lp-move-1",
     )
     .await
     .unwrap();
@@ -990,7 +990,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         plate.id,
         dock,
         Some("reserved putback"),
-        Some("lp-move-reserved"),
+        "lp-move-reserved",
     )
     .await
     .unwrap_err();
