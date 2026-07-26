@@ -79,22 +79,35 @@ async fn typed_task_details_require_a_transaction_local_tenant_context() {
     .await
     .unwrap();
 
-    let mut tenant_b_tx = tenant_tx(&fixture.db, tenant_b).await;
-    insert_owner_facility(&mut tenant_b_tx, tenant_b, owner_b, facility_b)
-        .await
-        .unwrap();
-    let balance_b = insert_balance(
-        &mut tenant_b_tx,
+    fixture
+        .assign_owner_to_facility(tenant_b, owner_b, facility_b)
+        .await;
+    repo::inventory::receive_inventory(
+        &fixture.db,
         tenant_b,
-        owner_b,
-        facility_b,
-        location_b,
+        user_b.id,
         item_batch_b,
-        single_b,
+        location_b,
+        5,
+        None,
+        Some("task detail RLS fixture"),
+        None,
+        None,
+        "task-detail-rls-b-receipt",
     )
     .await
     .unwrap();
-    tenant_b_tx.commit().await.unwrap();
+    let mut tenant_b_tx = tenant_tx(&fixture.db, tenant_b).await;
+    let balance_b = find_balance(
+        &mut tenant_b_tx,
+        tenant_b,
+        owner_b,
+        location_b,
+        item_batch_b,
+    )
+    .await
+    .unwrap();
+    tenant_b_tx.rollback().await.unwrap();
     let target_b = CountTarget {
         tenant_id: tenant_b,
         inventory_owner_id: owner_b,
@@ -105,21 +118,29 @@ async fn typed_task_details_require_a_transaction_local_tenant_context() {
         inventory_balance_id: balance_b,
     };
 
-    let mut tx = tenant_tx(&fixture.db, tenant_a).await;
-    insert_owner_facility(&mut tx, tenant_a, owner_a, facility_a)
-        .await
-        .unwrap();
-    let balance_a = insert_balance(
-        &mut tx,
+    fixture
+        .assign_owner_to_facility(tenant_a, owner_a, facility_a)
+        .await;
+    repo::inventory::receive_inventory(
+        &fixture.db,
         tenant_a,
-        owner_a,
-        facility_a,
-        location_a,
+        user_a.id,
         item_batch_a,
-        single_a,
+        location_a,
+        5,
+        None,
+        Some("task detail RLS fixture"),
+        None,
+        None,
+        "task-detail-rls-a-receipt",
     )
     .await
     .unwrap();
+    let mut balance_tx = tenant_tx(&fixture.db, tenant_a).await;
+    let balance_a = find_balance(&mut balance_tx, tenant_a, owner_a, location_a, item_batch_a)
+        .await
+        .unwrap();
+    balance_tx.rollback().await.unwrap();
     let target_a = CountTarget {
         tenant_id: tenant_a,
         inventory_owner_id: owner_a,
@@ -129,6 +150,8 @@ async fn typed_task_details_require_a_transaction_local_tenant_context() {
         item_id: single_a,
         inventory_balance_id: balance_a,
     };
+
+    let mut tx = tenant_tx(&fixture.db, tenant_a).await;
     let item_task = insert_task(
         &mut tx,
         tenant_a,
@@ -675,56 +698,28 @@ async fn insert_item_detail(
     .map(|_| ())
 }
 
-async fn insert_owner_facility(
+async fn find_balance(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     inventory_owner_id: i64,
-    facility_id: i64,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"
-        INSERT INTO inventory_owner_facilities (
-            tenant_id, created, inventory_owner_id, facility_id
-        )
-        VALUES ($1, $2, $3, $4)
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(db::now_iso())
-    .bind(inventory_owner_id)
-    .bind(facility_id)
-    .execute(&mut **tx)
-    .await
-    .map(|_| ())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn insert_balance(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    inventory_owner_id: i64,
-    facility_id: i64,
     location_id: i64,
     item_batch_id: i64,
-    item_id: i64,
 ) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         r#"
-        INSERT INTO inventory_balances (
-            tenant_id, inventory_owner_id, created, facility_id, location_id,
-            item_batch_id, item_id, uom, status, qty_on_hand, qty_reserved
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'each', 'available', 5, 0)
-        RETURNING id
+        SELECT id
+        FROM inventory_balances
+        WHERE tenant_id = $1
+          AND inventory_owner_id = $2
+          AND location_id = $3
+          AND item_batch_id = $4
+          AND deleted IS NULL
         "#,
     )
     .bind(tenant_id.get())
     .bind(inventory_owner_id)
-    .bind(db::now_iso())
-    .bind(facility_id)
     .bind(location_id)
     .bind(item_batch_id)
-    .bind(item_id)
     .fetch_one(&mut **tx)
     .await
 }
@@ -765,12 +760,12 @@ async fn insert_count_result(
             tenant_id, task_id, inventory_owner_id, facility_id, location_id,
             item_id, inventory_balance_id, item_batch_id, license_plate_id,
             uom, lot, expiration, serial, status, system_qty_on_hand,
-            system_qty_reserved, counted_qty, variance_qty,
+            system_qty_reserved, system_qty_held, counted_qty, variance_qty,
             inventory_transaction_id, confirmed_by, confirmed_at, note
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, NULL, 'each', NULL, NULL, NULL,
-            'available', 5, 0, 5, 0, NULL, $9, statement_timestamp(),
+            'available', 5, 0, 0, 5, 0, NULL, $9, statement_timestamp(),
             'RLS fixture'
         )
         "#,

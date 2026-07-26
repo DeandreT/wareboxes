@@ -333,6 +333,10 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         ),
         ("inventory_holds", "inventory_holds_tenant_isolation"),
         (
+            "inventory_projection_changes",
+            "inventory_projection_changes_tenant_isolation",
+        ),
+        (
             "order_tracking_numbers",
             "order_tracking_numbers_tenant_isolation",
         ),

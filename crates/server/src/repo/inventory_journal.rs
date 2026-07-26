@@ -139,6 +139,23 @@ pub(crate) async fn begin_transaction(
     .fetch_one(&mut **tx)
     .await?;
 
+    let existing_transaction_id: Option<String> = sqlx::query_scalar(
+        "SELECT NULLIF(current_setting('wareboxes.inventory_transaction_id', true), '')",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    if let Some(existing_transaction_id) = existing_transaction_id {
+        return Err(AppError::internal(format!(
+            "database transaction already contains inventory transaction {existing_transaction_id}"
+        )));
+    }
+    sqlx::query_scalar::<_, String>(
+        "SELECT set_config('wareboxes.inventory_transaction_id', $1, true)",
+    )
+    .bind(transaction_id.to_string())
+    .fetch_one(&mut **tx)
+    .await?;
+
     let event_key = format!("inventory-transaction:{transaction_id}");
     let aggregate_id = transaction_id.to_string();
     let payload = serde_json::json!({
