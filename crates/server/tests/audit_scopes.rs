@@ -322,7 +322,8 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
     .await
     .unwrap());
 
-    assert!(sqlx::query(
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let error = sqlx::query(
         r#"
         INSERT INTO audit_location_counts
             (tenant_id, created, audit_id, inventory_owner_id, facility_id, location_id,
@@ -337,9 +338,12 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
     .bind(denied_facility)
     .bind(denied_location)
     .bind(allowed_item)
-    .execute(&fixture.db)
+    .execute(&mut *tx)
     .await
-    .is_err());
+    .unwrap_err();
+    let code = error.as_database_error().and_then(|error| error.code());
+    assert_eq!(code.as_deref(), Some("23503"));
+    tx.rollback().await.unwrap();
 
     let token = auth::create_session(&fixture.db, operator.id)
         .await

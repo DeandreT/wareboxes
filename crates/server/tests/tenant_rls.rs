@@ -222,11 +222,11 @@ async fn command_records_require_a_transaction_local_tenant_context() {
     db::validate_runtime_role(&fixture.db).await.unwrap();
 
     for statement in [
-        "ALTER TABLE audit_waves ENABLE ROW LEVEL SECURITY",
-        "ALTER TABLE audit_waves FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE pick_waves ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE pick_waves FORCE ROW LEVEL SECURITY",
         r#"
-        CREATE POLICY audit_waves_tenant_isolation
-        ON audit_waves
+        CREATE POLICY pick_waves_tenant_isolation
+        ON pick_waves
         USING (
             tenant_id =
                 NULLIF(current_setting('wareboxes.tenant_id', true), '')::BIGINT
@@ -241,9 +241,9 @@ async fn command_records_require_a_transaction_local_tenant_context() {
     }
     assert!(db::validate_runtime_role(&fixture.db).await.is_err());
     for statement in [
-        "DROP POLICY audit_waves_tenant_isolation ON audit_waves",
-        "ALTER TABLE audit_waves NO FORCE ROW LEVEL SECURITY",
-        "ALTER TABLE audit_waves DISABLE ROW LEVEL SECURITY",
+        "DROP POLICY pick_waves_tenant_isolation ON pick_waves",
+        "ALTER TABLE pick_waves NO FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE pick_waves DISABLE ROW LEVEL SECURITY",
     ] {
         sqlx::query(statement).execute(&admin_db).await.unwrap();
     }
@@ -264,6 +264,24 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         ("permissions", "permissions_tenant_isolation"),
         ("user_roles", "user_roles_tenant_isolation"),
         ("role_permissions", "role_permissions_tenant_isolation"),
+        ("audit_waves", "audit_waves_tenant_isolation"),
+        (
+            "audit_location_counts",
+            "audit_location_counts_tenant_isolation",
+        ),
+        ("audit_wave_items", "audit_wave_items_tenant_isolation"),
+        (
+            "audit_wave_inventory_owners",
+            "audit_wave_inventory_owners_tenant_isolation",
+        ),
+        (
+            "audit_wave_locations",
+            "audit_wave_locations_tenant_isolation",
+        ),
+        (
+            "audit_wave_assignments",
+            "audit_wave_assignments_tenant_isolation",
+        ),
         ("facilities", "facilities_tenant_isolation"),
         ("locations", "locations_tenant_isolation"),
         ("inventory_owners", "inventory_owners_tenant_isolation"),

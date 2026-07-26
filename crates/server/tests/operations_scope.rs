@@ -189,6 +189,7 @@ async fn workforce_and_inventory_audits_are_tenant_isolated() {
     .await
     .unwrap();
     tx.commit().await.unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_a).await;
     sqlx::query(
         r#"
         INSERT INTO audit_location_counts (
@@ -205,9 +206,10 @@ async fn workforce_and_inventory_audits_are_tenant_isolated() {
     .bind(facility_a)
     .bind(location_a)
     .bind(item_a)
-    .execute(&fixture.db)
+    .execute(&mut *tx)
     .await
     .unwrap();
+    tx.commit().await.unwrap();
     let counts = repo::audits::get_location_counts(&fixture.db, &access_a, audit_a)
         .await
         .unwrap();
@@ -220,7 +222,8 @@ async fn workforce_and_inventory_audits_are_tenant_isolated() {
             .unwrap()
             .is_empty()
     );
-    assert!(sqlx::query(
+    let admin_db = admin_db_for(&fixture.db).await;
+    let error = sqlx::query(
         "INSERT INTO audit_wave_items (tenant_id, created, item_id, audit_wave_id, inventory_owner_id, facility_id) VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(tenant_b.get())
@@ -229,9 +232,12 @@ async fn workforce_and_inventory_audits_are_tenant_isolated() {
     .bind(audit_b)
     .bind(owner_b)
     .bind(facility_b)
-    .execute(&fixture.db)
+    .execute(&admin_db)
     .await
-    .is_err());
+    .unwrap_err();
+    let code = error.as_database_error().and_then(|error| error.code());
+    assert_eq!(code.as_deref(), Some("23503"));
+    admin_db.close().await;
 
     let token = auth::create_session(&fixture.db, operator.id)
         .await
