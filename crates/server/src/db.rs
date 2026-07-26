@@ -129,7 +129,64 @@ pub async fn validate_runtime_role(pool: &Db) -> anyhow::Result<()> {
 async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::Result<()> {
     let role: RuntimeRole = sqlx::query_as(
         r#"
-        WITH expected_policy(table_name, policy_name) AS (
+        WITH tenant_table AS (
+            SELECT tenant_class.oid,
+                   tenant_class.relname AS table_name,
+                   tenant_class.relrowsecurity,
+                   tenant_class.relforcerowsecurity
+            FROM pg_class tenant_class
+            JOIN pg_namespace tenant_namespace
+              ON tenant_namespace.oid = tenant_class.relnamespace
+            JOIN pg_attribute tenant_column
+              ON tenant_column.attrelid = tenant_class.oid
+             AND tenant_column.attname = 'tenant_id'
+             AND tenant_column.attnum > 0
+             AND NOT tenant_column.attisdropped
+            WHERE tenant_namespace.nspname = 'public'
+              AND tenant_class.relkind IN ('r', 'p')
+        ),
+        tenant_policy_debt(table_name) AS (
+            VALUES
+                ('addresses'),
+                ('audit_location_counts'),
+                ('audit_wave_assignments'),
+                ('audit_wave_inventory_owners'),
+                ('audit_wave_items'),
+                ('audit_wave_locations'),
+                ('audit_waves'),
+                ('barcodes'),
+                ('dims'),
+                ('employee_facilities'),
+                ('employees'),
+                ('facilities'),
+                ('inventory_owner_facilities'),
+                ('inventory_owner_items'),
+                ('inventory_owners'),
+                ('item_batches'),
+                ('item_pack_links'),
+                ('items'),
+                ('load_files'),
+                ('load_lines'),
+                ('load_notes'),
+                ('load_orders'),
+                ('loads'),
+                ('locations'),
+                ('order_items'),
+                ('orders'),
+                ('outbox_aggregate_sequences'),
+                ('outbox_event_keys'),
+                ('outbox_events'),
+                ('permissions'),
+                ('pick_waves'),
+                ('role_permissions'),
+                ('roles'),
+                ('skus'),
+                ('tenant_memberships'),
+                ('user_facilities'),
+                ('user_inventory_owners'),
+                ('user_roles')
+        ),
+        expected_policy(table_name, policy_name) AS (
             VALUES
                 (
                     'command_idempotency_records',
@@ -195,6 +252,53 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'inventory_balances',
                     'inventory_balances_tenant_isolation'
                 )
+        ),
+        tenant_table_classification AS (
+            SELECT
+                (SELECT COUNT(*) FROM tenant_table) =
+                    (SELECT COUNT(*) FROM expected_policy) +
+                    (SELECT COUNT(*) FROM tenant_policy_debt)
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM expected_policy expected
+                    JOIN tenant_policy_debt debt
+                      ON debt.table_name = expected.table_name
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM expected_policy expected
+                    LEFT JOIN tenant_table tenant
+                      ON tenant.table_name = expected.table_name
+                    WHERE tenant.oid IS NULL
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM tenant_policy_debt debt
+                    LEFT JOIN tenant_table tenant
+                      ON tenant.table_name = debt.table_name
+                    WHERE tenant.oid IS NULL
+                       OR tenant.relrowsecurity
+                       OR tenant.relforcerowsecurity
+                       OR EXISTS (
+                           SELECT 1
+                           FROM pg_policy policy
+                           WHERE policy.polrelid = tenant.oid
+                       )
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM tenant_table tenant
+                    WHERE NOT EXISTS (
+                              SELECT 1
+                              FROM expected_policy expected
+                              WHERE expected.table_name = tenant.table_name
+                          )
+                      AND NOT EXISTS (
+                              SELECT 1
+                              FROM tenant_policy_debt debt
+                              WHERE debt.table_name = tenant.table_name
+                          )
+                ) AS valid
         )
         SELECT role.rolname AS name,
                session_user::TEXT AS session_name,
@@ -259,6 +363,7 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                (
                    SELECT COUNT(*) > 0
                       AND COUNT(*) = (SELECT COUNT(*) FROM expected_policy)
+                      AND (SELECT valid FROM tenant_table_classification)
                    FROM expected_policy expected
                    JOIN pg_namespace policy_namespace
                      ON policy_namespace.nspname = 'public'

@@ -184,6 +184,71 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         .unwrap();
     db::validate_runtime_role(&fixture.db).await.unwrap();
 
+    sqlx::query(
+        r#"
+        CREATE TABLE unclassified_tenant_records (
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            tenant_id BIGINT NOT NULL
+        )
+        "#,
+    )
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    assert!(db::validate_runtime_role(&fixture.db).await.is_err());
+    for statement in [
+        "ALTER TABLE unclassified_tenant_records ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE unclassified_tenant_records FORCE ROW LEVEL SECURITY",
+        r#"
+        CREATE POLICY unclassified_tenant_records_tenant_isolation
+        ON unclassified_tenant_records
+        USING (
+            tenant_id =
+                NULLIF(current_setting('wareboxes.tenant_id', true), '')::BIGINT
+        )
+        WITH CHECK (
+            tenant_id =
+                NULLIF(current_setting('wareboxes.tenant_id', true), '')::BIGINT
+        )
+        "#,
+    ] {
+        sqlx::query(statement).execute(&admin_db).await.unwrap();
+    }
+    assert!(db::validate_runtime_role(&fixture.db).await.is_err());
+    sqlx::query("DROP TABLE unclassified_tenant_records")
+        .execute(&admin_db)
+        .await
+        .unwrap();
+    db::validate_runtime_role(&fixture.db).await.unwrap();
+
+    for statement in [
+        "ALTER TABLE addresses ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE addresses FORCE ROW LEVEL SECURITY",
+        r#"
+        CREATE POLICY addresses_tenant_isolation
+        ON addresses
+        USING (
+            tenant_id =
+                NULLIF(current_setting('wareboxes.tenant_id', true), '')::BIGINT
+        )
+        WITH CHECK (
+            tenant_id =
+                NULLIF(current_setting('wareboxes.tenant_id', true), '')::BIGINT
+        )
+        "#,
+    ] {
+        sqlx::query(statement).execute(&admin_db).await.unwrap();
+    }
+    assert!(db::validate_runtime_role(&fixture.db).await.is_err());
+    for statement in [
+        "DROP POLICY addresses_tenant_isolation ON addresses",
+        "ALTER TABLE addresses NO FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE addresses DISABLE ROW LEVEL SECURITY",
+    ] {
+        sqlx::query(statement).execute(&admin_db).await.unwrap();
+    }
+    db::validate_runtime_role(&fixture.db).await.unwrap();
+
     for (table_name, policy_name) in [
         ("order_activity", "order_activity_tenant_isolation"),
         ("load_activity", "load_activity_tenant_isolation"),
