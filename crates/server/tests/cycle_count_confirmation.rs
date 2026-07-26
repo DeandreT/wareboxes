@@ -1,8 +1,11 @@
 mod common;
 
+use std::time::Duration;
+
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use common::*;
+use tokio::time::{sleep, timeout};
 use tower::ServiceExt;
 use wareboxes_core::models::{InventoryHoldReason, InventoryTransactionType, TenantAccess};
 use wareboxes_domain::CommandContext;
@@ -11,6 +14,32 @@ use wareboxes_server::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_server::{routes, state::AppState};
 
 const CONFIRM_OPERATION: &str = "task.confirm_item_location_cycle_count.v1";
+
+async fn wait_until_task_is_locked(db: &db::Db, tenant_id: TenantId, task_id: i64) {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let mut tx = tenant_tx(db, tenant_id).await;
+            let result = sqlx::query(
+                "SELECT id FROM work_tasks WHERE tenant_id = $1 AND id = $2 FOR UPDATE NOWAIT",
+            )
+            .bind(tenant_id.get())
+            .bind(task_id)
+            .fetch_one(&mut *tx)
+            .await;
+            tx.rollback().await.unwrap();
+
+            match result {
+                Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("55P03") => {
+                    break;
+                }
+                Ok(_) => sleep(Duration::from_millis(10)).await,
+                Err(error) => panic!("unexpected cycle count task lock probe error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("cycle count confirmation locks its task before inventory");
+}
 
 struct CycleCountFixture {
     fixture: Fixture,
@@ -539,4 +568,213 @@ async fn concurrent_different_keys_have_one_winner() {
     assert_eq!(count.task_status().await, "completed");
     assert_eq!(count.effect_counts().await, (1, 1, 1, 1, 1, 1, 1));
     count.assert_reconciled().await;
+}
+
+#[tokio::test]
+async fn license_plate_cycle_count_locks_plate_before_balance() {
+    let fixture = Fixture::new().await;
+    let user = fixture
+        .wms_user("cycle-count-license-plate-lock-order@test.com")
+        .await;
+    let tenant_id = tenant_for_user(&fixture.db, user.id).await;
+    let inventory_owner_id = fixture
+        .inventory_owner(tenant_id, "Cycle Count LP Lock Owner")
+        .await;
+    let facility_id = fixture
+        .facility(tenant_id, "Cycle Count LP Lock Facility")
+        .await;
+    fixture
+        .assign_owner_to_facility(tenant_id, inventory_owner_id, facility_id)
+        .await;
+    let location_id = fixture
+        .location(tenant_id, facility_id, "CYCLE-COUNT-LP-LOCK")
+        .await;
+    let item_id = fixture
+        .item(tenant_id, "Cycle Count LP Lock Item", "each")
+        .await;
+    let item_batch_id = repo::inventory::add_item_batch(
+        &fixture.db,
+        tenant_id,
+        inventory_owner_id,
+        item_id,
+        None,
+        Some("CYCLE-COUNT-LP-LOCK-LOT"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let license_plate_id = repo::license_plates::add_license_plate(
+        &fixture.db,
+        tenant_id,
+        inventory_owner_id,
+        facility_id,
+        Some("CYCLE-COUNT-LP-LOCK"),
+    )
+    .await
+    .unwrap();
+
+    let mut setup_tx = tenant_tx(&fixture.db, tenant_id).await;
+    sqlx::query(
+        r#"
+        UPDATE license_plates
+        SET location_id = $1
+        WHERE tenant_id = $2 AND id = $3
+        "#,
+    )
+    .bind(location_id)
+    .bind(tenant_id.get())
+    .bind(license_plate_id)
+    .execute(&mut *setup_tx)
+    .await
+    .unwrap();
+    let receipt_transaction_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO inventory_transactions (
+            tenant_id, inventory_owner_id, created, actor_user_id,
+            transaction_type, operation, idempotency_key, request_hash
+        )
+        VALUES ($1, $2, $3, $4, 'receive', $5, $5, $5)
+        RETURNING id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id)
+    .bind(db::now_iso())
+    .bind(user.id)
+    .bind("cycle-count-license-plate-lock-receipt")
+    .fetch_one(&mut *setup_tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO inventory_entries (
+            tenant_id, inventory_owner_id, transaction_id, created, facility_id,
+            location_id, license_plate_id, item_batch_id, item_id, uom, lot,
+            expiration, serial, status, quantity_delta
+        )
+        SELECT $1, batch.inventory_owner_id, $2, $3, $4, $5, $6, batch.id,
+               batch.item_id, batch.uom, batch.lot, batch.expiration, batch.serial,
+               'available', 10
+        FROM item_batches batch
+        WHERE batch.tenant_id = $1 AND batch.id = $7
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(receipt_transaction_id)
+    .bind(db::now_iso())
+    .bind(facility_id)
+    .bind(location_id)
+    .bind(license_plate_id)
+    .bind(item_batch_id)
+    .execute(&mut *setup_tx)
+    .await
+    .unwrap();
+    let inventory_balance_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO inventory_balances (
+            tenant_id, inventory_owner_id, created, facility_id, location_id,
+            license_plate_id, item_batch_id, item_id, uom, status,
+            qty_on_hand, qty_reserved
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'each', 'available', 10, 0)
+        RETURNING id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id)
+    .bind(db::now_iso())
+    .bind(facility_id)
+    .bind(location_id)
+    .bind(license_plate_id)
+    .bind(item_batch_id)
+    .bind(item_id)
+    .fetch_one(&mut *setup_tx)
+    .await
+    .unwrap();
+    setup_tx.commit().await.unwrap();
+
+    let task_id = repo::tasks::create_item_location_cycle_count_task(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        location_id,
+        item_id,
+        Some("lock_order_regression"),
+        None,
+        None,
+        inventory_balance_id,
+        Some("count license-plated inventory"),
+    )
+    .await
+    .unwrap();
+    let access = default_tenant_for_user(&fixture.db, user.id).await.unwrap();
+    let start_context = CycleCountFixture::command(&access, "cycle-count-lp-lock-start");
+    assert!(
+        repo::tasks::start_task_in_scope(&fixture.db, &access, &start_context, task_id)
+            .await
+            .unwrap()
+    );
+
+    let mut plate_blocker = tenant_tx(&fixture.db, tenant_id).await;
+    sqlx::query("SELECT id FROM license_plates WHERE tenant_id = $1 AND id = $2 FOR UPDATE")
+        .bind(tenant_id.get())
+        .bind(license_plate_id)
+        .fetch_one(&mut *plate_blocker)
+        .await
+        .unwrap();
+
+    let confirm_db = fixture.db.clone();
+    let confirm_access = access.clone();
+    let confirm_context = CycleCountFixture::command(&access, "cycle-count-lp-lock-confirm");
+    let mut confirmation = tokio::spawn(async move {
+        repo::tasks::confirm_item_location_cycle_count_in_scope(
+            &confirm_db,
+            &confirm_access,
+            &confirm_context,
+            task_id,
+            7,
+            Some("three units missing"),
+        )
+        .await
+    });
+
+    wait_until_task_is_locked(&fixture.db, tenant_id, task_id).await;
+    sleep(Duration::from_millis(50)).await;
+    assert!(!confirmation.is_finished());
+
+    let mut balance_probe = tenant_tx(&fixture.db, tenant_id).await;
+    sqlx::query(
+        "SELECT id FROM inventory_balances WHERE tenant_id = $1 AND id = $2 FOR UPDATE NOWAIT",
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_balance_id)
+    .fetch_one(&mut *balance_probe)
+    .await
+    .expect("confirmation must not lock the balance before its license plate");
+    balance_probe.rollback().await.unwrap();
+
+    plate_blocker.commit().await.unwrap();
+    let result = timeout(Duration::from_secs(2), &mut confirmation)
+        .await
+        .expect("cycle count confirmation completes after the license plate lock is released")
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.inventory_balance_id, inventory_balance_id);
+    assert_eq!(result.license_plate_id, Some(license_plate_id));
+    assert_eq!(result.previous_on_hand_quantity, 10);
+    assert_eq!(result.counted_quantity, 7);
+    assert_eq!(result.variance_quantity, -3);
+    assert!(
+        repo::inventory::get_reconciliation_issues(&fixture.db, tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo::inventory::get_inventory_hold_reconciliation_issues_in_scope(&fixture.db, &access)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

@@ -9,6 +9,7 @@ use crate::error::{AppError, AppResult};
 use crate::repo::access::lock_current_scope_tx;
 use crate::repo::idempotency::{require_command_context, PreparedCommand};
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
+use crate::repo::inventory_locking::{balance_license_plate_hint, lock_license_plate};
 use crate::repo::outbox::{self, NewOutboxEvent};
 
 use super::{insert_progress_tx, require_replayed_task_visible_tx, TaskDimensions};
@@ -223,6 +224,9 @@ pub async fn confirm_item_location_cycle_count_in_scope(
         &scope,
     )
     .await?;
+    let license_plate_id =
+        balance_license_plate_hint(&mut tx, access.tenant_id, target.inventory_balance_id).await?;
+    lock_license_plate(&mut tx, access.tenant_id, license_plate_id).await?;
     let balance = lock_balance(&mut tx, access.tenant_id, &target).await?;
     let committed_quantity = balance
         .qty_reserved
