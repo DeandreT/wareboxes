@@ -62,6 +62,26 @@ fn api_request(
     request.body(body).unwrap()
 }
 
+fn expected_receipt_request(
+    token: &str,
+    tenant_id: TenantId,
+    load_line_id: i64,
+    idempotency_key: &str,
+    body: Value,
+) -> Request<Body> {
+    let mut request = api_request(
+        token,
+        tenant_id,
+        Method::POST,
+        &format!("/api/inbound/load-lines/{load_line_id}/receipts"),
+        Some(body),
+    );
+    request
+        .headers_mut()
+        .insert(IDEMPOTENCY_KEY_HEADER, idempotency_key.parse().unwrap());
+    request
+}
+
 async fn response_json<T: serde::de::DeserializeOwned>(response: axum::response::Response) -> T {
     let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()
@@ -123,6 +143,22 @@ async fn order_and_load_workflows_enforce_owner_and_facility_scopes() {
     )
     .await
     .unwrap();
+    assert!(repo::inventory_owners::replace_inventory_owner_facilities(
+        &db,
+        tenant_id,
+        allowed_owner,
+        &[allowed_facility],
+    )
+    .await
+    .unwrap());
+    assert!(repo::inventory_owners::replace_inventory_owner_facilities(
+        &db,
+        tenant_id,
+        denied_owner,
+        &[denied_facility],
+    )
+    .await
+    .unwrap());
     let allowed_location = repo::locations::add_location(
         &db,
         tenant_id,
@@ -341,6 +377,15 @@ async fn order_and_load_workflows_enforce_owner_and_facility_scopes() {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!response_json::<bool>(response).await);
 
+    let mut tx = tenant_tx(&db, tenant_id).await;
+    sqlx::query("UPDATE loads SET status = 'arrived' WHERE tenant_id = $1 AND id = $2")
+        .bind(tenant_id.get())
+        .bind(allowed_load)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
     let response = app
         .clone()
         .oneshot(api_request(
@@ -474,36 +519,34 @@ async fn order_and_load_workflows_enforce_owner_and_facility_scopes() {
 
     let response = app
         .clone()
-        .oneshot(api_request(
+        .oneshot(expected_receipt_request(
             &token,
             tenant_id,
-            Method::POST,
-            "/api/loads/lines/receive",
-            Some(json!({
-                "load_line_id": denied_line,
-                "to_location_id": denied_location,
+            denied_line,
+            "denied-line-receipt",
+            json!({
+                "receiving_location_id": denied_location,
                 "received_qty": 1,
                 "rejected_qty": 0,
-                "idempotency_key": "denied-line-receipt"
-            })),
+                "missing_qty": 0
+            }),
         ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     let response = app
-        .oneshot(api_request(
+        .oneshot(expected_receipt_request(
             &token,
             tenant_id,
-            Method::POST,
-            "/api/loads/lines/receive",
-            Some(json!({
-                "load_line_id": allowed_line,
-                "to_location_id": denied_location,
+            allowed_line,
+            "cross-facility-receipt",
+            json!({
+                "receiving_location_id": denied_location,
                 "received_qty": 1,
                 "rejected_qty": 0,
-                "idempotency_key": "cross-facility-receipt"
-            })),
+                "missing_qty": 0
+            }),
         ))
         .await
         .unwrap();

@@ -4,8 +4,68 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use common::*;
 use tower::ServiceExt;
+use wareboxes_core::models::{
+    InboundReceiptExceptionReason, ReceiveExpectedInventoryResult, Timestamp,
+};
+use wareboxes_domain::CommandContext;
 use wareboxes_server::auth::TENANT_ID_HEADER;
 use wareboxes_server::{routes, state::AppState};
+
+#[allow(clippy::too_many_arguments)]
+async fn receive_expected_line(
+    db: &db::Db,
+    tenant_id: TenantId,
+    user_id: i64,
+    load_line_id: i64,
+    receiving_location_id: i64,
+    received_qty: i64,
+    rejected_qty: i64,
+    missing_qty: i64,
+    license_plate_id: Option<i64>,
+    license_plate_barcode: Option<&str>,
+    lot: Option<&str>,
+    serial: Option<&str>,
+    expiration: Option<Timestamp>,
+    exception_note: Option<&str>,
+    idempotency_key: &str,
+) -> Result<ReceiveExpectedInventoryResult, AppError> {
+    let access = repo::tenants::access_for_user(db, user_id, tenant_id)
+        .await?
+        .ok_or_else(AppError::forbidden)?;
+    let exception_reason = if rejected_qty > 0 {
+        Some(InboundReceiptExceptionReason::CountDiscrepancy)
+    } else if missing_qty > 0 {
+        Some(InboundReceiptExceptionReason::ShortShipment)
+    } else {
+        None
+    };
+    let context = CommandContext {
+        tenant_id,
+        actor_id: access.user_id,
+        request_id: format!("test-{idempotency_key}"),
+        idempotency_key: Some(idempotency_key.to_owned()),
+    };
+    repo::inbound_receipt::receive_expected_inventory(
+        db,
+        &access,
+        &context,
+        load_line_id,
+        &repo::inbound_receipt::ReceiveExpectedInventoryCommand {
+            receiving_location_id: Some(receiving_location_id),
+            received_qty,
+            rejected_qty,
+            missing_qty,
+            license_plate_id,
+            license_plate_barcode,
+            lot,
+            serial,
+            expiration,
+            exception_reason,
+            exception_note: exception_reason.and(exception_note),
+        },
+    )
+    .await
+}
 
 #[tokio::test]
 async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
@@ -106,14 +166,13 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         None,
         None,
         None,
-        None,
         Some(db::now_iso()),
     )
     .await
     .unwrap_err();
     assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
 
-    let err = repo::loads::receive_line(
+    let err = receive_expected_line(
         &db,
         tenant_id,
         user.id,
@@ -123,7 +182,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         0,
         0,
         None,
-        None,
+        Some("CONCURRENT-RECEIPT-LP"),
         None,
         None,
         None,
@@ -154,12 +213,11 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         None,
         None,
         None,
-        None,
     )
     .await
     .unwrap());
 
-    let receipt = repo::loads::receive_line(
+    let receipt = receive_expected_line(
         &db,
         tenant_id,
         user.id,
@@ -180,7 +238,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     .unwrap();
     assert!(receipt.inventory_transaction_id.is_some());
 
-    let replay = repo::loads::receive_line(
+    let replay = receive_expected_line(
         &db,
         tenant_id,
         user.id,
@@ -214,7 +272,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     assert!(load_row
         .activity
         .iter()
-        .any(|a| a.action == "line_received"));
+        .any(|a| a.action == "expected_inventory_received"));
 
     let balances = repo::inventory::get_balances(&db, tenant_id, false)
         .await
@@ -275,11 +333,10 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         None,
         None,
         None,
-        None,
     )
     .await
     .unwrap());
-    let err = repo::loads::receive_line(
+    let err = receive_expected_line(
         &db,
         tenant_id,
         user.id,
@@ -306,7 +363,6 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         user.id,
         load,
         Some(LoadStatus::Closed),
-        None,
         None,
         None,
         None,
@@ -400,7 +456,7 @@ async fn concurrent_load_receipts_preserve_every_accepted_quantity() {
         .unwrap();
     tx.commit().await.unwrap();
 
-    let receipt_a = repo::loads::receive_line(
+    let receipt_a = receive_expected_line(
         &fixture.db,
         tenant_id,
         user.id,
@@ -410,14 +466,14 @@ async fn concurrent_load_receipts_preserve_every_accepted_quantity() {
         0,
         0,
         None,
-        None,
+        Some("CONCURRENT-RECEIPT-LP"),
         None,
         None,
         None,
         Some("concurrent receipt"),
         "concurrent-receipt-a",
     );
-    let receipt_b = repo::loads::receive_line(
+    let receipt_b = receive_expected_line(
         &fixture.db,
         tenant_id,
         user.id,
@@ -427,7 +483,7 @@ async fn concurrent_load_receipts_preserve_every_accepted_quantity() {
         0,
         0,
         None,
-        None,
+        Some("CONCURRENT-RECEIPT-LP"),
         None,
         None,
         None,
@@ -460,6 +516,11 @@ async fn concurrent_load_receipts_preserve_every_accepted_quantity() {
             .sum::<i64>(),
         10
     );
+    let plates = repo::license_plates::get_license_plates(&fixture.db, tenant_id, false)
+        .await
+        .unwrap();
+    assert_eq!(plates.len(), 1);
+    assert_eq!(plates[0].barcode.as_deref(), Some("CONCURRENT-RECEIPT-LP"));
     assert!(
         repo::inventory::get_reconciliation_issues(&fixture.db, tenant_id)
             .await
@@ -637,7 +698,6 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
         None,
         None,
         None,
-        None,
     )
     .await
     .unwrap());
@@ -683,7 +743,7 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
     )
     .await
     .is_err());
-    assert!(repo::loads::receive_line(
+    assert!(receive_expected_line(
         &fixture.db,
         tenant_b,
         operator.id,
@@ -895,12 +955,11 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         None,
         None,
         None,
-        None,
     )
     .await
     .unwrap());
 
-    let receipt = repo::loads::receive_line(
+    let receipt = receive_expected_line(
         &db,
         tenant_id,
         user.id,

@@ -3,16 +3,9 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::{to_bytes, Body};
-use axum::http::{header, Method, Request, StatusCode};
 use common::*;
-use serde_json::json;
 use tokio::sync::{oneshot, Barrier};
 use tokio::time::timeout;
-use tower::ServiceExt;
-use wareboxes_core::dto::{ErrorCode, ErrorResponse};
-use wareboxes_server::auth::TENANT_ID_HEADER;
-use wareboxes_server::{routes, state::AppState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InventoryEffects {
@@ -340,40 +333,6 @@ async fn owner_facility_pair_is_enforced_across_inventory_boundaries() {
     assert_eq!(
         inventory_effects(&fixture.db, tenant_id).await,
         before_repository_rejection
-    );
-
-    let token = auth::create_session(&fixture.db, user.id).await.unwrap();
-    let app = routes::app(AppState::new(fixture.db.clone()));
-    let before_http_rejection = inventory_effects(&fixture.db, tenant_id).await;
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/inventory/receive")
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                .header(TENANT_ID_HEADER, tenant_id.to_string())
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&json!({
-                        "item_batch_id": item_batch_id,
-                        "to_location_id": unassigned_location_id,
-                        "qty": 2,
-                        "idempotency_key": "owner-facility-invalid-http-receipt"
-                    }))
-                    .unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
-    let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
-    assert_eq!(error.code, ErrorCode::Conflict);
-    assert!(error.message.contains("not active") && error.message.contains("facility"));
-    assert_eq!(
-        inventory_effects(&fixture.db, tenant_id).await,
-        before_http_rejection
     );
 
     fixture

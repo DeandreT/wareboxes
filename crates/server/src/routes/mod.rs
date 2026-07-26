@@ -130,7 +130,6 @@ pub fn app(state: AppState) -> Router {
         .route("/loads/files/add", post(loads::add_file))
         .route("/loads/files/delete", post(loads::delete_file))
         .route("/loads/lines/add", post(loads::add_line))
-        .route("/loads/lines/receive", post(loads::receive_line))
         .route("/mobile/inbound/loads", get(loads::mobile_inbound_list))
         .route(
             "/mobile/inbound/loads/:load_id",
@@ -141,8 +140,8 @@ pub fn app(state: AppState) -> Router {
             post(loads::mobile_arrive),
         )
         .route(
-            "/mobile/inbound/lines/:load_line_id/receive",
-            post(loads::mobile_receive_line),
+            "/inbound/load-lines/:load_line_id/receipts",
+            post(loads::receive_expected_inventory),
         )
         .route("/inventory/batches", get(inventory::list_batches))
         .route("/inventory/batches/add", post(inventory::add_batch))
@@ -152,7 +151,6 @@ pub fn app(state: AppState) -> Router {
             "/inventory/reconciliation",
             get(inventory::list_reconciliation_issues),
         )
-        .route("/inventory/receive", post(inventory::receive))
         .route("/inventory/transactions", get(inventory::list_transactions))
         .route("/inventory/moves", post(inventory::move_stock))
         .route("/inventory/moves/split", post(inventory::split_move_stock))

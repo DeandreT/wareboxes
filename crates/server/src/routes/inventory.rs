@@ -5,8 +5,7 @@ use wareboxes_core::dto::{
     CancelInventoryAllocationResult, CancelInventoryReservation, CancelInventoryReservationResult,
     ChangeInventoryStatus, ChangeInventoryStatusResult, CreateInventoryReservation,
     CreateInventoryReservationResult, ItemBatchIdRequest, MoveInventory, PlaceInventoryHold,
-    PlaceInventoryHoldResult, ReceiveInventory, ReleaseInventoryHold, ReleaseInventoryHoldResult,
-    SplitMoveInventory,
+    PlaceInventoryHoldResult, ReleaseInventoryHold, ReleaseInventoryHoldResult, SplitMoveInventory,
 };
 use wareboxes_core::models::{
     InventoryAllocation, InventoryBalance, InventoryHold, InventoryHoldReconciliationIssue,
@@ -159,43 +158,6 @@ pub async fn list_reconciliation_issues(
     Ok(Json(
         repo::inventory::get_reconciliation_issues_in_scope(&state.db, &user.tenant).await?,
     ))
-}
-
-pub async fn receive(
-    State(state): State<AppState>,
-    user: CurrentTenant,
-    Json(body): Json<ReceiveInventory>,
-) -> AppResult<Json<i64>> {
-    user.require_permission(&state.db, PERM).await?;
-    validate(&body)?;
-    if repo::access::item_batch_owner(&state.db, &user.tenant, body.item_batch_id, false)
-        .await?
-        .is_none()
-    {
-        return Err(AppError::bad_request("Item batch not found"));
-    }
-    require_scoped_location(
-        &state.db,
-        &user,
-        body.to_location_id,
-        "Destination location",
-    )
-    .await?;
-    let id = repo::inventory::receive_inventory(
-        &state.db,
-        user.tenant.tenant_id,
-        user.user.id,
-        body.item_batch_id,
-        body.to_location_id,
-        body.qty,
-        body.status,
-        body.reason.as_deref(),
-        body.reference_type.as_deref(),
-        body.reference_id,
-        &body.idempotency_key,
-    )
-    .await?;
-    Ok(Json(id))
 }
 
 pub async fn move_stock(

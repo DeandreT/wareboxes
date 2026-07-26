@@ -280,6 +280,13 @@ pub async fn find_or_create_license_plate_tx(
                     "license plate barcode cannot be blank",
                 ));
             }
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(format!(
+                    "license-plate-barcode:{}:{barcode}",
+                    tenant_id.get()
+                ))
+                .execute(&mut **tx)
+                .await?;
             if let Some(row) = sqlx::query(
                 r#"
                 SELECT id, inventory_owner_id, facility_id, location_id,

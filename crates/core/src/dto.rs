@@ -532,7 +532,6 @@ pub struct LoadUpdate {
     pub arrival: Option<Timestamp>,
     pub departure: Option<Timestamp>,
     pub rejected: Option<Timestamp>,
-    pub receive_completed: Option<bool>,
     pub closed: Option<Timestamp>,
 }
 
@@ -577,45 +576,28 @@ pub struct AddLoadLine {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct ReceiveLoadLine {
-    #[validate(range(min = 1, message = "Invalid load line ID"))]
-    pub load_line_id: i64,
+#[serde(deny_unknown_fields)]
+pub struct ReceiveExpectedInventory {
     #[validate(range(min = 1, message = "Invalid receiving location ID"))]
-    pub to_location_id: i64,
+    pub receiving_location_id: Option<i64>,
     #[validate(range(min = 0, message = "Received quantity cannot be negative"))]
     pub received_qty: i64,
     #[validate(range(min = 0, message = "Rejected quantity cannot be negative"))]
     pub rejected_qty: i64,
     #[validate(range(min = 0, message = "Missing quantity cannot be negative"))]
-    pub missing_qty: Option<i64>,
+    pub missing_qty: i64,
+    #[validate(range(min = 1, message = "Invalid license plate ID"))]
     pub license_plate_id: Option<i64>,
+    #[validate(length(min = 1, max = 200, message = "Invalid license plate barcode"))]
     pub license_plate_barcode: Option<String>,
+    #[validate(length(min = 1, max = 200, message = "Invalid lot"))]
     pub lot: Option<String>,
+    #[validate(length(min = 1, max = 200, message = "Invalid serial"))]
     pub serial: Option<String>,
     pub expiration: Option<Timestamp>,
-    pub reason: Option<String>,
-    #[validate(length(min = 1, max = 200, message = "Idempotency key is required"))]
-    pub idempotency_key: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct ReceiveInboundLine {
-    #[validate(range(min = 1, message = "Invalid receiving location ID"))]
-    pub to_location_id: i64,
-    #[validate(range(min = 0, message = "Received quantity cannot be negative"))]
-    pub received_qty: i64,
-    #[validate(range(min = 0, message = "Rejected quantity cannot be negative"))]
-    pub rejected_qty: i64,
-    #[validate(range(min = 0, message = "Missing quantity cannot be negative"))]
-    pub missing_qty: Option<i64>,
-    pub license_plate_id: Option<i64>,
-    pub license_plate_barcode: Option<String>,
-    pub lot: Option<String>,
-    pub serial: Option<String>,
-    pub expiration: Option<Timestamp>,
-    pub reason: Option<String>,
-    #[validate(length(min = 1, max = 200, message = "Idempotency key is required"))]
-    pub idempotency_key: String,
+    pub exception_reason: Option<crate::models::InboundReceiptExceptionReason>,
+    #[validate(length(min = 1, max = 1000, message = "Invalid exception note"))]
+    pub exception_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -845,22 +827,6 @@ pub struct AddItemBatch {
 pub struct ItemBatchIdRequest {
     #[validate(range(min = 1, message = "Invalid item batch ID"))]
     pub item_batch_id: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct ReceiveInventory {
-    #[validate(range(min = 1, message = "Invalid item batch ID"))]
-    pub item_batch_id: i64,
-    #[validate(range(min = 1, message = "Invalid destination location ID"))]
-    pub to_location_id: i64,
-    #[validate(range(min = 1, message = "Quantity must be positive"))]
-    pub qty: i64,
-    pub status: Option<InventoryStatus>,
-    pub reason: Option<String>,
-    pub reference_type: Option<String>,
-    pub reference_id: Option<i64>,
-    #[validate(length(min = 1, max = 200, message = "Idempotency key is required"))]
-    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
