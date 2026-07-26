@@ -5,7 +5,7 @@ use wareboxes_core::dto::{AddAuditLocationCount, AuditLocationCountUpdate};
 use wareboxes_core::models::{AuditApprovalStatus, AuditLocationCount, AuditWave, TenantAccess};
 use wareboxes_domain::TenantId;
 
-use crate::db::{now_iso, Db};
+use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 
@@ -465,6 +465,7 @@ pub async fn add_location_count(
     count: &AddAuditLocationCount,
 ) -> AppResult<Option<i64>> {
     let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, access.user_id.get()).await?;
     let dependencies = sqlx::query_as::<_, (i64, i64, bool)>(
         r#"

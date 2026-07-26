@@ -217,6 +217,7 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "order_tracking_numbers",
             "order_tracking_numbers_tenant_isolation",
         ),
+        ("inventory_balances", "inventory_balances_tenant_isolation"),
     ] {
         sqlx::query(&format!(
             "ALTER POLICY {policy_name} ON {table_name} \

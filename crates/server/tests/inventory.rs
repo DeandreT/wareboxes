@@ -524,11 +524,13 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
         .unwrap();
     let transaction_id = tenant_a_transactions[0].id;
     let entry_id = tenant_a_transactions[0].entries[0].id;
+    let mut tenant_a_tx = tenant_tx(&fixture.db, tenant_a).await;
     sqlx::query("UPDATE inventory_balances SET qty_on_hand = qty_on_hand + 1 WHERE tenant_id = $1")
         .bind(tenant_a.get())
-        .execute(&fixture.db)
+        .execute(&mut *tenant_a_tx)
         .await
         .unwrap();
+    tenant_a_tx.commit().await.unwrap();
 
     let unbound_visibility: (i64, i64, i64) = sqlx::query_as(
         r#"
@@ -637,11 +639,13 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
             .unwrap()
             .is_empty()
     );
+    let mut tenant_a_tx = tenant_tx(&fixture.db, tenant_a).await;
     sqlx::query("UPDATE inventory_balances SET qty_on_hand = qty_on_hand - 1 WHERE tenant_id = $1")
         .bind(tenant_a.get())
-        .execute(&fixture.db)
+        .execute(&mut *tenant_a_tx)
         .await
         .unwrap();
+    tenant_a_tx.commit().await.unwrap();
 
     let other_owner_order = fixture.order(tenant_a, "OTHER-OWNER-ORDER", owner_b).await;
     let balance = repo::inventory::get_balances(&fixture.db, tenant_a, false)
@@ -895,6 +899,105 @@ async fn concurrent_inventory_retries_apply_effects_once() {
         .await
         .unwrap();
     assert_eq!(missing_tenant.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn concurrent_initial_receipt_and_batch_deletion_preserve_batch_stock_invariant() {
+    let fixture = Fixture::new().await;
+    let user = fixture.user("inventory-batch-delete-race@test.com").await;
+    let tenant_id = tenant_for_user(&fixture.db, user.id).await;
+    let inventory_owner = fixture
+        .inventory_owner(tenant_id, "Batch Delete Race Owner")
+        .await;
+    let facility = fixture.facility(tenant_id, "Batch Delete Race DC").await;
+    let receiving = fixture
+        .location(tenant_id, facility, "BATCH-DELETE-RACE-RECEIVING")
+        .await;
+    let item = fixture
+        .item(tenant_id, "Batch Delete Race Item", "each")
+        .await;
+
+    for attempt in 0..6 {
+        let batch = repo::inventory::add_item_batch(
+            &fixture.db,
+            tenant_id,
+            inventory_owner,
+            item,
+            None,
+            Some(&format!("BATCH-DELETE-RACE-{attempt}")),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+
+        let receipt_db = fixture.db.clone();
+        let receipt_barrier = barrier.clone();
+        let actor_id = user.id;
+        let receipt = tokio::spawn(async move {
+            receipt_barrier.wait().await;
+            repo::inventory::receive_inventory(
+                &receipt_db,
+                tenant_id,
+                actor_id,
+                batch,
+                receiving,
+                1,
+                None,
+                Some("initial receipt racing batch deletion"),
+                None,
+                None,
+                None,
+            )
+            .await
+        });
+
+        let deletion_db = fixture.db.clone();
+        let deletion_barrier = barrier.clone();
+        let deletion = tokio::spawn(async move {
+            deletion_barrier.wait().await;
+            repo::inventory::set_item_batch_deleted(&deletion_db, tenant_id, batch, true).await
+        });
+
+        barrier.wait().await;
+        let receipt_result = receipt.await.unwrap();
+        let deletion_result = deletion.await.unwrap();
+        let batch_deleted = repo::inventory::get_item_batches(&fixture.db, tenant_id, true)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.id == batch)
+            .unwrap()
+            .deleted
+            .is_some();
+        let stocked_qty = repo::inventory::get_balances(&fixture.db, tenant_id, false)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|balance| balance.item_batch_id == batch)
+            .map(|balance| balance.qty_on_hand)
+            .sum::<i64>();
+
+        match (receipt_result, deletion_result) {
+            (Ok(_), Err(_)) => {
+                assert!(!batch_deleted);
+                assert_eq!(stocked_qty, 1);
+            }
+            (Err(_), Ok(true)) => {
+                assert!(batch_deleted);
+                assert_eq!(stocked_qty, 0);
+            }
+            outcome => panic!("receipt/delete race produced an invalid outcome: {outcome:?}"),
+        }
+    }
+
+    assert!(
+        repo::inventory::get_reconciliation_issues(&fixture.db, tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

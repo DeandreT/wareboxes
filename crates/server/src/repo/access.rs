@@ -249,6 +249,8 @@ pub async fn inventory_position_dimensions(
     status: &str,
 ) -> AppResult<Option<OperationalDimensions>> {
     let scope = ScopeBindings::for_access(access);
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
     let row = sqlx::query(
         r#"
         SELECT facility_id, inventory_owner_id
@@ -271,9 +273,11 @@ pub async fn inventory_position_dimensions(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
-    row.as_ref().map(dimensions_from_row).transpose()
+    let dimensions = row.as_ref().map(dimensions_from_row).transpose()?;
+    tx.commit().await?;
+    Ok(dimensions)
 }
 
 pub async fn inventory_reservation_dimensions(
