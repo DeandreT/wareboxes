@@ -427,50 +427,6 @@ async fn lock_task_in_current_scope_tx(
     Ok(dimensions.is_allowed_by(&scope).then_some(scope))
 }
 
-async fn progress_locations_match_task_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    task_id: i64,
-    scope: &ScopeBindings,
-    from_location_id: Option<i64>,
-    to_location_id: Option<i64>,
-) -> AppResult<bool> {
-    bind_tenant_context(tx, tenant_id).await?;
-    let mut location_ids = [from_location_id, to_location_id]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    location_ids.sort_unstable();
-    location_ids.dedup();
-    if location_ids.is_empty() {
-        return Ok(true);
-    }
-    let rows = sqlx::query(
-        r#"
-        SELECT location.id
-        FROM locations location
-        INNER JOIN work_tasks task
-            ON task.tenant_id = location.tenant_id
-           AND task.id = $2
-        WHERE location.tenant_id = $1
-          AND location.id = ANY($3)
-          AND location.deleted IS NULL
-          AND location.active
-          AND location.facility_id = task.facility_id
-          AND ($4 OR location.facility_id = ANY($5))
-        FOR SHARE OF location
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(task_id)
-    .bind(&location_ids)
-    .bind(scope.all_facilities)
-    .bind(&scope.facility_ids)
-    .fetch_all(&mut **tx)
-    .await?;
-    Ok(rows.len() == location_ids.len())
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn record_task_progress(
     db: &Db,
@@ -505,7 +461,7 @@ pub async fn record_task_progress(
 async fn record_task_progress_with_scope(
     db: &Db,
     tenant_id: TenantId,
-    user_id: i64,
+    _user_id: i64,
     scope_user_id: Option<i64>,
     task_id: i64,
     task_line_id: Option<i64>,
@@ -519,7 +475,7 @@ async fn record_task_progress_with_scope(
     if qty_completed <= 0 {
         return Err(AppError::bad_request("completed quantity must be positive"));
     }
-    let prepared = command
+    let _prepared = command
         .map(|command| {
             PreparedCommand::new(
                 command,
@@ -539,61 +495,15 @@ async fn record_task_progress_with_scope(
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
     if let Some(scope_user_id) = scope_user_id {
-        let Some(scope) =
-            lock_task_in_current_scope_tx(&mut tx, tenant_id, scope_user_id, task_id).await?
-        else {
-            return Ok(false);
-        };
-        if let Some(prepared) = prepared.as_ref() {
-            if let Some(updated) = prepared.replayed::<bool>(&mut tx).await? {
-                tx.commit().await?;
-                return Ok(updated);
-            }
-        }
-        if !progress_locations_match_task_tx(
-            &mut tx,
-            tenant_id,
-            task_id,
-            &scope,
-            from_location_id,
-            to_location_id,
-        )
-        .await?
+        if lock_task_in_current_scope_tx(&mut tx, tenant_id, scope_user_id, task_id)
+            .await?
+            .is_none()
         {
             return Ok(false);
         }
     }
-    if scope_user_id.is_none() {
-        if let Some(prepared) = prepared.as_ref() {
-            if let Some(updated) = prepared.replayed::<bool>(&mut tx).await? {
-                tx.commit().await?;
-                return Ok(updated);
-            }
-        }
-    }
-    let updated = record_task_progress_tx(
-        &mut tx,
-        tenant_id,
-        user_id,
-        task_id,
-        task_line_id,
-        action,
-        qty_completed,
-        from_location_id,
-        to_location_id,
-        note,
-    )
-    .await?;
-    if !updated {
-        return Ok(false);
-    }
-    match prepared {
-        Some(prepared) => prepared.commit(tx, updated).await,
-        None => {
-            tx.commit().await?;
-            Ok(updated)
-        }
-    }
+    let task_type = task_type_tx(&mut tx, tenant_id, task_id).await?;
+    Err(typed_inventory_execution_required(task_type))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -627,127 +537,6 @@ pub async fn record_task_progress_in_scope(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn record_task_progress_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    user_id: i64,
-    task_id: i64,
-    task_line_id: Option<i64>,
-    action: WorkTaskProgressAction,
-    qty_completed: i64,
-    from_location_id: Option<i64>,
-    to_location_id: Option<i64>,
-    note: Option<&str>,
-) -> AppResult<bool> {
-    bind_tenant_context(tx, tenant_id).await?;
-    let task_type = task_type_tx(tx, tenant_id, task_id).await?;
-    let updated = match task_type {
-        WorkTaskType::BreakMasterPack => {
-            if action != WorkTaskProgressAction::Progress || task_line_id.is_some() {
-                return Err(AppError::bad_request(
-                    "break master pack tasks only accept task progress",
-                ));
-            }
-            let res = sqlx::query(
-                r#"
-                UPDATE break_master_pack_tasks detail
-                SET master_qty_completed = master_qty_completed + $1
-                FROM work_tasks task
-                WHERE detail.tenant_id = task.tenant_id
-                  AND detail.task_id = task.id
-                  AND task.tenant_id = $2
-                  AND detail.task_id = $3
-                  AND task.deleted IS NULL
-                  AND task.status IN ('assigned', 'in_progress')
-                  AND task.assigned_user_id = $4
-                  AND detail.master_qty_completed + $1 <= detail.master_qty
-                "#,
-            )
-            .bind(qty_completed)
-            .bind(tenant_id.get())
-            .bind(task_id)
-            .bind(user_id)
-            .execute(&mut **tx)
-            .await?;
-            res.rows_affected() > 0
-        }
-        WorkTaskType::UnpackCancelledOrder => {
-            let task_line_id = task_line_id.ok_or_else(|| {
-                AppError::bad_request("unpack cancelled order progress requires a task line")
-            })?;
-            if action == WorkTaskProgressAction::Progress {
-                return Err(AppError::bad_request(
-                    "unpack cancelled order tasks require unpacked, missing, or damaged progress",
-                ));
-            }
-            let action = action.as_str();
-            let res = sqlx::query(
-                r#"
-                UPDATE unpack_cancelled_order_task_lines line
-                SET unpacked_qty = line.unpacked_qty + CASE WHEN $1 = 'unpacked' THEN $2 ELSE 0 END,
-                    missing_qty = line.missing_qty + CASE WHEN $1 = 'missing' THEN $2 ELSE 0 END,
-                    damaged_qty = line.damaged_qty + CASE WHEN $1 = 'damaged' THEN $2 ELSE 0 END,
-                    source_location_id = COALESCE(line.source_location_id, $5),
-                    destination_location_id = COALESCE($6, line.destination_location_id),
-                    status = CASE
-                        WHEN line.unpacked_qty + line.missing_qty + line.damaged_qty + $2 < line.expected_qty THEN 'partial'
-                        WHEN line.missing_qty + line.damaged_qty
-                             + CASE WHEN $1 IN ('missing', 'damaged') THEN $2 ELSE 0 END > 0 THEN 'exception'
-                        ELSE 'completed'
-                    END
-                FROM work_tasks task
-                WHERE line.tenant_id = task.tenant_id
-                  AND line.task_id = task.id
-                  AND task.tenant_id = $8
-                  AND line.id = $3
-                  AND line.task_id = $4
-                  AND task.deleted IS NULL
-                  AND task.status IN ('assigned', 'in_progress')
-                  AND task.assigned_user_id = $7
-                  AND line.status IN ('open', 'partial')
-                  AND line.unpacked_qty + line.missing_qty + line.damaged_qty + $2 <= line.expected_qty
-                "#,
-            )
-            .bind(action)
-            .bind(qty_completed)
-            .bind(task_line_id)
-            .bind(task_id)
-            .bind(from_location_id)
-            .bind(to_location_id)
-            .bind(user_id)
-            .bind(tenant_id.get())
-            .execute(&mut **tx)
-            .await?;
-            res.rows_affected() > 0
-        }
-        WorkTaskType::CycleCountItemLocation | WorkTaskType::CycleCountLocation => false,
-    };
-    if updated {
-        sqlx::query("UPDATE work_tasks SET modified = $1 WHERE tenant_id = $2 AND id = $3")
-            .bind(now_iso())
-            .bind(tenant_id.get())
-            .bind(task_id)
-            .execute(&mut **tx)
-            .await?;
-        insert_progress_tx(
-            tx,
-            tenant_id,
-            task_id,
-            task_line_id,
-            Some(user_id),
-            action.as_str(),
-            Some(qty_completed),
-            from_location_id,
-            to_location_id,
-            note,
-            None,
-        )
-        .await?;
-    }
-    Ok(updated)
-}
-
 pub async fn complete_task(
     db: &Db,
     tenant_id: TenantId,
@@ -762,7 +551,7 @@ async fn complete_task_with_scope(
     db: &Db,
     tenant_id: TenantId,
     task_id: i64,
-    user_id: i64,
+    _user_id: i64,
     qty_completed: Option<i64>,
     scope_user_id: Option<i64>,
     command: Option<&CommandContext>,
@@ -770,7 +559,7 @@ async fn complete_task_with_scope(
     if qty_completed.is_some_and(|quantity| quantity <= 0) {
         return Err(AppError::bad_request("completed quantity must be positive"));
     }
-    let prepared = command
+    let _prepared = command
         .map(|command| PreparedCommand::new(command, "task.complete.v1", &(task_id, qty_completed)))
         .transpose()?;
     let mut tx = db.begin().await?;
@@ -783,117 +572,8 @@ async fn complete_task_with_scope(
             return Ok(false);
         }
     }
-    if let Some(prepared) = prepared.as_ref() {
-        if let Some(completed) = prepared.replayed::<bool>(&mut tx).await? {
-            tx.commit().await?;
-            return Ok(completed);
-        }
-    }
-    if let Some(qty_completed) = qty_completed {
-        if !record_task_progress_tx(
-            &mut tx,
-            tenant_id,
-            user_id,
-            task_id,
-            None,
-            WorkTaskProgressAction::Progress,
-            qty_completed,
-            None,
-            None,
-            None,
-        )
-        .await?
-        {
-            return Ok(false);
-        }
-    }
-    let locked: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM work_tasks WHERE tenant_id = $1 AND id = $2 FOR UPDATE")
-            .bind(tenant_id.get())
-            .bind(task_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    if locked.is_none() {
-        return Ok(false);
-    }
     let task_type = task_type_tx(&mut tx, tenant_id, task_id).await?;
-    let detail_complete = match task_type {
-        WorkTaskType::BreakMasterPack => {
-            let complete: bool = sqlx::query_scalar(
-                "SELECT master_qty_completed >= master_qty FROM break_master_pack_tasks WHERE tenant_id = $1 AND task_id = $2",
-            )
-            .bind(tenant_id.get())
-            .bind(task_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .unwrap_or(false);
-            complete
-        }
-        WorkTaskType::UnpackCancelledOrder => {
-            let open_count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM unpack_cancelled_order_task_lines WHERE tenant_id = $1 AND task_id = $2 AND status IN ('open', 'partial')",
-            )
-            .bind(tenant_id.get())
-            .bind(task_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            open_count == 0
-        }
-        _ => true,
-    };
-    if !detail_complete {
-        return Ok(false);
-    }
-
-    let now = now_iso();
-    let res = sqlx::query(
-        r#"
-        UPDATE work_tasks
-        SET status = 'completed',
-            completed_by = $1,
-            completed_at = $2,
-            lease_expires_at = NULL,
-            modified = $2
-        WHERE tenant_id = $3
-          AND id = $4
-          AND deleted IS NULL
-          AND status IN ('assigned', 'in_progress')
-          AND (assigned_user_id IS NULL OR assigned_user_id = $1)
-        "#,
-    )
-    .bind(user_id)
-    .bind(now)
-    .bind(tenant_id.get())
-    .bind(task_id)
-    .execute(&mut *tx)
-    .await?;
-    if res.rows_affected() > 0 {
-        insert_progress_tx(
-            &mut tx,
-            tenant_id,
-            task_id,
-            None,
-            Some(user_id),
-            "completed",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await?;
-    }
-    let completed = res.rows_affected() > 0;
-    if !completed {
-        return Ok(false);
-    }
-    match prepared {
-        Some(prepared) => prepared.commit(tx, completed).await,
-        None => {
-            tx.commit().await?;
-            Ok(completed)
-        }
-    }
+    Err(typed_inventory_execution_required(task_type))
 }
 
 pub async fn complete_task_in_scope(
@@ -1142,6 +822,12 @@ async fn task_type_tx(
     .ok_or_else(|| AppError::bad_request("task not found"))?;
     WorkTaskType::parse(&value)
         .ok_or_else(|| AppError::internal(format!("invalid work task type in database: {value}")))
+}
+
+fn typed_inventory_execution_required(task_type: WorkTaskType) -> AppError {
+    AppError::conflict(format!(
+        "{task_type} tasks require a typed command that records their inventory effect"
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]

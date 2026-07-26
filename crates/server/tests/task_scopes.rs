@@ -594,7 +594,18 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         Some(json!({"task_id": allowed_claim})),
     )
     .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let response = send_api(
+        &app,
+        &token,
+        tenant_id,
+        Method::POST,
+        "/api/tasks/cancel",
+        Some(json!({"task_id": allowed_claim})),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::OK);
+    assert!(response_json::<bool>(response).await);
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let unpack_line_id: i64 = sqlx::query_scalar(
