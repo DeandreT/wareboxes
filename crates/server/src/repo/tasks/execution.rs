@@ -940,6 +940,7 @@ pub(super) async fn user_can_execute_task_tx(
     dimensions: TaskDimensions,
     required_permission: &str,
 ) -> AppResult<bool> {
+    bind_tenant_context(tx, tenant_id).await?;
     sqlx::query_scalar(
         r#"
         SELECT EXISTS(

@@ -6,7 +6,7 @@ use sqlx::Row;
 use wareboxes_core::models::{Role, User};
 use wareboxes_domain::TenantId;
 
-use crate::db::{now_iso, Db};
+use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::AppResult;
 use crate::permissions::get_user_permissions;
 
@@ -26,6 +26,7 @@ fn map_user(row: &sqlx::postgres::PgRow) -> AppResult<User> {
 }
 
 async fn direct_roles(db: &Db, tenant_id: TenantId, user_id: i64) -> AppResult<Vec<Role>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         SELECT r.id AS id, r.created AS created, r.deleted AS deleted,
@@ -41,9 +42,10 @@ async fn direct_roles(db: &Db, tenant_id: TenantId, user_id: i64) -> AppResult<V
     )
     .bind(tenant_id.get())
     .bind(user_id)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.iter()
+    let roles = rows
+        .iter()
         .map(|r| {
             Ok(Role {
                 id: r.try_get("id")?,
@@ -56,7 +58,9 @@ async fn direct_roles(db: &Db, tenant_id: TenantId, user_id: i64) -> AppResult<V
                 ..Default::default()
             })
         })
-        .collect()
+        .collect();
+    tx.commit().await?;
+    roles
 }
 
 pub async fn enrich_for_tenant(db: &Db, tenant_id: TenantId, mut user: User) -> AppResult<User> {
@@ -66,6 +70,7 @@ pub async fn enrich_for_tenant(db: &Db, tenant_id: TenantId, mut user: User) -> 
 }
 
 pub async fn get_users(db: &Db, tenant_id: TenantId, show_deleted: bool) -> AppResult<Vec<User>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let sql = if show_deleted {
         r#"
         SELECT user_account.id, user_account.created, membership.deleted,
@@ -89,7 +94,11 @@ pub async fn get_users(db: &Db, tenant_id: TenantId, show_deleted: bool) -> AppR
         ORDER BY user_account.id
         "#
     };
-    let rows = sqlx::query(sql).bind(tenant_id.get()).fetch_all(db).await?;
+    let rows = sqlx::query(sql)
+        .bind(tenant_id.get())
+        .fetch_all(&mut *tx)
+        .await?;
+    tx.commit().await?;
     let mut users = Vec::with_capacity(rows.len());
     for row in &rows {
         users.push(enrich_for_tenant(db, tenant_id, map_user(row)?).await?);
@@ -140,6 +149,7 @@ pub async fn update_user(
     nick_name: Option<&str>,
     phone: Option<&str>,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         r#"
         UPDATE users
@@ -160,8 +170,9 @@ pub async fn update_user(
     .bind(phone)
     .bind(id)
     .bind(tenant_id.get())
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }
 
@@ -171,13 +182,15 @@ pub async fn set_user_membership_deleted(
     id: i64,
     deleted: bool,
 ) -> AppResult<bool> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         "UPDATE tenant_memberships SET deleted = $1 WHERE tenant_id = $2 AND user_id = $3",
     )
     .bind(if deleted { Some(now_iso()) } else { None })
     .bind(tenant_id.get())
     .bind(id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(res.rows_affected() > 0)
 }

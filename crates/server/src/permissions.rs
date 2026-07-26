@@ -7,7 +7,7 @@ use sqlx::Row;
 use wareboxes_core::models::Permission;
 use wareboxes_domain::TenantId;
 
-use crate::db::{now_iso, Db};
+use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::AppResult;
 
 /// All permissions a user has via their roles and every ancestor role.
@@ -17,6 +17,7 @@ pub async fn get_user_permissions(
     tenant_id: TenantId,
     user_id: i64,
 ) -> AppResult<Vec<Permission>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         WITH RECURSIVE role_hierarchy AS (
@@ -50,10 +51,11 @@ pub async fn get_user_permissions(
     )
     .bind(tenant_id.get())
     .bind(user_id)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await?;
 
-    rows.iter()
+    let permissions = rows
+        .iter()
         .map(|r| {
             Ok(Permission {
                 id: r.try_get("id")?,
@@ -63,7 +65,9 @@ pub async fn get_user_permissions(
                 deleted: r.try_get("deleted")?,
             })
         })
-        .collect()
+        .collect();
+    tx.commit().await?;
+    permissions
 }
 
 /// Ensure the per-user "self role" exists (role named after the user's email,
@@ -75,7 +79,7 @@ pub async fn ensure_self_role(
     user_id: i64,
     email: &str,
 ) -> AppResult<()> {
-    let mut tx = db.begin().await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT, 0))")
         .bind(tenant_id.get())
         .bind(user_id)
