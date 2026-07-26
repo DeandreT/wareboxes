@@ -219,6 +219,99 @@ pub async fn add_inventory_owner(
     Ok(id)
 }
 
+pub async fn replace_inventory_owner_facilities(
+    db: &Db,
+    tenant_id: TenantId,
+    inventory_owner_id: i64,
+    facility_ids: &[i64],
+) -> AppResult<bool> {
+    let mut facility_ids = facility_ids.to_vec();
+    facility_ids.sort_unstable();
+    if facility_ids.iter().any(|id| *id <= 0) || facility_ids.windows(2).any(|ids| ids[0] == ids[1])
+    {
+        return Err(crate::error::AppError::bad_request(
+            "facility_ids must contain unique positive IDs",
+        ));
+    }
+
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    let owner_id: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM inventory_owners
+        WHERE tenant_id = $1
+          AND id = $2
+          AND deleted IS NULL
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if owner_id.is_none() {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    let facility_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM facilities
+        WHERE tenant_id = $1
+          AND id = ANY($2)
+          AND deleted IS NULL
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(&facility_ids)
+    .fetch_one(&mut *tx)
+    .await?;
+    let expected_count = i64::try_from(facility_ids.len())
+        .map_err(|_| crate::error::AppError::bad_request("too many facility IDs"))?;
+    if facility_count != expected_count {
+        return Err(crate::error::AppError::bad_request(
+            "facility_ids contains an unavailable facility",
+        ));
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE inventory_owner_facilities
+        SET deleted = $1
+        WHERE tenant_id = $2
+          AND inventory_owner_id = $3
+          AND deleted IS NULL
+          AND NOT (facility_id = ANY($4))
+        "#,
+    )
+    .bind(now_iso())
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id)
+    .bind(&facility_ids)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO inventory_owner_facilities
+            (tenant_id, created, inventory_owner_id, facility_id)
+        SELECT $1, $2, $3, UNNEST($4::BIGINT[])
+        ON CONFLICT (tenant_id, inventory_owner_id, facility_id) DO UPDATE
+        SET created = excluded.created, deleted = NULL
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(now_iso())
+    .bind(inventory_owner_id)
+    .bind(&facility_ids)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(true)
+}
+
 pub async fn update_inventory_owner(
     db: &Db,
     tenant_id: TenantId,

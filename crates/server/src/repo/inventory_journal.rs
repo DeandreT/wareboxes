@@ -1,7 +1,7 @@
 //! Immutable inventory journal primitives shared by inventory workflows.
 
 use wareboxes_core::models::{InventoryStatus, InventoryTransactionType};
-use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
+use wareboxes_domain::{OwnerFacilityScope, TenantId};
 
 use crate::db::{bind_tenant_context, now_iso};
 use crate::error::{AppError, AppResult};
@@ -14,8 +14,7 @@ pub(crate) use super::idempotency::{
 
 pub(crate) struct JournalCommand<'a> {
     pub tenant_id: TenantId,
-    pub inventory_owner_id: i64,
-    pub facility_id: i64,
+    pub owner_facility: OwnerFacilityScope,
     pub actor_user_id: i64,
     pub transaction_type: InventoryTransactionType,
     pub reason: Option<&'a str>,
@@ -34,12 +33,61 @@ pub(crate) enum JournalStart {
 }
 
 pub(crate) struct JournalEntry {
-    pub facility_id: i64,
     pub location_id: i64,
     pub license_plate_id: Option<i64>,
     pub item_batch_id: i64,
     pub status: InventoryStatus,
     pub quantity_delta: i64,
+}
+
+pub(crate) fn owner_facility_scope(
+    inventory_owner_id: i64,
+    facility_id: i64,
+) -> AppResult<OwnerFacilityScope> {
+    Ok(OwnerFacilityScope::new(
+        wareboxes_domain::InventoryOwnerId::new(inventory_owner_id)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        wareboxes_domain::FacilityId::new(facility_id)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+    ))
+}
+
+pub(crate) async fn lock_active_owner_facility_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    scope: OwnerFacilityScope,
+) -> AppResult<()> {
+    bind_tenant_context(tx, tenant_id).await?;
+    let assignment_id: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT assignment.id
+        FROM inventory_owner_facilities assignment
+        INNER JOIN inventory_owners owner
+            ON owner.tenant_id = assignment.tenant_id
+           AND owner.id = assignment.inventory_owner_id
+           AND owner.deleted IS NULL
+        INNER JOIN facilities facility
+            ON facility.tenant_id = assignment.tenant_id
+           AND facility.id = assignment.facility_id
+           AND facility.deleted IS NULL
+        WHERE assignment.tenant_id = $1
+          AND assignment.inventory_owner_id = $2
+          AND assignment.facility_id = $3
+          AND assignment.deleted IS NULL
+        FOR SHARE OF assignment
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(scope.inventory_owner_id.get())
+    .bind(scope.facility_id.get())
+    .fetch_optional(&mut **tx)
+    .await?;
+    if assignment_id.is_none() {
+        return Err(AppError::conflict(
+            "inventory owner is not active in the facility",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn begin_transaction(
@@ -49,7 +97,7 @@ pub(crate) async fn begin_transaction(
     if command.operation.trim().is_empty() {
         return Err(AppError::internal("journal operation cannot be blank"));
     }
-    bind_tenant_context(tx, command.tenant_id).await?;
+    lock_active_owner_facility_tx(tx, command.tenant_id, command.owner_facility).await?;
 
     if command.record_idempotency {
         if let Some(transaction_id) = replayed_transaction(
@@ -77,7 +125,7 @@ pub(crate) async fn begin_transaction(
         "#,
     )
     .bind(command.tenant_id.get())
-    .bind(command.inventory_owner_id)
+    .bind(command.owner_facility.inventory_owner_id.get())
     .bind(occurred_at)
     .bind(command.actor_user_id)
     .bind(command.transaction_type.as_str())
@@ -91,16 +139,12 @@ pub(crate) async fn begin_transaction(
     .fetch_one(&mut **tx)
     .await?;
 
-    let inventory_owner_id = InventoryOwnerId::new(command.inventory_owner_id)
-        .map_err(|error| AppError::internal(error.to_string()))?;
-    let facility_id = FacilityId::new(command.facility_id)
-        .map_err(|error| AppError::internal(error.to_string()))?;
     let event_key = format!("inventory-transaction:{transaction_id}");
     let aggregate_id = transaction_id.to_string();
     let payload = serde_json::json!({
         "inventory_transaction_id": transaction_id,
-        "inventory_owner_id": command.inventory_owner_id,
-        "facility_id": command.facility_id,
+        "inventory_owner_id": command.owner_facility.inventory_owner_id,
+        "facility_id": command.owner_facility.facility_id,
         "transaction_type": command.transaction_type.as_str(),
         "operation": command.operation,
     });
@@ -108,8 +152,8 @@ pub(crate) async fn begin_transaction(
         tx,
         &NewOutboxEvent {
             tenant_id: command.tenant_id,
-            inventory_owner_id: Some(inventory_owner_id),
-            facility_id: Some(facility_id),
+            inventory_owner_id: Some(command.owner_facility.inventory_owner_id),
+            facility_id: Some(command.owner_facility.facility_id),
             actor_user_id: Some(command.actor_user_id),
             event_key: &event_key,
             aggregate_type: "inventory_transaction",
@@ -152,7 +196,7 @@ pub(crate) async fn begin_transaction(
 pub(crate) async fn append_entry(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
-    inventory_owner_id: i64,
+    owner_facility: OwnerFacilityScope,
     transaction_id: i64,
     entry: &JournalEntry,
 ) -> AppResult<i64> {
@@ -180,10 +224,10 @@ pub(crate) async fn append_entry(
         "#,
     )
     .bind(tenant_id.get())
-    .bind(inventory_owner_id)
+    .bind(owner_facility.inventory_owner_id.get())
     .bind(transaction_id)
     .bind(now_iso())
-    .bind(entry.facility_id)
+    .bind(owner_facility.facility_id.get())
     .bind(entry.location_id)
     .bind(entry.license_plate_id)
     .bind(entry.item_batch_id)

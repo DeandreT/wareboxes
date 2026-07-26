@@ -55,6 +55,9 @@ impl AppError {
             AppError::Core(CoreError::Internal(_)) => CoreError::Internal("internal error".into()),
             AppError::Core(core) => core.clone(),
             AppError::Db(sqlx::Error::RowNotFound) => CoreError::NotFound("resource".to_string()),
+            AppError::Db(sqlx::Error::Database(e)) if e.code().as_deref() == Some("55000") => {
+                CoreError::Conflict("operation violates current resource state".into())
+            }
             AppError::Db(sqlx::Error::Database(e)) => match e.kind() {
                 ErrorKind::UniqueViolation => {
                     CoreError::Conflict("unique constraint violated".into())

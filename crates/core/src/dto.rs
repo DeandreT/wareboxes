@@ -242,6 +242,13 @@ pub struct InventoryOwnerIdRequest {
     pub inventory_owner_id: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct ReplaceInventoryOwnerFacilities {
+    #[validate(range(min = 1, message = "Invalid inventory owner ID"))]
+    pub inventory_owner_id: i64,
+    pub facility_ids: Vec<i64>,
+}
+
 // ---------------------------------------------------------------------------
 // Orders
 // ---------------------------------------------------------------------------

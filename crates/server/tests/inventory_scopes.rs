@@ -166,6 +166,22 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
     )
     .await
     .unwrap();
+    assert!(repo::inventory_owners::replace_inventory_owner_facilities(
+        &db,
+        tenant_id,
+        allowed_owner,
+        &[allowed_facility],
+    )
+    .await
+    .unwrap());
+    assert!(repo::inventory_owners::replace_inventory_owner_facilities(
+        &db,
+        tenant_id,
+        denied_owner,
+        &[denied_facility],
+    )
+    .await
+    .unwrap());
     let item = repo::items::add_item(
         &db,
         tenant_id,

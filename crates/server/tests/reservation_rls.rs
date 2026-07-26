@@ -118,6 +118,9 @@ async fn reservation_refs(fixture: &Fixture, tenant_id: TenantId, name: &str) ->
         .await;
     let item_id = fixture.item(tenant_id, name, "each").await;
     let inventory_owner_id = fixture.inventory_owner(tenant_id, name).await;
+    fixture
+        .assign_owner_to_facility(tenant_id, inventory_owner_id, facility_id)
+        .await;
     let item_batch_id = repo::inventory::add_item_batch(
         &fixture.db,
         tenant_id,

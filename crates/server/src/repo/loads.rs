@@ -1137,13 +1137,14 @@ pub async fn receive_line(
         let facility_id = facility_id.ok_or_else(|| {
             AppError::bad_request("receiving location must be active in the load facility")
         })?;
+        let owner_facility =
+            inventory_journal::owner_facility_scope(inventory_owner_id, facility_id)?;
 
         let transaction_id = match inventory_journal::begin_transaction(
             &mut tx,
             &JournalCommand {
                 tenant_id,
-                inventory_owner_id,
-                facility_id,
+                owner_facility,
                 actor_user_id: user_id,
                 transaction_type: InventoryTransactionType::Receive,
                 reason,
@@ -1227,10 +1228,9 @@ pub async fn receive_line(
         inventory_journal::append_entry(
             &mut tx,
             tenant_id,
-            inventory_owner_id,
+            owner_facility,
             transaction_id,
             &JournalEntry {
-                facility_id,
                 location_id: to_location_id,
                 license_plate_id: resolved_license_plate_id,
                 item_batch_id: batch_id,

@@ -247,6 +247,9 @@ async fn outbox_storage_and_workers_are_tenant_isolated() {
 async fn event_refs(fixture: &Fixture, tenant_id: TenantId, user_id: i64, key: &str) -> EventRefs {
     let inventory_owner_id = fixture.inventory_owner(tenant_id, key).await;
     let facility_id = fixture.facility(tenant_id, key).await;
+    fixture
+        .assign_owner_to_facility(tenant_id, inventory_owner_id, facility_id)
+        .await;
     let event_key = format!("{key}-event");
     let ordering_key = format!("{key}-ordering");
     let payload = json!({"key": key});

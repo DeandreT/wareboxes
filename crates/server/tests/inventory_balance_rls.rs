@@ -129,6 +129,9 @@ async fn inventory_balances_require_a_transaction_local_tenant_context() {
 async fn balance_refs(fixture: &Fixture, tenant_id: TenantId, name: &str) -> BalanceRefs {
     let inventory_owner_id = fixture.inventory_owner(tenant_id, name).await;
     let facility_id = fixture.facility(tenant_id, name).await;
+    fixture
+        .assign_owner_to_facility(tenant_id, inventory_owner_id, facility_id)
+        .await;
     let source_location_id = fixture
         .location(tenant_id, facility_id, &format!("{name} Source"))
         .await;

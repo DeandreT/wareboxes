@@ -701,13 +701,13 @@ pub async fn receive_inventory(
     .bind(to_location_id)
     .fetch_one(&mut *tx)
     .await?;
+    let owner_facility = inventory_journal::owner_facility_scope(inventory_owner_id, facility_id)?;
 
     let transaction_id = match inventory_journal::begin_transaction(
         &mut tx,
         &JournalCommand {
             tenant_id,
-            inventory_owner_id,
-            facility_id,
+            owner_facility,
             actor_user_id: user_id,
             transaction_type: InventoryTransactionType::Receive,
             reason,
@@ -768,10 +768,9 @@ pub async fn receive_inventory(
     inventory_journal::append_entry(
         &mut tx,
         tenant_id,
-        inventory_owner_id,
+        owner_facility,
         transaction_id,
         &JournalEntry {
-            facility_id,
             location_id: to_location_id,
             license_plate_id: None,
             item_batch_id,
@@ -882,13 +881,14 @@ pub async fn move_inventory(
             "inventory moves cannot cross facilities; use an inventory transfer workflow",
         ));
     }
+    let owner_facility =
+        inventory_journal::owner_facility_scope(inventory_owner_id, source_facility_id)?;
 
     let transaction_id = match inventory_journal::begin_transaction(
         &mut tx,
         &JournalCommand {
             tenant_id,
-            inventory_owner_id,
-            facility_id: source_facility_id,
+            owner_facility,
             actor_user_id: user_id,
             transaction_type: InventoryTransactionType::Move,
             reason,
@@ -980,10 +980,9 @@ pub async fn move_inventory(
         inventory_journal::append_entry(
             &mut tx,
             tenant_id,
-            inventory_owner_id,
+            owner_facility,
             transaction_id,
             &JournalEntry {
-                facility_id: source_facility_id,
                 location_id,
                 license_plate_id: None,
                 item_batch_id,
@@ -1131,13 +1130,14 @@ pub async fn split_move_inventory(
             ));
         }
     }
+    let owner_facility =
+        inventory_journal::owner_facility_scope(inventory_owner_id, source_facility_id)?;
 
     let transaction_id = match inventory_journal::begin_transaction(
         &mut tx,
         &JournalCommand {
             tenant_id,
-            inventory_owner_id,
-            facility_id: source_facility_id,
+            owner_facility,
             actor_user_id: user_id,
             transaction_type: InventoryTransactionType::Move,
             reason,
@@ -1184,10 +1184,9 @@ pub async fn split_move_inventory(
     inventory_journal::append_entry(
         &mut tx,
         tenant_id,
-        inventory_owner_id,
+        owner_facility,
         transaction_id,
         &JournalEntry {
-            facility_id: source_facility_id,
             location_id: from_location_id,
             license_plate_id: None,
             item_batch_id,
@@ -1237,10 +1236,9 @@ pub async fn split_move_inventory(
         inventory_journal::append_entry(
             &mut tx,
             tenant_id,
-            inventory_owner_id,
+            owner_facility,
             transaction_id,
             &JournalEntry {
-                facility_id: source_facility_id,
                 location_id: *to_location_id,
                 license_plate_id: None,
                 item_batch_id,
@@ -1331,6 +1329,8 @@ pub async fn reserve_inventory(db: &Db, command: &ReserveInventoryCommand<'_>) -
     let resolved_location_id: i64 = balance_row.try_get("location_id")?;
     let qty_on_hand: i64 = balance_row.try_get("qty_on_hand")?;
     let qty_reserved: i64 = balance_row.try_get("qty_reserved")?;
+    let owner_facility = inventory_journal::owner_facility_scope(inventory_owner_id, facility_id)?;
+    inventory_journal::lock_active_owner_facility_tx(&mut tx, tenant_id, owner_facility).await?;
 
     if qty_on_hand - qty_reserved < qty {
         return Err(AppError::conflict(
