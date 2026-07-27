@@ -481,5 +481,5 @@ async fn order_and_load_workflows_enforce_owner_and_facility_scopes() {
     assert!(denied_load.carrier.is_none());
     assert_eq!(denied_load.notes.len(), 1);
     assert_eq!(denied_load.files.len(), 1);
-    assert_eq!(denied_load.lines.len(), 1);
+    assert!(denied_load.lines.is_empty());
 }
