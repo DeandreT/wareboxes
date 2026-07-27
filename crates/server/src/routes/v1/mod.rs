@@ -7,6 +7,7 @@ mod license_plate_putaway;
 mod putaway;
 mod putaway_claim_lifecycle;
 mod putaway_claims;
+mod rf_sessions;
 
 use axum::middleware;
 use axum::routing::{get, post};
@@ -24,6 +25,7 @@ pub fn router() -> Router<AppState> {
             "/expected-receiving/lines/:load_line_id/confirmations",
             post(expected_receiving::confirm),
         )
+        .route("/rf/sessions", post(rf_sessions::create))
         .route("/inventory/balances", get(inventory_balances::list))
         .route(
             "/license-plate-putaway-tasks",

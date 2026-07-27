@@ -18,13 +18,17 @@ impl PutawayKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {
+    pub location_id: i64,
     pub name: Option<String>,
-    pub barcode: String,
+    pub barcode: Option<String>,
 }
 
 impl Location {
-    pub fn display_name(&self) -> &str {
-        self.name.as_deref().unwrap_or(&self.barcode)
+    pub fn display_name(&self) -> String {
+        self.name
+            .clone()
+            .or_else(|| self.barcode.clone())
+            .unwrap_or_else(|| format!("Location {}", self.location_id))
     }
 }
 
@@ -56,6 +60,8 @@ impl PutawayWork {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutawayClaim {
     pub task_id: i64,
+    pub inventory_owner_id: i64,
+    pub facility_id: i64,
     pub priority: i64,
     pub instructions: Option<String>,
     pub lease_expires_at: String,
@@ -277,7 +283,12 @@ impl PutawayWorkflow {
             return None;
         }
         let claim = self.claim.as_ref()?;
-        if claim.source.is_some() && !self.source_verified {
+        if claim
+            .source
+            .as_ref()
+            .is_some_and(|source| source.barcode.is_some())
+            && !self.source_verified
+        {
             return Some(ScanStage::Source);
         }
         if matches!(claim.work, PutawayWork::LicensePlate { .. })
@@ -343,7 +354,7 @@ impl PutawayWorkflow {
                 let expected = claim
                     .source
                     .as_ref()
-                    .map(|location| location.barcode.as_str());
+                    .and_then(|location| location.barcode.as_deref());
                 if expected != Some(scanned.as_str()) {
                     self.reject_scan("Source location does not match this task");
                     return None;
@@ -368,7 +379,7 @@ impl PutawayWorkflow {
                 None
             }
             ScanStage::Destination => {
-                if claim.destination.barcode != scanned {
+                if claim.destination.barcode.as_deref() != Some(scanned.as_str()) {
                     self.reject_scan("Destination location does not match this task");
                     return None;
                 }
@@ -468,6 +479,34 @@ impl PutawayWorkflow {
         Transition::Applied
     }
 
+    pub fn restore_ready_command(
+        &mut self,
+        record_id: i64,
+        draft: DurableCommandDraft,
+    ) -> Transition {
+        if record_id <= 0 || self.reconcile_reason.is_some() {
+            return Transition::Ignored;
+        }
+        self.lane = CommandLane::Ready(PersistedCommand { record_id, draft });
+        Transition::Effect(WorkflowEffect::DispatchPersistedCommand { record_id })
+    }
+
+    pub fn restore_ambiguous_command(
+        &mut self,
+        record_id: i64,
+        draft: DurableCommandDraft,
+        message: impl Into<String>,
+    ) -> Transition {
+        if record_id <= 0 || self.reconcile_reason.is_some() {
+            return Transition::Ignored;
+        }
+        self.lane = CommandLane::Ambiguous {
+            command: PersistedCommand { record_id, draft },
+            message: message.into(),
+        };
+        Transition::Applied
+    }
+
     pub fn retry_ambiguous(&mut self) -> Option<WorkflowEffect> {
         let CommandLane::Ambiguous { command, .. } = &self.lane else {
             return None;
@@ -527,6 +566,37 @@ impl PutawayWorkflow {
         self.lane = CommandLane::Empty;
         self.error = None;
         Transition::Applied
+    }
+
+    pub fn durable_rejection_recorded(
+        &mut self,
+        record_id: i64,
+        message: impl Into<String>,
+    ) -> Transition {
+        let command = match &self.lane {
+            CommandLane::InFlight(command) => command,
+            CommandLane::Ambiguous { command, .. } => command,
+            _ => return Transition::Ignored,
+        };
+        if command.record_id != record_id {
+            return Transition::Ignored;
+        }
+        self.lane = CommandLane::Empty;
+        self.error = Some(message.into());
+        Transition::Applied
+    }
+
+    pub fn restore_current_claim(&mut self, claim: Option<PutawayClaim>) {
+        self.selected_kind = claim
+            .as_ref()
+            .map(|claim| claim.work.kind())
+            .unwrap_or(self.selected_kind);
+        self.claim = claim;
+        self.lane = CommandLane::Empty;
+        self.reconcile_reason = None;
+        self.error = None;
+        self.notice = None;
+        self.reset_scans();
     }
 
     pub fn require_reconciliation(&mut self, reason: String) {
@@ -624,16 +694,20 @@ mod tests {
     fn loose_claim() -> PutawayClaim {
         PutawayClaim {
             task_id: 42,
+            inventory_owner_id: 3,
+            facility_id: 4,
             priority: 80,
             instructions: None,
             lease_expires_at: "2026-07-27T01:00:00Z".into(),
             source: Some(Location {
+                location_id: 5,
                 name: Some("Receiving 1".into()),
-                barcode: "RECV-01".into(),
+                barcode: Some("RECV-01".into()),
             }),
             destination: Location {
+                location_id: 6,
                 name: Some("A-01-01".into()),
-                barcode: "A-01-01".into(),
+                barcode: Some("A-01-01".into()),
             },
             work: PutawayWork::Loose {
                 item_description: Some("Widget".into()),
@@ -649,13 +723,16 @@ mod tests {
     fn license_plate_claim() -> PutawayClaim {
         PutawayClaim {
             task_id: 91,
+            inventory_owner_id: 3,
+            facility_id: 4,
             priority: 60,
             instructions: None,
             lease_expires_at: "2026-07-27T01:00:00Z".into(),
             source: None,
             destination: Location {
+                location_id: 8,
                 name: None,
-                barcode: "B-02-03".into(),
+                barcode: Some("B-02-03".into()),
             },
             work: PutawayWork::LicensePlate {
                 barcode: "LP-91".into(),
@@ -712,6 +789,47 @@ mod tests {
             Some(WorkflowEffect::DispatchPersistedCommand { record_id: 7 })
         );
         assert_eq!(workflow.current_draft(), before.as_ref());
+    }
+
+    #[test]
+    fn persisted_command_recovery_dispatches_the_original_draft() {
+        let mut workflow = PutawayWorkflow::default();
+        let draft = DurableCommandDraft {
+            schema_version: 1,
+            command_id: "command-1".into(),
+            idempotency_key: "key-1".into(),
+            command: PutawayCommand::ClaimNext {
+                workflow: PutawayKind::Loose,
+            },
+        };
+
+        assert_eq!(
+            workflow.restore_ready_command(7, draft.clone()),
+            Transition::Effect(WorkflowEffect::DispatchPersistedCommand { record_id: 7 })
+        );
+        assert_eq!(workflow.current_draft(), Some(&draft));
+        assert_eq!(workflow.activity(), Activity::ReadyToDispatch);
+    }
+
+    #[test]
+    fn restored_ambiguous_command_requires_an_explicit_check() {
+        let mut workflow = PutawayWorkflow::default();
+        let draft = DurableCommandDraft {
+            schema_version: 1,
+            command_id: "command-1".into(),
+            idempotency_key: "key-1".into(),
+            command: PutawayCommand::ClaimNext {
+                workflow: PutawayKind::Loose,
+            },
+        };
+
+        assert_eq!(
+            workflow.restore_ambiguous_command(7, draft.clone(), "check saved scan"),
+            Transition::Applied
+        );
+        assert_eq!(workflow.activity(), Activity::Ambiguous);
+        assert_eq!(workflow.current_draft(), Some(&draft));
+        assert_eq!(workflow.ambiguous_message(), Some("check saved scan"));
     }
 
     #[test]
