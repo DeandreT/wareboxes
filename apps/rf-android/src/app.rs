@@ -13,6 +13,7 @@ use crate::workflow::{
     ScanStage, Transition, WorkflowEffect,
 };
 
+mod heartbeat;
 mod session;
 
 const ICON_FONT: &str = "lucide";
@@ -46,7 +47,10 @@ pub struct RfApp {
     session_gate: SessionGate,
     expected_auth_request_id: Option<String>,
     expected_claim_request_id: Option<String>,
+    lease_check_task_id: Option<i64>,
+    lease_rejection_check: bool,
     reauth_scope: Option<ExecutionScope>,
+    reauth_notice: Option<String>,
     server_url: String,
     server_configured: bool,
     email: String,
@@ -58,6 +62,7 @@ pub struct RfApp {
     device_id: String,
     scan_focus: Option<(i64, ScanStage)>,
     field_focus_pending: bool,
+    heartbeat: heartbeat::HeartbeatRuntime,
 }
 
 impl RfApp {
@@ -92,7 +97,10 @@ impl RfApp {
             session_gate: SessionGate::SignedOut,
             expected_auth_request_id: None,
             expected_claim_request_id: None,
+            lease_check_task_id: None,
+            lease_rejection_check: false,
             reauth_scope: None,
+            reauth_notice: None,
             server_url: default_server_url(),
             server_configured: false,
             email: String::new(),
@@ -104,6 +112,7 @@ impl RfApp {
             device_id: format!("rf-{}", uuid::Uuid::new_v4()),
             scan_focus: None,
             field_focus_pending: true,
+            heartbeat: heartbeat::HeartbeatRuntime::new(),
         }
     }
 
@@ -155,7 +164,10 @@ impl RfApp {
             session_gate: SessionGate::SignedOut,
             expected_auth_request_id: None,
             expected_claim_request_id: None,
+            lease_check_task_id: None,
+            lease_rejection_check: false,
             reauth_scope: None,
+            reauth_notice: None,
             edit_server: server_url.is_empty(),
             server_url,
             server_configured,
@@ -167,6 +179,7 @@ impl RfApp {
             device_id,
             scan_focus: None,
             field_focus_pending: true,
+            heartbeat: heartbeat::HeartbeatRuntime::new(),
         }
     }
 
@@ -347,10 +360,11 @@ impl RfApp {
             Self::message_band(ui, Self::danger(), Icon::AlertTriangle, error);
         }
         ui.add_space(14.0);
+        let can_connect = !self.server_url.trim().is_empty();
         let connect = ui.add_enabled(
-            !self.server_url.trim().is_empty(),
+            can_connect,
             egui::Button::new(egui::RichText::new("Connect").strong())
-                .fill(egui::Color32::from_rgb(18, 112, 81))
+                .fill(Self::primary_fill(can_connect))
                 .min_size(egui::vec2(ui.available_width(), 56.0)),
         );
         let enter = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -501,14 +515,9 @@ impl RfApp {
             ui.add_space(8.0);
             Self::message_band(ui, Self::danger(), Icon::AlertTriangle, error);
         }
-        if self.reauth_scope.is_some() {
+        if let Some(notice) = self.reauth_notice.as_deref() {
             ui.add_space(8.0);
-            Self::message_band(
-                ui,
-                Self::warning(),
-                Icon::Save,
-                "Your saved scan is still on this device. Use the same operator account.",
-            );
+            Self::message_band(ui, Self::warning(), Icon::LogIn, notice);
         }
         ui.add_space(14.0);
         let signing_in = self.session_gate == SessionGate::SigningIn;
@@ -525,7 +534,7 @@ impl RfApp {
             .add_enabled(
                 can_submit,
                 egui::Button::new(egui::RichText::new(label).strong())
-                    .fill(egui::Color32::from_rgb(18, 112, 81))
+                    .fill(Self::primary_fill(can_submit))
                     .min_size(egui::vec2(ui.available_width(), 56.0)),
             )
             .clicked();
@@ -588,15 +597,17 @@ impl RfApp {
     }
 
     fn header(&self, ui: &mut egui::Ui) {
-        let (label, color) = match self.workflow.activity() {
-            Activity::Idle => ("READY", Self::accent()),
-            Activity::Active => ("ACTIVE", Self::accent()),
-            Activity::Persisting => ("SAVING", Self::warning()),
-            Activity::ReadyToDispatch => ("QUEUED", Self::warning()),
-            Activity::InFlight => ("SENDING", Self::warning()),
-            Activity::Ambiguous => ("CHECK", Self::danger()),
-            Activity::ReconcileRequired => ("BLOCKED", Self::danger()),
-        };
+        let (label, color) =
+            self.heartbeat_header()
+                .unwrap_or_else(|| match self.workflow.activity() {
+                    Activity::Idle => ("READY", Self::accent()),
+                    Activity::Active => ("ACTIVE", Self::accent()),
+                    Activity::Persisting => ("SAVING", Self::warning()),
+                    Activity::ReadyToDispatch => ("QUEUED", Self::warning()),
+                    Activity::InFlight => ("SENDING", Self::warning()),
+                    Activity::Ambiguous => ("CHECK", Self::danger()),
+                    Activity::ReconcileRequired => ("BLOCKED", Self::danger()),
+                });
         egui::containers::Sides::new().height(34.0).show(
             ui,
             |ui| {
@@ -639,10 +650,11 @@ impl RfApp {
         });
         ui.add_space(10.0);
 
+        let can_execute = self.can_execute();
         let button = egui::Button::new(egui::RichText::new("Get next task").strong())
-            .fill(egui::Color32::from_rgb(18, 112, 81))
+            .fill(Self::primary_fill(can_execute))
             .min_size(egui::vec2(ui.available_width(), 58.0));
-        if ui.add_enabled(self.can_execute(), button).clicked() {
+        if ui.add_enabled(can_execute, button).clicked() {
             let (command_id, key) = Self::command_identity("claim");
             let effect = self.workflow.begin_claim_next(command_id, key);
             self.emit(effect);
@@ -704,23 +716,31 @@ impl RfApp {
             );
         }
 
+        let lease_actions_allowed = if self.workflow.activity() == Activity::Active {
+            self.heartbeat_status(ui, claim.task_id)
+        } else {
+            false
+        };
         if let Some(stage) = self.workflow.expected_scan() {
-            self.scan_control(ui, claim.task_id, stage);
+            self.scan_control(ui, claim.task_id, stage, lease_actions_allowed);
         }
 
         ui.add_space(8.0);
         if self.release_confirmation {
-            self.release_confirmation(ui);
-        } else if self.workflow.activity() == Activity::Active
-            && ui
-                .add(Self::secondary_button(
-                    "Release work",
-                    ui.available_width(),
-                    48.0,
-                ))
-                .clicked()
-        {
-            self.release_confirmation = true;
+            self.release_confirmation(ui, lease_actions_allowed);
+        } else {
+            let release_clicked = ui
+                .add_enabled(
+                    lease_actions_allowed,
+                    Self::secondary_button("Release work", ui.available_width(), 48.0),
+                )
+                .on_disabled_hover_text("Check task connection first")
+                .clicked();
+            if self.workflow.activity() == Activity::Active
+                && action_requested(lease_actions_allowed, release_clicked)
+            {
+                self.release_confirmation = true;
+            }
         }
     }
 
@@ -790,7 +810,13 @@ impl RfApp {
             });
     }
 
-    fn scan_control(&mut self, ui: &mut egui::Ui, task_id: i64, stage: ScanStage) {
+    fn scan_control(
+        &mut self,
+        ui: &mut egui::Ui,
+        task_id: i64,
+        stage: ScanStage,
+        lease_actions_allowed: bool,
+    ) {
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(stage.prompt())
@@ -798,31 +824,41 @@ impl RfApp {
                 .strong()
                 .color(Self::accent()),
         );
-        let response = ui.add_sized(
-            [ui.available_width(), 56.0],
-            egui::TextEdit::singleline(self.workflow.scan_draft_mut())
-                .id(egui::Id::new(("putaway_scan", task_id, stage)))
-                .font(egui::TextStyle::Monospace)
-                .hint_text("SCAN"),
-        );
+        let response = ui
+            .add_enabled_ui(lease_actions_allowed, |ui| {
+                ui.add_sized(
+                    [ui.available_width(), 56.0],
+                    egui::TextEdit::singleline(self.workflow.scan_draft_mut())
+                        .id(egui::Id::new(("putaway_scan", task_id, stage)))
+                        .font(egui::TextStyle::Monospace)
+                        .hint_text("SCAN"),
+                )
+            })
+            .inner;
         let focus_key = (task_id, stage);
-        if self.scan_focus != Some(focus_key) {
+        if lease_actions_allowed && self.scan_focus != Some(focus_key) {
             response.request_focus();
             self.scan_focus = Some(focus_key);
+        } else if !lease_actions_allowed {
+            self.scan_focus = None;
         }
         let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
         let scan_ready = !self.workflow.scan_draft_mut().trim().is_empty();
-        if enter
-            || ui
-                .add_enabled(
-                    scan_ready,
-                    egui::Button::new(egui::RichText::new("Confirm scan").strong())
-                        .fill(egui::Color32::from_rgb(18, 112, 81))
-                        .min_size(egui::vec2(ui.available_width(), 54.0)),
-                )
-                .on_disabled_hover_text("A scan is required")
-                .clicked()
-        {
+        let can_confirm = scan_ready && lease_actions_allowed;
+        let clicked = ui
+            .add_enabled(
+                can_confirm,
+                egui::Button::new(egui::RichText::new("Confirm scan").strong())
+                    .fill(Self::primary_fill(can_confirm))
+                    .min_size(egui::vec2(ui.available_width(), 54.0)),
+            )
+            .on_disabled_hover_text(if lease_actions_allowed {
+                "A scan is required"
+            } else {
+                "Check task connection first"
+            })
+            .clicked();
+        if action_requested(lease_actions_allowed, enter || clicked) {
             let (command_id, key) = Self::command_identity("confirm");
             let effect = self.workflow.submit_scan(command_id, key);
             self.emit(effect);
@@ -836,7 +872,15 @@ impl RfApp {
             .min_size(egui::vec2(width, height))
     }
 
-    fn release_confirmation(&mut self, ui: &mut egui::Ui) {
+    fn primary_fill(enabled: bool) -> egui::Color32 {
+        if enabled {
+            egui::Color32::from_rgb(18, 112, 81)
+        } else {
+            egui::Color32::from_rgb(28, 34, 32)
+        }
+    }
+
+    fn release_confirmation(&mut self, ui: &mut egui::Ui, lease_actions_allowed: bool) {
         egui::Frame::new()
             .fill(egui::Color32::from_rgb(57, 42, 21))
             .inner_margin(egui::Margin::same(10))
@@ -853,14 +897,20 @@ impl RfApp {
                     {
                         self.release_confirmation = false;
                     }
-                    if ui
-                        .add(
+                    let release_clicked = ui
+                        .add_enabled(
+                            lease_actions_allowed,
                             egui::Button::new("Return to queue")
-                                .fill(egui::Color32::from_rgb(112, 72, 18))
+                                .fill(if lease_actions_allowed {
+                                    egui::Color32::from_rgb(112, 72, 18)
+                                } else {
+                                    egui::Color32::from_rgb(28, 34, 32)
+                                })
                                 .min_size(egui::vec2(ui.available_width(), 48.0)),
                         )
-                        .clicked()
-                    {
+                        .on_disabled_hover_text("Check task connection first")
+                        .clicked();
+                    if action_requested(lease_actions_allowed, release_clicked) {
                         let (command_id, key) = Self::command_identity("release");
                         let effect = self.workflow.begin_release(
                             command_id,
@@ -967,7 +1017,7 @@ impl RfApp {
             facility_id: 4,
             priority: 80,
             instructions: Some("Keep upright".into()),
-            lease_expires_at: "preview".into(),
+            lease_expires_at: (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339(),
             source: Some(Location {
                 location_id: 17,
                 name: Some("Receiving 01".into()),
@@ -1000,6 +1050,10 @@ fn valid_email(value: &str) -> bool {
         && !domain.ends_with('.')
         && !value.chars().any(char::is_whitespace)
         && value.len() <= 254
+}
+
+const fn action_requested(actions_allowed: bool, requested: bool) -> bool {
+    actions_allowed && requested
 }
 
 fn server_display_name(value: &str) -> String {
@@ -1072,6 +1126,7 @@ impl eframe::App for RfApp {
         self.process_network_events(root_ui.ctx());
         self.persist_queued_commands();
         self.dispatch_queued_commands(root_ui.ctx());
+        self.maintain_claim_heartbeat(root_ui.ctx());
 
         #[cfg(target_os = "android")]
         egui::Panel::top("android_status_bar_space")
@@ -1151,5 +1206,17 @@ impl eframe::App for RfApp {
                         self.error(ui);
                     });
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::action_requested;
+
+    #[test]
+    fn blocked_lease_rejects_keyboard_button_and_release_requests() {
+        assert!(!action_requested(false, true));
+        assert!(!action_requested(false, false));
+        assert!(action_requested(true, true));
     }
 }

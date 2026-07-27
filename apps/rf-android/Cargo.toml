@@ -11,6 +11,7 @@ name = "wareboxes_rf_android"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
+chrono = { workspace = true }
 ehttp = "=0.5.0"
 egui = { version = "0.35.0", default-features = false }
 lucide-icons = "1.27.0"

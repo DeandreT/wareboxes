@@ -28,6 +28,12 @@ malformed successful responses and indeterminate business conflicts stop work fo
 reconciliation. On startup and after sign-in, the app recovers unresolved device
 commands before requesting the operator's current putaway claim.
 
+Active putaway claims are verified immediately and renewed through the versioned
+heartbeat command. Heartbeat retries keep one idempotency identity, server lease
+windows are anchored to a monotonic device clock, and late callbacks cannot extend
+ownership. Scan and release actions remain blocked until the claim is verified and
+stop again before the last confirmed lease becomes unsafe.
+
 ## Build Requirements
 
 - Rust 1.92 or newer.

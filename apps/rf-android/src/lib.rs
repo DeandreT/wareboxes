@@ -2,6 +2,7 @@
 
 mod app;
 pub mod command_store;
+pub mod lease;
 pub mod transport;
 pub mod wire;
 pub mod workflow;
