@@ -1,4 +1,11 @@
 use super::*;
+use crate::expected_receiving::{
+    ConfirmationIntent, ConfirmationRecoverySnapshot, ConfirmationRecoverySnapshotInput,
+    DockBarcode, ExpectedReceiptCommand, ExpectedReceiptLine, ExpectedReceiptLineInput, FacilityId,
+    InventoryOwnerId, ItemBarcode, ItemId, LoadBarcode, LoadId, LoadLineId, LocationId,
+    NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason, ReceivingDock,
+    ReceivingLoadStatus, StockDimension,
+};
 use crate::workflow::{PutawayKind, ReleaseReason};
 
 fn scope() -> ExecutionScope {
@@ -14,7 +21,7 @@ fn draft(command_id: &str, key: &str, command: PutawayCommand) -> DurableCommand
         schema_version: 1,
         command_id: command_id.into(),
         idempotency_key: key.into(),
-        command,
+        command: command.into(),
     }
 }
 
@@ -26,6 +33,56 @@ fn claim_draft(command_id: &str, key: &str) -> DurableCommandDraft {
             workflow: PutawayKind::Loose,
         },
     )
+}
+
+fn expected_receipt_draft(command_id: &str, key: &str) -> DurableCommandDraft {
+    let line = ExpectedReceiptLine::try_new(ExpectedReceiptLineInput {
+        load_line_id: LoadLineId::try_from(55).unwrap(),
+        item_id: ItemId::try_from(66).unwrap(),
+        item_description: Some("Case-picked item".into()),
+        uom: StockDimension::new("case").unwrap(),
+        item_barcodes: vec![ItemBarcode::new("CASE-66").unwrap()],
+        expected: PositiveQuantity::try_from(10).unwrap(),
+        received: NonNegativeQuantity::new(2).unwrap(),
+        rejected: NonNegativeQuantity::new(0).unwrap(),
+        missing: NonNegativeQuantity::new(0).unwrap(),
+        remaining: NonNegativeQuantity::new(8).unwrap(),
+        lot: None,
+        serial: None,
+        expiration: None,
+    })
+    .unwrap();
+    let recovery = ConfirmationRecoverySnapshot::try_new(ConfirmationRecoverySnapshotInput {
+        load_barcode: LoadBarcode::new("LOAD-11").unwrap(),
+        load_id: LoadId::try_from(11).unwrap(),
+        inventory_owner_id: InventoryOwnerId::try_from(22).unwrap(),
+        facility_id: FacilityId::try_from(33).unwrap(),
+        reference_number: Some("ASN-11".into()),
+        status: ReceivingLoadStatus::Receiving,
+        dock: ReceivingDock::new(
+            LocationId::try_from(44).unwrap(),
+            DockBarcode::new("DOCK-04").unwrap(),
+            Some("Inbound dock 4".into()),
+        ),
+        selected_line: line,
+    })
+    .unwrap();
+    DurableCommandDraft {
+        schema_version: 1,
+        command_id: command_id.into(),
+        idempotency_key: key.into(),
+        command: RfCommand::ExpectedReceipt(Box::new(
+            ConfirmationIntent::try_new(
+                recovery,
+                ExpectedReceiptCommand::Missing {
+                    quantity: PositiveQuantity::try_from(3).unwrap(),
+                    reason: ReceiptExceptionReason::ShortShipment,
+                    note: None,
+                },
+            )
+            .unwrap(),
+        )),
+    }
 }
 
 fn response(status: u16) -> DurableHttpResponse {
@@ -203,6 +260,76 @@ fn command_is_durable_before_an_attempt_can_start() {
     assert_eq!(attempt.command.status, CommandStatus::Dispatching);
     assert_eq!(attempt.ordinal, 1);
     assert_ne!(attempt.attempt_id, attempt.request_id);
+}
+
+#[test]
+fn expected_receipt_uses_the_same_durable_replay_lane_as_putaway() {
+    let mut store = CommandStore::open_in_memory().expect("store should open");
+    let record = store
+        .persist(
+            &scope(),
+            expected_receipt_draft("receipt-1", "expected-receiving:55:1"),
+        )
+        .expect("receipt should persist before dispatch");
+
+    assert_eq!(
+        record.operation,
+        CommandOperation::ExpectedReceiptConfirmation
+    );
+    assert_eq!(
+        record.request.response_kind,
+        ResponseKind::ExpectedReceiptConfirmation
+    );
+    assert_eq!(
+        record.request.path,
+        "/api/v1/expected-receiving/lines/55/confirmations"
+    );
+    assert!(record.request.verify_body());
+
+    let attempt = store
+        .begin_attempt(&scope(), record.record_id)
+        .expect("persisted receipt should dispatch");
+    store
+        .mark_ambiguous(
+            &scope(),
+            record.record_id,
+            &attempt.attempt_id,
+            "connection closed",
+        )
+        .expect("ambiguous result should remain replayable");
+    let retry = store
+        .begin_attempt(&scope(), record.record_id)
+        .expect("receipt retry should start");
+    assert_eq!(retry.command.request, attempt.command.request);
+    assert_eq!(
+        retry.command.draft.idempotency_key,
+        attempt.command.draft.idempotency_key
+    );
+    assert_ne!(retry.request_id, attempt.request_id);
+}
+
+#[test]
+fn typed_command_rejects_a_tampered_durable_request_envelope() {
+    let mut store = CommandStore::open_in_memory().expect("store should open");
+    let record = store
+        .persist(
+            &scope(),
+            expected_receipt_draft("receipt-1", "expected-receiving:55:1"),
+        )
+        .expect("receipt should persist");
+    store
+        .connection
+        .execute(
+            "UPDATE rf_commands SET path = '/api/v1/putaway-claims/next' WHERE record_id = ?1",
+            [record.record_id],
+        )
+        .expect("test should corrupt the request path");
+
+    assert!(matches!(
+        store.unresolved_for_device(&scope().device_id),
+        Err(CommandStoreError::CorruptRecord(message))
+            if message == "durable request does not match its typed command"
+    ));
 }
 
 #[test]
@@ -418,7 +545,7 @@ fn only_the_active_attempt_can_record_a_retryable_response() {
 
 #[test]
 fn retryable_http_statuses_use_the_explicit_retry_api() {
-    for status in [401, 429, 500, 503, 599] {
+    for status in [401, 408, 429, 500, 503, 599] {
         let mut store = CommandStore::open_in_memory().expect("store should open");
         let record = store
             .persist(&scope(), claim_draft("command-1", "key-1"))

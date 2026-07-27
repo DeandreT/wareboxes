@@ -192,8 +192,8 @@ BEGIN
     created_at := now() - ((i % 90) || ' days')::interval;
 
     INSERT INTO loads
-        (tenant_id, created, facility_id, inventory_owner_id, status, type, reference_number,
-         invoice_number, carrier, trailer_number, seal_number, dock_door_location_id,
+        (tenant_id, created, facility_id, inventory_owner_id, execution_barcode, status, type,
+         reference_number, invoice_number, carrier, trailer_number, seal_number, dock_door_location_id,
          expected_time, appointment_time, actual_time, arrival, rejected,
          receive_completed, closed, checked_in_by, closed_by)
     VALUES (
@@ -201,6 +201,7 @@ BEGIN
       created_at,
       facility,
       owner_ids[((i - 1) % array_length(owner_ids, 1)) + 1],
+      'WB-SEED-LOAD-' || seed_no,
       load_status,
       load_type,
       'WB-SEED-LOAD-' || seed_no,

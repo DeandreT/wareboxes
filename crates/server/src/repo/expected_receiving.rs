@@ -48,6 +48,41 @@ pub struct ExpectedReceivingSession {
     pub lines: Vec<ExpectedReceiptLine>,
 }
 
+/// Resolves a canonical load execution barcode inside the caller's complete
+/// tenant, facility, and inventory-owner scope.
+pub async fn get_expected_receiving_session_by_execution_barcode(
+    db: &Db,
+    access: &TenantAccess,
+    execution_barcode: &str,
+) -> AppResult<ExpectedReceivingSession> {
+    let execution_barcode = crate::repo::loads::normalize_execution_barcode(execution_barcode)?;
+    let scope = ScopeBindings::for_access(access);
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
+    let load_id: i64 = sqlx::query_scalar(
+        r#"
+        SELECT load.id
+        FROM loads load
+        WHERE load.tenant_id = $1
+          AND load.execution_barcode = $2
+          AND load.deleted IS NULL
+          AND ($3 OR load.facility_id = ANY($4))
+          AND ($5 OR load.inventory_owner_id = ANY($6))
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(execution_barcode)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::not_found("expected receiving load"))?;
+    tx.commit().await?;
+
+    get_expected_receiving_session(db, access, load_id).await
+}
+
 /// Loads the executable read projection for an expected receiving session.
 ///
 /// Scope failures intentionally look identical to an unknown load. Readiness

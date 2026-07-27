@@ -55,7 +55,7 @@ pub(super) fn create(connection: &mut Connection) -> Result<(), CommandStoreErro
             ),
             UNIQUE (tenant_id, operation, idempotency_key)
         );
-        CREATE UNIQUE INDEX rf_commands_one_unresolved_putaway_per_device
+        CREATE UNIQUE INDEX rf_commands_one_unresolved_per_device
             ON rf_commands (device_id)
             WHERE status IN (
                 'persisted',

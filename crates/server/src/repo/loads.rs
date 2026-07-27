@@ -15,6 +15,32 @@ use crate::error::{AppError, AppResult};
 use crate::repo::access::ScopeBindings;
 use crate::repo::orders;
 
+const MAX_EXECUTION_BARCODE_LENGTH: usize = 200;
+
+pub fn normalize_execution_barcode(value: &str) -> AppResult<String> {
+    let normalized = value.trim();
+    let mut characters = normalized.bytes();
+    let valid_first = characters
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric());
+    let valid_rest = characters
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'));
+    if normalized.is_empty()
+        || normalized.len() > MAX_EXECUTION_BARCODE_LENGTH
+        || !valid_first
+        || !valid_rest
+    {
+        return Err(AppError::bad_request(
+            "execution barcode must contain 1 to 200 letters, digits, periods, underscores, colons, or hyphens and start with a letter or digit",
+        ));
+    }
+    Ok(normalized.to_ascii_uppercase())
+}
+
+fn generated_execution_barcode() -> String {
+    format!("WB-LOAD-{}", hex::encode_upper(rand::random::<[u8; 16]>()))
+}
+
 fn parse_load_status(s: &str) -> AppResult<LoadStatus> {
     LoadStatus::parse(s)
         .ok_or_else(|| AppError::internal(format!("invalid load status in database: {s}")))
@@ -46,6 +72,7 @@ fn map_load(row: &sqlx::postgres::PgRow) -> AppResult<Load> {
         facility_name: row.try_get("facility_name")?,
         inventory_owner_id: row.try_get("inventory_owner_id")?,
         inventory_owner_name: row.try_get("inventory_owner_name")?,
+        execution_barcode: row.try_get("execution_barcode")?,
         status: parse_load_status(row.try_get::<String, _>("status")?.as_str())?,
         r#type: parse_load_type(row.try_get::<String, _>("type")?.as_str())?,
         reference_number: row.try_get::<Option<String>, _>("reference_number")?,
@@ -148,7 +175,8 @@ pub async fn get_loads(
     let rows = sqlx::query(
         r#"
         SELECT l.id, l.tenant_id, l.created, l.deleted, l.facility_id, facility.name AS facility_name,
-               l.inventory_owner_id, a.name AS inventory_owner_name, l.status, l.type, l.reference_number,
+               l.inventory_owner_id, a.name AS inventory_owner_name, l.execution_barcode,
+               l.status, l.type, l.reference_number,
                l.invoice_number, l.carrier, l.trailer_number, l.seal_number, l.dock_door_location_id,
                l.expected_time, l.appointment_time, l.actual_time, l.arrival, l.departure, l.rejected,
                l.receive_completed, l.closed, l.checked_in_by, l.closed_by
@@ -281,7 +309,8 @@ async fn get_load_summaries_with_scope(
     let rows = sqlx::query(
         r#"
         SELECT l.id, l.tenant_id, l.created, l.deleted, l.facility_id, facility.name AS facility_name,
-               l.inventory_owner_id, a.name AS inventory_owner_name, l.status, l.type, l.reference_number,
+               l.inventory_owner_id, a.name AS inventory_owner_name, l.execution_barcode,
+               l.status, l.type, l.reference_number,
                l.invoice_number, l.carrier, l.trailer_number, l.seal_number, l.dock_door_location_id,
                l.expected_time, l.appointment_time, l.actual_time, l.arrival, l.departure, l.rejected,
                l.receive_completed, l.closed, l.checked_in_by, l.closed_by
@@ -383,7 +412,8 @@ async fn get_load_with_scope(
     let row = sqlx::query(
         r#"
         SELECT l.id, l.tenant_id, l.created, l.deleted, l.facility_id, facility.name AS facility_name,
-               l.inventory_owner_id, a.name AS inventory_owner_name, l.status, l.type, l.reference_number,
+               l.inventory_owner_id, a.name AS inventory_owner_name, l.execution_barcode,
+               l.status, l.type, l.reference_number,
                l.invoice_number, l.carrier, l.trailer_number, l.seal_number, l.dock_door_location_id,
                l.expected_time, l.appointment_time, l.actual_time, l.arrival, l.departure, l.rejected,
                l.receive_completed, l.closed, l.checked_in_by, l.closed_by
@@ -503,15 +533,56 @@ pub async fn add_load(
     expected_time: Option<Timestamp>,
     appointment_time: Option<Timestamp>,
 ) -> AppResult<i64> {
+    let execution_barcode = generated_execution_barcode();
+    add_load_with_execution_barcode(
+        db,
+        tenant_id,
+        user_id,
+        facility_id,
+        inventory_owner_id,
+        &execution_barcode,
+        load_type,
+        reference_number,
+        invoice_number,
+        carrier,
+        trailer_number,
+        seal_number,
+        dock_door_location_id,
+        expected_time,
+        appointment_time,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn add_load_with_execution_barcode(
+    db: &Db,
+    tenant_id: TenantId,
+    user_id: i64,
+    facility_id: i64,
+    inventory_owner_id: i64,
+    execution_barcode: &str,
+    load_type: LoadType,
+    reference_number: Option<&str>,
+    invoice_number: Option<&str>,
+    carrier: Option<&str>,
+    trailer_number: Option<&str>,
+    seal_number: Option<&str>,
+    dock_door_location_id: Option<i64>,
+    expected_time: Option<Timestamp>,
+    appointment_time: Option<Timestamp>,
+) -> AppResult<i64> {
+    let execution_barcode = normalize_execution_barcode(execution_barcode)?;
     let now = now_iso();
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO loads
-            (tenant_id, created, facility_id, inventory_owner_id, status, type, reference_number, invoice_number, carrier,
+            (tenant_id, created, facility_id, inventory_owner_id, execution_barcode,
+             status, type, reference_number, invoice_number, carrier,
              trailer_number, seal_number, dock_door_location_id, expected_time, appointment_time,
              receive_completed)
-        VALUES ($1, $2, $3, $4, 'planned', $5, $6, $7, $8, $9, $10, $11, $12, $13, false)
+        VALUES ($1, $2, $3, $4, $5, 'planned', $6, $7, $8, $9, $10, $11, $12, $13, $14, false)
         RETURNING id
         "#,
     )
@@ -519,6 +590,7 @@ pub async fn add_load(
     .bind(now)
     .bind(facility_id)
     .bind(inventory_owner_id)
+    .bind(execution_barcode)
     .bind(load_type.as_str())
     .bind(reference_number)
     .bind(invoice_number)

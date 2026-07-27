@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::expected_receiving::ConfirmationIntent;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PutawayKind {
@@ -133,11 +135,39 @@ impl PutawayCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "workflow", content = "payload", rename_all = "snake_case")]
+pub enum RfCommand {
+    Putaway(PutawayCommand),
+    ExpectedReceipt(Box<ConfirmationIntent>),
+}
+
+impl RfCommand {
+    pub const fn as_putaway(&self) -> Option<&PutawayCommand> {
+        match self {
+            Self::Putaway(command) => Some(command),
+            Self::ExpectedReceipt(_) => None,
+        }
+    }
+}
+
+impl From<PutawayCommand> for RfCommand {
+    fn from(command: PutawayCommand) -> Self {
+        Self::Putaway(command)
+    }
+}
+
+impl From<ConfirmationIntent> for RfCommand {
+    fn from(intent: ConfirmationIntent) -> Self {
+        Self::ExpectedReceipt(Box::new(intent))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DurableCommandDraft {
     pub schema_version: u16,
     pub command_id: String,
     pub idempotency_key: String,
-    pub command: PutawayCommand,
+    pub command: RfCommand,
 }
 
 impl DurableCommandDraft {
@@ -186,6 +216,7 @@ pub enum CommandOutcome {
     Claimed(Option<Box<PutawayClaim>>),
     Confirmed { task_id: i64 },
     Released { task_id: i64 },
+    ExpectedReceipt(crate::expected_receiving::ConfirmationResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -484,7 +515,8 @@ impl PutawayWorkflow {
         record_id: i64,
         draft: DurableCommandDraft,
     ) -> Transition {
-        if record_id <= 0 || self.reconcile_reason.is_some() {
+        if record_id <= 0 || self.reconcile_reason.is_some() || draft.command.as_putaway().is_none()
+        {
             return Transition::Ignored;
         }
         self.lane = CommandLane::Ready(PersistedCommand { record_id, draft });
@@ -497,7 +529,8 @@ impl PutawayWorkflow {
         draft: DurableCommandDraft,
         message: impl Into<String>,
     ) -> Transition {
-        if record_id <= 0 || self.reconcile_reason.is_some() {
+        if record_id <= 0 || self.reconcile_reason.is_some() || draft.command.as_putaway().is_none()
+        {
             return Transition::Ignored;
         }
         self.lane = CommandLane::Ambiguous {
@@ -529,7 +562,11 @@ impl PutawayWorkflow {
         if command.record_id != record_id {
             return Transition::Ignored;
         }
-        if !Self::outcome_matches(&command.draft.command, &outcome) {
+        let Some(putaway_command) = command.draft.command.as_putaway() else {
+            self.require_reconciliation("Recorded result does not match the workflow".into());
+            return Transition::Applied;
+        };
+        if !Self::outcome_matches(putaway_command, &outcome) {
             self.require_reconciliation("Recorded result does not match the command".into());
             return Transition::Applied;
         }
@@ -561,6 +598,10 @@ impl PutawayWorkflow {
                 self.claim = None;
                 self.reset_scans();
                 self.notice = Some("Putaway returned to the queue".into());
+            }
+            CommandOutcome::ExpectedReceipt(_) => {
+                self.require_reconciliation("Recorded result does not match the workflow".into());
+                return Transition::Applied;
             }
         }
         self.lane = CommandLane::Empty;
@@ -628,7 +669,7 @@ impl PutawayWorkflow {
             schema_version: 1,
             command_id,
             idempotency_key,
-            command,
+            command: command.into(),
         };
         self.lane = CommandLane::Persisting(draft.clone());
         self.error = None;
@@ -800,7 +841,8 @@ mod tests {
             idempotency_key: "key-1".into(),
             command: PutawayCommand::ClaimNext {
                 workflow: PutawayKind::Loose,
-            },
+            }
+            .into(),
         };
 
         assert_eq!(
@@ -820,7 +862,8 @@ mod tests {
             idempotency_key: "key-1".into(),
             command: PutawayCommand::ClaimNext {
                 workflow: PutawayKind::Loose,
-            },
+            }
+            .into(),
         };
 
         assert_eq!(
@@ -851,7 +894,7 @@ mod tests {
         };
         assert!(matches!(
             draft.command,
-            PutawayCommand::ConfirmLoose { task_id: 42, .. }
+            RfCommand::Putaway(PutawayCommand::ConfirmLoose { task_id: 42, .. })
         ));
     }
 
@@ -960,7 +1003,8 @@ mod tests {
             idempotency_key: "key-7".into(),
             command: PutawayCommand::ClaimNext {
                 workflow: PutawayKind::Loose,
-            },
+            }
+            .into(),
         };
 
         let payload = draft.canonical_payload().expect("payload should encode");

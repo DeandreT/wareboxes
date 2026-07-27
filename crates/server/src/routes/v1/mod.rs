@@ -18,6 +18,10 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(
+            "/expected-receiving/loads/by-barcode/:execution_barcode",
+            get(expected_receiving::get_session_by_execution_barcode),
+        )
+        .route(
             "/expected-receiving/loads/:load_id",
             get(expected_receiving::get_session),
         )
