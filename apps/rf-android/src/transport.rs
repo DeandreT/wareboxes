@@ -6,7 +6,10 @@ use url::Url;
 use wareboxes_api_contract::v1::IdempotencyKey;
 
 use crate::command_store::{DispatchAttempt, DurableHttpResponse, ExecutionScope};
-use crate::wire::build_heartbeat_request_parts;
+use crate::wire::{
+    EXPECTED_RECEIVING_BARCODE_LOOKUP_PATH, build_expected_receiving_session_path,
+    build_heartbeat_request_parts, normalize_expected_receiving_load_barcode,
+};
 
 const ACCEPT_JSON: &str = "application/json";
 const REQUEST_ID_HEADER: &str = "X-Request-Id";
@@ -58,6 +61,20 @@ impl ServerEndpoint {
             .map(|url| url.into())
             .map_err(|_| TransportBuildError::InvalidApiPath)
     }
+
+    fn api_url_with_segment(
+        &self,
+        path: &str,
+        segment: &str,
+    ) -> Result<String, TransportBuildError> {
+        let path = path.trim_end_matches('/');
+        let mut url =
+            Url::parse(&self.api_url(path)?).map_err(|_| TransportBuildError::InvalidApiPath)?;
+        url.path_segments_mut()
+            .map_err(|_| TransportBuildError::InvalidApiPath)?
+            .push(segment);
+        Ok(url.into())
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -76,6 +93,10 @@ pub enum TransportBuildError {
     InvalidIdempotencyKey,
     #[error("The heartbeat request could not be encoded")]
     InvalidHeartbeatRequest,
+    #[error("The expected receiving load ID must be positive")]
+    InvalidLoadId,
+    #[error("Scan a valid load barcode")]
+    InvalidLoadBarcode,
 }
 
 pub struct AuthenticatedTransport<'a> {
@@ -96,6 +117,16 @@ pub enum NetworkEvent {
     },
     Heartbeat {
         task_id: i64,
+        request_id: String,
+        response: Result<NetworkResponse, String>,
+    },
+    ExpectedReceivingSession {
+        load_id: i64,
+        request_id: String,
+        response: Result<NetworkResponse, String>,
+    },
+    ExpectedReceivingBarcodeLookup {
+        barcode: String,
         request_id: String,
         response: Result<NetworkResponse, String>,
     },
@@ -159,6 +190,36 @@ pub fn build_heartbeat_request(
     request
         .headers
         .insert(IDEMPOTENCY_KEY_HEADER, idempotency_key.into_inner());
+    Ok(request)
+}
+
+pub fn build_expected_receiving_session_request(
+    transport: &AuthenticatedTransport<'_>,
+    load_id: i64,
+    request_id: &str,
+) -> Result<ehttp::Request, TransportBuildError> {
+    let path = build_expected_receiving_session_path(load_id).map_err(|error| match error {
+        crate::wire::WireRequestError::InvalidLoadId => TransportBuildError::InvalidLoadId,
+        _ => TransportBuildError::InvalidApiPath,
+    })?;
+    let mut request = ehttp::Request::get(transport.endpoint.api_url(&path)?);
+    request.headers = authenticated_headers(transport, request_id);
+    Ok(request)
+}
+
+pub fn build_expected_receiving_barcode_lookup_request(
+    transport: &AuthenticatedTransport<'_>,
+    barcode: &str,
+    request_id: &str,
+) -> Result<ehttp::Request, TransportBuildError> {
+    let barcode = normalize_expected_receiving_load_barcode(barcode)
+        .map_err(|_| TransportBuildError::InvalidLoadBarcode)?;
+    let mut request = ehttp::Request::get(
+        transport
+            .endpoint
+            .api_url_with_segment(EXPECTED_RECEIVING_BARCODE_LOOKUP_PATH, &barcode)?,
+    );
+    request.headers = authenticated_headers(transport, request_id);
     Ok(request)
 }
 
@@ -253,6 +314,46 @@ pub fn send_heartbeat(
     });
 }
 
+pub fn send_expected_receiving_session(
+    request: ehttp::Request,
+    load_id: i64,
+    request_id: String,
+    sender: Sender<NetworkEvent>,
+    context: egui::Context,
+) {
+    ehttp::fetch(request, move |result| {
+        let response = result
+            .map(NetworkResponse::from)
+            .map_err(|error| error.to_string());
+        let _ = sender.send(NetworkEvent::ExpectedReceivingSession {
+            load_id,
+            request_id,
+            response,
+        });
+        context.request_repaint();
+    });
+}
+
+pub fn send_expected_receiving_barcode_lookup(
+    request: ehttp::Request,
+    barcode: String,
+    request_id: String,
+    sender: Sender<NetworkEvent>,
+    context: egui::Context,
+) {
+    ehttp::fetch(request, move |result| {
+        let response = result
+            .map(NetworkResponse::from)
+            .map_err(|error| error.to_string());
+        let _ = sender.send(NetworkEvent::ExpectedReceivingBarcodeLookup {
+            barcode,
+            request_id,
+            response,
+        });
+        context.request_repaint();
+    });
+}
+
 pub fn send_command(
     request: ehttp::Request,
     record_id: i64,
@@ -289,10 +390,9 @@ impl From<ehttp::Response> for NetworkResponse {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::command_store::CommandStore;
     use crate::workflow::{DurableCommandDraft, PutawayCommand, PutawayKind};
-
-    use super::*;
 
     fn attempt() -> DispatchAttempt {
         let mut store = CommandStore::open_in_memory().unwrap();
@@ -310,7 +410,8 @@ mod tests {
                     idempotency_key: "putaway-key-1".into(),
                     command: PutawayCommand::ClaimNext {
                         workflow: PutawayKind::Loose,
-                    },
+                    }
+                    .into(),
                 },
             )
             .unwrap();
@@ -455,6 +556,113 @@ mod tests {
     }
 
     #[test]
+    fn expected_receiving_session_get_has_authenticated_headers_without_idempotency() {
+        let endpoint = ServerEndpoint::parse("https://example.com/wareboxes").unwrap();
+        let scope = ExecutionScope {
+            tenant_id: 7,
+            operator_id: 8,
+            device_id: "rf-01".into(),
+        };
+        let request = build_expected_receiving_session_request(
+            &AuthenticatedTransport {
+                endpoint: &endpoint,
+                token: "session-secret",
+                scope: &scope,
+            },
+            11,
+            "rf-receiving-session-1",
+        )
+        .unwrap();
+
+        assert_eq!(request.method, "GET");
+        assert_eq!(
+            request.url,
+            "https://example.com/wareboxes/api/v1/expected-receiving/loads/11"
+        );
+        assert!(request.body.is_empty());
+        assert_eq!(
+            request.headers.get("Authorization"),
+            Some("Bearer session-secret")
+        );
+        assert_eq!(request.headers.get(TENANT_ID_HEADER), Some("7"));
+        assert_eq!(
+            request.headers.get(REQUEST_ID_HEADER),
+            Some("rf-receiving-session-1")
+        );
+        assert_eq!(request.headers.get(IDEMPOTENCY_KEY_HEADER), None);
+        assert_eq!(request.headers.get("Content-Type"), None);
+    }
+
+    #[test]
+    fn expected_receiving_barcode_lookup_encodes_one_path_segment() {
+        let endpoint = ServerEndpoint::parse("https://example.com/wareboxes").unwrap();
+        let scope = ExecutionScope {
+            tenant_id: 7,
+            operator_id: 8,
+            device_id: "rf-01".into(),
+        };
+        let transport = AuthenticatedTransport {
+            endpoint: &endpoint,
+            token: "session-secret",
+            scope: &scope,
+        };
+        assert_eq!(
+            endpoint
+                .api_url_with_segment(EXPECTED_RECEIVING_BARCODE_LOOKUP_PATH, "ASN/50%?#東京")
+                .unwrap(),
+            "https://example.com/wareboxes/api/v1/expected-receiving/loads/by-barcode/ASN%2F50%25%3F%23%E6%9D%B1%E4%BA%AC"
+        );
+        let request = build_expected_receiving_barcode_lookup_request(
+            &transport,
+            " asn:50.1_2-3 ",
+            "rf-receiving-barcode-1",
+        )
+        .unwrap();
+
+        assert_eq!(request.method, "GET");
+        assert_eq!(
+            request.url,
+            "https://example.com/wareboxes/api/v1/expected-receiving/loads/by-barcode/ASN:50.1_2-3"
+        );
+        assert_eq!(
+            request.headers.get("Authorization"),
+            Some("Bearer session-secret")
+        );
+        assert_eq!(request.headers.get(TENANT_ID_HEADER), Some("7"));
+        assert_eq!(request.headers.get(IDEMPOTENCY_KEY_HEADER), None);
+
+        for invalid in ["", "-ASN-1", "ASN/1", "ASN%1", "ASN?1", "ASN#1", "東京"] {
+            assert!(matches!(
+                build_expected_receiving_barcode_lookup_request(
+                    &transport,
+                    invalid,
+                    "rf-receiving-barcode-2"
+                ),
+                Err(TransportBuildError::InvalidLoadBarcode)
+            ));
+        }
+    }
+
+    #[test]
+    fn expected_receiving_transport_rejects_invalid_load_identity() {
+        let endpoint = ServerEndpoint::parse("https://example.com").unwrap();
+        let scope = ExecutionScope {
+            tenant_id: 7,
+            operator_id: 8,
+            device_id: "rf-01".into(),
+        };
+        let transport = AuthenticatedTransport {
+            endpoint: &endpoint,
+            token: "session-secret",
+            scope: &scope,
+        };
+        assert!(matches!(
+            build_expected_receiving_session_request(&transport, 0, "request-1"),
+            Err(TransportBuildError::InvalidLoadId)
+        ));
+    }
+
+    #[test]
     fn retry_changes_only_transport_attempt_identity() {
         let mut store = CommandStore::open_in_memory().unwrap();
         let scope = ExecutionScope {
@@ -471,7 +679,8 @@ mod tests {
                     idempotency_key: "putaway-key-2".into(),
                     command: PutawayCommand::ClaimNext {
                         workflow: PutawayKind::Loose,
-                    },
+                    }
+                    .into(),
                 },
             )
             .unwrap();

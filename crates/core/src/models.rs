@@ -1142,6 +1142,7 @@ pub struct Load {
     pub facility_name: Option<String>,
     pub inventory_owner_id: i64,
     pub inventory_owner_name: Option<String>,
+    pub execution_barcode: String,
     pub status: LoadStatus,
     pub r#type: LoadType,
     pub reference_number: Option<String>,

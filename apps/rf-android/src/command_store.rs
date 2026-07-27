@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::wire::{
     DurableHttpRequest, HttpMethod, ResponseKind, WireRequestError, build_durable_request,
 };
-use crate::workflow::{DurableCommandDraft, PutawayCommand};
+use crate::workflow::{DurableCommandDraft, PutawayCommand, RfCommand};
 
 mod schema;
 
@@ -52,6 +52,7 @@ pub enum CommandOperation {
     ConfirmLoose,
     ConfirmLicensePlate,
     Release,
+    ExpectedReceiptConfirmation,
 }
 
 impl CommandOperation {
@@ -62,6 +63,7 @@ impl CommandOperation {
             Self::ConfirmLoose => "confirm_loose",
             Self::ConfirmLicensePlate => "confirm_license_plate",
             Self::Release => "release",
+            Self::ExpectedReceiptConfirmation => "expected_receipt_confirmation",
         }
     }
 
@@ -72,6 +74,7 @@ impl CommandOperation {
             "confirm_loose" => Ok(Self::ConfirmLoose),
             "confirm_license_plate" => Ok(Self::ConfirmLicensePlate),
             "release" => Ok(Self::Release),
+            "expected_receipt_confirmation" => Ok(Self::ExpectedReceiptConfirmation),
             _ => Err(CommandStoreError::CorruptRecord(
                 "unknown command operation".into(),
             )),
@@ -79,14 +82,17 @@ impl CommandOperation {
     }
 }
 
-impl From<&PutawayCommand> for CommandOperation {
-    fn from(command: &PutawayCommand) -> Self {
+impl From<&RfCommand> for CommandOperation {
+    fn from(command: &RfCommand) -> Self {
         match command {
-            PutawayCommand::ClaimNext { .. } => Self::ClaimNext,
-            PutawayCommand::ClaimById { .. } => Self::ClaimById,
-            PutawayCommand::ConfirmLoose { .. } => Self::ConfirmLoose,
-            PutawayCommand::ConfirmLicensePlate { .. } => Self::ConfirmLicensePlate,
-            PutawayCommand::Release { .. } => Self::Release,
+            RfCommand::Putaway(PutawayCommand::ClaimNext { .. }) => Self::ClaimNext,
+            RfCommand::Putaway(PutawayCommand::ClaimById { .. }) => Self::ClaimById,
+            RfCommand::Putaway(PutawayCommand::ConfirmLoose { .. }) => Self::ConfirmLoose,
+            RfCommand::Putaway(PutawayCommand::ConfirmLicensePlate { .. }) => {
+                Self::ConfirmLicensePlate
+            }
+            RfCommand::Putaway(PutawayCommand::Release { .. }) => Self::Release,
+            RfCommand::ExpectedReceipt(_) => Self::ExpectedReceiptConfirmation,
         }
     }
 }
@@ -183,7 +189,7 @@ pub enum CommandStoreError {
     ServerUrlChangeBlocked,
     #[error("the command identity already belongs to different immutable content")]
     IdentityConflict,
-    #[error("another unresolved putaway command already exists on this device")]
+    #[error("another unresolved command already exists on this device")]
     UnresolvedCommandExists,
     #[error("durable command {0} does not exist")]
     NotFound(i64),
@@ -938,6 +944,12 @@ fn decode_record(raw: RawRecord) -> Result<DurableCommandRecord, CommandStoreErr
             "request body hash does not match".into(),
         ));
     }
+    let expected_request = build_durable_request(&draft)?;
+    if request != expected_request {
+        return Err(CommandStoreError::CorruptRecord(
+            "durable request does not match its typed command".into(),
+        ));
+    }
     let operation = CommandOperation::parse(&raw.operation)?;
     if operation != CommandOperation::from(&draft.command) {
         return Err(CommandStoreError::CorruptRecord(
@@ -1143,6 +1155,7 @@ const fn response_kind_name(kind: ResponseKind) -> &'static str {
         ResponseKind::LooseConfirmation => "loose_confirmation",
         ResponseKind::LicensePlateConfirmation => "license_plate_confirmation",
         ResponseKind::Release => "release",
+        ResponseKind::ExpectedReceiptConfirmation => "expected_receipt_confirmation",
     }
 }
 
@@ -1153,6 +1166,7 @@ fn parse_response_kind(value: &str) -> Result<ResponseKind, CommandStoreError> {
         "loose_confirmation" => Ok(ResponseKind::LooseConfirmation),
         "license_plate_confirmation" => Ok(ResponseKind::LicensePlateConfirmation),
         "release" => Ok(ResponseKind::Release),
+        "expected_receipt_confirmation" => Ok(ResponseKind::ExpectedReceiptConfirmation),
         _ => Err(CommandStoreError::CorruptRecord(
             "unknown response kind".into(),
         )),
@@ -1164,7 +1178,7 @@ fn bounded(message: &str) -> String {
 }
 
 pub const fn is_retryable_http_status(status: u16) -> bool {
-    status == 401 || status == 429 || (status >= 500 && status < 600)
+    status == 401 || status == 408 || status == 429 || (status >= 500 && status < 600)
 }
 
 fn now_ms() -> i64 {

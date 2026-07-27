@@ -13,14 +13,34 @@ use wareboxes_core::models::{
 use super::error::{V1Error, V1Result};
 use crate::auth::CurrentTenant;
 use crate::error::AppError;
-use crate::repo;
 use crate::request_context::IdempotencyKey;
 use crate::state::AppState;
+use crate::{permissions, repo};
 
 const PERMISSION: &str = "wms";
 const MAX_BARCODE_LENGTH: usize = 200;
 const MAX_DIMENSION_LENGTH: usize = 200;
 const MAX_NOTE_LENGTH: usize = 1_000;
+
+pub async fn get_session_by_execution_barcode(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(execution_barcode): Path<String>,
+) -> V1Result<Json<ExpectedReceivingSessionResponse>> {
+    if !permissions::user_has_permission(&state.db, user.tenant.tenant_id, user.user.id, PERMISSION)
+        .await?
+    {
+        return Err(AppError::not_found("expected receiving load").into());
+    }
+    let session = repo::expected_receiving::get_expected_receiving_session_by_execution_barcode(
+        &state.db,
+        &user.tenant,
+        &execution_barcode,
+    )
+    .await?;
+
+    Ok(Json(map_session(session)))
+}
 
 pub async fn get_session(
     State(state): State<AppState>,

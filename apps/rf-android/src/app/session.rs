@@ -4,21 +4,86 @@ use wareboxes_api_contract::v1::{
 };
 
 use crate::command_store::{
-    CommandStatus, DurableCommandRecord, DurableHttpResponse, ExecutionScope,
+    CommandOperation, CommandStatus, DurableCommandRecord, DurableHttpResponse, ExecutionScope,
     is_retryable_http_status,
+};
+use crate::expected_receiving::{
+    ConfirmationFailure, ConfirmationId, LoadBarcode, LoadResolutionFailure, LoadResolutionId,
+    ReceivingEffect, ReceivingTransition, ReconciliationReason, RefreshFailure, RefreshId,
 };
 use crate::transport::{
     AuthenticatedTransport, NetworkEvent, NetworkResponse, ServerEndpoint, build_command_request,
-    build_current_claim_request, build_session_request, send_command, send_current_claim,
+    build_current_claim_request, build_expected_receiving_barcode_lookup_request,
+    build_expected_receiving_session_request, build_session_request, send_command,
+    send_current_claim, send_expected_receiving_barcode_lookup, send_expected_receiving_session,
     send_session,
 };
-use crate::wire::{decode_claim_response, decode_command_response};
-use crate::workflow::WorkflowEffect;
+use crate::wire::{decode_claim_response, decode_command_response, decode_receiving_session};
+use crate::workflow::{DurableCommandDraft, RfCommand, WorkflowEffect};
 
 use super::{
     RF_SESSION_PATH, RfApp, RfSession, SessionGate, rejected_command_message,
     session_error_message, support_message, valid_email,
 };
+
+mod receiving;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReceivingRequestKind {
+    Resolve {
+        resolution_id: LoadResolutionId,
+        barcode: LoadBarcode,
+    },
+    Refresh {
+        refresh_id: RefreshId,
+        load_id: i64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ReceivingRequest {
+    request_id: String,
+    kind: ReceivingRequestKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReceivingCommandPhase {
+    Ready,
+    InFlight,
+    Ambiguous,
+    ReconcileRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ReceivingCommandRuntime {
+    record_id: i64,
+    confirmation_id: ConfirmationId,
+    phase: ReceivingCommandPhase,
+    message: Option<String>,
+}
+
+impl ReceivingCommandRuntime {
+    pub(super) const fn phase(&self) -> ReceivingCommandPhase {
+        self.phase
+    }
+
+    pub(super) fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+
+    #[cfg(all(debug_assertions, not(target_os = "android")))]
+    pub(super) fn debug_ambiguous(
+        confirmation_id: ConfirmationId,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            record_id: 1,
+            confirmation_id,
+            phase: ReceivingCommandPhase::Ambiguous,
+            message: Some(message.into()),
+        }
+    }
+}
 
 impl RfApp {
     pub(super) fn begin_sign_in(&mut self, context: &egui::Context) {
@@ -89,6 +154,20 @@ impl RfApp {
                     request_id,
                     response,
                 } => self.handle_heartbeat_response(context, task_id, &request_id, response),
+                NetworkEvent::ExpectedReceivingSession {
+                    load_id,
+                    request_id,
+                    response,
+                } => {
+                    self.handle_receiving_session_response(context, load_id, &request_id, response)
+                }
+                NetworkEvent::ExpectedReceivingBarcodeLookup {
+                    barcode,
+                    request_id,
+                    response,
+                } => {
+                    self.handle_receiving_barcode_response(context, &barcode, &request_id, response)
+                }
                 NetworkEvent::Command {
                     record_id,
                     attempt_id,
@@ -227,6 +306,10 @@ impl RfApp {
 
     fn restore_command(&mut self, context: &egui::Context, record: DurableCommandRecord) {
         self.session_gate = SessionGate::Ready;
+        if record.operation == CommandOperation::ExpectedReceiptConfirmation {
+            self.restore_receiving_command(record);
+            return;
+        }
         match record.status {
             CommandStatus::Persisted => {
                 let transition = self
@@ -269,6 +352,79 @@ impl RfApp {
                 );
             }
             CommandStatus::Completed | CommandStatus::Rejected => {}
+        }
+    }
+
+    fn restore_receiving_command(&mut self, record: DurableCommandRecord) {
+        let RfCommand::ExpectedReceipt(intent) = &record.draft.command else {
+            self.require_receiving_reconciliation(
+                "The saved receipt does not contain a receiving command.",
+            );
+            return;
+        };
+        let confirmation_id = if let Some(runtime) = self
+            .receiving_command
+            .as_ref()
+            .filter(|runtime| runtime.record_id == record.record_id)
+        {
+            runtime.confirmation_id
+        } else {
+            match self
+                .receiving
+                .restore_pending_confirmation((**intent).clone())
+            {
+                Ok(confirmation_id) => confirmation_id,
+                Err(_) => {
+                    self.require_receiving_reconciliation(
+                        "The saved receipt recovery snapshot is invalid.",
+                    );
+                    return;
+                }
+            }
+        };
+        self.work_mode = super::WorkMode::Receive;
+        let phase = match record.status {
+            CommandStatus::Persisted => ReceivingCommandPhase::Ready,
+            CommandStatus::Ambiguous | CommandStatus::Retryable => ReceivingCommandPhase::Ambiguous,
+            CommandStatus::ResponseRecorded => ReceivingCommandPhase::InFlight,
+            CommandStatus::ReconcileRequired | CommandStatus::Dispatching => {
+                ReceivingCommandPhase::ReconcileRequired
+            }
+            CommandStatus::Completed | CommandStatus::Rejected => return,
+        };
+        self.receiving_command = Some(ReceivingCommandRuntime {
+            record_id: record.record_id,
+            confirmation_id,
+            phase,
+            message: match phase {
+                ReceivingCommandPhase::Ambiguous => Some(
+                    "The server may have received this receipt. Check it before continuing.".into(),
+                ),
+                ReceivingCommandPhase::ReconcileRequired => {
+                    Some("Saved receiving work needs supervisor review.".into())
+                }
+                ReceivingCommandPhase::Ready | ReceivingCommandPhase::InFlight => None,
+            },
+        });
+        match record.status {
+            CommandStatus::ResponseRecorded => match record.response.clone() {
+                Some(response) => {
+                    let scope = record.scope.clone();
+                    self.apply_recorded_response(&scope, record, response);
+                }
+                None => self
+                    .require_receiving_reconciliation("The saved receipt response is incomplete."),
+            },
+            CommandStatus::ReconcileRequired | CommandStatus::Dispatching => {
+                self.require_receiving_reconciliation(
+                    "Saved receiving work needs supervisor review before inventory moves.",
+                );
+            }
+            CommandStatus::Persisted
+            | CommandStatus::Ambiguous
+            | CommandStatus::Retryable
+            | CommandStatus::Completed
+            | CommandStatus::Rejected => {}
         }
     }
 
@@ -510,9 +666,19 @@ impl RfApp {
         response: Result<DurableHttpResponse, String>,
     ) {
         let Some(scope) = self.execution_scope.clone() else {
-            self.workflow.require_reconciliation(
-                "The authenticated device scope was lost during dispatch.".into(),
-            );
+            if self
+                .receiving_command
+                .as_ref()
+                .is_some_and(|runtime| runtime.record_id == record_id)
+            {
+                self.require_receiving_reconciliation(
+                    "The authenticated device scope was lost during dispatch.",
+                );
+            } else {
+                self.workflow.require_reconciliation(
+                    "The authenticated device scope was lost during dispatch.".into(),
+                );
+            }
             return;
         };
         let response = match response {
@@ -528,16 +694,36 @@ impl RfApp {
                         )
                         .ok()
                 });
-                if stored.is_some() {
-                    self.workflow.dispatch_ambiguous(
-                        record_id,
-                        "The server may have received the scan. Check it before continuing.",
-                    );
+                if let Some(stored) = stored {
+                    if stored.operation == CommandOperation::ExpectedReceiptConfirmation {
+                        if let Some(runtime) = self.receiving_command.as_mut() {
+                            runtime.phase = ReceivingCommandPhase::Ambiguous;
+                            runtime.message = Some(
+                                "The server may have received the receipt. Check it before continuing."
+                                    .into(),
+                            );
+                        }
+                    } else {
+                        self.workflow.dispatch_ambiguous(
+                            record_id,
+                            "The server may have received the scan. Check it before continuing.",
+                        );
+                    }
                     self.connectivity_notice = Some("Connection lost.".into());
                 } else {
-                    self.workflow.require_reconciliation(
-                        "The interrupted command could not be saved for recovery.".into(),
-                    );
+                    if self
+                        .receiving_command
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.record_id == record_id)
+                    {
+                        self.require_receiving_reconciliation(
+                            "The interrupted receipt could not be saved for recovery.",
+                        );
+                    } else {
+                        self.workflow.require_reconciliation(
+                            "The interrupted command could not be saved for recovery.".into(),
+                        );
+                    }
                 }
                 return;
             }
@@ -550,17 +736,38 @@ impl RfApp {
                     .ok()
             });
             let Some(stored) = stored else {
-                self.workflow.require_reconciliation(
-                    "The retryable server result could not be saved.".into(),
-                );
+                if self
+                    .receiving_command
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.record_id == record_id)
+                {
+                    self.require_receiving_reconciliation(
+                        "The retryable receipt result could not be saved.",
+                    );
+                } else {
+                    self.workflow.require_reconciliation(
+                        "The retryable server result could not be saved.".into(),
+                    );
+                }
                 return;
             };
+            let is_receiving = stored.operation == CommandOperation::ExpectedReceiptConfirmation;
             if response.status == 401 {
-                self.workflow.restore_ambiguous_command(
-                    record_id,
-                    stored.draft,
-                    "Sign in with the same operator account to recover this saved scan.",
-                );
+                if is_receiving {
+                    if let Some(runtime) = self.receiving_command.as_mut() {
+                        runtime.phase = ReceivingCommandPhase::Ambiguous;
+                        runtime.message = Some(
+                            "Sign in with the same operator account to recover this receipt."
+                                .into(),
+                        );
+                    }
+                } else {
+                    self.workflow.restore_ambiguous_command(
+                        record_id,
+                        stored.draft,
+                        "Sign in with the same operator account to recover this saved scan.",
+                    );
+                }
                 self.require_reauthentication_with_message(
                     Some(scope),
                     "Session expired. Sign in to recover the saved scan.",
@@ -570,10 +777,20 @@ impl RfApp {
                     ),
                 );
             } else {
-                self.workflow.dispatch_ambiguous(
-                    record_id,
-                    "The service is temporarily unavailable. Check the saved scan again.",
-                );
+                if is_receiving {
+                    if let Some(runtime) = self.receiving_command.as_mut() {
+                        runtime.phase = ReceivingCommandPhase::Ambiguous;
+                        runtime.message = Some(
+                            "The service is temporarily unavailable. Check the saved receipt again."
+                                .into(),
+                        );
+                    }
+                } else {
+                    self.workflow.dispatch_ambiguous(
+                        record_id,
+                        "The service is temporarily unavailable. Check the saved scan again.",
+                    );
+                }
                 self.connectivity_notice = Some("Server unavailable.".into());
             }
             return;
@@ -586,9 +803,19 @@ impl RfApp {
         {
             Some(Ok(record)) => record,
             Some(Err(_)) | None => {
-                self.workflow.require_reconciliation(
-                    "The server result could not be stored durably.".into(),
-                );
+                if self
+                    .receiving_command
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.record_id == record_id)
+                {
+                    self.require_receiving_reconciliation(
+                        "The receipt result could not be stored durably.",
+                    );
+                } else {
+                    self.workflow.require_reconciliation(
+                        "The server result could not be stored durably.".into(),
+                    );
+                }
                 return;
             }
         };
@@ -608,6 +835,9 @@ impl RfApp {
                 response.status,
                 &response.body,
             ) {
+                Ok(crate::workflow::CommandOutcome::ExpectedReceipt(result)) => {
+                    self.apply_receiving_success(scope, record_id, result);
+                }
                 Ok(outcome) => {
                     if self
                         .finalize_record(scope, record_id, CommandStatus::Completed, None)
@@ -617,11 +847,21 @@ impl RfApp {
                         self.connectivity_notice = None;
                     }
                 }
-                Err(_) => self.require_record_reconciliation(
-                    scope,
-                    record_id,
-                    "The server returned an invalid command result.",
-                ),
+                Err(_) => {
+                    if recorded.operation == CommandOperation::ExpectedReceiptConfirmation {
+                        self.require_receiving_record_reconciliation(
+                            scope,
+                            record_id,
+                            "The server returned an invalid receipt result.",
+                        );
+                    } else {
+                        self.require_record_reconciliation(
+                            scope,
+                            record_id,
+                            "The server returned an invalid command result.",
+                        );
+                    }
+                }
             }
             return;
         }
@@ -636,6 +876,10 @@ impl RfApp {
             && !matches!(reason, Some(ErrorReason::IdempotencyKeyReused))
         {
             let message = rejected_command_message(error.as_ref());
+            if recorded.operation == CommandOperation::ExpectedReceiptConfirmation {
+                self.apply_receiving_rejection(scope, record_id, &message);
+                return;
+            }
             if self
                 .finalize_record(scope, record_id, CommandStatus::Rejected, Some(&message))
                 .is_some()
@@ -647,7 +891,123 @@ impl RfApp {
                 "Work needs review. Do not move or scan inventory.",
                 request_id,
             );
-            self.require_record_reconciliation(scope, record_id, &message);
+            if recorded.operation == CommandOperation::ExpectedReceiptConfirmation {
+                self.require_receiving_record_reconciliation(scope, record_id, &message);
+            } else {
+                self.require_record_reconciliation(scope, record_id, &message);
+            }
+        }
+    }
+
+    fn apply_receiving_rejection(&mut self, scope: &ExecutionScope, record_id: i64, message: &str) {
+        let Some(confirmation_id) = self.receiving_command.as_ref().and_then(|runtime| {
+            (runtime.record_id == record_id).then_some(runtime.confirmation_id)
+        }) else {
+            self.require_receiving_record_reconciliation(
+                scope,
+                record_id,
+                "The rejected receipt does not match the saved workflow.",
+            );
+            return;
+        };
+        let mut next = self.receiving.clone();
+        let transition = next.confirmation_failed(confirmation_id, ConfirmationFailure::Rejected);
+        if !matches!(transition, ReceivingTransition::Applied) {
+            self.require_receiving_record_reconciliation(
+                scope,
+                record_id,
+                "The rejected receipt does not match the saved workflow.",
+            );
+            return;
+        }
+        if self
+            .finalize_receiving_record(scope, record_id, CommandStatus::Rejected, Some(message))
+            .is_some()
+        {
+            self.receiving = next;
+            self.receiving_command = None;
+            self.emit_receiving_transition(transition);
+        }
+    }
+
+    fn apply_receiving_success(
+        &mut self,
+        scope: &ExecutionScope,
+        record_id: i64,
+        result: crate::expected_receiving::ConfirmationResult,
+    ) {
+        let Some(confirmation_id) = self.receiving_command.as_ref().and_then(|runtime| {
+            (runtime.record_id == record_id).then_some(runtime.confirmation_id)
+        }) else {
+            self.require_receiving_record_reconciliation(
+                scope,
+                record_id,
+                "The receipt result does not match the saved workflow.",
+            );
+            return;
+        };
+        let mut next = self.receiving.clone();
+        let transition = next.confirmation_succeeded(confirmation_id, result);
+        if matches!(transition, ReceivingTransition::ReconciliationRequired(_)) {
+            let message = "The receipt result conflicts with the saved pre-command state.";
+            if self
+                .finalize_receiving_record(
+                    scope,
+                    record_id,
+                    CommandStatus::ReconcileRequired,
+                    Some(message),
+                )
+                .is_some()
+            {
+                self.receiving = next;
+                if let Some(runtime) = self.receiving_command.as_mut() {
+                    runtime.phase = ReceivingCommandPhase::ReconcileRequired;
+                    runtime.message = Some(message.into());
+                }
+            }
+            return;
+        }
+        if !matches!(
+            transition,
+            ReceivingTransition::Applied | ReceivingTransition::Effect(_)
+        ) {
+            self.require_receiving_record_reconciliation(
+                scope,
+                record_id,
+                "The receipt result does not match the saved workflow.",
+            );
+            return;
+        }
+        if self
+            .finalize_receiving_record(scope, record_id, CommandStatus::Completed, None)
+            .is_some()
+        {
+            self.receiving = next;
+            self.receiving_command = None;
+            self.emit_receiving_transition(transition);
+            self.connectivity_notice = None;
+        }
+    }
+
+    fn finalize_receiving_record(
+        &mut self,
+        scope: &ExecutionScope,
+        record_id: i64,
+        status: CommandStatus,
+        message: Option<&str>,
+    ) -> Option<DurableCommandRecord> {
+        match self
+            .command_store
+            .as_mut()
+            .map(|store| store.finalize(scope, record_id, status, message))
+        {
+            Some(Ok(record)) => Some(record),
+            Some(Err(_)) | None => {
+                self.require_receiving_reconciliation(
+                    "The durable receipt could not be finalized.",
+                );
+                None
+            }
         }
     }
 
@@ -665,8 +1025,19 @@ impl RfApp {
         {
             Some(Ok(record)) => Some(record),
             Some(Err(_)) | None => {
-                self.workflow
-                    .require_reconciliation("The durable command could not be finalized.".into());
+                if self
+                    .receiving_command
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.record_id == record_id)
+                {
+                    self.require_receiving_reconciliation(
+                        "The durable receipt could not be finalized.",
+                    );
+                } else {
+                    self.workflow.require_reconciliation(
+                        "The durable command could not be finalized.".into(),
+                    );
+                }
                 None
             }
         }
@@ -687,7 +1058,34 @@ impl RfApp {
             )
             .is_some()
         {
-            self.workflow.require_reconciliation(message.into());
+            if self
+                .receiving_command
+                .as_ref()
+                .is_some_and(|runtime| runtime.record_id == record_id)
+            {
+                self.require_receiving_reconciliation(message);
+            } else {
+                self.workflow.require_reconciliation(message.into());
+            }
+        }
+    }
+
+    fn require_receiving_record_reconciliation(
+        &mut self,
+        scope: &ExecutionScope,
+        record_id: i64,
+        message: &str,
+    ) {
+        if self
+            .finalize_receiving_record(
+                scope,
+                record_id,
+                CommandStatus::ReconcileRequired,
+                Some(message),
+            )
+            .is_some()
+        {
+            self.require_receiving_reconciliation(message);
         }
     }
 

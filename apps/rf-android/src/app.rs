@@ -7,6 +7,7 @@ use lucide_icons::Icon;
 use wareboxes_api_contract::v1::{ErrorReason, ErrorResponse};
 
 use crate::command_store::{CommandStore, ExecutionScope};
+use crate::expected_receiving::{ExpectedReceivingReducer, ReceivingEffect};
 use crate::transport::{NetworkEvent, ServerEndpoint};
 use crate::workflow::{
     Activity, Location, PutawayClaim, PutawayKind, PutawayWork, PutawayWorkflow, ReleaseReason,
@@ -14,7 +15,10 @@ use crate::workflow::{
 };
 
 mod heartbeat;
+mod receiving;
 mod session;
+
+use receiving::{ReceivingUiState, WorkMode};
 
 const ICON_FONT: &str = "lucide";
 const RF_SESSION_PATH: &str = "/api/v1/rf/sessions";
@@ -35,8 +39,14 @@ enum SessionGate {
 }
 
 pub struct RfApp {
+    work_mode: WorkMode,
     workflow: PutawayWorkflow,
     effects: VecDeque<WorkflowEffect>,
+    receiving: ExpectedReceivingReducer,
+    receiving_effects: VecDeque<ReceivingEffect>,
+    receiving_request: Option<session::ReceivingRequest>,
+    receiving_command: Option<session::ReceivingCommandRuntime>,
+    receiving_ui: ReceivingUiState,
     command_store: Option<CommandStore>,
     execution_scope: Option<ExecutionScope>,
     storage_error: Option<String>,
@@ -85,8 +95,14 @@ impl RfApp {
         Self::install_style(creation_context);
         let (network_tx, network_rx) = mpsc::channel();
         Self {
+            work_mode: WorkMode::Putaway,
             workflow: PutawayWorkflow::default(),
             effects: VecDeque::new(),
+            receiving: ExpectedReceivingReducer::default(),
+            receiving_effects: VecDeque::new(),
+            receiving_request: None,
+            receiving_command: None,
+            receiving_ui: ReceivingUiState::default(),
             command_store: None,
             execution_scope: None,
             storage_error: Some(message.into()),
@@ -151,9 +167,15 @@ impl RfApp {
                 false,
             ),
         };
-        Self {
+        let app = Self {
+            work_mode: WorkMode::Putaway,
             workflow: PutawayWorkflow::default(),
             effects: VecDeque::new(),
+            receiving: ExpectedReceivingReducer::default(),
+            receiving_effects: VecDeque::new(),
+            receiving_request: None,
+            receiving_command: None,
+            receiving_ui: ReceivingUiState::default(),
             command_store,
             execution_scope: None,
             storage_error,
@@ -180,7 +202,14 @@ impl RfApp {
             scan_focus: None,
             field_focus_pending: true,
             heartbeat: heartbeat::HeartbeatRuntime::new(),
-        }
+        };
+        #[cfg(all(debug_assertions, not(target_os = "android")))]
+        let app = {
+            let mut app = app;
+            app.open_debug_preview_from_environment();
+            app
+        };
+        app
     }
 
     fn install_style(creation_context: &eframe::CreationContext<'_>) {
@@ -594,40 +623,6 @@ impl RfApp {
         self.execution_scope = Some(scope);
         self.session_gate = SessionGate::Ready;
         self.workflow.load_debug_claim(Self::debug_claim());
-    }
-
-    fn header(&self, ui: &mut egui::Ui) {
-        let (label, color) =
-            self.heartbeat_header()
-                .unwrap_or_else(|| match self.workflow.activity() {
-                    Activity::Idle => ("READY", Self::accent()),
-                    Activity::Active => ("ACTIVE", Self::accent()),
-                    Activity::Persisting => ("SAVING", Self::warning()),
-                    Activity::ReadyToDispatch => ("QUEUED", Self::warning()),
-                    Activity::InFlight => ("SENDING", Self::warning()),
-                    Activity::Ambiguous => ("CHECK", Self::danger()),
-                    Activity::ReconcileRequired => ("BLOCKED", Self::danger()),
-                });
-        egui::containers::Sides::new().height(34.0).show(
-            ui,
-            |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(Self::icon(Icon::PackageOpen).color(Self::accent()));
-                    ui.heading("Putaway");
-                });
-            },
-            |ui| {
-                ui.label(egui::RichText::new(label).strong().color(color));
-            },
-        );
-        if let Some(session) = self.session.as_ref() {
-            ui.label(
-                egui::RichText::new(&session.tenant_name)
-                    .small()
-                    .color(egui::Color32::from_rgb(166, 177, 173)),
-            );
-        }
-        ui.separator();
     }
 
     fn idle(&mut self, ui: &mut egui::Ui) {
@@ -1124,6 +1119,10 @@ fn default_server_url() -> String {
 impl eframe::App for RfApp {
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.process_network_events(root_ui.ctx());
+        self.process_receiving_effects(root_ui.ctx());
+        if self.receiving_command.is_some() {
+            self.work_mode = WorkMode::Receive;
+        }
         self.persist_queued_commands();
         self.dispatch_queued_commands(root_ui.ctx());
         self.maintain_claim_heartbeat(root_ui.ctx());
@@ -1142,21 +1141,24 @@ impl eframe::App for RfApp {
             return;
         }
 
-        egui::Panel::top("putaway_header")
+        egui::Panel::top("rf_work_header")
+            .exact_size(150.0)
             .frame(
                 egui::Frame::side_top_panel(root_ui.style())
                     .inner_margin(egui::Margin::symmetric(12, 10)),
             )
-            .show(root_ui, |ui| self.header(ui));
+            .show(root_ui, |ui| self.work_header(ui));
 
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(root_ui.style()).inner_margin(egui::Margin::same(12)))
             .show(root_ui, |ui| {
                 egui::ScrollArea::vertical()
-                    .id_salt("putaway_work")
+                    .id_salt(("rf_work", self.work_mode))
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if let Some(notice) = self.connectivity_notice.clone() {
+                        if self.work_mode == WorkMode::Putaway
+                            && let Some(notice) = self.connectivity_notice.clone()
+                        {
                             Self::message_band(ui, Self::warning(), Icon::WifiOff, &notice);
                             if self.workflow.activity() == Activity::Idle
                                 && self.expected_claim_request_id.is_none()
@@ -1185,25 +1187,33 @@ impl eframe::App for RfApp {
                                 "Checking saved work",
                                 "Waiting for the server",
                             );
-                        } else if self.workflow.claim().is_some() {
-                            self.active_work(ui);
                         } else {
-                            match self.workflow.activity() {
-                                Activity::Idle => self.idle(ui),
-                                Activity::Active => {
-                                    self.workflow.require_reconciliation(
-                                        "Active work is missing its durable claim".into(),
-                                    );
+                            match self.work_mode {
+                                WorkMode::Receive => self.receiving_view(ui),
+                                WorkMode::Putaway => {
+                                    if self.workflow.claim().is_some() {
+                                        self.active_work(ui);
+                                    } else {
+                                        match self.workflow.activity() {
+                                            Activity::Idle => self.idle(ui),
+                                            Activity::Active => {
+                                                self.workflow.require_reconciliation(
+                                                    "Active work is missing its durable claim"
+                                                        .into(),
+                                                );
+                                            }
+                                            Activity::Persisting
+                                            | Activity::ReadyToDispatch
+                                            | Activity::InFlight
+                                            | Activity::Ambiguous
+                                            | Activity::ReconcileRequired => {}
+                                        }
+                                    }
+                                    self.command_state(ui);
+                                    self.error(ui);
                                 }
-                                Activity::Persisting
-                                | Activity::ReadyToDispatch
-                                | Activity::InFlight
-                                | Activity::Ambiguous
-                                | Activity::ReconcileRequired => {}
                             }
                         }
-                        self.command_state(ui);
-                        self.error(ui);
                     });
             });
     }

@@ -328,14 +328,16 @@ async fn assert_forged_inserts_fail(
                 sqlx::query(
                     r#"
                     INSERT INTO loads
-                        (tenant_id, created, facility_id, inventory_owner_id, type)
-                    VALUES ($1, $2, $3, $4, 'inbound')
+                        (tenant_id, created, facility_id, inventory_owner_id,
+                         execution_barcode, type)
+                    VALUES ($1, $2, $3, $4, $5, 'inbound')
                     "#,
                 )
                 .bind(refs.tenant_id.get())
                 .bind(db::now_iso())
                 .bind(refs.facility_id)
                 .bind(refs.inventory_owner_id)
+                .bind(format!("FORGED-{key}"))
                 .execute(&mut *tx)
                 .await
             }
