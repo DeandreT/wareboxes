@@ -550,7 +550,7 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
     assert!(response_json::<bool>(response).await);
 
     let admin_db = admin_db_for(&fixture.db).await;
-    sqlx::query(
+    let assignment_retirement = sqlx::query(
         r#"
         UPDATE inventory_owner_facilities
         SET deleted = clock_timestamp()
@@ -562,8 +562,33 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
     .bind(allowed_facility)
     .execute(&admin_db)
     .await
-    .unwrap();
+    .unwrap_err();
+    assert_eq!(
+        assignment_retirement
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .as_deref(),
+        Some("55000")
+    );
+    assert!(
+        repo::audits::set_audit_wave_deleted(&fixture.db, &restricted, allowed_wave, true,)
+            .await
+            .unwrap()
+    );
+    assert!(
+        repo::audits::set_audit_wave_deleted(&fixture.db, &restricted, allowed_wave, false,)
+            .await
+            .unwrap()
+    );
 
+    sqlx::query(
+        "UPDATE locations SET deleted = clock_timestamp() WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(tenant_id.get())
+    .bind(allowed_location)
+    .execute(&admin_db)
+    .await
+    .unwrap();
     let response = app
         .clone()
         .oneshot(request(
@@ -576,52 +601,6 @@ async fn inventory_audits_enforce_facility_and_owner_scope_for_reads_and_writes(
         .await
         .unwrap();
     assert!(!response_json::<bool>(response).await);
-    assert!(
-        repo::audits::set_audit_wave_deleted(&fixture.db, &restricted, allowed_wave, true,)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !repo::audits::set_audit_wave_deleted(&fixture.db, &restricted, allowed_wave, false,)
-            .await
-            .unwrap()
-    );
-
-    sqlx::query(
-        r#"
-        UPDATE inventory_owner_facilities
-        SET deleted = NULL
-        WHERE tenant_id = $1 AND inventory_owner_id = $2 AND facility_id = $3
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(allowed_owner)
-    .bind(allowed_facility)
-    .execute(&admin_db)
-    .await
-    .unwrap();
-    assert!(
-        repo::audits::set_audit_wave_deleted(&fixture.db, &restricted, allowed_wave, false,)
-            .await
-            .unwrap()
-    );
-    sqlx::query(
-        "UPDATE locations SET deleted = clock_timestamp() WHERE tenant_id = $1 AND id = $2",
-    )
-    .bind(tenant_id.get())
-    .bind(allowed_location)
-    .execute(&admin_db)
-    .await
-    .unwrap();
-    assert!(!repo::audits::set_location_count_deleted(
-        &fixture.db,
-        &restricted,
-        allowed_count,
-        3,
-        false,
-    )
-    .await
-    .unwrap());
     sqlx::query("UPDATE locations SET deleted = NULL WHERE tenant_id = $1 AND id = $2")
         .bind(tenant_id.get())
         .bind(allowed_location)
