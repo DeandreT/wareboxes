@@ -102,6 +102,7 @@ chmod 0644 /etc/wareboxes/caddy.env
 install -m 0644 "$script_dir/Caddyfile" /etc/caddy/Caddyfile
 install -m 0644 "$script_dir/postgres.compose.yml" /opt/wareboxes/runtime/postgres.compose.yml
 install -m 0755 "$script_dir/postgres-init/001-create-app-role.sh" /opt/wareboxes/runtime/postgres-init/001-create-app-role.sh
+install -m 0644 "$script_dir/runtime-version" /etc/wareboxes/runtime-version
 install -m 0644 "$script_dir/wareboxes.service" /etc/systemd/system/wareboxes.service
 install -m 0755 "$script_dir/wareboxes-deploy" /usr/local/sbin/wareboxes-deploy
 

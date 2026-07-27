@@ -88,6 +88,29 @@ If migrations were changed during development, reset the local database with:
 scripts/reset-db.sh
 ```
 
+## Deployment
+
+The deployment workflow verifies `deploy/runtime-version` before it builds or
+activates a release. Run the current `deploy/provision.sh` on a host whenever that
+version changes; normal application releases intentionally cannot rewrite root-owned
+service, database, or secret configuration.
+
+Before the production-readiness gate, a host with an incompatible schema or database
+role layout should be rebuilt rather than migrated for compatibility. After retaining
+anything that matters, run these commands from a current repository checkout on the
+host:
+
+```bash
+sudo systemctl stop wareboxes.service
+sudo docker compose \
+  -f /opt/wareboxes/runtime/postgres.compose.yml \
+  down --volumes
+sudo deploy/provision.sh '<deploy-public-key>' '<site-address>'
+```
+
+The next successful CI run can then deploy the application release. This procedure is
+destructive and is not valid after the production-readiness gate.
+
 ## Website
 
 The deployable website combines the static pages in `site/` with the real eframe
