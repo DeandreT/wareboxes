@@ -24,7 +24,7 @@ impl WareboxesApp {
                     "Search inventory owner",
                 );
                 ui.label("Type");
-                egui::ComboBox::from_id_source("new_load_type")
+                egui::ComboBox::from_id_salt("new_load_type")
                     .selected_text(
                         LoadType::parse(&self.forms.new_type)
                             .map(Self::load_type_label)
@@ -111,7 +111,7 @@ impl WareboxesApp {
                 ui.label("Date");
                 self.load_date_filter_ui(ui, &mut date_filter, &mut date_mode);
                 ui.label("Status");
-                egui::ComboBox::from_id_source("loads_status_filter")
+                egui::ComboBox::from_id_salt("loads_status_filter")
                     .selected_text(if status_filter.is_empty() {
                         "Any Status"
                     } else {
@@ -130,7 +130,7 @@ impl WareboxesApp {
                         }
                     });
                 ui.label("Type");
-                egui::ComboBox::from_id_source("loads_type_filter")
+                egui::ComboBox::from_id_salt("loads_type_filter")
                     .selected_text(if type_filter.is_empty() {
                         "Any Type"
                     } else {
@@ -221,7 +221,7 @@ impl WareboxesApp {
         let row_height = card_side + spacing;
 
         egui::ScrollArea::vertical()
-            .id_source("loads_card_grid_scroll")
+            .id_salt("loads_card_grid_scroll")
             .show_rows(ui, row_height, row_count, |ui, row_range| {
                 for row in row_range {
                     ui.horizontal(|ui| {
@@ -266,7 +266,13 @@ impl WareboxesApp {
         };
         let (rect, response) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
         let painter = ui.painter().with_clip_rect(rect);
-        painter.rect(rect, egui::Rounding::same(8.0), fill, stroke);
+        painter.rect(
+            rect,
+            egui::CornerRadius::same(8),
+            fill,
+            stroke,
+            egui::StrokeKind::Middle,
+        );
         if response.clicked() {
             self.open_load_ids.insert(load.id);
             self.api.get_load_detail(load.id);
@@ -340,7 +346,7 @@ impl WareboxesApp {
                 egui::Rect::from_min_size(egui::pos2(x, y + 2.0), egui::vec2(max_text_width, 10.0));
             painter.rect_filled(
                 progress_rect,
-                egui::Rounding::same(3.0),
+                egui::CornerRadius::same(3),
                 if dark_mode {
                     egui::Color32::from_black_alpha(115)
                 } else {
@@ -352,7 +358,7 @@ impl WareboxesApp {
                     progress_rect.min,
                     egui::vec2(progress_rect.width() * progress, progress_rect.height()),
                 ),
-                egui::Rounding::same(3.0),
+                egui::CornerRadius::same(3),
                 if dark_mode {
                     egui::Color32::from_white_alpha(155)
                 } else {
@@ -438,8 +444,8 @@ impl WareboxesApp {
         egui::Frame::default()
             .fill(fill)
             .stroke(stroke)
-            .inner_margin(egui::Margin::same(8.0))
-            .rounding(egui::Rounding::same(6.0))
+            .inner_margin(egui::Margin::same(8))
+            .corner_radius(egui::CornerRadius::same(6))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     Self::detail_text(ui, &format!("Line #{}", line.id), true, 15.0);
@@ -511,8 +517,8 @@ impl WareboxesApp {
         egui::Frame::default()
             .fill(fill)
             .stroke(egui::Stroke::new(1.0_f32, stroke))
-            .inner_margin(egui::Margin::same(8.0))
-            .rounding(egui::Rounding::same(6.0))
+            .inner_margin(egui::Margin::same(8))
+            .corner_radius(egui::CornerRadius::same(6))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     Self::detail_text(ui, &order.order_key, true, 15.0);
@@ -605,8 +611,8 @@ impl WareboxesApp {
                     egui::Color32::from_rgb(188, 198, 214)
                 },
             ))
-            .inner_margin(egui::Margin::same(8.0))
-            .rounding(egui::Rounding::same(6.0))
+            .inner_margin(egui::Margin::same(8))
+            .corner_radius(egui::CornerRadius::same(6))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     Self::detail_text(ui, &format!("Note #{}", display_number), true, 14.0);
@@ -954,7 +960,7 @@ impl WareboxesApp {
             *date_mode = "day".to_owned();
         }
 
-        egui::ComboBox::from_id_source("loads_date_mode_filter")
+        egui::ComboBox::from_id_salt("loads_date_mode_filter")
             .selected_text(match date_mode.as_str() {
                 "month" => "Month",
                 "year" => "Year",
@@ -1033,7 +1039,7 @@ impl WareboxesApp {
                         _ => Self::shift_month(calendar_month, 1),
                     };
                 }
-                let today_enabled = max_date.map_or(true, |max_date| today <= max_date);
+                let today_enabled = max_date.is_none_or(|max_date| today <= max_date);
                 if ui
                     .add_enabled(today_enabled, egui::Button::new("Today"))
                     .clicked()
@@ -1042,7 +1048,7 @@ impl WareboxesApp {
                     calendar_month =
                         NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
                     calendar_view = "day".to_owned();
-                    ui.close_menu();
+                    ui.close();
                 }
             });
             ui.add_space(4.0);
@@ -1056,7 +1062,7 @@ impl WareboxesApp {
                                     NaiveDate::from_ymd_opt(calendar_month.year(), month, 1)
                                         .unwrap_or(calendar_month);
                                 let enabled =
-                                    max_date.map_or(true, |max_date| month_date <= max_date);
+                                    max_date.is_none_or(|max_date| month_date <= max_date);
                                 if ui
                                     .add_enabled(
                                         enabled,
@@ -1082,8 +1088,7 @@ impl WareboxesApp {
                                 let year = start_year + offset;
                                 let year_date =
                                     NaiveDate::from_ymd_opt(year, 1, 1).unwrap_or(calendar_month);
-                                let enabled =
-                                    max_date.map_or(true, |max_date| year_date <= max_date);
+                                let enabled = max_date.is_none_or(|max_date| year_date <= max_date);
                                 if ui
                                     .add_enabled(enabled, egui::Button::new(year.to_string()))
                                     .clicked()
@@ -1129,20 +1134,17 @@ impl WareboxesApp {
                                     let is_selected =
                                         !date_value.is_empty() && cell_date == selected;
                                     let enabled =
-                                        max_date.map_or(true, |max_date| cell_date <= max_date);
+                                        max_date.is_none_or(|max_date| cell_date <= max_date);
                                     if ui
                                         .add_enabled(
                                             enabled,
-                                            egui::SelectableLabel::new(
-                                                is_selected,
-                                                day.to_string(),
-                                            ),
+                                            egui::Button::selectable(is_selected, day.to_string()),
                                         )
                                         .clicked()
                                     {
                                         *date_value = cell_date.format("%Y-%m-%d").to_string();
                                         calendar_view = "day".to_owned();
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                     day += 1;
                                 }

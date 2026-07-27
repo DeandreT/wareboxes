@@ -538,7 +538,13 @@ impl WareboxesApp {
     }
 
     fn apply_visuals(&self, ctx: &egui::Context) {
-        ctx.set_style(Self::theme_style(self.light_mode));
+        let theme = if self.light_mode {
+            egui::Theme::Light
+        } else {
+            egui::Theme::Dark
+        };
+        ctx.set_theme(theme);
+        ctx.set_style_of(theme, Self::theme_style(self.light_mode));
     }
 
     fn drain_events(&mut self, now: f64) {
@@ -733,34 +739,40 @@ fn prefill_demo_login(forms: &mut Forms) {
 }
 
 impl eframe::App for WareboxesApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let now = ctx.input(|i| i.time);
         self.now = now;
         self.drain_events(now);
         self.apply_visuals(ctx);
         self.toasts.retain(|t| now - t.created < 5.0);
 
+        if self.session.is_some() {
+            self.auto_refresh();
+            // Keep ticking even without user input so auto-refresh fires.
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
         if self.session.is_none() {
-            self.login_view(ctx);
-            self.toast_overlay(ctx);
+            self.login_view(ui);
+            self.toast_overlay(&ctx);
             return;
         }
 
-        self.auto_refresh();
-        // Keep ticking even without user input so auto-refresh fires.
-        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        self.nav_bar(ui);
+        self.settings_panel(&ctx);
 
-        self.nav_bar(ctx);
-        self.settings_panel(ctx);
-
-        egui::CentralPanel::default().show(ctx, |_ui| {});
-        self.show_panels(ctx);
-        self.new_order_window(ctx);
-        self.new_item_window(ctx);
-        self.workspace_editor(ctx);
-        self.workspace_delete_confirmation(ctx);
-        self.confirmation_dialog(ctx);
-        self.toast_overlay(ctx);
+        egui::CentralPanel::default().show(ui, |_ui| {});
+        self.show_panels(&ctx);
+        self.new_order_window(&ctx);
+        self.new_item_window(&ctx);
+        self.workspace_editor(&ctx);
+        self.workspace_delete_confirmation(&ctx);
+        self.confirmation_dialog(&ctx);
+        self.toast_overlay(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -781,10 +793,10 @@ impl eframe::App for WareboxesApp {
 }
 
 impl WareboxesApp {
-    fn login_view(&mut self, ctx: &egui::Context) {
+    fn login_view(&mut self, root_ui: &mut egui::Ui) {
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().inner_margin(egui::Margin::same(16.0)))
-            .show(ctx, |ui| {
+            .frame(egui::Frame::new().inner_margin(egui::Margin::same(16)))
+            .show(root_ui, |ui| {
                 let width = ui.available_width().min(380.0);
                 #[cfg(target_arch = "wasm32")]
                 let height: f32 = 286.0;
@@ -793,7 +805,7 @@ impl WareboxesApp {
                 let size = egui::vec2(width, height.min(ui.available_height()));
                 let rect = egui::Rect::from_center_size(ui.max_rect().center(), size);
 
-                ui.allocate_ui_at_rect(rect, |ui| {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                     ui.vertical(|ui| {
                         ui.label(
                             egui::RichText::new("WAREBOXES")
@@ -856,13 +868,13 @@ impl WareboxesApp {
         }
     }
 
-    fn nav_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("app_shell")
+    fn nav_bar(&mut self, root_ui: &mut egui::Ui) {
+        egui::Panel::top("app_shell")
             .frame(
-                egui::Frame::side_top_panel(ctx.style().as_ref())
-                    .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
+                egui::Frame::side_top_panel(root_ui.style())
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
             )
-            .show(ctx, |ui| {
+            .show(root_ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new("WAREBOXES")
@@ -941,11 +953,11 @@ impl WareboxesApp {
                         ui.set_min_width(190.0);
                         if ui.button("Rename workspace").clicked() {
                             edit_workspace = true;
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui.button("Duplicate workspace").clicked() {
                             duplicate_workspace = true;
-                            ui.close_menu();
+                            ui.close();
                         }
                         ui.separator();
                         for (layout, label) in [
@@ -958,7 +970,7 @@ impl WareboxesApp {
                                 .clicked()
                             {
                                 requested_layout = Some(layout);
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     });
@@ -1152,7 +1164,7 @@ impl WareboxesApp {
         let mut open = true;
         let mut pop_out = false;
         let mut refresh = false;
-        let panel_bounds = ctx.available_rect();
+        let panel_bounds = ctx.content_rect();
         egui::Window::new(s.title())
             .id(egui::Id::new(("panel", workspace_id, layout_generation, s)))
             .open(&mut open)
@@ -1186,7 +1198,7 @@ impl WareboxesApp {
         docked_index: usize,
         docked_count: usize,
     ) -> (egui::Pos2, egui::Vec2) {
-        let viewport = ctx.available_rect();
+        let viewport = ctx.content_rect();
         let requested_size = match screen {
             Screen::Orders => egui::vec2(980.0, 620.0),
             Screen::Items => egui::vec2(920.0, 640.0),
@@ -1364,11 +1376,11 @@ impl WareboxesApp {
                     };
                     ui.scope(|ui| {
                         ui.set_opacity(opacity);
-                        egui::Frame::none()
+                        egui::Frame::new()
                             .fill(ui.visuals().window_fill)
                             .stroke(egui::Stroke::new(1.0_f32, color))
-                            .rounding(4.0)
-                            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                            .corner_radius(4)
+                            .inner_margin(egui::Margin::symmetric(10, 8))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     let icon = if t.error {

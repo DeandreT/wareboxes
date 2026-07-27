@@ -227,7 +227,7 @@ impl WareboxesApp {
 
             let move_scroll_height = ui.available_height().clamp(260.0, 640.0);
             egui::ScrollArea::vertical()
-                .id_source("inventory_move_scroll")
+                .id_salt("inventory_move_scroll")
                 .auto_shrink([false, false])
                 .max_height(move_scroll_height)
                 .show(ui, |ui| {
@@ -238,7 +238,7 @@ impl WareboxesApp {
                     ui.add_space(6.0);
 
             let selected_item_id = egui::Frame::group(ui.style())
-                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                .inner_margin(egui::Margin::symmetric(10, 8))
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new("1. Select item").strong());
@@ -271,7 +271,7 @@ impl WareboxesApp {
                 .map(|item_id| self.inventory_source_options_for_item(item_id))
                 .unwrap_or_default();
             let source_balance_id = egui::Frame::group(ui.style())
-                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                .inner_margin(egui::Margin::symmetric(10, 8))
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new("2. Pick source").strong());
@@ -327,8 +327,8 @@ impl WareboxesApp {
                                                 if selected { 2.0_f32 } else { 1.0_f32 },
                                                 color,
                                             ))
-                                            .rounding(egui::Rounding::same(8.0))
-                                            .inner_margin(egui::Margin::symmetric(9.0, 7.0))
+                                            .corner_radius(egui::CornerRadius::same(8))
+                                            .inner_margin(egui::Margin::symmetric(9, 7))
                                             .show(ui, |ui| {
                                                 ui.set_width(card_width - 24.0);
                                                 ui.vertical(|ui| {
@@ -340,7 +340,7 @@ impl WareboxesApp {
                                                             .strong()
                                                             .color(Self::load_detail_text_color(ui)),
                                                         )
-                                                        .truncate(true),
+                                                        .truncate(),
                                                     )
                                                     .on_hover_text(self.location_hover_text(
                                                         balance.location_id,
@@ -389,7 +389,7 @@ impl WareboxesApp {
             let mut add_destination = false;
             let mut destination_rows = Vec::new();
             egui::Frame::group(ui.style())
-                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                .inner_margin(egui::Margin::symmetric(10, 8))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("3. Build destination plan").strong());
@@ -518,7 +518,7 @@ impl WareboxesApp {
                 .sum::<i64>();
 
             egui::Frame::group(ui.style())
-                .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                .inner_margin(egui::Margin::symmetric(10, 8))
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new("4. Review and move").strong());
@@ -743,7 +743,7 @@ impl WareboxesApp {
             });
             ui.horizontal_wrapped(|ui| {
                 ui.label("Reason");
-                egui::ComboBox::from_id_source("inventory_status_change_reason")
+                egui::ComboBox::from_id_salt("inventory_status_change_reason")
                     .selected_text(Self::title_case(&reason.as_str().replace('_', " ")))
                     .show_ui(ui, |ui| {
                         for option in InventoryStatusChangeReason::ALL {
@@ -770,7 +770,7 @@ impl WareboxesApp {
 
             ui.horizontal_wrapped(|ui| {
                 ui.label("Target");
-                egui::ComboBox::from_id_source("inventory_status_change_target")
+                egui::ComboBox::from_id_salt("inventory_status_change_target")
                     .selected_text(Self::inventory_status_label(target))
                     .show_ui(ui, |ui| {
                         for option in &allowed_targets {
@@ -1242,7 +1242,7 @@ impl WareboxesApp {
                 ui.label("Quantity");
                 ui.add_sized([80.0, 24.0], egui::TextEdit::singleline(&mut qty));
                 ui.label("Reason");
-                egui::ComboBox::from_id_source("inventory_hold_reason")
+                egui::ComboBox::from_id_salt("inventory_hold_reason")
                     .selected_text(Self::title_case(&reason.as_str().replace('_', " ")))
                     .show_ui(ui, |ui| {
                         for option in InventoryHoldReason::ALL {

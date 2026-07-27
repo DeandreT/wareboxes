@@ -13,26 +13,31 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Wareboxes WMS",
         options,
-        Box::new(|cc| Box::new(WareboxesApp::new(cc))),
+        Box::new(|cc| Ok(Box::new(WareboxesApp::new(cc)))),
     )
 }
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
+    use wasm_bindgen::JsCast as _;
+
     let web_options = eframe::WebOptions::default();
     wasm_bindgen_futures::spawn_local(async {
         let Some(document) = web_sys::window().and_then(|window| window.document()) else {
             return;
         };
-        let Some(canvas) = document.get_element_by_id("wareboxes_canvas") else {
+        let Some(canvas) = document
+            .get_element_by_id("wareboxes_canvas")
+            .and_then(|element| element.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+        else {
             return;
         };
 
         let started = eframe::WebRunner::new()
             .start(
-                "wareboxes_canvas",
+                canvas.clone(),
                 web_options,
-                Box::new(|cc| Box::new(WareboxesApp::new(cc))),
+                Box::new(|cc| Ok(Box::new(WareboxesApp::new(cc)))),
             )
             .await;
 
