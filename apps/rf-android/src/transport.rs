@@ -3,8 +3,10 @@ use std::sync::mpsc::Sender;
 use eframe::egui;
 use thiserror::Error;
 use url::Url;
+use wareboxes_api_contract::v1::IdempotencyKey;
 
 use crate::command_store::{DispatchAttempt, DurableHttpResponse, ExecutionScope};
+use crate::wire::build_heartbeat_request_parts;
 
 const ACCEPT_JSON: &str = "application/json";
 const REQUEST_ID_HEADER: &str = "X-Request-Id";
@@ -68,6 +70,12 @@ pub enum TransportBuildError {
     InvalidApiPath,
     #[error("The stored command body does not match its integrity hash")]
     CorruptCommandBody,
+    #[error("The putaway task ID must be positive")]
+    InvalidTaskId,
+    #[error("Enter a valid idempotency key")]
+    InvalidIdempotencyKey,
+    #[error("The heartbeat request could not be encoded")]
+    InvalidHeartbeatRequest,
 }
 
 pub struct AuthenticatedTransport<'a> {
@@ -83,6 +91,11 @@ pub enum NetworkEvent {
         response: Result<NetworkResponse, String>,
     },
     CurrentClaim {
+        request_id: String,
+        response: Result<NetworkResponse, String>,
+    },
+    Heartbeat {
+        task_id: i64,
         request_id: String,
         response: Result<NetworkResponse, String>,
     },
@@ -125,6 +138,27 @@ pub fn build_current_claim_request(
             .api_url("/api/v1/putaway-claims/current")?,
     );
     request.headers = authenticated_headers(transport, request_id);
+    Ok(request)
+}
+
+pub fn build_heartbeat_request(
+    transport: &AuthenticatedTransport<'_>,
+    task_id: i64,
+    request_id: &str,
+    idempotency_key: &str,
+) -> Result<ehttp::Request, TransportBuildError> {
+    let (path, body) = build_heartbeat_request_parts(task_id).map_err(|error| match error {
+        crate::wire::WireRequestError::InvalidTaskId => TransportBuildError::InvalidTaskId,
+        _ => TransportBuildError::InvalidHeartbeatRequest,
+    })?;
+    let idempotency_key = IdempotencyKey::new(idempotency_key)
+        .map_err(|_| TransportBuildError::InvalidIdempotencyKey)?;
+    let mut request = ehttp::Request::post(transport.endpoint.api_url(&path)?, body);
+    request.headers = authenticated_headers(transport, request_id);
+    request.headers.insert("Content-Type", ACCEPT_JSON);
+    request
+        .headers
+        .insert(IDEMPOTENCY_KEY_HEADER, idempotency_key.into_inner());
     Ok(request)
 }
 
@@ -192,6 +226,26 @@ pub fn send_current_claim(
             .map(NetworkResponse::from)
             .map_err(|error| error.to_string());
         let _ = sender.send(NetworkEvent::CurrentClaim {
+            request_id,
+            response,
+        });
+        context.request_repaint();
+    });
+}
+
+pub fn send_heartbeat(
+    request: ehttp::Request,
+    task_id: i64,
+    request_id: String,
+    sender: Sender<NetworkEvent>,
+    context: egui::Context,
+) {
+    ehttp::fetch(request, move |result| {
+        let response = result
+            .map(NetworkResponse::from)
+            .map_err(|error| error.to_string());
+        let _ = sender.send(NetworkEvent::Heartbeat {
+            task_id,
             request_id,
             response,
         });
@@ -329,6 +383,75 @@ mod tests {
             request.headers.get(REQUEST_ID_HEADER),
             Some(attempt.request_id.as_str())
         );
+    }
+
+    #[test]
+    fn heartbeat_request_uses_authenticated_replay_safe_headers_and_exact_body() {
+        let endpoint = ServerEndpoint::parse("https://example.com").unwrap();
+        let scope = ExecutionScope {
+            tenant_id: 7,
+            operator_id: 8,
+            device_id: "rf-01".into(),
+        };
+        let request = build_heartbeat_request(
+            &AuthenticatedTransport {
+                endpoint: &endpoint,
+                token: "session-secret",
+                scope: &scope,
+            },
+            42,
+            "rf-heartbeat-request-1",
+            "putaway:heartbeat:42:1",
+        )
+        .unwrap();
+
+        assert_eq!(request.method, "POST");
+        assert_eq!(
+            request.url,
+            "https://example.com/api/v1/putaway-claims/42/heartbeats"
+        );
+        assert_eq!(request.body, b"{}");
+        assert_eq!(
+            request.headers.get("Content-Type"),
+            Some("application/json")
+        );
+        assert_eq!(
+            request.headers.get(IDEMPOTENCY_KEY_HEADER),
+            Some("putaway:heartbeat:42:1")
+        );
+        assert_eq!(
+            request.headers.get("Authorization"),
+            Some("Bearer session-secret")
+        );
+        assert_eq!(request.headers.get(TENANT_ID_HEADER), Some("7"));
+        assert_eq!(
+            request.headers.get(REQUEST_ID_HEADER),
+            Some("rf-heartbeat-request-1")
+        );
+    }
+
+    #[test]
+    fn heartbeat_request_rejects_invalid_task_and_idempotency_identity() {
+        let endpoint = ServerEndpoint::parse("https://example.com").unwrap();
+        let scope = ExecutionScope {
+            tenant_id: 7,
+            operator_id: 8,
+            device_id: "rf-01".into(),
+        };
+        let transport = AuthenticatedTransport {
+            endpoint: &endpoint,
+            token: "session-secret",
+            scope: &scope,
+        };
+
+        assert!(matches!(
+            build_heartbeat_request(&transport, 0, "request-1", "heartbeat-1"),
+            Err(TransportBuildError::InvalidTaskId)
+        ));
+        assert!(matches!(
+            build_heartbeat_request(&transport, 42, "request-1", "has spaces"),
+            Err(TransportBuildError::InvalidIdempotencyKey)
+        ));
     }
 
     #[test]

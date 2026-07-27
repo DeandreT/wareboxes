@@ -1,12 +1,13 @@
+use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use wareboxes_api_contract::v1::{
     API_PREFIX, ClaimNextPutawayRequest, ClaimPutawayByIdRequest,
-    ConfirmLicensePlatePutawayRequest, ConfirmPutawayRequest, IdempotencyKey,
-    LicensePlatePutawayConfirmationResponse, PutawayClaimReleaseReason, PutawayClaimResponse,
-    PutawayClaimSourceLocation, PutawayClaimWork, PutawayConfirmationResponse, PutawayWorkflow,
-    ReleasePutawayClaimRequest,
+    ConfirmLicensePlatePutawayRequest, ConfirmPutawayRequest, HeartbeatPutawayClaimRequest,
+    IdempotencyKey, LicensePlatePutawayConfirmationResponse, PutawayClaimHeartbeatResponse,
+    PutawayClaimReleaseReason, PutawayClaimResponse, PutawayClaimSourceLocation, PutawayClaimWork,
+    PutawayConfirmationResponse, PutawayWorkflow, ReleasePutawayClaimRequest,
 };
 
 use crate::workflow::{
@@ -70,6 +71,20 @@ pub enum WireResponseError {
     Decode(#[from] serde_json::Error),
     #[error("the warehouse service returned an invalid putaway claim")]
     InvalidClaim,
+    #[error("the heartbeat response contains an invalid task ID")]
+    InvalidHeartbeatTaskId,
+    #[error("the heartbeat response task ID {actual} does not match requested task {expected}")]
+    HeartbeatTaskMismatch { expected: i64, actual: i64 },
+    #[error("the heartbeat response contains an invalid RFC 3339 {field}")]
+    InvalidHeartbeatTimestamp { field: &'static str },
+}
+
+pub fn build_heartbeat_request_parts(task_id: i64) -> Result<(String, Vec<u8>), WireRequestError> {
+    validate_task_id(task_id)?;
+    Ok((
+        format!("{API_PREFIX}/putaway-claims/{task_id}/heartbeats"),
+        serde_json::to_vec(&HeartbeatPutawayClaimRequest::default())?,
+    ))
 }
 
 pub fn build_durable_request(
@@ -193,6 +208,41 @@ pub fn decode_claim_response(body: &[u8]) -> Result<Option<PutawayClaim>, WireRe
     serde_json::from_slice::<Option<PutawayClaimResponse>>(body)?
         .map(map_claim)
         .transpose()
+}
+
+pub fn decode_heartbeat_response(
+    expected_task_id: i64,
+    status: u16,
+    body: &[u8],
+) -> Result<PutawayClaimHeartbeatResponse, WireResponseError> {
+    if !(200..300).contains(&status) {
+        return Err(WireResponseError::UnsuccessfulStatus(status));
+    }
+    if expected_task_id <= 0 {
+        return Err(WireResponseError::InvalidHeartbeatTaskId);
+    }
+
+    let response = serde_json::from_slice::<PutawayClaimHeartbeatResponse>(body)?;
+    if response.task_id <= 0 {
+        return Err(WireResponseError::InvalidHeartbeatTaskId);
+    }
+    if response.task_id != expected_task_id {
+        return Err(WireResponseError::HeartbeatTaskMismatch {
+            expected: expected_task_id,
+            actual: response.task_id,
+        });
+    }
+    if DateTime::parse_from_rfc3339(&response.heartbeat_at).is_err() {
+        return Err(WireResponseError::InvalidHeartbeatTimestamp {
+            field: "heartbeat_at",
+        });
+    }
+    if DateTime::parse_from_rfc3339(&response.lease_expires_at).is_err() {
+        return Err(WireResponseError::InvalidHeartbeatTimestamp {
+            field: "lease_expires_at",
+        });
+    }
+    Ok(response)
 }
 
 fn map_claim(response: PutawayClaimResponse) -> Result<PutawayClaim, WireResponseError> {
@@ -337,6 +387,19 @@ mod tests {
         assert_eq!(request.path, "/api/v1/putaway-claims/42");
         assert_eq!(body(&request), json!({}));
         assert_eq!(request.response_kind, ResponseKind::Claim);
+    }
+
+    #[test]
+    fn heartbeat_request_uses_the_public_v1_contract() {
+        let (path, body) =
+            build_heartbeat_request_parts(42).expect("heartbeat request should build");
+
+        assert_eq!(path, "/api/v1/putaway-claims/42/heartbeats");
+        assert_eq!(body, b"{}");
+        assert!(matches!(
+            build_heartbeat_request_parts(0),
+            Err(WireRequestError::InvalidTaskId)
+        ));
     }
 
     #[test]
@@ -488,6 +551,79 @@ mod tests {
         ));
         assert!(matches!(
             decode_command_response(ResponseKind::Release, 503, b"{}"),
+            Err(WireResponseError::UnsuccessfulStatus(503))
+        ));
+    }
+
+    #[test]
+    fn heartbeat_response_validates_task_and_rfc3339_timestamps() {
+        let body = serde_json::to_vec(&json!({
+            "task_id": 42,
+            "heartbeat_at": "2026-07-27T00:05:00.123456+00:00",
+            "lease_expires_at": "2026-07-27T00:07:00Z"
+        }))
+        .unwrap();
+
+        let response = decode_heartbeat_response(42, 200, &body).unwrap();
+
+        assert_eq!(response.task_id, 42);
+        assert_eq!(response.heartbeat_at, "2026-07-27T00:05:00.123456+00:00");
+    }
+
+    #[test]
+    fn heartbeat_response_rejects_invalid_ids_and_timestamps() {
+        let invalid_task = br#"{
+            "task_id": 0,
+            "heartbeat_at": "2026-07-27T00:05:00Z",
+            "lease_expires_at": "2026-07-27T00:07:00Z"
+        }"#;
+        assert!(matches!(
+            decode_heartbeat_response(42, 200, invalid_task),
+            Err(WireResponseError::InvalidHeartbeatTaskId)
+        ));
+
+        let mismatched = br#"{
+            "task_id": 43,
+            "heartbeat_at": "2026-07-27T00:05:00Z",
+            "lease_expires_at": "2026-07-27T00:07:00Z"
+        }"#;
+        assert!(matches!(
+            decode_heartbeat_response(42, 200, mismatched),
+            Err(WireResponseError::HeartbeatTaskMismatch {
+                expected: 42,
+                actual: 43
+            })
+        ));
+
+        let invalid_heartbeat = br#"{
+            "task_id": 42,
+            "heartbeat_at": "2026-02-29T00:05:00Z",
+            "lease_expires_at": "2026-07-27T00:07:00Z"
+        }"#;
+        assert!(matches!(
+            decode_heartbeat_response(42, 200, invalid_heartbeat),
+            Err(WireResponseError::InvalidHeartbeatTimestamp {
+                field: "heartbeat_at"
+            })
+        ));
+
+        let invalid_lease = br#"{
+            "task_id": 42,
+            "heartbeat_at": "2026-07-27T00:05:00Z",
+            "lease_expires_at": "2026-07-27T24:00:00Z"
+        }"#;
+        assert!(matches!(
+            decode_heartbeat_response(42, 200, invalid_lease),
+            Err(WireResponseError::InvalidHeartbeatTimestamp {
+                field: "lease_expires_at"
+            })
+        ));
+        assert!(matches!(
+            decode_heartbeat_response(0, 200, invalid_lease),
+            Err(WireResponseError::InvalidHeartbeatTaskId)
+        ));
+        assert!(matches!(
+            decode_heartbeat_response(42, 503, b"{}"),
             Err(WireResponseError::UnsuccessfulStatus(503))
         ));
     }

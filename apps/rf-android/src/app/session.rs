@@ -84,6 +84,11 @@ impl RfApp {
                     request_id,
                     response,
                 } => self.handle_current_claim_response(&request_id, response),
+                NetworkEvent::Heartbeat {
+                    task_id,
+                    request_id,
+                    response,
+                } => self.handle_heartbeat_response(context, task_id, &request_id, response),
                 NetworkEvent::Command {
                     record_id,
                     attempt_id,
@@ -198,6 +203,10 @@ impl RfApp {
             [record] if record.scope == scope => self.restore_command(context, record.clone()),
             [record] => {
                 self.reauth_scope = Some(record.scope.clone());
+                self.reauth_notice = Some(
+                    "Your saved scan is still on this device. Use the same operator account."
+                        .into(),
+                );
                 self.session = None;
                 self.execution_scope = None;
                 self.session_gate = SessionGate::SignedOut;
@@ -277,8 +286,10 @@ impl RfApp {
             Ok(request) => request,
             Err(_) => {
                 self.session_gate = SessionGate::Ready;
-                self.connectivity_notice =
-                    Some("Saved work could not be checked. Try again.".into());
+                if self.lease_check_task_id.is_none() {
+                    self.connectivity_notice =
+                        Some("Saved work could not be checked. Try again.".into());
+                }
                 return;
             }
         };
@@ -300,34 +311,98 @@ impl RfApp {
             return;
         }
         self.expected_claim_request_id = None;
+        let lease_check_task_id = self.lease_check_task_id.take();
+        let lease_rejection_check = std::mem::take(&mut self.lease_rejection_check);
         self.session_gate = SessionGate::Ready;
         let response = match response {
             Ok(response) => response,
             Err(_) => {
-                self.connectivity_notice =
-                    Some("Connection lost. Saved work could not be checked.".into());
+                if let Some(task_id) = lease_check_task_id {
+                    self.lease_check_task_id = Some(task_id);
+                    self.lease_rejection_check = lease_rejection_check;
+                } else {
+                    self.connectivity_notice =
+                        Some("Connection lost. Saved work could not be checked.".into());
+                }
                 return;
             }
         };
         if response.status == 401 {
-            self.require_reauthentication(None);
+            self.clear_claim_heartbeat();
+            if let Some(task_id) = lease_check_task_id {
+                self.require_reauthentication_for_task(task_id);
+            } else {
+                self.require_reauthentication(None);
+            }
             return;
         }
         if !(200..300).contains(&response.status) {
-            self.connectivity_notice = Some(
-                "The current task could not be checked. Try again before claiming work.".into(),
-            );
+            if let Some(task_id) = lease_check_task_id {
+                self.lease_check_task_id = Some(task_id);
+                self.lease_rejection_check = lease_rejection_check;
+            } else {
+                self.connectivity_notice = Some(
+                    "The current task could not be checked. Try again before claiming work.".into(),
+                );
+            }
             return;
         }
         match decode_claim_response(&response.body) {
             Ok(claim) => {
-                self.workflow.restore_current_claim(claim);
+                self.clear_claim_heartbeat();
+                if let Some(expected_task_id) = lease_check_task_id {
+                    match claim {
+                        Some(claim)
+                            if claim.task_id == expected_task_id && !lease_rejection_check =>
+                        {
+                            self.workflow.restore_current_claim(Some(claim));
+                        }
+                        Some(_) | None => {
+                            self.workflow.restore_current_claim(None);
+                            self.workflow.require_reconciliation(
+                                "This task is no longer assigned. Do not move its inventory. Contact a supervisor."
+                                    .into(),
+                            );
+                        }
+                    }
+                } else {
+                    self.workflow.restore_current_claim(claim);
+                }
                 self.connectivity_notice = None;
                 self.reauth_scope = None;
+                self.reauth_notice = None;
             }
-            Err(_) => self
-                .workflow
-                .require_reconciliation("The server returned invalid current-work data.".into()),
+            Err(_) => {
+                self.clear_claim_heartbeat();
+                self.workflow.require_reconciliation(
+                    "The server returned invalid current-work data.".into(),
+                );
+            }
+        }
+    }
+
+    pub(super) fn request_current_claim_for_lease(
+        &mut self,
+        context: &egui::Context,
+        task_id: i64,
+    ) {
+        if task_id <= 0 || self.expected_claim_request_id.is_some() {
+            return;
+        }
+        self.clear_claim_heartbeat();
+        self.lease_check_task_id = Some(task_id);
+        self.lease_rejection_check = false;
+        self.request_current_claim(context);
+    }
+
+    pub(super) fn request_current_claim_after_rejection(
+        &mut self,
+        context: &egui::Context,
+        task_id: i64,
+    ) {
+        self.request_current_claim_for_lease(context, task_id);
+        if self.lease_check_task_id == Some(task_id) {
+            self.lease_rejection_check = true;
         }
     }
 
@@ -486,7 +561,14 @@ impl RfApp {
                     stored.draft,
                     "Sign in with the same operator account to recover this saved scan.",
                 );
-                self.require_reauthentication(Some(scope));
+                self.require_reauthentication_with_message(
+                    Some(scope),
+                    "Session expired. Sign in to recover the saved scan.",
+                    Some(
+                        "Your saved scan is still on this device. Use the same operator account."
+                            .into(),
+                    ),
+                );
             } else {
                 self.workflow.dispatch_ambiguous(
                     record_id,
@@ -610,14 +692,35 @@ impl RfApp {
     }
 
     fn require_reauthentication(&mut self, scope: Option<ExecutionScope>) {
+        self.require_reauthentication_with_message(scope, "Session expired. Sign in again.", None);
+    }
+
+    pub(super) fn require_reauthentication_for_task(&mut self, task_id: i64) {
+        self.clear_claim_heartbeat();
+        self.require_reauthentication_with_message(
+            self.execution_scope.clone(),
+            &format!("Session expired. Sign in to continue task {task_id}."),
+            Some(format!(
+                "Task {task_id} must be checked with the same operator account."
+            )),
+        );
+    }
+
+    fn require_reauthentication_with_message(
+        &mut self,
+        scope: Option<ExecutionScope>,
+        message: &str,
+        notice: Option<String>,
+    ) {
         let scope = scope.or_else(|| self.execution_scope.clone());
         self.reauth_scope = scope;
+        self.reauth_notice = notice;
         self.session = None;
         self.session_gate = SessionGate::SignedOut;
         self.password.clear();
         self.reveal_password = false;
         self.field_focus_pending = true;
-        self.auth_error = Some("Session expired. Sign in to recover saved work.".into());
+        self.auth_error = Some(message.into());
     }
 
     pub(super) fn can_execute(&self) -> bool {
