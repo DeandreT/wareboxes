@@ -5,10 +5,11 @@ Wareboxes is a warehouse management system prototype.
 ## Workspace
 
 - `crates/server`: Axum HTTP API backed by PostgreSQL and SQLx
-- `crates/client`: egui/eframe desktop client
+- `crates/client`: egui/eframe operations and administration client
 - `crates/core`: shared models, DTOs, and errors
 - `crates/barcodes`: barcode encoders
 - `migrations/postgres`: PostgreSQL migrations
+- `apps/rf-android`: native Android warehouse execution client
 - `scripts`: local development and test helpers
 
 ## Requirements
@@ -33,10 +34,29 @@ cargo run -p wareboxes-server
 cargo run -p wareboxes-client
 ```
 
-To run the native client against the hosted demo with its credentials prefilled:
+To run the operations client against the hosted demo with its credentials prefilled:
 
 ```bash
 scripts/run-client-demo.sh
+```
+
+## Android RF
+
+The Rust Android app owns scanner-driven warehouse execution. Install `cargo-apk`
+and the ARM64 Rust target once, then build its APK:
+
+```bash
+cargo install cargo-apk --locked
+rustup target add aarch64-linux-android
+scripts/build-rf-android.sh
+```
+
+The debug APK is written below `target/debug/apk/`.
+
+Install and launch it on a connected device:
+
+```bash
+scripts/install-rf-android.sh
 ```
 
 The local Postgres container uses host port `5433`.

@@ -82,8 +82,8 @@ record. Wareboxes owns facility execution and its auditable inventory consequenc
 - Purchase order, ASN, transfer, return, and non-expected receipt contracts.
 - Appointment, arrival, unload, expected/blind receipt, discrepancy, inspection,
   quarantine, labeling, cross-dock, and directed putaway.
-- Native Android scanner workflows for inbound and putaway, including rugged-device
-  scanning, reconnect recovery, and typed exception handling.
+- Rust/egui Android scanner workflows for inbound and putaway, including
+  rugged-device scanning, reconnect recovery, and typed exception handling.
 - Count plans, blind counts, recounts, tolerances, approval, and adjustment posting.
 - Inventory trace, recall, aging, and reconciliation views.
 
