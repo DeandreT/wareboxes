@@ -12,7 +12,7 @@ impl WareboxesApp {
             .unwrap_or_default();
         fonts.font_data.insert(
             Self::ICON_FONT.to_owned(),
-            egui::FontData::from_static(lucide_icons::LUCIDE_FONT_BYTES),
+            egui::FontData::from_static(lucide_icons::LUCIDE_FONT_BYTES).into(),
         );
         let icon_family = fonts
             .families
@@ -36,14 +36,14 @@ impl WareboxesApp {
     }
 
     pub(super) fn theme_style(light_mode: bool) -> egui::Style {
-        use egui::{Color32, FontFamily, FontId, Rounding, Stroke, TextStyle};
+        use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle};
 
         let mut style = egui::Style::default();
         style.spacing.item_spacing = egui::vec2(6.0, 4.0);
         style.spacing.button_padding = egui::vec2(8.0, 4.0);
         style.spacing.interact_size = egui::vec2(26.0, 26.0);
-        style.spacing.window_margin = egui::Margin::symmetric(8.0, 6.0);
-        style.spacing.menu_margin = egui::Margin::same(6.0);
+        style.spacing.window_margin = egui::Margin::symmetric(8, 6);
+        style.spacing.menu_margin = egui::Margin::same(6);
         style.animation_time = 0.16;
         style.text_styles = [
             (
@@ -71,7 +71,7 @@ impl WareboxesApp {
         } else {
             egui::Visuals::dark()
         };
-        let rounding = Rounding::same(4.0);
+        let corner_radius = CornerRadius::same(4);
 
         if light_mode {
             let text = Color32::from_rgb(24, 34, 31);
@@ -106,7 +106,7 @@ impl WareboxesApp {
             visuals.widgets.active.weak_bg_fill = accent;
             visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, accent);
             visuals.widgets.open = visuals.widgets.active;
-            visuals.text_cursor = Stroke::new(2.0_f32, accent);
+            visuals.text_cursor.stroke = Stroke::new(2.0_f32, accent);
             visuals.widgets.noninteractive.weak_bg_fill = surface;
             visuals.override_text_color = None;
         } else {
@@ -142,7 +142,7 @@ impl WareboxesApp {
             visuals.widgets.active.weak_bg_fill = Color32::from_rgb(30, 80, 68);
             visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, accent);
             visuals.widgets.open = visuals.widgets.active;
-            visuals.text_cursor = Stroke::new(2.0_f32, accent);
+            visuals.text_cursor.stroke = Stroke::new(2.0_f32, accent);
             visuals.widgets.noninteractive.weak_bg_fill = surface;
         }
 
@@ -153,10 +153,10 @@ impl WareboxesApp {
             &mut visuals.widgets.active,
             &mut visuals.widgets.open,
         ] {
-            widget.rounding = rounding;
+            widget.corner_radius = corner_radius;
         }
-        visuals.window_rounding = rounding;
-        visuals.menu_rounding = rounding;
+        visuals.window_corner_radius = corner_radius;
+        visuals.menu_corner_radius = corner_radius;
         visuals.striped = true;
         style.visuals = visuals;
         style

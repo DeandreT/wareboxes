@@ -38,7 +38,7 @@ impl WareboxesApp {
             ui.separator();
             ui.weak("Rows");
             let mut selected_size = page_size;
-            egui::ComboBox::from_id_source(("page_size", noun))
+            egui::ComboBox::from_id_salt(("page_size", noun))
                 .selected_text(selected_size.to_string())
                 .width(72.0)
                 .show_ui(ui, |ui| {
@@ -94,7 +94,7 @@ impl WareboxesApp {
 
     pub(super) fn entity_picker(
         ui: &mut egui::Ui,
-        id: impl std::hash::Hash,
+        id: impl egui::AsIdSalt,
         draft: &mut String,
         options: &[(i64, String)],
         hint: &str,
@@ -185,7 +185,7 @@ impl WareboxesApp {
                         ))
                         .show(ui.ctx(), |ui| {
                             egui::Frame::popup(ui.style())
-                                .inner_margin(egui::Margin::symmetric(4.0, 4.0))
+                                .inner_margin(egui::Margin::symmetric(4, 4))
                                 .show(ui, |ui| {
                                     ui.set_width(width);
                                     let clip_rect = ui.max_rect();
@@ -217,14 +217,14 @@ impl WareboxesApp {
                                                     if let Some(fill) = fill {
                                                         ui.painter().rect_filled(
                                                             ui.max_rect(),
-                                                            egui::Rounding::same(3.0),
+                                                            egui::CornerRadius::same(3),
                                                             fill,
                                                         );
                                                     }
                                                     ui.add_sized(
                                                         [width, 24.0],
                                                         egui::Label::new(label)
-                                                            .truncate(true)
+                                                            .truncate()
                                                             .sense(egui::Sense::click()),
                                                     )
                                                 },
@@ -636,8 +636,8 @@ impl WareboxesApp {
         egui::Frame::default()
             .fill(fill)
             .stroke(egui::Stroke::new(1.0_f32, color))
-            .rounding(egui::Rounding::same(5.0))
-            .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+            .corner_radius(egui::CornerRadius::same(5))
+            .inner_margin(egui::Margin::symmetric(6, 3))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
@@ -658,7 +658,7 @@ impl WareboxesApp {
 
     pub(super) fn select_from_allowed(
         ui: &mut egui::Ui,
-        id: impl std::hash::Hash,
+        id: impl egui::AsIdSalt,
         value: &mut String,
         options: &[(&str, &str)],
     ) {
@@ -669,7 +669,7 @@ impl WareboxesApp {
             .iter()
             .find_map(|(allowed, label)| (*allowed == value).then_some(*label))
             .unwrap_or(options[0].1);
-        egui::ComboBox::from_id_source(id)
+        egui::ComboBox::from_id_salt(id)
             .selected_text(selected)
             .show_ui(ui, |ui| {
                 for (allowed, label) in options {
@@ -701,8 +701,8 @@ impl WareboxesApp {
         egui::Frame::default()
             .fill(fill)
             .stroke(egui::Stroke::new(1.0_f32, stroke))
-            .rounding(egui::Rounding::same(999.0))
-            .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+            .corner_radius(egui::CornerRadius::same(u8::MAX))
+            .inner_margin(egui::Margin::symmetric(8, 3))
             .show(ui, |ui| {
                 ui.label(
                     egui::RichText::new(Self::packaging_unit_label(value))
@@ -754,8 +754,8 @@ impl WareboxesApp {
         egui::Frame::default()
             .fill(fill)
             .stroke(egui::Stroke::new(1.0_f32, stroke))
-            .rounding(egui::Rounding::same(6.0))
-            .inner_margin(egui::Margin::same(6.0))
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::same(6))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.label(
@@ -777,7 +777,7 @@ impl WareboxesApp {
                     };
                     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                     let painter = ui.painter().with_clip_rect(rect);
-                    painter.rect_filled(rect, egui::Rounding::same(3.0), egui::Color32::WHITE);
+                    painter.rect_filled(rect, egui::CornerRadius::same(3), egui::Color32::WHITE);
                     if barcode_type == "qr" {
                         if let Ok(encoded) = wareboxes_barcodes::encode_qr(value) {
                             Self::paint_qr_matrix(&painter, rect.shrink(4.0), &encoded)
@@ -806,7 +806,7 @@ impl WareboxesApp {
                         egui::pos2(x, rect.top()),
                         egui::pos2((x + width).min(rect.right()), rect.bottom()),
                     ),
-                    egui::Rounding::ZERO,
+                    egui::CornerRadius::ZERO,
                     ink,
                 );
             }
@@ -833,7 +833,7 @@ impl WareboxesApp {
                         egui::pos2(origin.x + x as f32 * module, origin.y + y as f32 * module);
                     painter.rect_filled(
                         egui::Rect::from_min_size(min, egui::vec2(module, module)),
-                        egui::Rounding::ZERO,
+                        egui::CornerRadius::ZERO,
                         egui::Color32::BLACK,
                     );
                 }
@@ -909,8 +909,8 @@ impl WareboxesApp {
                 1.0_f32,
                 Self::load_status_color(LoadStatus::Scheduled),
             ))
-            .rounding(egui::Rounding::same(5.0))
-            .inner_margin(egui::Margin::symmetric(6.0, 3.0))
+            .corner_radius(egui::CornerRadius::same(5))
+            .inner_margin(egui::Margin::symmetric(6, 3))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
@@ -1191,8 +1191,8 @@ impl WareboxesApp {
         egui::Frame::default()
             .fill(fill)
             .stroke(egui::Stroke::new(1.0_f32, color))
-            .rounding(egui::Rounding::same(5.0))
-            .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+            .corner_radius(egui::CornerRadius::same(5))
+            .inner_margin(egui::Margin::symmetric(6, 2))
             .show(ui, |ui| {
                 ui.label(
                     egui::RichText::new(format!("{label}: {count}"))
@@ -1212,8 +1212,8 @@ impl WareboxesApp {
         egui::Frame::default()
             .fill(fill)
             .stroke(egui::Stroke::new(1.0_f32, color))
-            .rounding(egui::Rounding::same(5.0))
-            .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+            .corner_radius(egui::CornerRadius::same(5))
+            .inner_margin(egui::Margin::symmetric(6, 2))
             .show(ui, |ui| {
                 ui.label(
                     egui::RichText::new(Self::order_visual_state_label(order))

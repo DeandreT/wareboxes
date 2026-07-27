@@ -152,10 +152,10 @@ impl WareboxesApp {
             .cloned()
             .unwrap_or_default();
         let mut refresh_orders = false;
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
-            .rounding(egui::Rounding::same(4.0))
-            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     let search_response = ui.add(
@@ -304,12 +304,12 @@ impl WareboxesApp {
                             ui.set_min_width(150.0);
                             if ui.button("Open details").clicked() {
                                 open_details = true;
-                                ui.close_menu();
+                                ui.close();
                             }
                             if o.deleted.is_some() {
                                 if ui.button("Restore order").clicked() {
                                     restore_order = true;
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             } else if o.status != OrderStatus::Shipped {
                                 ui.separator();
@@ -321,7 +321,7 @@ impl WareboxesApp {
                                     .clicked()
                                 {
                                     delete_order = true;
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             }
                         });
@@ -422,12 +422,12 @@ impl WareboxesApp {
                             ui.set_min_width(160.0);
                             if ui.button("Refresh details").clicked() {
                                 refresh = true;
-                                ui.close_menu();
+                                ui.close();
                             }
                             if order.deleted.is_some() {
                                 if ui.button("Restore order").clicked() {
                                     restore_order = true;
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             } else if order.status != OrderStatus::Shipped {
                                 ui.separator();
@@ -439,7 +439,7 @@ impl WareboxesApp {
                                     .clicked()
                                 {
                                     delete_order = true;
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             }
                         });
@@ -1217,10 +1217,10 @@ impl WareboxesApp {
             .get("items:search")
             .cloned()
             .unwrap_or_default();
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
-            .rounding(egui::Rounding::same(4.0))
-            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add(
@@ -1352,12 +1352,12 @@ impl WareboxesApp {
                                 ui.set_min_width(150.0);
                                 if ui.button("Open item").clicked() {
                                     open_details = true;
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                                 if item.deleted.is_some() {
                                     if ui.button("Restore item").clicked() {
                                         restore_item = true;
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                 } else {
                                     ui.separator();
@@ -1369,7 +1369,7 @@ impl WareboxesApp {
                                         .clicked()
                                     {
                                         delete_item = true;
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                 }
                             });
@@ -1448,7 +1448,7 @@ impl WareboxesApp {
                         if item.deleted.is_some() {
                             if ui.button("Restore item").clicked() {
                                 restore_item = true;
-                                ui.close_menu();
+                                ui.close();
                             }
                         } else if ui
                             .add(egui::Button::new(
@@ -1458,7 +1458,7 @@ impl WareboxesApp {
                             .clicked()
                         {
                             delete_item = true;
-                            ui.close_menu();
+                            ui.close();
                         }
                     });
                 });
@@ -1516,9 +1516,9 @@ impl WareboxesApp {
         let key = format!("item:{}:sku", item.id);
         let mut sku = self.forms.drafts.get(&key).cloned().unwrap_or_default();
         let mut add_sku = false;
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
-            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+            .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add(
@@ -1595,9 +1595,9 @@ impl WareboxesApp {
         let mut add_barcode = false;
         let barcode_error = Self::barcode_validation_error(&barcode, &barcode_type);
         let can_use_barcode = !barcode.trim().is_empty() && barcode_error.is_none();
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
-            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+            .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.add(

@@ -608,7 +608,7 @@ fn qr_data_codewords(data: &[u8], data_codewords: usize) -> Vec<u8> {
     }
 
     let terminator = 4.min(capacity_bits.saturating_sub(bits.len()));
-    bits.extend(std::iter::repeat(false).take(terminator));
+    bits.extend(std::iter::repeat_n(false, terminator));
     while bits.len() % 8 != 0 {
         bits.push(false);
     }
@@ -773,7 +773,7 @@ fn draw_data(modules: &mut [bool], reserved: &[bool], size: usize, codewords: &[
 }
 
 fn qr_mask_0(x: usize, y: usize) -> bool {
-    (x + y) % 2 == 0
+    (x + y).is_multiple_of(2)
 }
 
 fn draw_format_bits(modules: &mut [bool], reserved: &mut [bool], size: usize, mask: u8) {
