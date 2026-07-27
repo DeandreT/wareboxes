@@ -13,6 +13,21 @@ Every retry keeps those immutable request bytes while creating a distinct
 transport attempt and request ID. An interrupted in-flight attempt reopens as
 ambiguous and requires an exact replay or reconciliation.
 
+## Authentication and Transport
+
+The app creates an RF-specific versioned session and holds its opaque bearer
+token only in memory. The app-private database retains a random device identity
+and validated server URL, but never credentials or session tokens. After sign-in,
+the operator, tenant, and device identities form the execution scope used for
+every durable command.
+
+Authenticated requests send the tenant, request, and idempotency headers required
+by the public API. A server response is stored before it changes the workflow.
+Known transient responses remain retryable with the original command bytes;
+malformed successful responses and indeterminate business conflicts stop work for
+reconciliation. On startup and after sign-in, the app recovers unresolved device
+commands before requesting the operator's current putaway claim.
+
 ## Build Requirements
 
 - Rust 1.92 or newer.

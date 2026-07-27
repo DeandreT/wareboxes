@@ -4,10 +4,15 @@ use thiserror::Error;
 use wareboxes_api_contract::v1::{
     API_PREFIX, ClaimNextPutawayRequest, ClaimPutawayByIdRequest,
     ConfirmLicensePlatePutawayRequest, ConfirmPutawayRequest, IdempotencyKey,
-    PutawayClaimReleaseReason, PutawayWorkflow, ReleasePutawayClaimRequest,
+    LicensePlatePutawayConfirmationResponse, PutawayClaimReleaseReason, PutawayClaimResponse,
+    PutawayClaimSourceLocation, PutawayClaimWork, PutawayConfirmationResponse, PutawayWorkflow,
+    ReleasePutawayClaimRequest,
 };
 
-use crate::workflow::{DurableCommandDraft, PutawayCommand, PutawayKind, ReleaseReason};
+use crate::workflow::{
+    CommandOutcome, DurableCommandDraft, Location, PutawayClaim, PutawayCommand, PutawayKind,
+    PutawayWork, ReleaseReason,
+};
 
 pub const JSON_CONTENT_TYPE: &str = "application/json";
 
@@ -55,6 +60,16 @@ pub enum WireRequestError {
     InvalidIdempotencyKey(#[from] wareboxes_api_contract::v1::IdempotencyKeyError),
     #[error("could not encode the versioned API request: {0}")]
     Encode(#[from] serde_json::Error),
+}
+
+#[derive(Debug, Error)]
+pub enum WireResponseError {
+    #[error("HTTP status {0} is not a successful command response")]
+    UnsuccessfulStatus(u16),
+    #[error("the warehouse service returned an invalid command response: {0}")]
+    Decode(#[from] serde_json::Error),
+    #[error("the warehouse service returned an invalid putaway claim")]
+    InvalidClaim,
 }
 
 pub fn build_durable_request(
@@ -130,6 +145,117 @@ pub fn build_durable_request(
         body,
         body_sha256,
         response_kind,
+    })
+}
+
+pub fn decode_command_response(
+    response_kind: ResponseKind,
+    status: u16,
+    body: &[u8],
+) -> Result<CommandOutcome, WireResponseError> {
+    if !(200..300).contains(&status) {
+        return Err(WireResponseError::UnsuccessfulStatus(status));
+    }
+    match response_kind {
+        ResponseKind::OptionalClaim => {
+            let claim = serde_json::from_slice::<Option<PutawayClaimResponse>>(body)?;
+            Ok(CommandOutcome::Claimed(
+                claim.map(map_claim).transpose()?.map(Box::new),
+            ))
+        }
+        ResponseKind::Claim => Ok(CommandOutcome::Claimed(Some(Box::new(map_claim(
+            serde_json::from_slice::<PutawayClaimResponse>(body)?,
+        )?)))),
+        ResponseKind::LooseConfirmation => {
+            let response = serde_json::from_slice::<PutawayConfirmationResponse>(body)?;
+            Ok(CommandOutcome::Confirmed {
+                task_id: response.task_id,
+            })
+        }
+        ResponseKind::LicensePlateConfirmation => {
+            let response = serde_json::from_slice::<LicensePlatePutawayConfirmationResponse>(body)?;
+            Ok(CommandOutcome::Confirmed {
+                task_id: response.task_id,
+            })
+        }
+        ResponseKind::Release => {
+            let response = serde_json::from_slice::<
+                wareboxes_api_contract::v1::PutawayClaimReleaseResponse,
+            >(body)?;
+            Ok(CommandOutcome::Released {
+                task_id: response.task_id,
+            })
+        }
+    }
+}
+
+pub fn decode_claim_response(body: &[u8]) -> Result<Option<PutawayClaim>, WireResponseError> {
+    serde_json::from_slice::<Option<PutawayClaimResponse>>(body)?
+        .map(map_claim)
+        .transpose()
+}
+
+fn map_claim(response: PutawayClaimResponse) -> Result<PutawayClaim, WireResponseError> {
+    if response.task_id <= 0
+        || response.inventory_owner_id <= 0
+        || response.facility_id <= 0
+        || response.destination_location.location_id <= 0
+        || response.destination_location.barcode.trim().is_empty()
+    {
+        return Err(WireResponseError::InvalidClaim);
+    }
+    let source = map_source(response.source_location)?;
+    let work = match response.work {
+        PutawayClaimWork::Loose {
+            item_id,
+            item_description,
+            uom,
+            lot,
+            serial,
+            quantity,
+            ..
+        } => PutawayWork::Loose {
+            item_description,
+            item_id,
+            quantity,
+            uom,
+            lot,
+            serial,
+        },
+        PutawayClaimWork::LicensePlate {
+            license_plate_barcode,
+            planned_balance_count,
+            ..
+        } => PutawayWork::LicensePlate {
+            barcode: license_plate_barcode,
+            planned_balance_count,
+        },
+    };
+    Ok(PutawayClaim {
+        task_id: response.task_id,
+        inventory_owner_id: response.inventory_owner_id,
+        facility_id: response.facility_id,
+        priority: response.priority,
+        instructions: response.instructions,
+        lease_expires_at: response.lease_expires_at,
+        source: Some(source),
+        destination: Location {
+            location_id: response.destination_location.location_id,
+            name: response.destination_location.name,
+            barcode: Some(response.destination_location.barcode),
+        },
+        work,
+    })
+}
+
+fn map_source(source: PutawayClaimSourceLocation) -> Result<Location, WireResponseError> {
+    if source.location_id <= 0 {
+        return Err(WireResponseError::InvalidClaim);
+    }
+    Ok(Location {
+        location_id: source.location_id,
+        name: source.name,
+        barcode: source.barcode.filter(|barcode| !barcode.trim().is_empty()),
     })
 }
 
@@ -296,6 +422,73 @@ mod tests {
         assert!(matches!(
             build_durable_request(&draft),
             Err(WireRequestError::UnsupportedSchema(2))
+        ));
+    }
+
+    #[test]
+    fn optional_claim_response_maps_scope_and_scannable_locations() {
+        let response = serde_json::to_vec(&json!({
+            "task_id": 42,
+            "inventory_owner_id": 7,
+            "facility_id": 9,
+            "priority": 80,
+            "instructions": "Keep upright",
+            "due_at": null,
+            "lease_expires_at": "2026-07-27T02:00:00Z",
+            "source_location": {
+                "location_id": 11,
+                "barcode": null,
+                "name": "Receiving"
+            },
+            "destination_location": {
+                "location_id": 12,
+                "barcode": "A-01-02",
+                "name": "A-01-02"
+            },
+            "work": {
+                "workflow": "loose",
+                "source_inventory_balance_id": 13,
+                "item_batch_id": 14,
+                "item_id": 15,
+                "item_description": "Widget",
+                "uom": "case",
+                "lot": "LOT-1",
+                "serial": null,
+                "expiration": null,
+                "inventory_status": "available",
+                "quantity": 4
+            }
+        }))
+        .unwrap();
+
+        let CommandOutcome::Claimed(Some(claim)) =
+            decode_command_response(ResponseKind::OptionalClaim, 200, &response).unwrap()
+        else {
+            panic!("expected a claim");
+        };
+        assert_eq!(claim.inventory_owner_id, 7);
+        assert_eq!(claim.facility_id, 9);
+        assert_eq!(claim.source.as_ref().unwrap().barcode, None);
+        assert_eq!(claim.destination.barcode.as_deref(), Some("A-01-02"));
+    }
+
+    #[test]
+    fn optional_claim_accepts_an_exact_json_null() {
+        assert_eq!(
+            decode_command_response(ResponseKind::OptionalClaim, 200, b"null").unwrap(),
+            CommandOutcome::Claimed(None)
+        );
+    }
+
+    #[test]
+    fn malformed_success_never_becomes_a_workflow_outcome() {
+        assert!(matches!(
+            decode_command_response(ResponseKind::LooseConfirmation, 200, b"{}"),
+            Err(WireResponseError::Decode(_))
+        ));
+        assert!(matches!(
+            decode_command_response(ResponseKind::Release, 503, b"{}"),
+            Err(WireResponseError::UnsuccessfulStatus(503))
         ));
     }
 }

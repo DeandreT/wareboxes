@@ -9,6 +9,7 @@ mod license_plate_putaway;
 mod putaway;
 mod putaway_claim;
 mod revision;
+mod rf_session;
 
 pub use cursor::{
     CursorPage, CursorPageRequest, OpaqueCursor, OpaqueCursorError, PageLimit, PageLimitError,
@@ -42,6 +43,10 @@ pub use putaway_claim::{
     PutawayClaimWork, PutawayWorkflow, ReleasePutawayClaimRequest,
 };
 pub use revision::{Revision, RevisionError, RevisionPrecondition};
+pub use rf_session::{
+    CreateRfSessionRequest, CreateRfSessionResponse, RfSessionOwnerScope, RfSessionSiteScope,
+    RfSessionTenant,
+};
 
 /// URL prefix for the version 1 public API.
 pub const API_PREFIX: &str = "/api/v1";

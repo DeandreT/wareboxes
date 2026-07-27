@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use url::Url;
 use uuid::Uuid;
 
 use crate::wire::{
@@ -12,8 +13,17 @@ use crate::wire::{
 };
 use crate::workflow::{DurableCommandDraft, PutawayCommand};
 
-const STORE_SCHEMA_VERSION: i64 = 1;
+mod schema;
+
+const STORE_SCHEMA_VERSION: i64 = 3;
 const MAX_ERROR_LENGTH: usize = 1_000;
+const MAX_SERVER_URL_LENGTH: usize = 2_048;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceProfile {
+    pub device_id: String,
+    pub server_url: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionScope {
@@ -27,10 +37,7 @@ impl ExecutionScope {
         if self.tenant_id <= 0 || self.operator_id <= 0 {
             return Err(CommandStoreError::InvalidScope);
         }
-        if self.device_id.is_empty()
-            || self.device_id.len() > 128
-            || !self.device_id.bytes().all(|byte| byte.is_ascii_graphic())
-        {
+        if !valid_device_id(&self.device_id) {
             return Err(CommandStoreError::InvalidScope);
         }
         Ok(())
@@ -90,6 +97,7 @@ pub enum CommandStatus {
     Persisted,
     Dispatching,
     Ambiguous,
+    Retryable,
     ResponseRecorded,
     ReconcileRequired,
     Completed,
@@ -102,6 +110,7 @@ impl CommandStatus {
             Self::Persisted => "persisted",
             Self::Dispatching => "dispatching",
             Self::Ambiguous => "ambiguous",
+            Self::Retryable => "retryable",
             Self::ResponseRecorded => "response_recorded",
             Self::ReconcileRequired => "reconcile_required",
             Self::Completed => "completed",
@@ -114,6 +123,7 @@ impl CommandStatus {
             "persisted" => Ok(Self::Persisted),
             "dispatching" => Ok(Self::Dispatching),
             "ambiguous" => Ok(Self::Ambiguous),
+            "retryable" => Ok(Self::Retryable),
             "response_recorded" => Ok(Self::ResponseRecorded),
             "reconcile_required" => Ok(Self::ReconcileRequired),
             "completed" => Ok(Self::Completed),
@@ -137,6 +147,7 @@ pub struct DurableCommandRecord {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub last_error: Option<String>,
+    pub response: Option<DurableHttpResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,9 +177,13 @@ pub enum CommandStoreError {
     UnsupportedSchema(i64),
     #[error("tenant, operator, and device scope must be valid")]
     InvalidScope,
+    #[error("server URL must be an HTTP(S) endpoint without credentials, query, or fragment")]
+    InvalidServerUrl,
+    #[error("server URL cannot change while this device has unresolved commands")]
+    ServerUrlChangeBlocked,
     #[error("the command identity already belongs to different immutable content")]
     IdentityConflict,
-    #[error("another unresolved putaway command already exists for this device scope")]
+    #[error("another unresolved putaway command already exists on this device")]
     UnresolvedCommandExists,
     #[error("durable command {0} does not exist")]
     NotFound(i64),
@@ -180,8 +195,14 @@ pub enum CommandStoreError {
         status: CommandStatus,
         target: &'static str,
     },
+    #[error("dispatch attempt {attempt_id} is not active for durable command {record_id}")]
+    AttemptMismatch { record_id: i64, attempt_id: String },
     #[error("durable command record is corrupt: {0}")]
     CorruptRecord(String),
+    #[error("HTTP status {0} is not a known retryable outcome")]
+    NonRetryableHttpStatus(u16),
+    #[error("HTTP status {0} must be recorded as a retryable outcome")]
+    RetryableHttpStatus(u16),
 }
 
 pub struct CommandStore {
@@ -199,7 +220,7 @@ impl CommandStore {
         Self::configure(connection, false)
     }
 
-    fn configure(connection: Connection, persistent: bool) -> Result<Self, CommandStoreError> {
+    fn configure(mut connection: Connection, persistent: bool) -> Result<Self, CommandStoreError> {
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
@@ -211,7 +232,7 @@ impl CommandStore {
 
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version == 0 {
-            Self::create_schema(&connection)?;
+            schema::create(&mut connection)?;
         } else if version != STORE_SCHEMA_VERSION {
             return Err(CommandStoreError::UnsupportedSchema(version));
         }
@@ -221,69 +242,67 @@ impl CommandStore {
         Ok(store)
     }
 
-    fn create_schema(connection: &Connection) -> Result<(), CommandStoreError> {
-        connection.execute_batch(
+    pub fn device_profile(&self) -> Result<DeviceProfile, CommandStoreError> {
+        load_device_profile(&self.connection)
+    }
+
+    pub fn server_url(&self) -> Result<Option<String>, CommandStoreError> {
+        Ok(self.device_profile()?.server_url)
+    }
+
+    pub fn set_server_url(
+        &mut self,
+        server_url: Option<&str>,
+    ) -> Result<DeviceProfile, CommandStoreError> {
+        let server_url = normalize_server_url(server_url)?;
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let profile = load_device_profile(&tx)?;
+        if profile.server_url == server_url {
+            tx.commit()?;
+            return Ok(profile);
+        }
+        let unresolved_exists = tx
+            .query_row(
+                r#"
+                SELECT 1
+                FROM rf_commands
+                WHERE device_id = ?1
+                  AND status IN (
+                      'persisted',
+                      'dispatching',
+                      'ambiguous',
+                      'retryable',
+                      'response_recorded',
+                      'reconcile_required'
+                  )
+                LIMIT 1
+                "#,
+                [&profile.device_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some();
+        if unresolved_exists {
+            return Err(CommandStoreError::ServerUrlChangeBlocked);
+        }
+        let changed = tx.execute(
             r#"
-            BEGIN IMMEDIATE;
-
-            CREATE TABLE rf_commands (
-                record_id INTEGER PRIMARY KEY,
-                command_id TEXT NOT NULL UNIQUE,
-                tenant_id INTEGER NOT NULL CHECK (tenant_id > 0),
-                operator_id INTEGER NOT NULL CHECK (operator_id > 0),
-                device_id TEXT NOT NULL,
-                schema_version INTEGER NOT NULL,
-                operation TEXT NOT NULL,
-                idempotency_key TEXT NOT NULL,
-                draft_json BLOB NOT NULL,
-                http_method TEXT NOT NULL,
-                path TEXT NOT NULL,
-                content_type TEXT NOT NULL,
-                body BLOB NOT NULL,
-                body_sha256 BLOB NOT NULL CHECK (length(body_sha256) = 32),
-                response_kind TEXT NOT NULL,
-                status TEXT NOT NULL,
-                attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-                created_at_ms INTEGER NOT NULL,
-                updated_at_ms INTEGER NOT NULL,
-                last_error TEXT,
-                response_status INTEGER,
-                response_body BLOB,
-                response_sha256 BLOB,
-                server_request_id TEXT,
-                UNIQUE (tenant_id, operation, idempotency_key)
-            );
-
-            CREATE UNIQUE INDEX rf_commands_one_unresolved_putaway
-                ON rf_commands (tenant_id, operator_id, device_id)
-                WHERE status IN (
-                    'persisted',
-                    'dispatching',
-                    'ambiguous',
-                    'response_recorded',
-                    'reconcile_required'
-                );
-
-            CREATE TABLE rf_command_attempts (
-                attempt_id TEXT PRIMARY KEY,
-                record_id INTEGER NOT NULL
-                    REFERENCES rf_commands(record_id) ON DELETE RESTRICT,
-                ordinal INTEGER NOT NULL CHECK (ordinal > 0),
-                request_id TEXT NOT NULL UNIQUE,
-                started_at_ms INTEGER NOT NULL,
-                finished_at_ms INTEGER,
-                status TEXT NOT NULL,
-                http_status INTEGER,
-                server_request_id TEXT,
-                error_message TEXT,
-                UNIQUE (record_id, ordinal)
-            );
-
-            PRAGMA user_version = 1;
-            COMMIT;
+            UPDATE rf_device_profile
+            SET server_url = ?1
+            WHERE singleton_id = 1
             "#,
+            [server_url],
         )?;
-        Ok(())
+        if changed != 1 {
+            return Err(CommandStoreError::CorruptRecord(
+                "device profile is missing".into(),
+            ));
+        }
+        let profile = load_device_profile(&tx)?;
+        tx.commit()?;
+        Ok(profile)
     }
 
     pub fn persist(
@@ -325,19 +344,18 @@ impl CommandStore {
                 r#"
                 SELECT 1
                 FROM rf_commands
-                WHERE tenant_id = ?1
-                  AND operator_id = ?2
-                  AND device_id = ?3
+                WHERE device_id = ?1
                   AND status IN (
                       'persisted',
                       'dispatching',
                       'ambiguous',
+                      'retryable',
                       'response_recorded',
                       'reconcile_required'
-                  )
+                )
                 LIMIT 1
                 "#,
-                params![scope.tenant_id, scope.operator_id, scope.device_id],
+                [&scope.device_id],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
@@ -410,7 +428,7 @@ impl CommandStore {
         require_scope(&record, scope)?;
         if !matches!(
             record.status,
-            CommandStatus::Persisted | CommandStatus::Ambiguous
+            CommandStatus::Persisted | CommandStatus::Ambiguous | CommandStatus::Retryable
         ) {
             return Err(CommandStoreError::InvalidTransition {
                 record_id,
@@ -497,9 +515,10 @@ impl CommandStore {
             params![now, message, attempt_id, record_id],
         )?;
         if changed != 1 {
-            return Err(CommandStoreError::CorruptRecord(
-                "active dispatch attempt is missing".into(),
-            ));
+            return Err(CommandStoreError::AttemptMismatch {
+                record_id,
+                attempt_id: attempt_id.to_owned(),
+            });
         }
         tx.execute(
             r#"
@@ -522,6 +541,9 @@ impl CommandStore {
         response: &DurableHttpResponse,
     ) -> Result<DurableCommandRecord, CommandStoreError> {
         scope.validate()?;
+        if is_retryable_http_status(response.status) {
+            return Err(CommandStoreError::RetryableHttpStatus(response.status));
+        }
         let now = now_ms();
         let response_sha256 = Sha256::digest(&response.body);
         let tx = self
@@ -554,9 +576,10 @@ impl CommandStore {
             ],
         )?;
         if changed != 1 {
-            return Err(CommandStoreError::CorruptRecord(
-                "active dispatch attempt is missing".into(),
-            ));
+            return Err(CommandStoreError::AttemptMismatch {
+                record_id,
+                attempt_id: attempt_id.to_owned(),
+            });
         }
         tx.execute(
             r#"
@@ -578,6 +601,69 @@ impl CommandStore {
                 response.server_request_id,
                 record_id,
             ],
+        )?;
+        let record = load_record(&tx, record_id)?;
+        tx.commit()?;
+        Ok(record)
+    }
+
+    pub fn record_retryable_response(
+        &mut self,
+        scope: &ExecutionScope,
+        record_id: i64,
+        attempt_id: &str,
+        response: &DurableHttpResponse,
+    ) -> Result<DurableCommandRecord, CommandStoreError> {
+        scope.validate()?;
+        if !is_retryable_http_status(response.status) {
+            return Err(CommandStoreError::NonRetryableHttpStatus(response.status));
+        }
+        let message = format!("HTTP {} response is retryable", response.status);
+        let now = now_ms();
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let record = load_record(&tx, record_id)?;
+        require_scope(&record, scope)?;
+        if record.status != CommandStatus::Dispatching {
+            return Err(CommandStoreError::InvalidTransition {
+                record_id,
+                status: record.status,
+                target: "retryable",
+            });
+        }
+        let changed = tx.execute(
+            r#"
+            UPDATE rf_command_attempts
+            SET status = 'retryable',
+                finished_at_ms = ?1,
+                http_status = ?2,
+                server_request_id = ?3,
+                error_message = ?4
+            WHERE attempt_id = ?5 AND record_id = ?6 AND status = 'dispatching'
+            "#,
+            params![
+                now,
+                i64::from(response.status),
+                response.server_request_id,
+                message,
+                attempt_id,
+                record_id,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(CommandStoreError::AttemptMismatch {
+                record_id,
+                attempt_id: attempt_id.to_owned(),
+            });
+        }
+        tx.execute(
+            r#"
+            UPDATE rf_commands
+            SET status = 'retryable', updated_at_ms = ?1, last_error = ?2
+            WHERE record_id = ?3
+            "#,
+            params![now, message, record_id],
         )?;
         let record = load_record(&tx, record_id)?;
         tx.commit()?;
@@ -644,6 +730,7 @@ impl CommandStore {
                   'persisted',
                   'dispatching',
                   'ambiguous',
+                  'retryable',
                   'response_recorded',
                   'reconcile_required'
               )
@@ -655,6 +742,37 @@ impl CommandStore {
                 params![scope.tenant_id, scope.operator_id, scope.device_id],
                 |row| row.get::<_, i64>(0),
             )?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|record_id| load_record_connection(&self.connection, record_id))
+            .collect()
+    }
+
+    pub fn unresolved_for_device(
+        &self,
+        device_id: &str,
+    ) -> Result<Vec<DurableCommandRecord>, CommandStoreError> {
+        if !valid_device_id(device_id) {
+            return Err(CommandStoreError::InvalidScope);
+        }
+        let mut statement = self.connection.prepare(
+            r#"
+            SELECT record_id
+            FROM rf_commands
+            WHERE device_id = ?1
+              AND status IN (
+                  'persisted',
+                  'dispatching',
+                  'ambiguous',
+                  'retryable',
+                  'response_recorded',
+                  'reconcile_required'
+              )
+            ORDER BY record_id
+            "#,
+        )?;
+        let ids = statement
+            .query_map([device_id], |row| row.get::<_, i64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         ids.into_iter()
             .map(|record_id| load_record_connection(&self.connection, record_id))
@@ -711,6 +829,10 @@ struct RawRecord {
     created_at_ms: i64,
     updated_at_ms: i64,
     last_error: Option<String>,
+    response_status: Option<i64>,
+    response_body: Option<Vec<u8>>,
+    response_sha256: Option<Vec<u8>>,
+    server_request_id: Option<String>,
 }
 
 fn load_record(
@@ -754,7 +876,11 @@ const RECORD_QUERY: &str = r#"
         attempt_count,
         created_at_ms,
         updated_at_ms,
-        last_error
+        last_error,
+        response_status,
+        response_body,
+        response_sha256,
+        server_request_id
     FROM rf_commands
     WHERE record_id = ?1
 "#;
@@ -779,6 +905,10 @@ fn raw_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRecord> {
         created_at_ms: row.get(15)?,
         updated_at_ms: row.get(16)?,
         last_error: row.get(17)?,
+        response_status: row.get(18)?,
+        response_body: row.get(19)?,
+        response_sha256: row.get(20)?,
+        server_request_id: row.get(21)?,
     })
 }
 
@@ -814,6 +944,25 @@ fn decode_record(raw: RawRecord) -> Result<DurableCommandRecord, CommandStoreErr
             "draft operation does not match its index".into(),
         ));
     }
+    let status = CommandStatus::parse(&raw.status)?;
+    let response = decode_response(
+        raw.response_status,
+        raw.response_body,
+        raw.response_sha256,
+        raw.server_request_id,
+    )?;
+    let response_required = matches!(
+        status,
+        CommandStatus::ResponseRecorded
+            | CommandStatus::ReconcileRequired
+            | CommandStatus::Completed
+            | CommandStatus::Rejected
+    );
+    if response_required != response.is_some() {
+        return Err(CommandStoreError::CorruptRecord(
+            "command status and recorded response do not match".into(),
+        ));
+    }
 
     Ok(DurableCommandRecord {
         record_id: raw.record_id,
@@ -825,12 +974,112 @@ fn decode_record(raw: RawRecord) -> Result<DurableCommandRecord, CommandStoreErr
         operation,
         draft,
         request,
-        status: CommandStatus::parse(&raw.status)?,
+        status,
         attempt_count: raw.attempt_count,
         created_at_ms: raw.created_at_ms,
         updated_at_ms: raw.updated_at_ms,
         last_error: raw.last_error,
+        response,
     })
+}
+
+fn decode_response(
+    status: Option<i64>,
+    body: Option<Vec<u8>>,
+    sha256: Option<Vec<u8>>,
+    server_request_id: Option<String>,
+) -> Result<Option<DurableHttpResponse>, CommandStoreError> {
+    match (status, body, sha256) {
+        (None, None, None) if server_request_id.is_none() => Ok(None),
+        (Some(status), Some(body), Some(sha256)) => {
+            let status = u16::try_from(status).map_err(|_| {
+                CommandStoreError::CorruptRecord("invalid recorded HTTP status".into())
+            })?;
+            let expected: [u8; 32] = sha256.try_into().map_err(|_| {
+                CommandStoreError::CorruptRecord("invalid response body hash".into())
+            })?;
+            let actual = Sha256::digest(&body);
+            if actual.as_slice() != expected {
+                return Err(CommandStoreError::CorruptRecord(
+                    "response body hash does not match".into(),
+                ));
+            }
+            Ok(Some(DurableHttpResponse {
+                status,
+                body,
+                server_request_id,
+            }))
+        }
+        _ => Err(CommandStoreError::CorruptRecord(
+            "recorded response fields are incomplete".into(),
+        )),
+    }
+}
+
+fn load_device_profile(connection: &Connection) -> Result<DeviceProfile, CommandStoreError> {
+    let raw = connection
+        .query_row(
+            r#"
+            SELECT device_id, server_url
+            FROM rf_device_profile
+            WHERE singleton_id = 1
+            "#,
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| CommandStoreError::CorruptRecord("device profile is missing".into()))?;
+    decode_device_profile(raw.0, raw.1)
+}
+
+fn decode_device_profile(
+    device_id: String,
+    server_url: Option<String>,
+) -> Result<DeviceProfile, CommandStoreError> {
+    if !valid_device_id(&device_id) {
+        return Err(CommandStoreError::CorruptRecord(
+            "device profile contains an invalid device ID".into(),
+        ));
+    }
+    let normalized_server_url = normalize_server_url(server_url.as_deref()).map_err(|_| {
+        CommandStoreError::CorruptRecord("device profile contains an invalid server URL".into())
+    })?;
+    if normalized_server_url != server_url {
+        return Err(CommandStoreError::CorruptRecord(
+            "device profile contains a non-canonical server URL".into(),
+        ));
+    }
+    Ok(DeviceProfile {
+        device_id,
+        server_url,
+    })
+}
+
+fn valid_device_id(device_id: &str) -> bool {
+    !device_id.is_empty()
+        && device_id.len() <= 128
+        && device_id.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn normalize_server_url(server_url: Option<&str>) -> Result<Option<String>, CommandStoreError> {
+    let Some(server_url) = server_url else {
+        return Ok(None);
+    };
+    let server_url = server_url.trim();
+    if server_url.is_empty() || server_url.len() > MAX_SERVER_URL_LENGTH {
+        return Err(CommandStoreError::InvalidServerUrl);
+    }
+    let url = Url::parse(server_url).map_err(|_| CommandStoreError::InvalidServerUrl)?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(CommandStoreError::InvalidServerUrl);
+    }
+    Ok(Some(url.as_str().trim_end_matches('/').to_owned()))
 }
 
 fn require_scope(
@@ -914,6 +1163,10 @@ fn bounded(message: &str) -> String {
     message.chars().take(MAX_ERROR_LENGTH).collect()
 }
 
+pub const fn is_retryable_http_status(status: u16) -> bool {
+    status == 401 || status == 429 || (status >= 500 && status < 600)
+}
+
 fn now_ms() -> i64 {
     let elapsed = match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(elapsed) => elapsed,
@@ -923,224 +1176,4 @@ fn now_ms() -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::workflow::{PutawayKind, ReleaseReason};
-
-    fn scope() -> ExecutionScope {
-        ExecutionScope {
-            tenant_id: 7,
-            operator_id: 9,
-            device_id: "device-11".into(),
-        }
-    }
-
-    fn draft(command_id: &str, key: &str, command: PutawayCommand) -> DurableCommandDraft {
-        DurableCommandDraft {
-            schema_version: 1,
-            command_id: command_id.into(),
-            idempotency_key: key.into(),
-            command,
-        }
-    }
-
-    fn claim_draft(command_id: &str, key: &str) -> DurableCommandDraft {
-        draft(
-            command_id,
-            key,
-            PutawayCommand::ClaimNext {
-                workflow: PutawayKind::Loose,
-            },
-        )
-    }
-
-    #[test]
-    fn command_is_durable_before_an_attempt_can_start() {
-        let mut store = CommandStore::open_in_memory().expect("store should open");
-        let record = store
-            .persist(&scope(), claim_draft("command-1", "key-1"))
-            .expect("command should persist");
-
-        assert_eq!(record.status, CommandStatus::Persisted);
-        assert_eq!(record.attempt_count, 0);
-        let attempt = store
-            .begin_attempt(&scope(), record.record_id)
-            .expect("persisted command should dispatch");
-        assert_eq!(attempt.command.status, CommandStatus::Dispatching);
-        assert_eq!(attempt.ordinal, 1);
-        assert_ne!(attempt.attempt_id, attempt.request_id);
-    }
-
-    #[test]
-    fn exact_duplicate_returns_the_original_record() {
-        let mut store = CommandStore::open_in_memory().expect("store should open");
-        let draft = claim_draft("command-1", "key-1");
-        let first = store
-            .persist(&scope(), draft.clone())
-            .expect("first command should persist");
-        let replay = store
-            .persist(&scope(), draft)
-            .expect("exact command should replay");
-
-        assert_eq!(replay, first);
-    }
-
-    #[test]
-    fn changed_content_cannot_reuse_a_command_identity() {
-        let mut store = CommandStore::open_in_memory().expect("store should open");
-        store
-            .persist(&scope(), claim_draft("command-1", "key-1"))
-            .expect("first command should persist");
-        let changed = draft(
-            "command-1",
-            "key-1",
-            PutawayCommand::ClaimNext {
-                workflow: PutawayKind::LicensePlate,
-            },
-        );
-
-        assert!(matches!(
-            store.persist(&scope(), changed),
-            Err(CommandStoreError::IdentityConflict)
-        ));
-    }
-
-    #[test]
-    fn one_scope_cannot_create_concurrent_unresolved_commands() {
-        let mut store = CommandStore::open_in_memory().expect("store should open");
-        store
-            .persist(&scope(), claim_draft("command-1", "key-1"))
-            .expect("first command should persist");
-
-        assert!(matches!(
-            store.persist(&scope(), claim_draft("command-2", "key-2")),
-            Err(CommandStoreError::UnresolvedCommandExists)
-        ));
-    }
-
-    #[test]
-    fn ambiguous_retry_keeps_the_request_and_changes_attempt_identity() {
-        let mut store = CommandStore::open_in_memory().expect("store should open");
-        let record = store
-            .persist(
-                &scope(),
-                draft(
-                    "command-1",
-                    "confirm-key-1",
-                    PutawayCommand::ConfirmLoose {
-                        task_id: 42,
-                        destination_location_barcode: "A-01-02".into(),
-                    },
-                ),
-            )
-            .expect("command should persist");
-        let first = store
-            .begin_attempt(&scope(), record.record_id)
-            .expect("first attempt should start");
-        store
-            .mark_ambiguous(
-                &scope(),
-                record.record_id,
-                &first.attempt_id,
-                "connection closed",
-            )
-            .expect("ambiguous result should persist");
-        let retry = store
-            .begin_attempt(&scope(), record.record_id)
-            .expect("retry should start");
-
-        assert_eq!(retry.command.request, first.command.request);
-        assert_eq!(
-            retry.command.draft.idempotency_key,
-            first.command.draft.idempotency_key
-        );
-        assert_ne!(retry.attempt_id, first.attempt_id);
-        assert_ne!(retry.request_id, first.request_id);
-        assert_eq!(retry.ordinal, 2);
-    }
-
-    #[test]
-    fn response_is_recorded_before_completion() {
-        let mut store = CommandStore::open_in_memory().expect("store should open");
-        let record = store
-            .persist(
-                &scope(),
-                draft(
-                    "release-1",
-                    "release-key-1",
-                    PutawayCommand::Release {
-                        task_id: 42,
-                        reason: ReleaseReason::WorkInterrupted,
-                        note: None,
-                    },
-                ),
-            )
-            .expect("command should persist");
-        let attempt = store
-            .begin_attempt(&scope(), record.record_id)
-            .expect("attempt should start");
-        let response = store
-            .record_response(
-                &scope(),
-                record.record_id,
-                &attempt.attempt_id,
-                &DurableHttpResponse {
-                    status: 200,
-                    body: br#"{"task_id":42}"#.to_vec(),
-                    server_request_id: Some("server-1".into()),
-                },
-            )
-            .expect("response should persist");
-
-        assert_eq!(response.status, CommandStatus::ResponseRecorded);
-        let completed = store
-            .finalize(&scope(), record.record_id, CommandStatus::Completed, None)
-            .expect("recorded response should complete");
-        assert_eq!(completed.status, CommandStatus::Completed);
-    }
-
-    #[test]
-    fn another_scope_cannot_dispatch_a_record() {
-        let mut store = CommandStore::open_in_memory().expect("store should open");
-        let record = store
-            .persist(&scope(), claim_draft("command-1", "key-1"))
-            .expect("command should persist");
-        let other_scope = ExecutionScope {
-            tenant_id: 8,
-            ..scope()
-        };
-
-        assert!(matches!(
-            store.begin_attempt(&other_scope, record.record_id),
-            Err(CommandStoreError::ScopeMismatch)
-        ));
-    }
-
-    #[test]
-    fn unfinished_dispatch_is_ambiguous_after_reopen() {
-        let path =
-            std::env::temp_dir().join(format!("wareboxes-rf-store-{}.sqlite3", Uuid::new_v4()));
-        let record_id = {
-            let mut store = CommandStore::open(&path).expect("store should open");
-            let record = store
-                .persist(&scope(), claim_draft("command-1", "key-1"))
-                .expect("command should persist");
-            store
-                .begin_attempt(&scope(), record.record_id)
-                .expect("attempt should start");
-            record.record_id
-        };
-
-        let store = CommandStore::open(&path).expect("store should reopen");
-        let unresolved = store
-            .unresolved(&scope())
-            .expect("unresolved command should load");
-        assert_eq!(unresolved.len(), 1);
-        assert_eq!(unresolved[0].record_id, record_id);
-        assert_eq!(unresolved[0].status, CommandStatus::Ambiguous);
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
-        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
-    }
-}
+mod tests;
