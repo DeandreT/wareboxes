@@ -4,6 +4,15 @@ Native Android RF client built with egui/eframe and Android `NativeActivity`.
 It is a member of the Wareboxes Rust workspace and ships as a separate APK from
 the operations client.
 
+## Command Durability
+
+Operator commands are stored in an app-private SQLite database before they can
+enter network dispatch. Each record retains its tenant, operator, and device
+scope; idempotency identity; exact versioned API path and body; and a body hash.
+Every retry keeps those immutable request bytes while creating a distinct
+transport attempt and request ID. An interrupted in-flight attempt reopens as
+ambiguous and requires an exact replay or reconciliation.
+
 ## Build Requirements
 
 - Rust 1.92 or newer.
