@@ -42,6 +42,32 @@ jobs:
         with:
           ref: ${{ steps.release.outputs.sha }}
 
+      - name: Configure deployment SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/wareboxes_deploy"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/wareboxes_deploy" "$HOME/.ssh/known_hosts"
+
+      - name: Verify host runtime configuration
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          expected_version="$(tr -d '[:space:]' < deploy/runtime-version)"
+          ssh_options=(-o BatchMode=yes -o IdentitiesOnly=yes -i "$HOME/.ssh/wareboxes_deploy")
+          installed_version="$(
+            ssh "${ssh_options[@]}" "deploy@${DEPLOY_HOST}" \
+              'cat /etc/wareboxes/runtime-version 2>/dev/null || true'
+          )"
+          installed_version="$(printf '%s' "$installed_version" | tr -d '[:space:]')"
+          if [ "$installed_version" != "$expected_version" ]; then
+            echo "::error::Host runtime configuration is stale (expected version ${expected_version}, found ${installed_version:-missing}). Run the versioned provisioning procedure before deploying."
+            exit 1
+          fi
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -66,16 +92,6 @@ jobs:
           cp -a _site/. release/site/
           tar -C release -czf "wareboxes-${RELEASE_SHA}.tar.gz" .
           sha256sum "wareboxes-${RELEASE_SHA}.tar.gz" > "wareboxes-${RELEASE_SHA}.tar.gz.sha256"
-
-      - name: Configure deployment SSH
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
-        run: |
-          install -d -m 0700 "$HOME/.ssh"
-          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/wareboxes_deploy"
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          chmod 0600 "$HOME/.ssh/wareboxes_deploy" "$HOME/.ssh/known_hosts"
 
       - name: Upload and activate release
         env:

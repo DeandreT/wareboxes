@@ -35,12 +35,10 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://wareboxes_app:wareboxes_app@127.0.0.1:5433/wareboxes".to_string()
-        });
-        let migration_database_url = env::var("MIGRATION_DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://wareboxes_admin:wareboxes_admin@127.0.0.1:5433/wareboxes".to_string()
-        });
+        let (database_url, migration_database_url) = resolve_database_urls(
+            optional_env("DATABASE_URL")?,
+            optional_env("MIGRATION_DATABASE_URL")?,
+        )?;
         let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
         let allow_public_registration = parse_bool_env("ALLOW_PUBLIC_REGISTRATION", false)?;
         let cors_allowed_origins = env::var("CORS_ALLOWED_ORIGINS")
@@ -76,6 +74,46 @@ impl Config {
     }
 }
 
+fn optional_env(name: &str) -> anyhow::Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => bail!("{name} must contain valid UTF-8"),
+    }
+}
+
+fn resolve_database_urls(
+    database_url: Option<String>,
+    migration_database_url: Option<String>,
+) -> anyhow::Result<(String, String)> {
+    let database_url = non_empty_database_url("DATABASE_URL", database_url)?;
+    let migration_database_url =
+        non_empty_database_url("MIGRATION_DATABASE_URL", migration_database_url)?;
+
+    match (database_url, migration_database_url) {
+        (None, None) => Ok((
+            "postgres://wareboxes_app:wareboxes_app@127.0.0.1:5433/wareboxes".to_string(),
+            "postgres://wareboxes_admin:wareboxes_admin@127.0.0.1:5433/wareboxes".to_string(),
+        )),
+        (Some(database_url), Some(migration_database_url)) => {
+            Ok((database_url, migration_database_url))
+        }
+        (Some(_), None) => {
+            bail!("MIGRATION_DATABASE_URL is required when DATABASE_URL is configured")
+        }
+        (None, Some(_)) => {
+            bail!("DATABASE_URL is required when MIGRATION_DATABASE_URL is configured")
+        }
+    }
+}
+
+fn non_empty_database_url(name: &str, value: Option<String>) -> anyhow::Result<Option<String>> {
+    match value {
+        Some(value) if value.trim().is_empty() => bail!("{name} must not be empty"),
+        value => Ok(value),
+    }
+}
+
 fn parse_bool_env(name: &str, default: bool) -> anyhow::Result<bool> {
     let Ok(value) = env::var(name) else {
         return Ok(default);
@@ -84,5 +122,77 @@ fn parse_bool_env(name: &str, default: bool) -> anyhow::Result<bool> {
         "true" | "1" | "yes" => Ok(true),
         "false" | "0" | "no" => Ok(false),
         _ => bail!("{name} must be true or false"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_database_urls;
+
+    const RUNTIME_URL: &str = "postgres://app@database/wareboxes";
+    const MIGRATION_URL: &str = "postgres://admin@database/wareboxes";
+
+    #[test]
+    fn uses_local_defaults_only_when_both_database_urls_are_absent() {
+        let (runtime, migration) =
+            resolve_database_urls(None, None).expect("local defaults should resolve");
+
+        assert!(runtime.contains("wareboxes_app"));
+        assert!(runtime.contains("127.0.0.1:5433"));
+        assert!(migration.contains("wareboxes_admin"));
+        assert!(migration.contains("127.0.0.1:5433"));
+    }
+
+    #[test]
+    fn accepts_explicit_database_url_pair() {
+        let urls = resolve_database_urls(
+            Some(RUNTIME_URL.to_string()),
+            Some(MIGRATION_URL.to_string()),
+        )
+        .expect("paired database URLs should resolve");
+
+        assert_eq!(urls, (RUNTIME_URL.to_string(), MIGRATION_URL.to_string()));
+    }
+
+    #[test]
+    fn rejects_runtime_url_without_migration_url() {
+        let error = resolve_database_urls(Some(RUNTIME_URL.to_string()), None)
+            .expect_err("an incomplete database URL pair must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "MIGRATION_DATABASE_URL is required when DATABASE_URL is configured"
+        );
+    }
+
+    #[test]
+    fn rejects_migration_url_without_runtime_url() {
+        let error = resolve_database_urls(None, Some(MIGRATION_URL.to_string()))
+            .expect_err("an incomplete database URL pair must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "DATABASE_URL is required when MIGRATION_DATABASE_URL is configured"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_database_urls() {
+        for (runtime, migration, expected) in [
+            (
+                Some(String::new()),
+                Some(MIGRATION_URL.to_string()),
+                "DATABASE_URL must not be empty",
+            ),
+            (
+                Some(RUNTIME_URL.to_string()),
+                Some(" \t".to_string()),
+                "MIGRATION_DATABASE_URL must not be empty",
+            ),
+        ] {
+            let error = resolve_database_urls(runtime, migration)
+                .expect_err("empty database URLs must fail");
+            assert_eq!(error.to_string(), expected);
+        }
     }
 }
