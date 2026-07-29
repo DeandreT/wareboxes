@@ -100,7 +100,6 @@ pub struct CurrentUser {
     pub(crate) session_token_hash: String,
 }
 
-#[async_trait::async_trait]
 impl FromRequestParts<AppState> for CurrentUser {
     type Rejection = AppError;
 
@@ -208,7 +207,6 @@ impl CurrentTenant {
     }
 }
 
-#[async_trait::async_trait]
 impl FromRequestParts<AppState> for CurrentTenant {
     type Rejection = AppError;
 

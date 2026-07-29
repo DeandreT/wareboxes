@@ -842,41 +842,25 @@ impl WareboxesApp {
     }
 
     pub(super) fn save_barcode_svg(&mut self, value: &str, barcode_type: &str) {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = (value, barcode_type);
-            self.toast(
-                "Saving barcode SVGs is only available in the desktop app",
-                true,
-                self.now,
-            );
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let filename = format!(
-                "{}-{}.svg",
-                Self::sanitize_filename(value),
-                Self::sanitize_filename(barcode_type)
-            );
-            let dir = std::path::Path::new("barcode_exports");
-            let path = dir.join(filename);
-            let result = std::fs::create_dir_all(dir)
-                .and_then(|_| {
-                    wareboxes_barcodes::svg(barcode_type, value)
-                        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))
-                })
-                .and_then(|svg| std::fs::write(&path, svg));
-            match result {
-                Ok(()) => self.toast(format!("Saved {}", path.display()), false, self.now),
-                Err(err) => {
-                    self.toast(format!("Failed to save barcode SVG: {err}"), true, self.now)
-                }
-            }
+        let filename = format!(
+            "{}-{}.svg",
+            Self::sanitize_filename(value),
+            Self::sanitize_filename(barcode_type)
+        );
+        let dir = std::path::Path::new("barcode_exports");
+        let path = dir.join(filename);
+        let result = std::fs::create_dir_all(dir)
+            .and_then(|_| {
+                wareboxes_barcodes::svg(barcode_type, value)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))
+            })
+            .and_then(|svg| std::fs::write(&path, svg));
+        match result {
+            Ok(()) => self.toast(format!("Saved {}", path.display()), false, self.now),
+            Err(err) => self.toast(format!("Failed to save barcode SVG: {err}"), true, self.now),
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn sanitize_filename(value: &str) -> String {
         let sanitized = value
             .chars()

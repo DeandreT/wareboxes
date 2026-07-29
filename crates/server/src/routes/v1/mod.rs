@@ -18,15 +18,15 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(
-            "/expected-receiving/loads/by-barcode/:execution_barcode",
+            "/expected-receiving/loads/by-barcode/{execution_barcode}",
             get(expected_receiving::get_session_by_execution_barcode),
         )
         .route(
-            "/expected-receiving/loads/:load_id",
+            "/expected-receiving/loads/{load_id}",
             get(expected_receiving::get_session),
         )
         .route(
-            "/expected-receiving/lines/:load_line_id/confirmations",
+            "/expected-receiving/lines/{load_line_id}/confirmations",
             post(expected_receiving::confirm),
         )
         .route("/rf/sessions", post(rf_sessions::create))
@@ -36,26 +36,26 @@ pub fn router() -> Router<AppState> {
             post(license_plate_putaway::create),
         )
         .route(
-            "/license-plate-putaway-tasks/:task_id/confirmations",
+            "/license-plate-putaway-tasks/{task_id}/confirmations",
             post(license_plate_putaway::confirm),
         )
         .route("/putaway-tasks", post(putaway::create))
         .route(
-            "/putaway-tasks/:task_id/confirmations",
+            "/putaway-tasks/{task_id}/confirmations",
             post(putaway::confirm),
         )
         .route("/putaway-claims/next", post(putaway_claims::claim_next))
         .route("/putaway-claims/current", get(putaway_claims::current))
         .route(
-            "/putaway-claims/:task_id",
+            "/putaway-claims/{task_id}",
             post(putaway_claims::claim_by_id),
         )
         .route(
-            "/putaway-claims/:task_id/heartbeats",
+            "/putaway-claims/{task_id}/heartbeats",
             post(putaway_claim_lifecycle::heartbeat),
         )
         .route(
-            "/putaway-claims/:task_id/releases",
+            "/putaway-claims/{task_id}/releases",
             post(putaway_claim_lifecycle::release),
         )
         .layer(middleware::map_response(error::normalize_error_response))

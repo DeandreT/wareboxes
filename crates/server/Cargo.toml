@@ -6,6 +6,15 @@ license.workspace = true
 rust-version.workspace = true
 description = "Wareboxes WMS HTTP API (Axum + SQLx, PostgreSQL)"
 
+[features]
+default = []
+ssr = [
+    "dep:leptos",
+    "dep:leptos_axum",
+    "dep:wareboxes-web-ops",
+    "wareboxes-web-ops/ssr",
+]
+
 [lib]
 name = "wareboxes_server"
 path = "src/lib.rs"
@@ -19,6 +28,7 @@ wareboxes-api-contract = { workspace = true }
 wareboxes-domain = { workspace = true }
 wareboxes-core = { workspace = true }
 wareboxes-barcodes = { workspace = true }
+wareboxes-web-ops = { path = "../../apps/web-ops", default-features = false, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
@@ -27,9 +37,9 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.8", features = ["macros"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sqlx = { version = "0.7", default-features = false, features = [
     "runtime-tokio",
@@ -38,13 +48,14 @@ sqlx = { version = "0.7", default-features = false, features = [
     "chrono",
     "migrate",
 ] }
-async-trait = "0.1"
 argon2 = "0.5"
 rand = "0.8"
 sha2 = "0.10"
 hex = "0.4"
 dotenvy = "0.15"
 validator = { version = "0.18", features = ["derive"] }
+leptos = { workspace = true, features = ["ssr"], optional = true }
+leptos_axum = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }

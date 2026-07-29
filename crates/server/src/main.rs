@@ -36,6 +36,8 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState::with_security(pool, cfg.security.clone());
     let app = routes::app(state);
+    #[cfg(feature = "ssr")]
+    let app = with_web_app(app)?;
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr)
         .await
@@ -46,6 +48,29 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+#[cfg(feature = "ssr")]
+fn with_web_app(api: axum::Router) -> anyhow::Result<axum::Router> {
+    use axum::Router;
+    use leptos::prelude::get_configuration;
+    use leptos_axum::{generate_route_list, LeptosRoutes};
+    use wareboxes_web_ops::app::{shell, App};
+
+    let configuration = get_configuration(None)?;
+    let mut leptos_options = configuration.leptos_options;
+    if leptos_options.output_name.is_empty() {
+        leptos_options.output_name = "wareboxes-web".into();
+    }
+    let routes = generate_route_list(App);
+    let web = Router::new()
+        .leptos_routes(&leptos_options, routes, {
+            let leptos_options = leptos_options.clone();
+            move || shell(leptos_options.clone())
+        })
+        .fallback(leptos_axum::file_and_error_handler(shell))
+        .with_state(leptos_options);
+    Ok(api.merge(web))
 }
 
 /// Mirrors the original `addDevAdmin`: make sure an `admin` permission exists

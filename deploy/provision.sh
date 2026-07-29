@@ -93,6 +93,10 @@ set_env_value \
   MIGRATION_DATABASE_URL \
   "postgres://wareboxes_admin:${database_admin_password}@127.0.0.1:5432/wareboxes" \
   /etc/wareboxes/wareboxes.env
+set_env_value LEPTOS_OUTPUT_NAME wareboxes-web /etc/wareboxes/wareboxes.env
+set_env_value LEPTOS_SITE_ROOT /opt/wareboxes/current/site /etc/wareboxes/wareboxes.env
+set_env_value LEPTOS_SITE_PKG_DIR pkg /etc/wareboxes/wareboxes.env
+set_env_value LEPTOS_ENV PROD /etc/wareboxes/wareboxes.env
 chown root:wareboxes /etc/wareboxes/wareboxes.env
 chmod 0640 /etc/wareboxes/wareboxes.env
 

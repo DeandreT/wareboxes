@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "apps/rf-android",
+    "apps/web-ops",
     "crates/api-contract",
     "crates/domain",
     "crates/core",
@@ -30,7 +31,34 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
+leptos = { version = "0.8" }
+leptos_axum = { version = "0.8" }
+leptos_meta = { version = "0.8" }
+leptos_router = { version = "0.8" }
+
+[[workspace.metadata.leptos]]
+name = "wareboxes-web"
+bin-package = "wareboxes-server"
+bin-target = "wareboxes-server"
+lib-package = "wareboxes-web-ops"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "apps/web-ops/style/main.css"
+assets-dir = "apps/web-ops/public"
+site-addr = "127.0.0.1:8080"
+reload-port = 3001
+browserquery = "defaults"
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false
 
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+codegen-units = 1
+panic = "abort"

@@ -85,7 +85,7 @@ pub fn app(state: AppState) -> Router {
         .route("/facilities", get(facilities::list))
         // orders
         .route("/orders", get(orders::list))
-        .route("/orders/:order_id", get(orders::get))
+        .route("/orders/{order_id}", get(orders::get))
         .route("/orders/add", post(orders::add))
         .route("/orders/update", post(orders::update))
         .route("/orders/cancel", post(orders::cancel))
@@ -110,7 +110,7 @@ pub fn app(state: AppState) -> Router {
         .route("/locations/restore", post(locations::restore))
         .route("/license-plates", get(license_plates::list))
         .route(
-            "/license-plates/barcode/:barcode",
+            "/license-plates/barcode/{barcode}",
             get(license_plates::get_by_barcode),
         )
         .route("/license-plates/add", post(license_plates::add))
@@ -120,7 +120,7 @@ pub fn app(state: AppState) -> Router {
         .route("/license-plates/restore", post(license_plates::restore))
         // Loads / inventory
         .route("/loads", get(loads::list))
-        .route("/loads/:load_id", get(loads::get))
+        .route("/loads/{load_id}", get(loads::get))
         .route("/loads/add", post(loads::add))
         .route("/loads/update", post(loads::update))
         .route("/loads/delete", post(loads::delete))
@@ -132,11 +132,11 @@ pub fn app(state: AppState) -> Router {
         .route("/loads/lines/add", post(loads::add_line))
         .route("/mobile/inbound/loads", get(loads::mobile_inbound_list))
         .route(
-            "/mobile/inbound/loads/:load_id",
+            "/mobile/inbound/loads/{load_id}",
             get(loads::mobile_inbound_get),
         )
         .route(
-            "/mobile/inbound/loads/:load_id/arrive",
+            "/mobile/inbound/loads/{load_id}/arrive",
             post(loads::mobile_arrive),
         )
         .route("/inventory/batches", get(inventory::list_batches))
@@ -225,7 +225,7 @@ pub fn app(state: AppState) -> Router {
         .route("/audits/counts/update", post(audits::update_count))
         .route("/audits/counts/delete", post(audits::delete_count))
         .route("/audits/counts/restore", post(audits::restore_count))
-        .route("/audits/:audit_id/counts", get(audits::counts));
+        .route("/audits/{audit_id}/counts", get(audits::counts));
 
     let security = state.security.clone();
     let mut app = Router::new()
