@@ -23,7 +23,6 @@ impl IdempotencyKey {
     }
 }
 
-#[async_trait::async_trait]
 impl<S> FromRequestParts<S> for IdempotencyKey
 where
     S: Send + Sync,

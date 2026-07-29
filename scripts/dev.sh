@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Local dev runner.
-#   scripts/dev.sh          start the API, wait for it, then launch the client
+#   scripts/dev.sh          start PostgreSQL and the Leptos SSR web application
+#   scripts/dev.sh web      same as the default
 #   scripts/dev.sh server   start only the API (foreground)
-#   scripts/dev.sh client   start only the client (assumes API already running)
+#   scripts/dev.sh desktop  start the transitional native operations client
 #
 # Config comes from .env (DATABASE_URL, MIGRATION_DATABASE_URL, BIND_ADDR,
 # BOOTSTRAP_ADMIN_*).
@@ -19,8 +20,7 @@ fi
 DATABASE_URL="${DATABASE_URL:-postgres://wareboxes_app:wareboxes_app@127.0.0.1:5433/wareboxes}"
 MIGRATION_DATABASE_URL="${MIGRATION_DATABASE_URL:-postgres://wareboxes_admin:wareboxes_admin@127.0.0.1:5433/wareboxes}"
 BIND_ADDR="${BIND_ADDR:-127.0.0.1:8080}"
-export DATABASE_URL MIGRATION_DATABASE_URL
-HEALTH="http://${BIND_ADDR}/health"
+export DATABASE_URL MIGRATION_DATABASE_URL BIND_ADDR
 
 ensure_cargo() {
   if ! command -v cargo >/dev/null 2>&1; then
@@ -82,32 +82,20 @@ run_server() {
   fi
   exit "$status"
 }
-run_client() { exec cargo run -p wareboxes-client; }
 
-case "${1:-all}" in
+run_web() {
+  if ! command -v cargo-leptos >/dev/null 2>&1; then
+    echo "cargo-leptos not found. Install it with: cargo install cargo-leptos --locked" >&2
+    exit 127
+  fi
+  exec cargo leptos watch --project wareboxes-web
+}
+
+run_desktop() { exec cargo run -p wareboxes-client; }
+
+case "${1:-web}" in
   server) ensure_cargo; ensure_postgres; run_server ;;
-  client) ensure_cargo; run_client ;;
-  all)
-    ensure_cargo
-    ensure_postgres
-    cargo build -p wareboxes-server -p wareboxes-client
-    cargo run -p wareboxes-server &
-    SERVER_PID=$!
-    trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-    echo "waiting for API at ${HEALTH} ..."
-    for _ in $(seq 1 60); do
-      if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-        wait "$SERVER_PID" || true
-        echo "server exited before becoming healthy" >&2
-        echo "If migrations were modified locally, run: scripts/reset-db.sh" >&2
-        exit 1
-      fi
-      if curl -fs "$HEALTH" >/dev/null 2>&1; then break; fi
-      sleep 0.5
-    done
-    curl -fs "$HEALTH" >/dev/null 2>&1 || { echo "server did not come up" >&2; echo "If migrations were modified locally, run: scripts/reset-db.sh" >&2; exit 1; }
-    echo "API up. Launching client (log in with ${BOOTSTRAP_ADMIN_EMAIL:-admin@example.com})."
-    cargo run -p wareboxes-client
-    ;;
-  *) echo "usage: scripts/dev.sh [server|client|all]" >&2; exit 2 ;;
+  desktop) ensure_cargo; run_desktop ;;
+  web) ensure_cargo; ensure_postgres; run_web ;;
+  *) echo "usage: scripts/dev.sh [web|server|desktop]" >&2; exit 2 ;;
 esac

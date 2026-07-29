@@ -33,7 +33,9 @@ trap 'rm -rf "$temporary_dir"' EXIT
 
 tar -xzf "$archive" --no-same-owner -C "$temporary_dir"
 test -x "$temporary_dir/wareboxes-server"
-test -f "$temporary_dir/site/index.html"
+test -f "$temporary_dir/site/pkg/wareboxes-web.css"
+test -f "$temporary_dir/site/pkg/wareboxes-web.js"
+test -f "$temporary_dir/site/pkg/wareboxes-web.wasm"
 chown -R root:root "$temporary_dir"
 chmod 0755 "$temporary_dir" "$temporary_dir/wareboxes-server" "$temporary_dir/site"
 

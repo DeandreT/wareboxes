@@ -1,6 +1,6 @@
-//! Thin async API client. Uses `ehttp` (works on native *and* wasm) and
-//! delivers results back to the egui app over an `mpsc` channel, requesting a
-//! repaint on completion.
+//! Thin async API client for the transitional desktop application. It delivers
+//! results back to the egui app over an `mpsc` channel and requests a repaint
+//! on completion.
 
 use std::sync::mpsc::Sender;
 

@@ -33,6 +33,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
 
@@ -42,8 +43,29 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Clippy (SSR)
+        run: cargo clippy -p wareboxes-server --all-targets --features ssr -- -D warnings
+
+      - name: Clippy (hydration)
+        run: >-
+          cargo clippy
+          -p wareboxes-web-ops
+          --target wasm32-unknown-unknown
+          --no-default-features
+          --features hydrate
+          -- -D warnings
+
       - name: Build workspace
         run: cargo build --workspace --locked
+
+      - name: Install cargo-leptos
+        run: >-
+          curl --proto '=https' --tlsv1.2 -LsSf
+          https://github.com/leptos-rs/cargo-leptos/releases/download/v0.3.6/cargo-leptos-installer.sh
+          | sh
+
+      - name: Build SSR web application
+        run: scripts/build-web.sh
 
       - name: Test (Postgres)
         env:

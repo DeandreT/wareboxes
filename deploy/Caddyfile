@@ -1,20 +1,17 @@
 {$WAREBOXES_SITE_ADDRESS:http://127.0.0.1} {
 	encode zstd gzip
 
-	@backend path /api/* /health
-	handle @backend {
-		reverse_proxy 127.0.0.1:8080
+	reverse_proxy 127.0.0.1:8080
+
+	handle_errors {
+		root * /opt/wareboxes/bootstrap/site
+		rewrite * /index.html
+		file_server
 	}
 
-	handle {
-		root * /opt/wareboxes/current/site
-		try_files {path} {path}/ /index.html
-		file_server
-
-		header {
-			Referrer-Policy strict-origin-when-cross-origin
-			X-Content-Type-Options nosniff
-			X-Frame-Options SAMEORIGIN
-		}
+	header {
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
 	}
 }

@@ -38,6 +38,8 @@ record. Wareboxes owns facility execution and its auditable inventory consequenc
 
 - Tenant lifecycle, memberships, and selected-tenant request context.
 - Facility and inventory-owner scopes for users and integration clients.
+- Server-rendered desktop operations console with permission-aware navigation and
+  tenant, facility, and inventory-owner scope visibility.
 - `tenant_id` and `inventory_owner_id` propagation with scoped foreign keys and
   uniqueness constraints.
 - PostgreSQL row-level security and fail-closed repository access.

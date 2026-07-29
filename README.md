@@ -5,7 +5,8 @@ Wareboxes is a warehouse management system prototype.
 ## Workspace
 
 - `crates/server`: Axum HTTP API backed by PostgreSQL and SQLx
-- `crates/client`: egui/eframe operations and administration client
+- `apps/web-ops`: Leptos SSR operations web application
+- `crates/client`: transitional egui/eframe native operations client
 - `crates/core`: shared models, DTOs, and errors
 - `crates/barcodes`: barcode encoders
 - `migrations/postgres`: PostgreSQL migrations
@@ -16,22 +17,34 @@ Wareboxes is a warehouse management system prototype.
 
 - Rust stable
 - Docker with Docker Compose
+- `cargo-leptos` and the `wasm32-unknown-unknown` Rust target
 - PostgreSQL is provided by `docker-compose.yml` for local development
 
 ## Development
 
-Start the local database and run the server/client:
+Install the web build tools once:
+
+```bash
+cargo install cargo-leptos --locked
+rustup target add wasm32-unknown-unknown
+```
+
+Start the local database and run the SSR web application:
 
 ```bash
 scripts/dev.sh
 ```
 
-Or run pieces manually:
+Open `http://127.0.0.1:8080`. The development server rebuilds and reloads the
+Leptos frontend and serves the API from the same origin. The operations web
+application targets desktop workstations; scanner execution remains in the Android
+RF application.
+
+Run the API without the web frontend or launch the transitional desktop client:
 
 ```bash
-docker compose up -d postgres
-cargo run -p wareboxes-server
-cargo run -p wareboxes-client
+scripts/dev.sh server
+scripts/dev.sh desktop
 ```
 
 To run the operations client against the hosted demo with its credentials prefilled:
@@ -111,15 +124,13 @@ sudo deploy/provision.sh '<deploy-public-key>' '<site-address>'
 The next successful CI run can then deploy the application release. This procedure is
 destructive and is not valid after the production-readiness gate.
 
-## Website
+## Web Release
 
-The deployable website combines the static pages in `site/` with the real eframe
-client compiled to WebAssembly. Install [Trunk](https://trunkrs.dev/) and the
-`wasm32-unknown-unknown` Rust target, then build and preview the assembled site
-from the repository root:
+The release build produces the SSR server and its hydration assets together:
 
 ```bash
-rustup target add wasm32-unknown-unknown
-scripts/build-site.sh
-python3 -m http.server 4173 --directory _site
+scripts/build-web.sh
 ```
+
+The server binary is written to `target/release/wareboxes-server` and the browser
+assets to `target/site`.

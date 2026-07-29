@@ -695,7 +695,6 @@ impl WareboxesApp {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn default_base_url() -> String {
     std::env::var("WAREBOXES_API_URL")
         .ok()
@@ -704,37 +703,12 @@ fn default_base_url() -> String {
         .unwrap_or_else(|| LOCAL_BASE_URL.to_owned())
 }
 
-#[cfg(target_arch = "wasm32")]
-fn default_base_url() -> String {
-    option_env!("WAREBOXES_API_URL")
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            web_sys::window()
-                .and_then(|window| window.location().origin().ok())
-                .filter(|origin| !origin.is_empty() && origin != "null")
-        })
-        .unwrap_or_else(|| LOCAL_BASE_URL.to_owned())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn prefill_demo_login(forms: &mut Forms) {
     if let Ok(email) = std::env::var("WAREBOXES_DEMO_EMAIL") {
         forms.email = email;
     }
     if let Ok(password) = std::env::var("WAREBOXES_DEMO_PASSWORD") {
         forms.password = password;
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn prefill_demo_login(forms: &mut Forms) {
-    if let Some(email) = option_env!("WAREBOXES_DEMO_EMAIL") {
-        forms.email = email.to_owned();
-    }
-    if let Some(password) = option_env!("WAREBOXES_DEMO_PASSWORD") {
-        forms.password = password.to_owned();
     }
 }
 
@@ -798,9 +772,6 @@ impl WareboxesApp {
             .frame(egui::Frame::new().inner_margin(egui::Margin::same(16)))
             .show(root_ui, |ui| {
                 let width = ui.available_width().min(380.0);
-                #[cfg(target_arch = "wasm32")]
-                let height: f32 = 286.0;
-                #[cfg(not(target_arch = "wasm32"))]
                 let height: f32 = 354.0;
                 let size = egui::vec2(width, height.min(ui.available_height()));
                 let rect = egui::Rect::from_center_size(ui.max_rect().center(), size);
@@ -816,15 +787,12 @@ impl WareboxesApp {
                         ui.label(egui::RichText::new("Warehouse operations").size(15.0));
                         ui.add_space(26.0);
 
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            ui.strong("Server URL");
-                            ui.add_sized(
-                                [width, 36.0],
-                                egui::TextEdit::singleline(&mut self.forms.base_url),
-                            );
-                            ui.add_space(8.0);
-                        }
+                        ui.strong("Server URL");
+                        ui.add_sized(
+                            [width, 36.0],
+                            egui::TextEdit::singleline(&mut self.forms.base_url),
+                        );
+                        ui.add_space(8.0);
 
                         ui.strong("Email");
                         ui.add_sized(
