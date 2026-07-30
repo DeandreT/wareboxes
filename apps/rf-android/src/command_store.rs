@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::wire::{
     DurableHttpRequest, HttpMethod, ResponseKind, WireRequestError, build_durable_request,
 };
-use crate::workflow::{DurableCommandDraft, PutawayCommand, RfCommand};
+use crate::workflow::{DurableCommandDraft, InventoryRelocationCommand, PutawayCommand, RfCommand};
 
 mod schema;
 
@@ -85,13 +85,26 @@ impl CommandOperation {
 impl From<&RfCommand> for CommandOperation {
     fn from(command: &RfCommand) -> Self {
         match command {
-            RfCommand::Putaway(PutawayCommand::ClaimNext { .. }) => Self::ClaimNext,
-            RfCommand::Putaway(PutawayCommand::ClaimById { .. }) => Self::ClaimById,
-            RfCommand::Putaway(PutawayCommand::ConfirmLoose { .. }) => Self::ConfirmLoose,
-            RfCommand::Putaway(PutawayCommand::ConfirmLicensePlate { .. }) => {
-                Self::ConfirmLicensePlate
+            RfCommand::Putaway(PutawayCommand::ClaimNext { .. })
+            | RfCommand::InventoryRelocation(InventoryRelocationCommand::ClaimNext { .. }) => {
+                Self::ClaimNext
             }
-            RfCommand::Putaway(PutawayCommand::Release { .. }) => Self::Release,
+            RfCommand::Putaway(PutawayCommand::ClaimById { .. })
+            | RfCommand::InventoryRelocation(InventoryRelocationCommand::ClaimById { .. }) => {
+                Self::ClaimById
+            }
+            RfCommand::Putaway(PutawayCommand::ConfirmLoose { .. })
+            | RfCommand::InventoryRelocation(InventoryRelocationCommand::ConfirmLoose { .. }) => {
+                Self::ConfirmLoose
+            }
+            RfCommand::Putaway(PutawayCommand::ConfirmLicensePlate { .. })
+            | RfCommand::InventoryRelocation(InventoryRelocationCommand::ConfirmLicensePlate {
+                ..
+            }) => Self::ConfirmLicensePlate,
+            RfCommand::Putaway(PutawayCommand::Release { .. })
+            | RfCommand::InventoryRelocation(InventoryRelocationCommand::Release { .. }) => {
+                Self::Release
+            }
             RfCommand::ExpectedReceipt(_) => Self::ExpectedReceiptConfirmation,
         }
     }
@@ -1155,6 +1168,10 @@ const fn response_kind_name(kind: ResponseKind) -> &'static str {
         ResponseKind::LooseConfirmation => "loose_confirmation",
         ResponseKind::LicensePlateConfirmation => "license_plate_confirmation",
         ResponseKind::Release => "release",
+        ResponseKind::RelocationOptionalClaim => "relocation_optional_claim",
+        ResponseKind::RelocationClaim => "relocation_claim",
+        ResponseKind::RelocationConfirmation => "relocation_confirmation",
+        ResponseKind::RelocationRelease => "relocation_release",
         ResponseKind::ExpectedReceiptConfirmation => "expected_receipt_confirmation",
     }
 }
@@ -1166,6 +1183,10 @@ fn parse_response_kind(value: &str) -> Result<ResponseKind, CommandStoreError> {
         "loose_confirmation" => Ok(ResponseKind::LooseConfirmation),
         "license_plate_confirmation" => Ok(ResponseKind::LicensePlateConfirmation),
         "release" => Ok(ResponseKind::Release),
+        "relocation_optional_claim" => Ok(ResponseKind::RelocationOptionalClaim),
+        "relocation_claim" => Ok(ResponseKind::RelocationClaim),
+        "relocation_confirmation" => Ok(ResponseKind::RelocationConfirmation),
+        "relocation_release" => Ok(ResponseKind::RelocationRelease),
         "expected_receipt_confirmation" => Ok(ResponseKind::ExpectedReceiptConfirmation),
         _ => Err(CommandStoreError::CorruptRecord(
             "unknown response kind".into(),

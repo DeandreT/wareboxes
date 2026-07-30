@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wareboxes-api-contract = { workspace = true }
+wareboxes-barcodes = { workspace = true }
 wareboxes-core = { workspace = true }
 leptos = { workspace = true }
 leptos_meta = { workspace = true }
@@ -18,6 +19,8 @@ leptos_router = { workspace = true }
 lucide-leptos = { version = "3.26.0", default-features = false, features = [
     "arrows",
     "buildings",
+    "devices",
+    "files",
     "layout",
     "notifications",
     "security",
@@ -26,6 +29,7 @@ lucide-leptos = { version = "3.26.0", default-features = false, features = [
 ] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+urlencoding = "2"
 
 console_error_panic_hook = { version = "0.1", optional = true }
 wasm-bindgen = { version = "0.2.106", optional = true }

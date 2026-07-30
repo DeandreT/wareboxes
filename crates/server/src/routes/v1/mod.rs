@@ -4,6 +4,8 @@ mod error;
 mod expected_receiving;
 mod inventory_balances;
 mod inventory_holds;
+mod inventory_relocation;
+mod inventory_rollups;
 mod inventory_status_transitions;
 mod license_plate_putaway;
 mod putaway;
@@ -34,6 +36,18 @@ pub fn router() -> Router<AppState> {
         .route("/rf/sessions", post(rf_sessions::create))
         .route("/inventory/balances", get(inventory_balances::list))
         .route(
+            "/inventory/rollups/by-location",
+            get(inventory_rollups::list_by_location),
+        )
+        .route(
+            "/inventory/rollups/by-facility",
+            get(inventory_rollups::list_by_facility),
+        )
+        .route(
+            "/inventory/rollups/by-item",
+            get(inventory_rollups::list_by_item),
+        )
+        .route(
             "/inventory/holds",
             get(inventory_holds::list).post(inventory_holds::place),
         )
@@ -44,6 +58,34 @@ pub fn router() -> Router<AppState> {
         .route(
             "/inventory/balances/{balance_id}/status-transitions",
             post(inventory_status_transitions::create),
+        )
+        .route(
+            "/inventory-relocation-tasks",
+            post(inventory_relocation::create),
+        )
+        .route(
+            "/inventory-relocation-tasks/{task_id}/confirmations",
+            post(inventory_relocation::confirm),
+        )
+        .route(
+            "/inventory-relocation-claims/next",
+            post(inventory_relocation::claim_next),
+        )
+        .route(
+            "/inventory-relocation-claims/current",
+            get(inventory_relocation::current),
+        )
+        .route(
+            "/inventory-relocation-claims/{task_id}",
+            post(inventory_relocation::claim_by_id),
+        )
+        .route(
+            "/inventory-relocation-claims/{task_id}/heartbeats",
+            post(inventory_relocation::heartbeat),
+        )
+        .route(
+            "/inventory-relocation-claims/{task_id}/releases",
+            post(inventory_relocation::release),
         )
         .route(
             "/license-plate-putaway-tasks",

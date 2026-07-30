@@ -11,6 +11,7 @@ use crate::request_context::{current_request_id_or_new, REQUEST_ID_HEADER};
 
 pub type V1Result<T> = Result<T, V1Error>;
 
+#[derive(Debug)]
 pub struct V1Error {
     status: StatusCode,
     reason: ErrorReason,

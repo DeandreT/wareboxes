@@ -1,7 +1,9 @@
-#[cfg(not(target_arch = "wasm32"))]
-use wareboxes_api_contract::v1::CreateInventoryStatusTransitionRequest;
 #[cfg(target_arch = "wasm32")]
 use wareboxes_api_contract::v1::ReleaseInventoryHoldRequest;
+use wareboxes_api_contract::v1::{
+    CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
+    CreateInventoryStatusTransitionRequest,
+};
 use wareboxes_api_contract::v1::{
     InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
     InventoryStatusTransitionResponse, OpaqueCursor, PlaceInventoryHoldRequest,
@@ -33,12 +35,13 @@ mod browser {
     use wareboxes_core::dto::{LoginRequest, SelectTenantRequest};
 
     use super::{
-        AccessScopeWorkspace, ApiError, InventoryBalancePage, InventoryHoldPage,
-        InventoryHoldStatus, InventoryStatusTransitionResponse, OpaqueCursor, OrderPage,
-        PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, ReleaseInventoryHoldRequest,
-        ReleaseInventoryHoldResponse, WebSessionContext,
+        AccessScopeWorkspace, ApiError, CreateInventoryRelocationTaskRequest,
+        CreateInventoryRelocationTaskResponse, CreateInventoryStatusTransitionRequest,
+        InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
+        InventoryStatusTransitionResponse, OpaqueCursor, OrderPage, PlaceInventoryHoldRequest,
+        PlaceInventoryHoldResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
+        WebSessionContext,
     };
-    use wareboxes_api_contract::v1::CreateInventoryStatusTransitionRequest;
 
     #[derive(Deserialize)]
     struct WireError {
@@ -76,20 +79,53 @@ mod browser {
     }
 
     pub async fn balances(cursor: Option<&OpaqueCursor>) -> Result<InventoryBalancePage, ApiError> {
-        let path = cursor.map_or_else(
-            || "/api/v1/inventory/balances?limit=100".to_owned(),
-            |cursor| {
-                format!(
-                    "/api/v1/inventory/balances?limit=100&cursor={}",
-                    cursor.as_str()
-                )
-            },
-        );
+        let path = balance_page_path(None, cursor);
+        get(&path).await
+    }
+
+    pub async fn search_balances(
+        query: &str,
+        cursor: Option<&OpaqueCursor>,
+    ) -> Result<InventoryBalancePage, ApiError> {
+        let path = balance_page_path(Some(query), cursor);
         get(&path).await
     }
 
     pub async fn access() -> Result<AccessScopeWorkspace, ApiError> {
         get("/api/web/access").await
+    }
+
+    pub async fn internal_get<T: DeserializeOwned>(path: &str) -> Result<T, ApiError> {
+        get(path).await
+    }
+
+    pub async fn internal_post<TRequest, TResponse>(
+        path: &str,
+        request: &TRequest,
+    ) -> Result<TResponse, ApiError>
+    where
+        TRequest: serde::Serialize,
+        TResponse: DeserializeOwned,
+    {
+        let request = Request::post(&url(path))
+            .json(request)
+            .map_err(|error| ApiError {
+                message: format!("Could not prepare the command: {error}"),
+                unauthorized: false,
+            })?;
+        decode(request.send().await).await
+    }
+
+    pub async fn internal_post_idempotent<TRequest, TResponse>(
+        path: &str,
+        request: &TRequest,
+        idempotency_key: &str,
+    ) -> Result<TResponse, ApiError>
+    where
+        TRequest: serde::Serialize,
+        TResponse: DeserializeOwned,
+    {
+        post(path, request, idempotency_key).await
     }
 
     pub async fn holds(
@@ -134,6 +170,18 @@ mod browser {
     ) -> Result<InventoryStatusTransitionResponse, ApiError> {
         post(
             &format!("/api/v1/inventory/balances/{balance_id}/status-transitions"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn create_inventory_relocation_task(
+        request: &CreateInventoryRelocationTaskRequest,
+        idempotency_key: &str,
+    ) -> Result<CreateInventoryRelocationTaskResponse, ApiError> {
+        post(
+            "/api/v1/inventory-relocation-tasks",
             request,
             idempotency_key,
         )
@@ -203,6 +251,19 @@ mod browser {
     fn url(path: &str) -> String {
         path.to_owned()
     }
+
+    fn balance_page_path(query: Option<&str>, cursor: Option<&OpaqueCursor>) -> String {
+        let mut path = "/api/v1/inventory/balances?limit=100".to_owned();
+        if let Some(query) = query.filter(|query| !query.is_empty()) {
+            path.push_str("&query=");
+            path.push_str(&urlencoding::encode(query));
+        }
+        if let Some(cursor) = cursor {
+            path.push_str("&cursor=");
+            path.push_str(cursor.as_str());
+        }
+        path
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -232,7 +293,48 @@ pub async fn balances(_cursor: Option<&OpaqueCursor>) -> Result<InventoryBalance
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub async fn search_balances(
+    _query: &str,
+    _cursor: Option<&OpaqueCursor>,
+) -> Result<InventoryBalancePage, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn access() -> Result<AccessScopeWorkspace, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn internal_get<T>(_path: &str) -> Result<T, ApiError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn internal_post<TRequest, TResponse>(
+    _path: &str,
+    _request: &TRequest,
+) -> Result<TResponse, ApiError>
+where
+    TRequest: serde::Serialize,
+    TResponse: serde::de::DeserializeOwned,
+{
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn internal_post_idempotent<TRequest, TResponse>(
+    _path: &str,
+    _request: &TRequest,
+    _idempotency_key: &str,
+) -> Result<TResponse, ApiError>
+where
+    TRequest: serde::Serialize,
+    TResponse: serde::de::DeserializeOwned,
+{
     Err(ApiError::unavailable())
 }
 
@@ -266,6 +368,14 @@ pub async fn transition_inventory_status(
     _request: &CreateInventoryStatusTransitionRequest,
     _idempotency_key: &str,
 ) -> Result<InventoryStatusTransitionResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn create_inventory_relocation_task(
+    _request: &CreateInventoryRelocationTaskRequest,
+    _idempotency_key: &str,
+) -> Result<CreateInventoryRelocationTaskResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

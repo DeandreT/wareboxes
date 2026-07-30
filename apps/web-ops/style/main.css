@@ -404,7 +404,10 @@ a {
 
 .sidebar nav {
   display: grid;
+  min-height: 0;
   gap: 3px;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .sidebar nav > p {
@@ -445,6 +448,7 @@ a {
 
 .sidebar-scope {
   display: grid;
+  flex: 0 0 auto;
   gap: 3px;
   margin-top: auto;
   padding: 11px 10px 2px;

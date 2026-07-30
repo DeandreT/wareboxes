@@ -3,8 +3,120 @@ use wareboxes_api_contract::v1::{InventoryBalanceResponse, InventoryBalanceStatu
 
 use crate::api;
 use crate::components::SearchField;
+use crate::inventory_rollups::{InventoryRollupKind, InventoryRollupsWorkbench};
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::view_model::format_quantity;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InventoryView {
+    Positions,
+    Location,
+    Facility,
+    Item,
+}
+
+#[component]
+pub fn InventoryWorkspace(
+    initial_balances: Vec<InventoryBalanceResponse>,
+    initial_cursor: Option<OpaqueCursor>,
+    on_unauthorized: Callback<()>,
+) -> impl IntoView {
+    let section = RwSignal::new(InventoryView::Positions);
+    let initial = StoredValue::new((initial_balances, initial_cursor));
+
+    view! {
+        <div class="inventory-workspace">
+            <nav class="inventory-view-tabs" aria-label="Inventory views">
+                <InventoryViewTab
+                    label="Positions"
+                    selected=Signal::derive(move || section.get() == InventoryView::Positions)
+                    select=Callback::new(move |_| section.set(InventoryView::Positions))
+                />
+                <InventoryViewTab
+                    label="By location"
+                    selected=Signal::derive(move || section.get() == InventoryView::Location)
+                    select=Callback::new(move |_| section.set(InventoryView::Location))
+                />
+                <InventoryViewTab
+                    label="By facility"
+                    selected=Signal::derive(move || section.get() == InventoryView::Facility)
+                    select=Callback::new(move |_| section.set(InventoryView::Facility))
+                />
+                <InventoryViewTab
+                    label="By item"
+                    selected=Signal::derive(move || section.get() == InventoryView::Item)
+                    select=Callback::new(move |_| section.set(InventoryView::Item))
+                />
+            </nav>
+            {move || match section.get() {
+                InventoryView::Positions => {
+                    let (balances, cursor) = initial.get_value();
+                    view! {
+                        <InventoryTable
+                            initial_balances=balances
+                            initial_cursor=cursor
+                            on_unauthorized
+                        />
+                    }
+                        .into_any()
+                }
+                InventoryView::Location => {
+                    view! {
+                        <InventoryRollupsWorkbench
+                            kind=InventoryRollupKind::Location
+                            on_unauthorized
+                        />
+                    }
+                        .into_any()
+                }
+                InventoryView::Facility => {
+                    view! {
+                        <InventoryRollupsWorkbench
+                            kind=InventoryRollupKind::Facility
+                            on_unauthorized
+                        />
+                    }
+                        .into_any()
+                }
+                InventoryView::Item => {
+                    view! {
+                        <InventoryRollupsWorkbench
+                            kind=InventoryRollupKind::Item
+                            on_unauthorized
+                        />
+                    }
+                        .into_any()
+                }
+            }}
+        </div>
+    }
+}
+
+#[component]
+fn InventoryViewTab(
+    label: &'static str,
+    selected: Signal<bool>,
+    select: Callback<()>,
+) -> impl IntoView {
+    view! {
+        <button
+            type="button"
+            class:active=move || selected.get()
+            aria-current=move || select_if(selected.get())
+            on:click=move |_| select.run(())
+        >
+            {label}
+        </button>
+    }
+}
+
+const fn select_if(selected: bool) -> Option<&'static str> {
+    if selected {
+        Some("page")
+    } else {
+        None
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InventorySort {

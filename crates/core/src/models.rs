@@ -1441,6 +1441,7 @@ pub enum WorkTaskType {
     UnpackCancelledOrder,
     Putaway,
     LicensePlatePutaway,
+    InventoryRelocation,
 }
 
 impl WorkTaskType {
@@ -1452,6 +1453,7 @@ impl WorkTaskType {
             WorkTaskType::UnpackCancelledOrder => "unpack_cancelled_order",
             WorkTaskType::Putaway => "putaway",
             WorkTaskType::LicensePlatePutaway => "license_plate_putaway",
+            WorkTaskType::InventoryRelocation => "inventory_relocation",
         }
     }
 
@@ -1463,6 +1465,7 @@ impl WorkTaskType {
             "unpack_cancelled_order" => WorkTaskType::UnpackCancelledOrder,
             "putaway" => WorkTaskType::Putaway,
             "license_plate_putaway" => WorkTaskType::LicensePlatePutaway,
+            "inventory_relocation" => WorkTaskType::InventoryRelocation,
             _ => return None,
         })
     }
@@ -1700,6 +1703,155 @@ pub struct LicensePlatePutawayConfirmation {
     pub moved_balance_count: i64,
     pub confirmed_by: i64,
     pub confirmed_at: Timestamp,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryRelocationWorkflow {
+    LooseBalance,
+    LicensePlate,
+}
+
+impl InventoryRelocationWorkflow {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LooseBalance => "loose_balance",
+            Self::LicensePlate => "license_plate",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "loose_balance" => Some(Self::LooseBalance),
+            "license_plate" => Some(Self::LicensePlate),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventoryRelocationLocation {
+    pub location_id: i64,
+    pub barcode: Option<String>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InventoryRelocationClaimWork {
+    LooseBalance {
+        source_inventory_balance_id: i64,
+        item_batch_id: i64,
+        item_id: i64,
+        item_description: Option<String>,
+        uom: String,
+        lot: Option<String>,
+        serial: Option<String>,
+        expiration: Option<Timestamp>,
+        inventory_status: InventoryStatus,
+        quantity: i64,
+    },
+    LicensePlate {
+        license_plate_id: i64,
+        license_plate_barcode: String,
+        planned_balance_count: i64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventoryRelocationClaim {
+    pub tenant_id: TenantId,
+    pub task_id: i64,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub priority: i64,
+    pub instructions: Option<String>,
+    pub due_at: Option<Timestamp>,
+    pub lease_expires_at: Timestamp,
+    pub source_location: InventoryRelocationLocation,
+    pub destination_location: InventoryRelocationLocation,
+    pub work: InventoryRelocationClaimWork,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventoryRelocationClaimHeartbeat {
+    pub tenant_id: TenantId,
+    pub task_id: i64,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub heartbeat_by: i64,
+    pub heartbeat_at: Timestamp,
+    pub previous_lease_expires_at: Timestamp,
+    pub lease_expires_at: Timestamp,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryRelocationClaimReleaseReason {
+    WorkInterrupted,
+    EquipmentUnavailable,
+    DestinationBlocked,
+    SafetyIssue,
+    Other,
+}
+
+impl InventoryRelocationClaimReleaseReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkInterrupted => "work_interrupted",
+            Self::EquipmentUnavailable => "equipment_unavailable",
+            Self::DestinationBlocked => "destination_blocked",
+            Self::SafetyIssue => "safety_issue",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventoryRelocationClaimRelease {
+    pub tenant_id: TenantId,
+    pub task_id: i64,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub released_by: i64,
+    pub released_at: Timestamp,
+    pub release_count: i64,
+    pub reason: InventoryRelocationClaimReleaseReason,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InventoryRelocationConfirmationResult {
+    LooseBalance {
+        source_inventory_balance_id: i64,
+        destination_inventory_balance_id: i64,
+        item_batch_id: i64,
+        item_id: i64,
+        inventory_status: InventoryStatus,
+        uom: String,
+        quantity: i64,
+    },
+    LicensePlate {
+        license_plate_id: i64,
+        license_plate_barcode: String,
+        moved_balance_count: i64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventoryRelocationConfirmation {
+    pub tenant_id: TenantId,
+    pub task_id: i64,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub source_location_id: i64,
+    pub destination_location_id: i64,
+    pub destination_location_barcode: String,
+    pub inventory_transaction_id: i64,
+    pub confirmed_by: i64,
+    pub confirmed_at: Timestamp,
+    pub result: InventoryRelocationConfirmationResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

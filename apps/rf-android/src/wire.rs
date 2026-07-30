@@ -3,13 +3,19 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use wareboxes_api_contract::v1::{
-    API_PREFIX, ClaimNextPutawayRequest, ClaimPutawayByIdRequest, ConfirmExpectedReceiptRequest,
-    ConfirmLicensePlatePutawayRequest, ConfirmPutawayRequest, ExpectedReceiptConfirmationResponse,
-    ExpectedReceiptDisposition, ExpectedReceiptExceptionReason, ExpectedReceivingLoadStatus,
-    ExpectedReceivingSessionResponse, HeartbeatPutawayClaimRequest, IdempotencyKey,
+    API_PREFIX, ClaimInventoryRelocationByIdRequest, ClaimNextInventoryRelocationRequest,
+    ClaimNextPutawayRequest, ClaimPutawayByIdRequest, ConfirmExpectedReceiptRequest,
+    ConfirmInventoryRelocationRequest, ConfirmLicensePlatePutawayRequest, ConfirmPutawayRequest,
+    ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
+    ExpectedReceiptExceptionReason, ExpectedReceivingLoadStatus, ExpectedReceivingSessionResponse,
+    HeartbeatInventoryRelocationClaimRequest, HeartbeatPutawayClaimRequest, IdempotencyKey,
+    InventoryRelocationClaimHeartbeatResponse, InventoryRelocationClaimReleaseReason,
+    InventoryRelocationClaimResponse, InventoryRelocationClaimWork,
+    InventoryRelocationConfirmationResponse, InventoryRelocationWorkflow,
     LicensePlatePutawayConfirmationResponse, PutawayClaimHeartbeatResponse,
     PutawayClaimReleaseReason, PutawayClaimResponse, PutawayClaimSourceLocation, PutawayClaimWork,
-    PutawayConfirmationResponse, PutawayWorkflow, ReleasePutawayClaimRequest,
+    PutawayConfirmationResponse, PutawayWorkflow as ApiPutawayWorkflow,
+    ReleaseInventoryRelocationClaimRequest, ReleasePutawayClaimRequest,
 };
 
 use crate::expected_receiving::{
@@ -20,8 +26,9 @@ use crate::expected_receiving::{
     ReceivingLoadStatus, ReceivingSession, ReceivingSessionInput, StockDimension,
 };
 use crate::workflow::{
-    CommandOutcome, DurableCommandDraft, Location, PutawayClaim, PutawayCommand, PutawayKind,
-    PutawayWork, ReleaseReason, RfCommand,
+    CommandOutcome, DurableCommandDraft, InventoryRelocationClaim, InventoryRelocationCommand,
+    Location, MovementClaimDetails, MovementKind, MovementOperation, MovementWork, PutawayClaim,
+    PutawayCommand, ReleaseReason, RfCommand,
 };
 
 pub const JSON_CONTENT_TYPE: &str = "application/json";
@@ -46,6 +53,10 @@ pub enum ResponseKind {
     LooseConfirmation,
     LicensePlateConfirmation,
     Release,
+    RelocationOptionalClaim,
+    RelocationClaim,
+    RelocationConfirmation,
+    RelocationRelease,
     ExpectedReceiptConfirmation,
 }
 
@@ -121,11 +132,24 @@ pub enum WireResponseError {
 }
 
 pub fn build_heartbeat_request_parts(task_id: i64) -> Result<(String, Vec<u8>), WireRequestError> {
+    build_movement_heartbeat_request_parts(MovementOperation::Putaway, task_id)
+}
+
+pub fn build_movement_heartbeat_request_parts(
+    operation: MovementOperation,
+    task_id: i64,
+) -> Result<(String, Vec<u8>), WireRequestError> {
     validate_task_id(task_id)?;
-    Ok((
-        format!("{API_PREFIX}/putaway-claims/{task_id}/heartbeats"),
-        serde_json::to_vec(&HeartbeatPutawayClaimRequest::default())?,
-    ))
+    match operation {
+        MovementOperation::Putaway => Ok((
+            format!("{API_PREFIX}/putaway-claims/{task_id}/heartbeats"),
+            serde_json::to_vec(&HeartbeatPutawayClaimRequest::default())?,
+        )),
+        MovementOperation::InventoryRelocation => Ok((
+            format!("{API_PREFIX}/inventory-relocation-claims/{task_id}/heartbeats"),
+            serde_json::to_vec(&HeartbeatInventoryRelocationClaimRequest::default())?,
+        )),
+    }
 }
 
 pub fn build_expected_receiving_session_path(load_id: i64) -> Result<String, WireRequestError> {
@@ -236,6 +260,65 @@ pub fn build_durable_request(
                 ResponseKind::Release,
             )
         }
+        RfCommand::InventoryRelocation(InventoryRelocationCommand::ClaimNext { workflow }) => (
+            format!("{API_PREFIX}/inventory-relocation-claims/next"),
+            serde_json::to_vec(&ClaimNextInventoryRelocationRequest {
+                workflow: map_relocation_workflow(*workflow),
+            })?,
+            ResponseKind::RelocationOptionalClaim,
+        ),
+        RfCommand::InventoryRelocation(InventoryRelocationCommand::ClaimById { task_id }) => {
+            validate_task_id(*task_id)?;
+            (
+                format!("{API_PREFIX}/inventory-relocation-claims/{task_id}"),
+                serde_json::to_vec(&ClaimInventoryRelocationByIdRequest::default())?,
+                ResponseKind::RelocationClaim,
+            )
+        }
+        RfCommand::InventoryRelocation(InventoryRelocationCommand::ConfirmLoose {
+            task_id,
+            destination_location_barcode,
+        }) => {
+            validate_task_id(*task_id)?;
+            (
+                format!("{API_PREFIX}/inventory-relocation-tasks/{task_id}/confirmations"),
+                serde_json::to_vec(&ConfirmInventoryRelocationRequest {
+                    destination_location_barcode: destination_location_barcode.clone(),
+                    license_plate_barcode: None,
+                })?,
+                ResponseKind::RelocationConfirmation,
+            )
+        }
+        RfCommand::InventoryRelocation(InventoryRelocationCommand::ConfirmLicensePlate {
+            task_id,
+            license_plate_barcode,
+            destination_location_barcode,
+        }) => {
+            validate_task_id(*task_id)?;
+            (
+                format!("{API_PREFIX}/inventory-relocation-tasks/{task_id}/confirmations"),
+                serde_json::to_vec(&ConfirmInventoryRelocationRequest {
+                    destination_location_barcode: destination_location_barcode.clone(),
+                    license_plate_barcode: Some(license_plate_barcode.clone()),
+                })?,
+                ResponseKind::RelocationConfirmation,
+            )
+        }
+        RfCommand::InventoryRelocation(InventoryRelocationCommand::Release {
+            task_id,
+            reason,
+            note,
+        }) => {
+            validate_task_id(*task_id)?;
+            (
+                format!("{API_PREFIX}/inventory-relocation-claims/{task_id}/releases"),
+                serde_json::to_vec(&ReleaseInventoryRelocationClaimRequest {
+                    reason: map_relocation_release_reason(*reason),
+                    note: note.clone(),
+                })?,
+                ResponseKind::RelocationRelease,
+            )
+        }
         RfCommand::ExpectedReceipt(intent) => {
             if !intent.is_current_and_valid() {
                 return Err(WireRequestError::InvalidExpectedReceiptField {
@@ -273,22 +356,22 @@ pub fn decode_command_response(
     match response_kind {
         ResponseKind::OptionalClaim => {
             let claim = serde_json::from_slice::<Option<PutawayClaimResponse>>(body)?;
-            Ok(CommandOutcome::Claimed(
+            Ok(CommandOutcome::PutawayClaimed(
                 claim.map(map_claim).transpose()?.map(Box::new),
             ))
         }
-        ResponseKind::Claim => Ok(CommandOutcome::Claimed(Some(Box::new(map_claim(
+        ResponseKind::Claim => Ok(CommandOutcome::PutawayClaimed(Some(Box::new(map_claim(
             serde_json::from_slice::<PutawayClaimResponse>(body)?,
         )?)))),
         ResponseKind::LooseConfirmation => {
             let response = serde_json::from_slice::<PutawayConfirmationResponse>(body)?;
-            Ok(CommandOutcome::Confirmed {
+            Ok(CommandOutcome::PutawayConfirmed {
                 task_id: response.task_id,
             })
         }
         ResponseKind::LicensePlateConfirmation => {
             let response = serde_json::from_slice::<LicensePlatePutawayConfirmationResponse>(body)?;
-            Ok(CommandOutcome::Confirmed {
+            Ok(CommandOutcome::PutawayConfirmed {
                 task_id: response.task_id,
             })
         }
@@ -296,7 +379,32 @@ pub fn decode_command_response(
             let response = serde_json::from_slice::<
                 wareboxes_api_contract::v1::PutawayClaimReleaseResponse,
             >(body)?;
-            Ok(CommandOutcome::Released {
+            Ok(CommandOutcome::PutawayReleased {
+                task_id: response.task_id,
+            })
+        }
+        ResponseKind::RelocationOptionalClaim => {
+            let claim = serde_json::from_slice::<Option<InventoryRelocationClaimResponse>>(body)?;
+            Ok(CommandOutcome::InventoryRelocationClaimed(
+                claim.map(map_relocation_claim).transpose()?.map(Box::new),
+            ))
+        }
+        ResponseKind::RelocationClaim => Ok(CommandOutcome::InventoryRelocationClaimed(Some(
+            Box::new(map_relocation_claim(serde_json::from_slice::<
+                InventoryRelocationClaimResponse,
+            >(body)?)?),
+        ))),
+        ResponseKind::RelocationConfirmation => {
+            let response = serde_json::from_slice::<InventoryRelocationConfirmationResponse>(body)?;
+            Ok(CommandOutcome::InventoryRelocationConfirmed {
+                task_id: response.task_id,
+            })
+        }
+        ResponseKind::RelocationRelease => {
+            let response = serde_json::from_slice::<
+                wareboxes_api_contract::v1::InventoryRelocationClaimReleaseResponse,
+            >(body)?;
+            Ok(CommandOutcome::InventoryRelocationReleased {
                 task_id: response.task_id,
             })
         }
@@ -313,6 +421,14 @@ pub fn decode_claim_response(body: &[u8]) -> Result<Option<PutawayClaim>, WireRe
         .transpose()
 }
 
+pub fn decode_relocation_claim_response(
+    body: &[u8],
+) -> Result<Option<InventoryRelocationClaim>, WireResponseError> {
+    serde_json::from_slice::<Option<InventoryRelocationClaimResponse>>(body)?
+        .map(map_relocation_claim)
+        .transpose()
+}
+
 pub fn decode_heartbeat_response(
     expected_task_id: i64,
     status: u16,
@@ -326,6 +442,40 @@ pub fn decode_heartbeat_response(
     }
 
     let response = serde_json::from_slice::<PutawayClaimHeartbeatResponse>(body)?;
+    if response.task_id <= 0 {
+        return Err(WireResponseError::InvalidHeartbeatTaskId);
+    }
+    if response.task_id != expected_task_id {
+        return Err(WireResponseError::HeartbeatTaskMismatch {
+            expected: expected_task_id,
+            actual: response.task_id,
+        });
+    }
+    if DateTime::parse_from_rfc3339(&response.heartbeat_at).is_err() {
+        return Err(WireResponseError::InvalidHeartbeatTimestamp {
+            field: "heartbeat_at",
+        });
+    }
+    if DateTime::parse_from_rfc3339(&response.lease_expires_at).is_err() {
+        return Err(WireResponseError::InvalidHeartbeatTimestamp {
+            field: "lease_expires_at",
+        });
+    }
+    Ok(response)
+}
+
+pub fn decode_relocation_heartbeat_response(
+    expected_task_id: i64,
+    status: u16,
+    body: &[u8],
+) -> Result<InventoryRelocationClaimHeartbeatResponse, WireResponseError> {
+    if !(200..300).contains(&status) {
+        return Err(WireResponseError::UnsuccessfulStatus(status));
+    }
+    if expected_task_id <= 0 {
+        return Err(WireResponseError::InvalidHeartbeatTaskId);
+    }
+    let response = serde_json::from_slice::<InventoryRelocationClaimHeartbeatResponse>(body)?;
     if response.task_id <= 0 {
         return Err(WireResponseError::InvalidHeartbeatTaskId);
     }
@@ -464,7 +614,7 @@ fn map_claim(response: PutawayClaimResponse) -> Result<PutawayClaim, WireRespons
             serial,
             quantity,
             ..
-        } => PutawayWork::Loose {
+        } => MovementWork::Loose {
             item_description,
             item_id,
             quantity,
@@ -476,12 +626,12 @@ fn map_claim(response: PutawayClaimResponse) -> Result<PutawayClaim, WireRespons
             license_plate_barcode,
             planned_balance_count,
             ..
-        } => PutawayWork::LicensePlate {
+        } => MovementWork::LicensePlate {
             barcode: license_plate_barcode,
             planned_balance_count,
         },
     };
-    Ok(PutawayClaim {
+    Ok(PutawayClaim::new(MovementClaimDetails {
         task_id: response.task_id,
         inventory_owner_id: response.inventory_owner_id,
         facility_id: response.facility_id,
@@ -495,7 +645,73 @@ fn map_claim(response: PutawayClaimResponse) -> Result<PutawayClaim, WireRespons
             barcode: Some(response.destination_location.barcode),
         },
         work,
-    })
+    }))
+}
+
+fn map_relocation_claim(
+    response: InventoryRelocationClaimResponse,
+) -> Result<InventoryRelocationClaim, WireResponseError> {
+    let destination_barcode = response
+        .destination_location
+        .barcode
+        .filter(|barcode| !barcode.trim().is_empty())
+        .ok_or(WireResponseError::InvalidClaim)?;
+    if response.task_id <= 0
+        || response.inventory_owner_id <= 0
+        || response.facility_id <= 0
+        || response.source_location.location_id <= 0
+        || response.destination_location.location_id <= 0
+    {
+        return Err(WireResponseError::InvalidClaim);
+    }
+    let work = match response.work {
+        InventoryRelocationClaimWork::LooseBalance {
+            item_id,
+            item_description,
+            uom,
+            lot,
+            serial,
+            quantity,
+            ..
+        } => MovementWork::Loose {
+            item_description,
+            item_id,
+            quantity,
+            uom,
+            lot,
+            serial,
+        },
+        InventoryRelocationClaimWork::LicensePlate {
+            license_plate_barcode,
+            planned_balance_count,
+            ..
+        } => MovementWork::LicensePlate {
+            barcode: license_plate_barcode,
+            planned_balance_count,
+        },
+    };
+    Ok(InventoryRelocationClaim::new(MovementClaimDetails {
+        task_id: response.task_id,
+        inventory_owner_id: response.inventory_owner_id,
+        facility_id: response.facility_id,
+        priority: response.priority,
+        instructions: response.instructions,
+        lease_expires_at: response.lease_expires_at,
+        source: Some(Location {
+            location_id: response.source_location.location_id,
+            name: response.source_location.name,
+            barcode: response
+                .source_location
+                .barcode
+                .filter(|barcode| !barcode.trim().is_empty()),
+        }),
+        destination: Location {
+            location_id: response.destination_location.location_id,
+            name: response.destination_location.name,
+            barcode: Some(destination_barcode),
+        },
+        work,
+    }))
 }
 
 fn map_receiving_session(
@@ -897,10 +1113,17 @@ fn validate_task_id(task_id: i64) -> Result<(), WireRequestError> {
     Ok(())
 }
 
-const fn map_workflow(workflow: PutawayKind) -> PutawayWorkflow {
+const fn map_workflow(workflow: MovementKind) -> ApiPutawayWorkflow {
     match workflow {
-        PutawayKind::Loose => PutawayWorkflow::Loose,
-        PutawayKind::LicensePlate => PutawayWorkflow::LicensePlate,
+        MovementKind::Loose => ApiPutawayWorkflow::Loose,
+        MovementKind::LicensePlate => ApiPutawayWorkflow::LicensePlate,
+    }
+}
+
+const fn map_relocation_workflow(workflow: MovementKind) -> InventoryRelocationWorkflow {
+    match workflow {
+        MovementKind::Loose => InventoryRelocationWorkflow::LooseBalance,
+        MovementKind::LicensePlate => InventoryRelocationWorkflow::LicensePlate,
     }
 }
 
@@ -911,6 +1134,22 @@ const fn map_release_reason(reason: ReleaseReason) -> PutawayClaimReleaseReason 
         ReleaseReason::DestinationBlocked => PutawayClaimReleaseReason::DestinationBlocked,
         ReleaseReason::SafetyIssue => PutawayClaimReleaseReason::SafetyIssue,
         ReleaseReason::Other => PutawayClaimReleaseReason::Other,
+    }
+}
+
+const fn map_relocation_release_reason(
+    reason: ReleaseReason,
+) -> InventoryRelocationClaimReleaseReason {
+    match reason {
+        ReleaseReason::WorkInterrupted => InventoryRelocationClaimReleaseReason::WorkInterrupted,
+        ReleaseReason::EquipmentUnavailable => {
+            InventoryRelocationClaimReleaseReason::EquipmentUnavailable
+        }
+        ReleaseReason::DestinationBlocked => {
+            InventoryRelocationClaimReleaseReason::DestinationBlocked
+        }
+        ReleaseReason::SafetyIssue => InventoryRelocationClaimReleaseReason::SafetyIssue,
+        ReleaseReason::Other => InventoryRelocationClaimReleaseReason::Other,
     }
 }
 
@@ -929,6 +1168,15 @@ mod tests {
         }
     }
 
+    fn relocation_draft(command: InventoryRelocationCommand) -> DurableCommandDraft {
+        DurableCommandDraft {
+            schema_version: 1,
+            command_id: "relocation-command-1".into(),
+            idempotency_key: "relocation:key-1".into(),
+            command: RfCommand::InventoryRelocation(command),
+        }
+    }
+
     fn body(request: &DurableHttpRequest) -> serde_json::Value {
         serde_json::from_slice(&request.body).expect("request body should be valid JSON")
     }
@@ -936,7 +1184,7 @@ mod tests {
     #[test]
     fn claim_next_uses_the_public_v1_contract() {
         let request = build_durable_request(&draft(PutawayCommand::ClaimNext {
-            workflow: PutawayKind::LicensePlate,
+            workflow: MovementKind::LicensePlate,
         }))
         .expect("claim request should build");
 
@@ -1032,9 +1280,151 @@ mod tests {
     }
 
     #[test]
+    fn relocation_commands_use_the_typed_relocation_contract() {
+        let claim =
+            build_durable_request(&relocation_draft(InventoryRelocationCommand::ClaimNext {
+                workflow: MovementKind::LicensePlate,
+            }))
+            .unwrap();
+        assert_eq!(claim.path, "/api/v1/inventory-relocation-claims/next");
+        assert_eq!(body(&claim), json!({"workflow": "license_plate"}));
+        assert_eq!(claim.response_kind, ResponseKind::RelocationOptionalClaim);
+
+        let loose = build_durable_request(&relocation_draft(
+            InventoryRelocationCommand::ConfirmLoose {
+                task_id: 42,
+                destination_location_barcode: "A-01-02".into(),
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            loose.path,
+            "/api/v1/inventory-relocation-tasks/42/confirmations"
+        );
+        assert_eq!(
+            body(&loose),
+            json!({"destination_location_barcode": "A-01-02"})
+        );
+
+        let plate = build_durable_request(&relocation_draft(
+            InventoryRelocationCommand::ConfirmLicensePlate {
+                task_id: 43,
+                license_plate_barcode: "LP-43".into(),
+                destination_location_barcode: "B-02-03".into(),
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            body(&plate),
+            json!({
+                "destination_location_barcode": "B-02-03",
+                "license_plate_barcode": "LP-43"
+            })
+        );
+        assert_eq!(plate.response_kind, ResponseKind::RelocationConfirmation);
+
+        let release =
+            build_durable_request(&relocation_draft(InventoryRelocationCommand::Release {
+                task_id: 43,
+                reason: ReleaseReason::SafetyIssue,
+                note: None,
+            }))
+            .unwrap();
+        assert_eq!(
+            release.path,
+            "/api/v1/inventory-relocation-claims/43/releases"
+        );
+        assert_eq!(body(&release), json!({"reason": "safety_issue"}));
+        assert_eq!(release.response_kind, ResponseKind::RelocationRelease);
+    }
+
+    #[test]
+    fn relocation_claim_and_results_decode_into_the_durable_workflow() {
+        let claim = serde_json::to_vec(&json!({
+            "task_id": 52,
+            "inventory_owner_id": 7,
+            "facility_id": 9,
+            "priority": 60,
+            "instructions": "Use aisle crossing 2",
+            "due_at": null,
+            "lease_expires_at": "2026-07-27T02:00:00Z",
+            "source_location": {
+                "location_id": 11,
+                "barcode": "A-01-01",
+                "name": "A-01-01"
+            },
+            "destination_location": {
+                "location_id": 12,
+                "barcode": "B-02-03",
+                "name": "B-02-03"
+            },
+            "work": {
+                "workflow": "license_plate",
+                "license_plate_id": 13,
+                "license_plate_barcode": "LP-52",
+                "planned_balance_count": 3
+            }
+        }))
+        .unwrap();
+        let CommandOutcome::InventoryRelocationClaimed(Some(claim)) =
+            decode_command_response(ResponseKind::RelocationOptionalClaim, 200, &claim).unwrap()
+        else {
+            panic!("expected relocation claim");
+        };
+        assert_eq!(claim.details().task_id, 52);
+        assert_eq!(
+            claim.details().source.as_ref().unwrap().barcode.as_deref(),
+            Some("A-01-01")
+        );
+        assert_eq!(
+            claim.details().work,
+            MovementWork::LicensePlate {
+                barcode: "LP-52".into(),
+                planned_balance_count: 3
+            }
+        );
+
+        let confirmation = serde_json::to_vec(&json!({
+            "task_id": 52,
+            "inventory_owner_id": 7,
+            "facility_id": 9,
+            "source_location_id": 11,
+            "destination_location_id": 12,
+            "destination_location_barcode": "B-02-03",
+            "inventory_transaction_id": 19,
+            "confirmed_by": 4,
+            "confirmed_at": "2026-07-27T01:30:00Z",
+            "result": {
+                "workflow": "license_plate",
+                "license_plate_id": 13,
+                "license_plate_barcode": "LP-52",
+                "moved_balance_count": 3
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            decode_command_response(ResponseKind::RelocationConfirmation, 200, &confirmation)
+                .unwrap(),
+            CommandOutcome::InventoryRelocationConfirmed { task_id: 52 }
+        );
+
+        let release = serde_json::to_vec(&json!({
+            "task_id": 52,
+            "released_at": "2026-07-27T01:40:00Z",
+            "release_count": 1,
+            "reason": "work_interrupted"
+        }))
+        .unwrap();
+        assert_eq!(
+            decode_command_response(ResponseKind::RelocationRelease, 200, &release).unwrap(),
+            CommandOutcome::InventoryRelocationReleased { task_id: 52 }
+        );
+    }
+
+    #[test]
     fn request_hash_detects_body_drift() {
         let mut request = build_durable_request(&draft(PutawayCommand::ClaimNext {
-            workflow: PutawayKind::Loose,
+            workflow: MovementKind::Loose,
         }))
         .expect("claim request should build");
         request.body.push(b' ');
@@ -1045,7 +1435,7 @@ mod tests {
     #[test]
     fn unsupported_command_schema_never_reaches_storage() {
         let mut draft = draft(PutawayCommand::ClaimNext {
-            workflow: PutawayKind::Loose,
+            workflow: MovementKind::Loose,
         });
         draft.schema_version = 2;
 
@@ -1091,22 +1481,25 @@ mod tests {
         }))
         .unwrap();
 
-        let CommandOutcome::Claimed(Some(claim)) =
+        let CommandOutcome::PutawayClaimed(Some(claim)) =
             decode_command_response(ResponseKind::OptionalClaim, 200, &response).unwrap()
         else {
             panic!("expected a claim");
         };
-        assert_eq!(claim.inventory_owner_id, 7);
-        assert_eq!(claim.facility_id, 9);
-        assert_eq!(claim.source.as_ref().unwrap().barcode, None);
-        assert_eq!(claim.destination.barcode.as_deref(), Some("A-01-02"));
+        assert_eq!(claim.details().inventory_owner_id, 7);
+        assert_eq!(claim.details().facility_id, 9);
+        assert_eq!(claim.details().source.as_ref().unwrap().barcode, None);
+        assert_eq!(
+            claim.details().destination.barcode.as_deref(),
+            Some("A-01-02")
+        );
     }
 
     #[test]
     fn optional_claim_accepts_an_exact_json_null() {
         assert_eq!(
             decode_command_response(ResponseKind::OptionalClaim, 200, b"null").unwrap(),
-            CommandOutcome::Claimed(None)
+            CommandOutcome::PutawayClaimed(None)
         );
     }
 

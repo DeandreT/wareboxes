@@ -4,12 +4,27 @@ use crate::expected_receiving::ConfirmationIntent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PutawayKind {
+pub enum MovementKind {
     Loose,
     LicensePlate,
 }
 
-impl PutawayKind {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovementOperation {
+    Putaway,
+    InventoryRelocation,
+}
+
+impl MovementOperation {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Putaway => "Putaway",
+            Self::InventoryRelocation => "Relocate",
+        }
+    }
+}
+
+impl MovementKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Loose => "Loose",
@@ -35,7 +50,7 @@ impl Location {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PutawayWork {
+pub enum MovementWork {
     Loose {
         item_description: Option<String>,
         item_id: i64,
@@ -50,17 +65,17 @@ pub enum PutawayWork {
     },
 }
 
-impl PutawayWork {
-    pub const fn kind(&self) -> PutawayKind {
+impl MovementWork {
+    pub const fn kind(&self) -> MovementKind {
         match self {
-            Self::Loose { .. } => PutawayKind::Loose,
-            Self::LicensePlate { .. } => PutawayKind::LicensePlate,
+            Self::Loose { .. } => MovementKind::Loose,
+            Self::LicensePlate { .. } => MovementKind::LicensePlate,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PutawayClaim {
+pub struct MovementClaimDetails {
     pub task_id: i64,
     pub inventory_owner_id: i64,
     pub facility_id: i64,
@@ -69,7 +84,59 @@ pub struct PutawayClaim {
     pub lease_expires_at: String,
     pub source: Option<Location>,
     pub destination: Location,
-    pub work: PutawayWork,
+    pub work: MovementWork,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PutawayClaim {
+    details: MovementClaimDetails,
+}
+
+impl PutawayClaim {
+    pub fn new(details: MovementClaimDetails) -> Self {
+        Self { details }
+    }
+
+    pub const fn details(&self) -> &MovementClaimDetails {
+        &self.details
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryRelocationClaim {
+    details: MovementClaimDetails,
+}
+
+impl InventoryRelocationClaim {
+    pub fn new(details: MovementClaimDetails) -> Self {
+        Self { details }
+    }
+
+    pub const fn details(&self) -> &MovementClaimDetails {
+        &self.details
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ActiveMovementClaim {
+    Putaway(PutawayClaim),
+    InventoryRelocation(InventoryRelocationClaim),
+}
+
+impl ActiveMovementClaim {
+    const fn operation(&self) -> MovementOperation {
+        match self {
+            Self::Putaway(_) => MovementOperation::Putaway,
+            Self::InventoryRelocation(_) => MovementOperation::InventoryRelocation,
+        }
+    }
+
+    const fn details(&self) -> &MovementClaimDetails {
+        match self {
+            Self::Putaway(claim) => &claim.details,
+            Self::InventoryRelocation(claim) => &claim.details,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -103,7 +170,7 @@ pub enum ReleaseReason {
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum PutawayCommand {
     ClaimNext {
-        workflow: PutawayKind,
+        workflow: MovementKind,
     },
     ClaimById {
         task_id: i64,
@@ -135,16 +202,133 @@ impl PutawayCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum InventoryRelocationCommand {
+    ClaimNext {
+        workflow: MovementKind,
+    },
+    ClaimById {
+        task_id: i64,
+    },
+    ConfirmLoose {
+        task_id: i64,
+        destination_location_barcode: String,
+    },
+    ConfirmLicensePlate {
+        task_id: i64,
+        license_plate_barcode: String,
+        destination_location_barcode: String,
+    },
+    Release {
+        task_id: i64,
+        reason: ReleaseReason,
+        note: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum MovementCommand {
+    ClaimNext {
+        workflow: MovementKind,
+    },
+    ClaimById {
+        task_id: i64,
+    },
+    ConfirmLoose {
+        task_id: i64,
+        destination_location_barcode: String,
+    },
+    ConfirmLicensePlate {
+        task_id: i64,
+        license_plate_barcode: String,
+        destination_location_barcode: String,
+    },
+    Release {
+        task_id: i64,
+        reason: ReleaseReason,
+        note: Option<String>,
+    },
+}
+
+impl MovementCommand {
+    fn into_putaway(self) -> PutawayCommand {
+        match self {
+            Self::ClaimNext { workflow } => PutawayCommand::ClaimNext { workflow },
+            Self::ClaimById { task_id } => PutawayCommand::ClaimById { task_id },
+            Self::ConfirmLoose {
+                task_id,
+                destination_location_barcode,
+            } => PutawayCommand::ConfirmLoose {
+                task_id,
+                destination_location_barcode,
+            },
+            Self::ConfirmLicensePlate {
+                task_id,
+                license_plate_barcode,
+                destination_location_barcode,
+            } => PutawayCommand::ConfirmLicensePlate {
+                task_id,
+                license_plate_barcode,
+                destination_location_barcode,
+            },
+            Self::Release {
+                task_id,
+                reason,
+                note,
+            } => PutawayCommand::Release {
+                task_id,
+                reason,
+                note,
+            },
+        }
+    }
+
+    fn into_relocation(self) -> InventoryRelocationCommand {
+        match self {
+            Self::ClaimNext { workflow } => InventoryRelocationCommand::ClaimNext { workflow },
+            Self::ClaimById { task_id } => InventoryRelocationCommand::ClaimById { task_id },
+            Self::ConfirmLoose {
+                task_id,
+                destination_location_barcode,
+            } => InventoryRelocationCommand::ConfirmLoose {
+                task_id,
+                destination_location_barcode,
+            },
+            Self::ConfirmLicensePlate {
+                task_id,
+                license_plate_barcode,
+                destination_location_barcode,
+            } => InventoryRelocationCommand::ConfirmLicensePlate {
+                task_id,
+                license_plate_barcode,
+                destination_location_barcode,
+            },
+            Self::Release {
+                task_id,
+                reason,
+                note,
+            } => InventoryRelocationCommand::Release {
+                task_id,
+                reason,
+                note,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "workflow", content = "payload", rename_all = "snake_case")]
 pub enum RfCommand {
     Putaway(PutawayCommand),
+    InventoryRelocation(InventoryRelocationCommand),
     ExpectedReceipt(Box<ConfirmationIntent>),
 }
 
 impl RfCommand {
-    pub const fn as_putaway(&self) -> Option<&PutawayCommand> {
+    pub const fn movement_operation(&self) -> Option<MovementOperation> {
         match self {
-            Self::Putaway(command) => Some(command),
+            Self::Putaway(_) => Some(MovementOperation::Putaway),
+            Self::InventoryRelocation(_) => Some(MovementOperation::InventoryRelocation),
             Self::ExpectedReceipt(_) => None,
         }
     }
@@ -213,9 +397,12 @@ enum CommandLane {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandOutcome {
-    Claimed(Option<Box<PutawayClaim>>),
-    Confirmed { task_id: i64 },
-    Released { task_id: i64 },
+    PutawayClaimed(Option<Box<PutawayClaim>>),
+    InventoryRelocationClaimed(Option<Box<InventoryRelocationClaim>>),
+    PutawayConfirmed { task_id: i64 },
+    InventoryRelocationConfirmed { task_id: i64 },
+    PutawayReleased { task_id: i64 },
+    InventoryRelocationReleased { task_id: i64 },
     ExpectedReceipt(crate::expected_receiving::ConfirmationResult),
 }
 
@@ -227,9 +414,10 @@ pub enum Transition {
 }
 
 #[derive(Debug, Clone)]
-pub struct PutawayWorkflow {
-    selected_kind: PutawayKind,
-    claim: Option<PutawayClaim>,
+pub struct MovementWorkflow {
+    operation: MovementOperation,
+    selected_kind: MovementKind,
+    claim: Option<ActiveMovementClaim>,
     lane: CommandLane,
     source_verified: bool,
     license_plate_scan: Option<String>,
@@ -239,10 +427,11 @@ pub struct PutawayWorkflow {
     reconcile_reason: Option<String>,
 }
 
-impl Default for PutawayWorkflow {
+impl Default for MovementWorkflow {
     fn default() -> Self {
         Self {
-            selected_kind: PutawayKind::Loose,
+            operation: MovementOperation::Putaway,
+            selected_kind: MovementKind::Loose,
             claim: None,
             lane: CommandLane::Empty,
             source_verified: false,
@@ -255,7 +444,19 @@ impl Default for PutawayWorkflow {
     }
 }
 
-impl PutawayWorkflow {
+impl MovementWorkflow {
+    pub const fn operation(&self) -> MovementOperation {
+        self.operation
+    }
+
+    pub fn select_operation(&mut self, operation: MovementOperation) {
+        if self.activity() == Activity::Idle {
+            self.operation = operation;
+            self.notice = None;
+            self.error = None;
+        }
+    }
+
     pub fn activity(&self) -> Activity {
         if self.reconcile_reason.is_some() {
             return Activity::ReconcileRequired;
@@ -270,11 +471,11 @@ impl PutawayWorkflow {
         }
     }
 
-    pub const fn selected_kind(&self) -> PutawayKind {
+    pub const fn selected_kind(&self) -> MovementKind {
         self.selected_kind
     }
 
-    pub fn select_kind(&mut self, kind: PutawayKind) {
+    pub fn select_kind(&mut self, kind: MovementKind) {
         if self.activity() == Activity::Idle {
             self.selected_kind = kind;
             self.notice = None;
@@ -282,8 +483,8 @@ impl PutawayWorkflow {
         }
     }
 
-    pub fn claim(&self) -> Option<&PutawayClaim> {
-        self.claim.as_ref()
+    pub fn claim(&self) -> Option<&MovementClaimDetails> {
+        self.claim.as_ref().map(ActiveMovementClaim::details)
     }
 
     pub fn scan_draft_mut(&mut self) -> &mut String {
@@ -313,7 +514,7 @@ impl PutawayWorkflow {
         if self.activity() != Activity::Active {
             return None;
         }
-        let claim = self.claim.as_ref()?;
+        let claim = self.claim.as_ref()?.details();
         if claim
             .source
             .as_ref()
@@ -322,7 +523,7 @@ impl PutawayWorkflow {
         {
             return Some(ScanStage::Source);
         }
-        if matches!(claim.work, PutawayWork::LicensePlate { .. })
+        if matches!(claim.work, MovementWork::LicensePlate { .. })
             && self.license_plate_scan.is_none()
         {
             return Some(ScanStage::LicensePlate);
@@ -341,7 +542,7 @@ impl PutawayWorkflow {
         self.begin_command(
             command_id,
             idempotency_key,
-            PutawayCommand::ClaimNext {
+            MovementCommand::ClaimNext {
                 workflow: self.selected_kind,
             },
         )
@@ -363,7 +564,7 @@ impl PutawayWorkflow {
         self.begin_command(
             command_id,
             idempotency_key,
-            PutawayCommand::ClaimById { task_id },
+            MovementCommand::ClaimById { task_id },
         )
     }
 
@@ -378,7 +579,7 @@ impl PutawayWorkflow {
             self.error = Some("Scan cannot be empty".into());
             return None;
         }
-        let claim = self.claim.as_ref()?;
+        let claim = self.claim.as_ref()?.details();
 
         match stage {
             ScanStage::Source => {
@@ -395,7 +596,7 @@ impl PutawayWorkflow {
                 None
             }
             ScanStage::LicensePlate => {
-                let PutawayWork::LicensePlate { barcode, .. } = &claim.work else {
+                let MovementWork::LicensePlate { barcode, .. } = &claim.work else {
                     self.require_reconciliation(
                         "Active work type changed while scanning".to_owned(),
                     );
@@ -415,13 +616,13 @@ impl PutawayWorkflow {
                     return None;
                 }
                 let command = match &claim.work {
-                    PutawayWork::Loose { .. } => PutawayCommand::ConfirmLoose {
+                    MovementWork::Loose { .. } => MovementCommand::ConfirmLoose {
                         task_id: claim.task_id,
                         destination_location_barcode: scanned,
                     },
-                    PutawayWork::LicensePlate { .. } => {
+                    MovementWork::LicensePlate { .. } => {
                         let license_plate_barcode = self.license_plate_scan.clone()?;
-                        PutawayCommand::ConfirmLicensePlate {
+                        MovementCommand::ConfirmLicensePlate {
                             task_id: claim.task_id,
                             license_plate_barcode,
                             destination_location_barcode: scanned,
@@ -444,7 +645,7 @@ impl PutawayWorkflow {
         if self.activity() != Activity::Active {
             return None;
         }
-        let task_id = self.claim.as_ref()?.task_id;
+        let task_id = self.claim.as_ref()?.details().task_id;
         let note = note
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
@@ -462,7 +663,7 @@ impl PutawayWorkflow {
         self.begin_command(
             command_id,
             idempotency_key,
-            PutawayCommand::Release {
+            MovementCommand::Release {
                 task_id,
                 reason,
                 note,
@@ -515,10 +716,13 @@ impl PutawayWorkflow {
         record_id: i64,
         draft: DurableCommandDraft,
     ) -> Transition {
-        if record_id <= 0 || self.reconcile_reason.is_some() || draft.command.as_putaway().is_none()
-        {
+        let Some(operation) = draft.command.movement_operation() else {
+            return Transition::Ignored;
+        };
+        if record_id <= 0 || self.reconcile_reason.is_some() {
             return Transition::Ignored;
         }
+        self.operation = operation;
         self.lane = CommandLane::Ready(PersistedCommand { record_id, draft });
         Transition::Effect(WorkflowEffect::DispatchPersistedCommand { record_id })
     }
@@ -529,10 +733,13 @@ impl PutawayWorkflow {
         draft: DurableCommandDraft,
         message: impl Into<String>,
     ) -> Transition {
-        if record_id <= 0 || self.reconcile_reason.is_some() || draft.command.as_putaway().is_none()
-        {
+        let Some(operation) = draft.command.movement_operation() else {
+            return Transition::Ignored;
+        };
+        if record_id <= 0 || self.reconcile_reason.is_some() {
             return Transition::Ignored;
         }
+        self.operation = operation;
         self.lane = CommandLane::Ambiguous {
             command: PersistedCommand { record_id, draft },
             message: message.into(),
@@ -562,42 +769,39 @@ impl PutawayWorkflow {
         if command.record_id != record_id {
             return Transition::Ignored;
         }
-        let Some(putaway_command) = command.draft.command.as_putaway() else {
+        let Some(operation) = command.draft.command.movement_operation() else {
             self.require_reconciliation("Recorded result does not match the workflow".into());
             return Transition::Applied;
         };
-        if !Self::outcome_matches(putaway_command, &outcome) {
+        if operation != self.operation || !Self::outcome_matches(&command.draft.command, &outcome) {
             self.require_reconciliation("Recorded result does not match the command".into());
             return Transition::Applied;
         }
 
         match outcome {
-            CommandOutcome::Claimed(claim) => {
-                if claim
-                    .as_ref()
-                    .is_some_and(|claim| claim.work.kind() != self.selected_kind)
-                {
-                    self.require_reconciliation(
-                        "Claimed work does not match the selected workflow".into(),
-                    );
+            CommandOutcome::PutawayClaimed(claim) => {
+                let claim = claim.map(|claim| ActiveMovementClaim::Putaway(*claim));
+                if !self.apply_claim_outcome(claim) {
                     return Transition::Applied;
                 }
-                self.claim = claim.map(|claim| *claim);
-                self.reset_scans();
-                self.notice = self
-                    .claim
-                    .is_none()
-                    .then(|| "No putaway work is available".to_owned());
             }
-            CommandOutcome::Confirmed { .. } => {
+            CommandOutcome::InventoryRelocationClaimed(claim) => {
+                let claim = claim.map(|claim| ActiveMovementClaim::InventoryRelocation(*claim));
+                if !self.apply_claim_outcome(claim) {
+                    return Transition::Applied;
+                }
+            }
+            CommandOutcome::PutawayConfirmed { .. }
+            | CommandOutcome::InventoryRelocationConfirmed { .. } => {
                 self.claim = None;
                 self.reset_scans();
-                self.notice = Some("Putaway confirmed".into());
+                self.notice = Some(format!("{} confirmed", self.operation.label()));
             }
-            CommandOutcome::Released { .. } => {
+            CommandOutcome::PutawayReleased { .. }
+            | CommandOutcome::InventoryRelocationReleased { .. } => {
                 self.claim = None;
                 self.reset_scans();
-                self.notice = Some("Putaway returned to the queue".into());
+                self.notice = Some(format!("{} returned to the queue", self.operation.label()));
             }
             CommandOutcome::ExpectedReceipt(_) => {
                 self.require_reconciliation("Recorded result does not match the workflow".into());
@@ -607,6 +811,32 @@ impl PutawayWorkflow {
         self.lane = CommandLane::Empty;
         self.error = None;
         Transition::Applied
+    }
+
+    fn apply_claim_outcome(&mut self, claim: Option<ActiveMovementClaim>) -> bool {
+        if claim
+            .as_ref()
+            .is_some_and(|claim| claim.operation() != self.operation)
+        {
+            self.require_reconciliation("Claimed work does not match the command".into());
+            return false;
+        }
+        if claim
+            .as_ref()
+            .is_some_and(|claim| claim.details().work.kind() != self.selected_kind)
+        {
+            self.require_reconciliation("Claimed work does not match the selected workflow".into());
+            return false;
+        }
+        self.claim = claim;
+        self.reset_scans();
+        self.notice = self.claim.is_none().then(|| {
+            format!(
+                "No {} work is available",
+                self.operation.label().to_lowercase()
+            )
+        });
+        true
     }
 
     pub fn durable_rejection_recorded(
@@ -627,10 +857,32 @@ impl PutawayWorkflow {
         Transition::Applied
     }
 
-    pub fn restore_current_claim(&mut self, claim: Option<PutawayClaim>) {
+    pub fn restore_current_putaway_claim(&mut self, claim: Option<PutawayClaim>) {
+        self.restore_current_claim(
+            MovementOperation::Putaway,
+            claim.map(ActiveMovementClaim::Putaway),
+        );
+    }
+
+    pub fn restore_current_inventory_relocation_claim(
+        &mut self,
+        claim: Option<InventoryRelocationClaim>,
+    ) {
+        self.restore_current_claim(
+            MovementOperation::InventoryRelocation,
+            claim.map(ActiveMovementClaim::InventoryRelocation),
+        );
+    }
+
+    fn restore_current_claim(
+        &mut self,
+        operation: MovementOperation,
+        claim: Option<ActiveMovementClaim>,
+    ) {
+        self.operation = operation;
         self.selected_kind = claim
             .as_ref()
-            .map(|claim| claim.work.kind())
+            .map(|claim| claim.details().work.kind())
             .unwrap_or(self.selected_kind);
         self.claim = claim;
         self.lane = CommandLane::Empty;
@@ -647,7 +899,20 @@ impl PutawayWorkflow {
 
     #[cfg(debug_assertions)]
     pub fn load_debug_claim(&mut self, claim: PutawayClaim) {
-        self.claim = Some(claim);
+        self.operation = MovementOperation::Putaway;
+        self.claim = Some(ActiveMovementClaim::Putaway(claim));
+        self.lane = CommandLane::Empty;
+        self.reconcile_reason = None;
+        self.notice = None;
+        self.error = None;
+        self.reset_scans();
+    }
+
+    #[cfg(all(debug_assertions, not(target_os = "android")))]
+    pub fn load_debug_relocation_claim(&mut self, claim: InventoryRelocationClaim) {
+        self.operation = MovementOperation::InventoryRelocation;
+        self.selected_kind = claim.details().work.kind();
+        self.claim = Some(ActiveMovementClaim::InventoryRelocation(claim));
         self.lane = CommandLane::Empty;
         self.reconcile_reason = None;
         self.notice = None;
@@ -659,17 +924,23 @@ impl PutawayWorkflow {
         &mut self,
         command_id: String,
         idempotency_key: String,
-        command: PutawayCommand,
+        command: MovementCommand,
     ) -> Option<WorkflowEffect> {
         if command_id.trim().is_empty() || idempotency_key.trim().is_empty() {
             self.error = Some("Command identity is unavailable".into());
             return None;
         }
+        let command = match self.operation {
+            MovementOperation::Putaway => RfCommand::Putaway(command.into_putaway()),
+            MovementOperation::InventoryRelocation => {
+                RfCommand::InventoryRelocation(command.into_relocation())
+            }
+        };
         let draft = DurableCommandDraft {
             schema_version: 1,
             command_id,
             idempotency_key,
-            command: command.into(),
+            command,
         };
         self.lane = CommandLane::Persisting(draft.clone());
         self.error = None;
@@ -677,22 +948,53 @@ impl PutawayWorkflow {
         Some(WorkflowEffect::PersistCommand(draft))
     }
 
-    fn outcome_matches(command: &PutawayCommand, outcome: &CommandOutcome) -> bool {
+    fn outcome_matches(command: &RfCommand, outcome: &CommandOutcome) -> bool {
         match (command, outcome) {
-            (PutawayCommand::ClaimNext { .. }, CommandOutcome::Claimed(_)) => true,
-            (PutawayCommand::ClaimById { task_id }, CommandOutcome::Claimed(Some(claim))) => {
-                *task_id == claim.task_id
-            }
             (
-                PutawayCommand::ConfirmLoose { task_id, .. }
-                | PutawayCommand::ConfirmLicensePlate { task_id, .. },
-                CommandOutcome::Confirmed {
+                RfCommand::Putaway(PutawayCommand::ClaimNext { .. }),
+                CommandOutcome::PutawayClaimed(_),
+            )
+            | (
+                RfCommand::InventoryRelocation(InventoryRelocationCommand::ClaimNext { .. }),
+                CommandOutcome::InventoryRelocationClaimed(_),
+            ) => true,
+            (
+                RfCommand::Putaway(PutawayCommand::ClaimById { task_id }),
+                CommandOutcome::PutawayClaimed(Some(claim)),
+            ) => *task_id == claim.details.task_id,
+            (
+                RfCommand::InventoryRelocation(InventoryRelocationCommand::ClaimById { task_id }),
+                CommandOutcome::InventoryRelocationClaimed(Some(claim)),
+            ) => *task_id == claim.details.task_id,
+            (
+                RfCommand::Putaway(
+                    PutawayCommand::ConfirmLoose { task_id, .. }
+                    | PutawayCommand::ConfirmLicensePlate { task_id, .. },
+                ),
+                CommandOutcome::PutawayConfirmed {
                     task_id: outcome_task_id,
                 },
             )
             | (
-                PutawayCommand::Release { task_id, .. },
-                CommandOutcome::Released {
+                RfCommand::InventoryRelocation(
+                    InventoryRelocationCommand::ConfirmLoose { task_id, .. }
+                    | InventoryRelocationCommand::ConfirmLicensePlate { task_id, .. },
+                ),
+                CommandOutcome::InventoryRelocationConfirmed {
+                    task_id: outcome_task_id,
+                },
+            )
+            | (
+                RfCommand::Putaway(PutawayCommand::Release { task_id, .. }),
+                CommandOutcome::PutawayReleased {
+                    task_id: outcome_task_id,
+                },
+            )
+            | (
+                RfCommand::InventoryRelocation(InventoryRelocationCommand::Release {
+                    task_id, ..
+                }),
+                CommandOutcome::InventoryRelocationReleased {
                     task_id: outcome_task_id,
                 },
             ) => task_id == outcome_task_id,
@@ -733,7 +1035,7 @@ mod tests {
     use super::*;
 
     fn loose_claim() -> PutawayClaim {
-        PutawayClaim {
+        PutawayClaim::new(MovementClaimDetails {
             task_id: 42,
             inventory_owner_id: 3,
             facility_id: 4,
@@ -750,7 +1052,7 @@ mod tests {
                 name: Some("A-01-01".into()),
                 barcode: Some("A-01-01".into()),
             },
-            work: PutawayWork::Loose {
+            work: MovementWork::Loose {
                 item_description: Some("Widget".into()),
                 item_id: 7,
                 quantity: 4,
@@ -758,11 +1060,11 @@ mod tests {
                 lot: Some("LOT-1".into()),
                 serial: None,
             },
-        }
+        })
     }
 
     fn license_plate_claim() -> PutawayClaim {
-        PutawayClaim {
+        PutawayClaim::new(MovementClaimDetails {
             task_id: 91,
             inventory_owner_id: 3,
             facility_id: 4,
@@ -775,14 +1077,14 @@ mod tests {
                 name: None,
                 barcode: Some("B-02-03".into()),
             },
-            work: PutawayWork::LicensePlate {
+            work: MovementWork::LicensePlate {
                 barcode: "LP-91".into(),
                 planned_balance_count: 3,
             },
-        }
+        })
     }
 
-    fn persist_active_claim(workflow: &mut PutawayWorkflow, claim: PutawayClaim) {
+    fn persist_active_claim(workflow: &mut MovementWorkflow, claim: PutawayClaim) {
         let effect = workflow
             .begin_claim_next("command-1".into(), "key-1".into())
             .expect("claim should begin");
@@ -794,14 +1096,46 @@ mod tests {
         );
         assert_eq!(workflow.dispatch_started(10), Transition::Applied);
         assert_eq!(
-            workflow.durable_outcome_recorded(10, CommandOutcome::Claimed(Some(Box::new(claim)))),
+            workflow.durable_outcome_recorded(
+                10,
+                CommandOutcome::PutawayClaimed(Some(Box::new(claim)))
+            ),
+            Transition::Applied
+        );
+    }
+
+    fn persist_active_relocation_claim(
+        workflow: &mut MovementWorkflow,
+        claim: InventoryRelocationClaim,
+    ) {
+        workflow.select_operation(MovementOperation::InventoryRelocation);
+        let effect = workflow
+            .begin_claim_next("relocation-command-1".into(), "relocation-key-1".into())
+            .expect("relocation claim should begin");
+        let WorkflowEffect::PersistCommand(draft) = &effect else {
+            panic!("relocation claim must persist first");
+        };
+        assert!(matches!(
+            draft.command,
+            RfCommand::InventoryRelocation(InventoryRelocationCommand::ClaimNext { .. })
+        ));
+        assert_eq!(
+            workflow.command_persisted("relocation-command-1", 11),
+            Transition::Effect(WorkflowEffect::DispatchPersistedCommand { record_id: 11 })
+        );
+        assert_eq!(workflow.dispatch_started(11), Transition::Applied);
+        assert_eq!(
+            workflow.durable_outcome_recorded(
+                11,
+                CommandOutcome::InventoryRelocationClaimed(Some(Box::new(claim)))
+            ),
             Transition::Applied
         );
     }
 
     #[test]
     fn command_must_be_persisted_before_dispatch() {
-        let mut workflow = PutawayWorkflow::default();
+        let mut workflow = MovementWorkflow::default();
         let effect = workflow
             .begin_claim_next("command-1".into(), "key-1".into())
             .expect("claim should begin");
@@ -817,7 +1151,7 @@ mod tests {
 
     #[test]
     fn ambiguous_retry_reuses_the_exact_durable_command() {
-        let mut workflow = PutawayWorkflow::default();
+        let mut workflow = MovementWorkflow::default();
         workflow.begin_claim_next("command-1".into(), "key-1".into());
         workflow.command_persisted("command-1", 7);
         workflow.dispatch_started(7);
@@ -834,13 +1168,13 @@ mod tests {
 
     #[test]
     fn persisted_command_recovery_dispatches_the_original_draft() {
-        let mut workflow = PutawayWorkflow::default();
+        let mut workflow = MovementWorkflow::default();
         let draft = DurableCommandDraft {
             schema_version: 1,
             command_id: "command-1".into(),
             idempotency_key: "key-1".into(),
             command: PutawayCommand::ClaimNext {
-                workflow: PutawayKind::Loose,
+                workflow: MovementKind::Loose,
             }
             .into(),
         };
@@ -855,13 +1189,13 @@ mod tests {
 
     #[test]
     fn restored_ambiguous_command_requires_an_explicit_check() {
-        let mut workflow = PutawayWorkflow::default();
+        let mut workflow = MovementWorkflow::default();
         let draft = DurableCommandDraft {
             schema_version: 1,
             command_id: "command-1".into(),
             idempotency_key: "key-1".into(),
             command: PutawayCommand::ClaimNext {
-                workflow: PutawayKind::Loose,
+                workflow: MovementKind::Loose,
             }
             .into(),
         };
@@ -877,7 +1211,7 @@ mod tests {
 
     #[test]
     fn loose_scan_sequence_has_no_fabricated_item_scan() {
-        let mut workflow = PutawayWorkflow::default();
+        let mut workflow = MovementWorkflow::default();
         persist_active_claim(&mut workflow, loose_claim());
         assert_eq!(workflow.expected_scan(), Some(ScanStage::Source));
 
@@ -899,9 +1233,95 @@ mod tests {
     }
 
     #[test]
+    fn relocation_loose_scan_sequence_emits_only_a_relocation_command() {
+        let mut workflow = MovementWorkflow::default();
+        let claim = InventoryRelocationClaim::new(loose_claim().details().clone());
+        persist_active_relocation_claim(&mut workflow, claim);
+
+        *workflow.scan_draft_mut() = "RECV-01".into();
+        assert_eq!(workflow.submit_scan("unused".into(), "unused".into()), None);
+        *workflow.scan_draft_mut() = "A-01-01".into();
+        let WorkflowEffect::PersistCommand(draft) = workflow
+            .submit_scan(
+                "relocation-confirm-1".into(),
+                "relocation-confirm-key".into(),
+            )
+            .expect("destination scan should persist a relocation confirmation")
+        else {
+            panic!("relocation confirmation must persist first");
+        };
+        assert!(matches!(
+            draft.command,
+            RfCommand::InventoryRelocation(InventoryRelocationCommand::ConfirmLoose {
+                task_id: 42,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn relocation_license_plate_requires_plate_then_destination_scans() {
+        let mut workflow = MovementWorkflow::default();
+        workflow.select_operation(MovementOperation::InventoryRelocation);
+        workflow.select_kind(MovementKind::LicensePlate);
+        let mut details = license_plate_claim().details().clone();
+        details.source = Some(Location {
+            location_id: 7,
+            name: Some("A-01-03".into()),
+            barcode: Some("A-01-03".into()),
+        });
+        let claim = InventoryRelocationClaim::new(details);
+        persist_active_relocation_claim(&mut workflow, claim);
+
+        assert_eq!(workflow.expected_scan(), Some(ScanStage::Source));
+        *workflow.scan_draft_mut() = "A-01-03".into();
+        assert_eq!(workflow.submit_scan("unused".into(), "unused".into()), None);
+        assert_eq!(workflow.expected_scan(), Some(ScanStage::LicensePlate));
+        *workflow.scan_draft_mut() = "LP-91".into();
+        assert_eq!(workflow.submit_scan("unused".into(), "unused".into()), None);
+        assert_eq!(workflow.expected_scan(), Some(ScanStage::Destination));
+        *workflow.scan_draft_mut() = "B-02-03".into();
+        let WorkflowEffect::PersistCommand(draft) = workflow
+            .submit_scan(
+                "relocation-confirm-2".into(),
+                "relocation-confirm-key-2".into(),
+            )
+            .expect("destination scan should persist an LPN relocation")
+        else {
+            panic!("LPN relocation confirmation must persist first");
+        };
+        assert!(matches!(
+            draft.command,
+            RfCommand::InventoryRelocation(
+                InventoryRelocationCommand::ConfirmLicensePlate {
+                    task_id: 91,
+                    ref license_plate_barcode,
+                    ref destination_location_barcode,
+                }
+            ) if license_plate_barcode == "LP-91"
+                && destination_location_barcode == "B-02-03"
+        ));
+    }
+
+    #[test]
+    fn relocation_command_rejects_a_putaway_result_variant() {
+        let mut workflow = MovementWorkflow::default();
+        workflow.select_operation(MovementOperation::InventoryRelocation);
+        workflow.begin_claim_next("relocation-command-1".into(), "relocation-key-1".into());
+        workflow.command_persisted("relocation-command-1", 12);
+        workflow.dispatch_started(12);
+
+        assert_eq!(
+            workflow.durable_outcome_recorded(12, CommandOutcome::PutawayClaimed(None)),
+            Transition::Applied
+        );
+        assert_eq!(workflow.activity(), Activity::ReconcileRequired);
+    }
+
+    #[test]
     fn license_plate_scan_sequence_is_enforced() {
-        let mut workflow = PutawayWorkflow::default();
-        workflow.select_kind(PutawayKind::LicensePlate);
+        let mut workflow = MovementWorkflow::default();
+        workflow.select_kind(MovementKind::LicensePlate);
         persist_active_claim(&mut workflow, license_plate_claim());
         assert_eq!(workflow.expected_scan(), Some(ScanStage::LicensePlate));
 
@@ -920,7 +1340,7 @@ mod tests {
 
     #[test]
     fn ambiguous_terminal_command_keeps_the_claim() {
-        let mut workflow = PutawayWorkflow::default();
+        let mut workflow = MovementWorkflow::default();
         persist_active_claim(&mut workflow, loose_claim());
         *workflow.scan_draft_mut() = "RECV-01".into();
         workflow.submit_scan("unused".into(), "unused".into());
@@ -937,7 +1357,7 @@ mod tests {
 
     #[test]
     fn mismatched_durable_result_requires_reconciliation() {
-        let mut workflow = PutawayWorkflow::default();
+        let mut workflow = MovementWorkflow::default();
         workflow.begin_claim_by_id(42, "command-1".into(), "key-1".into());
         workflow.command_persisted("command-1", 4);
         workflow.dispatch_started(4);
@@ -945,7 +1365,7 @@ mod tests {
         assert_eq!(
             workflow.durable_outcome_recorded(
                 4,
-                CommandOutcome::Claimed(Some(Box::new(loose_claim().with_task_id(99))))
+                CommandOutcome::PutawayClaimed(Some(Box::new(loose_claim().with_task_id(99))))
             ),
             Transition::Applied
         );
@@ -954,13 +1374,13 @@ mod tests {
 
     #[test]
     fn selected_task_claim_cannot_record_an_empty_result() {
-        let mut workflow = PutawayWorkflow::default();
+        let mut workflow = MovementWorkflow::default();
         workflow.begin_claim_by_id(42, "command-1".into(), "key-1".into());
         workflow.command_persisted("command-1", 4);
         workflow.dispatch_started(4);
 
         assert_eq!(
-            workflow.durable_outcome_recorded(4, CommandOutcome::Claimed(None)),
+            workflow.durable_outcome_recorded(4, CommandOutcome::PutawayClaimed(None)),
             Transition::Applied
         );
         assert_eq!(workflow.activity(), Activity::ReconcileRequired);
@@ -968,7 +1388,7 @@ mod tests {
 
     #[test]
     fn other_release_requires_a_bounded_note() {
-        let mut workflow = PutawayWorkflow::default();
+        let mut workflow = MovementWorkflow::default();
         persist_active_claim(&mut workflow, loose_claim());
 
         assert!(
@@ -990,7 +1410,7 @@ mod tests {
 
     impl ClaimTestExt for PutawayClaim {
         fn with_task_id(mut self, task_id: i64) -> Self {
-            self.task_id = task_id;
+            self.details.task_id = task_id;
             self
         }
     }
@@ -1002,7 +1422,7 @@ mod tests {
             command_id: "command-7".into(),
             idempotency_key: "key-7".into(),
             command: PutawayCommand::ClaimNext {
-                workflow: PutawayKind::Loose,
+                workflow: MovementKind::Loose,
             }
             .into(),
         };
@@ -1025,7 +1445,7 @@ mod tests {
         );
         assert!(
             !PutawayCommand::ClaimNext {
-                workflow: PutawayKind::Loose,
+                workflow: MovementKind::Loose,
             }
             .is_terminal()
         );

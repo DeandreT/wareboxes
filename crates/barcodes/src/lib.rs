@@ -1,4 +1,4 @@
-//! Dependency-free barcode encoders used by the Wareboxes client.
+//! Dependency-free barcode encoders shared by Wareboxes operator surfaces.
 //!
 //! Currently implements Code 128-B, GS1-128, UPC-A, and QR Code Model 2 byte mode.
 

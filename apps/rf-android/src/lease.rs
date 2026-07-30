@@ -1,4 +1,4 @@
-//! Pure lease scheduling for claimed putaway work.
+//! Pure lease scheduling for claimed movement work.
 //!
 //! Server wall-clock timestamps are converted to a monotonic deadline as soon as
 //! they are observed. Subsequent decisions use only monotonic time, so device
@@ -180,9 +180,9 @@ pub struct HeartbeatLease<'a> {
     pub lease_expires_at: &'a str,
 }
 
-/// Pure state machine for one claimed putaway task.
+/// Pure state machine for one claimed movement task.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PutawayLeaseMonitor {
+pub struct MovementLeaseMonitor {
     task_id: i64,
     lease_expires_at: DateTime<Utc>,
     lease_deadline: Duration,
@@ -195,7 +195,7 @@ pub struct PutawayLeaseMonitor {
     verified: bool,
 }
 
-impl PutawayLeaseMonitor {
+impl MovementLeaseMonitor {
     /// Anchors a server lease expiry to a local monotonic clock sample.
     pub fn new(
         task_id: i64,
@@ -536,8 +536,8 @@ mod tests {
         ClockSample::new(timestamp(wall_time), Duration::from_secs(monotonic_secs))
     }
 
-    fn monitor() -> PutawayLeaseMonitor {
-        PutawayLeaseMonitor::new(
+    fn monitor() -> MovementLeaseMonitor {
+        MovementLeaseMonitor::new(
             TASK_ID,
             "2026-07-27T01:30:00Z",
             clock("2026-07-27T01:00:00Z", 100),
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn parses_rfc3339_offsets_and_anchors_to_monotonic_time() {
-        let monitor = PutawayLeaseMonitor::new(
+        let monitor = MovementLeaseMonitor::new(
             TASK_ID,
             "2026-07-26T18:30:00-07:00",
             clock("2026-07-27T01:00:00Z", 100),
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn rejects_malformed_server_timestamp() {
         assert_eq!(
-            PutawayLeaseMonitor::new(
+            MovementLeaseMonitor::new(
                 TASK_ID,
                 "tomorrow",
                 clock("2026-07-27T01:00:00Z", 100),
@@ -586,7 +586,7 @@ mod tests {
 
     #[test]
     fn expired_initial_lease_is_represented_as_blocked() {
-        let monitor = PutawayLeaseMonitor::new(
+        let monitor = MovementLeaseMonitor::new(
             TASK_ID,
             "2026-07-27T00:59:59Z",
             clock("2026-07-27T01:00:00Z", 100),
@@ -723,7 +723,7 @@ mod tests {
             Duration::from_secs(15),
         )
         .unwrap();
-        let mut monitor = PutawayLeaseMonitor::new(
+        let mut monitor = MovementLeaseMonitor::new(
             TASK_ID,
             "2026-07-27T01:01:00Z",
             clock("2026-07-27T01:00:00Z", 100),
@@ -955,7 +955,7 @@ mod tests {
 
     #[test]
     fn short_lease_heartbeats_immediately_and_blocks_inventory() {
-        let monitor = PutawayLeaseMonitor::new(
+        let monitor = MovementLeaseMonitor::new(
             TASK_ID,
             "2026-07-27T01:00:20Z",
             clock("2026-07-27T01:00:00Z", 100),
