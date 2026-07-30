@@ -16,6 +16,13 @@ use super::{insert_progress_tx, require_replayed_task_visible_tx, TaskDimensions
 
 const OPERATION: &str = "task.confirm_item_location_cycle_count.v1";
 
+#[derive(serde::Serialize)]
+struct CountScans<'a> {
+    location_barcode: &'a str,
+    item_barcode: &'a str,
+    license_plate_barcode: Option<&'a str>,
+}
+
 struct CountTarget {
     inventory_owner_id: i64,
     facility_id: i64,
@@ -193,6 +200,56 @@ pub async fn confirm_item_location_cycle_count_in_scope(
     counted_quantity: i64,
     note: Option<&str>,
 ) -> AppResult<ItemLocationCycleCountConfirmation> {
+    confirm_item_location_cycle_count_with_scans_in_scope(
+        db,
+        access,
+        command,
+        task_id,
+        counted_quantity,
+        note,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn confirm_scanned_item_location_cycle_count_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    command: &CommandContext,
+    task_id: i64,
+    location_barcode: &str,
+    item_barcode: &str,
+    license_plate_barcode: Option<&str>,
+    counted_quantity: i64,
+    note: Option<&str>,
+) -> AppResult<ItemLocationCycleCountConfirmation> {
+    confirm_item_location_cycle_count_with_scans_in_scope(
+        db,
+        access,
+        command,
+        task_id,
+        counted_quantity,
+        note,
+        Some(CountScans {
+            location_barcode,
+            item_barcode,
+            license_plate_barcode,
+        }),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn confirm_item_location_cycle_count_with_scans_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    command: &CommandContext,
+    task_id: i64,
+    counted_quantity: i64,
+    note: Option<&str>,
+    scans: Option<CountScans<'_>>,
+) -> AppResult<ItemLocationCycleCountConfirmation> {
     require_command_context(access, command)?;
     if task_id <= 0 {
         return Err(AppError::bad_request("task ID must be positive"));
@@ -201,7 +258,11 @@ pub async fn confirm_item_location_cycle_count_in_scope(
         return Err(AppError::bad_request("counted quantity cannot be negative"));
     }
     let note = validated_note(note)?;
-    let prepared = PreparedCommand::new(command, OPERATION, &(task_id, counted_quantity, note))?;
+    let prepared = PreparedCommand::new(
+        command,
+        OPERATION,
+        &(task_id, counted_quantity, note, &scans),
+    )?;
 
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
@@ -228,6 +289,9 @@ pub async fn confirm_item_location_cycle_count_in_scope(
         balance_license_plate_hint(&mut tx, access.tenant_id, target.inventory_balance_id).await?;
     lock_license_plate(&mut tx, access.tenant_id, license_plate_id).await?;
     let balance = lock_balance(&mut tx, access.tenant_id, &target).await?;
+    if let Some(scans) = scans {
+        validate_scans_tx(&mut tx, access.tenant_id, &target, &balance, scans).await?;
+    }
     let committed_quantity = balance
         .qty_reserved
         .checked_add(balance.qty_held)
@@ -477,4 +541,97 @@ pub async fn confirm_item_location_cycle_count_in_scope(
     prepared
         .commit_with_inventory_transaction(tx, confirmation, inventory_transaction_id)
         .await
+}
+
+async fn validate_scans_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: wareboxes_domain::TenantId,
+    target: &CountTarget,
+    balance: &LockedBalance,
+    scans: CountScans<'_>,
+) -> AppResult<()> {
+    let location_matches: bool = sqlx::query_scalar(
+        r#"
+        SELECT barcode = $3
+        FROM locations
+        WHERE tenant_id = $1
+          AND id = $2
+          AND deleted IS NULL
+          AND active
+        FOR SHARE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(target.location_id)
+    .bind(scans.location_barcode)
+    .fetch_optional(&mut **tx)
+    .await?
+    .unwrap_or(false);
+    if !location_matches {
+        return Err(AppError::conflict(
+            "scanned location does not match the cycle count task",
+        ));
+    }
+
+    let item_matches: bool = sqlx::query_scalar(
+        r#"
+        SELECT TRUE
+        FROM barcodes
+        WHERE tenant_id = $1
+          AND item_id = $2
+          AND name = $3
+          AND deleted IS NULL
+        ORDER BY id
+        LIMIT 1
+        FOR SHARE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(target.item_id)
+    .bind(scans.item_barcode)
+    .fetch_optional(&mut **tx)
+    .await?
+    .unwrap_or(false);
+    if !item_matches {
+        return Err(AppError::conflict(
+            "scanned item does not match the cycle count task",
+        ));
+    }
+
+    match (balance.license_plate_id, scans.license_plate_barcode) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err(AppError::conflict(
+            "cycle count stock is not on a license plate",
+        )),
+        (Some(_), None) => Err(AppError::conflict(
+            "license plate scan is required for this cycle count",
+        )),
+        (Some(license_plate_id), Some(scanned_barcode)) => {
+            let plate_matches: bool = sqlx::query_scalar(
+                r#"
+                SELECT barcode = $4
+                FROM license_plates
+                WHERE tenant_id = $1
+                  AND inventory_owner_id = $2
+                  AND id = $3
+                  AND deleted IS NULL
+                FOR SHARE
+                "#,
+            )
+            .bind(tenant_id.get())
+            .bind(target.inventory_owner_id)
+            .bind(license_plate_id)
+            .bind(scanned_barcode)
+            .fetch_optional(&mut **tx)
+            .await?
+            .unwrap_or(false);
+            if plate_matches {
+                Ok(())
+            } else {
+                Err(AppError::conflict(
+                    "scanned license plate does not match the cycle count task",
+                ))
+            }
+        }
+    }
 }

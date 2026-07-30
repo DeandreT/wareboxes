@@ -29,9 +29,43 @@ use crate::toast::ToastProvider;
 use crate::view_model::{facility_inventory, format_quantity, has_permission, open_order_count};
 
 const SESSION_BOOTSTRAP_ID: &str = "wareboxes-session-bootstrap";
+const WORKSPACE_BOOTSTRAP_ID: &str = "wareboxes-workspace-bootstrap";
 
 #[derive(Clone, Default)]
 pub struct InitialWebSession(pub Option<WebSessionContext>);
+
+#[derive(Clone, Default)]
+pub struct InitialWebWorkspace(pub Option<WorkspaceBootstrap>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceBootstrapSection {
+    Overview,
+    Orders,
+    Inventory,
+    Access,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceBootstrapData {
+    pub orders: Option<OrderPage>,
+    pub balances: Vec<InventoryBalanceResponse>,
+    pub balance_next_cursor: Option<OpaqueCursor>,
+    pub access: AccessScopeWorkspace,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status", content = "payload")]
+pub enum WorkspaceBootstrapContent {
+    Ready(WorkspaceBootstrapData),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceBootstrap {
+    pub section: WorkspaceBootstrapSection,
+    pub content: WorkspaceBootstrapContent,
+}
 
 #[derive(Clone)]
 pub(crate) enum SessionState {
@@ -50,6 +84,18 @@ struct WorkspaceData {
     loads: Vec<Load>,
     catalog_items: Vec<Item>,
     locations: Vec<Location>,
+}
+
+impl From<WorkspaceBootstrapData> for WorkspaceData {
+    fn from(bootstrap: WorkspaceBootstrapData) -> Self {
+        Self {
+            orders: bootstrap.orders,
+            balances: bootstrap.balances,
+            balance_next_cursor: bootstrap.balance_next_cursor,
+            access: bootstrap.access,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -72,6 +118,32 @@ pub(crate) enum Section {
     InventoryIntegrity,
     Access,
     Administration(AdministrationArea),
+}
+
+impl Section {
+    fn bootstrap_section(self) -> Option<WorkspaceBootstrapSection> {
+        match self {
+            Self::Overview => Some(WorkspaceBootstrapSection::Overview),
+            Self::Orders => Some(WorkspaceBootstrapSection::Orders),
+            Self::Inventory => Some(WorkspaceBootstrapSection::Inventory),
+            Self::Access => Some(WorkspaceBootstrapSection::Access),
+            _ => None,
+        }
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn supports_workspace_refresh(self) -> bool {
+        matches!(
+            self,
+            Self::Overview
+                | Self::Orders
+                | Self::Loads
+                | Self::Inventory
+                | Self::InventoryHolds
+                | Self::InventoryDisposition
+                | Self::Access
+        )
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -109,18 +181,26 @@ pub fn App() -> impl IntoView {
     provide_meta_context();
     provide_display_preferences();
     let initial_session = initial_web_session();
-    let bootstrap = serialize_bootstrap(&initial_session);
+    let initial_workspace = initial_web_workspace();
+    let session_bootstrap = serialize_bootstrap(&initial_session);
+    let workspace_bootstrap = serialize_bootstrap(&initial_workspace);
     let session_state = RwSignal::new(match initial_session {
         Some(session) => SessionState::Authenticated(Box::new(session)),
         None => SessionState::Anonymous(None),
     });
     provide_context(session_state);
+    provide_context(InitialWebWorkspace(initial_workspace));
 
     view! {
         <script
             id=SESSION_BOOTSTRAP_ID
             type="application/json"
-            inner_html=bootstrap
+            inner_html=session_bootstrap
+        ></script>
+        <script
+            id=WORKSPACE_BOOTSTRAP_ID
+            type="application/json"
+            inner_html=workspace_bootstrap
         ></script>
         <Stylesheet id="wareboxes-web" href="/pkg/wareboxes-web.css"/>
         <Stylesheet id="wareboxes-holds" href="/holds.css"/>
@@ -313,17 +393,68 @@ fn AuthenticatedPage(section: Section) -> impl IntoView {
 
 #[component]
 fn AuthenticatedWorkspace(session: WebSessionContext, section: Section) -> impl IntoView {
-    let workspace_state = RwSignal::new(WorkspaceState::Loading);
+    let initial_state = initial_workspace_state(section);
+    #[cfg(target_arch = "wasm32")]
+    let needs_initial_request = initial_state.is_none();
+    let workspace_state = RwSignal::new(initial_state.unwrap_or(WorkspaceState::Loading));
     provide_context(workspace_state);
     provide_context(session.clone());
     #[cfg(target_arch = "wasm32")]
-    request_workspace(session, section, workspace_state);
+    {
+        if needs_initial_request {
+            request_workspace(session.clone(), section, workspace_state);
+        }
+        install_workspace_auto_refresh(session, section, workspace_state);
+    }
 
     view! {
         <PageFrame section>
             <WorkspaceContent section/>
         </PageFrame>
     }
+}
+
+fn initial_workspace_state(section: Section) -> Option<WorkspaceState> {
+    let bootstrap = use_context::<InitialWebWorkspace>()?.0?;
+    if section.bootstrap_section()? != bootstrap.section {
+        return None;
+    }
+    Some(match bootstrap.content {
+        WorkspaceBootstrapContent::Ready(data) => WorkspaceState::Ready(data.into()),
+        WorkspaceBootstrapContent::Failed(message) => WorkspaceState::Failed(message),
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn install_workspace_auto_refresh(
+    session: WebSessionContext,
+    section: Section,
+    state: RwSignal<WorkspaceState>,
+) {
+    use std::time::Duration;
+
+    if !section.supports_workspace_refresh() {
+        return;
+    }
+    let Some(owner) = Owner::current() else {
+        return;
+    };
+    let Ok(handle) = set_interval_with_handle(
+        move || {
+            if workspace_is_ready_for_auto_refresh(&state) {
+                owner.with(|| request_workspace(session.clone(), section, state));
+            }
+        },
+        Duration::from_secs(30),
+    ) else {
+        return;
+    };
+    on_cleanup(move || handle.clear());
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn workspace_is_ready_for_auto_refresh(state: &RwSignal<WorkspaceState>) -> bool {
+    matches!(state.get_untracked(), WorkspaceState::Ready(_))
 }
 
 fn request_workspace(
@@ -1090,17 +1221,28 @@ fn initial_web_session() -> Option<WebSessionContext> {
 
 #[cfg(target_arch = "wasm32")]
 fn initial_web_session() -> Option<WebSessionContext> {
-    let document = web_sys::window()?.document()?;
-    let raw = document
-        .get_element_by_id(SESSION_BOOTSTRAP_ID)?
-        .text_content()?;
-    serde_json::from_str::<Option<WebSessionContext>>(&raw)
-        .ok()
-        .flatten()
+    browser_bootstrap(SESSION_BOOTSTRAP_ID)
 }
 
-fn serialize_bootstrap(session: &Option<WebSessionContext>) -> String {
-    escape_bootstrap_json(serde_json::to_string(session).unwrap_or_else(|_| "null".to_owned()))
+#[cfg(not(target_arch = "wasm32"))]
+fn initial_web_workspace() -> Option<WorkspaceBootstrap> {
+    use_context::<InitialWebWorkspace>().and_then(|initial| initial.0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn initial_web_workspace() -> Option<WorkspaceBootstrap> {
+    browser_bootstrap(WORKSPACE_BOOTSTRAP_ID)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_bootstrap<T: serde::de::DeserializeOwned>(element_id: &str) -> Option<T> {
+    let document = web_sys::window()?.document()?;
+    let raw = document.get_element_by_id(element_id)?.text_content()?;
+    serde_json::from_str::<Option<T>>(&raw).ok().flatten()
+}
+
+fn serialize_bootstrap<T: serde::Serialize>(value: &Option<T>) -> String {
+    escape_bootstrap_json(serde_json::to_string(value).unwrap_or_else(|_| "null".to_owned()))
 }
 
 fn escape_bootstrap_json(json: String) -> String {
@@ -1114,7 +1256,10 @@ mod tests {
     use leptos::prelude::*;
     use leptos_router::location::RequestUrl;
 
-    use super::{escape_bootstrap_json, App};
+    use super::{
+        escape_bootstrap_json, workspace_is_ready_for_auto_refresh, App, Section, WorkspaceData,
+        WorkspaceState,
+    };
 
     #[test]
     fn server_render_contains_hydratable_sign_in() {
@@ -1132,5 +1277,25 @@ mod tests {
         let escaped = escape_bootstrap_json(r#""</script>&""#.to_owned());
 
         assert_eq!(escaped, r#""\u003c/script\u003e\u0026""#);
+    }
+
+    #[test]
+    fn automatic_refresh_only_runs_for_ready_data_backed_workspaces() {
+        Owner::new().with(|| {
+            let state = RwSignal::new(WorkspaceState::Loading);
+            assert!(!workspace_is_ready_for_auto_refresh(&state));
+            state.set(WorkspaceState::Ready(WorkspaceData::default()));
+            assert!(workspace_is_ready_for_auto_refresh(&state));
+            state.set(WorkspaceState::Refreshing(WorkspaceData::default()));
+            assert!(!workspace_is_ready_for_auto_refresh(&state));
+        });
+
+        assert!(Section::Overview.supports_workspace_refresh());
+        assert!(Section::Orders.supports_workspace_refresh());
+        assert!(!Section::Catalog.supports_workspace_refresh());
+        assert!(
+            !Section::Administration(crate::administration::AdministrationArea::Users)
+                .supports_workspace_refresh()
+        );
     }
 }

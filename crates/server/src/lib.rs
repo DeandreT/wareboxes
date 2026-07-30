@@ -11,3 +11,5 @@ pub mod repo;
 pub mod request_context;
 pub mod routes;
 pub mod state;
+#[cfg(feature = "ssr")]
+pub mod web_app;

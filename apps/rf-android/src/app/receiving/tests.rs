@@ -23,23 +23,33 @@ fn draft(reason: Option<ReceiptExceptionReason>, note: Option<&str>) -> Receivin
 fn work_mode_changes_only_without_owned_work() {
     assert!(work_mode_switch_allowed(
         Activity::Idle,
-        ReceivingActivity::AwaitingLoad
+        ReceivingActivity::AwaitingLoad,
+        Activity::Idle
     ));
     assert!(work_mode_switch_allowed(
         Activity::Idle,
-        ReceivingActivity::LoadComplete
+        ReceivingActivity::LoadComplete,
+        Activity::Idle
     ));
     assert!(!work_mode_switch_allowed(
         Activity::Active,
-        ReceivingActivity::AwaitingLoad
+        ReceivingActivity::AwaitingLoad,
+        Activity::Idle
     ));
     assert!(!work_mode_switch_allowed(
         Activity::Idle,
-        ReceivingActivity::Active
+        ReceivingActivity::Active,
+        Activity::Idle
     ));
     assert!(!work_mode_switch_allowed(
         Activity::Idle,
-        ReceivingActivity::ConfirmationPending
+        ReceivingActivity::ConfirmationPending,
+        Activity::Idle
+    ));
+    assert!(!work_mode_switch_allowed(
+        Activity::Idle,
+        ReceivingActivity::AwaitingLoad,
+        Activity::Active
     ));
 }
 

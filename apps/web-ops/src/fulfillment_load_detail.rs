@@ -1,6 +1,10 @@
 use leptos::prelude::*;
-use wareboxes_core::dto::{AddLoadLine, AddLoadNote, ArriveLoad, LoadUpdate};
-use wareboxes_core::models::{Item, Load, LoadStatus, LoadType, Location};
+use lucide_leptos::{Download, ExternalLink, Paperclip, Trash2};
+use wareboxes_core::dto::{
+    AddLoadFile, AddLoadLine, AddLoadNote, ArriveLoad, LoadFileIdRequest, LoadNoteIdRequest,
+    LoadUpdate,
+};
+use wareboxes_core::models::{Item, Load, LoadFileCategory, LoadStatus, LoadType, Location};
 
 use crate::api;
 use crate::fulfillment_shared::{
@@ -24,6 +28,16 @@ struct LoadCommandContext {
     pending: RwSignal<bool>,
     error: RwSignal<Option<String>>,
     confirmation: RwSignal<Option<LoadStatus>>,
+    on_refreshed: Callback<i64>,
+    on_unauthorized: Callback<()>,
+    toasts: crate::toast::ToastBus,
+}
+
+#[derive(Clone, Copy)]
+struct DetailDeleteContext {
+    pending: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    confirmation: RwSignal<Option<i64>>,
     on_refreshed: Callback<i64>,
     on_unauthorized: Callback<()>,
     toasts: crate::toast::ToastBus,
@@ -293,28 +307,13 @@ pub fn LoadDetailPanel(
             </Show>
 
             <Show when=move || tab.get() == LoadDetailTab::Documents>
-                <section class="detail-section">
-                    <div class="detail-section-title">
-                        <h3>"Documents"</h3>
-                        <span>{format!("{} records", load.get_value().files.len())}</span>
-                    </div>
-                    <div class="document-list">
-                        {load
-                            .get_value()
-                            .files
-                            .into_iter()
-                            .map(|file| {
-                                view! {
-                                    <div>
-                                        <strong>{file.original_name}</strong>
-                                        <span>{title_case(file.category.as_str())}</span>
-                                        <small>{short_timestamp(file.created)}</small>
-                                    </div>
-                                }
-                            })
-                            .collect_view()}
-                    </div>
-                </section>
+                <DocumentsPanel
+                    load=load.get_value()
+                    pending=command_pending
+                    error=command_error
+                    on_refreshed
+                    on_unauthorized
+                />
             </Show>
         </div>
     }
@@ -977,6 +976,239 @@ fn OutboundFreightPanel(load: Load) -> impl IntoView {
 }
 
 #[component]
+fn DocumentsPanel(
+    load: Load,
+    pending: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    on_refreshed: Callback<i64>,
+    on_unauthorized: Callback<()>,
+) -> impl IntoView {
+    let original_name = RwSignal::new(String::new());
+    let path = RwSignal::new(String::new());
+    let content_type = RwSignal::new(String::new());
+    let category = RwSignal::new(LoadFileCategory::General.as_str().to_owned());
+    let delete_target = RwSignal::new(None::<i64>);
+    let load_id = load.id;
+    let file_count = load.files.len();
+    let empty = load.files.is_empty();
+    let toasts = use_toast_bus();
+
+    let submit = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        if pending.get_untracked() {
+            return;
+        }
+        let name_value = original_name.get_untracked().trim().to_owned();
+        if name_value.is_empty() {
+            error.set(Some("Enter the document name.".to_owned()));
+            return;
+        }
+        let path_value = path.get_untracked().trim().to_owned();
+        if document_href(&path_value).is_none() {
+            error.set(Some(
+                "Enter a browser-safe storage URL or relative path.".to_owned(),
+            ));
+            return;
+        }
+        let request = AddLoadFile {
+            load_id,
+            original_name: name_value.clone(),
+            name: stored_document_name(&name_value, &path_value),
+            path: path_value,
+            content_type: optional_text(&content_type.get_untracked()),
+            category: LoadFileCategory::parse(&category.get_untracked()),
+        };
+        pending.set(true);
+        error.set(None);
+        leptos::task::spawn_local(async move {
+            match api::internal_post::<_, i64>("/api/loads/files/add", &request).await {
+                Ok(file_id) => {
+                    original_name.set(String::new());
+                    path.set(String::new());
+                    content_type.set(String::new());
+                    category.set(LoadFileCategory::General.as_str().to_owned());
+                    pending.set(false);
+                    toasts.success(format!("Document #{file_id} attached to load #{load_id}."));
+                    on_refreshed.run(load_id);
+                }
+                Err(api_error) if api_error.unauthorized => {
+                    pending.set(false);
+                    on_unauthorized.run(());
+                }
+                Err(api_error) => {
+                    toasts.error(api_error.message.clone());
+                    error.set(Some(api_error.message));
+                    pending.set(false);
+                }
+            }
+        });
+    };
+
+    view! {
+        <section class="detail-section">
+            <div class="detail-section-title">
+                <h3>"Documents"</h3>
+                <span>{format!("{file_count} records")}</span>
+            </div>
+            <form class="document-entry" on:submit=submit>
+                <label>
+                    <span>"Document name"</span>
+                    <input
+                        type="text"
+                        placeholder="BOL-1042.pdf"
+                        prop:value=move || original_name.get()
+                        on:input=move |event| original_name.set(event_target_value(&event))
+                    />
+                </label>
+                <label>
+                    <span>"Category"</span>
+                    <select
+                        prop:value=move || category.get()
+                        on:change=move |event| category.set(event_target_value(&event))
+                    >
+                        <option value="general">"General"</option>
+                        <option value="invoice">"Invoice"</option>
+                    </select>
+                </label>
+                <label class="document-path-field">
+                    <span>"Storage URL or path"</span>
+                    <input
+                        type="text"
+                        placeholder="/documents/BOL-1042.pdf"
+                        prop:value=move || path.get()
+                        on:input=move |event| path.set(event_target_value(&event))
+                    />
+                </label>
+                <label>
+                    <span>"Content type"</span>
+                    <input
+                        type="text"
+                        placeholder="application/pdf"
+                        prop:value=move || content_type.get()
+                        on:input=move |event| content_type.set(event_target_value(&event))
+                    />
+                </label>
+                <button
+                    class="button primary-action document-attach-action"
+                    type="submit"
+                    disabled=move || pending.get()
+                >
+                    <Paperclip size=15/>
+                    <span>{move || if pending.get() { "Attaching" } else { "Attach" }}</span>
+                </button>
+            </form>
+            <div class="document-list">
+                {load
+                    .files
+                    .into_iter()
+                    .filter(|file| file.deleted.is_none())
+                    .rev()
+                    .map(|file| {
+                        let file_id = file.id;
+                        let href = document_href(&file.path);
+                        let original_name = file.original_name;
+                        let download_name = original_name.clone();
+                        let link_title = format!("Open {original_name}");
+                        let download_title = format!("Download {original_name}");
+                        let delete_title = format!("Delete {original_name}");
+                        view! {
+                            <div class="document-row">
+                                <div class="document-identity">
+                                    <strong title=original_name.clone()>{original_name.clone()}</strong>
+                                    <small>{file.content_type.unwrap_or_else(|| "Type not recorded".to_owned())}</small>
+                                </div>
+                                <span>{title_case(file.category.as_str())}</span>
+                                <small>{short_timestamp(file.created)}</small>
+                                <div class="document-actions">
+                                    {href.map(|href| {
+                                        let download_href = href.clone();
+                                        view! {
+                                            <a
+                                                class="button document-action quiet-action"
+                                                href=href
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                aria-label=link_title
+                                                title="Open document"
+                                            >
+                                                <ExternalLink size=14/>
+                                            </a>
+                                            <a
+                                                class="button document-action quiet-action"
+                                                href=download_href
+                                                download=download_name
+                                                aria-label=download_title
+                                                title="Download document"
+                                            >
+                                                <Download size=14/>
+                                            </a>
+                                        }
+                                    })}
+                                    <Show
+                                        when=move || delete_target.get() == Some(file_id)
+                                        fallback=move || {
+                                            let delete_title = delete_title.clone();
+                                            view! {
+                                                <button
+                                                    class="button document-action danger-action"
+                                                    type="button"
+                                                    aria-label=delete_title
+                                                    title="Delete document"
+                                                    disabled=move || pending.get()
+                                                    on:click=move |_| delete_target.set(Some(file_id))
+                                                >
+                                                    <Trash2 size=14/>
+                                                </button>
+                                            }
+                                        }
+                                    >
+                                        <span class="inline-delete-confirmation">
+                                            <strong>"Delete?"</strong>
+                                            <button
+                                                class="button danger-action"
+                                                type="button"
+                                                disabled=move || pending.get()
+                                                on:click=move |_| {
+                                                    delete_load_file(
+                                                        file_id,
+                                                        load_id,
+                                                        DetailDeleteContext {
+                                                            pending,
+                                                            error,
+                                                            confirmation: delete_target,
+                                                            on_refreshed,
+                                                            on_unauthorized,
+                                                            toasts,
+                                                        },
+                                                    );
+                                                }
+                                            >
+                                                "Yes"
+                                            </button>
+                                            <button
+                                                class="button quiet-action"
+                                                type="button"
+                                                disabled=move || pending.get()
+                                                on:click=move |_| delete_target.set(None)
+                                            >
+                                                "No"
+                                            </button>
+                                        </span>
+                                    </Show>
+                                </div>
+                            </div>
+                        }
+                    })
+                    .collect_view()}
+            </div>
+            {empty.then(|| {
+                view! { <p class="empty-state">"No documents are attached to this load."</p> }
+            })}
+        </section>
+    }
+}
+
+#[component]
 fn NotesPanel(
     load: Load,
     pending: RwSignal<bool>,
@@ -985,7 +1217,16 @@ fn NotesPanel(
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     let note = RwSignal::new(String::new());
+    let delete_target = RwSignal::new(None::<i64>);
     let load_id = load.id;
+    let notes = load
+        .notes
+        .into_iter()
+        .filter(|note| note.deleted.is_none())
+        .rev()
+        .collect::<Vec<_>>();
+    let note_count = notes.len();
+    let empty = notes.is_empty();
     let toasts = use_toast_bus();
     let submit = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
@@ -1025,7 +1266,7 @@ fn NotesPanel(
         <section class="detail-section">
             <div class="detail-section-title">
                 <h3>"Load notes"</h3>
-                <span>{format!("{} notes", load.notes.len())}</span>
+                <span>{format!("{note_count} notes")}</span>
             </div>
             <form class="note-entry" on:submit=submit>
                 <label>
@@ -1042,23 +1283,173 @@ fn NotesPanel(
                 </button>
             </form>
             <ol class="notes-list">
-                {load
-                    .notes
+                {notes
                     .into_iter()
-                    .filter(|note| note.deleted.is_none())
-                    .rev()
                     .map(|note| {
+                        let note_id = note.id;
+                        let delete_title = format!("Delete load note #{note_id}");
                         view! {
                             <li>
                                 <span>{short_timestamp(note.created)}</span>
                                 <p>{note.note}</p>
+                                <div class="note-actions">
+                                    <Show
+                                        when=move || delete_target.get() == Some(note_id)
+                                        fallback=move || {
+                                            let delete_title = delete_title.clone();
+                                            view! {
+                                                <button
+                                                    class="button document-action danger-action"
+                                                    type="button"
+                                                    aria-label=delete_title
+                                                    title="Delete note"
+                                                    disabled=move || pending.get()
+                                                    on:click=move |_| delete_target.set(Some(note_id))
+                                                >
+                                                    <Trash2 size=14/>
+                                                </button>
+                                            }
+                                        }
+                                    >
+                                        <span class="inline-delete-confirmation">
+                                            <strong>"Delete?"</strong>
+                                            <button
+                                                class="button danger-action"
+                                                type="button"
+                                                disabled=move || pending.get()
+                                                on:click=move |_| {
+                                                    delete_load_note(
+                                                        note_id,
+                                                        load_id,
+                                                        DetailDeleteContext {
+                                                            pending,
+                                                            error,
+                                                            confirmation: delete_target,
+                                                            on_refreshed,
+                                                            on_unauthorized,
+                                                            toasts,
+                                                        },
+                                                    );
+                                                }
+                                            >
+                                                "Yes"
+                                            </button>
+                                            <button
+                                                class="button quiet-action"
+                                                type="button"
+                                                disabled=move || pending.get()
+                                                on:click=move |_| delete_target.set(None)
+                                            >
+                                                "No"
+                                            </button>
+                                        </span>
+                                    </Show>
+                                </div>
                             </li>
                         }
                     })
                     .collect_view()}
             </ol>
+            {empty.then(|| {
+                view! { <p class="empty-state">"No notes have been added to this load."</p> }
+            })}
         </section>
     }
+}
+
+fn delete_load_file(file_id: i64, load_id: i64, context: DetailDeleteContext) {
+    if context.pending.get_untracked() {
+        return;
+    }
+    context.pending.set(true);
+    context.error.set(None);
+    leptos::task::spawn_local(async move {
+        let request = LoadFileIdRequest { file_id };
+        match api::internal_post::<_, bool>("/api/loads/files/delete", &request).await {
+            Ok(true) => {
+                context.pending.set(false);
+                context.confirmation.set(None);
+                context.toasts.success("Document deleted.");
+                context.on_refreshed.run(load_id);
+            }
+            Ok(false) => {
+                context
+                    .error
+                    .set(Some("The document could not be deleted.".to_owned()));
+                context.pending.set(false);
+            }
+            Err(api_error) if api_error.unauthorized => {
+                context.pending.set(false);
+                context.on_unauthorized.run(());
+            }
+            Err(api_error) => {
+                context.toasts.error(api_error.message.clone());
+                context.error.set(Some(api_error.message));
+                context.pending.set(false);
+            }
+        }
+    });
+}
+
+fn delete_load_note(note_id: i64, load_id: i64, context: DetailDeleteContext) {
+    if context.pending.get_untracked() {
+        return;
+    }
+    context.pending.set(true);
+    context.error.set(None);
+    leptos::task::spawn_local(async move {
+        let request = LoadNoteIdRequest {
+            load_note_id: note_id,
+        };
+        match api::internal_post::<_, bool>("/api/loads/notes/delete", &request).await {
+            Ok(true) => {
+                context.pending.set(false);
+                context.confirmation.set(None);
+                context.toasts.success("Load note deleted.");
+                context.on_refreshed.run(load_id);
+            }
+            Ok(false) => {
+                context
+                    .error
+                    .set(Some("The note could not be deleted.".to_owned()));
+                context.pending.set(false);
+            }
+            Err(api_error) if api_error.unauthorized => {
+                context.pending.set(false);
+                context.on_unauthorized.run(());
+            }
+            Err(api_error) => {
+                context.toasts.error(api_error.message.clone());
+                context.error.set(Some(api_error.message));
+                context.pending.set(false);
+            }
+        }
+    });
+}
+
+fn document_href(path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty()
+        || path.chars().any(char::is_control)
+        || path.starts_with("//")
+        || path.contains('\\')
+    {
+        return None;
+    }
+    let lowercase = path.to_ascii_lowercase();
+    if lowercase.starts_with("http://") || lowercase.starts_with("https://") {
+        return Some(path.to_owned());
+    }
+    (!path.contains(':')).then(|| path.to_owned())
+}
+
+fn stored_document_name(original_name: &str, path: &str) -> String {
+    path.split(['/', '\\'])
+        .next_back()
+        .and_then(|segment| segment.split(['?', '#']).next())
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or(original_name)
+        .to_owned()
 }
 
 fn transition_load(load_id: i64, target: LoadStatus, context: LoadCommandContext) {
@@ -1173,6 +1564,44 @@ fn title_case(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_links_allow_web_and_relative_references() {
+        assert_eq!(
+            document_href("https://files.example.test/BOL-1042.pdf"),
+            Some("https://files.example.test/BOL-1042.pdf".to_owned())
+        );
+        assert_eq!(
+            document_href("/documents/BOL-1042.pdf"),
+            Some("/documents/BOL-1042.pdf".to_owned())
+        );
+        assert_eq!(
+            document_href("documents/BOL-1042.pdf"),
+            Some("documents/BOL-1042.pdf".to_owned())
+        );
+    }
+
+    #[test]
+    fn document_links_reject_active_content_and_malformed_references() {
+        assert_eq!(document_href("javascript:alert(1)"), None);
+        assert_eq!(document_href("data:text/plain,secret"), None);
+        assert_eq!(document_href("//files.example.test/secret.pdf"), None);
+        assert_eq!(document_href(r"\\files.example.test\secret.pdf"), None);
+        assert_eq!(document_href("line\nbreak.pdf"), None);
+        assert_eq!(document_href("  "), None);
+    }
+
+    #[test]
+    fn stored_document_name_uses_the_storage_object_name() {
+        assert_eq!(
+            stored_document_name("Bill of lading.pdf", "/loads/42/bol-42.pdf?version=3"),
+            "bol-42.pdf"
+        );
+        assert_eq!(
+            stored_document_name("Bill of lading.pdf", "/loads/42/"),
+            "Bill of lading.pdf"
+        );
+    }
 
     #[test]
     fn rf_receiving_transitions_are_not_supervisor_actions() {

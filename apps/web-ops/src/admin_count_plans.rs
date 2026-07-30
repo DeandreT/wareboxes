@@ -1,8 +1,5 @@
 use leptos::prelude::*;
-use wareboxes_core::dto::{
-    AddAuditLocationCount, AddAuditWave, AuditLocationCountIdRequest, AuditLocationCountUpdate,
-    AuditWaveIdRequest, AuditWaveUpdate,
-};
+use wareboxes_core::dto::{AddAuditWave, AuditWaveIdRequest, AuditWaveUpdate};
 use wareboxes_core::models::{
     AuditLocationCount, AuditWave, Facility, InventoryOwner, Item, Location,
 };
@@ -46,13 +43,6 @@ pub fn CountPlansWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
     let new_description = RwSignal::new(String::new());
     let new_facility = RwSignal::new(String::new());
     let new_client = RwSignal::new(String::new());
-    let count_location = RwSignal::new(String::new());
-    let count_item = RwSignal::new(String::new());
-    let count_uom = RwSignal::new("EA".to_owned());
-    let count_lot = RwSignal::new(String::new());
-    let count_serial = RwSignal::new(String::new());
-    let count_quantity = RwSignal::new("0".to_owned());
-    let editing_count = RwSignal::new(None::<(i64, i64)>);
     let sort = RwSignal::new(SortSpec {
         key: PlanSort::Name,
         direction: SortDirection::Ascending,
@@ -229,135 +219,6 @@ pub fn CountPlansWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
         });
     };
 
-    let save_count = move |event: leptos::ev::SubmitEvent| {
-        event.prevent_default();
-        let Some(audit_wave_id) = selected_plan_id.get_untracked() else {
-            return;
-        };
-        let Some(location_id) = selected_id(&count_location.get_untracked()) else {
-            command_error.set(Some("Choose a location.".to_owned()));
-            return;
-        };
-        let Some(item_id) = selected_id(&count_item.get_untracked()) else {
-            command_error.set(Some("Choose an item.".to_owned()));
-            return;
-        };
-        let Ok(count) = count_quantity.get_untracked().parse::<i64>() else {
-            command_error.set(Some("Enter a whole-number count.".to_owned()));
-            return;
-        };
-        let uom = count_uom.get_untracked().trim().to_owned();
-        if count < 0 || uom.is_empty() || pending.get_untracked() {
-            command_error.set(Some(
-                "Count cannot be negative and UOM is required.".to_owned(),
-            ));
-            return;
-        }
-        pending.set(true);
-        command_error.set(None);
-        leptos::task::spawn_local(async move {
-            let result = if let Some((audit_location_count_id, expected_revision)) =
-                editing_count.get_untracked()
-            {
-                api::internal_post::<_, bool>(
-                    "/api/audits/counts/update",
-                    &AuditLocationCountUpdate {
-                        audit_location_count_id,
-                        expected_revision,
-                        count,
-                    },
-                )
-                .await
-                .map(|updated| updated.then_some(audit_location_count_id))
-            } else {
-                api::internal_post::<_, i64>(
-                    "/api/audits/counts/add",
-                    &AddAuditLocationCount {
-                        audit_wave_id,
-                        location_id,
-                        item_id,
-                        uom,
-                        lot: optional_text(&count_lot.get_untracked()),
-                        expiration: None,
-                        serial: optional_text(&count_serial.get_untracked()),
-                        count,
-                    },
-                )
-                .await
-                .map(Some)
-            };
-            match result {
-                Ok(Some(_)) => {
-                    editing_count.set(None);
-                    count_location.set(String::new());
-                    count_item.set(String::new());
-                    count_lot.set(String::new());
-                    count_serial.set(String::new());
-                    count_quantity.set("0".to_owned());
-                    toasts.success("Count line saved.");
-                    load_counts.run(audit_wave_id);
-                }
-                Ok(None) => {
-                    let message =
-                        "The count line changed elsewhere. Refresh and try again.".to_owned();
-                    toasts.error(message.clone());
-                    command_error.set(Some(message));
-                }
-                Err(error) if error.unauthorized => on_unauthorized.run(()),
-                Err(error) => {
-                    toasts.error(error.message.clone());
-                    command_error.set(Some(error.message));
-                }
-            }
-            pending.set(false);
-        });
-    };
-
-    let set_count_active = move |count_line: AuditLocationCount, active: bool| {
-        let Some(plan_id) = selected_plan_id.get_untracked() else {
-            return;
-        };
-        if pending.get_untracked() {
-            return;
-        }
-        let path = if active {
-            "/api/audits/counts/restore"
-        } else {
-            "/api/audits/counts/delete"
-        };
-        pending.set(true);
-        command_error.set(None);
-        leptos::task::spawn_local(async move {
-            match api::internal_post::<_, bool>(
-                path,
-                &AuditLocationCountIdRequest {
-                    audit_location_count_id: count_line.id,
-                    expected_revision: count_line.revision,
-                },
-            )
-            .await
-            {
-                Ok(true) => {
-                    let state = if active { "restored" } else { "removed" };
-                    toasts.success(format!("Count line {state}."));
-                    load_counts.run(plan_id);
-                }
-                Ok(false) => {
-                    let message =
-                        "The count line changed elsewhere. Refresh and try again.".to_owned();
-                    toasts.error(message.clone());
-                    command_error.set(Some(message));
-                }
-                Err(error) if error.unauthorized => on_unauthorized.run(()),
-                Err(error) => {
-                    toasts.error(error.message.clone());
-                    command_error.set(Some(error.message));
-                }
-            }
-            pending.set(false);
-        });
-    };
-
     view! {
         <section class="admin-workbench">
             <details class="admin-create">
@@ -423,7 +284,6 @@ pub fn CountPlansWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                                     selected.map_or_else(
                                         || view! { <div class="admin-editor-placeholder">"Select a count plan to maintain its count lines."</div> }.into_any(),
                                         |plan| {
-                                            let facility_id = plan.facility_id;
                                             view! {
                                                 <div class="admin-editor-heading"><h2>{plan.name.clone().unwrap_or_else(|| format!("Plan #{}", plan.id))}</h2><span>{format!("#{}", plan.id)}</span></div>
                                                 <form class="admin-form" on:submit=save_plan>
@@ -431,42 +291,11 @@ pub fn CountPlansWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                                                     <label><span>"Description"</span><textarea prop:value=move || edit_description.get() on:input=move |event| edit_description.set(event_target_value(&event))></textarea></label>
                                                     <div class="admin-form-actions"><button type="submit" class="button primary-action compact" disabled=move || pending.get()>"Save plan"</button></div>
                                                 </form>
-                                                <form class="admin-form" on:submit=save_count>
-                                                    <CountFields
-                                                        locations=Signal::derive(move || locations.get().into_iter().filter(|location| location.facility_id == facility_id && location.deleted.is_none()).collect())
-                                                        items=Signal::derive(move || items.get())
-                                                        location=count_location
-                                                        item=count_item
-                                                        uom=count_uom
-                                                        lot=count_lot
-                                                        serial=count_serial
-                                                        quantity=count_quantity
-                                                        editing=editing_count
-                                                    />
-                                                    <div class="admin-form-actions">
-                                                        <button type="button" class="button quiet-action compact" on:click=move |_| {
-                                                            editing_count.set(None);
-                                                            count_location.set(String::new());
-                                                            count_item.set(String::new());
-                                                            count_quantity.set("0".to_owned());
-                                                        }>"Clear"</button>
-                                                        <button type="submit" class="button secondary-action compact" disabled=move || pending.get()>{move || if editing_count.get().is_some() { "Update count" } else { "Add count" }}</button>
-                                                    </div>
-                                                </form>
                                                 <CountLedger
                                                     counts
                                                     locations=Signal::derive(move || locations.get())
                                                     items=Signal::derive(move || items.get())
                                                     loading=counts_loading.read_only()
-                                                    editing_count
-                                                    count_location
-                                                    count_item
-                                                    count_uom
-                                                    count_lot
-                                                    count_serial
-                                                    count_quantity
-                                                    pending=pending.read_only()
-                                                    set_active=Callback::new(move |(line, active)| set_count_active(line, active))
                                                 />
                                             }.into_any()
                                         },
@@ -482,69 +311,26 @@ pub fn CountPlansWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
 }
 
 #[component]
-fn CountFields(
-    locations: Signal<Vec<Location>>,
-    items: Signal<Vec<Item>>,
-    location: RwSignal<String>,
-    item: RwSignal<String>,
-    uom: RwSignal<String>,
-    lot: RwSignal<String>,
-    serial: RwSignal<String>,
-    quantity: RwSignal<String>,
-    editing: RwSignal<Option<(i64, i64)>>,
-) -> impl IntoView {
-    view! {
-        <div class="admin-form-grid">
-            <label><span>"Location"</span><select required disabled=move || editing.get().is_some() prop:value=move || location.get() on:change=move |event| location.set(event_target_value(&event))>
-                <option value="">"Select location"</option>
-                {move || locations.get().into_iter().map(|location| view! { <option value=location.id.to_string()>{location_label(&location)}</option> }).collect_view()}
-            </select></label>
-            <label><span>"Item"</span><select required disabled=move || editing.get().is_some() prop:value=move || item.get() on:change=move |event| item.set(event_target_value(&event))>
-                <option value="">"Select item"</option>
-                {move || items.get().into_iter().filter(|item| item.deleted.is_none()).map(|item| view! { <option value=item.id.to_string()>{item_label(&item)}</option> }).collect_view()}
-            </select></label>
-            <label><span>"UOM"</span><input type="text" required disabled=move || editing.get().is_some() prop:value=move || uom.get() on:input=move |event| uom.set(event_target_value(&event))/></label>
-            <label><span>"Count"</span><input type="number" min="0" step="1" required prop:value=move || quantity.get() on:input=move |event| quantity.set(event_target_value(&event))/></label>
-            <label><span>"Lot"</span><input type="text" disabled=move || editing.get().is_some() prop:value=move || lot.get() on:input=move |event| lot.set(event_target_value(&event))/></label>
-            <label><span>"Serial"</span><input type="text" disabled=move || editing.get().is_some() prop:value=move || serial.get() on:input=move |event| serial.set(event_target_value(&event))/></label>
-        </div>
-    }
-}
-
-#[component]
-#[allow(clippy::too_many_arguments)]
 fn CountLedger(
     counts: RwSignal<Vec<AuditLocationCount>>,
     locations: Signal<Vec<Location>>,
     items: Signal<Vec<Item>>,
     loading: ReadSignal<bool>,
-    editing_count: RwSignal<Option<(i64, i64)>>,
-    count_location: RwSignal<String>,
-    count_item: RwSignal<String>,
-    count_uom: RwSignal<String>,
-    count_lot: RwSignal<String>,
-    count_serial: RwSignal<String>,
-    count_quantity: RwSignal<String>,
-    pending: ReadSignal<bool>,
-    set_active: Callback<(AuditLocationCount, bool)>,
 ) -> impl IntoView {
     view! {
         <div class="table-scroll">
             <table class="data-table admin-table">
                 <caption class="sr-only">"Count lines for the selected plan"</caption>
-                <thead><tr><th>"Location"</th><th>"Item"</th><th class="numeric">"Expected"</th><th class="numeric">"Count"</th><th>"Approval"</th><th class="action-column">"Actions"</th></tr></thead>
+                <thead><tr><th>"Location"</th><th>"Item"</th><th class="numeric">"Expected"</th><th class="numeric">"Observed"</th><th>"Approval"</th></tr></thead>
                 <tbody>{move || {
                     if loading.get() {
-                        view! { <tr><td class="table-empty-row" colspan="6">"Loading count lines..."</td></tr> }.into_any()
+                        view! { <tr><td class="table-empty-row" colspan="5">"Loading count lines..."</td></tr> }.into_any()
                     } else if counts.get().is_empty() {
-                        view! { <tr><td class="table-empty-row" colspan="6">"No count lines."</td></tr> }.into_any()
+                        view! { <tr><td class="table-empty-row" colspan="5">"No count results yet."</td></tr> }.into_any()
                     } else {
                         let location_rows = locations.get();
                         let item_rows = items.get();
                         counts.get().into_iter().map(|line| {
-                            let edit_line = line.clone();
-                            let active_line = line.clone();
-                            let inactive = line.deleted.is_some();
                             let location_name = location_rows.iter().find(|location| location.id == line.location_id).map(location_label).unwrap_or_else(|| format!("Location #{}", line.location_id));
                             let item_name = item_rows.iter().find(|item| item.id == line.item_id).map(item_label).unwrap_or_else(|| format!("Item #{}", line.item_id));
                             view! {
@@ -554,18 +340,6 @@ fn CountLedger(
                                     <td class="numeric">{line.on_hand}</td>
                                     <td class="numeric">{line.count}</td>
                                     <td><span class="status processing">{line.approval_status.to_string()}</span></td>
-                                    <td class="action-column"><div class="admin-row-actions">
-                                        <button type="button" class="table-action" disabled=inactive on:click=move |_| {
-                                            editing_count.set(Some((edit_line.id, edit_line.revision)));
-                                            count_location.set(edit_line.location_id.to_string());
-                                            count_item.set(edit_line.item_id.to_string());
-                                            count_uom.set(edit_line.uom.clone());
-                                            count_lot.set(edit_line.lot.clone().unwrap_or_default());
-                                            count_serial.set(edit_line.serial.clone().unwrap_or_default());
-                                            count_quantity.set(edit_line.count.to_string());
-                                        }>"Edit"</button>
-                                        <button type="button" class=if inactive { "table-action" } else { "table-action danger" } disabled=move || pending.get() on:click=move |_| set_active.run((active_line.clone(), inactive))>{if inactive { "Restore" } else { "Remove" }}</button>
-                                    </div></td>
                                 </tr>
                             }
                         }).collect_view().into_any()

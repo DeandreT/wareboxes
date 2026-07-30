@@ -11,10 +11,17 @@ pub async fn workspace(
     State(state): State<AppState>,
     user: CurrentTenant,
 ) -> AppResult<Json<AccessScopeWorkspace>> {
+    Ok(Json(workspace_for_access(&state, &user.tenant).await?))
+}
+
+pub(crate) async fn workspace_for_access(
+    state: &AppState,
+    access: &wareboxes_core::models::TenantAccess,
+) -> AppResult<AccessScopeWorkspace> {
     let facilities = repo::facilities::get_facilities_in_scope(
         &state.db,
-        user.tenant.tenant_id,
-        &user.tenant.site_scope,
+        access.tenant_id,
+        &access.site_scope,
         false,
     )
     .await?
@@ -28,9 +35,9 @@ pub async fn workspace(
     .collect();
     let inventory_owners = repo::inventory_owners::get_inventory_owners_in_scope(
         &state.db,
-        user.tenant.tenant_id,
-        &user.tenant.owner_scope,
-        &user.tenant.site_scope,
+        access.tenant_id,
+        &access.owner_scope,
+        &access.site_scope,
         false,
     )
     .await?
@@ -40,8 +47,8 @@ pub async fn workspace(
         name: owner.name,
     })
     .collect();
-    Ok(Json(AccessScopeWorkspace {
+    Ok(AccessScopeWorkspace {
         facilities,
         inventory_owners,
-    }))
+    })
 }

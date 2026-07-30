@@ -15,6 +15,22 @@ pub enum MovementOperation {
     InventoryRelocation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimOperation {
+    Putaway,
+    InventoryRelocation,
+    CycleCount,
+}
+
+impl From<MovementOperation> for ClaimOperation {
+    fn from(operation: MovementOperation) -> Self {
+        match operation {
+            MovementOperation::Putaway => Self::Putaway,
+            MovementOperation::InventoryRelocation => Self::InventoryRelocation,
+        }
+    }
+}
+
 impl MovementOperation {
     pub const fn label(self) -> &'static str {
         match self {
@@ -226,6 +242,28 @@ pub enum InventoryRelocationCommand {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum CycleCountCommand {
+    ClaimNext,
+    ClaimById {
+        task_id: i64,
+    },
+    Confirm {
+        task_id: i64,
+        location_barcode: String,
+        item_barcode: String,
+        license_plate_barcode: Option<String>,
+        counted_quantity: i64,
+        note: Option<String>,
+    },
+    Release {
+        task_id: i64,
+        reason: ReleaseReason,
+        note: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone)]
 enum MovementCommand {
     ClaimNext {
@@ -321,6 +359,7 @@ impl MovementCommand {
 pub enum RfCommand {
     Putaway(PutawayCommand),
     InventoryRelocation(InventoryRelocationCommand),
+    CycleCount(CycleCountCommand),
     ExpectedReceipt(Box<ConfirmationIntent>),
 }
 
@@ -329,6 +368,7 @@ impl RfCommand {
         match self {
             Self::Putaway(_) => Some(MovementOperation::Putaway),
             Self::InventoryRelocation(_) => Some(MovementOperation::InventoryRelocation),
+            Self::CycleCount(_) => None,
             Self::ExpectedReceipt(_) => None,
         }
     }
@@ -403,6 +443,9 @@ pub enum CommandOutcome {
     InventoryRelocationConfirmed { task_id: i64 },
     PutawayReleased { task_id: i64 },
     InventoryRelocationReleased { task_id: i64 },
+    CycleCountClaimed(Option<Box<crate::cycle_count::CycleCountClaim>>),
+    CycleCountConfirmed { task_id: i64 },
+    CycleCountReleased { task_id: i64 },
     ExpectedReceipt(crate::expected_receiving::ConfirmationResult),
 }
 
@@ -803,7 +846,10 @@ impl MovementWorkflow {
                 self.reset_scans();
                 self.notice = Some(format!("{} returned to the queue", self.operation.label()));
             }
-            CommandOutcome::ExpectedReceipt(_) => {
+            CommandOutcome::ExpectedReceipt(_)
+            | CommandOutcome::CycleCountClaimed(_)
+            | CommandOutcome::CycleCountConfirmed { .. }
+            | CommandOutcome::CycleCountReleased { .. } => {
                 self.require_reconciliation("Recorded result does not match the workflow".into());
                 return Transition::Applied;
             }

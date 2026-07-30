@@ -12,13 +12,16 @@ use crate::lease::{
 use crate::transport::{
     AuthenticatedTransport, NetworkResponse, build_movement_heartbeat_request, send_heartbeat,
 };
-use crate::wire::{decode_heartbeat_response, decode_relocation_heartbeat_response};
-use crate::workflow::{Activity, MovementOperation};
+use crate::wire::{
+    decode_cycle_count_heartbeat_response, decode_heartbeat_response,
+    decode_relocation_heartbeat_response,
+};
+use crate::workflow::{Activity, ClaimOperation};
 
 use super::RfApp;
 
 struct ExpectedHeartbeat {
-    operation: MovementOperation,
+    operation: ClaimOperation,
     task_id: i64,
     attempt_id: HeartbeatAttemptId,
     request_id: String,
@@ -60,11 +63,27 @@ impl RfApp {
             return;
         }
 
-        let active_claim = (self.workflow.activity() == Activity::Active)
-            .then(|| self.workflow.claim())
-            .flatten()
-            .map(|claim| (claim.task_id, claim.lease_expires_at.clone()));
-        let Some((task_id, lease_expires_at)) = active_claim else {
+        let active_claim = if self.cycle_count.activity() == Activity::Active {
+            self.cycle_count.claim().map(|claim| {
+                (
+                    ClaimOperation::CycleCount,
+                    claim.task_id,
+                    claim.lease_expires_at.clone(),
+                )
+            })
+        } else {
+            (self.workflow.activity() == Activity::Active)
+                .then(|| self.workflow.claim())
+                .flatten()
+                .map(|claim| {
+                    (
+                        self.workflow.operation().into(),
+                        claim.task_id,
+                        claim.lease_expires_at.clone(),
+                    )
+                })
+        };
+        let Some((operation, task_id, lease_expires_at)) = active_claim else {
             self.heartbeat.reset();
             return;
         };
@@ -88,8 +107,9 @@ impl RfApp {
                 }
                 Err(_) => {
                     self.heartbeat.reset();
-                    self.workflow.require_reconciliation(
-                        "The task lease returned by the server is invalid.".into(),
+                    self.require_lease_reconciliation(
+                        operation,
+                        "The task lease returned by the server is invalid.",
                     );
                     return;
                 }
@@ -154,7 +174,6 @@ impl RfApp {
             token: &session.token,
             scope: &session.scope,
         };
-        let operation = self.workflow.operation();
         let request = match build_movement_heartbeat_request(
             &transport,
             operation,
@@ -188,7 +207,7 @@ impl RfApp {
     pub(super) fn handle_heartbeat_response(
         &mut self,
         context: &egui::Context,
-        operation: MovementOperation,
+        operation: ClaimOperation,
         task_id: i64,
         request_id: &str,
         response: Result<NetworkResponse, String>,
@@ -202,13 +221,24 @@ impl RfApp {
         {
             return;
         }
-        if self.workflow.operation() != operation
-            || self.workflow.activity() != Activity::Active
-            || self
-                .workflow
-                .claim()
-                .is_none_or(|claim| claim.task_id != task_id)
-        {
+        let active_matches = match operation {
+            ClaimOperation::CycleCount => {
+                self.cycle_count.activity() == Activity::Active
+                    && self
+                        .cycle_count
+                        .claim()
+                        .is_some_and(|claim| claim.task_id == task_id)
+            }
+            ClaimOperation::Putaway | ClaimOperation::InventoryRelocation => {
+                ClaimOperation::from(self.workflow.operation()) == operation
+                    && self.workflow.activity() == Activity::Active
+                    && self
+                        .workflow
+                        .claim()
+                        .is_some_and(|claim| claim.task_id == task_id)
+            }
+        };
+        if !active_matches {
             self.heartbeat.reset();
             return;
         }
@@ -226,7 +256,7 @@ impl RfApp {
 
         if (200..300).contains(&response.status) {
             let heartbeat = match operation {
-                MovementOperation::Putaway => {
+                ClaimOperation::Putaway => {
                     decode_heartbeat_response(task_id, response.status, &response.body).map(
                         |response| {
                             (
@@ -237,8 +267,18 @@ impl RfApp {
                         },
                     )
                 }
-                MovementOperation::InventoryRelocation => {
+                ClaimOperation::InventoryRelocation => {
                     decode_relocation_heartbeat_response(task_id, response.status, &response.body)
+                        .map(|response| {
+                            (
+                                response.task_id,
+                                response.heartbeat_at,
+                                response.lease_expires_at,
+                            )
+                        })
+                }
+                ClaimOperation::CycleCount => {
+                    decode_cycle_count_heartbeat_response(task_id, response.status, &response.body)
                         .map(|response| {
                             (
                                 response.task_id,
@@ -308,7 +348,9 @@ impl RfApp {
     }
 
     pub(super) fn heartbeat_header(&self) -> Option<(&'static str, egui::Color32)> {
-        if self.workflow.activity() != Activity::Active {
+        if self.workflow.activity() != Activity::Active
+            && self.cycle_count.activity() != Activity::Active
+        {
             return None;
         }
         if self.lease_check_task_id.is_some() {
@@ -439,10 +481,31 @@ impl RfApp {
     }
 
     fn fail_heartbeat_integrity(&mut self) {
+        let operation = self
+            .heartbeat
+            .expected
+            .as_ref()
+            .map(|expected| expected.operation)
+            .unwrap_or_else(|| {
+                if self.cycle_count.activity() == Activity::Active {
+                    ClaimOperation::CycleCount
+                } else {
+                    self.workflow.operation().into()
+                }
+            });
         self.heartbeat.reset();
-        self.workflow.require_reconciliation(
-            "The task connection could not be verified. Do not move inventory.".into(),
+        self.require_lease_reconciliation(
+            operation,
+            "The task connection could not be verified. Do not move inventory.",
         );
+    }
+
+    fn require_lease_reconciliation(&mut self, operation: ClaimOperation, message: &str) {
+        if operation == ClaimOperation::CycleCount {
+            self.cycle_count.require_reconciliation(message.into());
+        } else {
+            self.workflow.require_reconciliation(message.into());
+        }
     }
 
     pub(super) fn clear_claim_heartbeat(&mut self) {
