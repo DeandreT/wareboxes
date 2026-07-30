@@ -1,16 +1,16 @@
 use std::collections::BTreeMap;
 
-use wareboxes_core::dto::SessionUser;
+use wareboxes_core::dto::WebSessionContext;
 use wareboxes_core::models::{InventoryBalance, OrderStatus};
 
-pub fn has_permission(session: &SessionUser, permission: &str) -> bool {
+pub fn has_permission(session: &WebSessionContext, permission: &str) -> bool {
     session.user.user_permissions.iter().any(|candidate| {
         candidate.name.eq_ignore_ascii_case("admin")
             || candidate.name.eq_ignore_ascii_case(permission)
     })
 }
 
-pub fn user_name(session: &SessionUser) -> String {
+pub fn user_name(session: &WebSessionContext) -> String {
     let parts = [
         session.user.first_name.as_deref(),
         session.user.last_name.as_deref(),

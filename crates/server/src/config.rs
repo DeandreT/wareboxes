@@ -8,6 +8,9 @@ pub struct SecurityConfig {
     pub allow_public_registration: bool,
     pub cors_allowed_origins: Vec<HeaderValue>,
     pub max_request_body_bytes: usize,
+    pub web_session_absolute_ttl_seconds: i32,
+    pub web_session_idle_ttl_seconds: i32,
+    pub secure_web_session_cookie: bool,
 }
 
 impl Default for SecurityConfig {
@@ -16,6 +19,9 @@ impl Default for SecurityConfig {
             allow_public_registration: false,
             cors_allowed_origins: Vec::new(),
             max_request_body_bytes: 1024 * 1024,
+            web_session_absolute_ttl_seconds: 12 * 60 * 60,
+            web_session_idle_ttl_seconds: 30 * 60,
+            secure_web_session_cookie: false,
         }
     }
 }
@@ -58,6 +64,18 @@ impl Config {
         if max_request_body_bytes == 0 {
             bail!("MAX_REQUEST_BODY_BYTES must be greater than zero");
         }
+        let web_session_absolute_ttl_seconds = parse_i32_env(
+            "WEB_SESSION_ABSOLUTE_TTL_SECONDS",
+            12 * 60 * 60,
+            300,
+            86_400,
+        )?;
+        let web_session_idle_ttl_seconds =
+            parse_i32_env("WEB_SESSION_IDLE_TTL_SECONDS", 30 * 60, 60, 86_400)?;
+        if web_session_idle_ttl_seconds > web_session_absolute_ttl_seconds {
+            bail!("WEB_SESSION_IDLE_TTL_SECONDS must not exceed the absolute session TTL");
+        }
+        let secure_web_session_cookie = parse_bool_env("SECURE_WEB_SESSION_COOKIE", false)?;
 
         Ok(Self {
             database_url,
@@ -69,6 +87,9 @@ impl Config {
                 allow_public_registration,
                 cors_allowed_origins,
                 max_request_body_bytes,
+                web_session_absolute_ttl_seconds,
+                web_session_idle_ttl_seconds,
+                secure_web_session_cookie,
             },
         })
     }
@@ -125,9 +146,27 @@ fn parse_bool_env(name: &str, default: bool) -> anyhow::Result<bool> {
     }
 }
 
+fn parse_i32_env(name: &str, default: i32, min: i32, max: i32) -> anyhow::Result<i32> {
+    let value = match env::var(name) {
+        Ok(value) => value
+            .parse::<i32>()
+            .with_context(|| format!("{name} must be an integer"))?,
+        Err(env::VarError::NotPresent) => default,
+        Err(env::VarError::NotUnicode(_)) => bail!("{name} must contain valid UTF-8"),
+    };
+    validate_i32(name, value, min, max)
+}
+
+fn validate_i32(name: &str, value: i32, min: i32, max: i32) -> anyhow::Result<i32> {
+    if !(min..=max).contains(&value) {
+        bail!("{name} must be between {min} and {max}");
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_database_urls;
+    use super::{resolve_database_urls, validate_i32};
 
     const RUNTIME_URL: &str = "postgres://app@database/wareboxes";
     const MIGRATION_URL: &str = "postgres://admin@database/wareboxes";
@@ -194,5 +233,12 @@ mod tests {
                 .expect_err("empty database URLs must fail");
             assert_eq!(error.to_string(), expected);
         }
+    }
+
+    #[test]
+    fn integer_security_bounds_are_enforced() {
+        let error = validate_i32("SECURITY_SECONDS", 299, 300, 86_400)
+            .expect_err("values below the security floor must fail");
+        assert!(error.to_string().contains("between 300 and 86400"));
     }
 }

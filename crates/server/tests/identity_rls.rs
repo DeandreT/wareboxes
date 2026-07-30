@@ -14,10 +14,14 @@ const SCOPE_SEQUENCES: [&str; 3] = [
     "user_facilities_id_seq",
     "user_inventory_owners_id_seq",
 ];
-const SESSION_FUNCTIONS: [&str; 3] = [
+const SESSION_FUNCTIONS: [&str; 7] = [
     "public.session_user_id(text)",
     "public.create_session_record(text,bigint)",
     "public.destroy_session_record(text)",
+    "public.api_session_user_id(text)",
+    "public.create_web_session_record(text,bigint,integer)",
+    "public.web_session_identity(text,integer)",
+    "public.select_web_session_tenant(text,bigint)",
 ];
 
 #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]

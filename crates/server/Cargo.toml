@@ -54,6 +54,7 @@ sha2 = "0.10"
 hex = "0.4"
 dotenvy = "0.15"
 validator = { version = "0.18", features = ["derive"] }
+cookie = "0.18"
 leptos = { workspace = true, features = ["ssr"], optional = true }
 leptos_axum = { workspace = true, optional = true }
 

@@ -35,9 +35,9 @@ async fn main() -> anyhow::Result<()> {
     migration_pool.close().await;
 
     let state = AppState::with_security(pool, cfg.security.clone());
-    let app = routes::app(state);
+    let app = routes::app(state.clone());
     #[cfg(feature = "ssr")]
-    let app = with_web_app(app)?;
+    let app = with_web_app(app, state)?;
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr)
         .await
@@ -51,11 +51,11 @@ async fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(feature = "ssr")]
-fn with_web_app(api: axum::Router) -> anyhow::Result<axum::Router> {
+fn with_web_app(api: axum::Router, state: AppState) -> anyhow::Result<axum::Router> {
     use axum::Router;
-    use leptos::prelude::get_configuration;
+    use leptos::prelude::{get_configuration, provide_context};
     use leptos_axum::{generate_route_list, LeptosRoutes};
-    use wareboxes_web_ops::app::{shell, App};
+    use wareboxes_web_ops::app::{shell, App, InitialWebSession};
 
     let configuration = get_configuration(None)?;
     let mut leptos_options = configuration.leptos_options;
@@ -63,11 +63,36 @@ fn with_web_app(api: axum::Router) -> anyhow::Result<axum::Router> {
         leptos_options.output_name = "wareboxes-web".into();
     }
     let routes = generate_route_list(App);
+    let render_options = leptos_options.clone();
+    let render_state = state;
+    let handler = move |request: axum::extract::Request| {
+        let options = render_options.clone();
+        let state = render_state.clone();
+        async move {
+            let initial_session = match auth::web_session_token(request.headers(), &state.security)
+            {
+                Some(token) => {
+                    match auth::web_session_context_for_token(&state.db, &state.security, &token)
+                        .await
+                    {
+                        Ok(session) => session,
+                        Err(error) => {
+                            tracing::warn!(%error, "could not restore web session for SSR");
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
+            let handler = leptos_axum::render_app_to_stream_with_context(
+                move || provide_context(InitialWebSession(initial_session.clone())),
+                move || shell(options.clone()),
+            );
+            handler(request).await
+        }
+    };
     let web = Router::new()
-        .leptos_routes(&leptos_options, routes, {
-            let leptos_options = leptos_options.clone();
-            move || shell(leptos_options.clone())
-        })
+        .leptos_routes_with_handler(routes, handler)
         .fallback(leptos_axum::file_and_error_handler(shell))
         .with_state(leptos_options);
     Ok(api.merge(web))

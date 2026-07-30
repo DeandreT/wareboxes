@@ -80,6 +80,11 @@ schema-owner connection used during startup migrations and bootstrap;
 same PostgreSQL database. Local volumes created before this role split must be
 rebuilt with `scripts/reset-db.sh`.
 
+The web operations console uses an HTTP-only, same-site cookie with server-held
+tenant context. `WEB_SESSION_ABSOLUTE_TTL_SECONDS` and
+`WEB_SESSION_IDLE_TTL_SECONDS` bound session lifetime. Local HTTP development uses
+`SECURE_WEB_SESSION_COOKIE=false`; HTTPS deployments must set it to `true`.
+
 ## Tests
 
 ```bash

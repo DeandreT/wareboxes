@@ -1,13 +1,51 @@
 use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::http::{header, HeaderMap, HeaderValue, Method};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
-use wareboxes_core::dto::{LoginRequest, RegisterRequest, SessionUser, UserSettings};
+use cookie::{Cookie, SameSite};
+use wareboxes_core::dto::{
+    LoginRequest, RegisterRequest, SelectTenantRequest, SessionUser, UserSettings,
+    WebSessionContext,
+};
 use wareboxes_core::models::{TenantAccess, User};
 
 use crate::auth::{self, CurrentTenant, CurrentUser};
 use crate::error::{AppError, AppResult};
 use crate::routes::validate;
 use crate::state::AppState;
+
+fn web_session_cookie(state: &AppState, token: String) -> Cookie<'static> {
+    Cookie::build((auth::web_session_cookie_name(&state.security), token))
+        .http_only(true)
+        .secure(state.security.secure_web_session_cookie)
+        .same_site(SameSite::Strict)
+        .path("/")
+        .max_age(cookie::time::Duration::seconds(i64::from(
+            state.security.web_session_absolute_ttl_seconds,
+        )))
+        .build()
+}
+
+fn expired_web_session_cookie(state: &AppState) -> Cookie<'static> {
+    let mut cookie = Cookie::build((auth::web_session_cookie_name(&state.security), ""))
+        .http_only(true)
+        .secure(state.security.secure_web_session_cookie)
+        .same_site(SameSite::Strict)
+        .path("/")
+        .build();
+    cookie.make_removal();
+    cookie
+}
+
+fn with_cookie<T: serde::Serialize>(body: T, cookie: Cookie<'static>) -> AppResult<Response> {
+    let mut response = Json(body).into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&cookie.to_string())
+            .map_err(|error| AppError::internal(format!("invalid session cookie: {error}")))?,
+    );
+    Ok(response)
+}
 
 pub async fn login(
     State(state): State<AppState>,
@@ -37,6 +75,71 @@ pub async fn login(
         let _ = auth::destroy_session(&state.db, &token).await;
     }
     response
+}
+
+pub async fn web_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<LoginRequest>,
+) -> AppResult<Response> {
+    auth::require_same_origin(&Method::POST, &headers)?;
+    validate(&body)?;
+    let user = auth::verify_credentials(&state.db, &body.email, &body.password)
+        .await?
+        .ok_or_else(AppError::unauthorized)?;
+    let token = auth::create_web_session(
+        &state.db,
+        user.id,
+        state.security.web_session_absolute_ttl_seconds,
+    )
+    .await?;
+    let context = auth::web_session_context_for_token(&state.db, &state.security, &token)
+        .await?
+        .ok_or_else(AppError::unauthorized);
+    match context {
+        Ok(context) => with_cookie(context, web_session_cookie(&state, token)),
+        Err(error) => {
+            let _ = auth::destroy_session(&state.db, &token).await;
+            Err(error)
+        }
+    }
+}
+
+pub async fn web_session(
+    State(state): State<AppState>,
+    user: CurrentUser,
+) -> AppResult<Json<WebSessionContext>> {
+    let tenant_id = user.require_web_tenant()?;
+    Ok(Json(
+        auth::web_session_context(&state.db, &user.session_token_hash, user.user.id, tenant_id)
+            .await?,
+    ))
+}
+
+pub async fn select_web_tenant(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Json(body): Json<SelectTenantRequest>,
+) -> AppResult<Json<WebSessionContext>> {
+    user.require_web_tenant()?;
+    validate(&body)?;
+    let tenant_id = wareboxes_domain::TenantId::new(body.tenant_id)
+        .map_err(|_| AppError::bad_request("tenant ID must be positive"))?;
+    if !auth::select_web_session_tenant(&state.db, &user.session_token_hash, tenant_id).await? {
+        return Err(AppError::forbidden());
+    }
+    Ok(Json(
+        auth::web_session_context(&state.db, &user.session_token_hash, user.user.id, tenant_id)
+            .await?,
+    ))
+}
+
+pub async fn web_logout(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Response> {
+    auth::require_same_origin(&Method::POST, &headers)?;
+    if let Some(token) = auth::web_session_token(&headers, &state.security) {
+        auth::destroy_session(&state.db, &token).await?;
+    }
+    with_cookie((), expired_web_session_cookie(&state))
 }
 
 pub async fn register(
