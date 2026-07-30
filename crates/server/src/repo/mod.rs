@@ -14,6 +14,7 @@ pub mod integration_inbox;
 pub mod inventory;
 mod inventory_allocation;
 mod inventory_hold;
+pub mod inventory_hold_v1;
 pub(crate) mod inventory_journal;
 mod inventory_locking;
 pub mod inventory_owners;

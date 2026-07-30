@@ -5,6 +5,7 @@ mod error;
 mod expected_receiving;
 mod idempotency;
 mod inventory;
+mod inventory_hold;
 mod license_plate_putaway;
 mod putaway;
 mod putaway_claim;
@@ -27,6 +28,11 @@ pub use idempotency::{
 pub use inventory::{
     InventoryBalancePage, InventoryBalancePageRequest, InventoryBalanceResponse,
     InventoryBalanceStatus, InventoryQuantity,
+};
+pub use inventory_hold::{
+    InventoryHoldPage, InventoryHoldPageRequest, InventoryHoldReason, InventoryHoldResponse,
+    InventoryHoldStatus, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
+    ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
 };
 pub use license_plate_putaway::{
     ConfirmLicensePlatePutawayRequest, CreateLicensePlatePutawayTaskRequest,

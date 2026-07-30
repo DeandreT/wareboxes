@@ -3,6 +3,7 @@
 mod error;
 mod expected_receiving;
 mod inventory_balances;
+mod inventory_holds;
 mod license_plate_putaway;
 mod putaway;
 mod putaway_claim_lifecycle;
@@ -31,6 +32,14 @@ pub fn router() -> Router<AppState> {
         )
         .route("/rf/sessions", post(rf_sessions::create))
         .route("/inventory/balances", get(inventory_balances::list))
+        .route(
+            "/inventory/holds",
+            get(inventory_holds::list).post(inventory_holds::place),
+        )
+        .route(
+            "/inventory/holds/{hold_id}/releases",
+            post(inventory_holds::release),
+        )
         .route(
             "/license-plate-putaway-tasks",
             post(license_plate_putaway::create),

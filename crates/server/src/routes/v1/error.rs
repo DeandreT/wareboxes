@@ -20,10 +20,14 @@ pub struct V1Error {
 
 impl V1Error {
     pub fn invalid_cursor() -> Self {
+        Self::invalid_cursor_for("inventory balance")
+    }
+
+    pub fn invalid_cursor_for(resource: &str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             reason: ErrorReason::InvalidCursor,
-            message: "invalid inventory balance cursor".into(),
+            message: format!("invalid {resource} cursor"),
             violations: Vec::new(),
         }
     }
