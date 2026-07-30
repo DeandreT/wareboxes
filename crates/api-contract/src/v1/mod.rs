@@ -6,6 +6,7 @@ mod expected_receiving;
 mod idempotency;
 mod inventory;
 mod inventory_hold;
+mod inventory_status_transition;
 mod license_plate_putaway;
 mod putaway;
 mod putaway_claim;
@@ -33,6 +34,10 @@ pub use inventory_hold::{
     InventoryHoldPage, InventoryHoldPageRequest, InventoryHoldReason, InventoryHoldResponse,
     InventoryHoldStatus, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
     ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
+};
+pub use inventory_status_transition::{
+    CreateInventoryStatusTransitionRequest, InventoryStatusTransitionReason,
+    InventoryStatusTransitionResponse,
 };
 pub use license_plate_putaway::{
     ConfirmLicensePlatePutawayRequest, CreateLicensePlatePutawayTaskRequest,
