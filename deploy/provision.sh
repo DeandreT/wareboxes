@@ -156,6 +156,17 @@ ufw allow 443/tcp
 ufw --force enable
 
 docker compose -f /opt/wareboxes/runtime/postgres.compose.yml pull
+postgres_group_id="$(docker run --rm --entrypoint id postgres:16-bookworm -g postgres)"
+if [[ ! "$postgres_group_id" =~ ^[0-9]+$ ]]; then
+  echo "could not resolve the PostgreSQL container group ID" >&2
+  exit 1
+fi
+chown root:"$postgres_group_id" \
+  /etc/wareboxes/postgres_admin_password \
+  /etc/wareboxes/postgres_app_password
+chmod 0640 \
+  /etc/wareboxes/postgres_admin_password \
+  /etc/wareboxes/postgres_app_password
 docker compose -f /opt/wareboxes/runtime/postgres.compose.yml up -d
 
 systemctl daemon-reload
