@@ -1,0 +1,41 @@
+.disposition-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  align-items: start;
+  gap: 14px;
+}
+
+.disposition-browser {
+  min-width: 0;
+}
+
+.disposition-table {
+  min-width: 800px;
+}
+
+.disposition-table .active-row {
+  background: var(--amber-soft);
+  box-shadow: inset 3px 0 var(--accent);
+}
+
+.disposition-table .active-row .action-column {
+  background: var(--amber-soft);
+}
+
+.disposition-command {
+  min-height: 440px;
+}
+
+.disposition-command .hold-form {
+  min-height: 438px;
+}
+
+@media (max-width: 1180px) {
+  .disposition-workbench {
+    grid-template-columns: minmax(0, 1fr) 310px;
+  }
+
+  .disposition-table {
+    min-width: 760px;
+  }
+}

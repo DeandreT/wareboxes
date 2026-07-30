@@ -735,6 +735,50 @@ a {
   white-space: nowrap;
 }
 
+.data-table th.sortable-column {
+  padding: 0;
+}
+
+.sort-button {
+  display: flex;
+  width: 100%;
+  min-height: 30px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  text-align: left;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.sort-button:hover,
+.sort-button.active {
+  color: var(--ink);
+}
+
+.sortable-column.numeric .sort-button {
+  justify-content: flex-end;
+}
+
+.sort-icon {
+  display: inline-grid;
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  place-items: center;
+  opacity: 0.55;
+}
+
+.sort-button.active .sort-icon {
+  color: var(--blue);
+  opacity: 1;
+}
+
 .data-table td {
   height: 36px;
   padding: 6px 10px;

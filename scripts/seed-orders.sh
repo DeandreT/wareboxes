@@ -67,7 +67,7 @@ BEGIN
 
   SELECT id INTO owner
   FROM inventory_owners
-  WHERE tenant_id = tenant AND name = 'Seed Inventory Owner' AND deleted IS NULL
+  WHERE tenant_id = tenant AND name = 'Northstar Retail' AND deleted IS NULL
   ORDER BY id
   LIMIT 1;
   IF owner IS NULL THEN

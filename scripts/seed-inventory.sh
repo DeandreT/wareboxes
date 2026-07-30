@@ -103,12 +103,12 @@ BEGIN
   LIMIT 1;
 
   INSERT INTO inventory_owners (tenant_id, created, name, email)
-  VALUES (tenant, now(), 'Seed Inventory Owner', 'seed.inventory.owner@example.test')
+  VALUES (tenant, now(), 'Northstar Retail', 'northstar.retail@example.test')
   ON CONFLICT (tenant_id, name) DO UPDATE SET deleted = NULL, email = EXCLUDED.email
   RETURNING id INTO owner;
 
   INSERT INTO facilities (tenant_id, created, name)
-  VALUES (tenant, now(), 'Seed Distribution Center')
+  VALUES (tenant, now(), 'Riverside Distribution Center')
   ON CONFLICT (tenant_id, name) DO UPDATE SET deleted = NULL
   RETURNING id INTO facility;
 

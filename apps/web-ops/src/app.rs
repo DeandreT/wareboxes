@@ -11,12 +11,16 @@ use wareboxes_api_contract::v1::{
 use wareboxes_core::dto::{
     AccessScopeResource, AccessScopeWorkspace, OrderPage, WebSessionContext,
 };
-use wareboxes_core::models::Order;
 
 use crate::api;
 use crate::components::{Icon, NavItem, SearchField, UiIcon};
 use crate::inventory::InventoryTable;
+use crate::inventory_disposition::InventoryDispositionWorkbench;
 use crate::inventory_holds::QuantityHoldsWorkbench;
+use crate::orders::OrderTable;
+use crate::preferences::{provide_display_preferences, DisplayOptionsMenu};
+use crate::sorting::{SortDirection, SortSpec, SortableHeader};
+use crate::toast::{use_toast_bus, ToastProvider, ToastViewport};
 use crate::view_model::{
     facility_inventory, format_quantity, has_permission, open_order_count, user_name,
 };
@@ -56,7 +60,14 @@ enum Section {
     Orders,
     Inventory,
     InventoryHolds,
+    InventoryDisposition,
     Access,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResourceSort {
+    Name,
+    Id,
 }
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -71,6 +82,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 />
                 <meta name="theme-color" content="#171b1d"/>
                 <link rel="icon" href="/favicon.svg"/>
+                <script src="/presentation-init.js"></script>
                 <AutoReload options=options.clone()/>
                 <HydrationScripts options/>
                 <MetaTags/>
@@ -85,6 +97,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
+    provide_display_preferences();
     let initial_session = initial_web_session();
     let bootstrap = serialize_bootstrap(&initial_session);
     let session_state = RwSignal::new(match initial_session {
@@ -101,16 +114,24 @@ pub fn App() -> impl IntoView {
         ></script>
         <Stylesheet id="wareboxes-web" href="/pkg/wareboxes-web.css"/>
         <Stylesheet id="wareboxes-holds" href="/holds.css"/>
+        <Stylesheet id="wareboxes-presentation" href="/presentation.css"/>
+        <Stylesheet id="wareboxes-disposition" href="/disposition.css"/>
         <Title text="Wareboxes"/>
-        <Router>
-            <Routes fallback=|| view! { <NotFoundPage/> }.into_any()>
-                <Route path=StaticSegment("") view=OverviewPage/>
-                <Route path=StaticSegment("orders") view=OrdersPage/>
-                <Route path=StaticSegment("inventory") view=InventoryPage/>
-                <Route path=(StaticSegment("inventory"), StaticSegment("holds")) view=InventoryHoldsPage/>
-                <Route path=StaticSegment("access") view=AccessPage/>
-            </Routes>
-        </Router>
+        <ToastProvider>
+            <Router>
+                <Routes fallback=|| view! { <NotFoundPage/> }.into_any()>
+                    <Route path=StaticSegment("") view=OverviewPage/>
+                    <Route path=StaticSegment("orders") view=OrdersPage/>
+                    <Route path=StaticSegment("inventory") view=InventoryPage/>
+                    <Route path=(StaticSegment("inventory"), StaticSegment("holds")) view=InventoryHoldsPage/>
+                    <Route
+                        path=(StaticSegment("inventory"), StaticSegment("disposition"))
+                        view=InventoryDispositionPage
+                    />
+                    <Route path=StaticSegment("access") view=AccessPage/>
+                </Routes>
+            </Router>
+        </ToastProvider>
     }
 }
 
@@ -169,21 +190,21 @@ fn LoginPage(notice: Option<String>) -> impl IntoView {
                     <p class="eyebrow">"Warehouse operations"</p>
                     <h1>"Control work, inventory, and exceptions."</h1>
                     <p class="login-intro">
-                        "Sign in to the tenant and facility scope assigned to your account."
+                        "Sign in to the organization, facility, and client scope assigned to your operator profile."
                     </p>
                 </div>
                 <dl class="scope-definitions">
                     <div>
-                        <dt>"Tenant"</dt>
-                        <dd>"Your operating organization"</dd>
+                        <dt>"Organization"</dt>
+                        <dd>"Your warehouse operation"</dd>
                     </div>
                     <div>
                         <dt>"Facility"</dt>
                         <dd>"Your authorized sites"</dd>
                     </div>
                     <div>
-                        <dt>"Owner"</dt>
-                        <dd>"The inventory you may manage"</dd>
+                        <dt>"Client"</dt>
+                        <dd>"The stock you may manage"</dd>
                     </div>
                 </dl>
             </section>
@@ -193,7 +214,7 @@ fn LoginPage(notice: Option<String>) -> impl IntoView {
                     <div class="form-heading">
                         <p class="eyebrow">"Secure access"</p>
                         <h2 id="sign-in-title">"Sign in"</h2>
-                        <p>"Use your Wareboxes operator account."</p>
+                        <p>"Use your Wareboxes operator profile."</p>
                     </div>
 
                     {notice.map(|message| {
@@ -329,10 +350,18 @@ async fn load_workspace(
             data.holds = hold_page.items;
             data.hold_next_cursor = hold_page.next_cursor;
         }
+        Section::InventoryDisposition if has_permission(session, "wms") => {
+            let page = api::balances(None).await?;
+            data.balances = page.items;
+            data.balance_next_cursor = page.next_cursor;
+        }
         Section::Access => {
             data.access = api::access().await?;
         }
-        Section::Orders | Section::Inventory | Section::InventoryHolds => {}
+        Section::Orders
+        | Section::Inventory
+        | Section::InventoryHolds
+        | Section::InventoryDisposition => {}
     }
     Ok(data)
 }
@@ -355,6 +384,11 @@ fn InventoryPage() -> impl IntoView {
 #[component]
 fn InventoryHoldsPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::InventoryHolds/> }
+}
+
+#[component]
+fn InventoryDispositionPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::InventoryDisposition/> }
 }
 
 #[component]
@@ -395,6 +429,15 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                 }
                 .into_any()
             }
+            Section::InventoryDisposition if has_permission(&session, "wms") => {
+                let session_state = expect_context::<RwSignal<SessionState>>();
+                let on_unauthorized = Callback::new(move |_| {
+                    session_state.set(SessionState::Anonymous(Some(
+                        "Your session ended. Sign in to continue.".to_owned(),
+                    )));
+                });
+                view! { <InventoryDisposition data on_unauthorized/> }.into_any()
+            }
             Section::Access => view! { <Access data/> }.into_any(),
             _ => view! { <AccessDenied/> }.into_any(),
         },
@@ -432,6 +475,7 @@ fn PageFrame(section: Section, children: Children) -> impl IntoView {
     let tenant_error = RwSignal::new(None::<String>);
     let navigate = use_navigate();
     let active_tenant_id = tenant_id;
+    let toasts = use_toast_bus();
 
     let switch_tenant = move |event| {
         let value = event_target_value(&event);
@@ -449,7 +493,9 @@ fn PageFrame(section: Section, children: Children) -> impl IntoView {
         leptos::task::spawn_local(async move {
             match api::select_tenant(selected_id).await {
                 Ok(context) => {
+                    let organization_name = context.active_tenant.name.clone();
                     session_state.set(SessionState::Authenticated(Box::new(context)));
+                    toasts.info(format!("Switched to {organization_name}."));
                     navigate("/", Default::default());
                 }
                 Err(error) if error.unauthorized => {
@@ -511,6 +557,12 @@ fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                 icon=UiIcon::Holds
                                 active=section == Section::InventoryHolds
                             />
+                            <NavItem
+                                href="/inventory/disposition"
+                                label="Disposition"
+                                icon=UiIcon::Disposition
+                                active=section == Section::InventoryDisposition
+                            />
                         }
                     })}
                     <p class="nav-group">"Context"</p>
@@ -522,7 +574,7 @@ fn PageFrame(section: Section, children: Children) -> impl IntoView {
                     />
                 </nav>
                 <div class="sidebar-scope">
-                    <span>"Active tenant"</span>
+                    <span>"Active organization"</span>
                     <strong>{tenant_name.clone()}</strong>
                     <small>{scope_summary(&session)}</small>
                 </div>
@@ -532,7 +584,7 @@ fn PageFrame(section: Section, children: Children) -> impl IntoView {
                 <header class="topbar">
                     <div class="tenant-control">
                         <Icon icon=UiIcon::Building/>
-                        <label for="tenant-selector">"Tenant"</label>
+                        <label for="tenant-selector">"Organization"</label>
                         <select
                             id="tenant-selector"
                             prop:value=move || selected_tenant.get()
@@ -552,6 +604,7 @@ fn PageFrame(section: Section, children: Children) -> impl IntoView {
                         }}
                     </div>
                     <div class="identity">
+                        <DisplayOptionsMenu/>
                         <span class="avatar" aria-hidden="true">{initials}</span>
                         <span class="identity-copy">
                             <strong>{display_name}</strong>
@@ -563,7 +616,10 @@ fn PageFrame(section: Section, children: Children) -> impl IntoView {
                         </button>
                     </div>
                 </header>
-                <main class="workspace">{children()}</main>
+                <main class="workspace">
+                    <ToastViewport/>
+                    {children()}
+                </main>
             </div>
         </div>
     }
@@ -579,10 +635,10 @@ fn scope_summary(session: &WebSessionContext) -> String {
         )
     };
     let owners = if session.active_tenant.owner_scope.all_inventory_owners {
-        "all owners".to_owned()
+        "all clients".to_owned()
     } else {
         format!(
-            "{} owners",
+            "{} clients",
             session.active_tenant.owner_scope.inventory_owner_ids.len()
         )
     };
@@ -774,10 +830,10 @@ fn Overview(data: WorkspaceData) -> impl IntoView {
                 <strong>{facility_count}</strong>
             </div>
             <div>
-                <span>"Inventory owners"</span>
+                <span>"Clients"</span>
                 <strong>{inventory_owner_count}</strong>
             </div>
-            <p>"Counts reflect the exact access scope assigned to this account."</p>
+            <p>"Counts reflect the exact access scope assigned to this operator profile."</p>
         </section>
     }
 }
@@ -826,82 +882,14 @@ fn Orders(data: WorkspaceData) -> impl IntoView {
     view! {
         <section class="page-heading">
             <div>
-                <p class="eyebrow">"Outbound"</p>
                 <h1>"Orders"</h1>
-                <p>"The latest orders across your authorized inventory owners."</p>
+                <p>"The latest orders across your authorized clients."</p>
             </div>
             <RefreshButton section=Section::Orders/>
         </section>
         <section class="data-section page-data">
             <OrderTable orders compact=false/>
         </section>
-    }
-}
-
-#[component]
-fn OrderTable(orders: Vec<Order>, compact: bool) -> impl IntoView {
-    let empty = orders.is_empty();
-    view! {
-        <div class="table-scroll">
-            <table class="data-table">
-                <caption class="sr-only">"Orders in the current tenant and owner scope"</caption>
-                <thead>
-                    <tr>
-                        <th scope="col">"Order"</th>
-                        <th scope="col">"Owner"</th>
-                        <th scope="col">"Status"</th>
-                        <th scope="col" class="numeric">"Units"</th>
-                        <th scope="col">"Destination"</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {orders
-                        .into_iter()
-                        .map(|order| {
-                            let destination = [order.city.as_deref(), order.state.as_deref()]
-                                .into_iter()
-                                .flatten()
-                                .filter(|part| !part.is_empty())
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            let destination = if destination.is_empty() {
-                                "Not assigned".to_owned()
-                            } else {
-                                destination
-                            };
-                            view! {
-                                <tr>
-                                    <td>
-                                        <strong>{order.order_key}</strong>
-                                        {order.rush.then(|| view! { <small class="rush">"Rush"</small> })}
-                                    </td>
-                                    <td>{order.inventory_owner_name.unwrap_or_else(|| "Unassigned".to_owned())}</td>
-                                    <td>
-                                        <span class=status_class(order.status.as_str())>
-                                            {order.status.to_string()}
-                                        </span>
-                                    </td>
-                                    <td class="numeric">{format_quantity(order.ordered_qty)}</td>
-                                    <td>{destination}</td>
-                                </tr>
-                            }
-                        })
-                        .collect_view()}
-                </tbody>
-            </table>
-            {empty.then(|| view! { <EmptyState message="No orders are currently in scope."/> })}
-            {compact.then(|| view! { <span class="compact-table-edge" aria-hidden="true"></span> })}
-        </div>
-    }
-}
-
-fn status_class(status: &str) -> &'static str {
-    match status {
-        "shipped" => "status shipped",
-        "cancelled" | "void" => "status muted",
-        "held" => "status held",
-        "processing" | "awaiting shipment" => "status processing",
-        _ => "status open",
     }
 }
 
@@ -917,9 +905,8 @@ fn Inventory(data: WorkspaceData) -> impl IntoView {
     view! {
         <section class="page-heading">
             <div>
-                <p class="eyebrow">"Stock control"</p>
                 <h1>"Inventory"</h1>
-                <p>"Current balances by facility, location, item, status, and owner."</p>
+                <p>"Current balances by facility, location, item, status, and client."</p>
             </div>
             <RefreshButton section=Section::Inventory/>
         </section>
@@ -936,7 +923,6 @@ fn InventoryHolds(data: WorkspaceData, on_unauthorized: Callback<()>) -> impl In
     view! {
         <section class="page-heading">
             <div>
-                <p class="eyebrow">"Inventory control"</p>
                 <h1>"Quantity holds"</h1>
                 <p>"Restrict and release specific quantities without changing inventory disposition."</p>
             </div>
@@ -953,6 +939,25 @@ fn InventoryHolds(data: WorkspaceData, on_unauthorized: Callback<()>) -> impl In
 }
 
 #[component]
+fn InventoryDisposition(data: WorkspaceData, on_unauthorized: Callback<()>) -> impl IntoView {
+    view! {
+        <section class="page-heading">
+            <div>
+                <p class="eyebrow">"Inventory control"</p>
+                <h1>"Disposition"</h1>
+                <p>"Move uncommitted stock between available, hold, damaged, and quarantine status."</p>
+            </div>
+            <RefreshButton section=Section::InventoryDisposition/>
+        </section>
+        <InventoryDispositionWorkbench
+            initial_balances=data.balances
+            initial_cursor=data.balance_next_cursor
+            on_unauthorized
+        />
+    }
+}
+
+#[component]
 fn Access(data: WorkspaceData) -> impl IntoView {
     let session = expect_context::<WebSessionContext>();
     let facility_scope = if session.active_tenant.site_scope.all_facilities {
@@ -961,17 +966,17 @@ fn Access(data: WorkspaceData) -> impl IntoView {
         "Assigned facilities"
     };
     let owner_scope = if session.active_tenant.owner_scope.all_inventory_owners {
-        "All inventory owners"
+        "All clients"
     } else {
-        "Assigned inventory owners"
+        "Assigned clients"
     };
 
     view! {
         <section class="page-heading">
             <div>
                 <p class="eyebrow">"Access context"</p>
-                <h1>"Facility and owner scope"</h1>
-                <p>"The exact operational resources available in the selected tenant."</p>
+                <h1>"Warehouse access"</h1>
+                <p>"Facilities and clients available in the selected organization."</p>
             </div>
             <RefreshButton section=Section::Access/>
         </section>
@@ -982,7 +987,7 @@ fn Access(data: WorkspaceData) -> impl IntoView {
                 resources=data.access.facilities
             />
             <ScopeResourceList
-                title="Inventory owners"
+                title="Clients"
                 scope_label=owner_scope
                 resources=data.access.inventory_owners
             />
@@ -997,6 +1002,10 @@ fn ScopeResourceList(
     resources: Vec<AccessScopeResource>,
 ) -> impl IntoView {
     let filter = RwSignal::new(String::new());
+    let sort = RwSignal::new(SortSpec {
+        key: ResourceSort::Name,
+        direction: SortDirection::Ascending,
+    });
     let count = resources.len();
     view! {
         <section class="data-section scope-resource-section">
@@ -1016,14 +1025,29 @@ fn ScopeResourceList(
                     <caption class="sr-only">{format!("{title} in the current access scope")}</caption>
                     <thead>
                         <tr>
-                            <th scope="col">"Name"</th>
-                            <th scope="col" class="numeric">"ID"</th>
+                            <SortableHeader
+                                label="Name"
+                                active=move || sort.get().key == ResourceSort::Name
+                                direction=move || sort.get().direction
+                                on_sort=Callback::new(move |_| {
+                                    SortSpec::select(sort, ResourceSort::Name)
+                                })
+                            />
+                            <SortableHeader
+                                label="ID"
+                                active=move || sort.get().key == ResourceSort::Id
+                                direction=move || sort.get().direction
+                                on_sort=Callback::new(move |_| {
+                                    SortSpec::select(sort, ResourceSort::Id)
+                                })
+                                numeric=true
+                            />
                         </tr>
                     </thead>
                     <tbody>
                         {move || {
                             let query = filter.get().trim().to_ascii_lowercase();
-                            let matching_resources = resources
+                            let mut matching_resources = resources
                                 .iter()
                                 .filter(|resource| {
                                     query.is_empty()
@@ -1031,6 +1055,22 @@ fn ScopeResourceList(
                                         || resource.id.to_string().contains(&query)
                                 })
                                 .collect::<Vec<_>>();
+                            let spec = sort.get();
+                            matching_resources.sort_by(|left, right| {
+                                let ordering = match spec.key {
+                                    ResourceSort::Name => left
+                                        .name
+                                        .to_ascii_lowercase()
+                                        .cmp(&right.name.to_ascii_lowercase()),
+                                    ResourceSort::Id => left.id.cmp(&right.id),
+                                }
+                                .then_with(|| left.id.cmp(&right.id));
+                                if spec.direction == SortDirection::Ascending {
+                                    ordering
+                                } else {
+                                    ordering.reverse()
+                                }
+                            });
                             if matching_resources.is_empty() {
                                 let message = if query.is_empty() {
                                     "No resources are assigned in this scope."
