@@ -1,8 +1,9 @@
 //! Version 1 public HTTP routes.
 
+mod cycle_count;
 mod error;
 mod expected_receiving;
-mod inventory_balances;
+pub(crate) mod inventory_balances;
 mod inventory_holds;
 mod inventory_relocation;
 mod inventory_rollups;
@@ -34,6 +35,24 @@ pub fn router() -> Router<AppState> {
             post(expected_receiving::confirm),
         )
         .route("/rf/sessions", post(rf_sessions::create))
+        .route("/cycle-count-claims/next", post(cycle_count::claim_next))
+        .route("/cycle-count-claims/current", get(cycle_count::current))
+        .route(
+            "/cycle-count-claims/{task_id}",
+            post(cycle_count::claim_by_id),
+        )
+        .route(
+            "/cycle-count-claims/{task_id}/heartbeats",
+            post(cycle_count::heartbeat),
+        )
+        .route(
+            "/cycle-count-claims/{task_id}/releases",
+            post(cycle_count::release),
+        )
+        .route(
+            "/cycle-count-tasks/{task_id}/confirmations",
+            post(cycle_count::confirm),
+        )
         .route("/inventory/balances", get(inventory_balances::list))
         .route(
             "/inventory/rollups/by-location",

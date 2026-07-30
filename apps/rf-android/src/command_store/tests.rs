@@ -6,7 +6,7 @@ use crate::expected_receiving::{
     NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason, ReceivingDock,
     ReceivingLoadStatus, StockDimension,
 };
-use crate::workflow::{InventoryRelocationCommand, MovementKind, ReleaseReason};
+use crate::workflow::{CycleCountCommand, InventoryRelocationCommand, MovementKind, ReleaseReason};
 
 fn scope() -> ExecutionScope {
     ExecutionScope {
@@ -42,6 +42,22 @@ fn relocation_claim_draft(command_id: &str, key: &str) -> DurableCommandDraft {
         idempotency_key: key.into(),
         command: RfCommand::InventoryRelocation(InventoryRelocationCommand::ClaimNext {
             workflow: MovementKind::Loose,
+        }),
+    }
+}
+
+fn cycle_count_confirmation_draft(command_id: &str, key: &str) -> DurableCommandDraft {
+    DurableCommandDraft {
+        schema_version: 1,
+        command_id: command_id.into(),
+        idempotency_key: key.into(),
+        command: RfCommand::CycleCount(CycleCountCommand::Confirm {
+            task_id: 81,
+            location_barcode: "A-08-01".into(),
+            item_barcode: "ITEM-81".into(),
+            license_plate_barcode: None,
+            counted_quantity: 4,
+            note: None,
         }),
     }
 }
@@ -334,6 +350,25 @@ fn relocation_command_persists_its_typed_endpoint_and_response_kind() {
     assert_eq!(
         record.request.response_kind,
         ResponseKind::RelocationOptionalClaim
+    );
+    assert_eq!(record.draft, draft);
+}
+
+#[test]
+fn cycle_count_confirmation_survives_the_durable_store_boundary() {
+    let mut store = CommandStore::open_in_memory().unwrap();
+    let draft = cycle_count_confirmation_draft("cycle-count-confirm-1", "cycle-count:confirm:81:1");
+
+    let record = store.persist(&scope(), draft.clone()).unwrap();
+
+    assert_eq!(record.operation, CommandOperation::CycleCountConfirmation);
+    assert_eq!(
+        record.request.path,
+        "/api/v1/cycle-count-tasks/81/confirmations"
+    );
+    assert_eq!(
+        record.request.response_kind,
+        ResponseKind::CycleCountConfirmation
     );
     assert_eq!(record.draft, draft);
 }

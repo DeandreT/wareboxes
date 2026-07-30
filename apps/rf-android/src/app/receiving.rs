@@ -28,16 +28,18 @@ pub(super) enum WorkMode {
     Receive,
     Putaway,
     Relocate,
+    Count,
 }
 
 impl WorkMode {
-    const ALL: [Self; 3] = [Self::Receive, Self::Putaway, Self::Relocate];
+    const ALL: [Self; 4] = [Self::Receive, Self::Putaway, Self::Relocate, Self::Count];
 
     const fn label(self) -> &'static str {
         match self {
             Self::Receive => "Receive",
             Self::Putaway => "Putaway",
             Self::Relocate => "Relocate",
+            Self::Count => "Count",
         }
     }
 }
@@ -159,6 +161,7 @@ impl RfApp {
                         WorkMode::Receive => Icon::PackagePlus,
                         WorkMode::Putaway => Icon::PackageOpen,
                         WorkMode::Relocate => Icon::Move,
+                        WorkMode::Count => Icon::ClipboardCheck,
                     };
                     ui.label(Self::icon(icon).color(Self::accent()));
                     ui.heading(self.work_mode.label());
@@ -176,9 +179,12 @@ impl RfApp {
             );
         }
 
-        let switching_allowed =
-            work_mode_switch_allowed(self.workflow.activity(), self.receiving.activity());
-        let segment_width = (ui.available_width() - 16.0) / 3.0;
+        let switching_allowed = work_mode_switch_allowed(
+            self.workflow.activity(),
+            self.receiving.activity(),
+            self.cycle_count.activity(),
+        );
+        let segment_width = (ui.available_width() - 24.0) / 4.0;
         ui.horizontal(|ui| {
             for mode in WorkMode::ALL {
                 let selected = self.work_mode == mode;
@@ -198,7 +204,7 @@ impl RfApp {
                         WorkMode::Relocate => self
                             .workflow
                             .select_operation(MovementOperation::InventoryRelocation),
-                        WorkMode::Receive => {}
+                        WorkMode::Receive | WorkMode::Count => {}
                     }
                     self.receiving_ui.focus = None;
                     self.scan_focus = None;
@@ -222,6 +228,9 @@ impl RfApp {
                         Activity::ReconcileRequired => ("BLOCKED", Self::danger()),
                     })
             }
+            WorkMode::Count => self
+                .heartbeat_header()
+                .unwrap_or_else(|| activity_status(self.cycle_count.activity())),
             WorkMode::Receive => match self.receiving.activity() {
                 ReceivingActivity::AwaitingLoad | ReceivingActivity::LoadComplete => {
                     ("READY", Self::accent())
@@ -932,6 +941,7 @@ impl RfApp {
             "receiving-error" => self.load_receiving_preview(ReceivingPreview::Error),
             "receiving-recovery" => self.load_receiving_preview(ReceivingPreview::Recovery),
             "receiving-reconcile" => self.load_receiving_preview(ReceivingPreview::Reconcile),
+            "count-active" => self.load_count_preview(),
             _ => {}
         }
     }
@@ -1019,12 +1029,29 @@ fn receiving_draft_snapshot(reducer: &ExpectedReceivingReducer) -> Option<Receiv
         })
 }
 
-fn work_mode_switch_allowed(putaway: Activity, receiving: ReceivingActivity) -> bool {
+fn work_mode_switch_allowed(
+    putaway: Activity,
+    receiving: ReceivingActivity,
+    count: Activity,
+) -> bool {
     putaway == Activity::Idle
+        && count == Activity::Idle
         && matches!(
             receiving,
             ReceivingActivity::AwaitingLoad | ReceivingActivity::LoadComplete
         )
+}
+
+fn activity_status(activity: Activity) -> (&'static str, egui::Color32) {
+    match activity {
+        Activity::Idle => ("READY", RfApp::accent()),
+        Activity::Active => ("ACTIVE", RfApp::accent()),
+        Activity::Persisting => ("SAVING", RfApp::warning()),
+        Activity::ReadyToDispatch => ("QUEUED", RfApp::warning()),
+        Activity::InFlight => ("SENDING", RfApp::warning()),
+        Activity::Ambiguous => ("CHECK", RfApp::danger()),
+        Activity::ReconcileRequired => ("BLOCKED", RfApp::danger()),
+    }
 }
 
 const fn confirmation_mode_label(mode: ConfirmationMode) -> &'static str {

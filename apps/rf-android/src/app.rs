@@ -7,6 +7,7 @@ use lucide_icons::Icon;
 use wareboxes_api_contract::v1::{ErrorReason, ErrorResponse};
 
 use crate::command_store::{CommandStore, ExecutionScope};
+use crate::cycle_count::{CountScanStage, CycleCountWorkflow};
 use crate::expected_receiving::{ExpectedReceivingReducer, ReceivingEffect};
 use crate::transport::{NetworkEvent, ServerEndpoint};
 use crate::workflow::{
@@ -14,6 +15,7 @@ use crate::workflow::{
     MovementWorkflow, PutawayClaim, ReleaseReason, ScanStage, Transition, WorkflowEffect,
 };
 
+mod cycle_count_ui;
 mod heartbeat;
 mod receiving;
 mod session;
@@ -42,6 +44,8 @@ pub struct RfApp {
     work_mode: WorkMode,
     workflow: MovementWorkflow,
     effects: VecDeque<WorkflowEffect>,
+    cycle_count: CycleCountWorkflow,
+    cycle_count_effects: VecDeque<WorkflowEffect>,
     receiving: ExpectedReceivingReducer,
     receiving_effects: VecDeque<ReceivingEffect>,
     receiving_request: Option<session::ReceivingRequest>,
@@ -71,6 +75,7 @@ pub struct RfApp {
     connectivity_notice: Option<String>,
     device_id: String,
     scan_focus: Option<(i64, ScanStage)>,
+    count_scan_focus: Option<(i64, CountScanStage)>,
     field_focus_pending: bool,
     heartbeat: heartbeat::HeartbeatRuntime,
 }
@@ -98,6 +103,8 @@ impl RfApp {
             work_mode: WorkMode::Putaway,
             workflow: MovementWorkflow::default(),
             effects: VecDeque::new(),
+            cycle_count: CycleCountWorkflow::default(),
+            cycle_count_effects: VecDeque::new(),
             receiving: ExpectedReceivingReducer::default(),
             receiving_effects: VecDeque::new(),
             receiving_request: None,
@@ -127,6 +134,7 @@ impl RfApp {
             connectivity_notice: None,
             device_id: format!("rf-{}", uuid::Uuid::new_v4()),
             scan_focus: None,
+            count_scan_focus: None,
             field_focus_pending: true,
             heartbeat: heartbeat::HeartbeatRuntime::new(),
         }
@@ -171,6 +179,8 @@ impl RfApp {
             work_mode: WorkMode::Putaway,
             workflow: MovementWorkflow::default(),
             effects: VecDeque::new(),
+            cycle_count: CycleCountWorkflow::default(),
+            cycle_count_effects: VecDeque::new(),
             receiving: ExpectedReceivingReducer::default(),
             receiving_effects: VecDeque::new(),
             receiving_request: None,
@@ -200,6 +210,7 @@ impl RfApp {
             connectivity_notice: None,
             device_id,
             scan_focus: None,
+            count_scan_focus: None,
             field_focus_pending: true,
             heartbeat: heartbeat::HeartbeatRuntime::new(),
         };
@@ -1162,6 +1173,7 @@ impl eframe::App for RfApp {
         if self.receiving_command.is_some() {
             self.work_mode = WorkMode::Receive;
         }
+        self.effects.extend(self.cycle_count_effects.drain(..));
         self.persist_queued_commands();
         self.dispatch_queued_commands(root_ui.ctx());
         self.maintain_claim_heartbeat(root_ui.ctx());
@@ -1195,11 +1207,14 @@ impl eframe::App for RfApp {
                     .id_salt(("rf_work", self.work_mode))
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if matches!(self.work_mode, WorkMode::Putaway | WorkMode::Relocate)
-                            && let Some(notice) = self.connectivity_notice.clone()
+                        if matches!(
+                            self.work_mode,
+                            WorkMode::Putaway | WorkMode::Relocate | WorkMode::Count
+                        ) && let Some(notice) = self.connectivity_notice.clone()
                         {
                             Self::message_band(ui, Self::warning(), Icon::WifiOff, &notice);
                             if self.workflow.activity() == Activity::Idle
+                                && self.cycle_count.activity() == Activity::Idle
                                 && self.expected_claim_request_id.is_none()
                                 && ui
                                     .add_sized(
@@ -1229,6 +1244,7 @@ impl eframe::App for RfApp {
                         } else {
                             match self.work_mode {
                                 WorkMode::Receive => self.receiving_view(ui),
+                                WorkMode::Count => self.count_view(ui),
                                 WorkMode::Putaway | WorkMode::Relocate => {
                                     if self.workflow.claim().is_some() {
                                         self.active_work(ui);

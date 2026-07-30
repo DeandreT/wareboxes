@@ -3,14 +3,14 @@ use std::sync::mpsc::Sender;
 use eframe::egui;
 use thiserror::Error;
 use url::Url;
-use wareboxes_api_contract::v1::IdempotencyKey;
+use wareboxes_api_contract::v1::{HeartbeatCycleCountClaimRequest, IdempotencyKey};
 
 use crate::command_store::{DispatchAttempt, DurableHttpResponse, ExecutionScope};
 use crate::wire::{
     EXPECTED_RECEIVING_BARCODE_LOOKUP_PATH, build_expected_receiving_session_path,
     build_movement_heartbeat_request_parts, normalize_expected_receiving_load_barcode,
 };
-use crate::workflow::MovementOperation;
+use crate::workflow::{ClaimOperation, MovementOperation};
 
 const ACCEPT_JSON: &str = "application/json";
 const REQUEST_ID_HEADER: &str = "X-Request-Id";
@@ -113,12 +113,12 @@ pub enum NetworkEvent {
         response: Result<NetworkResponse, String>,
     },
     CurrentClaim {
-        operation: MovementOperation,
+        operation: ClaimOperation,
         request_id: String,
         response: Result<NetworkResponse, String>,
     },
     Heartbeat {
-        operation: MovementOperation,
+        operation: ClaimOperation,
         task_id: i64,
         request_id: String,
         response: Result<NetworkResponse, String>,
@@ -164,12 +164,13 @@ pub fn build_session_request(
 
 pub fn build_current_claim_request(
     transport: &AuthenticatedTransport<'_>,
-    operation: MovementOperation,
+    operation: ClaimOperation,
     request_id: &str,
 ) -> Result<ehttp::Request, TransportBuildError> {
     let path = match operation {
-        MovementOperation::Putaway => "/api/v1/putaway-claims/current",
-        MovementOperation::InventoryRelocation => "/api/v1/inventory-relocation-claims/current",
+        ClaimOperation::Putaway => "/api/v1/putaway-claims/current",
+        ClaimOperation::InventoryRelocation => "/api/v1/inventory-relocation-claims/current",
+        ClaimOperation::CycleCount => "/api/v1/cycle-count-claims/current",
     };
     let mut request = ehttp::Request::get(transport.endpoint.api_url(path)?);
     request.headers = authenticated_headers(transport, request_id);
@@ -178,17 +179,38 @@ pub fn build_current_claim_request(
 
 pub fn build_movement_heartbeat_request(
     transport: &AuthenticatedTransport<'_>,
-    operation: MovementOperation,
+    operation: ClaimOperation,
     task_id: i64,
     request_id: &str,
     idempotency_key: &str,
 ) -> Result<ehttp::Request, TransportBuildError> {
-    let (path, body) = build_movement_heartbeat_request_parts(operation, task_id).map_err(
-        |error| match error {
-            crate::wire::WireRequestError::InvalidTaskId => TransportBuildError::InvalidTaskId,
-            _ => TransportBuildError::InvalidHeartbeatRequest,
-        },
-    )?;
+    let (path, body) = match operation {
+        ClaimOperation::Putaway | ClaimOperation::InventoryRelocation => {
+            let movement = match operation {
+                ClaimOperation::Putaway => MovementOperation::Putaway,
+                ClaimOperation::InventoryRelocation => MovementOperation::InventoryRelocation,
+                ClaimOperation::CycleCount => unreachable!(),
+            };
+            build_movement_heartbeat_request_parts(movement, task_id).map_err(
+                |error| match error {
+                    crate::wire::WireRequestError::InvalidTaskId => {
+                        TransportBuildError::InvalidTaskId
+                    }
+                    _ => TransportBuildError::InvalidHeartbeatRequest,
+                },
+            )?
+        }
+        ClaimOperation::CycleCount => {
+            if task_id <= 0 {
+                return Err(TransportBuildError::InvalidTaskId);
+            }
+            (
+                format!("/api/v1/cycle-count-claims/{task_id}/heartbeats"),
+                serde_json::to_vec(&HeartbeatCycleCountClaimRequest::default())
+                    .map_err(|_| TransportBuildError::InvalidHeartbeatRequest)?,
+            )
+        }
+    };
     let idempotency_key = IdempotencyKey::new(idempotency_key)
         .map_err(|_| TransportBuildError::InvalidIdempotencyKey)?;
     let mut request = ehttp::Request::post(transport.endpoint.api_url(&path)?, body);
@@ -285,7 +307,7 @@ pub fn send_session(
 
 pub fn send_current_claim(
     request: ehttp::Request,
-    operation: MovementOperation,
+    operation: ClaimOperation,
     request_id: String,
     sender: Sender<NetworkEvent>,
     context: egui::Context,
@@ -305,7 +327,7 @@ pub fn send_current_claim(
 
 pub fn send_heartbeat(
     request: ehttp::Request,
-    operation: MovementOperation,
+    operation: ClaimOperation,
     task_id: i64,
     request_id: String,
     sender: Sender<NetworkEvent>,
@@ -511,7 +533,7 @@ mod tests {
                 token: "session-secret",
                 scope: &scope,
             },
-            MovementOperation::Putaway,
+            MovementOperation::Putaway.into(),
             42,
             "rf-heartbeat-request-1",
             "putaway:heartbeat:42:1",
@@ -560,7 +582,7 @@ mod tests {
         assert!(matches!(
             build_movement_heartbeat_request(
                 &transport,
-                MovementOperation::Putaway,
+                MovementOperation::Putaway.into(),
                 0,
                 "request-1",
                 "heartbeat-1"
@@ -570,7 +592,7 @@ mod tests {
         assert!(matches!(
             build_movement_heartbeat_request(
                 &transport,
-                MovementOperation::Putaway,
+                MovementOperation::Putaway.into(),
                 42,
                 "request-1",
                 "has spaces"
@@ -595,7 +617,7 @@ mod tests {
 
         let current = build_current_claim_request(
             &transport,
-            MovementOperation::InventoryRelocation,
+            MovementOperation::InventoryRelocation.into(),
             "request-1",
         )
         .unwrap();
@@ -606,7 +628,7 @@ mod tests {
 
         let heartbeat = build_movement_heartbeat_request(
             &transport,
-            MovementOperation::InventoryRelocation,
+            MovementOperation::InventoryRelocation.into(),
             42,
             "request-2",
             "relocation:heartbeat:42:1",
@@ -615,6 +637,43 @@ mod tests {
         assert_eq!(
             heartbeat.url,
             "https://example.com/api/v1/inventory-relocation-claims/42/heartbeats"
+        );
+        assert_eq!(heartbeat.body, b"{}");
+    }
+
+    #[test]
+    fn cycle_count_claim_and_heartbeat_use_count_endpoints() {
+        let endpoint = ServerEndpoint::parse("https://example.com").unwrap();
+        let scope = ExecutionScope {
+            tenant_id: 7,
+            operator_id: 8,
+            device_id: "rf-01".into(),
+        };
+        let transport = AuthenticatedTransport {
+            endpoint: &endpoint,
+            token: "session-secret",
+            scope: &scope,
+        };
+
+        let current =
+            build_current_claim_request(&transport, ClaimOperation::CycleCount, "request-1")
+                .unwrap();
+        assert_eq!(
+            current.url,
+            "https://example.com/api/v1/cycle-count-claims/current"
+        );
+
+        let heartbeat = build_movement_heartbeat_request(
+            &transport,
+            ClaimOperation::CycleCount,
+            42,
+            "request-2",
+            "cycle-count:heartbeat:42:1",
+        )
+        .unwrap();
+        assert_eq!(
+            heartbeat.url,
+            "https://example.com/api/v1/cycle-count-claims/42/heartbeats"
         );
         assert_eq!(heartbeat.body, b"{}");
     }

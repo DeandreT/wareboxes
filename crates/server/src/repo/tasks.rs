@@ -15,6 +15,8 @@ use references::{
 };
 
 mod cycle_count;
+mod cycle_count_claim;
+mod cycle_count_claim_lifecycle;
 mod execution;
 mod inventory_relocation;
 mod inventory_relocation_claim;
@@ -29,6 +31,8 @@ mod queries;
 mod references;
 
 pub use cycle_count::*;
+pub use cycle_count_claim::*;
+pub use cycle_count_claim_lifecycle::*;
 pub use execution::*;
 pub use inventory_relocation::*;
 pub use inventory_relocation_claim::*;

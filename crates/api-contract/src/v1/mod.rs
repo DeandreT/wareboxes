@@ -1,6 +1,7 @@
 //! Version 1 public API primitives.
 
 mod cursor;
+mod cycle_count;
 mod error;
 mod expected_receiving;
 mod idempotency;
@@ -18,6 +19,12 @@ mod rf_session;
 pub use cursor::{
     CursorPage, CursorPageRequest, OpaqueCursor, OpaqueCursorError, PageLimit, PageLimitError,
     DEFAULT_PAGE_LIMIT, MAX_CURSOR_LENGTH, MAX_PAGE_LIMIT,
+};
+pub use cycle_count::{
+    ClaimCycleCountByIdRequest, ClaimNextCycleCountRequest, ConfirmCycleCountRequest,
+    CycleCountClaimHeartbeatResponse, CycleCountClaimReleaseReason, CycleCountClaimReleaseResponse,
+    CycleCountClaimResponse, CycleCountConfirmationResponse, CycleCountItem, CycleCountLocation,
+    CycleCountStock, HeartbeatCycleCountClaimRequest, ReleaseCycleCountClaimRequest,
 };
 pub use error::{ErrorReason, ErrorResponse, FieldViolation};
 pub use expected_receiving::{

@@ -1869,6 +1869,92 @@ pub struct CycleCountItemLocationTask {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CycleCountClaimLocation {
+    pub location_id: i64,
+    pub barcode: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CycleCountClaimItem {
+    pub item_id: i64,
+    pub description: Option<String>,
+    pub barcodes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CycleCountClaimStock {
+    pub inventory_balance_id: i64,
+    pub license_plate_id: Option<i64>,
+    pub license_plate_barcode: Option<String>,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub expiration: Option<Timestamp>,
+    pub serial: Option<String>,
+    pub inventory_status: InventoryStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CycleCountClaim {
+    pub tenant_id: TenantId,
+    pub task_id: i64,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub priority: i64,
+    pub instructions: Option<String>,
+    pub due_at: Option<Timestamp>,
+    pub lease_expires_at: Timestamp,
+    pub location: CycleCountClaimLocation,
+    pub item: CycleCountClaimItem,
+    pub stock: CycleCountClaimStock,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CycleCountClaimHeartbeat {
+    pub tenant_id: TenantId,
+    pub task_id: i64,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub heartbeat_by: i64,
+    pub heartbeat_at: Timestamp,
+    pub previous_lease_expires_at: Timestamp,
+    pub lease_expires_at: Timestamp,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CycleCountClaimReleaseReason {
+    WorkInterrupted,
+    EquipmentUnavailable,
+    SafetyIssue,
+    Other,
+}
+
+impl CycleCountClaimReleaseReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkInterrupted => "work_interrupted",
+            Self::EquipmentUnavailable => "equipment_unavailable",
+            Self::SafetyIssue => "safety_issue",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CycleCountClaimRelease {
+    pub tenant_id: TenantId,
+    pub task_id: i64,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub facility_id: i64,
+    pub released_by: i64,
+    pub released_at: Timestamp,
+    pub release_count: i64,
+    pub reason: CycleCountClaimReleaseReason,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ItemLocationCycleCountConfirmation {
     pub tenant_id: TenantId,
     pub task_id: i64,

@@ -19,12 +19,12 @@ use crate::transport::{
     send_session,
 };
 use crate::wire::{
-    decode_claim_response, decode_command_response, decode_receiving_session,
-    decode_relocation_claim_response,
+    decode_claim_response, decode_command_response, decode_cycle_count_claim_response,
+    decode_receiving_session, decode_relocation_claim_response,
 };
 use crate::workflow::{
-    DurableCommandDraft, InventoryRelocationClaim, MovementOperation, MovementWorkflow,
-    PutawayClaim, RfCommand, WorkflowEffect,
+    ClaimOperation, DurableCommandDraft, InventoryRelocationClaim, MovementWorkflow, PutawayClaim,
+    RfCommand, WorkflowEffect,
 };
 
 use super::{
@@ -71,6 +71,7 @@ pub(super) struct ReceivingCommandRuntime {
 enum CurrentMovementClaim {
     Putaway(Option<PutawayClaim>),
     InventoryRelocation(Option<InventoryRelocationClaim>),
+    CycleCount(Option<crate::cycle_count::CycleCountClaim>),
 }
 
 impl CurrentMovementClaim {
@@ -78,6 +79,7 @@ impl CurrentMovementClaim {
         match self {
             Self::Putaway(claim) => claim.is_none(),
             Self::InventoryRelocation(claim) => claim.is_none(),
+            Self::CycleCount(claim) => claim.is_none(),
         }
     }
 
@@ -85,15 +87,21 @@ impl CurrentMovementClaim {
         match self {
             Self::Putaway(claim) => claim.as_ref().map(|claim| claim.details().task_id),
             Self::InventoryRelocation(claim) => claim.as_ref().map(|claim| claim.details().task_id),
+            Self::CycleCount(claim) => claim.as_ref().map(|claim| claim.task_id),
         }
     }
 
-    fn restore(self, workflow: &mut MovementWorkflow) {
+    fn restore(
+        self,
+        workflow: &mut MovementWorkflow,
+        cycle_count: &mut crate::cycle_count::CycleCountWorkflow,
+    ) {
         match self {
             Self::Putaway(claim) => workflow.restore_current_putaway_claim(claim),
             Self::InventoryRelocation(claim) => {
                 workflow.restore_current_inventory_relocation_claim(claim)
             }
+            Self::CycleCount(claim) => cycle_count.restore_current_claim(claim),
         }
     }
 }
@@ -354,6 +362,10 @@ impl RfApp {
             self.restore_receiving_command(record);
             return;
         }
+        if matches!(record.draft.command, RfCommand::CycleCount(_)) {
+            self.restore_cycle_count_command(context, record);
+            return;
+        }
         if let Some(operation) = record.draft.command.movement_operation() {
             self.work_mode = super::WorkMode::from(operation);
         }
@@ -396,6 +408,61 @@ impl RfApp {
             CommandStatus::ReconcileRequired | CommandStatus::Dispatching => {
                 self.workflow.require_reconciliation(
                     "Saved work needs supervisor review before inventory moves.".into(),
+                );
+            }
+            CommandStatus::Completed | CommandStatus::Rejected => {}
+        }
+    }
+
+    fn restore_cycle_count_command(
+        &mut self,
+        context: &egui::Context,
+        record: DurableCommandRecord,
+    ) {
+        self.work_mode = super::WorkMode::Count;
+        match record.status {
+            CommandStatus::Persisted => {
+                let transition = self
+                    .cycle_count
+                    .restore_ready_command(record.record_id, record.draft);
+                self.emit_count_transition(transition);
+            }
+            CommandStatus::Ambiguous | CommandStatus::Retryable => {
+                self.cycle_count.restore_ambiguous_command(
+                    record.record_id,
+                    record.draft,
+                    "The server may have received the saved count. Check it before continuing.",
+                );
+            }
+            CommandStatus::ResponseRecorded => {
+                let response = record.response.clone();
+                self.cycle_count.restore_ambiguous_command(
+                    record.record_id,
+                    record.draft.clone(),
+                    "Applying the saved count result.",
+                );
+                match response {
+                    Some(response) => {
+                        let scope = record.scope.clone();
+                        self.apply_recorded_response(&scope, record, response);
+                        if self.cycle_count.activity()
+                            != crate::workflow::Activity::ReconcileRequired
+                        {
+                            self.session_gate = SessionGate::Recovering;
+                            self.request_current_claim_for_operation(
+                                context,
+                                ClaimOperation::CycleCount,
+                            );
+                        }
+                    }
+                    None => self
+                        .cycle_count
+                        .require_reconciliation("The saved count response is incomplete.".into()),
+                }
+            }
+            CommandStatus::ReconcileRequired | CommandStatus::Dispatching => {
+                self.cycle_count.require_reconciliation(
+                    "Saved count work needs supervisor review before inventory changes.".into(),
                 );
             }
             CommandStatus::Completed | CommandStatus::Rejected => {}
@@ -476,13 +543,13 @@ impl RfApp {
     }
 
     pub(super) fn request_current_claim(&mut self, context: &egui::Context) {
-        self.request_current_claim_for_operation(context, MovementOperation::Putaway);
+        self.request_current_claim_for_operation(context, ClaimOperation::Putaway);
     }
 
     fn request_current_claim_for_operation(
         &mut self,
         context: &egui::Context,
-        operation: MovementOperation,
+        operation: ClaimOperation,
     ) {
         let Some(session) = self.session.as_ref() else {
             return;
@@ -517,7 +584,7 @@ impl RfApp {
     fn handle_current_claim_response(
         &mut self,
         context: &egui::Context,
-        operation: MovementOperation,
+        operation: ClaimOperation,
         request_id: &str,
         response: Result<NetworkResponse, String>,
     ) {
@@ -553,12 +620,12 @@ impl RfApp {
         }
         if !(200..300).contains(&response.status) {
             if lease_check_task_id.is_none()
-                && operation == MovementOperation::Putaway
+                && operation == ClaimOperation::Putaway
                 && response.status == 409
             {
                 self.request_current_claim_for_operation(
                     context,
-                    MovementOperation::InventoryRelocation,
+                    ClaimOperation::InventoryRelocation,
                 );
                 return;
             }
@@ -574,50 +641,78 @@ impl RfApp {
             return;
         }
         let claim = match operation {
-            MovementOperation::Putaway => {
+            ClaimOperation::Putaway => {
                 decode_claim_response(&response.body).map(CurrentMovementClaim::Putaway)
             }
-            MovementOperation::InventoryRelocation => {
-                decode_relocation_claim_response(&response.body)
-                    .map(CurrentMovementClaim::InventoryRelocation)
-            }
+            ClaimOperation::InventoryRelocation => decode_relocation_claim_response(&response.body)
+                .map(CurrentMovementClaim::InventoryRelocation),
+            ClaimOperation::CycleCount => decode_cycle_count_claim_response(&response.body)
+                .map(CurrentMovementClaim::CycleCount),
         };
         match claim {
             Ok(claim) => {
                 if lease_check_task_id.is_none()
-                    && operation == MovementOperation::Putaway
+                    && operation == ClaimOperation::Putaway
                     && claim.is_none()
                 {
                     self.request_current_claim_for_operation(
                         context,
-                        MovementOperation::InventoryRelocation,
+                        ClaimOperation::InventoryRelocation,
                     );
+                    return;
+                }
+                if lease_check_task_id.is_none()
+                    && operation == ClaimOperation::InventoryRelocation
+                    && claim.is_none()
+                {
+                    self.request_current_claim_for_operation(context, ClaimOperation::CycleCount);
                     return;
                 }
                 self.session_gate = SessionGate::Ready;
                 self.clear_claim_heartbeat();
                 if let Some(expected_task_id) = lease_check_task_id {
                     if claim.task_id() == Some(expected_task_id) && !lease_rejection_check {
-                        claim.restore(&mut self.workflow);
-                        self.work_mode = super::WorkMode::from(operation);
+                        claim.restore(&mut self.workflow, &mut self.cycle_count);
+                        self.work_mode = match operation {
+                            ClaimOperation::Putaway => super::WorkMode::Putaway,
+                            ClaimOperation::InventoryRelocation => super::WorkMode::Relocate,
+                            ClaimOperation::CycleCount => super::WorkMode::Count,
+                        };
                     } else {
                         match operation {
-                            MovementOperation::Putaway => {
+                            ClaimOperation::Putaway => {
                                 self.workflow.restore_current_putaway_claim(None)
                             }
-                            MovementOperation::InventoryRelocation => self
+                            ClaimOperation::InventoryRelocation => self
                                 .workflow
                                 .restore_current_inventory_relocation_claim(None),
+                            ClaimOperation::CycleCount => {
+                                self.cycle_count.restore_current_claim(None)
+                            }
                         }
-                        self.work_mode = super::WorkMode::from(operation);
-                        self.workflow.require_reconciliation(
-                            "This task is no longer assigned. Do not move its inventory. Contact a supervisor."
-                                .into(),
-                        );
+                        self.work_mode = match operation {
+                            ClaimOperation::Putaway => super::WorkMode::Putaway,
+                            ClaimOperation::InventoryRelocation => super::WorkMode::Relocate,
+                            ClaimOperation::CycleCount => super::WorkMode::Count,
+                        };
+                        if operation == ClaimOperation::CycleCount {
+                            self.cycle_count.require_reconciliation(
+                                "This count is no longer assigned. Contact a supervisor.".into(),
+                            );
+                        } else {
+                            self.workflow.require_reconciliation(
+                                "This task is no longer assigned. Do not move its inventory. Contact a supervisor."
+                                    .into(),
+                            );
+                        }
                     }
                 } else if !claim.is_none() {
-                    claim.restore(&mut self.workflow);
-                    self.work_mode = super::WorkMode::from(operation);
+                    claim.restore(&mut self.workflow, &mut self.cycle_count);
+                    self.work_mode = match operation {
+                        ClaimOperation::Putaway => super::WorkMode::Putaway,
+                        ClaimOperation::InventoryRelocation => super::WorkMode::Relocate,
+                        ClaimOperation::CycleCount => super::WorkMode::Count,
+                    };
                 } else {
                     self.workflow.restore_current_putaway_claim(None);
                     self.work_mode = super::WorkMode::Putaway;
@@ -647,7 +742,13 @@ impl RfApp {
         self.clear_claim_heartbeat();
         self.lease_check_task_id = Some(task_id);
         self.lease_rejection_check = false;
-        self.request_current_claim_for_operation(context, self.workflow.operation());
+        let operation =
+            if self.work_mode == super::WorkMode::Count || self.cycle_count.claim().is_some() {
+                ClaimOperation::CycleCount
+            } else {
+                self.workflow.operation().into()
+            };
+        self.request_current_claim_for_operation(context, operation);
     }
 
     pub(super) fn request_current_claim_after_rejection(
@@ -683,17 +784,31 @@ impl RfApp {
                 continue;
             };
             let command_id = draft.command_id.clone();
+            let is_cycle_count = matches!(draft.command, RfCommand::CycleCount(_));
             match store.persist(scope, draft) {
                 Ok(record) => {
-                    let transition = self
-                        .workflow
-                        .command_persisted(&command_id, record.record_id);
-                    self.emit_transition(transition);
+                    if is_cycle_count {
+                        let transition = self
+                            .cycle_count
+                            .command_persisted(&command_id, record.record_id);
+                        self.emit_count_transition(transition);
+                    } else {
+                        let transition = self
+                            .workflow
+                            .command_persisted(&command_id, record.record_id);
+                        self.emit_transition(transition);
+                    }
                 }
                 Err(error) => {
-                    self.workflow.require_reconciliation(format!(
-                        "The command could not be stored durably: {error}"
-                    ));
+                    if is_cycle_count {
+                        self.cycle_count.require_reconciliation(format!(
+                            "The count could not be stored durably: {error}"
+                        ));
+                    } else {
+                        self.workflow.require_reconciliation(format!(
+                            "The command could not be stored durably: {error}"
+                        ));
+                    }
                 }
             }
         }
@@ -747,7 +862,11 @@ impl RfApp {
                     continue;
                 }
             };
-            self.workflow.dispatch_started(record_id);
+            if matches!(attempt.command.draft.command, RfCommand::CycleCount(_)) {
+                self.cycle_count.dispatch_started(record_id);
+            } else {
+                self.workflow.dispatch_started(record_id);
+            }
             send_command(
                 request,
                 record_id,
@@ -802,6 +921,11 @@ impl RfApp {
                                     .into(),
                             );
                         }
+                    } else if matches!(stored.draft.command, RfCommand::CycleCount(_)) {
+                        self.cycle_count.dispatch_ambiguous(
+                            record_id,
+                            "The server may have received the count. Check it before continuing.",
+                        );
                     } else {
                         self.workflow.dispatch_ambiguous(
                             record_id,
@@ -843,6 +967,10 @@ impl RfApp {
                     self.require_receiving_reconciliation(
                         "The retryable receipt result could not be saved.",
                     );
+                } else if self.cycle_count.owns_record(record_id) {
+                    self.cycle_count.require_reconciliation(
+                        "The retryable count result could not be saved.".into(),
+                    );
                 } else {
                     self.workflow.require_reconciliation(
                         "The retryable server result could not be saved.".into(),
@@ -851,6 +979,7 @@ impl RfApp {
                 return;
             };
             let is_receiving = stored.operation == CommandOperation::ExpectedReceiptConfirmation;
+            let is_cycle_count = matches!(stored.draft.command, RfCommand::CycleCount(_));
             if response.status == 401 {
                 if is_receiving {
                     if let Some(runtime) = self.receiving_command.as_mut() {
@@ -860,6 +989,12 @@ impl RfApp {
                                 .into(),
                         );
                     }
+                } else if is_cycle_count {
+                    self.cycle_count.restore_ambiguous_command(
+                        record_id,
+                        stored.draft,
+                        "Sign in with the same operator account to recover this saved count.",
+                    );
                 } else {
                     self.workflow.restore_ambiguous_command(
                         record_id,
@@ -884,6 +1019,11 @@ impl RfApp {
                                 .into(),
                         );
                     }
+                } else if is_cycle_count {
+                    self.cycle_count.dispatch_ambiguous(
+                        record_id,
+                        "The service is temporarily unavailable. Check the saved count again.",
+                    );
                 } else {
                     self.workflow.dispatch_ambiguous(
                         record_id,
@@ -938,11 +1078,22 @@ impl RfApp {
                     self.apply_receiving_success(scope, record_id, result);
                 }
                 Ok(outcome) => {
+                    let is_cycle_count = matches!(
+                        outcome,
+                        crate::workflow::CommandOutcome::CycleCountClaimed(_)
+                            | crate::workflow::CommandOutcome::CycleCountConfirmed { .. }
+                            | crate::workflow::CommandOutcome::CycleCountReleased { .. }
+                    );
                     if self
                         .finalize_record(scope, record_id, CommandStatus::Completed, None)
                         .is_some()
                     {
-                        self.workflow.durable_outcome_recorded(record_id, outcome);
+                        if is_cycle_count {
+                            self.cycle_count
+                                .durable_outcome_recorded(record_id, outcome);
+                        } else {
+                            self.workflow.durable_outcome_recorded(record_id, outcome);
+                        }
                         self.connectivity_notice = None;
                     }
                 }
@@ -983,7 +1134,12 @@ impl RfApp {
                 .finalize_record(scope, record_id, CommandStatus::Rejected, Some(&message))
                 .is_some()
             {
-                self.workflow.durable_rejection_recorded(record_id, message);
+                if matches!(recorded.draft.command, RfCommand::CycleCount(_)) {
+                    self.cycle_count
+                        .durable_rejection_recorded(record_id, message);
+                } else {
+                    self.workflow.durable_rejection_recorded(record_id, message);
+                }
             }
         } else {
             let message = support_message(
@@ -992,6 +1148,8 @@ impl RfApp {
             );
             if recorded.operation == CommandOperation::ExpectedReceiptConfirmation {
                 self.require_receiving_record_reconciliation(scope, record_id, &message);
+            } else if matches!(recorded.draft.command, RfCommand::CycleCount(_)) {
+                self.require_count_record_reconciliation(scope, record_id, &message);
             } else {
                 self.require_record_reconciliation(scope, record_id, &message);
             }
@@ -1132,6 +1290,10 @@ impl RfApp {
                     self.require_receiving_reconciliation(
                         "The durable receipt could not be finalized.",
                     );
+                } else if self.cycle_count.owns_record(record_id) {
+                    self.cycle_count.require_reconciliation(
+                        "The durable count command could not be finalized.".into(),
+                    );
                 } else {
                     self.workflow.require_reconciliation(
                         "The durable command could not be finalized.".into(),
@@ -1166,6 +1328,25 @@ impl RfApp {
             } else {
                 self.workflow.require_reconciliation(message.into());
             }
+        }
+    }
+
+    fn require_count_record_reconciliation(
+        &mut self,
+        scope: &ExecutionScope,
+        record_id: i64,
+        message: &str,
+    ) {
+        if self
+            .finalize_record(
+                scope,
+                record_id,
+                CommandStatus::ReconcileRequired,
+                Some(message),
+            )
+            .is_some()
+        {
+            self.cycle_count.require_reconciliation(message.into());
         }
     }
 

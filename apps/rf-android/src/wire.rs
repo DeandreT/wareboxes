@@ -3,21 +3,25 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use wareboxes_api_contract::v1::{
-    API_PREFIX, ClaimInventoryRelocationByIdRequest, ClaimNextInventoryRelocationRequest,
-    ClaimNextPutawayRequest, ClaimPutawayByIdRequest, ConfirmExpectedReceiptRequest,
+    API_PREFIX, ClaimCycleCountByIdRequest, ClaimInventoryRelocationByIdRequest,
+    ClaimNextCycleCountRequest, ClaimNextInventoryRelocationRequest, ClaimNextPutawayRequest,
+    ClaimPutawayByIdRequest, ConfirmCycleCountRequest, ConfirmExpectedReceiptRequest,
     ConfirmInventoryRelocationRequest, ConfirmLicensePlatePutawayRequest, ConfirmPutawayRequest,
-    ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
-    ExpectedReceiptExceptionReason, ExpectedReceivingLoadStatus, ExpectedReceivingSessionResponse,
-    HeartbeatInventoryRelocationClaimRequest, HeartbeatPutawayClaimRequest, IdempotencyKey,
-    InventoryRelocationClaimHeartbeatResponse, InventoryRelocationClaimReleaseReason,
-    InventoryRelocationClaimResponse, InventoryRelocationClaimWork,
-    InventoryRelocationConfirmationResponse, InventoryRelocationWorkflow,
-    LicensePlatePutawayConfirmationResponse, PutawayClaimHeartbeatResponse,
-    PutawayClaimReleaseReason, PutawayClaimResponse, PutawayClaimSourceLocation, PutawayClaimWork,
-    PutawayConfirmationResponse, PutawayWorkflow as ApiPutawayWorkflow,
+    CycleCountClaimHeartbeatResponse, CycleCountClaimReleaseReason, CycleCountClaimResponse,
+    CycleCountConfirmationResponse, ExpectedReceiptConfirmationResponse,
+    ExpectedReceiptDisposition, ExpectedReceiptExceptionReason, ExpectedReceivingLoadStatus,
+    ExpectedReceivingSessionResponse, HeartbeatInventoryRelocationClaimRequest,
+    HeartbeatPutawayClaimRequest, IdempotencyKey, InventoryRelocationClaimHeartbeatResponse,
+    InventoryRelocationClaimReleaseReason, InventoryRelocationClaimResponse,
+    InventoryRelocationClaimWork, InventoryRelocationConfirmationResponse,
+    InventoryRelocationWorkflow, LicensePlatePutawayConfirmationResponse,
+    PutawayClaimHeartbeatResponse, PutawayClaimReleaseReason, PutawayClaimResponse,
+    PutawayClaimSourceLocation, PutawayClaimWork, PutawayConfirmationResponse,
+    PutawayWorkflow as ApiPutawayWorkflow, ReleaseCycleCountClaimRequest,
     ReleaseInventoryRelocationClaimRequest, ReleasePutawayClaimRequest,
 };
 
+use crate::cycle_count::CycleCountClaim;
 use crate::expected_receiving::{
     ConfirmationMode, ConfirmationResult, DockBarcode, ExpectedReceiptCommand,
     ExpectedReceiptLine as DomainExpectedReceiptLine, ExpectedReceiptLineInput, Expiration,
@@ -26,9 +30,9 @@ use crate::expected_receiving::{
     ReceivingLoadStatus, ReceivingSession, ReceivingSessionInput, StockDimension,
 };
 use crate::workflow::{
-    CommandOutcome, DurableCommandDraft, InventoryRelocationClaim, InventoryRelocationCommand,
-    Location, MovementClaimDetails, MovementKind, MovementOperation, MovementWork, PutawayClaim,
-    PutawayCommand, ReleaseReason, RfCommand,
+    CommandOutcome, CycleCountCommand, DurableCommandDraft, InventoryRelocationClaim,
+    InventoryRelocationCommand, Location, MovementClaimDetails, MovementKind, MovementOperation,
+    MovementWork, PutawayClaim, PutawayCommand, ReleaseReason, RfCommand,
 };
 
 pub const JSON_CONTENT_TYPE: &str = "application/json";
@@ -57,6 +61,10 @@ pub enum ResponseKind {
     RelocationClaim,
     RelocationConfirmation,
     RelocationRelease,
+    CycleCountOptionalClaim,
+    CycleCountClaim,
+    CycleCountConfirmation,
+    CycleCountRelease,
     ExpectedReceiptConfirmation,
 }
 
@@ -319,6 +327,55 @@ pub fn build_durable_request(
                 ResponseKind::RelocationRelease,
             )
         }
+        RfCommand::CycleCount(CycleCountCommand::ClaimNext) => (
+            format!("{API_PREFIX}/cycle-count-claims/next"),
+            serde_json::to_vec(&ClaimNextCycleCountRequest::default())?,
+            ResponseKind::CycleCountOptionalClaim,
+        ),
+        RfCommand::CycleCount(CycleCountCommand::ClaimById { task_id }) => {
+            validate_task_id(*task_id)?;
+            (
+                format!("{API_PREFIX}/cycle-count-claims/{task_id}"),
+                serde_json::to_vec(&ClaimCycleCountByIdRequest::default())?,
+                ResponseKind::CycleCountClaim,
+            )
+        }
+        RfCommand::CycleCount(CycleCountCommand::Confirm {
+            task_id,
+            location_barcode,
+            item_barcode,
+            license_plate_barcode,
+            counted_quantity,
+            note,
+        }) => {
+            validate_task_id(*task_id)?;
+            (
+                format!("{API_PREFIX}/cycle-count-tasks/{task_id}/confirmations"),
+                serde_json::to_vec(&ConfirmCycleCountRequest {
+                    location_barcode: location_barcode.clone(),
+                    item_barcode: item_barcode.clone(),
+                    license_plate_barcode: license_plate_barcode.clone(),
+                    counted_quantity: *counted_quantity,
+                    note: note.clone(),
+                })?,
+                ResponseKind::CycleCountConfirmation,
+            )
+        }
+        RfCommand::CycleCount(CycleCountCommand::Release {
+            task_id,
+            reason,
+            note,
+        }) => {
+            validate_task_id(*task_id)?;
+            (
+                format!("{API_PREFIX}/cycle-count-claims/{task_id}/releases"),
+                serde_json::to_vec(&ReleaseCycleCountClaimRequest {
+                    reason: map_cycle_count_release_reason(*reason),
+                    note: note.clone(),
+                })?,
+                ResponseKind::CycleCountRelease,
+            )
+        }
         RfCommand::ExpectedReceipt(intent) => {
             if !intent.is_current_and_valid() {
                 return Err(WireRequestError::InvalidExpectedReceiptField {
@@ -408,6 +465,29 @@ pub fn decode_command_response(
                 task_id: response.task_id,
             })
         }
+        ResponseKind::CycleCountOptionalClaim => {
+            let claim = serde_json::from_slice::<Option<CycleCountClaimResponse>>(body)?;
+            Ok(CommandOutcome::CycleCountClaimed(
+                claim.map(map_cycle_count_claim).transpose()?.map(Box::new),
+            ))
+        }
+        ResponseKind::CycleCountClaim => Ok(CommandOutcome::CycleCountClaimed(Some(Box::new(
+            map_cycle_count_claim(serde_json::from_slice::<CycleCountClaimResponse>(body)?)?,
+        )))),
+        ResponseKind::CycleCountConfirmation => {
+            let response = serde_json::from_slice::<CycleCountConfirmationResponse>(body)?;
+            Ok(CommandOutcome::CycleCountConfirmed {
+                task_id: response.task_id,
+            })
+        }
+        ResponseKind::CycleCountRelease => {
+            let response = serde_json::from_slice::<
+                wareboxes_api_contract::v1::CycleCountClaimReleaseResponse,
+            >(body)?;
+            Ok(CommandOutcome::CycleCountReleased {
+                task_id: response.task_id,
+            })
+        }
         ResponseKind::ExpectedReceiptConfirmation => {
             let response = decode_expected_receipt_confirmation_response_from_body(status, body)?;
             Ok(CommandOutcome::ExpectedReceipt(response))
@@ -426,6 +506,14 @@ pub fn decode_relocation_claim_response(
 ) -> Result<Option<InventoryRelocationClaim>, WireResponseError> {
     serde_json::from_slice::<Option<InventoryRelocationClaimResponse>>(body)?
         .map(map_relocation_claim)
+        .transpose()
+}
+
+pub fn decode_cycle_count_claim_response(
+    body: &[u8],
+) -> Result<Option<CycleCountClaim>, WireResponseError> {
+    serde_json::from_slice::<Option<CycleCountClaimResponse>>(body)?
+        .map(map_cycle_count_claim)
         .transpose()
 }
 
@@ -476,6 +564,40 @@ pub fn decode_relocation_heartbeat_response(
         return Err(WireResponseError::InvalidHeartbeatTaskId);
     }
     let response = serde_json::from_slice::<InventoryRelocationClaimHeartbeatResponse>(body)?;
+    if response.task_id <= 0 {
+        return Err(WireResponseError::InvalidHeartbeatTaskId);
+    }
+    if response.task_id != expected_task_id {
+        return Err(WireResponseError::HeartbeatTaskMismatch {
+            expected: expected_task_id,
+            actual: response.task_id,
+        });
+    }
+    if DateTime::parse_from_rfc3339(&response.heartbeat_at).is_err() {
+        return Err(WireResponseError::InvalidHeartbeatTimestamp {
+            field: "heartbeat_at",
+        });
+    }
+    if DateTime::parse_from_rfc3339(&response.lease_expires_at).is_err() {
+        return Err(WireResponseError::InvalidHeartbeatTimestamp {
+            field: "lease_expires_at",
+        });
+    }
+    Ok(response)
+}
+
+pub fn decode_cycle_count_heartbeat_response(
+    expected_task_id: i64,
+    status: u16,
+    body: &[u8],
+) -> Result<CycleCountClaimHeartbeatResponse, WireResponseError> {
+    if !(200..300).contains(&status) {
+        return Err(WireResponseError::UnsuccessfulStatus(status));
+    }
+    if expected_task_id <= 0 {
+        return Err(WireResponseError::InvalidHeartbeatTaskId);
+    }
+    let response = serde_json::from_slice::<CycleCountClaimHeartbeatResponse>(body)?;
     if response.task_id <= 0 {
         return Err(WireResponseError::InvalidHeartbeatTaskId);
     }
@@ -712,6 +834,60 @@ fn map_relocation_claim(
         },
         work,
     }))
+}
+
+fn map_cycle_count_claim(
+    response: CycleCountClaimResponse,
+) -> Result<CycleCountClaim, WireResponseError> {
+    if response.task_id <= 0
+        || response.inventory_owner_id <= 0
+        || response.facility_id <= 0
+        || response.location.location_id <= 0
+        || response.location.barcode.trim().is_empty()
+        || response.item.item_id <= 0
+        || response.item.barcodes.is_empty()
+        || response
+            .item
+            .barcodes
+            .iter()
+            .any(|barcode| barcode.trim().is_empty())
+        || response.stock.inventory_balance_id <= 0
+        || response.stock.uom.trim().is_empty()
+        || response
+            .stock
+            .license_plate_barcode
+            .as_ref()
+            .is_some_and(|barcode| barcode.trim().is_empty())
+        || DateTime::parse_from_rfc3339(&response.lease_expires_at).is_err()
+    {
+        return Err(WireResponseError::InvalidClaim);
+    }
+    let inventory_status = match response.stock.inventory_status {
+        wareboxes_api_contract::v1::InventoryBalanceStatus::Available => "available",
+        wareboxes_api_contract::v1::InventoryBalanceStatus::Hold => "hold",
+        wareboxes_api_contract::v1::InventoryBalanceStatus::Damaged => "damaged",
+        wareboxes_api_contract::v1::InventoryBalanceStatus::Quarantine => "quarantine",
+    };
+    Ok(CycleCountClaim {
+        task_id: response.task_id,
+        inventory_owner_id: response.inventory_owner_id,
+        facility_id: response.facility_id,
+        priority: response.priority,
+        instructions: response.instructions,
+        lease_expires_at: response.lease_expires_at,
+        location_id: response.location.location_id,
+        location_name: response.location.name,
+        location_barcode: response.location.barcode,
+        item_id: response.item.item_id,
+        item_description: response.item.description,
+        item_barcodes: response.item.barcodes,
+        inventory_balance_id: response.stock.inventory_balance_id,
+        license_plate_barcode: response.stock.license_plate_barcode,
+        uom: response.stock.uom,
+        lot: response.stock.lot,
+        serial: response.stock.serial,
+        inventory_status: inventory_status.into(),
+    })
 }
 
 fn map_receiving_session(
@@ -1153,6 +1329,17 @@ const fn map_relocation_release_reason(
     }
 }
 
+const fn map_cycle_count_release_reason(reason: ReleaseReason) -> CycleCountClaimReleaseReason {
+    match reason {
+        ReleaseReason::WorkInterrupted => CycleCountClaimReleaseReason::WorkInterrupted,
+        ReleaseReason::EquipmentUnavailable => CycleCountClaimReleaseReason::EquipmentUnavailable,
+        ReleaseReason::SafetyIssue => CycleCountClaimReleaseReason::SafetyIssue,
+        ReleaseReason::Other | ReleaseReason::DestinationBlocked => {
+            CycleCountClaimReleaseReason::Other
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -1174,6 +1361,15 @@ mod tests {
             command_id: "relocation-command-1".into(),
             idempotency_key: "relocation:key-1".into(),
             command: RfCommand::InventoryRelocation(command),
+        }
+    }
+
+    fn cycle_count_draft(command: CycleCountCommand) -> DurableCommandDraft {
+        DurableCommandDraft {
+            schema_version: 1,
+            command_id: "cycle-count-command-1".into(),
+            idempotency_key: "cycle-count:key-1".into(),
+            command: RfCommand::CycleCount(command),
         }
     }
 
@@ -1419,6 +1615,84 @@ mod tests {
             decode_command_response(ResponseKind::RelocationRelease, 200, &release).unwrap(),
             CommandOutcome::InventoryRelocationReleased { task_id: 52 }
         );
+    }
+
+    #[test]
+    fn cycle_count_confirmation_persists_every_scanned_identity() {
+        let request = build_durable_request(&cycle_count_draft(CycleCountCommand::Confirm {
+            task_id: 71,
+            location_barcode: "A-01-02".into(),
+            item_barcode: "ITEM-71".into(),
+            license_plate_barcode: Some("LP-71".into()),
+            counted_quantity: 0,
+            note: Some("Location empty".into()),
+        }))
+        .unwrap();
+
+        assert_eq!(request.path, "/api/v1/cycle-count-tasks/71/confirmations");
+        assert_eq!(
+            body(&request),
+            json!({
+                "location_barcode": "A-01-02",
+                "item_barcode": "ITEM-71",
+                "license_plate_barcode": "LP-71",
+                "counted_quantity": 0,
+                "note": "Location empty"
+            })
+        );
+        assert_eq!(request.response_kind, ResponseKind::CycleCountConfirmation);
+    }
+
+    #[test]
+    fn cycle_count_claim_is_blind_and_requires_a_scannable_item() {
+        let response = json!({
+            "task_id": 71,
+            "inventory_owner_id": 7,
+            "facility_id": 9,
+            "priority": 80,
+            "instructions": null,
+            "due_at": null,
+            "lease_expires_at": "2026-07-27T02:00:00Z",
+            "location": {
+                "location_id": 11,
+                "barcode": "A-01-02",
+                "name": "A-01-02"
+            },
+            "item": {
+                "item_id": 15,
+                "description": "Widget",
+                "barcodes": ["ITEM-71"]
+            },
+            "stock": {
+                "inventory_balance_id": 13,
+                "license_plate_barcode": null,
+                "uom": "each",
+                "lot": "LOT-1",
+                "expiration": null,
+                "serial": null,
+                "inventory_status": "available"
+            }
+        });
+        assert!(response["stock"].get("quantity").is_none());
+        let encoded = serde_json::to_vec(&response).unwrap();
+        let CommandOutcome::CycleCountClaimed(Some(claim)) =
+            decode_command_response(ResponseKind::CycleCountOptionalClaim, 200, &encoded).unwrap()
+        else {
+            panic!("expected cycle count claim");
+        };
+        assert_eq!(claim.task_id, 71);
+        assert_eq!(claim.item_barcodes, vec!["ITEM-71"]);
+
+        let mut invalid = response;
+        invalid["item"]["barcodes"] = json!([]);
+        assert!(matches!(
+            decode_command_response(
+                ResponseKind::CycleCountOptionalClaim,
+                200,
+                &serde_json::to_vec(&invalid).unwrap()
+            ),
+            Err(WireResponseError::InvalidClaim)
+        ));
     }
 
     #[test]

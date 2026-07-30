@@ -11,7 +11,9 @@ use uuid::Uuid;
 use crate::wire::{
     DurableHttpRequest, HttpMethod, ResponseKind, WireRequestError, build_durable_request,
 };
-use crate::workflow::{DurableCommandDraft, InventoryRelocationCommand, PutawayCommand, RfCommand};
+use crate::workflow::{
+    CycleCountCommand, DurableCommandDraft, InventoryRelocationCommand, PutawayCommand, RfCommand,
+};
 
 mod schema;
 
@@ -53,6 +55,7 @@ pub enum CommandOperation {
     ConfirmLicensePlate,
     Release,
     ExpectedReceiptConfirmation,
+    CycleCountConfirmation,
 }
 
 impl CommandOperation {
@@ -64,6 +67,7 @@ impl CommandOperation {
             Self::ConfirmLicensePlate => "confirm_license_plate",
             Self::Release => "release",
             Self::ExpectedReceiptConfirmation => "expected_receipt_confirmation",
+            Self::CycleCountConfirmation => "cycle_count_confirmation",
         }
     }
 
@@ -75,6 +79,7 @@ impl CommandOperation {
             "confirm_license_plate" => Ok(Self::ConfirmLicensePlate),
             "release" => Ok(Self::Release),
             "expected_receipt_confirmation" => Ok(Self::ExpectedReceiptConfirmation),
+            "cycle_count_confirmation" => Ok(Self::CycleCountConfirmation),
             _ => Err(CommandStoreError::CorruptRecord(
                 "unknown command operation".into(),
             )),
@@ -106,6 +111,12 @@ impl From<&RfCommand> for CommandOperation {
                 Self::Release
             }
             RfCommand::ExpectedReceipt(_) => Self::ExpectedReceiptConfirmation,
+            RfCommand::CycleCount(CycleCountCommand::ClaimNext) => Self::ClaimNext,
+            RfCommand::CycleCount(CycleCountCommand::ClaimById { .. }) => Self::ClaimById,
+            RfCommand::CycleCount(CycleCountCommand::Confirm { .. }) => {
+                Self::CycleCountConfirmation
+            }
+            RfCommand::CycleCount(CycleCountCommand::Release { .. }) => Self::Release,
         }
     }
 }
@@ -1172,6 +1183,10 @@ const fn response_kind_name(kind: ResponseKind) -> &'static str {
         ResponseKind::RelocationClaim => "relocation_claim",
         ResponseKind::RelocationConfirmation => "relocation_confirmation",
         ResponseKind::RelocationRelease => "relocation_release",
+        ResponseKind::CycleCountOptionalClaim => "cycle_count_optional_claim",
+        ResponseKind::CycleCountClaim => "cycle_count_claim",
+        ResponseKind::CycleCountConfirmation => "cycle_count_confirmation",
+        ResponseKind::CycleCountRelease => "cycle_count_release",
         ResponseKind::ExpectedReceiptConfirmation => "expected_receipt_confirmation",
     }
 }
@@ -1187,6 +1202,10 @@ fn parse_response_kind(value: &str) -> Result<ResponseKind, CommandStoreError> {
         "relocation_claim" => Ok(ResponseKind::RelocationClaim),
         "relocation_confirmation" => Ok(ResponseKind::RelocationConfirmation),
         "relocation_release" => Ok(ResponseKind::RelocationRelease),
+        "cycle_count_optional_claim" => Ok(ResponseKind::CycleCountOptionalClaim),
+        "cycle_count_claim" => Ok(ResponseKind::CycleCountClaim),
+        "cycle_count_confirmation" => Ok(ResponseKind::CycleCountConfirmation),
+        "cycle_count_release" => Ok(ResponseKind::CycleCountRelease),
         "expected_receipt_confirmation" => Ok(ResponseKind::ExpectedReceiptConfirmation),
         _ => Err(CommandStoreError::CorruptRecord(
             "unknown response kind".into(),
