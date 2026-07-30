@@ -2,31 +2,35 @@ use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::{
     components::{Route, Router, Routes, A},
+    hooks::use_navigate,
     StaticSegment,
 };
-use wareboxes_core::dto::{OrderPage, SessionUser};
-use wareboxes_core::models::{Facility, InventoryBalance, InventoryOwner, Order};
+use wareboxes_core::dto::{
+    AccessScopeResource, AccessScopeWorkspace, OrderPage, WebSessionContext,
+};
+use wareboxes_core::models::{InventoryBalance, Order};
 
 use crate::api;
 use crate::view_model::{
     facility_inventory, format_quantity, has_permission, open_order_count, user_name,
 };
 
-#[cfg(target_arch = "wasm32")]
-const SESSION_STORAGE_KEY: &str = "wareboxes.web.session.v1";
+const SESSION_BOOTSTRAP_ID: &str = "wareboxes-session-bootstrap";
+
+#[derive(Clone, Default)]
+pub struct InitialWebSession(pub Option<WebSessionContext>);
 
 #[derive(Clone)]
 enum SessionState {
-    Anonymous,
-    Authenticated(Box<SessionUser>),
+    Anonymous(Option<String>),
+    Authenticated(Box<WebSessionContext>),
 }
 
 #[derive(Clone, Default)]
 struct WorkspaceData {
     orders: Option<OrderPage>,
     balances: Vec<InventoryBalance>,
-    facilities: Vec<Facility>,
-    inventory_owners: Vec<InventoryOwner>,
+    access: AccessScopeWorkspace,
 }
 
 #[derive(Clone)]
@@ -41,6 +45,7 @@ enum Section {
     Overview,
     Orders,
     Inventory,
+    Access,
 }
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -69,24 +74,29 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
-    let session_state = RwSignal::new(SessionState::Anonymous);
+    let initial_session = initial_web_session();
+    let bootstrap = serialize_bootstrap(&initial_session);
+    let session_state = RwSignal::new(match initial_session {
+        Some(session) => SessionState::Authenticated(Box::new(session)),
+        None => SessionState::Anonymous(None),
+    });
     provide_context(session_state);
 
-    #[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
-    Effect::new(move || {
-        leptos::task::spawn_local(restore_session(session_state));
-    });
-
     view! {
+        <script
+            id=SESSION_BOOTSTRAP_ID
+            type="application/json"
+            inner_html=bootstrap
+        ></script>
         <Stylesheet id="wareboxes-web" href="/pkg/wareboxes-web.css"/>
         <Title text="Wareboxes"/>
         <Router>
-            {move || match session_state.get() {
-                SessionState::Anonymous => view! { <LoginPage/> }.into_any(),
-                SessionState::Authenticated(session) => {
-                    view! { <OperationsApp session=*session/> }.into_any()
-                }
-            }}
+            <Routes fallback=|| view! { <NotFoundPage/> }.into_any()>
+                <Route path=StaticSegment("") view=OverviewPage/>
+                <Route path=StaticSegment("orders") view=OrdersPage/>
+                <Route path=StaticSegment("inventory") view=InventoryPage/>
+                <Route path=StaticSegment("access") view=AccessPage/>
+            </Routes>
         </Router>
     }
 }
@@ -104,7 +114,7 @@ fn Brand() -> impl IntoView {
 }
 
 #[component]
-fn LoginPage() -> impl IntoView {
+fn LoginPage(notice: Option<String>) -> impl IntoView {
     let session_state = expect_context::<RwSignal<SessionState>>();
     let email = RwSignal::new(String::new());
     let password = RwSignal::new(String::new());
@@ -128,7 +138,6 @@ fn LoginPage() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match api::login(email_value, password_value).await {
                 Ok(session) => {
-                    store_session(&session);
                     session_state.set(SessionState::Authenticated(Box::new(session)));
                 }
                 Err(api_error) => {
@@ -174,6 +183,12 @@ fn LoginPage() -> impl IntoView {
                         <p>"Use your Wareboxes operator account."</p>
                     </div>
 
+                    {notice.map(|message| {
+                        view! {
+                            <div class="session-notice" role="status">{message}</div>
+                        }
+                    })}
+
                     <label for="email">"Email"</label>
                     <input
                         id="email"
@@ -218,39 +233,52 @@ fn LoginPage() -> impl IntoView {
 }
 
 #[component]
-fn OperationsApp(session: SessionUser) -> impl IntoView {
-    let workspace_state = RwSignal::new(WorkspaceState::Loading);
-    provide_context(workspace_state);
-    provide_context(session.clone());
-    request_workspace(session, workspace_state);
+fn AuthenticatedPage(section: Section) -> impl IntoView {
+    let session_state = expect_context::<RwSignal<SessionState>>();
 
-    view! {
-        <Routes fallback=|| view! { <NotFoundPage/> }.into_any()>
-            <Route path=StaticSegment("") view=OverviewPage/>
-            <Route path=StaticSegment("orders") view=OrdersPage/>
-            <Route path=StaticSegment("inventory") view=InventoryPage/>
-        </Routes>
+    move || match session_state.get() {
+        SessionState::Anonymous(notice) => view! { <LoginPage notice/> }.into_any(),
+        SessionState::Authenticated(session) => {
+            view! { <AuthenticatedWorkspace session=*session section/> }.into_any()
+        }
     }
 }
 
-fn request_workspace(session: SessionUser, state: RwSignal<WorkspaceState>) {
+#[component]
+fn AuthenticatedWorkspace(session: WebSessionContext, section: Section) -> impl IntoView {
+    let workspace_state = RwSignal::new(WorkspaceState::Loading);
+    provide_context(workspace_state);
+    provide_context(session.clone());
+    #[cfg(target_arch = "wasm32")]
+    request_workspace(session, workspace_state);
+
+    view! {
+        <PageFrame section>
+            <WorkspaceContent section/>
+        </PageFrame>
+    }
+}
+
+fn request_workspace(session: WebSessionContext, state: RwSignal<WorkspaceState>) {
     state.set(WorkspaceState::Loading);
     leptos::task::spawn_local(async move {
         match load_workspace(&session).await {
             Ok(data) => state.set(WorkspaceState::Ready(data)),
             Err(error) if error.unauthorized => {
-                clear_stored_session();
                 let root = expect_context::<RwSignal<SessionState>>();
-                root.set(SessionState::Anonymous);
+                root.set(SessionState::Anonymous(Some(
+                    "Your session ended. Sign in to continue.".to_owned(),
+                )));
             }
             Err(error) => state.set(WorkspaceState::Failed(error.message)),
         }
     });
 }
 
-async fn load_workspace(session: &SessionUser) -> Result<WorkspaceData, api::ApiError> {
+async fn load_workspace(session: &WebSessionContext) -> Result<WorkspaceData, api::ApiError> {
+    let access = api::access().await?;
     let orders = if has_permission(session, "orders") {
-        Some(api::orders(session).await?)
+        Some(api::orders().await?)
     } else {
         None
     };
@@ -258,52 +286,43 @@ async fn load_workspace(session: &SessionUser) -> Result<WorkspaceData, api::Api
     if !has_permission(session, "wms") {
         return Ok(WorkspaceData {
             orders,
+            access,
             ..WorkspaceData::default()
         });
     }
 
-    let balances = api::balances(session).await?;
-    let facilities = api::facilities(session).await?;
-    let inventory_owners = api::inventory_owners(session).await?;
+    let balances = api::balances().await?;
     Ok(WorkspaceData {
         orders,
         balances,
-        facilities,
-        inventory_owners,
+        access,
     })
 }
 
 #[component]
 fn OverviewPage() -> impl IntoView {
-    view! {
-        <PageFrame section=Section::Overview>
-            <WorkspaceContent section=Section::Overview/>
-        </PageFrame>
-    }
+    view! { <AuthenticatedPage section=Section::Overview/> }
 }
 
 #[component]
 fn OrdersPage() -> impl IntoView {
-    view! {
-        <PageFrame section=Section::Orders>
-            <WorkspaceContent section=Section::Orders/>
-        </PageFrame>
-    }
+    view! { <AuthenticatedPage section=Section::Orders/> }
 }
 
 #[component]
 fn InventoryPage() -> impl IntoView {
-    view! {
-        <PageFrame section=Section::Inventory>
-            <WorkspaceContent section=Section::Inventory/>
-        </PageFrame>
-    }
+    view! { <AuthenticatedPage section=Section::Inventory/> }
+}
+
+#[component]
+fn AccessPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::Access/> }
 }
 
 #[component]
 fn WorkspaceContent(section: Section) -> impl IntoView {
     let state = expect_context::<RwSignal<WorkspaceState>>();
-    let session = expect_context::<SessionUser>();
+    let session = expect_context::<WebSessionContext>();
 
     move || match state.get() {
         WorkspaceState::Loading => view! { <WorkspaceLoading/> }.into_any(),
@@ -318,6 +337,7 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
             Section::Inventory if has_permission(&session, "wms") => {
                 view! { <Inventory data/> }.into_any()
             }
+            Section::Access => view! { <Access data/> }.into_any(),
             _ => view! { <AccessDenied/> }.into_any(),
         },
     }
@@ -325,7 +345,7 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
 
 #[component]
 fn PageFrame(section: Section, children: Children) -> impl IntoView {
-    let session = expect_context::<SessionUser>();
+    let session = expect_context::<WebSessionContext>();
     let session_state = expect_context::<RwSignal<SessionState>>();
     let display_name = user_name(&session);
     let initials = display_name
@@ -335,17 +355,63 @@ fn PageFrame(section: Section, children: Children) -> impl IntoView {
         .collect::<String>()
         .to_uppercase();
     let tenant_name = session.active_tenant.name.clone();
+    let tenant_id = session.active_tenant.tenant_id.get();
     let email = session.user.email.clone();
     let can_view_orders = has_permission(&session, "orders");
     let can_view_inventory = has_permission(&session, "wms");
-    let session_for_logout = session.clone();
+    let available_tenants = session.available_tenants.clone();
+    let tenant_count = available_tenants.len();
+    let tenant_options = available_tenants
+        .into_iter()
+        .map(|tenant| {
+            view! {
+                <option value=tenant.tenant_id.to_string()>{tenant.name}</option>
+            }
+        })
+        .collect_view();
+    let selected_tenant = RwSignal::new(tenant_id.to_string());
+    let switching_tenant = RwSignal::new(false);
+    let tenant_error = RwSignal::new(None::<String>);
+    let navigate = use_navigate();
+    let active_tenant_id = tenant_id;
+
+    let switch_tenant = move |event| {
+        let value = event_target_value(&event);
+        selected_tenant.set(value.clone());
+        let Ok(selected_id) = value.parse::<i64>() else {
+            selected_tenant.set(active_tenant_id.to_string());
+            return;
+        };
+        if selected_id == active_tenant_id || switching_tenant.get_untracked() {
+            return;
+        }
+        switching_tenant.set(true);
+        tenant_error.set(None);
+        let navigate = navigate.clone();
+        leptos::task::spawn_local(async move {
+            match api::select_tenant(selected_id).await {
+                Ok(context) => {
+                    session_state.set(SessionState::Authenticated(Box::new(context)));
+                    navigate("/", Default::default());
+                }
+                Err(error) if error.unauthorized => {
+                    session_state.set(SessionState::Anonymous(Some(
+                        "Your session ended. Sign in to continue.".to_owned(),
+                    )));
+                }
+                Err(error) => {
+                    selected_tenant.set(active_tenant_id.to_string());
+                    tenant_error.set(Some(error.message));
+                    switching_tenant.set(false);
+                }
+            }
+        });
+    };
 
     let sign_out = move |_| {
-        let session = session_for_logout.clone();
-        clear_stored_session();
-        session_state.set(SessionState::Anonymous);
+        session_state.set(SessionState::Anonymous(None));
         leptos::task::spawn_local(async move {
-            api::logout(&session).await;
+            api::logout().await;
         });
     };
 
@@ -386,19 +452,43 @@ fn PageFrame(section: Section, children: Children) -> impl IntoView {
                             </A>
                         }
                     })}
+                    <p class="nav-group">"Context"</p>
+                    <A
+                        href="/access"
+                        attr:class=nav_class(section == Section::Access)
+                        attr:aria-current=aria_current(section == Section::Access)
+                    >
+                        "Access"
+                    </A>
                 </nav>
                 <div class="sidebar-scope">
                     <span>"Active tenant"</span>
                     <strong>{tenant_name.clone()}</strong>
-                    <small>{session.active_tenant.slug.clone()}</small>
+                    <small>{scope_summary(&session)}</small>
                 </div>
             </aside>
 
             <div class="app-region">
                 <header class="topbar">
-                    <div class="tenant-heading">
-                        <span>"Tenant"</span>
-                        <strong>{tenant_name}</strong>
+                    <div class="tenant-control">
+                        <label for="tenant-selector">"Tenant"</label>
+                        <select
+                            id="tenant-selector"
+                            prop:value=move || selected_tenant.get()
+                            disabled=move || switching_tenant.get() || tenant_count <= 1
+                            on:change=switch_tenant
+                        >
+                            {tenant_options}
+                        </select>
+                        {move || {
+                            tenant_error.get().map(|message| {
+                                view! {
+                                    <span class="tenant-switch-error" role="alert" title=message>
+                                        "Tenant switch failed"
+                                    </span>
+                                }
+                            })
+                        }}
                     </div>
                     <div class="identity">
                         <span class="avatar" aria-hidden="true">{initials}</span>
@@ -429,6 +519,26 @@ fn aria_current(active: bool) -> Option<&'static str> {
     active.then_some("page")
 }
 
+fn scope_summary(session: &WebSessionContext) -> String {
+    let facilities = if session.active_tenant.site_scope.all_facilities {
+        "All facilities".to_owned()
+    } else {
+        format!(
+            "{} facilities",
+            session.active_tenant.site_scope.facility_ids.len()
+        )
+    };
+    let owners = if session.active_tenant.owner_scope.all_inventory_owners {
+        "all owners".to_owned()
+    } else {
+        format!(
+            "{} owners",
+            session.active_tenant.owner_scope.inventory_owner_ids.len()
+        )
+    };
+    format!("{facilities}, {owners}")
+}
+
 #[component]
 fn WorkspaceLoading() -> impl IntoView {
     view! {
@@ -443,7 +553,7 @@ fn WorkspaceLoading() -> impl IntoView {
 #[component]
 fn WorkspaceError(
     message: String,
-    session: SessionUser,
+    session: WebSessionContext,
     state: RwSignal<WorkspaceState>,
 ) -> impl IntoView {
     let retry = move |_| request_workspace(session.clone(), state);
@@ -472,7 +582,7 @@ fn AccessDenied() -> impl IntoView {
 
 #[component]
 fn Overview(data: WorkspaceData) -> impl IntoView {
-    let session = expect_context::<SessionUser>();
+    let session = expect_context::<WebSessionContext>();
     let can_view_orders = has_permission(&session, "orders");
     let can_view_inventory = has_permission(&session, "wms");
     let total_on_hand = data
@@ -505,8 +615,8 @@ fn Overview(data: WorkspaceData) -> impl IntoView {
         .unwrap_or_default();
     let facility_totals = facility_inventory(&data.balances);
     let facility_totals_empty = facility_totals.is_empty();
-    let facility_count = data.facilities.len();
-    let inventory_owner_count = data.inventory_owners.len();
+    let facility_count = data.access.facilities.len();
+    let inventory_owner_count = data.access.inventory_owners.len();
     let overview_class = if can_view_orders && can_view_inventory {
         "overview-grid"
     } else {
@@ -605,21 +715,17 @@ fn Overview(data: WorkspaceData) -> impl IntoView {
             })}
         </section>
 
-        {can_view_inventory.then(|| {
-            view! {
-                <section class="scope-band">
-                    <div>
-                        <span>"Facilities"</span>
-                        <strong>{facility_count}</strong>
-                    </div>
-                    <div>
-                        <span>"Inventory owners"</span>
-                        <strong>{inventory_owner_count}</strong>
-                    </div>
-                    <p>"Counts reflect the site and owner scope assigned to this account."</p>
-                </section>
-            }
-        })}
+        <section class="scope-band">
+            <div>
+                <span>"Facilities"</span>
+                <strong>{facility_count}</strong>
+            </div>
+            <div>
+                <span>"Inventory owners"</span>
+                <strong>{inventory_owner_count}</strong>
+            </div>
+            <p>"Counts reflect the exact access scope assigned to this account."</p>
+        </section>
     }
 }
 
@@ -636,7 +742,7 @@ fn Metric(label: &'static str, value: String, tone: &'static str) -> impl IntoVi
 #[component]
 fn RefreshButton() -> impl IntoView {
     let state = expect_context::<RwSignal<WorkspaceState>>();
-    let session = expect_context::<SessionUser>();
+    let session = expect_context::<WebSessionContext>();
     let refresh = move |_| request_workspace(session.clone(), state);
     view! {
         <button class="secondary-action" type="button" on:click=refresh>
@@ -795,6 +901,124 @@ fn Inventory(data: WorkspaceData) -> impl IntoView {
 }
 
 #[component]
+fn Access(data: WorkspaceData) -> impl IntoView {
+    let session = expect_context::<WebSessionContext>();
+    let facility_scope = if session.active_tenant.site_scope.all_facilities {
+        "All facilities"
+    } else {
+        "Assigned facilities"
+    };
+    let owner_scope = if session.active_tenant.owner_scope.all_inventory_owners {
+        "All inventory owners"
+    } else {
+        "Assigned inventory owners"
+    };
+
+    view! {
+        <section class="page-heading">
+            <div>
+                <p class="eyebrow">"Access context"</p>
+                <h1>"Facility and owner scope"</h1>
+                <p>"The exact operational resources available in the selected tenant."</p>
+            </div>
+            <RefreshButton/>
+        </section>
+        <section class="access-grid">
+            <ScopeResourceList
+                title="Facilities"
+                scope_label=facility_scope
+                resources=data.access.facilities
+            />
+            <ScopeResourceList
+                title="Inventory owners"
+                scope_label=owner_scope
+                resources=data.access.inventory_owners
+            />
+        </section>
+    }
+}
+
+#[component]
+fn ScopeResourceList(
+    title: &'static str,
+    scope_label: &'static str,
+    resources: Vec<AccessScopeResource>,
+) -> impl IntoView {
+    let filter = RwSignal::new(String::new());
+    let count = resources.len();
+    view! {
+        <section class="data-section scope-resource-section">
+            <div class="section-title scope-resource-title">
+                <div>
+                    <p class="eyebrow">{scope_label}</p>
+                    <h2>{title} <span>{count}</span></h2>
+                </div>
+                <label class="compact-search">
+                    <span class="sr-only">{format!("Filter {title}")}</span>
+                    <input
+                        type="search"
+                        placeholder="Filter"
+                        prop:value=move || filter.get()
+                        on:input=move |event| filter.set(event_target_value(&event))
+                    />
+                </label>
+            </div>
+            <div class="table-scroll">
+                <table class="data-table scope-table">
+                    <thead>
+                        <tr>
+                            <th>"Name"</th>
+                            <th class="numeric">"ID"</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {move || {
+                            let query = filter.get().trim().to_ascii_lowercase();
+                            let matching_resources = resources
+                                .iter()
+                                .filter(|resource| {
+                                    query.is_empty()
+                                        || resource.name.to_ascii_lowercase().contains(&query)
+                                        || resource.id.to_string().contains(&query)
+                                })
+                                .collect::<Vec<_>>();
+                            if matching_resources.is_empty() {
+                                let message = if query.is_empty() {
+                                    "No resources are assigned in this scope."
+                                } else {
+                                    "No matching resources."
+                                };
+                                view! {
+                                    <tr>
+                                        <td class="table-empty-row" colspan="2">
+                                            {message}
+                                        </td>
+                                    </tr>
+                                }
+                                    .into_any()
+                            } else {
+                                matching_resources
+                                    .into_iter()
+                                    .map(|resource| {
+                                        view! {
+                                            <tr>
+                                                <td><strong>{resource.name.clone()}</strong></td>
+                                                <td class="numeric">{resource.id}</td>
+                                            </tr>
+                                        }
+                                    })
+                                    .collect_view()
+                                    .into_any()
+                            }
+                        }}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    }
+}
+
+#[component]
 fn EmptyState(message: &'static str) -> impl IntoView {
     view! { <p class="empty-state">{message}</p> }
 }
@@ -810,66 +1034,38 @@ fn NotFoundPage() -> impl IntoView {
     }
 }
 
-#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
-async fn restore_session(state: RwSignal<SessionState>) {
-    let Some(mut session) = read_stored_session() else {
-        return;
-    };
-    match api::restore(&session).await {
-        Ok(user) => {
-            session.user = user;
-            store_session(&session);
-            state.set(SessionState::Authenticated(Box::new(session)));
-        }
-        Err(_) => {
-            clear_stored_session();
-            state.set(SessionState::Anonymous);
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn read_stored_session() -> Option<SessionUser> {
-    let storage = web_sys::window()?.local_storage().ok().flatten()?;
-    let value = storage.get_item(SESSION_STORAGE_KEY).ok().flatten()?;
-    serde_json::from_str(&value).ok()
-}
-
-#[cfg(target_arch = "wasm32")]
-fn store_session(session: &SessionUser) {
-    let Some(storage) = web_sys::window()
-        .and_then(|window| window.local_storage().ok())
-        .flatten()
-    else {
-        return;
-    };
-    if let Ok(value) = serde_json::to_string(session) {
-        let _ = storage.set_item(SESSION_STORAGE_KEY, &value);
-    }
-}
-
 #[cfg(not(target_arch = "wasm32"))]
-fn store_session(_session: &SessionUser) {}
-
-#[cfg(target_arch = "wasm32")]
-fn clear_stored_session() {
-    if let Some(storage) = web_sys::window()
-        .and_then(|window| window.local_storage().ok())
-        .flatten()
-    {
-        let _ = storage.remove_item(SESSION_STORAGE_KEY);
-    }
+fn initial_web_session() -> Option<WebSessionContext> {
+    use_context::<InitialWebSession>().and_then(|initial| initial.0)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn clear_stored_session() {}
+#[cfg(target_arch = "wasm32")]
+fn initial_web_session() -> Option<WebSessionContext> {
+    let document = web_sys::window()?.document()?;
+    let raw = document
+        .get_element_by_id(SESSION_BOOTSTRAP_ID)?
+        .text_content()?;
+    serde_json::from_str::<Option<WebSessionContext>>(&raw)
+        .ok()
+        .flatten()
+}
+
+fn serialize_bootstrap(session: &Option<WebSessionContext>) -> String {
+    escape_bootstrap_json(serde_json::to_string(session).unwrap_or_else(|_| "null".to_owned()))
+}
+
+fn escape_bootstrap_json(json: String) -> String {
+    json.replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+}
 
 #[cfg(all(test, feature = "ssr"))]
 mod tests {
     use leptos::prelude::*;
     use leptos_router::location::RequestUrl;
 
-    use super::App;
+    use super::{escape_bootstrap_json, App};
 
     #[test]
     fn server_render_contains_hydratable_sign_in() {
@@ -880,5 +1076,12 @@ mod tests {
         assert!(html.contains("Sign in"));
         assert!(html.contains("Warehouse operations"));
         assert!(html.contains("wareboxes"));
+    }
+
+    #[test]
+    fn session_bootstrap_cannot_close_its_script_element() {
+        let escaped = escape_bootstrap_json(r#""</script>&""#.to_owned());
+
+        assert_eq!(escaped, r#""\u003c/script\u003e\u0026""#);
     }
 }

@@ -52,6 +52,9 @@ BIND_ADDR=127.0.0.1:8080
 ALLOW_PUBLIC_REGISTRATION=false
 CORS_ALLOWED_ORIGINS=
 MAX_REQUEST_BODY_BYTES=1048576
+WEB_SESSION_ABSOLUTE_TTL_SECONDS=43200
+WEB_SESSION_IDLE_TTL_SECONDS=1800
+SECURE_WEB_SESSION_COOKIE=true
 RUST_LOG=info,wareboxes_server=info
 EOF
 fi
@@ -97,6 +100,9 @@ set_env_value LEPTOS_OUTPUT_NAME wareboxes-web /etc/wareboxes/wareboxes.env
 set_env_value LEPTOS_SITE_ROOT /opt/wareboxes/current/site /etc/wareboxes/wareboxes.env
 set_env_value LEPTOS_SITE_PKG_DIR pkg /etc/wareboxes/wareboxes.env
 set_env_value LEPTOS_ENV PROD /etc/wareboxes/wareboxes.env
+set_env_value WEB_SESSION_ABSOLUTE_TTL_SECONDS 43200 /etc/wareboxes/wareboxes.env
+set_env_value WEB_SESSION_IDLE_TTL_SECONDS 1800 /etc/wareboxes/wareboxes.env
+set_env_value SECURE_WEB_SESSION_COOKIE true /etc/wareboxes/wareboxes.env
 chown root:wareboxes /etc/wareboxes/wareboxes.env
 chmod 0640 /etc/wareboxes/wareboxes.env
 

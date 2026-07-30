@@ -101,6 +101,36 @@ pub struct SessionUser {
     pub settings: UserSettings,
 }
 
+/// Browser-safe authenticated context. The web session token is held only in
+/// an HTTP-only cookie and is intentionally absent from this projection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSessionContext {
+    pub user: User,
+    pub active_tenant: TenantAccess,
+    pub available_tenants: Vec<TenantAccess>,
+    #[serde(default)]
+    pub settings: UserSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
+pub struct SelectTenantRequest {
+    #[validate(range(min = 1, message = "Invalid tenant ID"))]
+    pub tenant_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccessScopeResource {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AccessScopeWorkspace {
+    pub facilities: Vec<AccessScopeResource>,
+    pub inventory_owners: Vec<AccessScopeResource>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Validate, Default)]
 pub struct UserSettings {
     pub light_mode: bool,

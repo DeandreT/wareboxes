@@ -48,8 +48,9 @@ record. Wareboxes owns facility execution and its auditable inventory consequenc
 - Partition and archive durable command records without weakening exact replay or
   actor attribution guarantees.
 - Transactional outbox and inbox foundations.
-- Restricted registration and CORS, protected credentials, login controls, short
-  sessions, and production identity integration boundaries.
+- Restricted registration and CORS, protected credentials, login controls,
+  purpose-bound short browser sessions with server-held tenant context, and
+  production identity integration boundaries.
 - Production container images, infrastructure definitions, managed secrets,
   telemetry, readiness, backups, and restore automation.
 - Tenant-isolation, authorization, concurrency, migration, and load-test harnesses.

@@ -1,5 +1,5 @@
-use wareboxes_core::dto::{OrderPage, SessionUser};
-use wareboxes_core::models::{Facility, InventoryBalance, InventoryOwner, User};
+use wareboxes_core::dto::{AccessScopeWorkspace, OrderPage, WebSessionContext};
+use wareboxes_core::models::InventoryBalance;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiError {
@@ -21,16 +21,12 @@ impl ApiError {
 mod browser {
     use gloo_net::http::{Request, Response};
     use serde::de::DeserializeOwned;
-    use wareboxes_core::dto::{ErrorResponse, LoginRequest};
+    use wareboxes_core::dto::{ErrorResponse, LoginRequest, SelectTenantRequest};
 
-    use super::{
-        ApiError, Facility, InventoryBalance, InventoryOwner, OrderPage, SessionUser, User,
-    };
+    use super::{AccessScopeWorkspace, ApiError, InventoryBalance, OrderPage, WebSessionContext};
 
-    const API_BASE: Option<&str> = option_env!("WAREBOXES_API_URL");
-
-    pub async fn login(email: String, password: String) -> Result<SessionUser, ApiError> {
-        let request = Request::post(&url("/api/auth/login"))
+    pub async fn login(email: String, password: String) -> Result<WebSessionContext, ApiError> {
+        let request = Request::post(&url("/api/web/auth/login"))
             .json(&LoginRequest { email, password })
             .map_err(|error| ApiError {
                 message: format!("Could not prepare the sign-in request: {error}"),
@@ -39,46 +35,34 @@ mod browser {
         decode(request.send().await).await
     }
 
-    pub async fn restore(session: &SessionUser) -> Result<User, ApiError> {
-        get("/api/auth/me", session).await
+    pub async fn select_tenant(tenant_id: i64) -> Result<WebSessionContext, ApiError> {
+        let request = Request::post(&url("/api/web/auth/tenant"))
+            .json(&SelectTenantRequest { tenant_id })
+            .map_err(|error| ApiError {
+                message: format!("Could not prepare the tenant request: {error}"),
+                unauthorized: false,
+            })?;
+        decode(request.send().await).await
     }
 
-    pub async fn logout(session: &SessionUser) {
-        let _ = authorized(Request::post(&url("/api/auth/logout")), session)
-            .send()
-            .await;
+    pub async fn logout() {
+        let _ = Request::post(&url("/api/web/auth/logout")).send().await;
     }
 
-    pub async fn orders(session: &SessionUser) -> Result<OrderPage, ApiError> {
-        get("/api/orders?limit=50&offset=0", session).await
+    pub async fn orders() -> Result<OrderPage, ApiError> {
+        get("/api/orders?limit=50&offset=0").await
     }
 
-    pub async fn balances(session: &SessionUser) -> Result<Vec<InventoryBalance>, ApiError> {
-        get("/api/inventory/balances", session).await
+    pub async fn balances() -> Result<Vec<InventoryBalance>, ApiError> {
+        get("/api/inventory/balances").await
     }
 
-    pub async fn facilities(session: &SessionUser) -> Result<Vec<Facility>, ApiError> {
-        get("/api/facilities", session).await
+    pub async fn access() -> Result<AccessScopeWorkspace, ApiError> {
+        get("/api/web/access").await
     }
 
-    pub async fn inventory_owners(session: &SessionUser) -> Result<Vec<InventoryOwner>, ApiError> {
-        get("/api/inventory-owners", session).await
-    }
-
-    async fn get<T: DeserializeOwned>(path: &str, session: &SessionUser) -> Result<T, ApiError> {
-        decode(authorized(Request::get(&url(path)), session).send().await).await
-    }
-
-    fn authorized(
-        builder: gloo_net::http::RequestBuilder,
-        session: &SessionUser,
-    ) -> gloo_net::http::RequestBuilder {
-        builder
-            .header("Authorization", &format!("Bearer {}", session.token))
-            .header(
-                "X-Wareboxes-Tenant-Id",
-                &session.active_tenant.tenant_id.to_string(),
-            )
+    async fn get<T: DeserializeOwned>(path: &str) -> Result<T, ApiError> {
+        decode(Request::get(&url(path)).send().await).await
     }
 
     async fn decode<T: DeserializeOwned>(
@@ -115,10 +99,7 @@ mod browser {
     }
 
     fn url(path: &str) -> String {
-        let Some(base) = API_BASE.map(str::trim).filter(|base| !base.is_empty()) else {
-            return path.to_owned();
-        };
-        format!("{}{}", base.trim_end_matches('/'), path)
+        path.to_owned()
     }
 }
 
@@ -126,34 +107,29 @@ mod browser {
 pub use browser::*;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn login(_email: String, _password: String) -> Result<SessionUser, ApiError> {
+pub async fn login(_email: String, _password: String) -> Result<WebSessionContext, ApiError> {
     Err(ApiError::unavailable())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn restore(_session: &SessionUser) -> Result<User, ApiError> {
+pub async fn select_tenant(_tenant_id: i64) -> Result<WebSessionContext, ApiError> {
     Err(ApiError::unavailable())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn logout(_session: &SessionUser) {}
+pub async fn logout() {}
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn orders(_session: &SessionUser) -> Result<OrderPage, ApiError> {
+pub async fn orders() -> Result<OrderPage, ApiError> {
     Err(ApiError::unavailable())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn balances(_session: &SessionUser) -> Result<Vec<InventoryBalance>, ApiError> {
+pub async fn balances() -> Result<Vec<InventoryBalance>, ApiError> {
     Err(ApiError::unavailable())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn facilities(_session: &SessionUser) -> Result<Vec<Facility>, ApiError> {
-    Err(ApiError::unavailable())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn inventory_owners(_session: &SessionUser) -> Result<Vec<InventoryOwner>, ApiError> {
+pub async fn access() -> Result<AccessScopeWorkspace, ApiError> {
     Err(ApiError::unavailable())
 }

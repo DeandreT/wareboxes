@@ -12,6 +12,7 @@ use crate::error::{AppError, AppResult};
 use crate::request_context::{assign_request_id, REQUEST_ID_HEADER};
 use crate::state::AppState;
 
+pub mod access;
 pub mod audits;
 pub mod auth;
 pub mod employees;
@@ -47,6 +48,11 @@ pub fn app(state: AppState) -> Router {
         .route("/auth/tenants", get(auth::tenants))
         .route("/auth/context", get(auth::context))
         .route("/auth/settings", post(auth::update_settings))
+        .route("/web/auth/login", post(auth::web_login))
+        .route("/web/auth/session", get(auth::web_session))
+        .route("/web/auth/tenant", post(auth::select_web_tenant))
+        .route("/web/auth/logout", post(auth::web_logout))
+        .route("/web/access", get(access::workspace))
         // users
         .route("/users", get(users::list))
         .route("/users/update", post(users::update))
