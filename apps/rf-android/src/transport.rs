@@ -8,8 +8,9 @@ use wareboxes_api_contract::v1::IdempotencyKey;
 use crate::command_store::{DispatchAttempt, DurableHttpResponse, ExecutionScope};
 use crate::wire::{
     EXPECTED_RECEIVING_BARCODE_LOOKUP_PATH, build_expected_receiving_session_path,
-    build_heartbeat_request_parts, normalize_expected_receiving_load_barcode,
+    build_movement_heartbeat_request_parts, normalize_expected_receiving_load_barcode,
 };
+use crate::workflow::MovementOperation;
 
 const ACCEPT_JSON: &str = "application/json";
 const REQUEST_ID_HEADER: &str = "X-Request-Id";
@@ -112,10 +113,12 @@ pub enum NetworkEvent {
         response: Result<NetworkResponse, String>,
     },
     CurrentClaim {
+        operation: MovementOperation,
         request_id: String,
         response: Result<NetworkResponse, String>,
     },
     Heartbeat {
+        operation: MovementOperation,
         task_id: i64,
         request_id: String,
         response: Result<NetworkResponse, String>,
@@ -161,27 +164,31 @@ pub fn build_session_request(
 
 pub fn build_current_claim_request(
     transport: &AuthenticatedTransport<'_>,
+    operation: MovementOperation,
     request_id: &str,
 ) -> Result<ehttp::Request, TransportBuildError> {
-    let mut request = ehttp::Request::get(
-        transport
-            .endpoint
-            .api_url("/api/v1/putaway-claims/current")?,
-    );
+    let path = match operation {
+        MovementOperation::Putaway => "/api/v1/putaway-claims/current",
+        MovementOperation::InventoryRelocation => "/api/v1/inventory-relocation-claims/current",
+    };
+    let mut request = ehttp::Request::get(transport.endpoint.api_url(path)?);
     request.headers = authenticated_headers(transport, request_id);
     Ok(request)
 }
 
-pub fn build_heartbeat_request(
+pub fn build_movement_heartbeat_request(
     transport: &AuthenticatedTransport<'_>,
+    operation: MovementOperation,
     task_id: i64,
     request_id: &str,
     idempotency_key: &str,
 ) -> Result<ehttp::Request, TransportBuildError> {
-    let (path, body) = build_heartbeat_request_parts(task_id).map_err(|error| match error {
-        crate::wire::WireRequestError::InvalidTaskId => TransportBuildError::InvalidTaskId,
-        _ => TransportBuildError::InvalidHeartbeatRequest,
-    })?;
+    let (path, body) = build_movement_heartbeat_request_parts(operation, task_id).map_err(
+        |error| match error {
+            crate::wire::WireRequestError::InvalidTaskId => TransportBuildError::InvalidTaskId,
+            _ => TransportBuildError::InvalidHeartbeatRequest,
+        },
+    )?;
     let idempotency_key = IdempotencyKey::new(idempotency_key)
         .map_err(|_| TransportBuildError::InvalidIdempotencyKey)?;
     let mut request = ehttp::Request::post(transport.endpoint.api_url(&path)?, body);
@@ -278,6 +285,7 @@ pub fn send_session(
 
 pub fn send_current_claim(
     request: ehttp::Request,
+    operation: MovementOperation,
     request_id: String,
     sender: Sender<NetworkEvent>,
     context: egui::Context,
@@ -287,6 +295,7 @@ pub fn send_current_claim(
             .map(NetworkResponse::from)
             .map_err(|error| error.to_string());
         let _ = sender.send(NetworkEvent::CurrentClaim {
+            operation,
             request_id,
             response,
         });
@@ -296,6 +305,7 @@ pub fn send_current_claim(
 
 pub fn send_heartbeat(
     request: ehttp::Request,
+    operation: MovementOperation,
     task_id: i64,
     request_id: String,
     sender: Sender<NetworkEvent>,
@@ -306,6 +316,7 @@ pub fn send_heartbeat(
             .map(NetworkResponse::from)
             .map_err(|error| error.to_string());
         let _ = sender.send(NetworkEvent::Heartbeat {
+            operation,
             task_id,
             request_id,
             response,
@@ -392,7 +403,7 @@ impl From<ehttp::Response> for NetworkResponse {
 mod tests {
     use super::*;
     use crate::command_store::CommandStore;
-    use crate::workflow::{DurableCommandDraft, PutawayCommand, PutawayKind};
+    use crate::workflow::{DurableCommandDraft, MovementKind, PutawayCommand};
 
     fn attempt() -> DispatchAttempt {
         let mut store = CommandStore::open_in_memory().unwrap();
@@ -409,7 +420,7 @@ mod tests {
                     command_id: "command-1".into(),
                     idempotency_key: "putaway-key-1".into(),
                     command: PutawayCommand::ClaimNext {
-                        workflow: PutawayKind::Loose,
+                        workflow: MovementKind::Loose,
                     }
                     .into(),
                 },
@@ -494,12 +505,13 @@ mod tests {
             operator_id: 8,
             device_id: "rf-01".into(),
         };
-        let request = build_heartbeat_request(
+        let request = build_movement_heartbeat_request(
             &AuthenticatedTransport {
                 endpoint: &endpoint,
                 token: "session-secret",
                 scope: &scope,
             },
+            MovementOperation::Putaway,
             42,
             "rf-heartbeat-request-1",
             "putaway:heartbeat:42:1",
@@ -546,13 +558,65 @@ mod tests {
         };
 
         assert!(matches!(
-            build_heartbeat_request(&transport, 0, "request-1", "heartbeat-1"),
+            build_movement_heartbeat_request(
+                &transport,
+                MovementOperation::Putaway,
+                0,
+                "request-1",
+                "heartbeat-1"
+            ),
             Err(TransportBuildError::InvalidTaskId)
         ));
         assert!(matches!(
-            build_heartbeat_request(&transport, 42, "request-1", "has spaces"),
+            build_movement_heartbeat_request(
+                &transport,
+                MovementOperation::Putaway,
+                42,
+                "request-1",
+                "has spaces"
+            ),
             Err(TransportBuildError::InvalidIdempotencyKey)
         ));
+    }
+
+    #[test]
+    fn relocation_claim_and_heartbeat_use_relocation_endpoints() {
+        let endpoint = ServerEndpoint::parse("https://example.com").unwrap();
+        let scope = ExecutionScope {
+            tenant_id: 7,
+            operator_id: 8,
+            device_id: "rf-01".into(),
+        };
+        let transport = AuthenticatedTransport {
+            endpoint: &endpoint,
+            token: "session-secret",
+            scope: &scope,
+        };
+
+        let current = build_current_claim_request(
+            &transport,
+            MovementOperation::InventoryRelocation,
+            "request-1",
+        )
+        .unwrap();
+        assert_eq!(
+            current.url,
+            "https://example.com/api/v1/inventory-relocation-claims/current"
+        );
+
+        let heartbeat = build_movement_heartbeat_request(
+            &transport,
+            MovementOperation::InventoryRelocation,
+            42,
+            "request-2",
+            "relocation:heartbeat:42:1",
+        )
+        .unwrap();
+        assert_eq!(
+            heartbeat.url,
+            "https://example.com/api/v1/inventory-relocation-claims/42/heartbeats"
+        );
+        assert_eq!(heartbeat.body, b"{}");
     }
 
     #[test]
@@ -678,7 +742,7 @@ mod tests {
                     command_id: "command-2".into(),
                     idempotency_key: "putaway-key-2".into(),
                     command: PutawayCommand::ClaimNext {
-                        workflow: PutawayKind::Loose,
+                        workflow: MovementKind::Loose,
                     }
                     .into(),
                 },

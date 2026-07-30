@@ -45,9 +45,14 @@ pub async fn get_inventory_balance_page(
     access: &TenantAccess,
     after_id: Option<i64>,
     limit: u16,
+    query: Option<&str>,
 ) -> AppResult<InventoryBalanceKeysetPage> {
     let scope = ScopeBindings::for_access(access);
     let fetch_limit = i64::from(limit) + 1;
+    let query_id = query
+        .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0);
     let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let rows = sqlx::query(
         r#"
@@ -96,8 +101,30 @@ pub async fn get_inventory_balance_page(
           AND ($2::BIGINT IS NULL OR balance.id > $2)
           AND ($3 OR balance.facility_id = ANY($4))
           AND ($5 OR balance.inventory_owner_id = ANY($6))
+          AND (
+              $7::TEXT IS NULL
+              OR STRPOS(LOWER(COALESCE(location.name, '')), LOWER($7)) > 0
+              OR STRPOS(LOWER(COALESCE(location.barcode, '')), LOWER($7)) > 0
+              OR STRPOS(LOWER(COALESCE(license_plate.barcode, '')), LOWER($7)) > 0
+              OR STRPOS(LOWER(COALESCE(sku.name, '')), LOWER($7)) > 0
+              OR STRPOS(LOWER(COALESCE(item.description, '')), LOWER($7)) > 0
+              OR STRPOS(LOWER(COALESCE(batch.lot, '')), LOWER($7)) > 0
+              OR STRPOS(LOWER(COALESCE(batch.serial, '')), LOWER($7)) > 0
+              OR (
+                  $8::BIGINT IS NOT NULL
+                  AND (
+                      balance.id = $8
+                      OR balance.inventory_owner_id = $8
+                      OR balance.facility_id = $8
+                      OR balance.location_id = $8
+                      OR balance.license_plate_id = $8
+                      OR balance.item_batch_id = $8
+                      OR balance.item_id = $8
+                  )
+              )
+          )
         ORDER BY balance.id
-        LIMIT $7
+        LIMIT $9
         "#,
     )
     .bind(access.tenant_id.get())
@@ -106,6 +133,8 @@ pub async fn get_inventory_balance_page(
     .bind(&scope.facility_ids)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
+    .bind(query)
+    .bind(query_id)
     .bind(fetch_limit)
     .fetch_all(&mut *tx)
     .await?;

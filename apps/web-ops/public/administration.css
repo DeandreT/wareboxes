@@ -1,0 +1,341 @@
+.admin-workbench {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+}
+
+.admin-toolbar,
+.admin-editor-heading,
+.admin-list-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.admin-toolbar {
+  min-height: var(--toolbar-height);
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.admin-toolbar .search-field {
+  width: min(360px, 42vw);
+}
+
+.admin-toolbar-actions,
+.admin-row-actions,
+.admin-form-actions,
+.admin-chip-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.admin-toolbar-actions {
+  margin-left: auto;
+}
+
+.admin-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.admin-toggle input {
+  margin: 0;
+}
+
+.admin-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 350px;
+  align-items: start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.admin-list,
+.admin-editor,
+.admin-create {
+  min-width: 0;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.admin-list-heading,
+.admin-editor-heading {
+  min-height: 42px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.admin-list-heading h2,
+.admin-editor-heading h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.admin-list-heading span,
+.admin-editor-heading span {
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.admin-editor {
+  position: sticky;
+  top: 66px;
+  max-height: calc(100vh - 80px);
+  overflow: auto;
+}
+
+.admin-editor-placeholder {
+  display: grid;
+  min-height: 270px;
+  place-content: center;
+  padding: 20px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-align: center;
+}
+
+.admin-form,
+.admin-create-form {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.admin-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 9px;
+}
+
+.admin-form-grid .wide {
+  grid-column: 1 / -1;
+}
+
+.admin-form label,
+.admin-create-form label {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 720;
+}
+
+.admin-form input,
+.admin-form select,
+.admin-form textarea,
+.admin-create-form input,
+.admin-create-form select,
+.admin-create-form textarea {
+  width: 100%;
+  min-height: var(--control-height);
+  padding: 4px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+}
+
+.admin-form textarea,
+.admin-create-form textarea {
+  min-height: 58px;
+  resize: vertical;
+}
+
+.admin-form input:focus,
+.admin-form select:focus,
+.admin-form textarea:focus,
+.admin-create-form input:focus,
+.admin-create-form select:focus,
+.admin-create-form textarea:focus {
+  border-color: var(--blue);
+  outline: 2px solid color-mix(in srgb, var(--blue) 16%, transparent);
+  outline-offset: 0;
+}
+
+.admin-form-actions {
+  justify-content: flex-end;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.admin-create > summary {
+  padding: 7px 10px;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.admin-create[open] > summary {
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.admin-check-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-height: 150px;
+  margin: 0;
+  padding: 7px;
+  overflow: auto;
+  gap: 3px 8px;
+  border: 1px solid var(--line);
+}
+
+.admin-check-grid legend {
+  padding: 0 4px;
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 720;
+}
+
+.admin-check-grid label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.admin-check-grid label span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-table {
+  min-width: 760px;
+}
+
+.admin-table .selected-row {
+  background: var(--amber-soft);
+  box-shadow: inset 3px 0 var(--accent);
+}
+
+.admin-table td {
+  vertical-align: middle;
+}
+
+.admin-table .cell-stack {
+  display: grid;
+  gap: 1px;
+}
+
+.admin-table .cell-stack small,
+.admin-cell-detail {
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-table .action-column {
+  min-width: 110px;
+}
+
+.admin-row-actions {
+  justify-content: flex-end;
+}
+
+.admin-row-actions .table-action {
+  min-width: 0;
+}
+
+.admin-chip-list {
+  flex-wrap: wrap;
+}
+
+.admin-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--surface-raised);
+  color: var(--ink-soft);
+  font-size: 9px;
+  font-weight: 680;
+}
+
+.admin-state {
+  display: flex;
+  min-height: 120px;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.admin-error {
+  flex-direction: column;
+  color: var(--red);
+}
+
+.admin-command-note {
+  margin: 0;
+  padding: 7px 8px;
+  border-left: 3px solid var(--blue);
+  background: var(--blue-soft);
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.admin-count-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 1px solid var(--line);
+}
+
+.admin-count-summary div {
+  display: grid;
+  gap: 1px;
+  padding: 6px 8px;
+  border-right: 1px solid var(--line);
+}
+
+.admin-count-summary div:last-child {
+  border-right: 0;
+}
+
+.admin-count-summary span {
+  color: var(--ink-soft);
+  font-size: 9px;
+  font-weight: 680;
+  text-transform: uppercase;
+}
+
+.admin-count-summary strong {
+  font-size: 14px;
+}
+
+@media (max-width: 1180px) {
+  .admin-split {
+    grid-template-columns: minmax(0, 1fr) 310px;
+  }
+
+  .admin-table {
+    min-width: 700px;
+  }
+}

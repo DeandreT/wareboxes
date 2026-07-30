@@ -16,6 +16,10 @@ use references::{
 
 mod cycle_count;
 mod execution;
+mod inventory_relocation;
+mod inventory_relocation_claim;
+mod inventory_relocation_claim_lifecycle;
+mod inventory_relocation_confirm;
 mod leasing;
 mod license_plate_putaway;
 mod putaway;
@@ -26,6 +30,10 @@ mod references;
 
 pub use cycle_count::*;
 pub use execution::*;
+pub use inventory_relocation::*;
+pub use inventory_relocation_claim::*;
+pub use inventory_relocation_claim_lifecycle::*;
+pub use inventory_relocation_confirm::*;
 pub use leasing::*;
 pub use license_plate_putaway::*;
 pub use putaway::*;
@@ -148,6 +156,7 @@ fn task_timeout_seconds(task_type: WorkTaskType) -> i64 {
         WorkTaskType::UnpackCancelledOrder => 30 * 60,
         WorkTaskType::Putaway => 30 * 60,
         WorkTaskType::LicensePlatePutaway => 30 * 60,
+        WorkTaskType::InventoryRelocation => 30 * 60,
     }
 }
 

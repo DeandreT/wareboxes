@@ -1,11 +1,21 @@
 #![recursion_limit = "512"]
 
+mod administration;
 pub mod api;
 pub mod app;
+mod app_frame;
+mod catalog;
 mod components;
+mod fulfillment;
+mod fulfillment_load_detail;
+mod fulfillment_loads;
+mod fulfillment_orders;
+mod fulfillment_shared;
 mod inventory;
 mod inventory_disposition;
 mod inventory_holds;
+mod inventory_integrity;
+mod inventory_rollups;
 mod orders;
 mod preferences;
 mod sorting;

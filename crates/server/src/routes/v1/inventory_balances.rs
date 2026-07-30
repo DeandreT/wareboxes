@@ -25,6 +25,7 @@ pub async fn list(
         &user.tenant,
         after_id,
         query.limit.get(),
+        query.query.as_ref().map(|query| query.as_str()),
     )
     .await?;
     let items = page

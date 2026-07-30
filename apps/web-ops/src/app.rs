@@ -2,7 +2,6 @@ use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::{
     components::{Route, Router, Routes, A},
-    hooks::use_navigate,
     StaticSegment,
 };
 use wareboxes_api_contract::v1::{
@@ -11,19 +10,23 @@ use wareboxes_api_contract::v1::{
 use wareboxes_core::dto::{
     AccessScopeResource, AccessScopeWorkspace, OrderPage, WebSessionContext,
 };
+use wareboxes_core::models::{Item, Load, Location};
 
+use crate::administration::{AdministrationArea, AdministrationWorkspace};
 use crate::api;
-use crate::components::{Icon, NavItem, SearchField, UiIcon};
-use crate::inventory::InventoryTable;
+use crate::app_frame::{Brand, PageFrame};
+use crate::catalog::CatalogWorkbench;
+use crate::components::{Icon, SearchField, UiIcon};
+use crate::fulfillment::{LoadsWorkbench, OrdersWorkbench};
+use crate::inventory::InventoryWorkspace;
 use crate::inventory_disposition::InventoryDispositionWorkbench;
 use crate::inventory_holds::QuantityHoldsWorkbench;
+use crate::inventory_integrity::InventoryIntegrityWorkbench;
 use crate::orders::OrderTable;
-use crate::preferences::{provide_display_preferences, DisplayOptionsMenu};
+use crate::preferences::provide_display_preferences;
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
-use crate::toast::{use_toast_bus, ToastProvider, ToastViewport};
-use crate::view_model::{
-    facility_inventory, format_quantity, has_permission, open_order_count, user_name,
-};
+use crate::toast::ToastProvider;
+use crate::view_model::{facility_inventory, format_quantity, has_permission, open_order_count};
 
 const SESSION_BOOTSTRAP_ID: &str = "wareboxes-session-bootstrap";
 
@@ -31,7 +34,7 @@ const SESSION_BOOTSTRAP_ID: &str = "wareboxes-session-bootstrap";
 pub struct InitialWebSession(pub Option<WebSessionContext>);
 
 #[derive(Clone)]
-enum SessionState {
+pub(crate) enum SessionState {
     Anonymous(Option<String>),
     Authenticated(Box<WebSessionContext>),
 }
@@ -44,6 +47,9 @@ struct WorkspaceData {
     holds: Vec<InventoryHoldResponse>,
     hold_next_cursor: Option<OpaqueCursor>,
     access: AccessScopeWorkspace,
+    loads: Vec<Load>,
+    catalog_items: Vec<Item>,
+    locations: Vec<Location>,
 }
 
 #[derive(Clone)]
@@ -55,13 +61,17 @@ enum WorkspaceState {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Section {
+pub(crate) enum Section {
     Overview,
     Orders,
+    Loads,
+    Catalog,
     Inventory,
     InventoryHolds,
     InventoryDisposition,
+    InventoryIntegrity,
     Access,
+    Administration(AdministrationArea),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -116,34 +126,57 @@ pub fn App() -> impl IntoView {
         <Stylesheet id="wareboxes-holds" href="/holds.css"/>
         <Stylesheet id="wareboxes-presentation" href="/presentation.css"/>
         <Stylesheet id="wareboxes-disposition" href="/disposition.css"/>
+        <Stylesheet id="wareboxes-inventory-integrity" href="/inventory-integrity.css"/>
+        <Stylesheet id="wareboxes-inventory-rollups" href="/inventory-rollups.css"/>
+        <Stylesheet id="wareboxes-fulfillment" href="/fulfillment.css"/>
+        <Stylesheet id="wareboxes-catalog" href="/catalog.css"/>
+        <Stylesheet id="wareboxes-administration" href="/administration.css"/>
         <Title text="Wareboxes"/>
         <ToastProvider>
             <Router>
                 <Routes fallback=|| view! { <NotFoundPage/> }.into_any()>
                     <Route path=StaticSegment("") view=OverviewPage/>
                     <Route path=StaticSegment("orders") view=OrdersPage/>
+                    <Route path=StaticSegment("loads") view=LoadsPage/>
+                    <Route path=StaticSegment("catalog") view=CatalogPage/>
                     <Route path=StaticSegment("inventory") view=InventoryPage/>
                     <Route path=(StaticSegment("inventory"), StaticSegment("holds")) view=InventoryHoldsPage/>
                     <Route
                         path=(StaticSegment("inventory"), StaticSegment("disposition"))
                         view=InventoryDispositionPage
                     />
+                    <Route
+                        path=(StaticSegment("inventory"), StaticSegment("control"))
+                        view=InventoryIntegrityPage
+                    />
                     <Route path=StaticSegment("access") view=AccessPage/>
+                    <Route
+                        path=(StaticSegment("administration"), StaticSegment("clients"))
+                        view=ClientsPage
+                    />
+                    <Route
+                        path=(StaticSegment("administration"), StaticSegment("users"))
+                        view=UsersPage
+                    />
+                    <Route
+                        path=(StaticSegment("administration"), StaticSegment("roles"))
+                        view=RolesPage
+                    />
+                    <Route
+                        path=(StaticSegment("administration"), StaticSegment("permissions"))
+                        view=PermissionsPage
+                    />
+                    <Route
+                        path=(StaticSegment("administration"), StaticSegment("employees"))
+                        view=EmployeesPage
+                    />
+                    <Route
+                        path=(StaticSegment("administration"), StaticSegment("count-plans"))
+                        view=CountPlansPage
+                    />
                 </Routes>
             </Router>
         </ToastProvider>
-    }
-}
-
-#[component]
-fn Brand() -> impl IntoView {
-    view! {
-        <span class="brand">
-            <span class="brand-mark" aria-hidden="true">
-                <i></i><i></i><i></i><i></i>
-            </span>
-            <span>"wareboxes"</span>
-        </span>
     }
 }
 
@@ -336,7 +369,15 @@ async fn load_workspace(
         }
         Section::Orders if has_permission(session, "orders") => {
             data.orders = Some(api::orders().await?);
+            data.access = api::access().await?;
         }
+        Section::Loads if has_permission(session, "wms") => {
+            data.loads = api::internal_get("/api/loads?offset=0&limit=500").await?;
+            data.access = api::access().await?;
+            data.catalog_items = api::internal_get("/api/items?show_deleted=false").await?;
+            data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
+        }
+        Section::Catalog if has_permission(session, "wms") => {}
         Section::Inventory if has_permission(session, "wms") => {
             let page = api::balances(None).await?;
             data.balances = page.items;
@@ -355,13 +396,19 @@ async fn load_workspace(
             data.balances = page.items;
             data.balance_next_cursor = page.next_cursor;
         }
+        Section::InventoryIntegrity if has_permission(session, "wms") => {}
         Section::Access => {
             data.access = api::access().await?;
         }
+        Section::Administration(_) if has_permission(session, "admin") => {}
         Section::Orders
+        | Section::Loads
+        | Section::Catalog
         | Section::Inventory
         | Section::InventoryHolds
-        | Section::InventoryDisposition => {}
+        | Section::InventoryDisposition
+        | Section::InventoryIntegrity
+        | Section::Administration(_) => {}
     }
     Ok(data)
 }
@@ -374,6 +421,16 @@ fn OverviewPage() -> impl IntoView {
 #[component]
 fn OrdersPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::Orders/> }
+}
+
+#[component]
+fn LoadsPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::Loads/> }
+}
+
+#[component]
+fn CatalogPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::Catalog/> }
 }
 
 #[component]
@@ -392,8 +449,55 @@ fn InventoryDispositionPage() -> impl IntoView {
 }
 
 #[component]
+fn InventoryIntegrityPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::InventoryIntegrity/> }
+}
+
+#[component]
 fn AccessPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::Access/> }
+}
+
+#[component]
+fn ClientsPage() -> impl IntoView {
+    view! {
+        <AuthenticatedPage section=Section::Administration(AdministrationArea::Clients)/>
+    }
+}
+
+#[component]
+fn UsersPage() -> impl IntoView {
+    view! {
+        <AuthenticatedPage section=Section::Administration(AdministrationArea::Users)/>
+    }
+}
+
+#[component]
+fn RolesPage() -> impl IntoView {
+    view! {
+        <AuthenticatedPage section=Section::Administration(AdministrationArea::Roles)/>
+    }
+}
+
+#[component]
+fn PermissionsPage() -> impl IntoView {
+    view! {
+        <AuthenticatedPage section=Section::Administration(AdministrationArea::Permissions)/>
+    }
+}
+
+#[component]
+fn EmployeesPage() -> impl IntoView {
+    view! {
+        <AuthenticatedPage section=Section::Administration(AdministrationArea::Employees)/>
+    }
+}
+
+#[component]
+fn CountPlansPage() -> impl IntoView {
+    view! {
+        <AuthenticatedPage section=Section::Administration(AdministrationArea::CountPlans)/>
+    }
 }
 
 #[component]
@@ -409,7 +513,13 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
         WorkspaceState::Ready(data) | WorkspaceState::Refreshing(data) => match section {
             Section::Overview => view! { <Overview data/> }.into_any(),
             Section::Orders if has_permission(&session, "orders") => {
-                view! { <Orders data/> }.into_any()
+                view! { <Orders data on_unauthorized=session_expired_callback()/> }.into_any()
+            }
+            Section::Loads if has_permission(&session, "wms") => {
+                view! { <Loads data on_unauthorized=session_expired_callback()/> }.into_any()
+            }
+            Section::Catalog if has_permission(&session, "wms") => {
+                view! { <CatalogWorkbench on_unauthorized=session_expired_callback()/> }.into_any()
             }
             Section::Inventory if has_permission(&session, "wms") => {
                 view! { <Inventory data/> }.into_any()
@@ -438,211 +548,35 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                 });
                 view! { <InventoryDisposition data on_unauthorized/> }.into_any()
             }
+            Section::InventoryIntegrity if has_permission(&session, "wms") => {
+                let session_state = expect_context::<RwSignal<SessionState>>();
+                let on_unauthorized = Callback::new(move |_| {
+                    session_state.set(SessionState::Anonymous(Some(
+                        "Your session ended. Sign in to continue.".to_owned(),
+                    )));
+                });
+                view! { <InventoryIntegrity on_unauthorized/> }.into_any()
+            }
             Section::Access => view! { <Access data/> }.into_any(),
+            Section::Administration(area) if has_permission(&session, "admin") => view! {
+                <AdministrationWorkspace
+                    area
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
             _ => view! { <AccessDenied/> }.into_any(),
         },
     }
 }
 
-#[component]
-fn PageFrame(section: Section, children: Children) -> impl IntoView {
-    let session = expect_context::<WebSessionContext>();
+fn session_expired_callback() -> Callback<()> {
     let session_state = expect_context::<RwSignal<SessionState>>();
-    let display_name = user_name(&session);
-    let initials = display_name
-        .split_whitespace()
-        .filter_map(|part| part.chars().next())
-        .take(2)
-        .collect::<String>()
-        .to_uppercase();
-    let tenant_name = session.active_tenant.name.clone();
-    let tenant_id = session.active_tenant.tenant_id.get();
-    let email = session.user.email.clone();
-    let can_view_orders = has_permission(&session, "orders");
-    let can_view_inventory = has_permission(&session, "wms");
-    let available_tenants = session.available_tenants.clone();
-    let tenant_count = available_tenants.len();
-    let tenant_options = available_tenants
-        .into_iter()
-        .map(|tenant| {
-            view! {
-                <option value=tenant.tenant_id.to_string()>{tenant.name}</option>
-            }
-        })
-        .collect_view();
-    let selected_tenant = RwSignal::new(tenant_id.to_string());
-    let switching_tenant = RwSignal::new(false);
-    let tenant_error = RwSignal::new(None::<String>);
-    let navigate = use_navigate();
-    let active_tenant_id = tenant_id;
-    let toasts = use_toast_bus();
-
-    let switch_tenant = move |event| {
-        let value = event_target_value(&event);
-        selected_tenant.set(value.clone());
-        let Ok(selected_id) = value.parse::<i64>() else {
-            selected_tenant.set(active_tenant_id.to_string());
-            return;
-        };
-        if selected_id == active_tenant_id || switching_tenant.get_untracked() {
-            return;
-        }
-        switching_tenant.set(true);
-        tenant_error.set(None);
-        let navigate = navigate.clone();
-        leptos::task::spawn_local(async move {
-            match api::select_tenant(selected_id).await {
-                Ok(context) => {
-                    let organization_name = context.active_tenant.name.clone();
-                    session_state.set(SessionState::Authenticated(Box::new(context)));
-                    toasts.info(format!("Switched to {organization_name}."));
-                    navigate("/", Default::default());
-                }
-                Err(error) if error.unauthorized => {
-                    session_state.set(SessionState::Anonymous(Some(
-                        "Your session ended. Sign in to continue.".to_owned(),
-                    )));
-                }
-                Err(error) => {
-                    selected_tenant.set(active_tenant_id.to_string());
-                    tenant_error.set(Some(error.message));
-                    switching_tenant.set(false);
-                }
-            }
-        });
-    };
-
-    let sign_out = move |_| {
-        session_state.set(SessionState::Anonymous(None));
-        leptos::task::spawn_local(async move {
-            api::logout().await;
-        });
-    };
-
-    view! {
-        <div class="app-shell">
-            <aside class="sidebar">
-                <a class="sidebar-brand" href="/" aria-label="Wareboxes overview">
-                    <Brand/>
-                </a>
-                <nav aria-label="Operations">
-                    <p>"Operations"</p>
-                    <NavItem
-                        href="/"
-                        label="Overview"
-                        icon=UiIcon::Overview
-                        active=section == Section::Overview
-                    />
-                    {can_view_orders.then(|| {
-                        view! {
-                            <NavItem
-                                href="/orders"
-                                label="Orders"
-                                icon=UiIcon::Orders
-                                active=section == Section::Orders
-                            />
-                        }
-                    })}
-                    {can_view_inventory.then(|| {
-                        view! {
-                            <NavItem
-                                href="/inventory"
-                                label="Inventory"
-                                icon=UiIcon::Inventory
-                                active=section == Section::Inventory
-                            />
-                            <NavItem
-                                href="/inventory/holds"
-                                label="Quantity holds"
-                                icon=UiIcon::Holds
-                                active=section == Section::InventoryHolds
-                            />
-                            <NavItem
-                                href="/inventory/disposition"
-                                label="Disposition"
-                                icon=UiIcon::Disposition
-                                active=section == Section::InventoryDisposition
-                            />
-                        }
-                    })}
-                    <p class="nav-group">"Context"</p>
-                    <NavItem
-                        href="/access"
-                        label="Access"
-                        icon=UiIcon::Access
-                        active=section == Section::Access
-                    />
-                </nav>
-                <div class="sidebar-scope">
-                    <span>"Active organization"</span>
-                    <strong>{tenant_name.clone()}</strong>
-                    <small>{scope_summary(&session)}</small>
-                </div>
-            </aside>
-
-            <div class="app-region">
-                <header class="topbar">
-                    <div class="tenant-control">
-                        <Icon icon=UiIcon::Building/>
-                        <label for="tenant-selector">"Organization"</label>
-                        <select
-                            id="tenant-selector"
-                            prop:value=move || selected_tenant.get()
-                            disabled=move || switching_tenant.get() || tenant_count <= 1
-                            on:change=switch_tenant
-                        >
-                            {tenant_options}
-                        </select>
-                        {move || {
-                            tenant_error.get().map(|message| {
-                                view! {
-                                    <span class="tenant-switch-error" role="alert">
-                                        {message}
-                                    </span>
-                                }
-                            })
-                        }}
-                    </div>
-                    <div class="identity">
-                        <DisplayOptionsMenu/>
-                        <span class="avatar" aria-hidden="true">{initials}</span>
-                        <span class="identity-copy">
-                            <strong>{display_name}</strong>
-                            <small>{email}</small>
-                        </span>
-                        <button class="button quiet-action" type="button" on:click=sign_out>
-                            <Icon icon=UiIcon::SignOut/>
-                            <span>"Sign out"</span>
-                        </button>
-                    </div>
-                </header>
-                <main class="workspace">
-                    <ToastViewport/>
-                    {children()}
-                </main>
-            </div>
-        </div>
-    }
-}
-
-fn scope_summary(session: &WebSessionContext) -> String {
-    let facilities = if session.active_tenant.site_scope.all_facilities {
-        "All facilities".to_owned()
-    } else {
-        format!(
-            "{} facilities",
-            session.active_tenant.site_scope.facility_ids.len()
-        )
-    };
-    let owners = if session.active_tenant.owner_scope.all_inventory_owners {
-        "all clients".to_owned()
-    } else {
-        format!(
-            "{} clients",
-            session.active_tenant.owner_scope.inventory_owner_ids.len()
-        )
-    };
-    format!("{facilities}, {owners}")
+    Callback::new(move |_| {
+        session_state.set(SessionState::Anonymous(Some(
+            "Your session ended. Sign in to continue.".to_owned(),
+        )));
+    })
 }
 
 #[component]
@@ -874,22 +808,34 @@ fn RefreshButton(section: Section) -> impl IntoView {
 }
 
 #[component]
-fn Orders(data: WorkspaceData) -> impl IntoView {
-    let orders = data
-        .orders
-        .map(|orders| orders.page.items)
-        .unwrap_or_default();
+fn Orders(data: WorkspaceData, on_unauthorized: Callback<()>) -> impl IntoView {
+    let initial_page = data.orders.unwrap_or_else(empty_order_page);
     view! {
-        <section class="page-heading">
-            <div>
-                <h1>"Orders"</h1>
-                <p>"The latest orders across your authorized clients."</p>
-            </div>
-            <RefreshButton section=Section::Orders/>
-        </section>
-        <section class="data-section page-data">
-            <OrderTable orders compact=false/>
-        </section>
+        <OrdersWorkbench
+            initial_page
+            access=data.access
+            on_unauthorized
+        />
+    }
+}
+
+fn empty_order_page() -> OrderPage {
+    OrderPage {
+        page: wareboxes_core::dto::Paged::new(Vec::new(), 0, 100, 0),
+        summaries: Vec::new(),
+    }
+}
+
+#[component]
+fn Loads(data: WorkspaceData, on_unauthorized: Callback<()>) -> impl IntoView {
+    view! {
+        <LoadsWorkbench
+            initial_loads=data.loads
+            access=data.access
+            catalog_items=data.catalog_items
+            locations=data.locations
+            on_unauthorized
+        />
     }
 }
 
@@ -910,7 +856,7 @@ fn Inventory(data: WorkspaceData) -> impl IntoView {
             </div>
             <RefreshButton section=Section::Inventory/>
         </section>
-        <InventoryTable
+        <InventoryWorkspace
             initial_balances=data.balances
             initial_cursor=data.balance_next_cursor
             on_unauthorized
@@ -954,6 +900,20 @@ fn InventoryDisposition(data: WorkspaceData, on_unauthorized: Callback<()>) -> i
             initial_cursor=data.balance_next_cursor
             on_unauthorized
         />
+    }
+}
+
+#[component]
+fn InventoryIntegrity(on_unauthorized: Callback<()>) -> impl IntoView {
+    view! {
+        <section class="page-heading">
+            <div>
+                <p class="eyebrow">"Inventory control"</p>
+                <h1>"Journal, reconciliation, and moves"</h1>
+                <p>"Inspect inventory integrity and direct scanner-confirmed facility moves."</p>
+            </div>
+        </section>
+        <InventoryIntegrityWorkbench on_unauthorized/>
     }
 }
 

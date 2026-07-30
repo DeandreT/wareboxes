@@ -1,8 +1,8 @@
 use leptos::prelude::*;
 use leptos_router::components::A;
 use lucide_leptos::{
-    ArrowRightLeft, Boxes, Building2, ClipboardList, LayoutDashboard, LockKeyhole, LogOut,
-    RefreshCw, Search, ShieldCheck, TriangleAlert,
+    ArrowRightLeft, Boxes, Building2, ClipboardList, LayoutDashboard, LockKeyhole, LogOut, Printer,
+    RefreshCw, Search, ShieldCheck, Trash2, TriangleAlert,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -10,14 +10,24 @@ pub enum UiIcon {
     Access,
     Alert,
     Building,
+    Catalog,
+    Clients,
+    Counts,
     Disposition,
+    Employees,
     Holds,
     Inventory,
+    Loads,
     Orders,
     Overview,
+    Permissions,
+    Print,
     Refresh,
+    Remove,
+    Roles,
     Search,
     SignOut,
+    Users,
 }
 
 #[component]
@@ -28,14 +38,24 @@ pub fn Icon(icon: UiIcon) -> impl IntoView {
                 UiIcon::Access => view! { <ShieldCheck size=16/> }.into_any(),
                 UiIcon::Alert => view! { <TriangleAlert size=16/> }.into_any(),
                 UiIcon::Building => view! { <Building2 size=16/> }.into_any(),
+                UiIcon::Catalog => view! { <Boxes size=16/> }.into_any(),
+                UiIcon::Clients => view! { <Building2 size=16/> }.into_any(),
+                UiIcon::Counts => view! { <ClipboardList size=16/> }.into_any(),
                 UiIcon::Disposition => view! { <ArrowRightLeft size=16/> }.into_any(),
+                UiIcon::Employees => view! { <ShieldCheck size=16/> }.into_any(),
                 UiIcon::Holds => view! { <LockKeyhole size=16/> }.into_any(),
                 UiIcon::Inventory => view! { <Boxes size=16/> }.into_any(),
+                UiIcon::Loads => view! { <ClipboardList size=16/> }.into_any(),
                 UiIcon::Orders => view! { <ClipboardList size=16/> }.into_any(),
                 UiIcon::Overview => view! { <LayoutDashboard size=16/> }.into_any(),
+                UiIcon::Permissions => view! { <LockKeyhole size=16/> }.into_any(),
+                UiIcon::Print => view! { <Printer size=16/> }.into_any(),
                 UiIcon::Refresh => view! { <RefreshCw size=16/> }.into_any(),
+                UiIcon::Remove => view! { <Trash2 size=16/> }.into_any(),
+                UiIcon::Roles => view! { <ShieldCheck size=16/> }.into_any(),
                 UiIcon::Search => view! { <Search size=16/> }.into_any(),
                 UiIcon::SignOut => view! { <LogOut size=16/> }.into_any(),
+                UiIcon::Users => view! { <ShieldCheck size=16/> }.into_any(),
             }}
         </span>
     }

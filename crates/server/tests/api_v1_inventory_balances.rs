@@ -6,9 +6,11 @@ use common::*;
 use tower::ServiceExt;
 use wareboxes_api_contract::v1::{
     ErrorReason, ErrorResponse, InventoryBalancePage, InventoryBalanceStatus,
+    MAX_INVENTORY_BALANCE_QUERY_LENGTH,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
-use wareboxes_core::models::InventoryStatus;
+use wareboxes_core::models::{InboundReceiptExceptionReason, InventoryStatus};
+use wareboxes_domain::CommandContext;
 use wareboxes_server::auth::TENANT_ID_HEADER;
 use wareboxes_server::{routes, state::AppState};
 
@@ -68,6 +70,110 @@ async fn receive_balance(
     item_id
 }
 
+async fn receive_searchable_plate_balance(
+    fixture: &Fixture,
+    tenant_id: TenantId,
+    actor_id: i64,
+    inventory_owner_id: i64,
+    facility_id: i64,
+    location_id: i64,
+) -> (i64, i64) {
+    let item_id = fixture.item(tenant_id, "V1 First Item", "each").await;
+    let load_id = repo::loads::add_load(
+        &fixture.db,
+        tenant_id,
+        actor_id,
+        facility_id,
+        inventory_owner_id,
+        LoadType::Inbound,
+        Some("V1-SEARCH-RECEIPT"),
+        None,
+        None,
+        None,
+        None,
+        Some(location_id),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let load_line_id = repo::loads::add_line(
+        &fixture.db,
+        tenant_id,
+        actor_id,
+        load_id,
+        item_id,
+        None,
+        10,
+        Some("LOT-SEARCH-ALPHA"),
+        Some("SERIAL-SEARCH-ALPHA"),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(repo::loads::update_load(
+        &fixture.db,
+        tenant_id,
+        actor_id,
+        load_id,
+        Some(LoadStatus::Arrived),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap());
+
+    let access = default_tenant_for_user(&fixture.db, actor_id)
+        .await
+        .unwrap();
+    let context = CommandContext {
+        tenant_id,
+        actor_id: access.user_id,
+        request_id: "request-v1-search-receipt".to_owned(),
+        idempotency_key: Some("v1-search-receipt".to_owned()),
+    };
+    let result = repo::inbound_receipt::receive_expected_inventory(
+        &fixture.db,
+        &access,
+        &context,
+        load_line_id,
+        &repo::inbound_receipt::ReceiveExpectedInventoryCommand {
+            receiving_location_id: Some(location_id),
+            received_qty: 10,
+            rejected_qty: 0,
+            missing_qty: 0,
+            license_plate_id: None,
+            license_plate_barcode: Some("LP-SEARCH-ALPHA"),
+            lot: Some("LOT-SEARCH-ALPHA"),
+            serial: Some("SERIAL-SEARCH-ALPHA"),
+            expiration: None,
+            exception_reason: None::<InboundReceiptExceptionReason>,
+            exception_note: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    (
+        item_id,
+        result
+            .license_plate_id
+            .expect("container receipt creates a license plate"),
+    )
+}
+
 #[tokio::test]
 async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
     let fixture = Fixture::new().await;
@@ -112,21 +218,46 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
     fixture
         .assign_owner_to_facility(tenant_id, denied_owner, denied_facility)
         .await;
-    let allowed_location = fixture
-        .location(tenant_id, allowed_facility, "V1-ALLOWED")
+    fixture
+        .assign_owner_to_facility(tenant_id, allowed_owner, denied_facility)
         .await;
+    fixture
+        .assign_owner_to_facility(tenant_id, denied_owner, allowed_facility)
+        .await;
+    let allowed_location = repo::locations::add_location(
+        &fixture.db,
+        tenant_id,
+        allowed_facility,
+        None,
+        Some("V1-ALLOWED"),
+        Some("Mezzanine Search Zone"),
+        "dock",
+        true,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
     let denied_location = fixture
         .location(tenant_id, denied_facility, "V1-DENIED")
         .await;
+    let second_allowed_location = fixture
+        .location(tenant_id, allowed_facility, "V1-SECOND")
+        .await;
+    let site_denied_location = fixture
+        .location(tenant_id, denied_facility, "V1-SITE-DENIED")
+        .await;
+    let owner_denied_location = fixture
+        .location(tenant_id, allowed_facility, "V1-OWNER-DENIED")
+        .await;
 
-    let first_item = receive_balance(
+    let (first_item, first_plate) = receive_searchable_plate_balance(
         &fixture,
         tenant_id,
         administrator.id,
         allowed_owner,
+        allowed_facility,
         allowed_location,
-        "V1 First Item",
-        InventoryStatus::Available,
     )
     .await;
     let denied_item = receive_balance(
@@ -144,12 +275,35 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
         tenant_id,
         administrator.id,
         allowed_owner,
-        allowed_location,
+        second_allowed_location,
         "V1 Second Item",
         InventoryStatus::Damaged,
     )
     .await;
+    receive_balance(
+        &fixture,
+        tenant_id,
+        administrator.id,
+        allowed_owner,
+        site_denied_location,
+        "V1 Site Denied Item",
+        InventoryStatus::Available,
+    )
+    .await;
+    receive_balance(
+        &fixture,
+        tenant_id,
+        administrator.id,
+        denied_owner,
+        owner_denied_location,
+        "V1 Owner Denied Item",
+        InventoryStatus::Available,
+    )
+    .await;
 
+    repo::items::add_sku(&fixture.db, tenant_id, first_item, "SKU-SEARCH-ALPHA", None)
+        .await
+        .unwrap();
     let first_balance = repo::inventory::get_balances(&fixture.db, tenant_id, false)
         .await
         .unwrap()
@@ -276,11 +430,24 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
         first_page.items[0].location_barcode.as_deref(),
         Some("V1-ALLOWED")
     );
+    assert_eq!(first_page.items[0].license_plate_id, Some(first_plate));
+    assert_eq!(
+        first_page.items[0].license_plate_barcode.as_deref(),
+        Some("LP-SEARCH-ALPHA")
+    );
     assert_eq!(
         first_page.items[0].item_description.as_deref(),
         Some("V1 First Item")
     );
-    assert!(first_page.items[0].primary_sku.is_none());
+    assert_eq!(
+        first_page.items[0].primary_sku.as_deref(),
+        Some("SKU-SEARCH-ALPHA")
+    );
+    assert_eq!(first_page.items[0].lot.as_deref(), Some("LOT-SEARCH-ALPHA"));
+    assert_eq!(
+        first_page.items[0].serial.as_deref(),
+        Some("SERIAL-SEARCH-ALPHA")
+    );
     assert_eq!(first_page.items[0].quantity.on_hand, 10);
     assert_eq!(first_page.items[0].quantity.reserved, 2);
     assert_eq!(first_page.items[0].quantity.held, 3);
@@ -326,6 +493,109 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
         .iter()
         .any(|balance| balance.item_id == denied_item));
 
+    for query in [
+        "mezzanine",
+        "v1-allowed",
+        "lp-search-alpha",
+        "sku-search-alpha",
+        "first",
+        "lot-search-alpha",
+        "serial-search-alpha",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(
+                &token,
+                tenant_id,
+                &format!("/api/v1/inventory/balances?query={query}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "query: {query}");
+        let page: InventoryBalancePage =
+            serde_json::from_slice(&body_bytes(response).await).unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|balance| balance.item_id)
+                .collect::<Vec<_>>(),
+            vec![first_item],
+            "query: {query}"
+        );
+    }
+
+    let id_response = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!("/api/v1/inventory/balances?query={}", first_balance.id),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(id_response.status(), StatusCode::OK);
+    let id_page: InventoryBalancePage =
+        serde_json::from_slice(&body_bytes(id_response).await).unwrap();
+    assert!(id_page
+        .items
+        .iter()
+        .any(|balance| balance.id == first_balance.id));
+
+    for (label, query) in [("denied", "denied"), ("literal percent", "%25")] {
+        let response = app
+            .clone()
+            .oneshot(request(
+                &token,
+                tenant_id,
+                &format!("/api/v1/inventory/balances?query={query}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "query: {label}");
+        let page: InventoryBalancePage =
+            serde_json::from_slice(&body_bytes(response).await).unwrap();
+        assert!(page.items.is_empty(), "query: {label}");
+    }
+
+    let filtered_first_response = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            "/api/v1/inventory/balances?query=v1&limit=1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(filtered_first_response.status(), StatusCode::OK);
+    let filtered_first_page: InventoryBalancePage =
+        serde_json::from_slice(&body_bytes(filtered_first_response).await).unwrap();
+    assert_eq!(filtered_first_page.items.len(), 1);
+    let filtered_cursor = filtered_first_page.next_cursor.unwrap();
+    let filtered_second_response = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!(
+                "/api/v1/inventory/balances?query=v1&limit=1&cursor={}",
+                filtered_cursor.as_str()
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(filtered_second_response.status(), StatusCode::OK);
+    let filtered_second_page: InventoryBalancePage =
+        serde_json::from_slice(&body_bytes(filtered_second_response).await).unwrap();
+    assert_eq!(
+        filtered_second_page
+            .items
+            .iter()
+            .map(|balance| balance.item_id)
+            .collect::<Vec<_>>(),
+        vec![second_item]
+    );
+    assert!(filtered_second_page.next_cursor.is_none());
+
     let invalid_cursor = app
         .clone()
         .oneshot(request(
@@ -350,6 +620,22 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
         .unwrap();
     assert_eq!(excessive_limit.status(), StatusCode::BAD_REQUEST);
     let error: ErrorResponse = serde_json::from_slice(&body_bytes(excessive_limit).await).unwrap();
+    assert_eq!(error.reason, ErrorReason::InvalidRequest);
+
+    let excessive_query = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!(
+                "/api/v1/inventory/balances?query={}",
+                "x".repeat(MAX_INVENTORY_BALANCE_QUERY_LENGTH + 1)
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(excessive_query.status(), StatusCode::BAD_REQUEST);
+    let error: ErrorResponse = serde_json::from_slice(&body_bytes(excessive_query).await).unwrap();
     assert_eq!(error.reason, ErrorReason::InvalidRequest);
 
     let unauthenticated = app

@@ -6,7 +6,7 @@ use crate::expected_receiving::{
     NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason, ReceivingDock,
     ReceivingLoadStatus, StockDimension,
 };
-use crate::workflow::{PutawayKind, ReleaseReason};
+use crate::workflow::{InventoryRelocationCommand, MovementKind, ReleaseReason};
 
 fn scope() -> ExecutionScope {
     ExecutionScope {
@@ -30,9 +30,20 @@ fn claim_draft(command_id: &str, key: &str) -> DurableCommandDraft {
         command_id,
         key,
         PutawayCommand::ClaimNext {
-            workflow: PutawayKind::Loose,
+            workflow: MovementKind::Loose,
         },
     )
+}
+
+fn relocation_claim_draft(command_id: &str, key: &str) -> DurableCommandDraft {
+    DurableCommandDraft {
+        schema_version: 1,
+        command_id: command_id.into(),
+        idempotency_key: key.into(),
+        command: RfCommand::InventoryRelocation(InventoryRelocationCommand::ClaimNext {
+            workflow: MovementKind::Loose,
+        }),
+    }
 }
 
 fn expected_receipt_draft(command_id: &str, key: &str) -> DurableCommandDraft {
@@ -309,6 +320,25 @@ fn expected_receipt_uses_the_same_durable_replay_lane_as_putaway() {
 }
 
 #[test]
+fn relocation_command_persists_its_typed_endpoint_and_response_kind() {
+    let mut store = CommandStore::open_in_memory().unwrap();
+    let draft = relocation_claim_draft("relocation-claim-1", "relocation:key-1");
+
+    let record = store.persist(&scope(), draft.clone()).unwrap();
+
+    assert_eq!(record.operation, CommandOperation::ClaimNext);
+    assert_eq!(
+        record.request.path,
+        "/api/v1/inventory-relocation-claims/next"
+    );
+    assert_eq!(
+        record.request.response_kind,
+        ResponseKind::RelocationOptionalClaim
+    );
+    assert_eq!(record.draft, draft);
+}
+
+#[test]
 fn typed_command_rejects_a_tampered_durable_request_envelope() {
     let mut store = CommandStore::open_in_memory().expect("store should open");
     let record = store
@@ -356,7 +386,7 @@ fn changed_content_cannot_reuse_a_command_identity() {
         "command-1",
         "key-1",
         PutawayCommand::ClaimNext {
-            workflow: PutawayKind::LicensePlate,
+            workflow: MovementKind::LicensePlate,
         },
     );
 

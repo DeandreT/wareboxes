@@ -13,7 +13,7 @@ use crate::expected_receiving::{
     LoadResolutionFailure, LocationId, NonNegativeQuantity, ReceivingDock, ReceivingEffect,
     ReceivingLoadStatus, ReceivingSession, ReceivingSessionInput, StockDimension,
 };
-use crate::workflow::Activity;
+use crate::workflow::{Activity, MovementKind, MovementOperation};
 
 use super::RfApp;
 use super::SessionGate;
@@ -27,15 +27,26 @@ mod tests;
 pub(super) enum WorkMode {
     Receive,
     Putaway,
+    Relocate,
 }
 
 impl WorkMode {
-    const ALL: [Self; 2] = [Self::Receive, Self::Putaway];
+    const ALL: [Self; 3] = [Self::Receive, Self::Putaway, Self::Relocate];
 
     const fn label(self) -> &'static str {
         match self {
             Self::Receive => "Receive",
             Self::Putaway => "Putaway",
+            Self::Relocate => "Relocate",
+        }
+    }
+}
+
+impl From<MovementOperation> for WorkMode {
+    fn from(operation: MovementOperation) -> Self {
+        match operation {
+            MovementOperation::Putaway => Self::Putaway,
+            MovementOperation::InventoryRelocation => Self::Relocate,
         }
     }
 }
@@ -147,6 +158,7 @@ impl RfApp {
                     let icon = match self.work_mode {
                         WorkMode::Receive => Icon::PackagePlus,
                         WorkMode::Putaway => Icon::PackageOpen,
+                        WorkMode::Relocate => Icon::Move,
                     };
                     ui.label(Self::icon(icon).color(Self::accent()));
                     ui.heading(self.work_mode.label());
@@ -166,7 +178,7 @@ impl RfApp {
 
         let switching_allowed =
             work_mode_switch_allowed(self.workflow.activity(), self.receiving.activity());
-        let segment_width = (ui.available_width() - 8.0) / 2.0;
+        let segment_width = (ui.available_width() - 16.0) / 3.0;
         ui.horizontal(|ui| {
             for mode in WorkMode::ALL {
                 let selected = self.work_mode == mode;
@@ -179,6 +191,15 @@ impl RfApp {
                     .on_disabled_hover_text("Finish or recover current work before switching");
                 if response.clicked() && switching_allowed {
                     self.work_mode = mode;
+                    match mode {
+                        WorkMode::Putaway => {
+                            self.workflow.select_operation(MovementOperation::Putaway)
+                        }
+                        WorkMode::Relocate => self
+                            .workflow
+                            .select_operation(MovementOperation::InventoryRelocation),
+                        WorkMode::Receive => {}
+                    }
                     self.receiving_ui.focus = None;
                     self.scan_focus = None;
                 }
@@ -189,7 +210,7 @@ impl RfApp {
 
     fn work_status(&self) -> (&'static str, egui::Color32) {
         match self.work_mode {
-            WorkMode::Putaway => {
+            WorkMode::Putaway | WorkMode::Relocate => {
                 self.heartbeat_header()
                     .unwrap_or_else(|| match self.workflow.activity() {
                         Activity::Idle => ("READY", Self::accent()),
@@ -903,6 +924,10 @@ impl RfApp {
         };
         self.open_debug_preview();
         match preview.as_str() {
+            "relocation-loose" => self.open_debug_relocation_preview(MovementKind::Loose),
+            "relocation-license-plate" => {
+                self.open_debug_relocation_preview(MovementKind::LicensePlate)
+            }
             "receiving-active" => self.load_receiving_preview(ReceivingPreview::Active),
             "receiving-error" => self.load_receiving_preview(ReceivingPreview::Error),
             "receiving-recovery" => self.load_receiving_preview(ReceivingPreview::Recovery),
@@ -914,7 +939,7 @@ impl RfApp {
     #[cfg(all(debug_assertions, not(target_os = "android")))]
     fn load_receiving_preview(&mut self, preview: ReceivingPreview) {
         self.work_mode = WorkMode::Receive;
-        self.workflow = crate::workflow::PutawayWorkflow::default();
+        self.workflow = crate::workflow::MovementWorkflow::default();
         self.receiving = ExpectedReceivingReducer::default();
         self.receiving_effects.clear();
         self.receiving_request = None;

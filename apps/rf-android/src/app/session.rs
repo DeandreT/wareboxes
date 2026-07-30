@@ -18,8 +18,14 @@ use crate::transport::{
     send_current_claim, send_expected_receiving_barcode_lookup, send_expected_receiving_session,
     send_session,
 };
-use crate::wire::{decode_claim_response, decode_command_response, decode_receiving_session};
-use crate::workflow::{DurableCommandDraft, RfCommand, WorkflowEffect};
+use crate::wire::{
+    decode_claim_response, decode_command_response, decode_receiving_session,
+    decode_relocation_claim_response,
+};
+use crate::workflow::{
+    DurableCommandDraft, InventoryRelocationClaim, MovementOperation, MovementWorkflow,
+    PutawayClaim, RfCommand, WorkflowEffect,
+};
 
 use super::{
     RF_SESSION_PATH, RfApp, RfSession, SessionGate, rejected_command_message,
@@ -60,6 +66,36 @@ pub(super) struct ReceivingCommandRuntime {
     confirmation_id: ConfirmationId,
     phase: ReceivingCommandPhase,
     message: Option<String>,
+}
+
+enum CurrentMovementClaim {
+    Putaway(Option<PutawayClaim>),
+    InventoryRelocation(Option<InventoryRelocationClaim>),
+}
+
+impl CurrentMovementClaim {
+    fn is_none(&self) -> bool {
+        match self {
+            Self::Putaway(claim) => claim.is_none(),
+            Self::InventoryRelocation(claim) => claim.is_none(),
+        }
+    }
+
+    fn task_id(&self) -> Option<i64> {
+        match self {
+            Self::Putaway(claim) => claim.as_ref().map(|claim| claim.details().task_id),
+            Self::InventoryRelocation(claim) => claim.as_ref().map(|claim| claim.details().task_id),
+        }
+    }
+
+    fn restore(self, workflow: &mut MovementWorkflow) {
+        match self {
+            Self::Putaway(claim) => workflow.restore_current_putaway_claim(claim),
+            Self::InventoryRelocation(claim) => {
+                workflow.restore_current_inventory_relocation_claim(claim)
+            }
+        }
+    }
 }
 
 impl ReceivingCommandRuntime {
@@ -146,14 +182,22 @@ impl RfApp {
                     response,
                 } => self.handle_session_response(context, &request_id, response),
                 NetworkEvent::CurrentClaim {
+                    operation,
                     request_id,
                     response,
-                } => self.handle_current_claim_response(&request_id, response),
+                } => self.handle_current_claim_response(context, operation, &request_id, response),
                 NetworkEvent::Heartbeat {
+                    operation,
                     task_id,
                     request_id,
                     response,
-                } => self.handle_heartbeat_response(context, task_id, &request_id, response),
+                } => self.handle_heartbeat_response(
+                    context,
+                    operation,
+                    task_id,
+                    &request_id,
+                    response,
+                ),
                 NetworkEvent::ExpectedReceivingSession {
                     load_id,
                     request_id,
@@ -310,6 +354,9 @@ impl RfApp {
             self.restore_receiving_command(record);
             return;
         }
+        if let Some(operation) = record.draft.command.movement_operation() {
+            self.work_mode = super::WorkMode::from(operation);
+        }
         match record.status {
             CommandStatus::Persisted => {
                 let transition = self
@@ -429,6 +476,14 @@ impl RfApp {
     }
 
     pub(super) fn request_current_claim(&mut self, context: &egui::Context) {
+        self.request_current_claim_for_operation(context, MovementOperation::Putaway);
+    }
+
+    fn request_current_claim_for_operation(
+        &mut self,
+        context: &egui::Context,
+        operation: MovementOperation,
+    ) {
         let Some(session) = self.session.as_ref() else {
             return;
         };
@@ -438,7 +493,7 @@ impl RfApp {
             token: &session.token,
             scope: &session.scope,
         };
-        let request = match build_current_claim_request(&transport, &request_id) {
+        let request = match build_current_claim_request(&transport, operation, &request_id) {
             Ok(request) => request,
             Err(_) => {
                 self.session_gate = SessionGate::Ready;
@@ -452,6 +507,7 @@ impl RfApp {
         self.expected_claim_request_id = Some(request_id.clone());
         send_current_claim(
             request,
+            operation,
             request_id,
             self.network_tx.clone(),
             context.clone(),
@@ -460,6 +516,8 @@ impl RfApp {
 
     fn handle_current_claim_response(
         &mut self,
+        context: &egui::Context,
+        operation: MovementOperation,
         request_id: &str,
         response: Result<NetworkResponse, String>,
     ) {
@@ -469,10 +527,10 @@ impl RfApp {
         self.expected_claim_request_id = None;
         let lease_check_task_id = self.lease_check_task_id.take();
         let lease_rejection_check = std::mem::take(&mut self.lease_rejection_check);
-        self.session_gate = SessionGate::Ready;
         let response = match response {
             Ok(response) => response,
             Err(_) => {
+                self.session_gate = SessionGate::Ready;
                 if let Some(task_id) = lease_check_task_id {
                     self.lease_check_task_id = Some(task_id);
                     self.lease_rejection_check = lease_rejection_check;
@@ -484,6 +542,7 @@ impl RfApp {
             }
         };
         if response.status == 401 {
+            self.session_gate = SessionGate::Ready;
             self.clear_claim_heartbeat();
             if let Some(task_id) = lease_check_task_id {
                 self.require_reauthentication_for_task(task_id);
@@ -493,6 +552,17 @@ impl RfApp {
             return;
         }
         if !(200..300).contains(&response.status) {
+            if lease_check_task_id.is_none()
+                && operation == MovementOperation::Putaway
+                && response.status == 409
+            {
+                self.request_current_claim_for_operation(
+                    context,
+                    MovementOperation::InventoryRelocation,
+                );
+                return;
+            }
+            self.session_gate = SessionGate::Ready;
             if let Some(task_id) = lease_check_task_id {
                 self.lease_check_task_id = Some(task_id);
                 self.lease_rejection_check = lease_rejection_check;
@@ -503,32 +573,61 @@ impl RfApp {
             }
             return;
         }
-        match decode_claim_response(&response.body) {
+        let claim = match operation {
+            MovementOperation::Putaway => {
+                decode_claim_response(&response.body).map(CurrentMovementClaim::Putaway)
+            }
+            MovementOperation::InventoryRelocation => {
+                decode_relocation_claim_response(&response.body)
+                    .map(CurrentMovementClaim::InventoryRelocation)
+            }
+        };
+        match claim {
             Ok(claim) => {
+                if lease_check_task_id.is_none()
+                    && operation == MovementOperation::Putaway
+                    && claim.is_none()
+                {
+                    self.request_current_claim_for_operation(
+                        context,
+                        MovementOperation::InventoryRelocation,
+                    );
+                    return;
+                }
+                self.session_gate = SessionGate::Ready;
                 self.clear_claim_heartbeat();
                 if let Some(expected_task_id) = lease_check_task_id {
-                    match claim {
-                        Some(claim)
-                            if claim.task_id == expected_task_id && !lease_rejection_check =>
-                        {
-                            self.workflow.restore_current_claim(Some(claim));
+                    if claim.task_id() == Some(expected_task_id) && !lease_rejection_check {
+                        claim.restore(&mut self.workflow);
+                        self.work_mode = super::WorkMode::from(operation);
+                    } else {
+                        match operation {
+                            MovementOperation::Putaway => {
+                                self.workflow.restore_current_putaway_claim(None)
+                            }
+                            MovementOperation::InventoryRelocation => self
+                                .workflow
+                                .restore_current_inventory_relocation_claim(None),
                         }
-                        Some(_) | None => {
-                            self.workflow.restore_current_claim(None);
-                            self.workflow.require_reconciliation(
-                                "This task is no longer assigned. Do not move its inventory. Contact a supervisor."
-                                    .into(),
-                            );
-                        }
+                        self.work_mode = super::WorkMode::from(operation);
+                        self.workflow.require_reconciliation(
+                            "This task is no longer assigned. Do not move its inventory. Contact a supervisor."
+                                .into(),
+                        );
                     }
+                } else if !claim.is_none() {
+                    claim.restore(&mut self.workflow);
+                    self.work_mode = super::WorkMode::from(operation);
                 } else {
-                    self.workflow.restore_current_claim(claim);
+                    self.workflow.restore_current_putaway_claim(None);
+                    self.work_mode = super::WorkMode::Putaway;
                 }
                 self.connectivity_notice = None;
                 self.reauth_scope = None;
                 self.reauth_notice = None;
             }
             Err(_) => {
+                self.session_gate = SessionGate::Ready;
                 self.clear_claim_heartbeat();
                 self.workflow.require_reconciliation(
                     "The server returned invalid current-work data.".into(),
@@ -548,7 +647,7 @@ impl RfApp {
         self.clear_claim_heartbeat();
         self.lease_check_task_id = Some(task_id);
         self.lease_rejection_check = false;
-        self.request_current_claim(context);
+        self.request_current_claim_for_operation(context, self.workflow.operation());
     }
 
     pub(super) fn request_current_claim_after_rejection(

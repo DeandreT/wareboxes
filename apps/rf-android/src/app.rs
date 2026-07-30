@@ -10,8 +10,8 @@ use crate::command_store::{CommandStore, ExecutionScope};
 use crate::expected_receiving::{ExpectedReceivingReducer, ReceivingEffect};
 use crate::transport::{NetworkEvent, ServerEndpoint};
 use crate::workflow::{
-    Activity, Location, PutawayClaim, PutawayKind, PutawayWork, PutawayWorkflow, ReleaseReason,
-    ScanStage, Transition, WorkflowEffect,
+    Activity, InventoryRelocationClaim, Location, MovementClaimDetails, MovementKind, MovementWork,
+    MovementWorkflow, PutawayClaim, ReleaseReason, ScanStage, Transition, WorkflowEffect,
 };
 
 mod heartbeat;
@@ -40,7 +40,7 @@ enum SessionGate {
 
 pub struct RfApp {
     work_mode: WorkMode,
-    workflow: PutawayWorkflow,
+    workflow: MovementWorkflow,
     effects: VecDeque<WorkflowEffect>,
     receiving: ExpectedReceivingReducer,
     receiving_effects: VecDeque<ReceivingEffect>,
@@ -96,7 +96,7 @@ impl RfApp {
         let (network_tx, network_rx) = mpsc::channel();
         Self {
             work_mode: WorkMode::Putaway,
-            workflow: PutawayWorkflow::default(),
+            workflow: MovementWorkflow::default(),
             effects: VecDeque::new(),
             receiving: ExpectedReceivingReducer::default(),
             receiving_effects: VecDeque::new(),
@@ -169,7 +169,7 @@ impl RfApp {
         };
         let app = Self {
             work_mode: WorkMode::Putaway,
-            workflow: PutawayWorkflow::default(),
+            workflow: MovementWorkflow::default(),
             effects: VecDeque::new(),
             receiving: ExpectedReceivingReducer::default(),
             receiving_effects: VecDeque::new(),
@@ -630,7 +630,7 @@ impl RfApp {
         ui.label(egui::RichText::new("WORK TYPE").small().strong());
         let segment_width = (ui.available_width() - 8.0) / 2.0;
         ui.horizontal(|ui| {
-            for kind in [PutawayKind::Loose, PutawayKind::LicensePlate] {
+            for kind in [MovementKind::Loose, MovementKind::LicensePlate] {
                 let selected = self.workflow.selected_kind() == kind;
                 if ui
                     .add_sized(
@@ -759,7 +759,7 @@ impl RfApp {
             });
     }
 
-    fn work_band(ui: &mut egui::Ui, work: &PutawayWork) {
+    fn work_band(ui: &mut egui::Ui, work: &MovementWork) {
         let width = ui.available_width();
         egui::Frame::new()
             .fill(ui.visuals().extreme_bg_color)
@@ -767,7 +767,7 @@ impl RfApp {
             .show(ui, |ui| {
                 ui.set_min_width((width - 24.0).max(0.0));
                 match work {
-                    PutawayWork::Loose {
+                    MovementWork::Loose {
                         item_description,
                         item_id,
                         quantity,
@@ -793,7 +793,7 @@ impl RfApp {
                             ui.monospace(format!("Serial {serial}"));
                         }
                     }
-                    PutawayWork::LicensePlate {
+                    MovementWork::LicensePlate {
                         barcode,
                         planned_balance_count,
                     } => {
@@ -1006,7 +1006,7 @@ impl RfApp {
 
     #[cfg(debug_assertions)]
     fn debug_claim() -> PutawayClaim {
-        PutawayClaim {
+        PutawayClaim::new(MovementClaimDetails {
             task_id: 1042,
             inventory_owner_id: 12,
             facility_id: 4,
@@ -1023,7 +1023,7 @@ impl RfApp {
                 name: Some("A-01-03".into()),
                 barcode: Some("A-01-03".into()),
             },
-            work: PutawayWork::Loose {
+            work: MovementWork::Loose {
                 item_description: Some("Case-picked item".into()),
                 item_id: 88,
                 quantity: 4,
@@ -1031,7 +1031,46 @@ impl RfApp {
                 lot: Some("LOT-2407".into()),
                 serial: None,
             },
-        }
+        })
+    }
+
+    #[cfg(all(debug_assertions, not(target_os = "android")))]
+    fn open_debug_relocation_preview(&mut self, kind: MovementKind) {
+        let work = match kind {
+            MovementKind::Loose => MovementWork::Loose {
+                item_description: Some("Case-picked item".into()),
+                item_id: 88,
+                quantity: 4,
+                uom: "cases".into(),
+                lot: Some("LOT-2407".into()),
+                serial: None,
+            },
+            MovementKind::LicensePlate => MovementWork::LicensePlate {
+                barcode: "LP-0001042".into(),
+                planned_balance_count: 3,
+            },
+        };
+        self.work_mode = WorkMode::Relocate;
+        self.workflow
+            .load_debug_relocation_claim(InventoryRelocationClaim::new(MovementClaimDetails {
+                task_id: 2042,
+                inventory_owner_id: 12,
+                facility_id: 4,
+                priority: 70,
+                instructions: Some("Keep aisle crossing clear".into()),
+                lease_expires_at: (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339(),
+                source: Some(Location {
+                    location_id: 31,
+                    name: Some("A-01-03".into()),
+                    barcode: Some("A-01-03".into()),
+                }),
+                destination: Location {
+                    location_id: 47,
+                    name: Some("B-02-01".into()),
+                    barcode: Some("B-02-01".into()),
+                },
+                work,
+            }));
     }
 }
 
@@ -1156,7 +1195,7 @@ impl eframe::App for RfApp {
                     .id_salt(("rf_work", self.work_mode))
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if self.work_mode == WorkMode::Putaway
+                        if matches!(self.work_mode, WorkMode::Putaway | WorkMode::Relocate)
                             && let Some(notice) = self.connectivity_notice.clone()
                         {
                             Self::message_band(ui, Self::warning(), Icon::WifiOff, &notice);
@@ -1190,7 +1229,7 @@ impl eframe::App for RfApp {
                         } else {
                             match self.work_mode {
                                 WorkMode::Receive => self.receiving_view(ui),
-                                WorkMode::Putaway => {
+                                WorkMode::Putaway | WorkMode::Relocate => {
                                     if self.workflow.claim().is_some() {
                                         self.active_work(ui);
                                     } else {

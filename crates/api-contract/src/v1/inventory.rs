@@ -1,6 +1,97 @@
+use std::fmt;
+use std::str::FromStr;
+
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
 use super::{CursorPage, OpaqueCursor, PageLimit};
+
+/// Maximum accepted inventory-balance search length.
+pub const MAX_INVENTORY_BALANCE_QUERY_LENGTH: usize = 200;
+
+/// Validated free-text search for inventory-balance discovery.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct InventoryBalanceSearchQuery(String);
+
+impl InventoryBalanceSearchQuery {
+    pub fn new(value: impl Into<String>) -> Result<Self, InventoryBalanceSearchQueryError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(InventoryBalanceSearchQueryError::Empty);
+        }
+        if value.trim() != value {
+            return Err(InventoryBalanceSearchQueryError::NotTrimmed);
+        }
+        if value.chars().count() > MAX_INVENTORY_BALANCE_QUERY_LENGTH {
+            return Err(InventoryBalanceSearchQueryError::TooLong);
+        }
+        if value.chars().any(char::is_control) {
+            return Err(InventoryBalanceSearchQueryError::InvalidCharacter);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for InventoryBalanceSearchQuery {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for InventoryBalanceSearchQuery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for InventoryBalanceSearchQuery {
+    type Err = InventoryBalanceSearchQueryError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for InventoryBalanceSearchQuery {
+    type Error = InventoryBalanceSearchQueryError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for InventoryBalanceSearchQuery {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(D::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InventoryBalanceSearchQueryError {
+    #[error("inventory balance query cannot be empty")]
+    Empty,
+    #[error("inventory balance query must be trimmed")]
+    NotTrimmed,
+    #[error(
+        "inventory balance query cannot exceed {MAX_INVENTORY_BALANCE_QUERY_LENGTH} characters"
+    )]
+    TooLong,
+    #[error("inventory balance query cannot contain control characters")]
+    InvalidCharacter,
+}
 
 /// Public inventory disposition for a balance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +146,8 @@ pub struct InventoryBalancePageRequest {
     pub cursor: Option<OpaqueCursor>,
     #[serde(default)]
     pub limit: PageLimit,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<InventoryBalanceSearchQuery>,
 }
 
 /// Cursor page returned by the version 1 inventory-balance collection.
@@ -107,6 +200,37 @@ mod tests {
         let request = serde_json::from_str::<InventoryBalancePageRequest>("{}").unwrap();
         assert!(request.cursor.is_none());
         assert_eq!(request.limit, PageLimit::default());
+        assert!(request.query.is_none());
         assert!(serde_json::from_str::<InventoryBalancePageRequest>(r#"{"limit":1001}"#).is_err());
+    }
+
+    #[test]
+    fn inventory_balance_search_queries_are_bounded_and_unambiguous() {
+        let request = serde_json::from_str::<InventoryBalancePageRequest>(
+            r#"{"query":"Reserve A / SKU-42"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            request
+                .query
+                .as_ref()
+                .map(InventoryBalanceSearchQuery::as_str),
+            Some("Reserve A / SKU-42")
+        );
+        assert!(serde_json::from_str::<InventoryBalancePageRequest>(r#"{"query":""}"#).is_err());
+        assert!(
+            serde_json::from_str::<InventoryBalancePageRequest>(r#"{"query":" padded "}"#).is_err()
+        );
+        assert!(serde_json::from_str::<InventoryBalancePageRequest>(
+            &serde_json::json!({
+                "query": "x".repeat(MAX_INVENTORY_BALANCE_QUERY_LENGTH + 1)
+            })
+            .to_string()
+        )
+        .is_err());
+        assert!(
+            serde_json::from_str::<InventoryBalancePageRequest>(r#"{"query":"line\nbreak"}"#)
+                .is_err()
+        );
     }
 }

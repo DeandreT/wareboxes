@@ -7,17 +7,18 @@ use wareboxes_api_contract::v1::{ErrorReason, ErrorResponse};
 
 use crate::lease::{
     ActionBlockReason, ClockSample, HeartbeatAttemptId, HeartbeatFailureKind, HeartbeatLease,
-    HeartbeatOutcome, HeartbeatState, LeasePolicy, PutawayLeaseMonitor,
+    HeartbeatOutcome, HeartbeatState, LeasePolicy, MovementLeaseMonitor,
 };
 use crate::transport::{
-    AuthenticatedTransport, NetworkResponse, build_heartbeat_request, send_heartbeat,
+    AuthenticatedTransport, NetworkResponse, build_movement_heartbeat_request, send_heartbeat,
 };
-use crate::wire::decode_heartbeat_response;
-use crate::workflow::Activity;
+use crate::wire::{decode_heartbeat_response, decode_relocation_heartbeat_response};
+use crate::workflow::{Activity, MovementOperation};
 
 use super::RfApp;
 
 struct ExpectedHeartbeat {
+    operation: MovementOperation,
     task_id: i64,
     attempt_id: HeartbeatAttemptId,
     request_id: String,
@@ -25,7 +26,7 @@ struct ExpectedHeartbeat {
 
 pub(super) struct HeartbeatRuntime {
     epoch: Instant,
-    monitor: Option<PutawayLeaseMonitor>,
+    monitor: Option<MovementLeaseMonitor>,
     expected: Option<ExpectedHeartbeat>,
     idempotency_key: Option<String>,
 }
@@ -75,7 +76,7 @@ impl RfApp {
             .as_ref()
             .is_none_or(|monitor| monitor.task_id() != task_id)
         {
-            match PutawayLeaseMonitor::new(
+            match MovementLeaseMonitor::new(
                 task_id,
                 &lease_expires_at,
                 ClockSample::new(Utc::now(), now),
@@ -128,7 +129,7 @@ impl RfApp {
                 self.heartbeat
                     .monitor
                     .as_ref()
-                    .map(PutawayLeaseMonitor::heartbeat_state),
+                    .map(MovementLeaseMonitor::heartbeat_state),
                 Some(HeartbeatState::InFlight { .. })
             ) {
                 Duration::from_secs(1)
@@ -153,8 +154,10 @@ impl RfApp {
             token: &session.token,
             scope: &session.scope,
         };
-        let request = match build_heartbeat_request(
+        let operation = self.workflow.operation();
+        let request = match build_movement_heartbeat_request(
             &transport,
+            operation,
             attempt.task_id,
             &request_id,
             &idempotency_key,
@@ -166,12 +169,14 @@ impl RfApp {
             }
         };
         self.heartbeat.expected = Some(ExpectedHeartbeat {
+            operation,
             task_id: attempt.task_id,
             attempt_id: attempt.id,
             request_id: request_id.clone(),
         });
         send_heartbeat(
             request,
+            operation,
             attempt.task_id,
             request_id,
             self.network_tx.clone(),
@@ -183,6 +188,7 @@ impl RfApp {
     pub(super) fn handle_heartbeat_response(
         &mut self,
         context: &egui::Context,
+        operation: MovementOperation,
         task_id: i64,
         request_id: &str,
         response: Result<NetworkResponse, String>,
@@ -190,10 +196,14 @@ impl RfApp {
         let Some(expected) = self.heartbeat.expected.as_ref() else {
             return;
         };
-        if expected.task_id != task_id || expected.request_id != request_id {
+        if expected.operation != operation
+            || expected.task_id != task_id
+            || expected.request_id != request_id
+        {
             return;
         }
-        if self.workflow.activity() != Activity::Active
+        if self.workflow.operation() != operation
+            || self.workflow.activity() != Activity::Active
             || self
                 .workflow
                 .claim()
@@ -215,21 +225,43 @@ impl RfApp {
         };
 
         if (200..300).contains(&response.status) {
-            let heartbeat =
-                match decode_heartbeat_response(task_id, response.status, &response.body) {
-                    Ok(heartbeat) => heartbeat,
-                    Err(_) => {
-                        self.fail_heartbeat_integrity();
-                        return;
-                    }
-                };
+            let heartbeat = match operation {
+                MovementOperation::Putaway => {
+                    decode_heartbeat_response(task_id, response.status, &response.body).map(
+                        |response| {
+                            (
+                                response.task_id,
+                                response.heartbeat_at,
+                                response.lease_expires_at,
+                            )
+                        },
+                    )
+                }
+                MovementOperation::InventoryRelocation => {
+                    decode_relocation_heartbeat_response(task_id, response.status, &response.body)
+                        .map(|response| {
+                            (
+                                response.task_id,
+                                response.heartbeat_at,
+                                response.lease_expires_at,
+                            )
+                        })
+                }
+            };
+            let (heartbeat_task_id, heartbeat_at, lease_expires_at) = match heartbeat {
+                Ok(heartbeat) => heartbeat,
+                Err(_) => {
+                    self.fail_heartbeat_integrity();
+                    return;
+                }
+            };
             let result = self.heartbeat.monitor.as_mut().map(|monitor| {
                 monitor.heartbeat_succeeded(
                     expected.attempt_id,
                     HeartbeatLease {
-                        task_id: heartbeat.task_id,
-                        heartbeat_at: &heartbeat.heartbeat_at,
-                        lease_expires_at: &heartbeat.lease_expires_at,
+                        task_id: heartbeat_task_id,
+                        heartbeat_at: &heartbeat_at,
+                        lease_expires_at: &lease_expires_at,
                     },
                     now,
                 )

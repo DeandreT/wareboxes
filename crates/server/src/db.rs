@@ -435,6 +435,18 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'license_plate_putaway_results_tenant_isolation'
                 ),
                 (
+                    'inventory_relocation_tasks',
+                    'inventory_relocation_tasks_tenant_isolation'
+                ),
+                (
+                    'inventory_relocation_task_contents',
+                    'inventory_relocation_task_contents_tenant_isolation'
+                ),
+                (
+                    'inventory_relocation_results',
+                    'inventory_relocation_results_tenant_isolation'
+                ),
+                (
                     'cycle_count_item_location_tasks',
                     'cycle_count_item_location_tasks_tenant_isolation'
                 ),
