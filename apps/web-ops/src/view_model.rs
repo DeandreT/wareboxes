@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
+use wareboxes_api_contract::v1::InventoryBalanceResponse;
 use wareboxes_core::dto::WebSessionContext;
-use wareboxes_core::models::{InventoryBalance, OrderStatus};
+use wareboxes_core::models::OrderStatus;
 
 pub fn has_permission(session: &WebSessionContext, permission: &str) -> bool {
     session.user.user_permissions.iter().any(|candidate| {
@@ -53,7 +54,7 @@ pub struct FacilityInventory {
     pub positions: usize,
 }
 
-pub fn facility_inventory(balances: &[InventoryBalance]) -> Vec<FacilityInventory> {
+pub fn facility_inventory(balances: &[InventoryBalanceResponse]) -> Vec<FacilityInventory> {
     let mut totals = BTreeMap::<i64, FacilityInventory>::new();
     for balance in balances {
         let total = totals
@@ -68,9 +69,9 @@ pub fn facility_inventory(balances: &[InventoryBalance]) -> Vec<FacilityInventor
                 held: 0,
                 positions: 0,
             });
-        total.on_hand += balance.qty_on_hand;
-        total.reserved += balance.qty_reserved;
-        total.held += balance.qty_held;
+        total.on_hand += balance.quantity.on_hand;
+        total.reserved += balance.quantity.reserved;
+        total.held += balance.quantity.held;
         total.positions += 1;
     }
     totals.into_values().collect()

@@ -224,6 +224,8 @@ BEGIN
            b.item_id, b.uom, b.lot, b.expiration, b.serial, inventory_status, quantity
     FROM item_batches b WHERE b.id = batch;
 
+    PERFORM set_config('wareboxes.inventory_transaction_id', transaction::text, true);
+
     IF plate IS NULL THEN
       INSERT INTO inventory_balances
           (tenant_id, inventory_owner_id, created, modified, facility_id, location_id,

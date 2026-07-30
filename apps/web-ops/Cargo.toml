@@ -10,10 +10,20 @@ description = "Wareboxes server-rendered operations web application"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+wareboxes-api-contract = { workspace = true }
 wareboxes-core = { workspace = true }
 leptos = { workspace = true }
 leptos_meta = { workspace = true }
 leptos_router = { workspace = true }
+lucide-leptos = { version = "3.26.0", default-features = false, features = [
+    "arrows",
+    "buildings",
+    "layout",
+    "notifications",
+    "security",
+    "shapes",
+    "text",
+] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
@@ -22,6 +32,7 @@ wasm-bindgen = { version = "0.2.106", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-net = { version = "0.6", features = ["http"] }
+uuid = { version = "1", features = ["js", "v4"] }
 web-sys = { version = "0.3", features = ["Document", "Element", "Node", "Window"] }
 
 [features]

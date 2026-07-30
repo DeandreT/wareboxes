@@ -5,12 +5,18 @@ use leptos_router::{
     hooks::use_navigate,
     StaticSegment,
 };
+use wareboxes_api_contract::v1::{
+    InventoryBalanceResponse, InventoryHoldResponse, InventoryHoldStatus, OpaqueCursor,
+};
 use wareboxes_core::dto::{
     AccessScopeResource, AccessScopeWorkspace, OrderPage, WebSessionContext,
 };
-use wareboxes_core::models::{InventoryBalance, Order};
+use wareboxes_core::models::Order;
 
 use crate::api;
+use crate::components::{Icon, NavItem, SearchField, UiIcon};
+use crate::inventory::InventoryTable;
+use crate::inventory_holds::QuantityHoldsWorkbench;
 use crate::view_model::{
     facility_inventory, format_quantity, has_permission, open_order_count, user_name,
 };
@@ -29,7 +35,10 @@ enum SessionState {
 #[derive(Clone, Default)]
 struct WorkspaceData {
     orders: Option<OrderPage>,
-    balances: Vec<InventoryBalance>,
+    balances: Vec<InventoryBalanceResponse>,
+    balance_next_cursor: Option<OpaqueCursor>,
+    holds: Vec<InventoryHoldResponse>,
+    hold_next_cursor: Option<OpaqueCursor>,
     access: AccessScopeWorkspace,
 }
 
@@ -37,6 +46,7 @@ struct WorkspaceData {
 enum WorkspaceState {
     Loading,
     Ready(WorkspaceData),
+    Refreshing(WorkspaceData),
     Failed(String),
 }
 
@@ -45,6 +55,7 @@ enum Section {
     Overview,
     Orders,
     Inventory,
+    InventoryHolds,
     Access,
 }
 
@@ -89,12 +100,14 @@ pub fn App() -> impl IntoView {
             inner_html=bootstrap
         ></script>
         <Stylesheet id="wareboxes-web" href="/pkg/wareboxes-web.css"/>
+        <Stylesheet id="wareboxes-holds" href="/holds.css"/>
         <Title text="Wareboxes"/>
         <Router>
             <Routes fallback=|| view! { <NotFoundPage/> }.into_any()>
                 <Route path=StaticSegment("") view=OverviewPage/>
                 <Route path=StaticSegment("orders") view=OrdersPage/>
                 <Route path=StaticSegment("inventory") view=InventoryPage/>
+                <Route path=(StaticSegment("inventory"), StaticSegment("holds")) view=InventoryHoldsPage/>
                 <Route path=StaticSegment("access") view=AccessPage/>
             </Routes>
         </Router>
@@ -223,7 +236,7 @@ fn LoginPage(notice: Option<String>) -> impl IntoView {
                         })
                     }}
 
-                    <button class="primary-action" type="submit" disabled=move || pending.get()>
+                    <button class="button primary-action" type="submit" disabled=move || pending.get()>
                         {move || if pending.get() { "Signing in..." } else { "Sign in" }}
                     </button>
                 </form>
@@ -250,7 +263,7 @@ fn AuthenticatedWorkspace(session: WebSessionContext, section: Section) -> impl 
     provide_context(workspace_state);
     provide_context(session.clone());
     #[cfg(target_arch = "wasm32")]
-    request_workspace(session, workspace_state);
+    request_workspace(session, section, workspace_state);
 
     view! {
         <PageFrame section>
@@ -259,10 +272,18 @@ fn AuthenticatedWorkspace(session: WebSessionContext, section: Section) -> impl 
     }
 }
 
-fn request_workspace(session: WebSessionContext, state: RwSignal<WorkspaceState>) {
-    state.set(WorkspaceState::Loading);
+fn request_workspace(
+    session: WebSessionContext,
+    section: Section,
+    state: RwSignal<WorkspaceState>,
+) {
+    let previous = match state.get_untracked() {
+        WorkspaceState::Ready(data) | WorkspaceState::Refreshing(data) => Some(data),
+        WorkspaceState::Loading | WorkspaceState::Failed(_) => None,
+    };
+    state.set(previous.map_or(WorkspaceState::Loading, WorkspaceState::Refreshing));
     leptos::task::spawn_local(async move {
-        match load_workspace(&session).await {
+        match load_workspace(&session, section).await {
             Ok(data) => state.set(WorkspaceState::Ready(data)),
             Err(error) if error.unauthorized => {
                 let root = expect_context::<RwSignal<SessionState>>();
@@ -275,28 +296,45 @@ fn request_workspace(session: WebSessionContext, state: RwSignal<WorkspaceState>
     });
 }
 
-async fn load_workspace(session: &WebSessionContext) -> Result<WorkspaceData, api::ApiError> {
-    let access = api::access().await?;
-    let orders = if has_permission(session, "orders") {
-        Some(api::orders().await?)
-    } else {
-        None
-    };
-
-    if !has_permission(session, "wms") {
-        return Ok(WorkspaceData {
-            orders,
-            access,
-            ..WorkspaceData::default()
-        });
+async fn load_workspace(
+    session: &WebSessionContext,
+    section: Section,
+) -> Result<WorkspaceData, api::ApiError> {
+    let mut data = WorkspaceData::default();
+    match section {
+        Section::Overview => {
+            data.access = api::access().await?;
+            if has_permission(session, "orders") {
+                data.orders = Some(api::orders().await?);
+            }
+            if has_permission(session, "wms") {
+                let page = api::balances(None).await?;
+                data.balances = page.items;
+                data.balance_next_cursor = page.next_cursor;
+            }
+        }
+        Section::Orders if has_permission(session, "orders") => {
+            data.orders = Some(api::orders().await?);
+        }
+        Section::Inventory if has_permission(session, "wms") => {
+            let page = api::balances(None).await?;
+            data.balances = page.items;
+            data.balance_next_cursor = page.next_cursor;
+        }
+        Section::InventoryHolds if has_permission(session, "wms") => {
+            let balance_page = api::balances(None).await?;
+            let hold_page = api::holds(InventoryHoldStatus::Active, None).await?;
+            data.balances = balance_page.items;
+            data.balance_next_cursor = balance_page.next_cursor;
+            data.holds = hold_page.items;
+            data.hold_next_cursor = hold_page.next_cursor;
+        }
+        Section::Access => {
+            data.access = api::access().await?;
+        }
+        Section::Orders | Section::Inventory | Section::InventoryHolds => {}
     }
-
-    let balances = api::balances().await?;
-    Ok(WorkspaceData {
-        orders,
-        balances,
-        access,
-    })
+    Ok(data)
 }
 
 #[component]
@@ -315,6 +353,11 @@ fn InventoryPage() -> impl IntoView {
 }
 
 #[component]
+fn InventoryHoldsPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::InventoryHolds/> }
+}
+
+#[component]
 fn AccessPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::Access/> }
 }
@@ -327,15 +370,30 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
     move || match state.get() {
         WorkspaceState::Loading => view! { <WorkspaceLoading/> }.into_any(),
         WorkspaceState::Failed(message) => {
-            view! { <WorkspaceError message session=session.clone() state/> }.into_any()
+            view! { <WorkspaceError message session=session.clone() section state/> }.into_any()
         }
-        WorkspaceState::Ready(data) => match section {
+        WorkspaceState::Ready(data) | WorkspaceState::Refreshing(data) => match section {
             Section::Overview => view! { <Overview data/> }.into_any(),
             Section::Orders if has_permission(&session, "orders") => {
                 view! { <Orders data/> }.into_any()
             }
             Section::Inventory if has_permission(&session, "wms") => {
                 view! { <Inventory data/> }.into_any()
+            }
+            Section::InventoryHolds if has_permission(&session, "wms") => {
+                let session_state = expect_context::<RwSignal<SessionState>>();
+                let on_unauthorized = Callback::new(move |_| {
+                    session_state.set(SessionState::Anonymous(Some(
+                        "Your session ended. Sign in to continue.".to_owned(),
+                    )));
+                });
+                view! {
+                    <InventoryHolds
+                        data
+                        on_unauthorized
+                    />
+                }
+                .into_any()
             }
             Section::Access => view! { <Access data/> }.into_any(),
             _ => view! { <AccessDenied/> }.into_any(),
@@ -423,43 +481,45 @@ fn PageFrame(section: Section, children: Children) -> impl IntoView {
                 </a>
                 <nav aria-label="Operations">
                     <p>"Operations"</p>
-                    <A
+                    <NavItem
                         href="/"
-                        attr:class=nav_class(section == Section::Overview)
-                        attr:aria-current=aria_current(section == Section::Overview)
-                    >
-                        "Overview"
-                    </A>
+                        label="Overview"
+                        icon=UiIcon::Overview
+                        active=section == Section::Overview
+                    />
                     {can_view_orders.then(|| {
                         view! {
-                            <A
+                            <NavItem
                                 href="/orders"
-                                attr:class=nav_class(section == Section::Orders)
-                                attr:aria-current=aria_current(section == Section::Orders)
-                            >
-                                "Orders"
-                            </A>
+                                label="Orders"
+                                icon=UiIcon::Orders
+                                active=section == Section::Orders
+                            />
                         }
                     })}
                     {can_view_inventory.then(|| {
                         view! {
-                            <A
+                            <NavItem
                                 href="/inventory"
-                                attr:class=nav_class(section == Section::Inventory)
-                                attr:aria-current=aria_current(section == Section::Inventory)
-                            >
-                                "Inventory"
-                            </A>
+                                label="Inventory"
+                                icon=UiIcon::Inventory
+                                active=section == Section::Inventory
+                            />
+                            <NavItem
+                                href="/inventory/holds"
+                                label="Quantity holds"
+                                icon=UiIcon::Holds
+                                active=section == Section::InventoryHolds
+                            />
                         }
                     })}
                     <p class="nav-group">"Context"</p>
-                    <A
+                    <NavItem
                         href="/access"
-                        attr:class=nav_class(section == Section::Access)
-                        attr:aria-current=aria_current(section == Section::Access)
-                    >
-                        "Access"
-                    </A>
+                        label="Access"
+                        icon=UiIcon::Access
+                        active=section == Section::Access
+                    />
                 </nav>
                 <div class="sidebar-scope">
                     <span>"Active tenant"</span>
@@ -471,6 +531,7 @@ fn PageFrame(section: Section, children: Children) -> impl IntoView {
             <div class="app-region">
                 <header class="topbar">
                     <div class="tenant-control">
+                        <Icon icon=UiIcon::Building/>
                         <label for="tenant-selector">"Tenant"</label>
                         <select
                             id="tenant-selector"
@@ -483,8 +544,8 @@ fn PageFrame(section: Section, children: Children) -> impl IntoView {
                         {move || {
                             tenant_error.get().map(|message| {
                                 view! {
-                                    <span class="tenant-switch-error" role="alert" title=message>
-                                        "Tenant switch failed"
+                                    <span class="tenant-switch-error" role="alert">
+                                        {message}
                                     </span>
                                 }
                             })
@@ -496,8 +557,9 @@ fn PageFrame(section: Section, children: Children) -> impl IntoView {
                             <strong>{display_name}</strong>
                             <small>{email}</small>
                         </span>
-                        <button class="quiet-action" type="button" on:click=sign_out>
-                            "Sign out"
+                        <button class="button quiet-action" type="button" on:click=sign_out>
+                            <Icon icon=UiIcon::SignOut/>
+                            <span>"Sign out"</span>
                         </button>
                     </div>
                 </header>
@@ -505,18 +567,6 @@ fn PageFrame(section: Section, children: Children) -> impl IntoView {
             </div>
         </div>
     }
-}
-
-fn nav_class(active: bool) -> &'static str {
-    if active {
-        "nav-link active"
-    } else {
-        "nav-link"
-    }
-}
-
-fn aria_current(active: bool) -> Option<&'static str> {
-    active.then_some("page")
 }
 
 fn scope_summary(session: &WebSessionContext) -> String {
@@ -554,16 +604,19 @@ fn WorkspaceLoading() -> impl IntoView {
 fn WorkspaceError(
     message: String,
     session: WebSessionContext,
+    section: Section,
     state: RwSignal<WorkspaceState>,
 ) -> impl IntoView {
-    let retry = move |_| request_workspace(session.clone(), state);
+    let retry = move |_| request_workspace(session.clone(), section, state);
     view! {
         <section class="workspace-state error-state" role="alert">
+            <Icon icon=UiIcon::Alert/>
             <p class="eyebrow">"Connection error"</p>
             <h1>"Operations data is unavailable"</h1>
             <p>{message}</p>
-            <button class="primary-action compact" type="button" on:click=retry>
-                "Retry"
+            <button class="button primary-action compact" type="button" on:click=retry>
+                <Icon icon=UiIcon::Refresh/>
+                <span>"Retry"</span>
             </button>
         </section>
     }
@@ -588,12 +641,12 @@ fn Overview(data: WorkspaceData) -> impl IntoView {
     let total_on_hand = data
         .balances
         .iter()
-        .map(|balance| balance.qty_on_hand)
+        .map(|balance| balance.quantity.on_hand)
         .sum::<i64>();
     let total_reserved = data
         .balances
         .iter()
-        .map(|balance| balance.qty_reserved)
+        .map(|balance| balance.quantity.reserved)
         .sum::<i64>();
     let order_total = data.orders.as_ref().map_or(0, |orders| orders.page.total);
     let open_orders = data
@@ -630,7 +683,7 @@ fn Overview(data: WorkspaceData) -> impl IntoView {
                 <h1>"Warehouse control"</h1>
                 <p>"Current demand, stock, and scope across your authorized operation."</p>
             </div>
-            <RefreshButton/>
+            <RefreshButton section=Section::Overview/>
         </section>
 
         {(can_view_orders || can_view_inventory).then(|| {
@@ -644,8 +697,8 @@ fn Overview(data: WorkspaceData) -> impl IntoView {
                     })}
                     {can_view_inventory.then(|| {
                         view! {
-                            <Metric label="On hand" value=format_quantity(total_on_hand) tone="green"/>
-                            <Metric label="Reserved" value=format_quantity(total_reserved) tone="amber"/>
+                            <Metric label="On hand in view" value=format_quantity(total_on_hand) tone="green"/>
+                            <Metric label="Reserved in view" value=format_quantity(total_reserved) tone="amber"/>
                         }
                     })}
                 </section>
@@ -740,13 +793,26 @@ fn Metric(label: &'static str, value: String, tone: &'static str) -> impl IntoVi
 }
 
 #[component]
-fn RefreshButton() -> impl IntoView {
+fn RefreshButton(section: Section) -> impl IntoView {
     let state = expect_context::<RwSignal<WorkspaceState>>();
     let session = expect_context::<WebSessionContext>();
-    let refresh = move |_| request_workspace(session.clone(), state);
+    let refresh = move |_| request_workspace(session.clone(), section, state);
+    let pending = move || {
+        matches!(
+            state.get(),
+            WorkspaceState::Loading | WorkspaceState::Refreshing(_)
+        )
+    };
     view! {
-        <button class="secondary-action" type="button" on:click=refresh>
-            "Refresh"
+        <button
+            class="button secondary-action"
+            type="button"
+            on:click=refresh
+            disabled=pending
+            aria-busy=move || pending().to_string()
+        >
+            <Icon icon=UiIcon::Refresh/>
+            <span>{move || if pending() { "Refreshing" } else { "Refresh" }}</span>
         </button>
     }
 }
@@ -764,7 +830,7 @@ fn Orders(data: WorkspaceData) -> impl IntoView {
                 <h1>"Orders"</h1>
                 <p>"The latest orders across your authorized inventory owners."</p>
             </div>
-            <RefreshButton/>
+            <RefreshButton section=Section::Orders/>
         </section>
         <section class="data-section page-data">
             <OrderTable orders compact=false/>
@@ -778,13 +844,14 @@ fn OrderTable(orders: Vec<Order>, compact: bool) -> impl IntoView {
     view! {
         <div class="table-scroll">
             <table class="data-table">
+                <caption class="sr-only">"Orders in the current tenant and owner scope"</caption>
                 <thead>
                     <tr>
-                        <th>"Order"</th>
-                        <th>"Owner"</th>
-                        <th>"Status"</th>
-                        <th class="numeric">"Units"</th>
-                        <th>"Destination"</th>
+                        <th scope="col">"Order"</th>
+                        <th scope="col">"Owner"</th>
+                        <th scope="col">"Status"</th>
+                        <th scope="col" class="numeric">"Units"</th>
+                        <th scope="col">"Destination"</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -840,7 +907,13 @@ fn status_class(status: &str) -> &'static str {
 
 #[component]
 fn Inventory(data: WorkspaceData) -> impl IntoView {
-    let empty = data.balances.is_empty();
+    let session_state = expect_context::<RwSignal<SessionState>>();
+    let on_unauthorized = Callback::new(move |_| {
+        session_state.set(SessionState::Anonymous(Some(
+            "Your session ended. Sign in to continue.".to_owned(),
+        )));
+    });
+
     view! {
         <section class="page-heading">
             <div>
@@ -848,55 +921,34 @@ fn Inventory(data: WorkspaceData) -> impl IntoView {
                 <h1>"Inventory"</h1>
                 <p>"Current balances by facility, location, item, status, and owner."</p>
             </div>
-            <RefreshButton/>
+            <RefreshButton section=Section::Inventory/>
         </section>
-        <section class="data-section page-data">
-            <div class="table-scroll">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>"Facility"</th>
-                            <th>"Location"</th>
-                            <th>"Item"</th>
-                            <th>"Status"</th>
-                            <th class="numeric">"On hand"</th>
-                            <th class="numeric">"Reserved"</th>
-                            <th class="numeric">"Held"</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {data
-                            .balances
-                            .into_iter()
-                            .map(|balance| {
-                                view! {
-                                    <tr>
-                                        <td>{balance.facility_name.unwrap_or_else(|| {
-                                            format!("Facility {}", balance.facility_id)
-                                        })}</td>
-                                        <td>{format!("#{}", balance.location_id)}</td>
-                                        <td>{format!("#{}", balance.item_id)}</td>
-                                        <td>
-                                            <span class="status open">{balance.status.to_string()}</span>
-                                        </td>
-                                        <td class="numeric strong">
-                                            {format_quantity(balance.qty_on_hand)}
-                                        </td>
-                                        <td class="numeric">
-                                            {format_quantity(balance.qty_reserved)}
-                                        </td>
-                                        <td class="numeric">{format_quantity(balance.qty_held)}</td>
-                                    </tr>
-                                }
-                            })
-                            .collect_view()}
-                    </tbody>
-                </table>
-                {empty.then(|| {
-                    view! { <EmptyState message="No inventory balances are currently in scope."/> }
-                })}
+        <InventoryTable
+            initial_balances=data.balances
+            initial_cursor=data.balance_next_cursor
+            on_unauthorized
+        />
+    }
+}
+
+#[component]
+fn InventoryHolds(data: WorkspaceData, on_unauthorized: Callback<()>) -> impl IntoView {
+    view! {
+        <section class="page-heading">
+            <div>
+                <p class="eyebrow">"Inventory control"</p>
+                <h1>"Quantity holds"</h1>
+                <p>"Restrict and release specific quantities without changing inventory disposition."</p>
             </div>
+            <RefreshButton section=Section::InventoryHolds/>
         </section>
+        <QuantityHoldsWorkbench
+            initial_balances=data.balances
+            initial_balance_cursor=data.balance_next_cursor
+            initial_holds=data.holds
+            initial_hold_cursor=data.hold_next_cursor
+            on_unauthorized
+        />
     }
 }
 
@@ -921,7 +973,7 @@ fn Access(data: WorkspaceData) -> impl IntoView {
                 <h1>"Facility and owner scope"</h1>
                 <p>"The exact operational resources available in the selected tenant."</p>
             </div>
-            <RefreshButton/>
+            <RefreshButton section=Section::Access/>
         </section>
         <section class="access-grid">
             <ScopeResourceList
@@ -953,22 +1005,19 @@ fn ScopeResourceList(
                     <p class="eyebrow">{scope_label}</p>
                     <h2>{title} <span>{count}</span></h2>
                 </div>
-                <label class="compact-search">
-                    <span class="sr-only">{format!("Filter {title}")}</span>
-                    <input
-                        type="search"
-                        placeholder="Filter"
-                        prop:value=move || filter.get()
-                        on:input=move |event| filter.set(event_target_value(&event))
-                    />
-                </label>
+                <SearchField
+                    label=format!("Filter {title}")
+                    placeholder="Filter"
+                    value=filter
+                />
             </div>
             <div class="table-scroll">
                 <table class="data-table scope-table">
+                    <caption class="sr-only">{format!("{title} in the current access scope")}</caption>
                     <thead>
                         <tr>
-                            <th>"Name"</th>
-                            <th class="numeric">"ID"</th>
+                            <th scope="col">"Name"</th>
+                            <th scope="col" class="numeric">"ID"</th>
                         </tr>
                     </thead>
                     <tbody>
