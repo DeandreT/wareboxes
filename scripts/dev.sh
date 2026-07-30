@@ -3,7 +3,6 @@
 #   scripts/dev.sh          start PostgreSQL and the Leptos SSR web application
 #   scripts/dev.sh web      same as the default
 #   scripts/dev.sh server   start only the API (foreground)
-#   scripts/dev.sh desktop  start the transitional native operations client
 #
 # Config comes from .env (DATABASE_URL, MIGRATION_DATABASE_URL, BIND_ADDR,
 # BOOTSTRAP_ADMIN_*).
@@ -91,11 +90,8 @@ run_web() {
   exec cargo leptos watch --project wareboxes-web
 }
 
-run_desktop() { exec cargo run -p wareboxes-client; }
-
 case "${1:-web}" in
   server) ensure_cargo; ensure_postgres; run_server ;;
-  desktop) ensure_cargo; run_desktop ;;
   web) ensure_cargo; ensure_postgres; run_web ;;
-  *) echo "usage: scripts/dev.sh [web|server|desktop]" >&2; exit 2 ;;
+  *) echo "usage: scripts/dev.sh [web|server]" >&2; exit 2 ;;
 esac

@@ -6,7 +6,6 @@ Wareboxes is a warehouse management system prototype.
 
 - `crates/server`: Axum HTTP API backed by PostgreSQL and SQLx
 - `apps/web-ops`: Leptos SSR operations web application
-- `crates/client`: transitional egui/eframe native operations client
 - `crates/core`: shared models, DTOs, and errors
 - `crates/barcodes`: barcode encoders
 - `migrations/postgres`: PostgreSQL migrations
@@ -40,17 +39,10 @@ Leptos frontend and serves the API from the same origin. The operations web
 application targets desktop workstations; scanner execution remains in the Android
 RF application.
 
-Run the API without the web frontend or launch the transitional desktop client:
+Run the API without the web frontend:
 
 ```bash
 scripts/dev.sh server
-scripts/dev.sh desktop
-```
-
-To run the operations client against the hosted demo with its credentials prefilled:
-
-```bash
-scripts/run-client-demo.sh
 ```
 
 ## Android RF

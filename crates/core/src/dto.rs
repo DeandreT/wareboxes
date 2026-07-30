@@ -1,6 +1,5 @@
-//! Request/response payloads — the wire contract shared by the Axum server
-//! and the egui client. Validation rules mirror the Zod schemas in the
-//! original `app/utils/*.ts` files.
+//! Internal request and response payloads shared by the server and operator
+//! applications.
 
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};

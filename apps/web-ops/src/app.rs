@@ -131,7 +131,7 @@ impl Section {
         }
     }
 
-    #[cfg(any(target_arch = "wasm32", test))]
+    #[cfg(any(target_arch = "wasm32", all(test, feature = "ssr")))]
     fn supports_workspace_refresh(self) -> bool {
         matches!(
             self,
@@ -452,7 +452,7 @@ fn install_workspace_auto_refresh(
     on_cleanup(move || handle.clear());
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(target_arch = "wasm32", all(test, feature = "ssr")))]
 fn workspace_is_ready_for_auto_refresh(state: &RwSignal<WorkspaceState>) -> bool {
     matches!(state.get_untracked(), WorkspaceState::Ready(_))
 }
