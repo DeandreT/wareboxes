@@ -4,7 +4,7 @@ Wareboxes is a warehouse management system prototype.
 
 ## Workspace
 
-- `crates/server`: Axum HTTP API backed by PostgreSQL and SQLx
+- `apps/server`: Axum HTTP API and Leptos SSR host backed by PostgreSQL and SQLx
 - `apps/web-ops`: Leptos SSR operations web application
 - `crates/core`: shared models, DTOs, and errors
 - `crates/barcodes`: barcode encoders
