@@ -1,5 +1,5 @@
-//! `wareboxes-core` — domain models, API DTOs, validation rules and the
-//! error taxonomy shared between the Axum server and the egui client.
+//! Domain models, internal API DTOs, validation rules, and the error taxonomy
+//! shared by the server and operator applications.
 pub mod dto;
 pub mod error;
 pub mod models;
@@ -7,7 +7,7 @@ pub mod models;
 pub use error::{CoreError, CoreResult, FieldError};
 
 /// Convert `validator::ValidationErrors` into our flat `FieldError` list so
-/// the server and client speak the same validation language.
+/// the server and applications speak the same validation language.
 pub fn field_errors(errors: &validator::ValidationErrors) -> Vec<FieldError> {
     let mut out = Vec::new();
     for (field, kind) in errors.field_errors() {

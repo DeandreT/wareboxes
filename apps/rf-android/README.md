@@ -2,7 +2,7 @@
 
 Native Android RF client built with egui/eframe and Android `NativeActivity`.
 It is a member of the Wareboxes Rust workspace and ships as a separate APK from
-the operations client.
+the web operations application.
 
 ## Command Durability
 

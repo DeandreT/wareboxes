@@ -8,7 +8,6 @@ members = [
     "crates/core",
     "crates/server",
     "crates/worker",
-    "crates/client",
     "crates/barcodes",
 ]
 
