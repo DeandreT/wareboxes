@@ -271,6 +271,16 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
     assert_eq!(first_page.items.len(), 1);
     assert_eq!(first_page.items[0].item_id, first_item);
     assert_eq!(first_page.items[0].facility_id, allowed_facility);
+    assert_eq!(first_page.items[0].inventory_owner_name, "V1 Allowed Owner");
+    assert_eq!(
+        first_page.items[0].location_barcode.as_deref(),
+        Some("V1-ALLOWED")
+    );
+    assert_eq!(
+        first_page.items[0].item_description.as_deref(),
+        Some("V1 First Item")
+    );
+    assert!(first_page.items[0].primary_sku.is_none());
     assert_eq!(first_page.items[0].quantity.on_hand, 10);
     assert_eq!(first_page.items[0].quantity.reserved, 2);
     assert_eq!(first_page.items[0].quantity.held, 3);

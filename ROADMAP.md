@@ -80,6 +80,8 @@ record. Wareboxes owns facility execution and its auditable inventory consequenc
   codes, zones, capacities, compatibility, and travel sequence.
 - Immutable inventory transaction journal and signed entries.
 - Transactional balance projections, reservations, allocations, and holds.
+- Desktop inventory control workflows for cursor-paginated balance browsing,
+  quantity hold placement and release, and reconciliation diagnostics.
 - Container/LPN hierarchy, lot and serial controls, expiration policy, status, and
   ownership disposition.
 - Purchase order, ASN, transfer, return, and non-expected receipt contracts.

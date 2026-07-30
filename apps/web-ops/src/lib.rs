@@ -2,6 +2,9 @@
 
 pub mod api;
 pub mod app;
+mod components;
+mod inventory;
+mod inventory_holds;
 mod view_model;
 
 #[cfg(all(feature = "hydrate", target_arch = "wasm32"))]

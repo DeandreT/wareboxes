@@ -2758,6 +2758,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c048c5848db78b5cdc13a701efc8e8febe7dc383332c36c767cd4a13d7bf11b3"
 
 [[package]]
+name = "lucide-leptos"
+version = "3.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "891dc65ee24a2d9981e8407c1def536765948c9d5e7c23f650761a91b4e09769"
+dependencies = [
+ "leptos",
+]
+
+[[package]]
 name = "manyhow"
 version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5668,8 +5677,11 @@ dependencies = [
  "leptos",
  "leptos_meta",
  "leptos_router",
+ "lucide-leptos",
  "serde",
  "serde_json",
+ "uuid",
+ "wareboxes-api-contract",
  "wareboxes-core",
  "wasm-bindgen",
  "web-sys",
