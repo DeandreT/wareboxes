@@ -137,7 +137,7 @@ BEGIN
   END IF;
 
   INSERT INTO facilities (tenant_id, created, name)
-  VALUES (tenant, now(), 'Seed Distribution Center')
+  VALUES (tenant, now(), 'Riverside Distribution Center')
   ON CONFLICT (tenant_id, name) DO UPDATE SET deleted = NULL
   RETURNING id INTO facility;
 

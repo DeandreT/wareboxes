@@ -1,8 +1,11 @@
+#[cfg(not(target_arch = "wasm32"))]
+use wareboxes_api_contract::v1::CreateInventoryStatusTransitionRequest;
 #[cfg(target_arch = "wasm32")]
 use wareboxes_api_contract::v1::ReleaseInventoryHoldRequest;
 use wareboxes_api_contract::v1::{
-    InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus, OpaqueCursor,
-    PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, ReleaseInventoryHoldResponse,
+    InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
+    InventoryStatusTransitionResponse, OpaqueCursor, PlaceInventoryHoldRequest,
+    PlaceInventoryHoldResponse, ReleaseInventoryHoldResponse,
 };
 use wareboxes_core::dto::{AccessScopeWorkspace, OrderPage, WebSessionContext};
 
@@ -31,10 +34,11 @@ mod browser {
 
     use super::{
         AccessScopeWorkspace, ApiError, InventoryBalancePage, InventoryHoldPage,
-        InventoryHoldStatus, OpaqueCursor, OrderPage, PlaceInventoryHoldRequest,
-        PlaceInventoryHoldResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
-        WebSessionContext,
+        InventoryHoldStatus, InventoryStatusTransitionResponse, OpaqueCursor, OrderPage,
+        PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, ReleaseInventoryHoldRequest,
+        ReleaseInventoryHoldResponse, WebSessionContext,
     };
+    use wareboxes_api_contract::v1::CreateInventoryStatusTransitionRequest;
 
     #[derive(Deserialize)]
     struct WireError {
@@ -57,7 +61,7 @@ mod browser {
         let request = Request::post(&url("/api/web/auth/tenant"))
             .json(&SelectTenantRequest { tenant_id })
             .map_err(|error| ApiError {
-                message: format!("Could not prepare the tenant request: {error}"),
+                message: format!("Could not prepare the organization switch request: {error}"),
                 unauthorized: false,
             })?;
         decode(request.send().await).await
@@ -118,6 +122,19 @@ mod browser {
         post(
             &format!("/api/v1/inventory/holds/{hold_id}/releases"),
             &ReleaseInventoryHoldRequest::default(),
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn transition_inventory_status(
+        balance_id: i64,
+        request: &CreateInventoryStatusTransitionRequest,
+        idempotency_key: &str,
+    ) -> Result<InventoryStatusTransitionResponse, ApiError> {
+        post(
+            &format!("/api/v1/inventory/balances/{balance_id}/status-transitions"),
+            request,
             idempotency_key,
         )
         .await
@@ -240,6 +257,15 @@ pub async fn release_hold(
     _hold_id: i64,
     _idempotency_key: &str,
 ) -> Result<ReleaseInventoryHoldResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn transition_inventory_status(
+    _balance_id: i64,
+    _request: &CreateInventoryStatusTransitionRequest,
+    _idempotency_key: &str,
+) -> Result<InventoryStatusTransitionResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

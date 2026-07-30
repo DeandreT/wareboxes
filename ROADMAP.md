@@ -39,7 +39,8 @@ record. Wareboxes owns facility execution and its auditable inventory consequenc
 - Tenant lifecycle, memberships, and selected-tenant request context.
 - Facility and inventory-owner scopes for users and integration clients.
 - Server-rendered desktop operations console with permission-aware navigation and
-  tenant, facility, and inventory-owner scope visibility.
+  organization, facility, and client scope visibility, sortable operational grids,
+  persistent display preferences, and command notifications.
 - `tenant_id` and `inventory_owner_id` propagation with scoped foreign keys and
   uniqueness constraints.
 - PostgreSQL row-level security and fail-closed repository access.
@@ -81,7 +82,8 @@ record. Wareboxes owns facility execution and its auditable inventory consequenc
 - Immutable inventory transaction journal and signed entries.
 - Transactional balance projections, reservations, allocations, and holds.
 - Desktop inventory control workflows for cursor-paginated balance browsing,
-  quantity hold placement and release, and reconciliation diagnostics.
+  quantity hold placement and release, controlled disposition changes, and
+  reconciliation diagnostics.
 - Container/LPN hierarchy, lot and serial controls, expiration policy, status, and
   ownership disposition.
 - Purchase order, ASN, transfer, return, and non-expected receipt contracts.

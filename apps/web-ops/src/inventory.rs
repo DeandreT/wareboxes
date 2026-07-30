@@ -3,7 +3,22 @@ use wareboxes_api_contract::v1::{InventoryBalanceResponse, InventoryBalanceStatu
 
 use crate::api;
 use crate::components::SearchField;
+use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::view_model::format_quantity;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InventorySort {
+    Facility,
+    Client,
+    Location,
+    Item,
+    Tracking,
+    LicensePlate,
+    Status,
+    OnHand,
+    Reserved,
+    Held,
+}
 
 #[component]
 pub fn InventoryTable(
@@ -16,6 +31,10 @@ pub fn InventoryTable(
     let filter = RwSignal::new(String::new());
     let loading_more = RwSignal::new(false);
     let page_error = RwSignal::new(None::<String>);
+    let sort = RwSignal::new(SortSpec {
+        key: InventorySort::Facility,
+        direction: SortDirection::Ascending,
+    });
     let load_more = move |_| {
         let Some(cursor) = next_cursor.get_untracked() else {
             return;
@@ -59,16 +78,89 @@ pub fn InventoryTable(
                     <caption class="sr-only">"Inventory balances in the current access scope"</caption>
                     <thead>
                         <tr>
-                            <th scope="col">"Facility"</th>
-                            <th scope="col">"Owner"</th>
-                            <th scope="col">"Location"</th>
-                            <th scope="col">"Item"</th>
-                            <th scope="col">"Lot / serial"</th>
-                            <th scope="col">"License plate"</th>
-                            <th scope="col">"Status"</th>
-                            <th scope="col" class="numeric">"On hand"</th>
-                            <th scope="col" class="numeric">"Reserved"</th>
-                            <th scope="col" class="numeric">"Held"</th>
+                            <SortableHeader
+                                label="Facility"
+                                active=move || sort.get().key == InventorySort::Facility
+                                direction=move || sort.get().direction
+                                on_sort=Callback::new(move |_| {
+                                    SortSpec::select(sort, InventorySort::Facility)
+                                })
+                            />
+                            <SortableHeader
+                                label="Client"
+                                active=move || sort.get().key == InventorySort::Client
+                                direction=move || sort.get().direction
+                                on_sort=Callback::new(move |_| {
+                                    SortSpec::select(sort, InventorySort::Client)
+                                })
+                            />
+                            <SortableHeader
+                                label="Location"
+                                active=move || sort.get().key == InventorySort::Location
+                                direction=move || sort.get().direction
+                                on_sort=Callback::new(move |_| {
+                                    SortSpec::select(sort, InventorySort::Location)
+                                })
+                            />
+                            <SortableHeader
+                                label="Item"
+                                active=move || sort.get().key == InventorySort::Item
+                                direction=move || sort.get().direction
+                                on_sort=Callback::new(move |_| {
+                                    SortSpec::select(sort, InventorySort::Item)
+                                })
+                            />
+                            <SortableHeader
+                                label="Lot / serial"
+                                active=move || sort.get().key == InventorySort::Tracking
+                                direction=move || sort.get().direction
+                                on_sort=Callback::new(move |_| {
+                                    SortSpec::select(sort, InventorySort::Tracking)
+                                })
+                            />
+                            <SortableHeader
+                                label="License plate"
+                                active=move || sort.get().key == InventorySort::LicensePlate
+                                direction=move || sort.get().direction
+                                on_sort=Callback::new(move |_| {
+                                    SortSpec::select(sort, InventorySort::LicensePlate)
+                                })
+                            />
+                            <SortableHeader
+                                label="Status"
+                                active=move || sort.get().key == InventorySort::Status
+                                direction=move || sort.get().direction
+                                on_sort=Callback::new(move |_| {
+                                    SortSpec::select(sort, InventorySort::Status)
+                                })
+                            />
+                            <SortableHeader
+                                label="On hand"
+                                active=move || sort.get().key == InventorySort::OnHand
+                                direction=move || sort.get().direction
+                                on_sort=Callback::new(move |_| {
+                                    SortSpec::select(sort, InventorySort::OnHand)
+                                })
+                                numeric=true
+                            />
+                            <SortableHeader
+                                label="Reserved"
+                                active=move || sort.get().key == InventorySort::Reserved
+                                direction=move || sort.get().direction
+                                on_sort=Callback::new(move |_| {
+                                    SortSpec::select(sort, InventorySort::Reserved)
+                                })
+                                numeric=true
+                            />
+                            <SortableHeader
+                                label="Held"
+                                active=move || sort.get().key == InventorySort::Held
+                                direction=move || sort.get().direction
+                                on_sort=Callback::new(move |_| {
+                                    SortSpec::select(sort, InventorySort::Held)
+                                })
+                                numeric=true
+                            />
                         </tr>
                     </thead>
                     <tbody>
@@ -76,10 +168,11 @@ pub fn InventoryTable(
                             let query = filter.get().trim().to_ascii_lowercase();
                             let all_balances = balances.get();
                             let is_empty = all_balances.is_empty();
-                            let matching = all_balances
+                            let mut matching = all_balances
                                 .into_iter()
                                 .filter(|balance| balance_matches(balance, &query))
                                 .collect::<Vec<_>>();
+                            sort_balances(&mut matching, sort.get());
                             if matching.is_empty() {
                                 let message = if is_empty {
                                     "No inventory balances are currently in scope."
@@ -100,13 +193,7 @@ pub fn InventoryTable(
                                         let item = item_label(&balance);
                                         let item_detail = item_detail(&balance);
                                         let tracking = tracking_label(&balance);
-                                        let license_plate = balance
-                                            .license_plate_barcode
-                                            .clone()
-                                            .or_else(|| {
-                                                balance.license_plate_id.map(|id| format!("#{id}"))
-                                            })
-                                            .unwrap_or_else(|| "-".to_owned());
+                                        let license_plate = license_plate_label(&balance);
                                         view! {
                                             <tr>
                                                 <td>{balance.facility_name.unwrap_or_else(|| {
@@ -172,12 +259,73 @@ pub fn InventoryTable(
     }
 }
 
+fn sort_balances(balances: &mut [InventoryBalanceResponse], spec: SortSpec<InventorySort>) {
+    balances.sort_by(|left, right| {
+        let ordering = match spec.key {
+            InventorySort::Facility => facility_label(left)
+                .to_ascii_lowercase()
+                .cmp(&facility_label(right).to_ascii_lowercase())
+                .then_with(|| {
+                    location_label(left)
+                        .to_ascii_lowercase()
+                        .cmp(&location_label(right).to_ascii_lowercase())
+                })
+                .then_with(|| {
+                    item_label(left)
+                        .to_ascii_lowercase()
+                        .cmp(&item_label(right).to_ascii_lowercase())
+                }),
+            InventorySort::Client => left
+                .inventory_owner_name
+                .to_ascii_lowercase()
+                .cmp(&right.inventory_owner_name.to_ascii_lowercase()),
+            InventorySort::Location => location_label(left)
+                .to_ascii_lowercase()
+                .cmp(&location_label(right).to_ascii_lowercase()),
+            InventorySort::Item => item_label(left)
+                .to_ascii_lowercase()
+                .cmp(&item_label(right).to_ascii_lowercase()),
+            InventorySort::Tracking => tracking_label(left)
+                .to_ascii_lowercase()
+                .cmp(&tracking_label(right).to_ascii_lowercase()),
+            InventorySort::LicensePlate => license_plate_label(left)
+                .to_ascii_lowercase()
+                .cmp(&license_plate_label(right).to_ascii_lowercase()),
+            InventorySort::Status => status_label(left.status).cmp(status_label(right.status)),
+            InventorySort::OnHand => left.quantity.on_hand.cmp(&right.quantity.on_hand),
+            InventorySort::Reserved => left.quantity.reserved.cmp(&right.quantity.reserved),
+            InventorySort::Held => left.quantity.held.cmp(&right.quantity.held),
+        }
+        .then_with(|| left.id.cmp(&right.id));
+        if spec.direction == SortDirection::Ascending {
+            ordering
+        } else {
+            ordering.reverse()
+        }
+    });
+}
+
+fn facility_label(balance: &InventoryBalanceResponse) -> String {
+    balance
+        .facility_name
+        .clone()
+        .unwrap_or_else(|| format!("Facility {}", balance.facility_id))
+}
+
 fn location_label(balance: &InventoryBalanceResponse) -> String {
     balance
         .location_barcode
         .clone()
         .or_else(|| balance.location_name.clone())
         .unwrap_or_else(|| format!("#{}", balance.location_id))
+}
+
+fn license_plate_label(balance: &InventoryBalanceResponse) -> String {
+    balance
+        .license_plate_barcode
+        .clone()
+        .or_else(|| balance.license_plate_id.map(|id| format!("#{id}")))
+        .unwrap_or_else(|| "-".to_owned())
 }
 
 fn status_label(status: InventoryBalanceStatus) -> &'static str {
