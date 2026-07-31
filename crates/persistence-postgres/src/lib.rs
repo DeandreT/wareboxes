@@ -4,6 +4,7 @@ pub mod authorization;
 pub mod db;
 pub mod facilities;
 pub mod integration_inbox;
+pub mod inventory_balances;
 pub mod locations;
 pub mod outbox;
 pub mod permissions;

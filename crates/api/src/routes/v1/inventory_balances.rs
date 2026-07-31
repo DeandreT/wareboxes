@@ -4,11 +4,13 @@ use wareboxes_api_contract::v1::{
     InventoryBalancePage, InventoryBalancePageRequest, InventoryBalanceResponse,
     InventoryBalanceStatus, InventoryQuantity, OpaqueCursor,
 };
+use wareboxes_application::inventory::{
+    InventoryBalanceReadModel, InventoryBalanceStatus as ApplicationInventoryBalanceStatus,
+};
 
 use super::error::{V1Error, V1Result};
 use crate::auth::CurrentTenant;
 use crate::error::{AppError, AppResult};
-use crate::repo;
 use crate::state::AppState;
 
 const PERMISSION: &str = "wms";
@@ -40,14 +42,17 @@ pub(crate) async fn page_for_access(
     limit: u16,
     query: Option<&str>,
 ) -> AppResult<InventoryBalancePage> {
-    let page =
-        repo::inventory_v1::get_inventory_balance_page(&state.db, access, after_id, limit, query)
-            .await?;
-    let items = page
-        .rows
-        .into_iter()
-        .map(map_balance)
-        .collect::<AppResult<Vec<_>>>()?;
+    let page = wareboxes_persistence_postgres::inventory_balances::get_inventory_balance_page(
+        &state.db,
+        access.tenant_id,
+        &access.site_scope,
+        &access.owner_scope,
+        after_id,
+        limit,
+        query,
+    )
+    .await?;
+    let items = page.items.into_iter().map(map_balance).collect();
     let next_cursor = page.next_after_id.map(encode_cursor).transpose()?;
 
     Ok(InventoryBalancePage::new(items, next_cursor))
@@ -71,33 +76,20 @@ fn encode_cursor(id: i64) -> AppResult<OpaqueCursor> {
         .map_err(|_| AppError::internal("generated an invalid inventory balance cursor"))
 }
 
-fn map_balance(
-    row: repo::inventory_v1::InventoryBalancePageRow,
-) -> AppResult<InventoryBalanceResponse> {
-    let status = match row.status.as_str() {
-        "available" => InventoryBalanceStatus::Available,
-        "hold" => InventoryBalanceStatus::Hold,
-        "damaged" => InventoryBalanceStatus::Damaged,
-        "quarantine" => InventoryBalanceStatus::Quarantine,
-        _ => return Err(AppError::internal("unknown inventory balance status")),
+fn map_balance(row: InventoryBalanceReadModel) -> InventoryBalanceResponse {
+    let status = match row.status {
+        ApplicationInventoryBalanceStatus::Available => InventoryBalanceStatus::Available,
+        ApplicationInventoryBalanceStatus::Hold => InventoryBalanceStatus::Hold,
+        ApplicationInventoryBalanceStatus::Damaged => InventoryBalanceStatus::Damaged,
+        ApplicationInventoryBalanceStatus::Quarantine => InventoryBalanceStatus::Quarantine,
     };
-    let uncommitted = row
-        .qty_on_hand
-        .checked_sub(row.qty_reserved)
-        .and_then(|quantity| quantity.checked_sub(row.qty_held))
-        .filter(|quantity| *quantity >= 0)
-        .ok_or_else(|| AppError::internal("invalid inventory balance quantities"))?;
-    let available = if status == InventoryBalanceStatus::Available {
-        uncommitted
-    } else {
-        0
-    };
+    let quantity = row.quantity;
 
-    Ok(InventoryBalanceResponse {
+    InventoryBalanceResponse {
         id: row.id,
-        inventory_owner_id: row.inventory_owner_id,
+        inventory_owner_id: row.inventory_owner_id.get(),
         inventory_owner_name: row.inventory_owner_name,
-        facility_id: row.facility_id,
+        facility_id: row.facility_id.get(),
         facility_name: row.facility_name,
         location_id: row.location_id,
         location_name: row.location_name,
@@ -113,10 +105,10 @@ fn map_balance(
         uom: row.uom,
         status,
         quantity: InventoryQuantity {
-            on_hand: row.qty_on_hand,
-            reserved: row.qty_reserved,
-            held: row.qty_held,
-            available,
+            on_hand: quantity.on_hand(),
+            reserved: quantity.reserved(),
+            held: quantity.held(),
+            available: quantity.available(),
         },
-    })
+    }
 }
