@@ -2,6 +2,7 @@
 
 pub mod authorization;
 mod context;
+pub mod identity;
 pub mod outbox;
 pub mod topology;
 

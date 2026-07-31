@@ -16,11 +16,12 @@ use sha2::{Digest, Sha256};
 use wareboxes_application::CommandContext;
 use wareboxes_core::dto::{UpdateUserAccessScope, WebSessionContext};
 use wareboxes_core::models::{TenantAccess, User};
-use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
+use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId, UserId};
 
 use crate::config::SecurityConfig;
 use crate::db::{now_iso, Db};
 use crate::error::{AppError, AppResult};
+use crate::identity::{enriched_user_response, identity_response, settings_response};
 use crate::permissions;
 use crate::repo;
 use crate::request_context::{current_request_id_or_new, IdempotencyKey};
@@ -29,6 +30,26 @@ use crate::state::AppState;
 pub const TENANT_ID_HEADER: &str = "x-wareboxes-tenant-id";
 const WEB_SESSION_COOKIE: &str = "wareboxes_web_session";
 const SECURE_WEB_SESSION_COOKIE: &str = "__Host-wareboxes_web_session";
+
+fn persisted_user_id(value: i64) -> AppResult<UserId> {
+    UserId::new(value).map_err(|error| AppError::internal(error.to_string()))
+}
+
+pub(crate) async fn enrich_user_for_tenant(
+    db: &Db,
+    tenant_id: TenantId,
+    user_id: i64,
+) -> AppResult<User> {
+    let user = wareboxes_persistence_postgres::users::get_tenant_user(
+        db,
+        tenant_id,
+        persisted_user_id(user_id)?,
+        true,
+    )
+    .await?
+    .ok_or_else(AppError::forbidden)?;
+    Ok(enriched_user_response(user))
+}
 
 pub fn hash_password(password: &str) -> AppResult<String> {
     let salt = SaltString::generate(&mut OsRng);
@@ -161,13 +182,23 @@ pub async fn web_session_context(
     let active_tenant = repo::tenants::access_for_user(db, user_id, tenant_id)
         .await?
         .ok_or_else(AppError::forbidden)?;
-    let user = repo::users::get_user_by_id(db, user_id, true)
-        .await?
-        .ok_or_else(AppError::unauthorized)?;
+    let user = wareboxes_persistence_postgres::users::find_user_by_id(
+        db,
+        persisted_user_id(user_id)?,
+        true,
+    )
+    .await?
+    .ok_or_else(AppError::unauthorized)?;
     permissions::ensure_self_role(db, tenant_id, user_id, &user.email).await?;
-    let user = repo::users::enrich_for_tenant(db, tenant_id, user).await?;
+    let user = enrich_user_for_tenant(db, tenant_id, user_id).await?;
     let available_tenants = repo::tenants::list_for_session(db, token_hash).await?;
-    let settings = repo::settings::get_user_settings(db, user_id).await?;
+    let settings = settings_response(
+        wareboxes_persistence_postgres::settings::get_user_settings(
+            db,
+            persisted_user_id(user_id)?,
+        )
+        .await?,
+    );
     Ok(WebSessionContext {
         user,
         active_tenant,
@@ -302,12 +333,16 @@ impl FromRequestParts<AppState> for CurrentUser {
             (token, user_id, SessionKind::Web { tenant_id })
         };
 
-        let user = repo::users::get_user_by_id(&state.db, user_id, true)
-            .await?
-            .ok_or_else(AppError::unauthorized)?;
+        let user = wareboxes_persistence_postgres::users::find_user_by_id(
+            &state.db,
+            persisted_user_id(user_id)?,
+            true,
+        )
+        .await?
+        .ok_or_else(AppError::unauthorized)?;
 
         Ok(CurrentUser {
-            user,
+            user: identity_response(user),
             session_token_hash: session_token_hash(&token),
             session_kind,
         })
@@ -427,7 +462,7 @@ impl FromRequestParts<AppState> for CurrentTenant {
         )
         .await?;
         let user =
-            repo::users::enrich_for_tenant(&state.db, tenant.tenant_id, current_user.user).await?;
+            enrich_user_for_tenant(&state.db, tenant.tenant_id, current_user.user.id).await?;
 
         Ok(Self { user, tenant })
     }
@@ -441,7 +476,7 @@ pub async fn register_user(
     first_name: Option<&str>,
     last_name: Option<&str>,
 ) -> AppResult<User> {
-    if repo::users::get_user_by_email(db, email, true)
+    if wareboxes_persistence_postgres::users::find_user_by_email(db, email, true)
         .await?
         .is_some()
     {
@@ -471,23 +506,22 @@ pub async fn register_user(
     let tenant_id = repo::tenants::provision_default_tenant(db, user_id, email).await?;
     permissions::ensure_self_role(db, tenant_id, user_id, email).await?;
 
-    let user = repo::users::get_user_by_id(db, user_id, true)
-        .await?
-        .ok_or_else(|| AppError::internal("user vanished after creation"))?;
-    repo::users::enrich_for_tenant(db, tenant_id, user).await
+    enrich_user_for_tenant(db, tenant_id, user_id).await
 }
 
 pub async fn verify_credentials(db: &Db, email: &str, password: &str) -> AppResult<Option<User>> {
-    let Some(user) = repo::users::get_user_by_email(db, email, false).await? else {
+    let Some(user) =
+        wareboxes_persistence_postgres::users::find_user_by_email(db, email, false).await?
+    else {
         return Ok(None);
     };
     let hash: Option<String> =
         sqlx::query_scalar("SELECT password_hash FROM user_credentials WHERE user_id = $1")
-            .bind(user.id)
+            .bind(user.id.get())
             .fetch_optional(db)
             .await?;
     match hash {
-        Some(h) if verify_password(password, &h) => Ok(Some(user)),
+        Some(h) if verify_password(password, &h) => Ok(Some(identity_response(user))),
         _ => Ok(None),
     }
 }

@@ -7,6 +7,8 @@ pub mod locations;
 pub mod outbox;
 pub mod permissions;
 pub mod roles;
+pub mod settings;
+pub mod users;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {

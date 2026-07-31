@@ -3,14 +3,20 @@ use axum::Json;
 use serde::Deserialize;
 use wareboxes_core::dto::{AddDeleteUserRole, UpdateUserAccessScope, UserIdRequest, UserUpdate};
 use wareboxes_core::models::User;
+use wareboxes_domain::UserId;
 
 use crate::auth::CurrentTenant;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
+use crate::identity::tenant_user_response;
 use crate::repo;
 use crate::routes::validate;
 use crate::state::AppState;
 
 const PERM: &str = "admin";
+
+fn requested_user_id(value: i64) -> AppResult<UserId> {
+    UserId::new(value).map_err(|_| AppError::bad_request("user ID must be positive"))
+}
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ShowDeleted {
@@ -24,7 +30,15 @@ pub async fn list(
     Query(q): Query<ShowDeleted>,
 ) -> AppResult<Json<Vec<User>>> {
     user.require_permission(&state.db, PERM).await?;
-    let users = repo::users::get_users(&state.db, user.tenant.tenant_id, q.show_deleted).await?;
+    let users = wareboxes_persistence_postgres::users::get_tenant_users(
+        &state.db,
+        user.tenant.tenant_id,
+        q.show_deleted,
+    )
+    .await?
+    .into_iter()
+    .map(tenant_user_response)
+    .collect();
     Ok(Json(users))
 }
 
@@ -35,10 +49,10 @@ pub async fn update(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::users::update_user(
+    let ok = wareboxes_persistence_postgres::users::update_user(
         &state.db,
         user.tenant.tenant_id,
-        body.user_id,
+        requested_user_id(body.user_id)?,
         body.first_name.as_deref(),
         body.last_name.as_deref(),
         body.nick_name.as_deref(),
@@ -55,10 +69,10 @@ pub async fn delete(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::users::set_user_membership_deleted(
+    let ok = wareboxes_persistence_postgres::users::set_user_membership_deleted(
         &state.db,
         user.tenant.tenant_id,
-        body.user_id,
+        requested_user_id(body.user_id)?,
         true,
     )
     .await?;
@@ -72,10 +86,10 @@ pub async fn restore(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::users::set_user_membership_deleted(
+    let ok = wareboxes_persistence_postgres::users::set_user_membership_deleted(
         &state.db,
         user.tenant.tenant_id,
-        body.user_id,
+        requested_user_id(body.user_id)?,
         false,
     )
     .await?;
