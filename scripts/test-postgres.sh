@@ -62,5 +62,46 @@ if [ "$role_flags" != "t|f|f|f|f|f|f" ]; then
 fi
 
 echo "TEST_DATABASE_URL=${TEST_DATABASE_URL}"
+export WAREBOXES_TEST_RUN_ID="${WAREBOXES_TEST_RUN_ID:-$$}"
+if [[ ! "$WAREBOXES_TEST_RUN_ID" =~ ^[0-9]{1,16}$ ]]; then
+  echo "WAREBOXES_TEST_RUN_ID must contain at most 16 ASCII digits." >&2
+  exit 1
+fi
+
+cleanup_test_databases() {
+  local container_id
+  local prefix="wareboxes_test_${WAREBOXES_TEST_RUN_ID}_"
+  container_id="$(docker compose ps -q postgres)"
+  if [ -z "$container_id" ]; then
+    return
+  fi
+
+  docker exec -i "$container_id" bash -s -- "$prefix" <<'EOF'
+set -euo pipefail
+prefix="$1"
+removed=0
+mapfile -t databases < <(
+  psql -U wareboxes_admin -d postgres -Atc \
+    "SELECT datname FROM pg_database WHERE datname LIKE 'wareboxes_test_%' ORDER BY datname"
+)
+for database in "${databases[@]}"; do
+  if [[ "$database" != "$prefix"* ]]; then
+    continue
+  fi
+  if [[ ! "$database" =~ ^wareboxes_test_[0-9]+_[0-9]+_[0-9]+$ ]]; then
+    echo "refusing to remove unexpected test database name: $database" >&2
+    exit 1
+  fi
+  if dropdb -U wareboxes_admin --if-exists "$database"; then
+    removed=$((removed + 1))
+  else
+    echo "warning: could not remove active test database $database" >&2
+  fi
+done
+echo "removed $removed run-scoped test database(s)"
+EOF
+}
+
+trap cleanup_test_databases EXIT
 echo "running: cargo test --workspace $*"
 cargo test --workspace "$@"
