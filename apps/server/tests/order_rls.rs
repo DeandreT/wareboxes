@@ -1,7 +1,7 @@
 mod common;
 
 use common::*;
-use wareboxes_domain::CommandContext;
+use wareboxes_application::CommandContext;
 
 #[derive(Clone, Copy)]
 struct OrderRefs {

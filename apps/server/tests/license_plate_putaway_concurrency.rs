@@ -6,8 +6,8 @@ use std::time::Duration;
 use common::*;
 use tokio::sync::Barrier;
 use tokio::time::timeout;
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::{InboundReceiptExceptionReason, InventoryHoldReason};
-use wareboxes_domain::CommandContext;
 
 const RACE_TIMEOUT: Duration = Duration::from_secs(3);
 

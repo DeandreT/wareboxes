@@ -11,8 +11,8 @@ use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     CreatePutawayTaskResponse, ErrorReason, ErrorResponse, PutawayConfirmationResponse,
 };
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::{InboundReceiptExceptionReason, InventoryHoldReason};
-use wareboxes_domain::CommandContext;
 
 fn request(
     token: &str,

@@ -12,8 +12,8 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{ErrorReason, ErrorResponse};
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::InboundReceiptExceptionReason;
-use wareboxes_domain::CommandContext;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 

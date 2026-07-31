@@ -1,9 +1,10 @@
 use sqlx::Row;
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::{
     InventoryRelocationClaim, InventoryRelocationClaimWork, InventoryRelocationLocation,
     InventoryRelocationWorkflow, InventoryStatus, TenantAccess, Timestamp,
 };
-use wareboxes_domain::{CommandContext, InventoryOwnerId};
+use wareboxes_domain::InventoryOwnerId;
 
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};

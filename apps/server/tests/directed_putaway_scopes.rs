@@ -14,9 +14,9 @@ use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     CreatePutawayTaskResponse, ErrorReason, ErrorResponse, PutawayConfirmationResponse,
 };
+use wareboxes_application::CommandContext;
 use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::InboundReceiptExceptionReason;
-use wareboxes_domain::CommandContext;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 

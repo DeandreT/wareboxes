@@ -4,12 +4,13 @@
 use std::collections::HashMap;
 
 use sqlx::Row;
+use wareboxes_application::CommandContext;
 use wareboxes_core::dto::{NewOrder, OrderPage, OrderUpdate, Paged, SummaryCount};
 use wareboxes_core::models::{
     AllocationStatus, InventoryAllocation, InventoryReservation, InventoryStatus, Order,
     OrderActivity, OrderItem, OrderStatus, OrderTrackingNumber, ReservationStatus, TenantAccess,
 };
-use wareboxes_domain::{CommandContext, InventoryOwnerId, TenantId};
+use wareboxes_domain::{InventoryOwnerId, TenantId};
 
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};

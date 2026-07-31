@@ -10,9 +10,9 @@ use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
+use wareboxes_application::CommandContext;
 use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::WorkTask;
-use wareboxes_domain::CommandContext;
 
 static NEXT_IDEMPOTENCY_KEY: AtomicU64 = AtomicU64::new(1);
 

@@ -11,10 +11,9 @@ use wareboxes_api_contract::v1::{
     PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, ReleaseInventoryHoldRequest,
     ReleaseInventoryHoldResponse, IDEMPOTENCY_KEY_HEADER,
 };
-use wareboxes_core::models::{
-    InventoryHoldReason as CoreHoldReason, OwnerScope, SiteScope, TenantAccess,
-};
-use wareboxes_domain::{CommandContext, FacilityId, InventoryOwnerId};
+use wareboxes_application::CommandContext;
+use wareboxes_core::models::{InventoryHoldReason as CoreHoldReason, TenantAccess};
+use wareboxes_domain::{FacilityId, InventoryOwnerId, OwnerScope, SiteScope};
 
 fn command_context(access: &TenantAccess, key: &str) -> CommandContext {
     CommandContext {

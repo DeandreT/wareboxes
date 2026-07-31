@@ -10,7 +10,8 @@ use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_core::dto::UpdateUserAccessScope;
-use wareboxes_core::models::{Employee, SiteScope};
+use wareboxes_core::models::Employee;
+use wareboxes_domain::SiteScope;
 
 fn api_request(
     token: &str,

@@ -10,10 +10,10 @@ use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::{
     InboundReceiptExceptionReason, InventoryHoldReason, InventoryTransactionType, TenantAccess,
 };
-use wareboxes_domain::CommandContext;
 
 const CONFIRM_OPERATION: &str = "task.confirm_item_location_cycle_count.v1";
 

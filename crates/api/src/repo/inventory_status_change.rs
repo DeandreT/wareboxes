@@ -2,11 +2,12 @@
 
 use serde::Serialize;
 use sqlx::Row;
+use wareboxes_application::CommandContext;
 use wareboxes_core::dto::ChangeInventoryStatusResult;
 use wareboxes_core::models::{
     InventoryStatus, InventoryStatusChangeReason, InventoryTransactionType, TenantAccess,
 };
-use wareboxes_domain::{CommandContext, TenantId};
+use wareboxes_domain::TenantId;
 
 use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::{AppError, AppResult};

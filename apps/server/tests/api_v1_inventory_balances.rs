@@ -10,9 +10,9 @@ use wareboxes_api_contract::v1::{
     ErrorReason, ErrorResponse, InventoryBalancePage, InventoryBalanceStatus,
     MAX_INVENTORY_BALANCE_QUERY_LENGTH,
 };
+use wareboxes_application::CommandContext;
 use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::{InboundReceiptExceptionReason, InventoryStatus};
-use wareboxes_domain::CommandContext;
 
 fn request(token: &str, tenant_id: TenantId, uri: &str) -> Request<Body> {
     Request::builder()

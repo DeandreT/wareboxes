@@ -1,9 +1,10 @@
 use sqlx::Row;
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::{
     InventoryStatus, InventoryTransactionType, PutawayConfirmation, TenantAccess, Timestamp,
     WorkTaskType,
 };
-use wareboxes_domain::{CommandContext, FacilityId, InventoryOwnerId};
+use wareboxes_domain::{FacilityId, InventoryOwnerId};
 
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};

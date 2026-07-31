@@ -6,10 +6,10 @@ use common::*;
 use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::{routes, state::AppState};
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::{
     InboundReceiptExceptionReason, ReceiveExpectedInventoryResult, Timestamp,
 };
-use wareboxes_domain::CommandContext;
 
 #[allow(clippy::too_many_arguments)]
 async fn receive_expected_line(
