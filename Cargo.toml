@@ -7,6 +7,7 @@ members = [
     "crates/api-contract",
     "crates/domain",
     "crates/core",
+    "crates/persistence-postgres",
     "apps/server",
     "crates/worker",
     "crates/barcodes",
@@ -24,6 +25,7 @@ wareboxes-api = { path = "crates/api" }
 wareboxes-domain = { path = "crates/domain" }
 wareboxes-core = { path = "crates/core" }
 wareboxes-barcodes = { path = "crates/barcodes" }
+wareboxes-persistence-postgres = { path = "crates/persistence-postgres" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

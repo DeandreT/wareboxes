@@ -10,7 +10,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use wareboxes_core::models::Timestamp;
 use wareboxes_domain::TenantId;
 
-use crate::error::{AppError, AppResult};
+use crate::{PersistenceError, PersistenceResult};
 
 pub type Db = PgPool;
 
@@ -104,14 +104,14 @@ pub async fn run_migrations(pool: &Db) -> anyhow::Result<()> {
 pub async fn bind_tenant_context(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: TenantId,
-) -> AppResult<()> {
+) -> PersistenceResult<()> {
     let session_token_hash: Option<String> = sqlx::query_scalar(
         "SELECT NULLIF(current_setting('wareboxes.session_token_hash', true), '')",
     )
     .fetch_one(&mut **tx)
     .await?;
     if session_token_hash.is_some() {
-        return Err(AppError::forbidden());
+        return Err(PersistenceError::AuthorizationContextConflict);
     }
 
     let tenant_id = tenant_id.to_string();
@@ -128,14 +128,14 @@ pub async fn bind_tenant_context(
             Ok(())
         }
         Some(current) if current == tenant_id => Ok(()),
-        Some(_) => Err(AppError::forbidden()),
+        Some(_) => Err(PersistenceError::AuthorizationContextConflict),
     }
 }
 
 pub async fn begin_tenant_transaction(
     db: &Db,
     tenant_id: TenantId,
-) -> AppResult<Transaction<'_, Postgres>> {
+) -> PersistenceResult<Transaction<'_, Postgres>> {
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
     Ok(tx)
@@ -144,9 +144,9 @@ pub async fn begin_tenant_transaction(
 pub async fn bind_session_context(
     tx: &mut Transaction<'_, Postgres>,
     token_hash: &str,
-) -> AppResult<()> {
+) -> PersistenceResult<()> {
     if token_hash.is_empty() {
-        return Err(AppError::forbidden());
+        return Err(PersistenceError::AuthorizationContextConflict);
     }
 
     let tenant_id: Option<String> =
@@ -154,7 +154,7 @@ pub async fn bind_session_context(
             .fetch_one(&mut **tx)
             .await?;
     if tenant_id.is_some() {
-        return Err(AppError::forbidden());
+        return Err(PersistenceError::AuthorizationContextConflict);
     }
 
     let current: Option<String> = sqlx::query_scalar(
@@ -173,14 +173,14 @@ pub async fn bind_session_context(
             Ok(())
         }
         Some(current) if current == token_hash => Ok(()),
-        Some(_) => Err(AppError::forbidden()),
+        Some(_) => Err(PersistenceError::AuthorizationContextConflict),
     }
 }
 
 pub async fn begin_session_transaction<'a>(
     db: &'a Db,
     token_hash: &str,
-) -> AppResult<Transaction<'a, Postgres>> {
+) -> PersistenceResult<Transaction<'a, Postgres>> {
     let mut tx = db.begin().await?;
     bind_session_context(&mut tx, token_hash).await?;
     Ok(tx)
