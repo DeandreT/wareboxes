@@ -1,11 +1,10 @@
 use sqlx::Row;
-use wareboxes_application::CommandContext;
+use wareboxes_application::{authorization::has_admin_override, CommandContext};
 use wareboxes_core::models::{TenantAccess, WorkTask, WorkTaskProgressAction, WorkTaskType};
 use wareboxes_domain::TenantId;
 
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
-use crate::permissions;
 use crate::repo::idempotency::PreparedCommand;
 
 use super::leasing::{release_expired_tasks_tx, release_inaccessible_active_tasks_tx};
@@ -61,10 +60,10 @@ async fn start_next_task_with_scope(
     let prepared = command
         .map(|command| PreparedCommand::new(command, "task.start_next.v1", &task_type))
         .transpose()?;
-    let permissions = permissions::get_user_permissions(db, tenant_id, user_id).await?;
-    let is_admin = permissions
-        .iter()
-        .any(|permission| permission.name.eq_ignore_ascii_case("admin"));
+    let permissions =
+        wareboxes_persistence_postgres::authorization::get_user_permissions(db, tenant_id, user_id)
+            .await?;
+    let is_admin = has_admin_override(&permissions);
     let allowed_permissions = permissions
         .iter()
         .map(|permission| permission.name.to_ascii_lowercase())
