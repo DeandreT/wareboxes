@@ -110,6 +110,12 @@ TEST_DATABASE_URL=postgres://wareboxes_admin:wareboxes_admin@127.0.0.1:5433/ware
   cargo test --workspace -- --test-threads=1
 ```
 
+Validate crate dependency direction independently of compilation:
+
+```bash
+scripts/check-boundaries.sh
+```
+
 ## Local Data
 
 If migrations were changed during development, reset the local database with:
