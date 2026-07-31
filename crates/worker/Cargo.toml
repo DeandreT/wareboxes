@@ -7,16 +7,12 @@ rust-version.workspace = true
 description = "Wareboxes background worker engine"
 
 [dependencies]
+wareboxes-application = { workspace = true }
 wareboxes-domain = { workspace = true }
-wareboxes-api = { workspace = true }
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-sqlx = { version = "0.7", default-features = false, features = [
-    "runtime-tokio",
-    "postgres",
-] }
 
 [dev-dependencies]
 chrono = { workspace = true }

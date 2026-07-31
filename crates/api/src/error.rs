@@ -24,6 +24,15 @@ impl From<wareboxes_persistence_postgres::PersistenceError> for AppError {
             wareboxes_persistence_postgres::PersistenceError::AuthorizationContextConflict => {
                 Self::forbidden()
             }
+            wareboxes_persistence_postgres::PersistenceError::InvalidInput(message) => {
+                Self::bad_request(message)
+            }
+            wareboxes_persistence_postgres::PersistenceError::Conflict(message) => {
+                Self::conflict(message)
+            }
+            wareboxes_persistence_postgres::PersistenceError::InvalidData(message) => {
+                Self::internal(message)
+            }
         }
     }
 }

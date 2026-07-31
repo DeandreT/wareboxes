@@ -14,7 +14,7 @@ use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 use crate::repo::idempotency::{require_command_context, PreparedCommand};
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
 use crate::repo::inventory_locking::{balance_license_plate_hint, lock_license_plate};
-use crate::repo::outbox::{self, NewOutboxEvent};
+use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 const OPERATION: &str = "inventory.status_change.v1";
 
@@ -458,8 +458,8 @@ async fn enqueue_status_changed_event(
             occurred_at: now_iso(),
         },
     )
-    .await
-    .map(|_| ())
+    .await?;
+    Ok(())
 }
 
 pub async fn change_inventory_status(

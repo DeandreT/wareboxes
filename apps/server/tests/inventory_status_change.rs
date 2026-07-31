@@ -430,12 +430,13 @@ async fn status_changes_round_trip_replay_and_preserve_committed_inventory() {
     );
 
     let first_ordering_key = format!("inventory-transaction:{}", first.inventory_transaction_id);
-    let first_events = repo::outbox::get_events(&fixture.db, tenant_id, None, 100)
-        .await
-        .unwrap()
-        .into_iter()
-        .filter(|event| event.ordering_key == first_ordering_key)
-        .collect::<Vec<_>>();
+    let first_events =
+        wareboxes_persistence_postgres::outbox::get_events(&fixture.db, tenant_id, None, 100)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.ordering_key == first_ordering_key)
+            .collect::<Vec<_>>();
     assert_eq!(first_events.len(), 2);
     assert_eq!(
         first_events

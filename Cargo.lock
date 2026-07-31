@@ -5336,6 +5336,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wareboxes-application"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "wareboxes-domain",
+]
+
+[[package]]
 name = "wareboxes-barcodes"
 version = "0.1.0"
 
@@ -5355,6 +5363,7 @@ dependencies = [
 name = "wareboxes-domain"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
  "thiserror 1.0.69",
 ]
@@ -5365,9 +5374,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "serde_json",
  "sqlx",
  "thiserror 1.0.69",
- "wareboxes-core",
+ "wareboxes-application",
  "wareboxes-domain",
 ]
 
@@ -5415,6 +5425,7 @@ dependencies = [
  "wareboxes-api-contract",
  "wareboxes-core",
  "wareboxes-domain",
+ "wareboxes-persistence-postgres",
 ]
 
 [[package]]
@@ -5446,10 +5457,9 @@ dependencies = [
  "async-trait",
  "chrono",
  "serde_json",
- "sqlx",
  "thiserror 1.0.69",
  "tokio",
- "wareboxes-api",
+ "wareboxes-application",
  "wareboxes-domain",
 ]
 

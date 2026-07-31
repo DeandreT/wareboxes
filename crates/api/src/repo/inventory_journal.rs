@@ -6,7 +6,7 @@ use wareboxes_domain::{OwnerFacilityScope, TenantId};
 use crate::db::{bind_tenant_context, now_iso};
 use crate::error::{AppError, AppResult};
 
-use super::outbox::{self, NewOutboxEvent};
+use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 pub(crate) use super::idempotency::{
     record_command_result, replayed_result, replayed_transaction, request_hash, NewCommandResult,

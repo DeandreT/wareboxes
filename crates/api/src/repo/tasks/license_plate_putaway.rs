@@ -13,7 +13,7 @@ use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 use crate::repo::idempotency::{require_command_context, PreparedCommand};
 use crate::repo::inventory;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
-use crate::repo::outbox::{self, NewOutboxEvent};
+use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 use super::{
     insert_progress_tx, insert_task_tx, lock_current_task_scope_tx,

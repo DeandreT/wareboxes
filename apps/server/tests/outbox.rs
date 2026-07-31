@@ -4,9 +4,9 @@ use std::collections::BTreeSet;
 
 use common::*;
 use serde_json::json;
-use wareboxes_api::repo::outbox::{self, NewOutboxEvent};
 use wareboxes_core::models::InventoryHoldReason;
 use wareboxes_domain::{CommandContext, FacilityId, InventoryOwnerId};
+use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 async fn enqueue_test_event(
     db: &db::Db,

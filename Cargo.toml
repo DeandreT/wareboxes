@@ -5,6 +5,7 @@ members = [
     "apps/web-ops",
     "crates/api",
     "crates/api-contract",
+    "crates/application",
     "crates/domain",
     "crates/core",
     "crates/persistence-postgres",
@@ -22,6 +23,7 @@ rust-version = "1.92"
 [workspace.dependencies]
 wareboxes-api-contract = { path = "crates/api-contract" }
 wareboxes-api = { path = "crates/api" }
+wareboxes-application = { path = "crates/application" }
 wareboxes-domain = { path = "crates/domain" }
 wareboxes-core = { path = "crates/core" }
 wareboxes-barcodes = { path = "crates/barcodes" }

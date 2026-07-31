@@ -13,8 +13,8 @@ use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 use crate::repo::idempotency::{request_hash, require_command_context, PreparedCommand};
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
-use crate::repo::outbox::{self, NewOutboxEvent};
 use crate::repo::{inventory, license_plates};
+use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 const INTERNAL_OPERATION: &str = "inbound.receive_expected_inventory.v1";
 const SCANNER_OPERATION: &str = "inbound.confirm_expected_receipt.v1";
@@ -489,8 +489,8 @@ async fn enqueue_receipt_event(
             occurred_at: now_iso(),
         },
     )
-    .await
-    .map(|_| ())
+    .await?;
+    Ok(())
 }
 
 fn receipt_disposition(receipt: &ValidatedReceipt<'_>) -> &'static str {
