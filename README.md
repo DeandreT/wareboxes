@@ -125,6 +125,14 @@ activates a release. Run the current `deploy/provision.sh` on a host whenever th
 version changes; normal application releases intentionally cannot rewrite root-owned
 service, database, or secret configuration.
 
+Provisioning installs the background worker service but leaves it disabled until a
+publisher is configured. Set the HTTP publisher variables in
+`/etc/wareboxes/wareboxes.env`, then activate it with:
+
+```bash
+sudo systemctl enable --now wareboxes-worker.service
+```
+
 Before the production-readiness gate, a host with an incompatible schema or database
 role layout should be rebuilt rather than migrated for compatibility. After retaining
 anything that matters, run these commands from a current repository checkout on the

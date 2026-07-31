@@ -114,6 +114,7 @@ install -m 0644 "$script_dir/postgres.compose.yml" /opt/wareboxes/runtime/postgr
 install -m 0755 "$script_dir/postgres-init/001-create-app-role.sh" /opt/wareboxes/runtime/postgres-init/001-create-app-role.sh
 install -m 0644 "$script_dir/runtime-version" /etc/wareboxes/runtime-version
 install -m 0644 "$script_dir/wareboxes.service" /etc/systemd/system/wareboxes.service
+install -m 0644 "$script_dir/wareboxes-worker.service" /etc/systemd/system/wareboxes-worker.service
 install -m 0755 "$script_dir/wareboxes-deploy" /usr/local/sbin/wareboxes-deploy
 
 install -d -m 0755 /etc/systemd/system/caddy.service.d

@@ -86,6 +86,7 @@ jobs:
         run: |
           install -d release/site
           install -m 0755 target/release/wareboxes-server release/wareboxes-server
+          install -m 0755 target/release/wareboxes-worker release/wareboxes-worker
           cp -a target/site/. release/site/
           tar -C release -czf "wareboxes-${RELEASE_SHA}.tar.gz" .
           sha256sum "wareboxes-${RELEASE_SHA}.tar.gz" > "wareboxes-${RELEASE_SHA}.tar.gz.sha256"
