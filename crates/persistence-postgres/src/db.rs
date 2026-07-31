@@ -5,6 +5,7 @@
 //! The repository layer uses PostgreSQL connections and row types directly.
 
 use anyhow::Context;
+use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnection, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Transaction};
 use wareboxes_domain::{TenantId, Timestamp};
@@ -52,6 +53,33 @@ pub fn now_iso() -> Timestamp {
 }
 
 static PG_MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations/postgres");
+
+/// Returns a deterministic fingerprint of every migration embedded in this build.
+///
+/// Test infrastructure uses this to share immutable migrated database templates
+/// across test processes without reusing a template after its schema changes.
+pub fn migration_fingerprint() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"wareboxes-postgres-migrations-v1\0");
+    for migration in PG_MIGRATIONS.iter() {
+        hasher.update(migration.version.to_be_bytes());
+        hasher.update([match migration.migration_type {
+            sqlx::migrate::MigrationType::Simple => 0,
+            sqlx::migrate::MigrationType::ReversibleUp => 1,
+            sqlx::migrate::MigrationType::ReversibleDown => 2,
+        }]);
+        hasher.update(migration.checksum.as_ref());
+    }
+
+    let digest = hasher.finalize();
+    let mut fingerprint = String::with_capacity(digest.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in digest {
+        fingerprint.push(char::from(HEX[usize::from(byte >> 4)]));
+        fingerprint.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    fingerprint
+}
 
 pub async fn connect(database_url: &str) -> anyhow::Result<Db> {
     let pool = PgPoolOptions::new()
@@ -829,4 +857,20 @@ pub async fn validate_same_database(migration_pool: &Db, runtime_pool: &Db) -> a
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::migration_fingerprint;
+
+    #[test]
+    fn migration_fingerprint_is_stable_and_identifier_safe() {
+        let fingerprint = migration_fingerprint();
+
+        assert_eq!(fingerprint, migration_fingerprint());
+        assert_eq!(fingerprint.len(), 64);
+        assert!(fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    }
 }
