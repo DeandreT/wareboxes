@@ -6,7 +6,7 @@ use tower::ServiceExt;
 use wareboxes_api::request_context::REQUEST_ID_HEADER;
 use wareboxes_api::routes;
 use wareboxes_api::state::AppState;
-use wareboxes_core::dto::{ErrorCode, ErrorResponse};
+use wareboxes_api_contract::web::{ErrorCode, ErrorResponse};
 
 async fn error_body(response: axum::response::Response) -> ErrorResponse {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();

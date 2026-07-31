@@ -3,7 +3,7 @@ use axum::http::{header, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use wareboxes_api_contract::v1::{ErrorReason, ErrorResponse, FieldViolation};
-use wareboxes_core::dto::{ErrorCode as LegacyErrorCode, ErrorResponse as LegacyErrorResponse};
+use wareboxes_api_contract::web::{ErrorCode as WebErrorCode, ErrorResponse as WebErrorResponse};
 use wareboxes_core::CoreError;
 
 use crate::error::AppError;
@@ -166,8 +166,8 @@ pub async fn normalize_error_response(response: Response) -> Response {
         .unwrap_or_else(current_request_id_or_new);
     let contract = if let Ok(contract) = serde_json::from_slice::<ErrorResponse>(&body) {
         contract
-    } else if let Ok(legacy) = serde_json::from_slice::<LegacyErrorResponse>(&body) {
-        legacy_contract(legacy)
+    } else if let Ok(web) = serde_json::from_slice::<WebErrorResponse>(&body) {
+        web_contract(web)
     } else {
         let (reason, message) = reason_for_status(parts.status);
         ErrorResponse::new(reason, message, fallback_request_id)
@@ -184,29 +184,28 @@ pub async fn normalize_error_response(response: Response) -> Response {
     normalized
 }
 
-fn legacy_contract(legacy: LegacyErrorResponse) -> ErrorResponse {
+fn web_contract(web: WebErrorResponse) -> ErrorResponse {
     ErrorResponse::new(
-        match legacy.code {
-            LegacyErrorCode::Unauthorized => ErrorReason::Unauthorized,
-            LegacyErrorCode::Forbidden => ErrorReason::Forbidden,
-            LegacyErrorCode::NotFound => ErrorReason::NotFound,
-            LegacyErrorCode::ValidationFailed => ErrorReason::ValidationFailed,
-            LegacyErrorCode::Conflict => ErrorReason::Conflict,
-            LegacyErrorCode::IdempotencyKeyReused => ErrorReason::IdempotencyKeyReused,
-            LegacyErrorCode::IdempotencyKeyRequired => ErrorReason::IdempotencyKeyRequired,
-            LegacyErrorCode::InvalidRequest => ErrorReason::InvalidRequest,
-            LegacyErrorCode::MethodNotAllowed => ErrorReason::MethodNotAllowed,
-            LegacyErrorCode::PayloadTooLarge => ErrorReason::PayloadTooLarge,
-            LegacyErrorCode::UnsupportedMediaType => ErrorReason::UnsupportedMediaType,
-            LegacyErrorCode::RateLimited => ErrorReason::RateLimited,
-            LegacyErrorCode::InternalError => ErrorReason::InternalError,
+        match web.code {
+            WebErrorCode::Unauthorized => ErrorReason::Unauthorized,
+            WebErrorCode::Forbidden => ErrorReason::Forbidden,
+            WebErrorCode::NotFound => ErrorReason::NotFound,
+            WebErrorCode::ValidationFailed => ErrorReason::ValidationFailed,
+            WebErrorCode::Conflict => ErrorReason::Conflict,
+            WebErrorCode::IdempotencyKeyReused => ErrorReason::IdempotencyKeyReused,
+            WebErrorCode::IdempotencyKeyRequired => ErrorReason::IdempotencyKeyRequired,
+            WebErrorCode::InvalidRequest => ErrorReason::InvalidRequest,
+            WebErrorCode::MethodNotAllowed => ErrorReason::MethodNotAllowed,
+            WebErrorCode::PayloadTooLarge => ErrorReason::PayloadTooLarge,
+            WebErrorCode::UnsupportedMediaType => ErrorReason::UnsupportedMediaType,
+            WebErrorCode::RateLimited => ErrorReason::RateLimited,
+            WebErrorCode::InternalError => ErrorReason::InternalError,
         },
-        legacy.message,
-        legacy.request_id,
+        web.message,
+        web.request_id,
     )
     .with_violations(
-        legacy
-            .details
+        web.details
             .into_iter()
             .map(|detail| FieldViolation {
                 field: detail.field,

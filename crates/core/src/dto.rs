@@ -9,33 +9,6 @@ use crate::models::{
     LoadStatus, LoadType, Order, TenantAccess, Timestamp, User,
 };
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ErrorCode {
-    Unauthorized,
-    Forbidden,
-    NotFound,
-    ValidationFailed,
-    Conflict,
-    IdempotencyKeyReused,
-    IdempotencyKeyRequired,
-    InvalidRequest,
-    MethodNotAllowed,
-    PayloadTooLarge,
-    UnsupportedMediaType,
-    RateLimited,
-    InternalError,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ErrorResponse {
-    pub code: ErrorCode,
-    pub message: String,
-    pub request_id: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub details: Vec<crate::FieldError>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Paged<T> {
     pub items: Vec<T>,
