@@ -1,0 +1,30 @@
+[package]
+name = "wareboxes-worker-process"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Wareboxes background worker process composition root"
+
+[[bin]]
+name = "wareboxes-worker"
+path = "src/main.rs"
+
+[dependencies]
+wareboxes-application = { workspace = true }
+wareboxes-domain = { workspace = true }
+wareboxes-persistence-postgres = { workspace = true }
+wareboxes-worker = { workspace = true }
+anyhow = { workspace = true }
+async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sqlx = { version = "0.7", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+] }
