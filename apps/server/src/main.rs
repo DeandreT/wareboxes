@@ -1,8 +1,11 @@
+mod config;
+
 use anyhow::Context;
 use tracing_subscriber::EnvFilter;
-use wareboxes_api::config::Config;
 use wareboxes_api::state::AppState;
 use wareboxes_api::{auth, db, repo, routes};
+
+use config::Config;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
