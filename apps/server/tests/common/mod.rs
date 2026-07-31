@@ -70,11 +70,20 @@ pub async fn setup() -> db::Db {
         .unwrap_or_else(|_| DEFAULT_TEST_DATABASE_URL.to_string());
     let migration_fingerprint = db::migration_fingerprint();
     let template_name = template_database_name(&migration_fingerprint);
-    let database_name = format!(
-        "wareboxes_test_{}_{}",
-        std::process::id(),
-        NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed)
-    );
+    let process_id = std::process::id();
+    let database_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
+    let database_name = match std::env::var("WAREBOXES_TEST_RUN_ID") {
+        Ok(run_id) => {
+            assert!(
+                !run_id.is_empty()
+                    && run_id.len() <= 16
+                    && run_id.bytes().all(|byte| byte.is_ascii_digit()),
+                "WAREBOXES_TEST_RUN_ID must contain at most 16 ASCII digits"
+            );
+            format!("wareboxes_test_{run_id}_{process_id}_{database_id}")
+        }
+        Err(_) => format!("wareboxes_test_{process_id}_{database_id}"),
+    };
 
     let admin_url = set_db_name(&base_url, "postgres");
     let test_admin_url = set_db_name(&base_url, &database_name);
