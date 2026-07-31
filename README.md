@@ -5,11 +5,13 @@ Wareboxes is a warehouse management system prototype.
 ## Workspace
 
 - `apps/server`: API and SSR process composition root
+- `apps/worker`: background delivery process composition root
 - `apps/web-ops`: Leptos SSR operations web application
 - `apps/rf-android`: native Android warehouse execution client
 - `crates/api`: Axum routes, authentication, and Leptos SSR integration
 - `crates/application`: transport-independent workflow contracts and orchestration
 - `crates/persistence-postgres`: PostgreSQL connection, migrations, and tenant context
+- `crates/worker`: persistence-independent background worker engine
 - `crates/core`: shared models, DTOs, and errors
 - `crates/barcodes`: barcode encoders
 - `migrations/postgres`: PostgreSQL migrations
@@ -47,6 +49,17 @@ Run the API without the web frontend:
 ```bash
 scripts/dev.sh server
 ```
+
+Run the outbox worker with the explicit development publisher:
+
+```bash
+OUTBOX_PUBLISHER=stdout cargo run -p wareboxes-worker-process --bin wareboxes-worker
+```
+
+The stdout publisher acknowledges and consumes delivered events. For HTTP delivery,
+set `OUTBOX_PUBLISHER=http`, `OUTBOX_PUBLISH_URL`, and
+`OUTBOX_PUBLISH_BEARER_TOKEN`. HTTP endpoints must use HTTPS unless
+`OUTBOX_ALLOW_INSECURE_HTTP=true` is explicitly set for local development.
 
 ## Android RF
 

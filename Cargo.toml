@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "apps/rf-android",
+    "apps/worker",
     "apps/web-ops",
     "crates/api",
     "crates/api-contract",
@@ -28,6 +29,7 @@ wareboxes-domain = { path = "crates/domain" }
 wareboxes-core = { path = "crates/core" }
 wareboxes-barcodes = { path = "crates/barcodes" }
 wareboxes-persistence-postgres = { path = "crates/persistence-postgres" }
+wareboxes-worker = { path = "crates/worker" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
