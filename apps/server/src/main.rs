@@ -1,16 +1,17 @@
 use anyhow::Context;
 use tracing_subscriber::EnvFilter;
-use wareboxes_server::config::Config;
-use wareboxes_server::state::AppState;
-use wareboxes_server::{auth, db, repo, routes};
+use wareboxes_api::config::Config;
+use wareboxes_api::state::AppState;
+use wareboxes_api::{auth, db, repo, routes};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,wareboxes_server=debug")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                EnvFilter::new("info,wareboxes_api=debug,wareboxes_server=debug")
+            }),
         )
         .init();
 
@@ -37,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::with_security(pool, cfg.security.clone());
     let app = routes::app(state.clone());
     #[cfg(feature = "ssr")]
-    let app = wareboxes_server::web_app::with_web_app(app, state)?;
+    let app = wareboxes_api::web_app::with_web_app(app, state)?;
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind_addr)
         .await

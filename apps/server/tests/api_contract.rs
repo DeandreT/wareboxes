@@ -3,10 +3,10 @@ mod common;
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use tower::ServiceExt;
+use wareboxes_api::request_context::REQUEST_ID_HEADER;
+use wareboxes_api::routes;
+use wareboxes_api::state::AppState;
 use wareboxes_core::dto::{ErrorCode, ErrorResponse};
-use wareboxes_server::request_context::REQUEST_ID_HEADER;
-use wareboxes_server::routes;
-use wareboxes_server::state::AppState;
 
 async fn error_body(response: axum::response::Response) -> ErrorResponse {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();

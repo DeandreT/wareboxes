@@ -5,13 +5,13 @@ use axum::http::{header, Method, Request, StatusCode};
 use common::*;
 use serde_json::{json, Value};
 use tower::ServiceExt;
+use wareboxes_api::auth::TENANT_ID_HEADER;
+use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
+use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     CycleCountClaimHeartbeatResponse, CycleCountClaimReleaseResponse, CycleCountClaimResponse,
     CycleCountConfirmationResponse, ErrorReason, ErrorResponse,
 };
-use wareboxes_server::auth::TENANT_ID_HEADER;
-use wareboxes_server::request_context::IDEMPOTENCY_KEY_HEADER;
-use wareboxes_server::{routes, state::AppState};
 
 struct CountContext {
     fixture: Fixture,
@@ -191,7 +191,7 @@ async fn assert_status(
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
-        .with_env_filter("wareboxes_server=debug")
+        .with_env_filter("wareboxes_api=debug")
         .try_init();
 }
 

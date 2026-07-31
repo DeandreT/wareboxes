@@ -2,8 +2,8 @@ mod common;
 
 use common::*;
 use serde_json::json;
+use wareboxes_api::repo::outbox::{self, NewOutboxEvent};
 use wareboxes_domain::{FacilityId, InventoryOwnerId};
-use wareboxes_server::repo::outbox::{self, NewOutboxEvent};
 
 #[derive(Clone)]
 struct EventRefs {

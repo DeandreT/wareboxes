@@ -5,9 +5,9 @@ use axum::extract::FromRequestParts;
 use axum::http::{header, Request, StatusCode};
 use common::*;
 use tower::ServiceExt;
-use wareboxes_server::auth::{CurrentTenant, TENANT_ID_HEADER};
-use wareboxes_server::routes;
-use wareboxes_server::state::AppState;
+use wareboxes_api::auth::{CurrentTenant, TENANT_ID_HEADER};
+use wareboxes_api::routes;
+use wareboxes_api::state::AppState;
 
 fn request_parts(token: &str, tenant_id: Option<i64>) -> axum::http::request::Parts {
     let mut request = Request::builder().header(header::AUTHORIZATION, format!("Bearer {token}"));

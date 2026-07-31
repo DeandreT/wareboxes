@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use async_trait::async_trait;
+use wareboxes_api::db::Db;
+use wareboxes_api::repo::outbox::{self, DeliveryFailureClass, FailOutboxEvent, OutboxEvent};
 use wareboxes_domain::TenantId;
-use wareboxes_server::db::Db;
-use wareboxes_server::repo::outbox::{self, DeliveryFailureClass, FailOutboxEvent, OutboxEvent};
 
 use crate::publisher::FailureClass;
 

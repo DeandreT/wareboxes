@@ -8,6 +8,9 @@ use common::*;
 use serde_json::{json, Value};
 use tokio::time::timeout;
 use tower::ServiceExt;
+use wareboxes_api::auth::TENANT_ID_HEADER;
+use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
+use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     CreateInventoryRelocationTaskResponse, ErrorReason, ErrorResponse,
     InventoryRelocationClaimHeartbeatResponse, InventoryRelocationClaimReleaseResponse,
@@ -17,9 +20,6 @@ use wareboxes_api_contract::v1::{
 use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::{InboundReceiptExceptionReason, ReceiveExpectedInventoryResult};
 use wareboxes_domain::CommandContext;
-use wareboxes_server::auth::TENANT_ID_HEADER;
-use wareboxes_server::request_context::IDEMPOTENCY_KEY_HEADER;
-use wareboxes_server::{routes, state::AppState};
 
 const CONCURRENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 

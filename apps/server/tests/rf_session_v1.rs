@@ -4,11 +4,11 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use common::*;
 use tower::ServiceExt;
+use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     CreateRfSessionRequest, CreateRfSessionResponse, ErrorReason, ErrorResponse,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
-use wareboxes_server::{routes, state::AppState};
 
 fn session_request(email: &str, password: &str) -> Request<Body> {
     let body = serde_json::to_vec(&CreateRfSessionRequest {

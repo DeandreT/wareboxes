@@ -4,9 +4,9 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use common::*;
 use tower::ServiceExt;
+use wareboxes_api::auth::TENANT_ID_HEADER;
+use wareboxes_api::{routes, state::AppState};
 use wareboxes_core::models::{AuditLocationCount, AuditWave, Employee, SiteScope};
-use wareboxes_server::auth::TENANT_ID_HEADER;
-use wareboxes_server::{routes, state::AppState};
 
 async fn grant_admin(db: &db::Db, tenant_id: TenantId, user_id: i64, role_name: &str) {
     let permission = repo::permissions::add_permission(db, tenant_id, "admin", Some("Admin"))

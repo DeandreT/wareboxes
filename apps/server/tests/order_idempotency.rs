@@ -5,10 +5,10 @@ use axum::http::{header, Method, Request, StatusCode};
 use common::*;
 use serde_json::{json, Value};
 use tower::ServiceExt;
+use wareboxes_api::auth::TENANT_ID_HEADER;
+use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
+use wareboxes_api::{routes, state::AppState};
 use wareboxes_core::dto::{ErrorCode, ErrorResponse, UpdateUserAccessScope};
-use wareboxes_server::auth::TENANT_ID_HEADER;
-use wareboxes_server::request_context::IDEMPOTENCY_KEY_HEADER;
-use wareboxes_server::{routes, state::AppState};
 
 #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
 struct OrderMetadataState {

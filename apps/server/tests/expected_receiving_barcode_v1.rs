@@ -4,11 +4,11 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use common::*;
 use tower::ServiceExt;
+use wareboxes_api::auth::TENANT_ID_HEADER;
+use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{ErrorReason, ErrorResponse, ExpectedReceivingSessionResponse};
 use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::{LoadStatus, LoadType};
-use wareboxes_server::auth::TENANT_ID_HEADER;
-use wareboxes_server::{routes, state::AppState};
 
 fn lookup_request(token: Option<&str>, tenant_id: TenantId, barcode: &str) -> Request<Body> {
     let mut request = Request::builder()
