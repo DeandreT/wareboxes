@@ -2,6 +2,10 @@
 
 Wareboxes is a warehouse management system prototype.
 
+The durable workspace and runtime boundaries are documented in
+[`docs/architecture.md`](docs/architecture.md). Product delivery gates are tracked
+in [`ROADMAP.md`](ROADMAP.md).
+
 ## Workspace
 
 - `apps/server`: API and SSR process composition root
