@@ -56,19 +56,20 @@ async fn auth_and_hierarchical_rbac() {
     )
     .await
     .unwrap();
-    let parent = repo::roles::add_role(&db, tenant_id, "parent", Some("p"))
+    let parent =
+        wareboxes_persistence_postgres::roles::add_role(&db, tenant_id, "parent", Some("p"))
+            .await
+            .unwrap();
+    let child = wareboxes_persistence_postgres::roles::add_role(&db, tenant_id, "child", Some("c"))
         .await
         .unwrap();
-    let child = repo::roles::add_role(&db, tenant_id, "child", Some("c"))
+    wareboxes_persistence_postgres::roles::add_role_permission(&db, tenant_id, parent, perm)
         .await
         .unwrap();
-    repo::roles::add_role_permission(&db, tenant_id, parent, perm)
+    wareboxes_persistence_postgres::roles::add_role_relationship(&db, tenant_id, parent, child)
         .await
         .unwrap();
-    repo::roles::add_role_relationship(&db, tenant_id, parent, child)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(&db, tenant_id, user.id, child)
+    wareboxes_persistence_postgres::roles::add_role_to_user(&db, tenant_id, user.id, child)
         .await
         .unwrap();
 
@@ -90,12 +91,12 @@ async fn auth_and_hierarchical_rbac() {
     );
 
     // Closures resolved by get_role.
-    let child_role = repo::roles::get_role(&db, tenant_id, child)
+    let child_role = wareboxes_persistence_postgres::roles::get_role(&db, tenant_id, child)
         .await
         .unwrap()
         .unwrap();
     assert!(child_role.parent_roles.iter().any(|r| r.id == parent));
-    let parent_role = repo::roles::get_role(&db, tenant_id, parent)
+    let parent_role = wareboxes_persistence_postgres::roles::get_role(&db, tenant_id, parent)
         .await
         .unwrap()
         .unwrap();
@@ -120,16 +121,22 @@ async fn auth_and_hierarchical_rbac() {
             .await
             .unwrap()
     );
-    assert!(
-        !repo::roles::add_role_to_user(&db, other_tenant, user.id, parent)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !repo::roles::add_role_permission(&db, other_tenant, parent, perm)
-            .await
-            .unwrap()
-    );
+    assert!(!wareboxes_persistence_postgres::roles::add_role_to_user(
+        &db,
+        other_tenant,
+        user.id,
+        parent
+    )
+    .await
+    .unwrap());
+    assert!(!wareboxes_persistence_postgres::roles::add_role_permission(
+        &db,
+        other_tenant,
+        parent,
+        perm
+    )
+    .await
+    .unwrap());
     let token = auth::create_session(&db, user.id).await.unwrap();
     let app = routes::app(AppState::new(db.clone()));
     let authorized = app
@@ -167,19 +174,26 @@ async fn auth_and_hierarchical_rbac() {
     )
     .await
     .unwrap();
-    let other_role = repo::roles::add_role(&db, other_tenant, "parent", Some("p"))
-        .await
-        .unwrap();
-    assert!(
-        repo::roles::add_role_permission(&db, other_tenant, other_role, other_perm)
+    let other_role =
+        wareboxes_persistence_postgres::roles::add_role(&db, other_tenant, "parent", Some("p"))
             .await
-            .unwrap()
-    );
-    assert!(
-        repo::roles::add_role_to_user(&db, other_tenant, user.id, other_role)
-            .await
-            .unwrap()
-    );
+            .unwrap();
+    assert!(wareboxes_persistence_postgres::roles::add_role_permission(
+        &db,
+        other_tenant,
+        other_role,
+        other_perm
+    )
+    .await
+    .unwrap());
+    assert!(wareboxes_persistence_postgres::roles::add_role_to_user(
+        &db,
+        other_tenant,
+        user.id,
+        other_role
+    )
+    .await
+    .unwrap());
     assert!(
         permissions::user_has_permission(&db, other_tenant, user.id, "orders")
             .await
@@ -199,7 +213,7 @@ async fn auth_and_hierarchical_rbac() {
     assert_eq!(newly_authorized.status(), StatusCode::OK);
 
     // The per-user self role must be undeletable.
-    let self_role = repo::roles::get_roles(&db, tenant_id, true, true)
+    let self_role = wareboxes_persistence_postgres::roles::get_roles(&db, tenant_id, true, true)
         .await
         .unwrap()
         .into_iter()
@@ -215,30 +229,53 @@ async fn auth_and_hierarchical_rbac() {
     .await
     .unwrap();
     membership_tx.commit().await.unwrap();
+    assert!(!wareboxes_persistence_postgres::roles::add_role_to_user(
+        &db,
+        tenant_id,
+        other_user.id,
+        self_role.id
+    )
+    .await
+    .unwrap());
+    assert!(!wareboxes_persistence_postgres::roles::update_role(
+        &db,
+        tenant_id,
+        self_role.id,
+        Some("renamed"),
+        None
+    )
+    .await
+    .unwrap());
+    assert!(!wareboxes_persistence_postgres::roles::set_role_deleted(
+        &db,
+        tenant_id,
+        self_role.id,
+        true
+    )
+    .await
+    .unwrap());
     assert!(
-        !repo::roles::add_role_to_user(&db, tenant_id, other_user.id, self_role.id)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !repo::roles::update_role(&db, tenant_id, self_role.id, Some("renamed"), None)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !repo::roles::set_role_deleted(&db, tenant_id, self_role.id, true)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !repo::roles::add_role_relationship(&db, tenant_id, parent, self_role.id)
-            .await
-            .unwrap()
-    );
-    let err = repo::roles::delete_user_role(&db, tenant_id, user.id, self_role.id)
+        !wareboxes_persistence_postgres::roles::add_role_relationship(
+            &db,
+            tenant_id,
+            parent,
+            self_role.id
+        )
         .await
-        .unwrap_err();
-    assert!(matches!(err, AppError::Core(CoreError::BadRequest(_))));
+        .unwrap()
+    );
+    let err = wareboxes_persistence_postgres::roles::delete_user_role(
+        &db,
+        tenant_id,
+        user.id,
+        self_role.id,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        wareboxes_persistence_postgres::PersistenceError::InvalidInput(_)
+    ));
 }
 
 #[tokio::test]

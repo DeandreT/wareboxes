@@ -163,7 +163,7 @@ async fn order_aggregate_is_isolated_by_selected_tenant() {
     )
     .await
     .unwrap();
-    let role = repo::roles::add_role(
+    let role = wareboxes_persistence_postgres::roles::add_role(
         &fixture.db,
         tenant_a,
         "order-scope-role",
@@ -171,12 +171,22 @@ async fn order_aggregate_is_isolated_by_selected_tenant() {
     )
     .await
     .unwrap();
-    repo::roles::add_role_permission(&fixture.db, tenant_a, role, permission)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(&fixture.db, tenant_a, operator.id, role)
-        .await
-        .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_a,
+        role,
+        permission,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_a,
+        operator.id,
+        role,
+    )
+    .await
+    .unwrap();
     let permission_b = wareboxes_persistence_postgres::permissions::add_permission(
         &fixture.db,
         tenant_b,
@@ -185,7 +195,7 @@ async fn order_aggregate_is_isolated_by_selected_tenant() {
     )
     .await
     .unwrap();
-    let role_b = repo::roles::add_role(
+    let role_b = wareboxes_persistence_postgres::roles::add_role(
         &fixture.db,
         tenant_b,
         "order-scope-role",
@@ -193,12 +203,22 @@ async fn order_aggregate_is_isolated_by_selected_tenant() {
     )
     .await
     .unwrap();
-    repo::roles::add_role_permission(&fixture.db, tenant_b, role_b, permission_b)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(&fixture.db, tenant_b, operator.id, role_b)
-        .await
-        .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_b,
+        role_b,
+        permission_b,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_b,
+        operator.id,
+        role_b,
+    )
+    .await
+    .unwrap();
 
     let owner_a = fixture.inventory_owner(tenant_a, "Tenant A Owner").await;
     let owner_b = fixture.inventory_owner(tenant_b, "Tenant B Owner").await;

@@ -38,13 +38,18 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     )
     .await
     .unwrap();
-    let wms_role = repo::roles::add_role(&db, tenant_id, "task-wms", Some("task worker"))
+    let wms_role = wareboxes_persistence_postgres::roles::add_role(
+        &db,
+        tenant_id,
+        "task-wms",
+        Some("task worker"),
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(&db, tenant_id, wms_role, wms_perm)
         .await
         .unwrap();
-    repo::roles::add_role_permission(&db, tenant_id, wms_role, wms_perm)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(&db, tenant_id, assignee.id, wms_role)
+    wareboxes_persistence_postgres::roles::add_role_to_user(&db, tenant_id, assignee.id, wms_role)
         .await
         .unwrap();
     let facility =
@@ -708,9 +713,14 @@ async fn task_queue_is_tenant_isolated_and_claims_once() {
         .await
         .unwrap();
         membership_tx.commit().await.unwrap();
-        repo::roles::add_role_to_user(&fixture.db, tenant_a, worker.id, role_id)
-            .await
-            .unwrap();
+        wareboxes_persistence_postgres::roles::add_role_to_user(
+            &fixture.db,
+            tenant_a,
+            worker.id,
+            role_id,
+        )
+        .await
+        .unwrap();
     }
 
     let first_db = fixture.db.clone();
@@ -810,7 +820,7 @@ async fn task_queue_is_tenant_isolated_and_claims_once() {
     )
     .await
     .unwrap();
-    let tenant_b_role = repo::roles::add_role(
+    let tenant_b_role = wareboxes_persistence_postgres::roles::add_role(
         &fixture.db,
         tenant_b,
         "task-scope-operator@test.com-wms",
@@ -818,12 +828,22 @@ async fn task_queue_is_tenant_isolated_and_claims_once() {
     )
     .await
     .unwrap();
-    repo::roles::add_role_permission(&fixture.db, tenant_b, tenant_b_role, tenant_b_permission)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(&fixture.db, tenant_b, operator.id, tenant_b_role)
-        .await
-        .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_b,
+        tenant_b_role,
+        tenant_b_permission,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_b,
+        operator.id,
+        tenant_b_role,
+    )
+    .await
+    .unwrap();
 
     let token = auth::create_session(&fixture.db, operator.id)
         .await

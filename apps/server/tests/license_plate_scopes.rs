@@ -89,7 +89,7 @@ async fn license_plates_are_owner_and_facility_scoped() {
     )
     .await
     .unwrap();
-    let role = repo::roles::add_role(
+    let role = wareboxes_persistence_postgres::roles::add_role(
         &db,
         tenant_id,
         "license-plate-scope-operator",
@@ -97,10 +97,10 @@ async fn license_plates_are_owner_and_facility_scoped() {
     )
     .await
     .unwrap();
-    repo::roles::add_role_permission(&db, tenant_id, role, permission)
+    wareboxes_persistence_postgres::roles::add_role_permission(&db, tenant_id, role, permission)
         .await
         .unwrap();
-    repo::roles::add_role_to_user(&db, tenant_id, operator.id, role)
+    wareboxes_persistence_postgres::roles::add_role_to_user(&db, tenant_id, operator.id, role)
         .await
         .unwrap();
 

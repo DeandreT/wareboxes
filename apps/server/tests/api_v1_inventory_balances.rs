@@ -198,7 +198,7 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
     )
     .await
     .unwrap();
-    let role = repo::roles::add_role(
+    let role = wareboxes_persistence_postgres::roles::add_role(
         &fixture.db,
         tenant_id,
         "v1-balance-reader",
@@ -206,12 +206,22 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
     )
     .await
     .unwrap();
-    repo::roles::add_role_permission(&fixture.db, tenant_id, role, permission)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(&fixture.db, tenant_id, operator.id, role)
-        .await
-        .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_id,
+        role,
+        permission,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_id,
+        operator.id,
+        role,
+    )
+    .await
+    .unwrap();
 
     let allowed_facility = fixture.facility(tenant_id, "V1 Allowed DC").await;
     let denied_facility = fixture.facility(tenant_id, "V1 Denied DC").await;

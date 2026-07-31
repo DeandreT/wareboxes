@@ -288,7 +288,7 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let role = repo::roles::add_role(
+        let role = wareboxes_persistence_postgres::roles::add_role(
             &self.db,
             tenant_id,
             &format!("{email}-wms"),
@@ -296,10 +296,10 @@ impl Fixture {
         )
         .await
         .unwrap();
-        repo::roles::add_role_permission(&self.db, tenant_id, role, perm)
+        wareboxes_persistence_postgres::roles::add_role_permission(&self.db, tenant_id, role, perm)
             .await
             .unwrap();
-        repo::roles::add_role_to_user(&self.db, tenant_id, user.id, role)
+        wareboxes_persistence_postgres::roles::add_role_to_user(&self.db, tenant_id, user.id, role)
             .await
             .unwrap();
         user

@@ -154,7 +154,7 @@ async fn inventory_rollups_are_typed_scoped_and_keyset_paginated() {
     )
     .await
     .unwrap();
-    let role = repo::roles::add_role(
+    let role = wareboxes_persistence_postgres::roles::add_role(
         &fixture.db,
         tenant_id,
         "inventory-rollup-reader",
@@ -162,12 +162,22 @@ async fn inventory_rollups_are_typed_scoped_and_keyset_paginated() {
     )
     .await
     .unwrap();
-    repo::roles::add_role_permission(&fixture.db, tenant_id, role, permission)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(&fixture.db, tenant_id, operator.id, role)
-        .await
-        .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_id,
+        role,
+        permission,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_id,
+        operator.id,
+        role,
+    )
+    .await
+    .unwrap();
 
     let first_facility = fixture.facility(tenant_id, "Rollup North").await;
     let second_facility = fixture.facility(tenant_id, "Rollup South").await;

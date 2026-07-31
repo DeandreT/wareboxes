@@ -5,15 +5,14 @@
 use std::collections::{HashMap, HashSet};
 
 use sqlx::Row;
-use wareboxes_core::models::{Permission, Role};
-use wareboxes_core::CoreError;
+use wareboxes_application::authorization::{PermissionReadModel, RoleReadModel};
 use wareboxes_domain::TenantId;
 
 use crate::db::{begin_tenant_transaction, now_iso, Db};
-use crate::error::{AppError, AppResult};
+use crate::{PersistenceError, PersistenceResult};
 
-fn map_role(row: &sqlx::postgres::PgRow) -> AppResult<Role> {
-    Ok(Role {
+fn map_role(row: &sqlx::postgres::PgRow) -> PersistenceResult<RoleReadModel> {
+    Ok(RoleReadModel {
         id: row.try_get("id")?,
         created: row.try_get("created")?,
         deleted: row.try_get("deleted")?,
@@ -31,7 +30,7 @@ fn map_role(row: &sqlx::postgres::PgRow) -> AppResult<Role> {
 async fn load_all_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
-) -> AppResult<Vec<Role>> {
+) -> PersistenceResult<Vec<RoleReadModel>> {
     let rows = sqlx::query(
         "SELECT id, created, deleted, name, description, parent_id, self_user_id FROM roles WHERE tenant_id = $1 AND deleted IS NULL",
     )
@@ -74,7 +73,7 @@ fn descendants(id: i64, children_of: &HashMap<i64, Vec<i64>>) -> Vec<i64> {
 async fn role_permission_map(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
-) -> AppResult<HashMap<i64, Vec<Permission>>> {
+) -> PersistenceResult<HashMap<i64, Vec<PermissionReadModel>>> {
     let rows = sqlx::query(
         r#"
         SELECT rp.role_id AS role_id,
@@ -89,10 +88,10 @@ async fn role_permission_map(
     .bind(tenant_id.get())
     .fetch_all(&mut **tx)
     .await?;
-    let mut map: HashMap<i64, Vec<Permission>> = HashMap::new();
+    let mut map: HashMap<i64, Vec<PermissionReadModel>> = HashMap::new();
     for r in &rows {
         let role_id = r.try_get("role_id")?;
-        map.entry(role_id).or_default().push(Permission {
+        map.entry(role_id).or_default().push(PermissionReadModel {
             id: r.try_get("id")?,
             created: r.try_get("created")?,
             deleted: r.try_get("deleted")?,
@@ -110,10 +109,10 @@ pub async fn get_roles(
     tenant_id: TenantId,
     show_deleted: bool,
     show_self_role: bool,
-) -> AppResult<Vec<Role>> {
+) -> PersistenceResult<Vec<RoleReadModel>> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let all = load_all_tx(&mut tx, tenant_id).await?;
-    let by_id: HashMap<i64, Role> = all.iter().map(|r| (r.id, r.clone())).collect();
+    let by_id: HashMap<i64, RoleReadModel> = all.iter().map(|r| (r.id, r.clone())).collect();
     let parent_of: HashMap<i64, Option<i64>> = all.iter().map(|r| (r.id, r.parent_id)).collect();
     let mut children_of: HashMap<i64, Vec<i64>> = HashMap::new();
     for r in &all {
@@ -130,7 +129,10 @@ pub async fn get_roles(
         .bind(tenant_id.get())
         .fetch_all(&mut *tx)
         .await?;
-    let mut roles: Vec<Role> = base_rows.iter().map(map_role).collect::<AppResult<_>>()?;
+    let mut roles: Vec<RoleReadModel> = base_rows
+        .iter()
+        .map(map_role)
+        .collect::<PersistenceResult<_>>()?;
     tx.commit().await?;
 
     roles
@@ -145,7 +147,7 @@ pub async fn get_roles(
             .filter_map(|id| by_id.get(id).cloned())
             .collect();
 
-        let mut perms: Vec<Permission> = Vec::new();
+        let mut perms: Vec<PermissionReadModel> = Vec::new();
         let mut seen = HashSet::new();
         for rid in std::iter::once(role.id).chain(anc) {
             if let Some(ps) = perm_map.get(&rid) {
@@ -161,7 +163,11 @@ pub async fn get_roles(
     Ok(roles)
 }
 
-pub async fn get_role(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<Option<Role>> {
+pub async fn get_role(
+    db: &Db,
+    tenant_id: TenantId,
+    id: i64,
+) -> PersistenceResult<Option<RoleReadModel>> {
     Ok(get_roles(db, tenant_id, true, true)
         .await?
         .into_iter()
@@ -173,7 +179,7 @@ pub async fn add_role(
     tenant_id: TenantId,
     name: &str,
     description: Option<&str>,
-) -> AppResult<i64> {
+) -> PersistenceResult<i64> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO roles (tenant_id, name, description, created) VALUES ($1, $2, $3, $4) RETURNING id",
@@ -194,11 +200,9 @@ pub async fn update_role(
     id: i64,
     name: Option<&str>,
     description: Option<&str>,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     if name.is_none() && description.is_none() {
-        return Err(AppError::Core(CoreError::BadRequest(
-            "No data to update".into(),
-        )));
+        return Err(PersistenceError::invalid_input("No data to update"));
     }
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
@@ -219,7 +223,7 @@ pub async fn set_role_deleted(
     tenant_id: TenantId,
     id: i64,
     deleted: bool,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         "UPDATE roles SET deleted = $1 WHERE tenant_id = $2 AND id = $3 AND self_user_id IS NULL",
@@ -239,7 +243,7 @@ pub async fn add_role_to_user(
     tenant_id: TenantId,
     user_id: i64,
     role_id: i64,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let row: Option<i64> = sqlx::query_scalar(
         r#"
@@ -277,7 +281,7 @@ pub async fn delete_user_role(
     tenant_id: TenantId,
     user_id: i64,
     role_id: i64,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let self_user_id: Option<i64> = sqlx::query_scalar(
         r#"
@@ -294,9 +298,7 @@ pub async fn delete_user_role(
     .await?
     .flatten();
     if self_user_id.is_some() {
-        return Err(AppError::Core(CoreError::BadRequest(
-            "Cannot delete self role".into(),
-        )));
+        return Err(PersistenceError::invalid_input("Cannot delete self role"));
     }
     let res = sqlx::query(
         "UPDATE user_roles SET deleted = $1 WHERE tenant_id = $2 AND user_id = $3 AND role_id = $4",
@@ -316,7 +318,7 @@ pub async fn add_role_permission(
     tenant_id: TenantId,
     role_id: i64,
     permission_id: i64,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let row: Option<i64> = sqlx::query_scalar(
         r#"
@@ -350,7 +352,7 @@ pub async fn delete_role_permission(
     tenant_id: TenantId,
     role_id: i64,
     permission_id: i64,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         "UPDATE role_permissions SET deleted = $1 WHERE tenant_id = $2 AND role_id = $3 AND permission_id = $4",
@@ -372,11 +374,11 @@ pub async fn add_role_relationship(
     tenant_id: TenantId,
     parent_id: i64,
     child_id: i64,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     if parent_id == child_id {
-        return Err(AppError::Core(CoreError::BadRequest(
-            "Parent and child roles cannot be the same".into(),
-        )));
+        return Err(PersistenceError::invalid_input(
+            "Parent and child roles cannot be the same",
+        ));
     }
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('role-hierarchy:' || $1::TEXT, 0))")
@@ -392,14 +394,14 @@ pub async fn add_role_relationship(
         }
     }
     if descendants(parent_id, &children_of).contains(&child_id) {
-        return Err(AppError::Core(CoreError::BadRequest(
-            "Child role is already a child of the parent role".into(),
-        )));
+        return Err(PersistenceError::invalid_input(
+            "Child role is already a child of the parent role",
+        ));
     }
     if ancestors(parent_id, &parent_of).contains(&child_id) {
-        return Err(AppError::Core(CoreError::BadRequest(
-            "Child role is a parent of the parent role".into(),
-        )));
+        return Err(PersistenceError::invalid_input(
+            "Child role is a parent of the parent role",
+        ));
     }
     let res = sqlx::query(
         r#"
@@ -430,7 +432,7 @@ pub async fn delete_role_relationship(
     db: &Db,
     tenant_id: TenantId,
     child_id: i64,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         "UPDATE roles SET parent_id = NULL WHERE tenant_id = $1 AND id = $2 AND self_user_id IS NULL",

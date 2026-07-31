@@ -24,7 +24,6 @@ pub mod items;
 pub mod license_plates;
 pub mod loads;
 pub mod orders;
-pub mod roles;
 pub mod settings;
 pub mod tasks;
 pub mod tenants;

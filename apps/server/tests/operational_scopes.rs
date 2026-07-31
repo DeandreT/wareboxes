@@ -19,9 +19,14 @@ async fn grant_permissions(
     role_name: &str,
     permission_names: &[&str],
 ) {
-    let role = repo::roles::add_role(db, tenant_id, role_name, Some("Operational scope role"))
-        .await
-        .unwrap();
+    let role = wareboxes_persistence_postgres::roles::add_role(
+        db,
+        tenant_id,
+        role_name,
+        Some("Operational scope role"),
+    )
+    .await
+    .unwrap();
     for permission_name in permission_names {
         let permission = wareboxes_persistence_postgres::permissions::add_permission(
             db,
@@ -31,11 +36,11 @@ async fn grant_permissions(
         )
         .await
         .unwrap();
-        repo::roles::add_role_permission(db, tenant_id, role, permission)
+        wareboxes_persistence_postgres::roles::add_role_permission(db, tenant_id, role, permission)
             .await
             .unwrap();
     }
-    repo::roles::add_role_to_user(db, tenant_id, user_id, role)
+    wareboxes_persistence_postgres::roles::add_role_to_user(db, tenant_id, user_id, role)
         .await
         .unwrap();
 }

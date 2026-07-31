@@ -173,7 +173,7 @@ async fn status_change_http_denials_and_revoked_replays_leave_no_effects() {
     )
     .await
     .unwrap();
-    let role = repo::roles::add_role(
+    let role = wareboxes_persistence_postgres::roles::add_role(
         &fixture.db,
         tenant_id,
         "status-change-operator",
@@ -181,16 +181,22 @@ async fn status_change_http_denials_and_revoked_replays_leave_no_effects() {
     )
     .await
     .unwrap();
-    assert!(
-        repo::roles::add_role_permission(&fixture.db, tenant_id, role, permission)
-            .await
-            .unwrap()
-    );
-    assert!(
-        repo::roles::add_role_to_user(&fixture.db, tenant_id, operator.id, role)
-            .await
-            .unwrap()
-    );
+    assert!(wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_id,
+        role,
+        permission
+    )
+    .await
+    .unwrap());
+    assert!(wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_id,
+        operator.id,
+        role
+    )
+    .await
+    .unwrap());
 
     let allowed_facility = fixture
         .facility(tenant_id, "Status Scope Allowed Facility")

@@ -89,9 +89,13 @@ pub async fn add_role(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok =
-        repo::roles::add_role_to_user(&state.db, user.tenant.tenant_id, body.user_id, body.role_id)
-            .await?;
+    let ok = wareboxes_persistence_postgres::roles::add_role_to_user(
+        &state.db,
+        user.tenant.tenant_id,
+        body.user_id,
+        body.role_id,
+    )
+    .await?;
     Ok(Json(ok))
 }
 
@@ -102,9 +106,13 @@ pub async fn remove_role(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok =
-        repo::roles::delete_user_role(&state.db, user.tenant.tenant_id, body.user_id, body.role_id)
-            .await?;
+    let ok = wareboxes_persistence_postgres::roles::delete_user_role(
+        &state.db,
+        user.tenant.tenant_id,
+        body.user_id,
+        body.role_id,
+    )
+    .await?;
     Ok(Json(ok))
 }
 

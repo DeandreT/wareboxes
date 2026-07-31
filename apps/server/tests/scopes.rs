@@ -18,15 +18,25 @@ async fn grant_permissions(
     role_name: &str,
     permission_ids: &[i64],
 ) {
-    let role = repo::roles::add_role(db, tenant_id, role_name, Some("Scope test role"))
+    let role = wareboxes_persistence_postgres::roles::add_role(
+        db,
+        tenant_id,
+        role_name,
+        Some("Scope test role"),
+    )
+    .await
+    .unwrap();
+    for permission_id in permission_ids {
+        wareboxes_persistence_postgres::roles::add_role_permission(
+            db,
+            tenant_id,
+            role,
+            *permission_id,
+        )
         .await
         .unwrap();
-    for permission_id in permission_ids {
-        repo::roles::add_role_permission(db, tenant_id, role, *permission_id)
-            .await
-            .unwrap();
     }
-    repo::roles::add_role_to_user(db, tenant_id, user_id, role)
+    wareboxes_persistence_postgres::roles::add_role_to_user(db, tenant_id, user_id, role)
         .await
         .unwrap();
 }
