@@ -7,5 +7,6 @@ rust-version.workspace = true
 description = "Domain primitives and invariants for the Wareboxes WMS"
 
 [dependencies]
+chrono = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

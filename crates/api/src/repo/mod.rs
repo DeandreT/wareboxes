@@ -26,7 +26,6 @@ pub mod license_plates;
 pub mod loads;
 pub mod locations;
 pub mod orders;
-pub mod outbox;
 pub mod permissions;
 pub mod roles;
 pub mod settings;

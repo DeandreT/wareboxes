@@ -1,156 +1,75 @@
 //! Transactional domain-event outbox and lease-based worker delivery primitives.
 
-use serde_json::Value;
 use sqlx::{Postgres, Row, Transaction};
-use wareboxes_core::models::Timestamp;
+pub use wareboxes_application::outbox::{
+    DeliveryAttempt, DeliveryAttemptOutcome, DeliveryFailureClass, FailOutboxEvent, NewOutboxEvent,
+    OutboxEvent,
+};
 use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
 
 use crate::db::{bind_tenant_context, Db};
-use crate::error::{AppError, AppResult};
+use crate::{PersistenceError, PersistenceResult};
 
-pub struct NewOutboxEvent<'a> {
-    pub tenant_id: TenantId,
-    pub inventory_owner_id: Option<InventoryOwnerId>,
-    pub facility_id: Option<FacilityId>,
-    pub actor_user_id: Option<i64>,
-    pub event_key: &'a str,
-    pub aggregate_type: &'a str,
-    pub aggregate_id: &'a str,
-    pub ordering_key: &'a str,
-    pub aggregate_sequence: i64,
-    pub event_type: &'a str,
-    pub schema_version: i32,
-    pub payload: &'a Value,
-    pub occurred_at: Timestamp,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct OutboxEvent {
-    pub id: i64,
-    pub tenant_id: TenantId,
-    pub inventory_owner_id: Option<InventoryOwnerId>,
-    pub facility_id: Option<FacilityId>,
-    pub actor_user_id: Option<i64>,
-    pub created: Timestamp,
-    pub event_key: String,
-    pub aggregate_type: String,
-    pub aggregate_id: String,
-    pub ordering_key: String,
-    pub aggregate_sequence: i64,
-    pub event_type: String,
-    pub schema_version: i32,
-    pub payload: Value,
-    pub occurred_at: Timestamp,
-    pub available_at: Timestamp,
-    pub claimed_at: Option<Timestamp>,
-    pub claimed_by: Option<String>,
-    pub lease_expires_at: Option<Timestamp>,
-    pub claim_version: i64,
-    pub attempts: i32,
-    pub last_error: Option<String>,
-    pub dead_lettered_at: Option<Timestamp>,
-    pub replay_count: i32,
-    pub discarded_at: Option<Timestamp>,
-    pub discard_reason: Option<String>,
-    pub discarded_by_user_id: Option<i64>,
-    pub published_at: Option<Timestamp>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeliveryFailureClass {
-    Retryable,
-    Permanent,
-}
-
-impl DeliveryFailureClass {
-    fn as_database_value(self) -> &'static str {
-        match self {
-            Self::Retryable => "retryable",
-            Self::Permanent => "permanent",
-        }
+fn failure_class_database_value(failure_class: DeliveryFailureClass) -> &'static str {
+    match failure_class {
+        DeliveryFailureClass::Retryable => "retryable",
+        DeliveryFailureClass::Permanent => "permanent",
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeliveryAttemptOutcome {
-    Published,
-    RetryScheduled,
-    PermanentFailure,
-    RetryExhausted,
-    LeaseLost,
-}
-
-impl DeliveryAttemptOutcome {
-    fn from_database_value(value: &str) -> AppResult<Self> {
-        match value {
-            "published" => Ok(Self::Published),
-            "retry_scheduled" => Ok(Self::RetryScheduled),
-            "permanent_failure" => Ok(Self::PermanentFailure),
-            "retry_exhausted" => Ok(Self::RetryExhausted),
-            "lease_lost" => Ok(Self::LeaseLost),
-            _ => Err(AppError::internal(format!(
-                "database returned an invalid delivery attempt outcome: {value}"
-            ))),
-        }
+fn delivery_attempt_outcome(value: &str) -> PersistenceResult<DeliveryAttemptOutcome> {
+    match value {
+        "published" => Ok(DeliveryAttemptOutcome::Published),
+        "retry_scheduled" => Ok(DeliveryAttemptOutcome::RetryScheduled),
+        "permanent_failure" => Ok(DeliveryAttemptOutcome::PermanentFailure),
+        "retry_exhausted" => Ok(DeliveryAttemptOutcome::RetryExhausted),
+        "lease_lost" => Ok(DeliveryAttemptOutcome::LeaseLost),
+        _ => Err(PersistenceError::invalid_data(format!(
+            "database returned an invalid delivery attempt outcome: {value}"
+        ))),
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliveryAttempt {
-    pub tenant_id: TenantId,
-    pub outbox_event_id: i64,
-    pub event_key: String,
-    pub event_type: String,
-    pub claim_version: i64,
-    pub replay_count: i32,
-    pub attempt_number: i32,
-    pub worker_id: String,
-    pub publisher_name: String,
-    pub claimed_at: Timestamp,
-    pub lease_expires_at: Timestamp,
-    pub outcome: Option<DeliveryAttemptOutcome>,
-    pub completed_at: Option<Timestamp>,
-    pub error: Option<String>,
-    pub retry_after_seconds: Option<i64>,
-}
-
-fn required_text(value: &str, label: &str) -> AppResult<()> {
+fn required_text(value: &str, label: &str) -> PersistenceResult<()> {
     if value.trim().is_empty() {
-        Err(AppError::bad_request(format!("{label} cannot be blank")))
+        Err(PersistenceError::invalid_input(format!(
+            "{label} cannot be blank"
+        )))
     } else {
         Ok(())
     }
 }
 
-fn bounded_text(value: &str, label: &str, maximum_characters: usize) -> AppResult<()> {
+fn bounded_text(value: &str, label: &str, maximum_characters: usize) -> PersistenceResult<()> {
     required_text(value, label)?;
     if value.chars().count() > maximum_characters {
-        return Err(AppError::bad_request(format!(
+        return Err(PersistenceError::invalid_input(format!(
             "{label} cannot exceed {maximum_characters} characters"
         )));
     }
     Ok(())
 }
 
-fn map_event(row: &sqlx::postgres::PgRow) -> AppResult<OutboxEvent> {
+fn map_event(row: &sqlx::postgres::PgRow) -> PersistenceResult<OutboxEvent> {
     let payload_json: String = row.try_get("payload_json")?;
-    let payload = serde_json::from_str(&payload_json)
-        .map_err(|error| AppError::internal(format!("decoding outbox payload: {error}")))?;
+    let payload = serde_json::from_str(&payload_json).map_err(|error| {
+        PersistenceError::invalid_data(format!("decoding outbox payload: {error}"))
+    })?;
     let inventory_owner_id = row
         .try_get::<Option<i64>, _>("inventory_owner_id")?
         .map(InventoryOwnerId::new)
         .transpose()
-        .map_err(|error| AppError::internal(error.to_string()))?;
+        .map_err(|error| PersistenceError::invalid_data(error.to_string()))?;
     let facility_id = row
         .try_get::<Option<i64>, _>("facility_id")?
         .map(FacilityId::new)
         .transpose()
-        .map_err(|error| AppError::internal(error.to_string()))?;
+        .map_err(|error| PersistenceError::invalid_data(error.to_string()))?;
 
     Ok(OutboxEvent {
         id: row.try_get("id")?,
         tenant_id: TenantId::new(row.try_get("tenant_id")?)
-            .map_err(|error| AppError::internal(error.to_string()))?,
+            .map_err(|error| PersistenceError::invalid_data(error.to_string()))?,
         inventory_owner_id,
         facility_id,
         actor_user_id: row.try_get("actor_user_id")?,
@@ -180,15 +99,15 @@ fn map_event(row: &sqlx::postgres::PgRow) -> AppResult<OutboxEvent> {
     })
 }
 
-fn map_delivery_attempt(row: &sqlx::postgres::PgRow) -> AppResult<DeliveryAttempt> {
+fn map_delivery_attempt(row: &sqlx::postgres::PgRow) -> PersistenceResult<DeliveryAttempt> {
     let outcome = row
         .try_get::<Option<String>, _>("outcome")?
         .as_deref()
-        .map(DeliveryAttemptOutcome::from_database_value)
+        .map(delivery_attempt_outcome)
         .transpose()?;
     Ok(DeliveryAttempt {
         tenant_id: TenantId::new(row.try_get("tenant_id")?)
-            .map_err(|error| AppError::internal(error.to_string()))?,
+            .map_err(|error| PersistenceError::invalid_data(error.to_string()))?,
         outbox_event_id: row.try_get("outbox_event_id")?,
         event_key: row.try_get("event_key")?,
         event_type: row.try_get("event_type")?,
@@ -250,23 +169,30 @@ const CLAIMED_EVENT_COLUMNS: &str = r#"
 pub async fn enqueue(
     tx: &mut Transaction<'_, Postgres>,
     event: &NewOutboxEvent<'_>,
-) -> AppResult<i64> {
+) -> PersistenceResult<i64> {
     required_text(event.event_key, "event key")?;
     required_text(event.aggregate_type, "aggregate type")?;
     required_text(event.aggregate_id, "aggregate ID")?;
     required_text(event.ordering_key, "ordering key")?;
     required_text(event.event_type, "event type")?;
     if event.aggregate_sequence <= 0 {
-        return Err(AppError::bad_request("aggregate sequence must be positive"));
+        return Err(PersistenceError::invalid_input(
+            "aggregate sequence must be positive",
+        ));
     }
     if event.schema_version <= 0 {
-        return Err(AppError::bad_request("schema version must be positive"));
+        return Err(PersistenceError::invalid_input(
+            "schema version must be positive",
+        ));
     }
     if !event.payload.is_object() {
-        return Err(AppError::bad_request("outbox payload must be an object"));
+        return Err(PersistenceError::invalid_input(
+            "outbox payload must be an object",
+        ));
     }
-    let payload = serde_json::to_string(event.payload)
-        .map_err(|error| AppError::internal(format!("encoding outbox payload: {error}")))?;
+    let payload = serde_json::to_string(event.payload).map_err(|error| {
+        PersistenceError::invalid_data(format!("encoding outbox payload: {error}"))
+    })?;
     bind_tenant_context(tx, event.tenant_id).await?;
 
     sqlx::query(
@@ -301,7 +227,7 @@ pub async fn enqueue(
     .await?;
     let expected_sequence = current_sequence.map_or(1, |sequence| sequence + 1);
     if event.aggregate_sequence != expected_sequence {
-        return Err(AppError::conflict(
+        return Err(PersistenceError::conflict(
             "outbox aggregate sequence must be contiguous",
         ));
     }
@@ -356,9 +282,9 @@ pub async fn get_events(
     tenant_id: TenantId,
     after_id: Option<i64>,
     limit: i64,
-) -> AppResult<Vec<OutboxEvent>> {
+) -> PersistenceResult<Vec<OutboxEvent>> {
     if !(1..=1_000).contains(&limit) {
-        return Err(AppError::bad_request(
+        return Err(PersistenceError::invalid_input(
             "outbox history limit must be between 1 and 1000",
         ));
     }
@@ -373,7 +299,10 @@ pub async fn get_events(
         .bind(limit)
         .fetch_all(&mut *tx)
         .await?;
-    let events = rows.iter().map(map_event).collect::<AppResult<Vec<_>>>()?;
+    let events = rows
+        .iter()
+        .map(map_event)
+        .collect::<PersistenceResult<Vec<_>>>()?;
     tx.commit().await?;
     Ok(events)
 }
@@ -383,12 +312,14 @@ pub async fn get_delivery_attempts(
     tenant_id: TenantId,
     outbox_event_id: i64,
     limit: i64,
-) -> AppResult<Vec<DeliveryAttempt>> {
+) -> PersistenceResult<Vec<DeliveryAttempt>> {
     if outbox_event_id <= 0 {
-        return Err(AppError::bad_request("outbox event ID must be positive"));
+        return Err(PersistenceError::invalid_input(
+            "outbox event ID must be positive",
+        ));
     }
     if !(1..=1_000).contains(&limit) {
-        return Err(AppError::bad_request(
+        return Err(PersistenceError::invalid_input(
             "delivery attempt history limit must be between 1 and 1000",
         ));
     }
@@ -430,7 +361,7 @@ pub async fn get_delivery_attempts(
     let attempts = rows
         .iter()
         .map(map_delivery_attempt)
-        .collect::<AppResult<Vec<_>>>()?;
+        .collect::<PersistenceResult<Vec<_>>>()?;
     tx.commit().await?;
     Ok(attempts)
 }
@@ -442,16 +373,18 @@ pub async fn claim_events(
     publisher_name: &str,
     batch_size: i64,
     lease_seconds: i64,
-) -> AppResult<Vec<OutboxEvent>> {
+) -> PersistenceResult<Vec<OutboxEvent>> {
     bounded_text(worker_id, "worker ID", 200)?;
     bounded_text(publisher_name, "publisher name", 200)?;
     if !(1..=1_000).contains(&batch_size) {
-        return Err(AppError::bad_request(
+        return Err(PersistenceError::invalid_input(
             "outbox batch size must be between 1 and 1000",
         ));
     }
     if lease_seconds <= 0 {
-        return Err(AppError::bad_request("outbox claim lease must be positive"));
+        return Err(PersistenceError::invalid_input(
+            "outbox claim lease must be positive",
+        ));
     }
 
     let sql = format!(
@@ -501,7 +434,10 @@ pub async fn claim_events(
         .bind(worker_id)
         .fetch_all(&mut *tx)
         .await?;
-    let mut events = rows.iter().map(map_event).collect::<AppResult<Vec<_>>>()?;
+    let mut events = rows
+        .iter()
+        .map(map_event)
+        .collect::<PersistenceResult<Vec<_>>>()?;
     events.sort_by_key(|event| event.id);
     if !events.is_empty() {
         let event_ids = events.iter().map(|event| event.id).collect::<Vec<_>>();
@@ -535,9 +471,9 @@ pub async fn claim_events(
         .execute(&mut *tx)
         .await?;
         let expected_rows = u64::try_from(events.len())
-            .map_err(|_| AppError::internal("claimed event count exceeds u64"))?;
+            .map_err(|_| PersistenceError::invalid_data("claimed event count exceeds u64"))?;
         if result.rows_affected() != expected_rows {
-            return Err(AppError::internal(
+            return Err(PersistenceError::invalid_data(
                 "delivery attempt journal did not record every claimed event",
             ));
         }
@@ -559,7 +495,7 @@ struct RecordDeliveryResult<'a> {
 async fn record_delivery_result(
     tx: &mut Transaction<'_, Postgres>,
     result: &RecordDeliveryResult<'_>,
-) -> AppResult<u64> {
+) -> PersistenceResult<u64> {
     let result = sqlx::query(
         r#"
         INSERT INTO outbox_delivery_attempt_results
@@ -598,7 +534,7 @@ pub async fn mark_published(
     event_id: i64,
     worker_id: &str,
     claim_version: i64,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     bounded_text(worker_id, "worker ID", 200)?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
@@ -638,7 +574,7 @@ pub async fn mark_published(
     )
     .await?;
     if published && journal_rows != 1 {
-        return Err(AppError::internal(
+        return Err(PersistenceError::invalid_data(
             "published event is missing its delivery attempt result",
         ));
     }
@@ -646,27 +582,16 @@ pub async fn mark_published(
     Ok(published)
 }
 
-pub struct FailOutboxEvent<'a> {
-    pub tenant_id: TenantId,
-    pub event_id: i64,
-    pub worker_id: &'a str,
-    pub claim_version: i64,
-    pub failure_class: DeliveryFailureClass,
-    pub error: &'a str,
-    pub retry_after_seconds: i64,
-    pub max_attempts: i32,
-}
-
-pub async fn mark_failed(db: &Db, failure: &FailOutboxEvent<'_>) -> AppResult<bool> {
+pub async fn mark_failed(db: &Db, failure: &FailOutboxEvent<'_>) -> PersistenceResult<bool> {
     bounded_text(failure.worker_id, "worker ID", 200)?;
     bounded_text(failure.error, "delivery error", 4_000)?;
     if failure.retry_after_seconds < 0 {
-        return Err(AppError::bad_request(
+        return Err(PersistenceError::invalid_input(
             "outbox retry delay cannot be negative",
         ));
     }
     if failure.max_attempts <= 0 {
-        return Err(AppError::bad_request(
+        return Err(PersistenceError::invalid_input(
             "outbox maximum attempts must be positive",
         ));
     }
@@ -699,7 +624,7 @@ pub async fn mark_failed(db: &Db, failure: &FailOutboxEvent<'_>) -> AppResult<bo
         RETURNING attempts
         "#,
     )
-    .bind(failure.failure_class.as_database_value())
+    .bind(failure_class_database_value(failure.failure_class))
     .bind(failure.max_attempts)
     .bind(failure.retry_after_seconds)
     .bind(failure.error.trim())
@@ -732,7 +657,7 @@ pub async fn mark_failed(db: &Db, failure: &FailOutboxEvent<'_>) -> AppResult<bo
     )
     .await?;
     if result.is_some() && journal_rows != 1 {
-        return Err(AppError::internal(
+        return Err(PersistenceError::invalid_data(
             "failed event is missing its delivery attempt result",
         ));
     }
@@ -740,7 +665,11 @@ pub async fn mark_failed(db: &Db, failure: &FailOutboxEvent<'_>) -> AppResult<bo
     Ok(result.is_some())
 }
 
-pub async fn replay_dead_letter(db: &Db, tenant_id: TenantId, event_id: i64) -> AppResult<bool> {
+pub async fn replay_dead_letter(
+    db: &Db,
+    tenant_id: TenantId,
+    event_id: i64,
+) -> PersistenceResult<bool> {
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
     let result = sqlx::query(
@@ -768,7 +697,7 @@ pub async fn discard_dead_letter(
     event_id: i64,
     user_id: i64,
     reason: &str,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     required_text(reason, "discard reason")?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
@@ -799,14 +728,14 @@ pub async fn purge_published(
     tenant_id: TenantId,
     retention_seconds: i64,
     batch_size: i64,
-) -> AppResult<u64> {
+) -> PersistenceResult<u64> {
     if retention_seconds < 0 {
-        return Err(AppError::bad_request(
+        return Err(PersistenceError::invalid_input(
             "outbox retention period cannot be negative",
         ));
     }
     if !(1..=10_000).contains(&batch_size) {
-        return Err(AppError::bad_request(
+        return Err(PersistenceError::invalid_input(
             "outbox purge batch size must be between 1 and 10000",
         ));
     }

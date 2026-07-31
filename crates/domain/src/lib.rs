@@ -1,7 +1,10 @@
 //! Domain identifiers and invariants shared across application boundaries.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+pub type Timestamp = DateTime<Utc>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("{kind} must be a positive integer, got {value}")]

@@ -18,7 +18,7 @@ use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 use crate::repo::inventory_journal;
 use crate::repo::inventory_locking::{balance_license_plate_hint, lock_license_plate};
-use crate::repo::outbox::{self, NewOutboxEvent};
+use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 fn parse_inventory_status(s: &str) -> AppResult<InventoryStatus> {
     InventoryStatus::parse(s)
@@ -364,8 +364,8 @@ async fn enqueue_reservation_event(
             occurred_at: event.occurred_at,
         },
     )
-    .await
-    .map(|_| ())
+    .await?;
+    Ok(())
 }
 
 async fn enqueue_allocation_event(
@@ -406,8 +406,8 @@ async fn enqueue_allocation_event(
             occurred_at: event.occurred_at,
         },
     )
-    .await
-    .map(|_| ())
+    .await?;
+    Ok(())
 }
 
 pub async fn create_inventory_reservation(

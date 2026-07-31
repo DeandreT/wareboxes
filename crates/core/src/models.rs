@@ -1,11 +1,10 @@
 //! Domain models, ported from the Drizzle schema in `app/utils/types/db/*.ts`.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId, UserId};
 
-pub type Timestamp = DateTime<Utc>;
+pub use wareboxes_domain::Timestamp;
 
 macro_rules! impl_status_display {
     ($ty:ty) => {

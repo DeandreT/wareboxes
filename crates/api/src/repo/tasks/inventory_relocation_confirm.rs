@@ -11,7 +11,7 @@ use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 use crate::repo::idempotency::{require_command_context, PreparedCommand};
 use crate::repo::inventory;
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
-use crate::repo::outbox::{self, NewOutboxEvent};
+use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 use super::inventory_relocation::{
     lock_plate, lock_plate_contents, lock_relocation_destination, movable_quantity,

@@ -7,8 +7,7 @@
 use anyhow::Context;
 use sqlx::postgres::{PgConnection, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Transaction};
-use wareboxes_core::models::Timestamp;
-use wareboxes_domain::TenantId;
+use wareboxes_domain::{TenantId, Timestamp};
 
 use crate::{PersistenceError, PersistenceResult};
 

@@ -29,6 +29,7 @@ leptos = { workspace = true, features = ["ssr"], optional = true }
 wareboxes-api-contract = { workspace = true }
 wareboxes-core = { workspace = true }
 wareboxes-domain = { workspace = true }
+wareboxes-persistence-postgres = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 axum = { version = "0.8", features = ["macros"] }
 tower = { version = "0.5", features = ["util"] }
