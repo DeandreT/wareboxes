@@ -8,11 +8,17 @@ use wareboxes_core::dto::{
     WebSessionContext,
 };
 use wareboxes_core::models::{TenantAccess, User};
+use wareboxes_domain::UserId;
 
 use crate::auth::{self, CurrentTenant, CurrentUser};
 use crate::error::{AppError, AppResult};
+use crate::identity::settings_response;
 use crate::routes::validate;
 use crate::state::AppState;
+
+fn authenticated_user_id(value: i64) -> AppResult<UserId> {
+    UserId::new(value).map_err(|error| AppError::internal(error.to_string()))
+}
 
 fn web_session_cookie(state: &AppState, token: String) -> Cookie<'static> {
     Cookie::build((auth::web_session_cookie_name(&state.security), token))
@@ -61,8 +67,14 @@ pub async fn login(
             .await?
             .ok_or_else(AppError::forbidden)?;
         let user =
-            crate::repo::users::enrich_for_tenant(&state.db, active_tenant.tenant_id, user).await?;
-        let settings = crate::repo::settings::get_user_settings(&state.db, user.id).await?;
+            auth::enrich_user_for_tenant(&state.db, active_tenant.tenant_id, user.id).await?;
+        let settings = settings_response(
+            wareboxes_persistence_postgres::settings::get_user_settings(
+                &state.db,
+                authenticated_user_id(user.id)?,
+            )
+            .await?,
+        );
         Ok(Json(SessionUser {
             token: token.clone(),
             user,
@@ -163,7 +175,13 @@ pub async fn register(
         let active_tenant = auth::default_tenant_for_session(&state.db, &token)
             .await?
             .ok_or_else(|| AppError::internal("registered user has no active tenant"))?;
-        let settings = crate::repo::settings::get_user_settings(&state.db, user.id).await?;
+        let settings = settings_response(
+            wareboxes_persistence_postgres::settings::get_user_settings(
+                &state.db,
+                authenticated_user_id(user.id)?,
+            )
+            .await?,
+        );
         Ok(Json(SessionUser {
             token: token.clone(),
             user,
@@ -216,7 +234,12 @@ pub async fn update_settings(
     Json(body): Json<UserSettings>,
 ) -> AppResult<Json<UserSettings>> {
     validate(&body)?;
-    Ok(Json(
-        crate::repo::settings::upsert_user_settings(&state.db, user.user.id, &body).await?,
-    ))
+    Ok(Json(settings_response(
+        wareboxes_persistence_postgres::settings::upsert_user_settings(
+            &state.db,
+            authenticated_user_id(user.user.id)?,
+            body.light_mode,
+        )
+        .await?,
+    )))
 }

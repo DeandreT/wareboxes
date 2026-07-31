@@ -3,7 +3,7 @@ mod config;
 use anyhow::Context;
 use tracing_subscriber::EnvFilter;
 use wareboxes_api::state::AppState;
-use wareboxes_api::{auth, db, repo, routes};
+use wareboxes_api::{auth, db, routes};
 
 use config::Config;
 
@@ -63,7 +63,7 @@ async fn bootstrap_admin(pool: &db::Db, cfg: &Config) -> anyhow::Result<()> {
         return Ok(());
     };
 
-    if repo::users::get_user_by_email(pool, email, true)
+    if wareboxes_persistence_postgres::users::find_user_by_email(pool, email, true)
         .await?
         .is_some()
     {
