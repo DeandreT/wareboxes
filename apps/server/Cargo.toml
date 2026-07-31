@@ -27,6 +27,7 @@ leptos = { workspace = true, features = ["ssr"], optional = true }
 
 [dev-dependencies]
 wareboxes-api-contract = { workspace = true }
+wareboxes-application = { workspace = true }
 wareboxes-core = { workspace = true }
 wareboxes-domain = { workspace = true }
 wareboxes-persistence-postgres = { workspace = true }

@@ -1,8 +1,8 @@
 //! Tenant- and facility-scoped employee persistence.
 
 use sqlx::{Postgres, Row, Transaction};
-use wareboxes_core::models::{Employee, SiteScope, Timestamp};
-use wareboxes_domain::{FacilityId, TenantId};
+use wareboxes_core::models::{Employee, Timestamp};
+use wareboxes_domain::{FacilityId, SiteScope, TenantId};
 
 use crate::db::{begin_tenant_transaction, Db};
 use crate::error::{AppError, AppResult};

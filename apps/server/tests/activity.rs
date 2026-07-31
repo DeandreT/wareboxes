@@ -1,7 +1,7 @@
 mod common;
 
 use common::*;
-use wareboxes_domain::CommandContext;
+use wareboxes_application::CommandContext;
 
 #[tokio::test]
 async fn order_and_load_mutations_write_activity_history() {

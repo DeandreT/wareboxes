@@ -6,8 +6,8 @@ use std::time::Duration;
 use common::*;
 use tokio::sync::Barrier;
 use tokio::time::timeout;
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::{InventoryHoldReason, InventoryHoldStatus, TenantAccess};
-use wareboxes_domain::CommandContext;
 
 fn command_context(access: &TenantAccess, key: &str) -> CommandContext {
     CommandContext {

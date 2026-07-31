@@ -2,8 +2,8 @@
 //! carts, docks, and virtual locations through `type` plus parent linkage.
 
 use sqlx::Row;
-use wareboxes_core::models::{Location, SiteScope};
-use wareboxes_domain::TenantId;
+use wareboxes_core::models::Location;
+use wareboxes_domain::{SiteScope, TenantId};
 
 use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::AppResult;

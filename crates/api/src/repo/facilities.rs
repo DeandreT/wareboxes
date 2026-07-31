@@ -2,8 +2,8 @@
 //! only listed facilities (no create/update); kept faithful here.
 
 use sqlx::Row;
-use wareboxes_core::models::{Facility, SiteScope};
-use wareboxes_domain::TenantId;
+use wareboxes_core::models::Facility;
+use wareboxes_domain::{SiteScope, TenantId};
 
 use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::AppResult;

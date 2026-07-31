@@ -13,9 +13,10 @@ use cookie::Cookie;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use sha2::{Digest, Sha256};
+use wareboxes_application::CommandContext;
 use wareboxes_core::dto::{UpdateUserAccessScope, WebSessionContext};
 use wareboxes_core::models::{TenantAccess, User};
-use wareboxes_domain::{CommandContext, FacilityId, InventoryOwnerId, TenantId};
+use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
 
 use crate::config::SecurityConfig;
 use crate::db::{now_iso, Db};

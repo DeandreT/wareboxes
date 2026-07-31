@@ -8,6 +8,7 @@ use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
+use wareboxes_application::CommandContext;
 use wareboxes_core::dto::{
     CancelInventoryReservationResult, ReleaseInventoryHoldResult, UpdateUserAccessScope,
 };
@@ -15,7 +16,6 @@ use wareboxes_core::models::{
     InventoryBalance, InventoryHold, InventoryHoldReason, InventoryHoldReconciliationIssue,
     InventoryReconciliationIssue, InventoryReservation, InventoryTransaction, ItemBatch,
 };
-use wareboxes_domain::CommandContext;
 
 fn api_request(
     token: &str,

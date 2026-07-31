@@ -2,8 +2,9 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
-use wareboxes_domain::{CommandContext, TenantId};
+use wareboxes_domain::TenantId;
 
 use crate::db::{bind_tenant_context, now_iso};
 use crate::error::{AppError, AppResult};

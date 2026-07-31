@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use sqlx::{Postgres, Row, Transaction};
-use wareboxes_core::models::{Facility, InventoryOwner, OwnerScope, SiteScope};
+use wareboxes_core::models::{Facility, InventoryOwner};
 use wareboxes_core::CoreError;
-use wareboxes_domain::TenantId;
+use wareboxes_domain::{OwnerScope, SiteScope, TenantId};
 
 use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::{AppError, AppResult};

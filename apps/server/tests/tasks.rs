@@ -6,8 +6,8 @@ use common::*;
 use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::{routes, state::AppState};
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::WorkTask;
-use wareboxes_domain::CommandContext;
 
 #[tokio::test]
 async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {

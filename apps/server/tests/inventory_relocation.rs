@@ -17,9 +17,9 @@ use wareboxes_api_contract::v1::{
     InventoryRelocationClaimResponse, InventoryRelocationConfirmationResponse,
     InventoryRelocationResult,
 };
+use wareboxes_application::CommandContext;
 use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::{InboundReceiptExceptionReason, ReceiveExpectedInventoryResult};
-use wareboxes_domain::CommandContext;
 
 const CONCURRENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 

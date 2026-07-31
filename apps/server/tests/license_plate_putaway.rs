@@ -12,10 +12,10 @@ use wareboxes_api_contract::v1::{
     CreateLicensePlatePutawayTaskResponse, ErrorReason, ErrorResponse,
     LicensePlatePutawayConfirmationResponse,
 };
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::{
     InboundReceiptExceptionReason, ReceiveExpectedInventoryResult, TenantAccess,
 };
-use wareboxes_domain::CommandContext;
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 struct MoveEffects {

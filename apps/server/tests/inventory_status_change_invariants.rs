@@ -6,8 +6,8 @@ use std::time::Duration;
 use common::*;
 use tokio::sync::Barrier;
 use tokio::time::timeout;
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::{InventoryStatus, InventoryStatusChangeReason, TenantAccess};
-use wareboxes_domain::CommandContext;
 
 #[derive(Debug, Clone, Copy)]
 struct StatusRefs {

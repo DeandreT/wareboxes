@@ -2,11 +2,12 @@
 
 use serde::Serialize;
 use sqlx::Row;
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::{
     InboundReceiptExceptionReason, InventoryStatus, InventoryTransactionType, LoadLineStatus,
     LoadStatus, LoadType, ReceiveExpectedInventoryResult, TenantAccess, Timestamp,
 };
-use wareboxes_domain::{CommandContext, OwnerFacilityScope, TenantId};
+use wareboxes_domain::{OwnerFacilityScope, TenantId};
 
 use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::{AppError, AppResult};

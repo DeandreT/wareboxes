@@ -15,11 +15,11 @@ use wareboxes_api_contract::v1::{
     ErrorReason, ErrorResponse, PutawayClaimHeartbeatResponse, PutawayClaimReleaseReason,
     PutawayClaimReleaseResponse, PutawayClaimResponse,
 };
+use wareboxes_application::CommandContext;
 use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::{
     InboundReceiptExceptionReason, ReceiveExpectedInventoryResult, TenantAccess,
 };
-use wareboxes_domain::CommandContext;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const RECEIPT_LOT: &str = "PUTAWAY-LIFECYCLE-LOT";

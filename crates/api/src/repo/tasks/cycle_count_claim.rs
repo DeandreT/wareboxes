@@ -1,9 +1,10 @@
 use sqlx::Row;
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::{
     CycleCountClaim, CycleCountClaimItem, CycleCountClaimLocation, CycleCountClaimStock,
     InventoryStatus, TenantAccess, Timestamp,
 };
-use wareboxes_domain::{CommandContext, InventoryOwnerId};
+use wareboxes_domain::InventoryOwnerId;
 
 use crate::db::{bind_tenant_context, Db};
 use crate::error::{AppError, AppResult};

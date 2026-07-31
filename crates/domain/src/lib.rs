@@ -63,6 +63,30 @@ positive_id!(InventoryOwnerId, "inventory owner ID");
 positive_id!(FacilityId, "facility ID");
 positive_id!(UserId, "user ID");
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SiteScope {
+    pub all_facilities: bool,
+    pub facility_ids: Vec<FacilityId>,
+}
+
+impl SiteScope {
+    pub fn includes(&self, facility_id: FacilityId) -> bool {
+        self.all_facilities || self.facility_ids.contains(&facility_id)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwnerScope {
+    pub all_inventory_owners: bool,
+    pub inventory_owner_ids: Vec<InventoryOwnerId>,
+}
+
+impl OwnerScope {
+    pub fn includes(&self, inventory_owner_id: InventoryOwnerId) -> bool {
+        self.all_inventory_owners || self.inventory_owner_ids.contains(&inventory_owner_id)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OwnerFacilityScope {
     pub inventory_owner_id: InventoryOwnerId,
@@ -76,14 +100,6 @@ impl OwnerFacilityScope {
             facility_id,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandContext {
-    pub tenant_id: TenantId,
-    pub actor_id: UserId,
-    pub request_id: String,
-    pub idempotency_key: Option<String>,
 }
 
 #[cfg(test)]
@@ -103,5 +119,26 @@ mod tests {
         let facility = FacilityId::new(4).unwrap();
 
         assert_eq!(tenant.get(), facility.get());
+    }
+
+    #[test]
+    fn access_scopes_include_only_explicit_ids_unless_unbounded() {
+        let facility = FacilityId::new(7).unwrap();
+        let owner = InventoryOwnerId::new(8).unwrap();
+        assert!(SiteScope {
+            all_facilities: false,
+            facility_ids: vec![facility],
+        }
+        .includes(facility));
+        assert!(!OwnerScope {
+            all_inventory_owners: false,
+            inventory_owner_ids: Vec::new(),
+        }
+        .includes(owner));
+        assert!(OwnerScope {
+            all_inventory_owners: true,
+            inventory_owner_ids: Vec::new(),
+        }
+        .includes(owner));
     }
 }

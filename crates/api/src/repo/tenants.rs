@@ -1,7 +1,7 @@
 use sqlx::Row;
 use wareboxes_core::dto::UpdateUserAccessScope;
-use wareboxes_core::models::{OwnerScope, SiteScope, TenantAccess, TenantStatus};
-use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId, UserId};
+use wareboxes_core::models::{TenantAccess, TenantStatus};
+use wareboxes_domain::{FacilityId, InventoryOwnerId, OwnerScope, SiteScope, TenantId, UserId};
 
 use crate::db::{begin_session_transaction, begin_tenant_transaction, bind_tenant_context, Db};
 use crate::error::{AppError, AppResult};

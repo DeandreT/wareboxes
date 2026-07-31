@@ -6,7 +6,8 @@ use common::*;
 use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::{routes, state::AppState};
-use wareboxes_core::models::{AuditLocationCount, AuditWave, Employee, SiteScope};
+use wareboxes_core::models::{AuditLocationCount, AuditWave, Employee};
+use wareboxes_domain::SiteScope;
 
 async fn grant_admin(db: &db::Db, tenant_id: TenantId, user_id: i64, role_name: &str) {
     let permission = repo::permissions::add_permission(db, tenant_id, "admin", Some("Admin"))

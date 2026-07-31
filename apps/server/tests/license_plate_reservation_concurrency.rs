@@ -6,8 +6,8 @@ use std::time::Duration;
 use common::*;
 use tokio::sync::{oneshot, Barrier};
 use tokio::time::{sleep, timeout};
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::{InboundReceiptExceptionReason, InventoryHoldReason};
-use wareboxes_domain::CommandContext;
 
 async fn wait_until_balance_is_locked(db: &db::Db, tenant_id: TenantId, inventory_balance_id: i64) {
     timeout(Duration::from_secs(2), async {
