@@ -110,13 +110,21 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         .await
         .unwrap();
 
-    let allowed_facility = repo::facilities::add_facility(&db, tenant_id, "Allowed Inventory DC")
-        .await
-        .unwrap();
-    let denied_facility = repo::facilities::add_facility(&db, tenant_id, "Denied Inventory DC")
-        .await
-        .unwrap();
-    let allowed_source = repo::locations::add_location(
+    let allowed_facility = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        tenant_id,
+        "Allowed Inventory DC",
+    )
+    .await
+    .unwrap();
+    let denied_facility = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        tenant_id,
+        "Denied Inventory DC",
+    )
+    .await
+    .unwrap();
+    let allowed_source = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         allowed_facility,
@@ -130,7 +138,7 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
     )
     .await
     .unwrap();
-    let allowed_destination = repo::locations::add_location(
+    let allowed_destination = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         allowed_facility,
@@ -144,7 +152,7 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
     )
     .await
     .unwrap();
-    let denied_location = repo::locations::add_location(
+    let denied_location = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         denied_facility,

@@ -10,10 +10,10 @@ async fn facilities_listing_filters_deleted() {
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
 
-    let keep = repo::facilities::add_facility(&db, tenant_id, "Main DC")
+    let keep = wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Main DC")
         .await
         .unwrap();
-    let gone = repo::facilities::add_facility(&db, tenant_id, "Old DC")
+    let gone = wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Old DC")
         .await
         .unwrap();
     let admin_db = admin_db_for(&db).await;
@@ -26,13 +26,13 @@ async fn facilities_listing_filters_deleted() {
         .unwrap();
     admin_db.close().await;
 
-    let active = repo::facilities::get_facilities(&db, tenant_id, false)
+    let active = wareboxes_persistence_postgres::facilities::get_facilities(&db, tenant_id, false)
         .await
         .unwrap();
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].id, keep);
 
-    let all = repo::facilities::get_facilities(&db, tenant_id, true)
+    let all = wareboxes_persistence_postgres::facilities::get_facilities(&db, tenant_id, true)
         .await
         .unwrap();
     assert_eq!(all.len(), 2);
@@ -46,12 +46,14 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
-    let facility = repo::facilities::add_facility(&db, tenant_id, "Selector DC")
-        .await
-        .unwrap();
-    let deleted_facility = repo::facilities::add_facility(&db, tenant_id, "Deleted DC")
-        .await
-        .unwrap();
+    let facility =
+        wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Selector DC")
+            .await
+            .unwrap();
+    let deleted_facility =
+        wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Deleted DC")
+            .await
+            .unwrap();
     let admin_db = admin_db_for(&db).await;
     sqlx::query("UPDATE facilities SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(db::now_iso())
@@ -122,7 +124,7 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
             .unwrap()
     );
 
-    let active_location = repo::locations::add_location(
+    let active_location = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         facility,
@@ -136,7 +138,7 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     )
     .await
     .unwrap();
-    let inactive_location = repo::locations::add_location(
+    let inactive_location = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         facility,
@@ -150,7 +152,7 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     )
     .await
     .unwrap();
-    let deleted_location = repo::locations::add_location(
+    let deleted_location = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         facility,
@@ -165,9 +167,14 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     .await
     .unwrap();
     assert!(
-        repo::locations::set_location_deleted(&db, tenant_id, deleted_location, true)
-            .await
-            .unwrap()
+        wareboxes_persistence_postgres::locations::set_location_deleted(
+            &db,
+            tenant_id,
+            deleted_location,
+            true
+        )
+        .await
+        .unwrap()
     );
 
     let load = repo::loads::add_load(
@@ -190,14 +197,20 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
     .unwrap();
 
     assert!(
-        repo::facilities::active_facility_exists(&db, tenant_id, facility)
-            .await
-            .unwrap()
+        wareboxes_persistence_postgres::facilities::active_facility_exists(
+            &db, tenant_id, facility
+        )
+        .await
+        .unwrap()
     );
     assert!(
-        !repo::facilities::active_facility_exists(&db, tenant_id, deleted_facility)
-            .await
-            .unwrap()
+        !wareboxes_persistence_postgres::facilities::active_facility_exists(
+            &db,
+            tenant_id,
+            deleted_facility
+        )
+        .await
+        .unwrap()
     );
     assert!(
         repo::inventory_owners::active_inventory_owner_exists(&db, tenant_id, inventory_owner)
@@ -226,26 +239,42 @@ async fn selector_reference_helpers_filter_deleted_and_inactive_records() {
         .await
         .unwrap());
     assert!(
-        repo::locations::active_location_exists(&db, tenant_id, active_location)
-            .await
-            .unwrap()
+        wareboxes_persistence_postgres::locations::active_location_exists(
+            &db,
+            tenant_id,
+            active_location
+        )
+        .await
+        .unwrap()
     );
     assert_eq!(
-        repo::locations::location_active_state(&db, tenant_id, active_location)
-            .await
-            .unwrap(),
+        wareboxes_persistence_postgres::locations::location_active_state(
+            &db,
+            tenant_id,
+            active_location
+        )
+        .await
+        .unwrap(),
         Some(true)
     );
     assert_eq!(
-        repo::locations::location_active_state(&db, tenant_id, inactive_location)
-            .await
-            .unwrap(),
+        wareboxes_persistence_postgres::locations::location_active_state(
+            &db,
+            tenant_id,
+            inactive_location
+        )
+        .await
+        .unwrap(),
         Some(false)
     );
     assert_eq!(
-        repo::locations::location_active_state(&db, tenant_id, deleted_location)
-            .await
-            .unwrap(),
+        wareboxes_persistence_postgres::locations::location_active_state(
+            &db,
+            tenant_id,
+            deleted_location
+        )
+        .await
+        .unwrap(),
         None
     );
 }

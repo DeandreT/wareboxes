@@ -1,6 +1,8 @@
 //! PostgreSQL infrastructure shared by Wareboxes process composition roots.
 
 pub mod db;
+pub mod facilities;
+pub mod locations;
 pub mod outbox;
 
 #[derive(Debug, thiserror::Error)]

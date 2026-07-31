@@ -417,7 +417,7 @@ async fn license_plate_putaway_races_serialize_without_duplicate_inventory_effec
     fixture
         .assign_owner_to_facility(tenant_id, inventory_owner_id, facility_id)
         .await;
-    let source_location_id = repo::locations::add_location(
+    let source_location_id = wareboxes_persistence_postgres::locations::add_location(
         &fixture.db,
         tenant_id,
         facility_id,

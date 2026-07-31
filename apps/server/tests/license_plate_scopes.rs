@@ -99,13 +99,15 @@ async fn license_plates_are_owner_and_facility_scoped() {
         .await
         .unwrap();
 
-    let allowed_facility = repo::facilities::add_facility(&db, tenant_id, "Allowed LPN DC")
-        .await
-        .unwrap();
-    let denied_facility = repo::facilities::add_facility(&db, tenant_id, "Denied LPN DC")
-        .await
-        .unwrap();
-    let allowed_location = repo::locations::add_location(
+    let allowed_facility =
+        wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Allowed LPN DC")
+            .await
+            .unwrap();
+    let denied_facility =
+        wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Denied LPN DC")
+            .await
+            .unwrap();
+    let allowed_location = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         allowed_facility,
@@ -119,7 +121,7 @@ async fn license_plates_are_owner_and_facility_scoped() {
     )
     .await
     .unwrap();
-    let allowed_destination = repo::locations::add_location(
+    let allowed_destination = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         allowed_facility,
@@ -133,7 +135,7 @@ async fn license_plates_are_owner_and_facility_scoped() {
     )
     .await
     .unwrap();
-    let denied_location = repo::locations::add_location(
+    let denied_location = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         denied_facility,

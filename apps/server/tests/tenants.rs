@@ -180,12 +180,20 @@ async fn owner_and_facility_master_data_is_tenant_scoped() {
     )
     .await
     .unwrap();
-    let first_facility = repo::facilities::add_facility(&db, first_tenant, "Shared Facility")
-        .await
-        .unwrap();
-    let second_facility = repo::facilities::add_facility(&db, second_tenant, "Shared Facility")
-        .await
-        .unwrap();
+    let first_facility = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        first_tenant,
+        "Shared Facility",
+    )
+    .await
+    .unwrap();
+    let second_facility = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        second_tenant,
+        "Shared Facility",
+    )
+    .await
+    .unwrap();
 
     let first_inventory_owners =
         repo::inventory_owners::get_inventory_owners(&db, first_tenant, false)
@@ -211,16 +219,21 @@ async fn owner_and_facility_master_data_is_tenant_scoped() {
     .await
     .unwrap());
 
-    let first_facilities = repo::facilities::get_facilities(&db, first_tenant, false)
-        .await
-        .unwrap();
+    let first_facilities =
+        wareboxes_persistence_postgres::facilities::get_facilities(&db, first_tenant, false)
+            .await
+            .unwrap();
     assert_eq!(first_facilities.len(), 1);
     assert_eq!(first_facilities[0].id, first_facility);
     assert_eq!(first_facilities[0].tenant_id, first_tenant);
     assert!(
-        !repo::facilities::active_facility_exists(&db, first_tenant, second_facility)
-            .await
-            .unwrap()
+        !wareboxes_persistence_postgres::facilities::active_facility_exists(
+            &db,
+            first_tenant,
+            second_facility
+        )
+        .await
+        .unwrap()
     );
 
     // Give one operator access to both tenants to prove the selected header,
@@ -286,14 +299,22 @@ async fn locations_are_tenant_scoped_for_repositories_and_routes() {
         .unwrap();
     let first_tenant = tenant_for_user(&db, operator.id).await;
     let second_tenant = tenant_for_user(&db, other.id).await;
-    let first_facility = repo::facilities::add_facility(&db, first_tenant, "Shared Facility")
-        .await
-        .unwrap();
-    let second_facility = repo::facilities::add_facility(&db, second_tenant, "Shared Facility")
-        .await
-        .unwrap();
+    let first_facility = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        first_tenant,
+        "Shared Facility",
+    )
+    .await
+    .unwrap();
+    let second_facility = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        second_tenant,
+        "Shared Facility",
+    )
+    .await
+    .unwrap();
 
-    let first_location = repo::locations::add_location(
+    let first_location = wareboxes_persistence_postgres::locations::add_location(
         &db,
         first_tenant,
         first_facility,
@@ -307,7 +328,7 @@ async fn locations_are_tenant_scoped_for_repositories_and_routes() {
     )
     .await
     .unwrap();
-    let second_location = repo::locations::add_location(
+    let second_location = wareboxes_persistence_postgres::locations::add_location(
         &db,
         second_tenant,
         second_facility,
@@ -322,24 +343,33 @@ async fn locations_are_tenant_scoped_for_repositories_and_routes() {
     .await
     .unwrap();
 
-    let first_locations = repo::locations::get_locations(&db, first_tenant, false)
-        .await
-        .unwrap();
+    let first_locations =
+        wareboxes_persistence_postgres::locations::get_locations(&db, first_tenant, false)
+            .await
+            .unwrap();
     assert_eq!(first_locations.len(), 1);
     assert_eq!(first_locations[0].id, first_location);
     assert_eq!(first_locations[0].tenant_id, first_tenant);
     assert!(
-        !repo::locations::active_location_exists(&db, first_tenant, second_location)
-            .await
-            .unwrap()
+        !wareboxes_persistence_postgres::locations::active_location_exists(
+            &db,
+            first_tenant,
+            second_location
+        )
+        .await
+        .unwrap()
     );
     assert_eq!(
-        repo::locations::location_active_state(&db, first_tenant, second_location)
-            .await
-            .unwrap(),
+        wareboxes_persistence_postgres::locations::location_active_state(
+            &db,
+            first_tenant,
+            second_location
+        )
+        .await
+        .unwrap(),
         None
     );
-    assert!(!repo::locations::update_location(
+    assert!(!wareboxes_persistence_postgres::locations::update_location(
         &db,
         first_tenant,
         second_location,
@@ -354,9 +384,14 @@ async fn locations_are_tenant_scoped_for_repositories_and_routes() {
     .await
     .unwrap());
     assert!(
-        !repo::locations::set_location_deleted(&db, first_tenant, second_location, true)
-            .await
-            .unwrap()
+        !wareboxes_persistence_postgres::locations::set_location_deleted(
+            &db,
+            first_tenant,
+            second_location,
+            true
+        )
+        .await
+        .unwrap()
     );
 
     let mut membership_tx = tenant_tx(&db, second_tenant).await;

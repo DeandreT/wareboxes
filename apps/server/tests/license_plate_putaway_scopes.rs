@@ -472,7 +472,7 @@ async fn license_plate_putaway_scopes_rls_and_acl_fail_closed() {
             .await;
     }
 
-    let allowed_receiving = repo::locations::add_location(
+    let allowed_receiving = wareboxes_persistence_postgres::locations::add_location(
         &fixture.db,
         tenant_id,
         allowed_facility,
@@ -486,7 +486,7 @@ async fn license_plate_putaway_scopes_rls_and_acl_fail_closed() {
     )
     .await
     .unwrap();
-    let denied_receiving = repo::locations::add_location(
+    let denied_receiving = wareboxes_persistence_postgres::locations::add_location(
         &fixture.db,
         tenant_id,
         denied_facility,

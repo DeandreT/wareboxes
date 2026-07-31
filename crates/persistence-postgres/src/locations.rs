@@ -2,17 +2,17 @@
 //! carts, docks, and virtual locations through `type` plus parent linkage.
 
 use sqlx::Row;
-use wareboxes_core::models::Location;
+use wareboxes_application::topology::LocationReadModel;
 use wareboxes_domain::{SiteScope, TenantId};
 
 use crate::db::{begin_tenant_transaction, now_iso, Db};
-use crate::error::AppResult;
+use crate::{PersistenceError, PersistenceResult};
 
-fn map(row: &sqlx::postgres::PgRow) -> AppResult<Location> {
-    Ok(Location {
+fn map(row: &sqlx::postgres::PgRow) -> PersistenceResult<LocationReadModel> {
+    Ok(LocationReadModel {
         id: row.try_get("id")?,
         tenant_id: TenantId::new(row.try_get("tenant_id")?)
-            .map_err(|error| crate::error::AppError::internal(error.to_string()))?,
+            .map_err(|error| PersistenceError::invalid_data(error.to_string()))?,
         created: row.try_get("created")?,
         deleted: row.try_get("deleted")?,
         facility_id: row.try_get("facility_id")?,
@@ -31,7 +31,7 @@ pub async fn get_locations(
     db: &Db,
     tenant_id: TenantId,
     show_deleted: bool,
-) -> AppResult<Vec<Location>> {
+) -> PersistenceResult<Vec<LocationReadModel>> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
@@ -49,7 +49,10 @@ pub async fn get_locations(
     .bind(show_deleted)
     .fetch_all(&mut *tx)
     .await?;
-    let locations = rows.iter().map(map).collect::<AppResult<Vec<_>>>()?;
+    let locations = rows
+        .iter()
+        .map(map)
+        .collect::<PersistenceResult<Vec<_>>>()?;
     tx.commit().await?;
     Ok(locations)
 }
@@ -59,7 +62,7 @@ pub async fn get_locations_in_scope(
     tenant_id: TenantId,
     site_scope: &SiteScope,
     show_deleted: bool,
-) -> AppResult<Vec<Location>> {
+) -> PersistenceResult<Vec<LocationReadModel>> {
     let facility_ids = site_scope
         .facility_ids
         .iter()
@@ -88,12 +91,19 @@ pub async fn get_locations_in_scope(
     .bind(&facility_ids)
     .fetch_all(&mut *tx)
     .await?;
-    let locations = rows.iter().map(map).collect::<AppResult<Vec<_>>>()?;
+    let locations = rows
+        .iter()
+        .map(map)
+        .collect::<PersistenceResult<Vec<_>>>()?;
     tx.commit().await?;
     Ok(locations)
 }
 
-pub async fn active_location_exists(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
+pub async fn active_location_exists(
+    db: &Db,
+    tenant_id: TenantId,
+    id: i64,
+) -> PersistenceResult<bool> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM locations WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL)",
@@ -111,7 +121,7 @@ pub async fn active_location_exists_in_scope(
     tenant_id: TenantId,
     site_scope: &SiteScope,
     id: i64,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     let facility_ids = site_scope
         .facility_ids
         .iter()
@@ -145,7 +155,7 @@ pub async fn active_location_exists_in_facility(
     tenant_id: TenantId,
     facility_id: i64,
     id: i64,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let exists: bool = sqlx::query_scalar(
         r#"
@@ -173,7 +183,7 @@ pub async fn active_location_facility_in_scope(
     tenant_id: TenantId,
     site_scope: &SiteScope,
     id: i64,
-) -> AppResult<Option<i64>> {
+) -> PersistenceResult<Option<i64>> {
     let facility_ids = site_scope
         .facility_ids
         .iter()
@@ -204,7 +214,7 @@ pub async fn location_active_state(
     db: &Db,
     tenant_id: TenantId,
     id: i64,
-) -> AppResult<Option<bool>> {
+) -> PersistenceResult<Option<bool>> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let active = sqlx::query_scalar(
         "SELECT active FROM locations WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL",
@@ -229,7 +239,7 @@ pub async fn add_location(
     active: bool,
     pickable: bool,
     receivable: bool,
-) -> AppResult<i64> {
+) -> PersistenceResult<i64> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         r#"
@@ -267,7 +277,7 @@ pub async fn update_location(
     active: Option<bool>,
     pickable: Option<bool>,
     receivable: Option<bool>,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         r#"
@@ -310,7 +320,7 @@ pub async fn update_location_in_scope(
     active: Option<bool>,
     pickable: Option<bool>,
     receivable: Option<bool>,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     let facility_ids = site_scope
         .facility_ids
         .iter()
@@ -354,7 +364,7 @@ pub async fn set_location_deleted(
     tenant_id: TenantId,
     id: i64,
     deleted: bool,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query("UPDATE locations SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(if deleted { Some(now_iso()) } else { None })
@@ -372,7 +382,7 @@ pub async fn set_location_deleted_in_scope(
     site_scope: &SiteScope,
     id: i64,
     deleted: bool,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     let facility_ids = site_scope
         .facility_ids
         .iter()

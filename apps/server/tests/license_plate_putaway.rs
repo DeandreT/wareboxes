@@ -256,7 +256,7 @@ async fn whole_license_plate_putaway_is_atomic_replay_safe_and_rejects_content_d
     fixture
         .assign_owner_to_facility(tenant_id, inventory_owner_id, facility_id)
         .await;
-    let receiving_location_id = repo::locations::add_location(
+    let receiving_location_id = wareboxes_persistence_postgres::locations::add_location(
         &fixture.db,
         tenant_id,
         facility_id,

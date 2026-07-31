@@ -75,10 +75,11 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
-    let facility = repo::facilities::add_facility(&db, tenant_id, "Inbound DC")
-        .await
-        .unwrap();
-    let dock = repo::locations::add_location(
+    let facility =
+        wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Inbound DC")
+            .await
+            .unwrap();
+    let dock = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         facility,
@@ -396,7 +397,7 @@ async fn concurrent_load_receipts_preserve_every_accepted_quantity() {
     let user = fixture.user("concurrent-receiver@test.com").await;
     let tenant_id = tenant_for_user(&fixture.db, user.id).await;
     let facility = fixture.facility(tenant_id, "Concurrent Inbound DC").await;
-    let dock = repo::locations::add_location(
+    let dock = wareboxes_persistence_postgres::locations::add_location(
         &fixture.db,
         tenant_id,
         facility,
@@ -566,7 +567,7 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
         .unwrap();
 
     let facility = fixture.facility(tenant_a, "Scoped Load Facility").await;
-    let dock = repo::locations::add_location(
+    let dock = wareboxes_persistence_postgres::locations::add_location(
         &fixture.db,
         tenant_a,
         facility,
@@ -852,10 +853,11 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
-    let facility = repo::facilities::add_facility(&db, tenant_id, "LP Inbound DC")
-        .await
-        .unwrap();
-    let dock = repo::locations::add_location(
+    let facility =
+        wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "LP Inbound DC")
+            .await
+            .unwrap();
+    let dock = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         facility,
@@ -869,7 +871,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     )
     .await
     .unwrap();
-    let reserve = repo::locations::add_location(
+    let reserve = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         facility,

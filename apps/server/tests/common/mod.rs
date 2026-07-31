@@ -312,7 +312,7 @@ impl Fixture {
     }
 
     pub async fn facility(&self, tenant_id: TenantId, name: &str) -> i64 {
-        repo::facilities::add_facility(&self.db, tenant_id, name)
+        wareboxes_persistence_postgres::facilities::add_facility(&self.db, tenant_id, name)
             .await
             .unwrap()
     }
@@ -342,7 +342,7 @@ impl Fixture {
     }
 
     pub async fn location(&self, tenant_id: TenantId, facility_id: i64, scan_code: &str) -> i64 {
-        repo::locations::add_location(
+        wareboxes_persistence_postgres::locations::add_location(
             &self.db,
             tenant_id,
             facility_id,

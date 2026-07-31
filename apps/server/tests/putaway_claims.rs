@@ -574,7 +574,7 @@ async fn typed_putaway_claims_are_exact_scoped_replay_safe_and_reclaimable() {
     }
     let source_barcode = "PUTAWAY-CLAIM-RECEIVING";
     let source_name = "Putaway Claim Receiving";
-    let source_location_id = repo::locations::add_location(
+    let source_location_id = wareboxes_persistence_postgres::locations::add_location(
         &fixture.db,
         tenant_id,
         facility_id,

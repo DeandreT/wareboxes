@@ -224,7 +224,7 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
     fixture
         .assign_owner_to_facility(tenant_id, denied_owner, allowed_facility)
         .await;
-    let allowed_location = repo::locations::add_location(
+    let allowed_location = wareboxes_persistence_postgres::locations::add_location(
         &fixture.db,
         tenant_id,
         allowed_facility,

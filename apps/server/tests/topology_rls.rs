@@ -114,7 +114,7 @@ async fn topology_requires_tenant_context_and_exact_runtime_privileges() {
     assert_forged_inserts_fail(&fixture.db, None, refs_a, "UNBOUND").await;
     assert_forged_inserts_fail(&fixture.db, Some(tenant_b), refs_a, "CROSS-TENANT").await;
 
-    let cross_facility_parent = repo::locations::add_location(
+    let cross_facility_parent = wareboxes_persistence_postgres::locations::add_location(
         &fixture.db,
         tenant_a,
         refs_a.facility_ids[1],
@@ -144,7 +144,7 @@ async fn topology_refs(fixture: &Fixture, tenant_id: TenantId, key: &str) -> Top
     let parent_location = fixture
         .location(tenant_id, first_facility, &format!("{key}-PARENT"))
         .await;
-    let child_location = repo::locations::add_location(
+    let child_location = wareboxes_persistence_postgres::locations::add_location(
         &fixture.db,
         tenant_id,
         first_facility,
@@ -192,7 +192,7 @@ async fn topology_refs(fixture: &Fixture, tenant_id: TenantId, key: &str) -> Top
 
 async fn assert_repository_topology(db: &db::Db, refs: TopologyRefs) {
     assert_eq!(
-        repo::facilities::get_facilities(db, refs.tenant_id, false)
+        wareboxes_persistence_postgres::facilities::get_facilities(db, refs.tenant_id, false)
             .await
             .unwrap()
             .into_iter()
@@ -201,7 +201,7 @@ async fn assert_repository_topology(db: &db::Db, refs: TopologyRefs) {
         refs.facility_ids
     );
     assert_eq!(
-        repo::locations::get_locations(db, refs.tenant_id, false)
+        wareboxes_persistence_postgres::locations::get_locations(db, refs.tenant_id, false)
             .await
             .unwrap()
             .into_iter()

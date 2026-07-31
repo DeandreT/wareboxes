@@ -16,10 +16,11 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
-    let facility = repo::facilities::add_facility(&db, tenant_id, "Main DC")
-        .await
-        .unwrap();
-    let receiving = repo::locations::add_location(
+    let facility =
+        wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Main DC")
+            .await
+            .unwrap();
+    let receiving = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         facility,
@@ -33,7 +34,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     )
     .await
     .unwrap();
-    let pick_face = repo::locations::add_location(
+    let pick_face = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         facility,
@@ -369,7 +370,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
         .unwrap();
     assert_eq!(pick_balance.qty_reserved, 0);
 
-    let split_a = repo::locations::add_location(
+    let split_a = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         facility,
@@ -383,7 +384,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     )
     .await
     .unwrap();
-    let split_b = repo::locations::add_location(
+    let split_b = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         facility,
@@ -1158,10 +1159,11 @@ async fn inventory_rejects_mixed_lot_or_expiration_in_same_location() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
-    let facility = repo::facilities::add_facility(&db, tenant_id, "Lot Guard DC")
-        .await
-        .unwrap();
-    let receiving = repo::locations::add_location(
+    let facility =
+        wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Lot Guard DC")
+            .await
+            .unwrap();
+    let receiving = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         facility,
@@ -1175,7 +1177,7 @@ async fn inventory_rejects_mixed_lot_or_expiration_in_same_location() {
     )
     .await
     .unwrap();
-    let reserve = repo::locations::add_location(
+    let reserve = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         facility,

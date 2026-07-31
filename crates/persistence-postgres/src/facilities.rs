@@ -2,17 +2,17 @@
 //! only listed facilities (no create/update); kept faithful here.
 
 use sqlx::Row;
-use wareboxes_core::models::Facility;
+use wareboxes_application::topology::FacilityReadModel;
 use wareboxes_domain::{SiteScope, TenantId};
 
 use crate::db::{begin_tenant_transaction, now_iso, Db};
-use crate::error::AppResult;
+use crate::{PersistenceError, PersistenceResult};
 
-fn map(row: &sqlx::postgres::PgRow) -> AppResult<Facility> {
-    Ok(Facility {
+fn map(row: &sqlx::postgres::PgRow) -> PersistenceResult<FacilityReadModel> {
+    Ok(FacilityReadModel {
         id: row.try_get("id")?,
         tenant_id: TenantId::new(row.try_get("tenant_id")?)
-            .map_err(|error| crate::error::AppError::internal(error.to_string()))?,
+            .map_err(|error| PersistenceError::invalid_data(error.to_string()))?,
         created: row.try_get("created")?,
         deleted: row.try_get("deleted")?,
         name: row.try_get("name")?,
@@ -24,7 +24,7 @@ pub async fn get_facilities(
     db: &Db,
     tenant_id: TenantId,
     show_deleted: bool,
-) -> AppResult<Vec<Facility>> {
+) -> PersistenceResult<Vec<FacilityReadModel>> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
@@ -38,7 +38,10 @@ pub async fn get_facilities(
     .bind(show_deleted)
     .fetch_all(&mut *tx)
     .await?;
-    let facilities = rows.iter().map(map).collect::<AppResult<Vec<_>>>()?;
+    let facilities = rows
+        .iter()
+        .map(map)
+        .collect::<PersistenceResult<Vec<_>>>()?;
     tx.commit().await?;
     Ok(facilities)
 }
@@ -48,7 +51,7 @@ pub async fn get_facilities_in_scope(
     tenant_id: TenantId,
     site_scope: &SiteScope,
     show_deleted: bool,
-) -> AppResult<Vec<Facility>> {
+) -> PersistenceResult<Vec<FacilityReadModel>> {
     let facility_ids = site_scope
         .facility_ids
         .iter()
@@ -71,12 +74,19 @@ pub async fn get_facilities_in_scope(
     .bind(&facility_ids)
     .fetch_all(&mut *tx)
     .await?;
-    let facilities = rows.iter().map(map).collect::<AppResult<Vec<_>>>()?;
+    let facilities = rows
+        .iter()
+        .map(map)
+        .collect::<PersistenceResult<Vec<_>>>()?;
     tx.commit().await?;
     Ok(facilities)
 }
 
-pub async fn active_facility_exists(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
+pub async fn active_facility_exists(
+    db: &Db,
+    tenant_id: TenantId,
+    id: i64,
+) -> PersistenceResult<bool> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM facilities WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL)",
@@ -94,7 +104,7 @@ pub async fn active_facility_exists_in_scope(
     tenant_id: TenantId,
     site_scope: &SiteScope,
     id: i64,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     let facility_ids = site_scope
         .facility_ids
         .iter()
@@ -125,7 +135,7 @@ pub async fn active_facility_exists_in_scope(
 
 /// Not part of the original app; provided so the data set is usable for
 /// testing and future inventory owner to facility linking.
-pub async fn add_facility(db: &Db, tenant_id: TenantId, name: &str) -> AppResult<i64> {
+pub async fn add_facility(db: &Db, tenant_id: TenantId, name: &str) -> PersistenceResult<i64> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO facilities (tenant_id, name, created) VALUES ($1, $2, $3) RETURNING id",

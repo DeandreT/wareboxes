@@ -133,15 +133,27 @@ async fn employee_routes_and_repositories_enforce_facility_scope() {
             .unwrap()
     );
 
-    let allowed_facility_a = repo::facilities::add_facility(&db, tenant_id, "Allowed Employee A")
-        .await
-        .unwrap();
-    let allowed_facility_b = repo::facilities::add_facility(&db, tenant_id, "Allowed Employee B")
-        .await
-        .unwrap();
-    let denied_facility = repo::facilities::add_facility(&db, tenant_id, "Denied Employee DC")
-        .await
-        .unwrap();
+    let allowed_facility_a = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        tenant_id,
+        "Allowed Employee A",
+    )
+    .await
+    .unwrap();
+    let allowed_facility_b = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        tenant_id,
+        "Allowed Employee B",
+    )
+    .await
+    .unwrap();
+    let denied_facility = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        tenant_id,
+        "Denied Employee DC",
+    )
+    .await
+    .unwrap();
 
     let unrestricted_scope = SiteScope {
         all_facilities: true,
@@ -487,13 +499,20 @@ async fn employee_routes_and_repositories_enforce_facility_scope() {
     .unwrap();
     assert!(tx.commit().await.is_err());
 
-    let retiring_facility = repo::facilities::add_facility(&db, tenant_id, "Retiring Employee DC")
-        .await
-        .unwrap();
-    let remaining_facility =
-        repo::facilities::add_facility(&db, tenant_id, "Remaining Employee DC")
-            .await
-            .unwrap();
+    let retiring_facility = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        tenant_id,
+        "Retiring Employee DC",
+    )
+    .await
+    .unwrap();
+    let remaining_facility = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        tenant_id,
+        "Remaining Employee DC",
+    )
+    .await
+    .unwrap();
     let reassigned_employee = add_employee(
         &db,
         tenant_id,
@@ -521,14 +540,20 @@ async fn employee_routes_and_repositories_enforce_facility_scope() {
             .unwrap();
     assert_eq!(reassigned_employee.facility_ids, vec![remaining_facility]);
 
-    let concurrent_facility_a =
-        repo::facilities::add_facility(&db, tenant_id, "Concurrent Employee A")
-            .await
-            .unwrap();
-    let concurrent_facility_b =
-        repo::facilities::add_facility(&db, tenant_id, "Concurrent Employee B")
-            .await
-            .unwrap();
+    let concurrent_facility_a = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        tenant_id,
+        "Concurrent Employee A",
+    )
+    .await
+    .unwrap();
+    let concurrent_facility_b = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        tenant_id,
+        "Concurrent Employee B",
+    )
+    .await
+    .unwrap();
     let concurrent_employee = add_employee(
         &db,
         tenant_id,

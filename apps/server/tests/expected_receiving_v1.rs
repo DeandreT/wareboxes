@@ -64,7 +64,7 @@ async fn receiving_dock(
     barcode: Option<&str>,
     name: &str,
 ) -> i64 {
-    repo::locations::add_location(
+    wareboxes_persistence_postgres::locations::add_location(
         &fixture.db,
         tenant_id,
         facility_id,

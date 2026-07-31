@@ -35,7 +35,7 @@ pub async fn add(
     validate(&body)?;
     user.require_facility(body.facility_id)?;
     user.require_inventory_owner(body.inventory_owner_id)?;
-    if !repo::facilities::active_facility_exists_in_scope(
+    if !wareboxes_persistence_postgres::facilities::active_facility_exists_in_scope(
         &state.db,
         user.tenant.tenant_id,
         &user.tenant.site_scope,
