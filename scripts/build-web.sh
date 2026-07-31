@@ -17,5 +17,10 @@ cargo leptos build \
   --project wareboxes-web \
   --bin-cargo-args=--locked \
   --lib-cargo-args=--locked
+cargo build \
+  --release \
+  --locked \
+  --package wareboxes-worker-process \
+  --bin wareboxes-worker
 
-echo "Wareboxes SSR server and web assets built in target/release and target/site"
+echo "Wareboxes server, worker, and web assets built in target/release and target/site"
