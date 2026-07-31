@@ -1,0 +1,13649 @@
+-- Wareboxes PostgreSQL baseline for fresh pre-production databases.
+-- Generated from the complete accepted schema; do not apply over earlier migration history.
+
+--
+-- PostgreSQL database dump
+--
+
+
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
+
+--
+-- Name: api_session_user_id(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.api_session_user_id(token_hash text) RETURNS bigint
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+    SELECT session.user_id
+    FROM public.sessions session
+    WHERE session.token = token_hash
+      AND session.purpose = 'api'
+      AND session.expires > CURRENT_TIMESTAMP
+$$;
+
+
+--
+-- Name: apply_inventory_allocation_projection(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.apply_inventory_allocation_projection() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    projection_delta BIGINT := 0;
+    affected_rows BIGINT;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        projection_delta := NEW.qty;
+    ELSIF OLD.status = 'allocated'
+          AND OLD.deleted IS NULL
+          AND NEW.status IN ('released', 'fulfilled')
+          AND NEW.deleted IS NOT NULL
+    THEN
+        projection_delta := -OLD.qty;
+    END IF;
+
+    IF projection_delta <> 0 THEN
+        UPDATE public.inventory_balances
+        SET qty_reserved = qty_reserved + projection_delta,
+            modified = COALESCE(NEW.modified, NEW.created)
+        WHERE tenant_id = NEW.tenant_id
+          AND inventory_owner_id = NEW.inventory_owner_id
+          AND id = NEW.inventory_balance_id
+          AND qty_reserved + projection_delta >= 0
+          AND qty_reserved + projection_delta <= qty_on_hand;
+        GET DIAGNOSTICS affected_rows = ROW_COUNT;
+        IF affected_rows <> 1 THEN
+            RAISE EXCEPTION
+                'inventory allocation projection could not be updated'
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: apply_inventory_hold_projection(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.apply_inventory_hold_projection() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    projection_delta BIGINT := 0;
+    affected_rows BIGINT;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        projection_delta := NEW.qty;
+    ELSIF OLD.status = 'active'
+          AND OLD.deleted IS NULL
+          AND NEW.status = 'released'
+          AND NEW.deleted IS NOT NULL
+    THEN
+        projection_delta := -OLD.qty;
+    END IF;
+
+    IF projection_delta <> 0 THEN
+        UPDATE public.inventory_balances
+        SET qty_held = qty_held + projection_delta,
+            modified = COALESCE(NEW.modified, NEW.created)
+        WHERE tenant_id = NEW.tenant_id
+          AND inventory_owner_id = NEW.inventory_owner_id
+          AND id = NEW.inventory_balance_id
+          AND qty_held + projection_delta >= 0
+          AND qty_reserved + qty_held + projection_delta <= qty_on_hand;
+        GET DIAGNOSTICS affected_rows = ROW_COUNT;
+        IF affected_rows <> 1 THEN
+            RAISE EXCEPTION
+                'inventory hold projection could not be updated'
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: assert_employee_active_facility(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.assert_employee_active_facility(checked_tenant_id bigint, checked_employee_id bigint) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            'employee-facility:' || checked_tenant_id::TEXT || ':' || checked_employee_id::TEXT,
+            0
+        )
+    );
+
+    IF EXISTS (
+        SELECT 1
+        FROM employees employee
+        WHERE employee.tenant_id = checked_tenant_id
+          AND employee.id = checked_employee_id
+          AND employee.deleted IS NULL
+    ) AND NOT EXISTS (
+        SELECT 1
+        FROM employee_facilities employee_facility
+        INNER JOIN facilities facility
+            ON facility.tenant_id = employee_facility.tenant_id
+           AND facility.id = employee_facility.facility_id
+           AND facility.deleted IS NULL
+        WHERE employee_facility.tenant_id = checked_tenant_id
+          AND employee_facility.employee_id = checked_employee_id
+          AND employee_facility.deleted IS NULL
+    ) THEN
+        RAISE EXCEPTION 'active employee requires an active facility'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN;
+END;
+$$;
+
+
+--
+-- Name: assert_inventory_balance_license_plate_location_consistency(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.assert_inventory_balance_license_plate_location_consistency(target_tenant_id bigint, target_inventory_balance_id bigint) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    balance_row RECORD;
+BEGIN
+    SELECT balance.inventory_owner_id,
+           balance.facility_id,
+           balance.location_id,
+           balance.license_plate_id,
+           balance.qty_on_hand,
+           balance.deleted
+    INTO balance_row
+    FROM public.inventory_balances balance
+    WHERE balance.tenant_id = target_tenant_id
+      AND balance.id = target_inventory_balance_id;
+
+    IF NOT FOUND
+       OR balance_row.deleted IS NOT NULL
+       OR balance_row.qty_on_hand <= 0
+       OR balance_row.license_plate_id IS NULL
+    THEN
+        RETURN;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.license_plates plate
+        WHERE plate.tenant_id = target_tenant_id
+          AND plate.id = balance_row.license_plate_id
+          AND plate.inventory_owner_id =
+              balance_row.inventory_owner_id
+          AND plate.facility_id = balance_row.facility_id
+          AND plate.location_id = balance_row.location_id
+          AND plate.deleted IS NULL
+    ) THEN
+        RAISE EXCEPTION
+            'positive license plate inventory balance must match its active plate location'
+            USING ERRCODE = '55000';
+    END IF;
+END;
+$$;
+
+
+--
+-- Name: assert_license_plate_location_consistency(bigint, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.assert_license_plate_location_consistency(target_tenant_id bigint, target_license_plate_id bigint) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    plate_row RECORD;
+BEGIN
+    IF target_license_plate_id IS NULL
+       OR NOT EXISTS (
+            SELECT 1
+            FROM public.inventory_balances balance
+            WHERE balance.tenant_id = target_tenant_id
+              AND balance.license_plate_id =
+                  target_license_plate_id
+              AND balance.deleted IS NULL
+              AND balance.qty_on_hand > 0
+       )
+    THEN
+        RETURN;
+    END IF;
+
+    SELECT plate.inventory_owner_id,
+           plate.facility_id,
+           plate.location_id,
+           plate.deleted
+    INTO plate_row
+    FROM public.license_plates plate
+    WHERE plate.tenant_id = target_tenant_id
+      AND plate.id = target_license_plate_id;
+
+    IF NOT FOUND
+       OR plate_row.deleted IS NOT NULL
+       OR plate_row.location_id IS NULL
+       OR EXISTS (
+            SELECT 1
+            FROM public.inventory_balances balance
+            WHERE balance.tenant_id = target_tenant_id
+              AND balance.license_plate_id =
+                  target_license_plate_id
+              AND balance.deleted IS NULL
+              AND balance.qty_on_hand > 0
+              AND (
+                  balance.inventory_owner_id
+                      IS DISTINCT FROM plate_row.inventory_owner_id
+                  OR balance.facility_id
+                      IS DISTINCT FROM plate_row.facility_id
+                  OR balance.location_id
+                      IS DISTINCT FROM plate_row.location_id
+              )
+       )
+    THEN
+        RAISE EXCEPTION
+            'license plate header and positive inventory balances must share one location'
+            USING ERRCODE = '55000';
+    END IF;
+END;
+$$;
+
+
+--
+-- Name: capture_inventory_projection_change(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.capture_inventory_projection_change() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    context_transaction_id BIGINT;
+    target_tenant_id BIGINT;
+    target_inventory_owner_id BIGINT;
+    old_effective_quantity BIGINT := 0;
+    new_effective_quantity BIGINT := 0;
+    dimensions_match BOOLEAN := FALSE;
+BEGIN
+    IF TG_OP IN ('UPDATE', 'DELETE') AND OLD.deleted IS NULL THEN
+        old_effective_quantity := OLD.qty_on_hand;
+    END IF;
+
+    IF TG_OP IN ('INSERT', 'UPDATE') AND NEW.deleted IS NULL THEN
+        new_effective_quantity := NEW.qty_on_hand;
+    END IF;
+
+    IF TG_OP = 'INSERT' AND new_effective_quantity = 0 THEN
+        RETURN NEW;
+    ELSIF TG_OP = 'DELETE' AND old_effective_quantity = 0 THEN
+        RETURN OLD;
+    ELSIF TG_OP = 'UPDATE' THEN
+        dimensions_match :=
+            OLD.tenant_id IS NOT DISTINCT FROM NEW.tenant_id
+            AND OLD.inventory_owner_id IS NOT DISTINCT FROM
+                NEW.inventory_owner_id
+            AND OLD.facility_id IS NOT DISTINCT FROM NEW.facility_id
+            AND OLD.location_id IS NOT DISTINCT FROM NEW.location_id
+            AND OLD.license_plate_id IS NOT DISTINCT FROM
+                NEW.license_plate_id
+            AND OLD.item_batch_id IS NOT DISTINCT FROM NEW.item_batch_id
+            AND OLD.item_id IS NOT DISTINCT FROM NEW.item_id
+            AND OLD.uom IS NOT DISTINCT FROM NEW.uom
+            AND OLD.status IS NOT DISTINCT FROM NEW.status;
+
+        IF dimensions_match
+           AND old_effective_quantity = new_effective_quantity
+        THEN
+            RETURN NEW;
+        END IF;
+    END IF;
+
+    target_tenant_id := CASE
+        WHEN TG_OP = 'DELETE' THEN OLD.tenant_id
+        ELSE NEW.tenant_id
+    END;
+    target_inventory_owner_id := CASE
+        WHEN TG_OP = 'DELETE' THEN OLD.inventory_owner_id
+        ELSE NEW.inventory_owner_id
+    END;
+    context_transaction_id :=
+        NULLIF(
+            current_setting(
+                'wareboxes.inventory_transaction_id',
+                true
+            ),
+            ''
+        )::BIGINT;
+
+    IF context_transaction_id IS NULL OR NOT EXISTS (
+        SELECT 1
+        FROM public.inventory_transactions transaction
+        WHERE transaction.tenant_id = target_tenant_id
+          AND transaction.inventory_owner_id =
+              target_inventory_owner_id
+          AND transaction.id = context_transaction_id
+          AND transaction.xmin::TEXT = pg_current_xact_id()::TEXT
+    ) THEN
+        RAISE EXCEPTION
+            'on-hand inventory changes require a journal transaction created in the same database transaction'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF TG_OP = 'UPDATE' AND dimensions_match THEN
+        INSERT INTO public.inventory_projection_changes (
+            tenant_id,
+            inventory_owner_id,
+            transaction_id,
+            inventory_balance_id,
+            facility_id,
+            location_id,
+            license_plate_id,
+            item_batch_id,
+            item_id,
+            uom,
+            lot,
+            expiration,
+            serial,
+            status,
+            quantity_delta
+        )
+        SELECT
+            NEW.tenant_id,
+            NEW.inventory_owner_id,
+            context_transaction_id,
+            NEW.id,
+            NEW.facility_id,
+            NEW.location_id,
+            NEW.license_plate_id,
+            NEW.item_batch_id,
+            NEW.item_id,
+            NEW.uom,
+            batch.lot,
+            batch.expiration,
+            batch.serial,
+            NEW.status,
+            new_effective_quantity - old_effective_quantity
+        FROM public.item_batches batch
+        WHERE batch.tenant_id = NEW.tenant_id
+          AND batch.inventory_owner_id = NEW.inventory_owner_id
+          AND batch.id = NEW.item_batch_id;
+
+        RETURN NEW;
+    END IF;
+
+    IF old_effective_quantity <> 0 THEN
+        INSERT INTO public.inventory_projection_changes (
+            tenant_id,
+            inventory_owner_id,
+            transaction_id,
+            inventory_balance_id,
+            facility_id,
+            location_id,
+            license_plate_id,
+            item_batch_id,
+            item_id,
+            uom,
+            lot,
+            expiration,
+            serial,
+            status,
+            quantity_delta
+        )
+        SELECT
+            OLD.tenant_id,
+            OLD.inventory_owner_id,
+            context_transaction_id,
+            OLD.id,
+            OLD.facility_id,
+            OLD.location_id,
+            OLD.license_plate_id,
+            OLD.item_batch_id,
+            OLD.item_id,
+            OLD.uom,
+            batch.lot,
+            batch.expiration,
+            batch.serial,
+            OLD.status,
+            -old_effective_quantity
+        FROM public.item_batches batch
+        WHERE batch.tenant_id = OLD.tenant_id
+          AND batch.inventory_owner_id = OLD.inventory_owner_id
+          AND batch.id = OLD.item_batch_id;
+    END IF;
+
+    IF new_effective_quantity <> 0 THEN
+        INSERT INTO public.inventory_projection_changes (
+            tenant_id,
+            inventory_owner_id,
+            transaction_id,
+            inventory_balance_id,
+            facility_id,
+            location_id,
+            license_plate_id,
+            item_batch_id,
+            item_id,
+            uom,
+            lot,
+            expiration,
+            serial,
+            status,
+            quantity_delta
+        )
+        SELECT
+            NEW.tenant_id,
+            NEW.inventory_owner_id,
+            context_transaction_id,
+            NEW.id,
+            NEW.facility_id,
+            NEW.location_id,
+            NEW.license_plate_id,
+            NEW.item_batch_id,
+            NEW.item_id,
+            NEW.uom,
+            batch.lot,
+            batch.expiration,
+            batch.serial,
+            NEW.status,
+            new_effective_quantity
+        FROM public.item_batches batch
+        WHERE batch.tenant_id = NEW.tenant_id
+          AND batch.inventory_owner_id = NEW.inventory_owner_id
+          AND batch.id = NEW.item_batch_id;
+    END IF;
+
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: close_inventory_relocation_task_detail(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.close_inventory_relocation_task_detail() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NEW.task_type = 'inventory_relocation'
+       AND (
+           NEW.deleted IS NOT NULL
+           OR NEW.status IN ('completed', 'cancelled')
+       )
+    THEN
+        UPDATE public.inventory_relocation_tasks
+        SET closed_at = COALESCE(
+            NEW.completed_at,
+            NEW.deleted,
+            statement_timestamp()
+        )
+        WHERE tenant_id = NEW.tenant_id
+          AND task_id = NEW.id
+          AND closed_at IS NULL;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: close_license_plate_putaway_task_detail(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.close_license_plate_putaway_task_detail() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NEW.task_type = 'license_plate_putaway'
+       AND (
+           NEW.deleted IS NOT NULL
+           OR NEW.status IN ('completed', 'cancelled')
+       )
+    THEN
+        UPDATE public.license_plate_putaway_tasks
+        SET closed_at = COALESCE(
+            NEW.completed_at,
+            NEW.deleted,
+            statement_timestamp()
+        )
+        WHERE tenant_id = NEW.tenant_id
+          AND task_id = NEW.id
+          AND closed_at IS NULL;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: close_putaway_task_detail(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.close_putaway_task_detail() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NEW.task_type = 'putaway'
+       AND (
+           NEW.deleted IS NOT NULL
+           OR NEW.status IN ('completed', 'cancelled')
+       )
+    THEN
+        UPDATE public.putaway_tasks
+        SET closed_at = COALESCE(
+            NEW.completed_at,
+            NEW.deleted,
+            statement_timestamp()
+        )
+        WHERE tenant_id = NEW.tenant_id
+          AND task_id = NEW.id
+          AND closed_at IS NULL;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: create_session_record(text, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.create_session_record(token_hash text, user_id bigint) RETURNS void
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+    INSERT INTO public.sessions (token, user_id, created, expires)
+    VALUES (
+        token_hash,
+        user_id,
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP + INTERVAL '30 days'
+    )
+$$;
+
+
+--
+-- Name: create_web_session_record(text, bigint, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.create_web_session_record(p_token_hash text, p_user_id bigint, p_absolute_ttl_seconds integer) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF p_absolute_ttl_seconds < 300 OR p_absolute_ttl_seconds > 86400 THEN
+        RAISE EXCEPTION 'web session TTL must be between 300 and 86400 seconds'
+            USING ERRCODE = '22023';
+    END IF;
+
+    INSERT INTO public.sessions (
+        token,
+        user_id,
+        created,
+        expires,
+        purpose,
+        active_tenant_id,
+        last_seen_at
+    )
+    VALUES (
+        p_token_hash,
+        p_user_id,
+        CURRENT_TIMESTAMP,
+        CURRENT_TIMESTAMP + p_absolute_ttl_seconds * INTERVAL '1 second',
+        'web',
+        NULL,
+        CURRENT_TIMESTAMP
+    );
+END;
+$$;
+
+
+--
+-- Name: destroy_session_record(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.destroy_session_record(token_hash text) RETURNS void
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+    DELETE FROM public.sessions
+    WHERE token = token_hash
+$$;
+
+
+--
+-- Name: enforce_employee_active_facility(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.enforce_employee_active_facility() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_TABLE_NAME = 'employees' THEN
+        PERFORM assert_employee_active_facility(NEW.tenant_id, NEW.id);
+    ELSIF TG_OP = 'DELETE' THEN
+        PERFORM assert_employee_active_facility(OLD.tenant_id, OLD.employee_id);
+    ELSIF TG_OP = 'INSERT' THEN
+        PERFORM assert_employee_active_facility(NEW.tenant_id, NEW.employee_id);
+    ELSE
+        IF (NEW.tenant_id, NEW.employee_id) < (OLD.tenant_id, OLD.employee_id) THEN
+            PERFORM assert_employee_active_facility(NEW.tenant_id, NEW.employee_id);
+            PERFORM assert_employee_active_facility(OLD.tenant_id, OLD.employee_id);
+        ELSE
+            PERFORM assert_employee_active_facility(OLD.tenant_id, OLD.employee_id);
+            IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+                OR NEW.employee_id IS DISTINCT FROM OLD.employee_id
+            THEN
+                PERFORM assert_employee_active_facility(NEW.tenant_id, NEW.employee_id);
+            END IF;
+        END IF;
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+
+--
+-- Name: enforce_inventory_status_transition(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.enforce_inventory_status_transition() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    target_tenant_id BIGINT;
+    target_inventory_owner_id BIGINT;
+    target_transaction_id BIGINT;
+    target_transaction_type TEXT;
+    target_actor_user_id BIGINT;
+    target_reason TEXT;
+    target_reference_type TEXT;
+    target_reference_id BIGINT;
+    transition_count BIGINT;
+    entry_count BIGINT;
+    transition_row public.inventory_status_transitions%ROWTYPE;
+    source_balance public.inventory_balances%ROWTYPE;
+    destination_balance public.inventory_balances%ROWTYPE;
+BEGIN
+    IF TG_TABLE_NAME = 'inventory_transactions' THEN
+        target_tenant_id := NEW.tenant_id;
+        target_inventory_owner_id := NEW.inventory_owner_id;
+        target_transaction_id := NEW.id;
+        target_transaction_type := NEW.transaction_type;
+        target_actor_user_id := NEW.actor_user_id;
+        target_reason := NEW.reason;
+        target_reference_type := NEW.reference_type;
+        target_reference_id := NEW.reference_id;
+    ELSE
+        target_tenant_id := NEW.tenant_id;
+        target_inventory_owner_id := NEW.inventory_owner_id;
+        target_transaction_id := NEW.transaction_id;
+
+        SELECT transaction.transaction_type,
+               transaction.actor_user_id,
+               transaction.reason,
+               transaction.reference_type,
+               transaction.reference_id
+        INTO target_transaction_type,
+             target_actor_user_id,
+             target_reason,
+             target_reference_type,
+             target_reference_id
+        FROM public.inventory_transactions transaction
+        WHERE transaction.tenant_id = target_tenant_id
+          AND transaction.inventory_owner_id = target_inventory_owner_id
+          AND transaction.id = target_transaction_id;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION
+                'inventory status transition transaction does not exist'
+                USING ERRCODE = '23503';
+        END IF;
+    END IF;
+
+    SELECT COUNT(*)
+    INTO transition_count
+    FROM public.inventory_status_transitions transition
+    WHERE transition.tenant_id = target_tenant_id
+      AND transition.inventory_owner_id = target_inventory_owner_id
+      AND transition.transaction_id = target_transaction_id;
+
+    IF target_transaction_type <> 'status_change' THEN
+        IF transition_count > 0 THEN
+            RAISE EXCEPTION
+                'inventory status transition audit requires a status-change transaction'
+                USING ERRCODE = '23514';
+        END IF;
+
+        RETURN NEW;
+    END IF;
+
+    IF transition_count <> 1 THEN
+        RAISE EXCEPTION
+            'inventory status-change transaction requires exactly one audit row'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT transition.*
+    INTO transition_row
+    FROM public.inventory_status_transitions transition
+    WHERE transition.tenant_id = target_tenant_id
+      AND transition.inventory_owner_id = target_inventory_owner_id
+      AND transition.transaction_id = target_transaction_id;
+
+    IF transition_row.created_by IS DISTINCT FROM target_actor_user_id
+       OR transition_row.reason_code IS DISTINCT FROM target_reason
+       OR transition_row.reference_type IS DISTINCT FROM
+            target_reference_type
+       OR transition_row.reference_id IS DISTINCT FROM target_reference_id
+    THEN
+        RAISE EXCEPTION
+            'inventory status-change audit does not match its transaction metadata'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT balance.*
+    INTO source_balance
+    FROM public.inventory_balances balance
+    WHERE balance.tenant_id = transition_row.tenant_id
+      AND balance.inventory_owner_id =
+          transition_row.inventory_owner_id
+      AND balance.facility_id = transition_row.facility_id
+      AND balance.id = transition_row.source_balance_id
+      AND balance.deleted IS NULL;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'inventory status-change source balance is not active'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT balance.*
+    INTO destination_balance
+    FROM public.inventory_balances balance
+    WHERE balance.tenant_id = transition_row.tenant_id
+      AND balance.inventory_owner_id =
+          transition_row.inventory_owner_id
+      AND balance.facility_id = transition_row.facility_id
+      AND balance.id = transition_row.destination_balance_id
+      AND balance.deleted IS NULL;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'inventory status-change destination balance is not active'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF source_balance.status IS DISTINCT FROM transition_row.from_status
+       OR destination_balance.status IS DISTINCT FROM transition_row.to_status
+    THEN
+        RAISE EXCEPTION
+            'inventory status-change balances do not match the audited statuses'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF source_balance.location_id IS DISTINCT FROM
+            destination_balance.location_id
+       OR source_balance.license_plate_id IS DISTINCT FROM
+            destination_balance.license_plate_id
+       OR source_balance.item_batch_id IS DISTINCT FROM
+            destination_balance.item_batch_id
+       OR source_balance.item_id IS DISTINCT FROM
+            destination_balance.item_id
+       OR source_balance.uom IS DISTINCT FROM destination_balance.uom
+    THEN
+        RAISE EXCEPTION
+            'inventory status-change balances may differ only by status'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT COUNT(*)
+    INTO entry_count
+    FROM public.inventory_entries entry
+    WHERE entry.tenant_id = target_tenant_id
+      AND entry.inventory_owner_id = target_inventory_owner_id
+      AND entry.transaction_id = target_transaction_id;
+
+    IF entry_count <> 2 THEN
+        RAISE EXCEPTION
+            'inventory status-change transaction requires exactly two entries'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.inventory_entries entry
+        WHERE entry.tenant_id = target_tenant_id
+          AND entry.inventory_owner_id = target_inventory_owner_id
+          AND entry.transaction_id = target_transaction_id
+          AND entry.facility_id = transition_row.facility_id
+          AND entry.location_id = source_balance.location_id
+          AND entry.license_plate_id IS NOT DISTINCT FROM
+              source_balance.license_plate_id
+          AND entry.item_batch_id = source_balance.item_batch_id
+          AND entry.item_id = source_balance.item_id
+          AND entry.uom = source_balance.uom
+          AND entry.status = transition_row.from_status
+          AND entry.quantity_delta = -transition_row.qty
+    ) THEN
+        RAISE EXCEPTION
+            'inventory status-change transaction is missing its source entry'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.inventory_entries entry
+        WHERE entry.tenant_id = target_tenant_id
+          AND entry.inventory_owner_id = target_inventory_owner_id
+          AND entry.transaction_id = target_transaction_id
+          AND entry.facility_id = transition_row.facility_id
+          AND entry.location_id = destination_balance.location_id
+          AND entry.license_plate_id IS NOT DISTINCT FROM
+              destination_balance.license_plate_id
+          AND entry.item_batch_id = destination_balance.item_batch_id
+          AND entry.item_id = destination_balance.item_id
+          AND entry.uom = destination_balance.uom
+          AND entry.status = transition_row.to_status
+          AND entry.quantity_delta = transition_row.qty
+    ) THEN
+        RAISE EXCEPTION
+            'inventory status-change transaction is missing its destination entry'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.inventory_reconciliation reconciliation
+        WHERE reconciliation.tenant_id = target_tenant_id
+          AND reconciliation.inventory_owner_id =
+              target_inventory_owner_id
+          AND reconciliation.facility_id = transition_row.facility_id
+          AND reconciliation.location_id = source_balance.location_id
+          AND reconciliation.license_plate_id IS NOT DISTINCT FROM
+              source_balance.license_plate_id
+          AND reconciliation.item_batch_id = source_balance.item_batch_id
+          AND reconciliation.item_id = source_balance.item_id
+          AND reconciliation.uom = source_balance.uom
+          AND reconciliation.status IN (
+              transition_row.from_status,
+              transition_row.to_status
+          )
+    ) THEN
+        RAISE EXCEPTION
+            'inventory status-change balances do not reconcile with the journal'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: enforce_inventory_transaction_conservation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.enforce_inventory_transaction_conservation() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.inventory_entries entry
+        WHERE entry.tenant_id = NEW.tenant_id
+          AND entry.inventory_owner_id = NEW.inventory_owner_id
+          AND entry.transaction_id = NEW.id
+    ) THEN
+        RAISE EXCEPTION 'inventory transaction must contain at least one entry'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.transaction_type = 'move' AND EXISTS (
+        SELECT 1
+        FROM public.inventory_entries entry
+        WHERE entry.tenant_id = NEW.tenant_id
+          AND entry.inventory_owner_id = NEW.inventory_owner_id
+          AND entry.transaction_id = NEW.id
+        GROUP BY entry.inventory_owner_id, entry.item_id, entry.uom, entry.lot,
+                 entry.expiration, entry.serial, entry.status
+        HAVING SUM(entry.quantity_delta) <> 0
+    ) THEN
+        RAISE EXCEPTION
+            'inventory move entries must conserve quantity for every stock dimension'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.transaction_type = 'move' AND (
+        SELECT COUNT(DISTINCT entry.facility_id)
+        FROM public.inventory_entries entry
+        WHERE entry.tenant_id = NEW.tenant_id
+          AND entry.inventory_owner_id = NEW.inventory_owner_id
+          AND entry.transaction_id = NEW.id
+    ) > 1 THEN
+        RAISE EXCEPTION 'inventory moves cannot span facilities'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.transaction_type = 'status_change' AND EXISTS (
+        SELECT 1
+        FROM public.inventory_entries entry
+        WHERE entry.tenant_id = NEW.tenant_id
+          AND entry.inventory_owner_id = NEW.inventory_owner_id
+          AND entry.transaction_id = NEW.id
+        GROUP BY entry.inventory_owner_id, entry.item_batch_id, entry.item_id,
+                 entry.uom, entry.lot, entry.expiration, entry.serial
+        HAVING SUM(entry.quantity_delta) <> 0
+    ) THEN
+        RAISE EXCEPTION
+            'inventory status-change entries must conserve quantity'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.transaction_type = 'status_change' AND (
+        SELECT COUNT(DISTINCT entry.facility_id)
+        FROM public.inventory_entries entry
+        WHERE entry.tenant_id = NEW.tenant_id
+          AND entry.inventory_owner_id = NEW.inventory_owner_id
+          AND entry.transaction_id = NEW.id
+    ) > 1 THEN
+        RAISE EXCEPTION 'inventory status changes cannot span facilities'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.transaction_type = 'receive' AND EXISTS (
+        SELECT 1
+        FROM public.inventory_entries entry
+        WHERE entry.tenant_id = NEW.tenant_id
+          AND entry.inventory_owner_id = NEW.inventory_owner_id
+          AND entry.transaction_id = NEW.id
+          AND entry.quantity_delta <= 0
+    ) THEN
+        RAISE EXCEPTION 'inventory receipt entries must be positive'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.transaction_type = 'ship' AND EXISTS (
+        SELECT 1
+        FROM public.inventory_entries entry
+        WHERE entry.tenant_id = NEW.tenant_id
+          AND entry.inventory_owner_id = NEW.inventory_owner_id
+          AND entry.transaction_id = NEW.id
+          AND entry.quantity_delta >= 0
+    ) THEN
+        RAISE EXCEPTION 'inventory shipment entries must be negative'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF EXISTS (
+        WITH projection AS (
+            SELECT
+                change.facility_id,
+                change.location_id,
+                change.license_plate_id,
+                change.item_batch_id,
+                change.item_id,
+                change.uom,
+                change.lot,
+                change.expiration,
+                change.serial,
+                change.status,
+                SUM(change.quantity_delta) AS quantity_delta
+            FROM public.inventory_projection_changes change
+            WHERE change.tenant_id = NEW.tenant_id
+              AND change.inventory_owner_id = NEW.inventory_owner_id
+              AND change.transaction_id = NEW.id
+            GROUP BY
+                change.facility_id,
+                change.location_id,
+                change.license_plate_id,
+                change.item_batch_id,
+                change.item_id,
+                change.uom,
+                change.lot,
+                change.expiration,
+                change.serial,
+                change.status
+        ),
+        journal AS (
+            SELECT
+                entry.facility_id,
+                entry.location_id,
+                entry.license_plate_id,
+                entry.item_batch_id,
+                entry.item_id,
+                entry.uom,
+                entry.lot,
+                entry.expiration,
+                entry.serial,
+                entry.status,
+                SUM(entry.quantity_delta) AS quantity_delta
+            FROM public.inventory_entries entry
+            WHERE entry.tenant_id = NEW.tenant_id
+              AND entry.inventory_owner_id = NEW.inventory_owner_id
+              AND entry.transaction_id = NEW.id
+            GROUP BY
+                entry.facility_id,
+                entry.location_id,
+                entry.license_plate_id,
+                entry.item_batch_id,
+                entry.item_id,
+                entry.uom,
+                entry.lot,
+                entry.expiration,
+                entry.serial,
+                entry.status
+        )
+        (
+            SELECT * FROM projection
+            EXCEPT
+            SELECT * FROM journal
+        )
+        UNION ALL
+        (
+            SELECT * FROM journal
+            EXCEPT
+            SELECT * FROM projection
+        )
+    ) THEN
+        RAISE EXCEPTION
+            'inventory journal entries must exactly match on-hand projection changes'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: enforce_load_execution_barcode_immutable(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.enforce_load_execution_barcode_immutable() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NEW.execution_barcode IS DISTINCT FROM OLD.execution_barcode THEN
+        RAISE EXCEPTION 'load execution barcode is immutable'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+
+--
+-- Name: guard_inventory_balance_commitments(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_inventory_balance_commitments() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    allocated_qty BIGINT;
+    held_qty BIGINT;
+BEGIN
+    SELECT COALESCE(SUM(allocation.qty), 0)::BIGINT
+    INTO allocated_qty
+    FROM public.inventory_allocations allocation
+    WHERE allocation.tenant_id = NEW.tenant_id
+      AND allocation.inventory_owner_id = NEW.inventory_owner_id
+      AND allocation.inventory_balance_id = NEW.id
+      AND allocation.deleted IS NULL
+      AND allocation.status = 'allocated';
+
+    SELECT COALESCE(SUM(hold.qty), 0)::BIGINT
+    INTO held_qty
+    FROM public.inventory_holds hold
+    WHERE hold.tenant_id = NEW.tenant_id
+      AND hold.inventory_owner_id = NEW.inventory_owner_id
+      AND hold.inventory_balance_id = NEW.id
+      AND hold.deleted IS NULL
+      AND hold.status = 'active';
+
+    IF NEW.qty_reserved IS DISTINCT FROM allocated_qty THEN
+        RAISE EXCEPTION
+            'inventory balance reserved projection does not match allocations'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.qty_held IS DISTINCT FROM held_qty THEN
+        RAISE EXCEPTION
+            'inventory balance held projection does not match active holds'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF allocated_qty + held_qty > NEW.qty_on_hand THEN
+        RAISE EXCEPTION
+            'inventory balance commitments exceed on-hand quantity'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF allocated_qty + held_qty > 0
+       AND (
+           NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+           OR NEW.inventory_owner_id IS DISTINCT FROM
+               OLD.inventory_owner_id
+           OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+           OR NEW.location_id IS DISTINCT FROM OLD.location_id
+           OR NEW.license_plate_id IS DISTINCT FROM OLD.license_plate_id
+           OR NEW.item_batch_id IS DISTINCT FROM OLD.item_batch_id
+           OR NEW.item_id IS DISTINCT FROM OLD.item_id
+           OR NEW.uom IS DISTINCT FROM OLD.uom
+           OR NEW.status IS DISTINCT FROM OLD.status
+           OR NEW.deleted IS DISTINCT FROM OLD.deleted
+       )
+    THEN
+        RAISE EXCEPTION
+            'committed inventory balance dimensions are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_license_plate_putaway_task_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_license_plate_putaway_task_mutation() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE'
+       OR OLD.tenant_id IS DISTINCT FROM NEW.tenant_id
+       OR OLD.task_id IS DISTINCT FROM NEW.task_id
+       OR OLD.inventory_owner_id IS DISTINCT FROM NEW.inventory_owner_id
+       OR OLD.facility_id IS DISTINCT FROM NEW.facility_id
+       OR OLD.license_plate_id IS DISTINCT FROM NEW.license_plate_id
+       OR OLD.source_location_id IS DISTINCT FROM NEW.source_location_id
+       OR OLD.destination_location_id
+            IS DISTINCT FROM NEW.destination_location_id
+       OR OLD.planned_balance_count
+            IS DISTINCT FROM NEW.planned_balance_count
+       OR OLD.closed_at IS NOT NULL
+       OR NEW.closed_at IS NULL
+    THEN
+        RAISE EXCEPTION
+            'license plate putaway task snapshots are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_putaway_task_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_putaway_task_mutation() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE'
+       OR OLD.tenant_id IS DISTINCT FROM NEW.tenant_id
+       OR OLD.task_id IS DISTINCT FROM NEW.task_id
+       OR OLD.inventory_owner_id IS DISTINCT FROM NEW.inventory_owner_id
+       OR OLD.facility_id IS DISTINCT FROM NEW.facility_id
+       OR OLD.source_inventory_balance_id
+            IS DISTINCT FROM NEW.source_inventory_balance_id
+       OR OLD.source_location_id IS DISTINCT FROM NEW.source_location_id
+       OR OLD.destination_location_id
+            IS DISTINCT FROM NEW.destination_location_id
+       OR OLD.item_batch_id IS DISTINCT FROM NEW.item_batch_id
+       OR OLD.item_id IS DISTINCT FROM NEW.item_id
+       OR OLD.inventory_status IS DISTINCT FROM NEW.inventory_status
+       OR OLD.planned_quantity IS DISTINCT FROM NEW.planned_quantity
+       OR OLD.closed_at IS NOT NULL
+       OR NEW.closed_at IS NULL
+    THEN
+        RAISE EXCEPTION 'putaway task snapshots are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_role_hierarchy(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_role_hierarchy() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended('role-hierarchy:' || NEW.tenant_id::TEXT, 0)
+    );
+
+    IF NEW.parent_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.parent_id = NEW.id THEN
+        RAISE EXCEPTION 'a role cannot be its own parent'
+            USING ERRCODE = '23514';
+    END IF;
+    IF EXISTS (
+        WITH RECURSIVE ancestors(id, parent_id) AS (
+            SELECT role.id, role.parent_id
+            FROM roles role
+            WHERE role.tenant_id = NEW.tenant_id
+              AND role.id = NEW.parent_id
+            UNION
+            SELECT role.id, role.parent_id
+            FROM roles role
+            INNER JOIN ancestors ancestor ON ancestor.parent_id = role.id
+            WHERE role.tenant_id = NEW.tenant_id
+        )
+        SELECT 1 FROM ancestors WHERE id = NEW.id
+    ) THEN
+        RAISE EXCEPTION 'role hierarchy cannot contain a cycle'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_self_role(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_self_role() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF OLD.self_user_id IS NULL AND NEW.self_user_id IS NOT NULL THEN
+        RAISE EXCEPTION 'a regular role cannot become a self role'
+            USING ERRCODE = '23514';
+    END IF;
+    IF OLD.self_user_id IS NOT NULL AND (
+        NEW.self_user_id IS DISTINCT FROM OLD.self_user_id
+        OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+        OR NEW.parent_id IS NOT NULL
+        OR NEW.deleted IS NOT NULL
+        OR NEW.description IS DISTINCT FROM 'Self role'
+    ) THEN
+        RAISE EXCEPTION 'self role invariants cannot be changed'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_self_user_role(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_self_user_role() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF (
+        NEW.deleted IS NOT NULL
+        OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+        OR NEW.user_id IS DISTINCT FROM OLD.user_id
+        OR NEW.role_id IS DISTINCT FROM OLD.role_id
+    ) AND EXISTS (
+        SELECT 1
+        FROM roles role
+        WHERE role.tenant_id = OLD.tenant_id
+          AND role.id = OLD.role_id
+          AND role.self_user_id = OLD.user_id
+    ) THEN
+        RAISE EXCEPTION 'self role assignment cannot be changed'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: inventory_allocation_cannot_be_deleted(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.inventory_allocation_cannot_be_deleted() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'inventory allocations are retained permanently'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: inventory_entry_matches_batch(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.inventory_entry_matches_batch() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    batch_item_id BIGINT;
+    batch_uom TEXT;
+    batch_lot TEXT;
+    batch_expiration TIMESTAMPTZ;
+    batch_serial TEXT;
+BEGIN
+    SELECT item_id, uom, lot, expiration, serial
+    INTO batch_item_id, batch_uom, batch_lot, batch_expiration, batch_serial
+    FROM item_batches
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND id = NEW.item_batch_id;
+
+    IF batch_item_id IS NULL THEN
+        RAISE EXCEPTION 'inventory item batch does not exist in this tenant and owner scope'
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF NEW.item_id IS DISTINCT FROM batch_item_id
+       OR NEW.uom IS DISTINCT FROM batch_uom
+       OR NEW.lot IS DISTINCT FROM batch_lot
+       OR NEW.expiration IS DISTINCT FROM batch_expiration
+       OR NEW.serial IS DISTINCT FROM batch_serial THEN
+        RAISE EXCEPTION 'inventory dimensions must match the item batch'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: inventory_hold_cannot_be_deleted(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.inventory_hold_cannot_be_deleted() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'inventory holds are retained permanently'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: inventory_row_matches_batch(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.inventory_row_matches_batch() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    batch_item_id BIGINT;
+    batch_uom TEXT;
+BEGIN
+    SELECT item_id, uom
+    INTO batch_item_id, batch_uom
+    FROM item_batches
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND id = NEW.item_batch_id;
+
+    IF batch_item_id IS NULL THEN
+        RAISE EXCEPTION 'inventory item batch does not exist in this tenant and owner scope'
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF NEW.item_id IS DISTINCT FROM batch_item_id
+       OR NEW.uom IS DISTINCT FROM batch_uom THEN
+        RAISE EXCEPTION 'inventory dimensions must match the item batch'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: prevent_mixed_item_lot_expiration_per_location(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.prevent_mixed_item_lot_expiration_per_location() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    incoming_item_id BIGINT;
+BEGIN
+    IF NEW.deleted IS NULL AND NEW.qty_on_hand > 0 THEN
+        IF TG_OP <> 'INSERT' THEN
+            IF OLD.location_id IS NOT DISTINCT FROM NEW.location_id
+               AND OLD.item_batch_id IS NOT DISTINCT FROM NEW.item_batch_id
+               AND OLD.deleted IS NOT DISTINCT FROM NEW.deleted
+               AND NEW.qty_on_hand <= OLD.qty_on_hand
+            THEN
+                RETURN NEW;
+            END IF;
+        END IF;
+
+        SELECT item_id INTO incoming_item_id
+        FROM item_batches
+        WHERE tenant_id = NEW.tenant_id
+          AND inventory_owner_id = NEW.inventory_owner_id
+          AND id = NEW.item_batch_id;
+
+        PERFORM pg_advisory_xact_lock(hashtextextended(
+            'inventory-location-item:' || NEW.tenant_id::text || ':' || NEW.inventory_owner_id::text || ':' || NEW.location_id::text || ':' || incoming_item_id::text,
+            0
+        ));
+
+        IF EXISTS (
+            SELECT 1
+            FROM inventory_balances ib
+            INNER JOIN item_batches existing_batch ON existing_batch.id = ib.item_batch_id
+            INNER JOIN item_batches incoming_batch ON incoming_batch.id = NEW.item_batch_id
+            WHERE ib.id <> COALESCE(NEW.id, -1)
+              AND ib.location_id = NEW.location_id
+              AND ib.tenant_id = NEW.tenant_id
+              AND ib.inventory_owner_id = NEW.inventory_owner_id
+              AND ib.deleted IS NULL
+              AND ib.qty_on_hand > 0
+              AND existing_batch.item_id = incoming_item_id
+              AND (
+                  existing_batch.lot IS DISTINCT FROM incoming_batch.lot
+                  OR existing_batch.expiration IS DISTINCT FROM incoming_batch.expiration
+              )
+            LIMIT 1
+        ) THEN
+            RAISE EXCEPTION 'location already contains this item with a different lot or expiration'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: protect_integration_inbox_key(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.protect_integration_inbox_key() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'integration inbox keys are permanent'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: protect_integration_inbox_receipt_envelope(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.protect_integration_inbox_receipt_envelope() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'integration inbox receipt envelopes are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: protect_inventory_owner_facility_assignment(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.protect_inventory_owner_facility_assignment() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    referenced_tenant_id BIGINT := OLD.tenant_id;
+    referenced_inventory_owner_id BIGINT := OLD.inventory_owner_id;
+    referenced_facility_id BIGINT := OLD.facility_id;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+            OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+            OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+        THEN
+            RAISE EXCEPTION 'inventory owner facility dimensions are immutable'
+                USING ERRCODE = '55000';
+        END IF;
+
+        IF OLD.deleted IS NOT NULL OR NEW.deleted IS NULL THEN
+            RETURN NEW;
+        END IF;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.inventory_holds hold
+        WHERE hold.tenant_id = referenced_tenant_id
+          AND hold.inventory_owner_id = referenced_inventory_owner_id
+          AND hold.facility_id = referenced_facility_id
+          AND hold.deleted IS NULL
+          AND hold.status = 'active'
+    ) THEN
+        RAISE EXCEPTION
+            'inventory owner facility assignment has active holds'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.inventory_balances balance
+        WHERE balance.tenant_id = referenced_tenant_id
+          AND balance.inventory_owner_id = referenced_inventory_owner_id
+          AND balance.facility_id = referenced_facility_id
+          AND (
+              balance.qty_on_hand > 0
+              OR balance.qty_reserved > 0
+              OR balance.qty_held > 0
+          )
+    ) THEN
+        RAISE EXCEPTION
+            'inventory owner facility assignment has committed inventory'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.inventory_reservations reservation
+        WHERE reservation.tenant_id = referenced_tenant_id
+          AND reservation.inventory_owner_id =
+              referenced_inventory_owner_id
+          AND reservation.facility_id = referenced_facility_id
+          AND reservation.deleted IS NULL
+          AND reservation.status = 'active'
+    ) THEN
+        RAISE EXCEPTION
+            'inventory owner facility assignment has active reservations'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.license_plates license_plate
+        WHERE license_plate.tenant_id = referenced_tenant_id
+          AND license_plate.inventory_owner_id =
+              referenced_inventory_owner_id
+          AND license_plate.facility_id = referenced_facility_id
+          AND license_plate.deleted IS NULL
+    ) THEN
+        RAISE EXCEPTION
+            'inventory owner facility assignment has active license plates'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.work_tasks task
+        WHERE task.tenant_id = referenced_tenant_id
+          AND task.inventory_owner_id = referenced_inventory_owner_id
+          AND task.facility_id = referenced_facility_id
+          AND task.deleted IS NULL
+          AND task.status IN ('open', 'assigned', 'in_progress')
+    ) THEN
+        RAISE EXCEPTION
+            'inventory owner facility assignment has executable work'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: protect_outbox_aggregate_sequence_state(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.protect_outbox_aggregate_sequence_state() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'outbox aggregate sequences are permanent'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+        OR NEW.ordering_key IS DISTINCT FROM OLD.ordering_key
+        OR NEW.last_sequence <> OLD.last_sequence + 1
+        OR NEW.updated < OLD.updated
+    THEN
+        RAISE EXCEPTION 'outbox aggregate sequences must advance by one'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: protect_outbox_delivery_attempt_history(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.protect_outbox_delivery_attempt_history() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'outbox delivery attempt history is append-only'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: protect_outbox_event_envelope(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.protect_outbox_event_envelope() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.id IS DISTINCT FROM OLD.id
+        OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+        OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+        OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+        OR NEW.actor_user_id IS DISTINCT FROM OLD.actor_user_id
+        OR NEW.created IS DISTINCT FROM OLD.created
+        OR NEW.event_key IS DISTINCT FROM OLD.event_key
+        OR NEW.aggregate_type IS DISTINCT FROM OLD.aggregate_type
+        OR NEW.aggregate_id IS DISTINCT FROM OLD.aggregate_id
+        OR NEW.ordering_key IS DISTINCT FROM OLD.ordering_key
+        OR NEW.aggregate_sequence IS DISTINCT FROM OLD.aggregate_sequence
+        OR NEW.event_type IS DISTINCT FROM OLD.event_type
+        OR NEW.schema_version IS DISTINCT FROM OLD.schema_version
+        OR NEW.payload IS DISTINCT FROM OLD.payload
+        OR NEW.occurred_at IS DISTINCT FROM OLD.occurred_at
+    THEN
+        RAISE EXCEPTION 'outbox event envelopes are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: protect_outbox_event_key_state(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.protect_outbox_event_key_state() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'outbox event keys are permanent'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+        OR NEW.event_key IS DISTINCT FROM OLD.event_key
+        OR NEW.created IS DISTINCT FROM OLD.created
+    THEN
+        RAISE EXCEPTION 'outbox event keys are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: protect_unpublished_outbox_event_deletion(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.protect_unpublished_outbox_event_deletion() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF OLD.published_at IS NULL AND OLD.discarded_at IS NULL THEN
+        RAISE EXCEPTION 'only published or discarded outbox events may be deleted'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN OLD;
+END;
+$$;
+
+
+--
+-- Name: protect_work_task_dimensions(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.protect_work_task_dimensions() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+        OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+        OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+        OR NEW.task_type IS DISTINCT FROM OLD.task_type
+    THEN
+        RAISE EXCEPTION 'work task dimensions are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: reject_cycle_count_result_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_cycle_count_result_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'cycle count results are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: reject_direct_inventory_balance_status_update(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_direct_inventory_balance_status_update() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NEW.status IS DISTINCT FROM OLD.status THEN
+        RAISE EXCEPTION
+            'inventory balance status changes require a status-change transaction'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: reject_inventory_journal_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_inventory_journal_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'inventory journal rows are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: reject_inventory_relocation_result_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_inventory_relocation_result_mutation() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'inventory relocation results are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: reject_license_plate_putaway_content_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_license_plate_putaway_content_mutation() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    RAISE EXCEPTION
+        'license plate putaway content snapshots are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: reject_license_plate_putaway_result_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_license_plate_putaway_result_mutation() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'license plate putaway results are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: reject_putaway_result_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_putaway_result_mutation() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'putaway results are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: require_active_inventory_owner_facility(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_active_inventory_owner_facility() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    PERFORM 1
+    FROM public.inventory_owner_facilities assignment
+    INNER JOIN public.inventory_owners owner
+        ON owner.tenant_id = assignment.tenant_id
+       AND owner.id = assignment.inventory_owner_id
+       AND owner.deleted IS NULL
+    INNER JOIN public.facilities facility
+        ON facility.tenant_id = assignment.tenant_id
+       AND facility.id = assignment.facility_id
+       AND facility.deleted IS NULL
+    WHERE assignment.tenant_id = NEW.tenant_id
+      AND assignment.inventory_owner_id = NEW.inventory_owner_id
+      AND assignment.facility_id = NEW.facility_id
+      AND assignment.deleted IS NULL
+    FOR SHARE OF assignment;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'inventory owner is not active at the selected facility'
+            USING ERRCODE = '23503';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_integration_inbox_receipt_for_key(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_integration_inbox_receipt_for_key() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM integration_inbox_receipts receipt
+        WHERE receipt.tenant_id = NEW.tenant_id
+          AND receipt.id = NEW.receipt_id
+          AND receipt.source_key = NEW.source_key
+          AND receipt.deduplication_key = NEW.deduplication_key
+          AND receipt.inventory_owner_id
+                IS NOT DISTINCT FROM NEW.inventory_owner_id
+          AND receipt.facility_id IS NOT DISTINCT FROM NEW.facility_id
+          AND receipt.content_type = NEW.content_type
+          AND receipt.payload_sha256 = NEW.payload_sha256
+    ) THEN
+        RAISE EXCEPTION 'integration inbox key must match its receipt envelope'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_item_location_cycle_count_result(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_item_location_cycle_count_result() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    result_row RECORD;
+BEGIN
+    IF NEW.task_type = 'cycle_count_item_location'
+       AND NEW.status = 'completed'
+       AND OLD.status IS DISTINCT FROM NEW.status
+    THEN
+        SELECT confirmed_by, confirmed_at
+        INTO result_row
+        FROM cycle_count_item_location_results
+        WHERE tenant_id = NEW.tenant_id
+          AND task_id = NEW.id;
+
+        IF NOT FOUND
+           OR NEW.completed_by IS DISTINCT FROM result_row.confirmed_by
+           OR NEW.completed_at IS DISTINCT FROM result_row.confirmed_at
+        THEN
+            RAISE EXCEPTION 'item-location cycle count completion requires its result'
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_license_plate_putaway_result(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_license_plate_putaway_result() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    result_row RECORD;
+BEGIN
+    IF NEW.task_type = 'license_plate_putaway'
+       AND NEW.status = 'completed'
+    THEN
+        SELECT result.confirmed_by,
+               result.confirmed_at
+        INTO result_row
+        FROM public.license_plate_putaway_results result
+        WHERE result.tenant_id = NEW.tenant_id
+          AND result.task_id = NEW.id;
+
+        IF NOT FOUND
+           OR NEW.completed_by
+                IS DISTINCT FROM result_row.confirmed_by
+           OR NEW.completed_at
+                IS DISTINCT FROM result_row.confirmed_at
+        THEN
+            RAISE EXCEPTION
+                'license plate putaway completion requires its matching result'
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_license_plate_putaway_task_detail(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_license_plate_putaway_task_detail() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    detail_count BIGINT;
+BEGIN
+    IF NEW.task_type = 'license_plate_putaway' THEN
+        SELECT COUNT(*)
+        INTO detail_count
+        FROM public.license_plate_putaway_tasks detail
+        WHERE detail.tenant_id = NEW.tenant_id
+          AND detail.task_id = NEW.id
+          AND detail.inventory_owner_id =
+              NEW.inventory_owner_id
+          AND detail.facility_id = NEW.facility_id;
+
+        IF detail_count <> 1 THEN
+            RAISE EXCEPTION
+                'license plate putaway work task requires exactly one scoped detail'
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_open_inventory_transaction(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_open_inventory_transaction() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM inventory_transactions
+        WHERE tenant_id = NEW.tenant_id
+          AND inventory_owner_id = NEW.inventory_owner_id
+          AND id = NEW.transaction_id
+          AND xmin::TEXT = pg_current_xact_id()::TEXT
+    ) THEN
+        RAISE EXCEPTION 'inventory entries may only be appended while creating their transaction'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_putaway_result(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_putaway_result() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    task_row RECORD;
+    result_row RECORD;
+BEGIN
+    SELECT task.status,
+           task.completed_by,
+           task.completed_at
+    INTO task_row
+    FROM public.work_tasks task
+    WHERE task.tenant_id = NEW.tenant_id
+      AND task.id = NEW.id
+      AND task.task_type = 'putaway';
+
+    IF FOUND AND task_row.status = 'completed' THEN
+        SELECT result.confirmed_by,
+               result.confirmed_at
+        INTO result_row
+        FROM public.putaway_results result
+        WHERE result.tenant_id = NEW.tenant_id
+          AND result.task_id = NEW.id;
+
+        IF NOT FOUND
+           OR task_row.completed_by
+                IS DISTINCT FROM result_row.confirmed_by
+           OR task_row.completed_at
+                IS DISTINCT FROM result_row.confirmed_at
+        THEN
+            RAISE EXCEPTION
+                'putaway completion requires its matching result'
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: retire_deleted_facility_employee_assignments(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.retire_deleted_facility_employee_assignments() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    checked_employee_id BIGINT;
+BEGIN
+    IF NEW.deleted IS NOT NULL AND OLD.deleted IS NULL THEN
+        FOR checked_employee_id IN
+            UPDATE employee_facilities
+            SET deleted = NEW.deleted
+            WHERE tenant_id = NEW.tenant_id
+              AND facility_id = NEW.id
+              AND deleted IS NULL
+            RETURNING employee_id
+        LOOP
+            PERFORM assert_employee_active_facility(NEW.tenant_id, checked_employee_id);
+        END LOOP;
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+
+--
+-- Name: select_web_session_tenant(text, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.select_web_session_tenant(p_token_hash text, p_selected_tenant_id bigint) RETURNS boolean
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+    WITH selected AS (
+        UPDATE public.sessions session
+        SET active_tenant_id = p_selected_tenant_id,
+            last_seen_at = CURRENT_TIMESTAMP
+        WHERE session.token = p_token_hash
+          AND session.purpose = 'web'
+          AND session.expires > CURRENT_TIMESTAMP
+          AND EXISTS (
+              SELECT 1
+              FROM public.tenant_memberships membership
+              JOIN public.tenants tenant
+                ON tenant.id = membership.tenant_id
+              WHERE membership.tenant_id = p_selected_tenant_id
+                AND membership.user_id = session.user_id
+                AND membership.deleted IS NULL
+                AND tenant.deleted IS NULL
+                AND tenant.status = 'active'
+          )
+        RETURNING 1
+    )
+    SELECT EXISTS(SELECT 1 FROM selected)
+$$;
+
+
+--
+-- Name: session_user_id(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.session_user_id(token_hash text) RETURNS bigint
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+    SELECT session.user_id
+    FROM public.sessions session
+    WHERE session.token = token_hash
+      AND session.expires > CURRENT_TIMESTAMP
+$$;
+
+
+--
+-- Name: validate_inventory_allocation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_inventory_allocation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    reservation_facility_id BIGINT;
+    reservation_item_id BIGINT;
+    reservation_uom TEXT;
+    reservation_qty BIGINT;
+    reservation_status TEXT;
+    balance_facility_id BIGINT;
+    balance_location_id BIGINT;
+    balance_license_plate_id BIGINT;
+    balance_item_batch_id BIGINT;
+    balance_item_id BIGINT;
+    balance_uom TEXT;
+    balance_status TEXT;
+    balance_on_hand BIGINT;
+    balance_reserved BIGINT;
+    balance_held BIGINT;
+    allocated_qty BIGINT;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+           OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+           OR NEW.created IS DISTINCT FROM OLD.created
+           OR NEW.created_by IS DISTINCT FROM OLD.created_by
+           OR NEW.reservation_id IS DISTINCT FROM OLD.reservation_id
+           OR NEW.inventory_balance_id IS DISTINCT FROM
+               OLD.inventory_balance_id
+           OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+           OR NEW.location_id IS DISTINCT FROM OLD.location_id
+           OR NEW.license_plate_id IS DISTINCT FROM OLD.license_plate_id
+           OR NEW.item_batch_id IS DISTINCT FROM OLD.item_batch_id
+           OR NEW.item_id IS DISTINCT FROM OLD.item_id
+           OR NEW.uom IS DISTINCT FROM OLD.uom
+           OR NEW.inventory_status IS DISTINCT FROM OLD.inventory_status
+           OR NEW.qty IS DISTINCT FROM OLD.qty
+        THEN
+            RAISE EXCEPTION 'inventory allocation dimensions are immutable'
+                USING ERRCODE = '55000';
+        END IF;
+
+        IF OLD.status <> 'allocated'
+           AND (
+               NEW.status IS DISTINCT FROM OLD.status
+               OR NEW.deleted IS DISTINCT FROM OLD.deleted
+               OR NEW.modified IS DISTINCT FROM OLD.modified
+           )
+        THEN
+            RAISE EXCEPTION 'terminal inventory allocation is immutable'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF NEW.status <> 'allocated' OR NEW.deleted IS NOT NULL THEN
+        RAISE EXCEPTION 'new inventory allocation must be active'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT reservation.facility_id, reservation.item_id, reservation.uom,
+           reservation.qty, reservation.status
+    INTO reservation_facility_id, reservation_item_id, reservation_uom,
+         reservation_qty, reservation_status
+    FROM public.inventory_reservations reservation
+    WHERE reservation.tenant_id = NEW.tenant_id
+      AND reservation.inventory_owner_id = NEW.inventory_owner_id
+      AND reservation.id = NEW.reservation_id
+    FOR UPDATE;
+
+    IF reservation_qty IS NULL THEN
+        RAISE EXCEPTION 'inventory reservation does not exist'
+            USING ERRCODE = '23503';
+    END IF;
+
+    SELECT balance.facility_id, balance.location_id,
+           balance.license_plate_id, balance.item_batch_id, balance.item_id,
+           balance.uom, balance.status, balance.qty_on_hand,
+           balance.qty_reserved, balance.qty_held
+    INTO balance_facility_id, balance_location_id,
+         balance_license_plate_id, balance_item_batch_id, balance_item_id,
+         balance_uom, balance_status, balance_on_hand, balance_reserved,
+         balance_held
+    FROM public.inventory_balances balance
+    WHERE balance.tenant_id = NEW.tenant_id
+      AND balance.inventory_owner_id = NEW.inventory_owner_id
+      AND balance.id = NEW.inventory_balance_id
+      AND balance.deleted IS NULL
+    FOR UPDATE;
+
+    IF balance_on_hand IS NULL THEN
+        RAISE EXCEPTION 'allocation inventory balance does not exist'
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF NEW.facility_id IS DISTINCT FROM reservation_facility_id
+       OR NEW.facility_id IS DISTINCT FROM balance_facility_id
+       OR NEW.location_id IS DISTINCT FROM balance_location_id
+       OR NEW.license_plate_id IS DISTINCT FROM balance_license_plate_id
+       OR NEW.item_batch_id IS DISTINCT FROM balance_item_batch_id
+       OR NEW.item_id IS DISTINCT FROM reservation_item_id
+       OR NEW.item_id IS DISTINCT FROM balance_item_id
+       OR NEW.uom IS DISTINCT FROM reservation_uom
+       OR NEW.uom IS DISTINCT FROM balance_uom
+       OR NEW.inventory_status IS DISTINCT FROM balance_status
+       OR NEW.inventory_status <> 'available'
+    THEN
+        RAISE EXCEPTION
+            'allocation dimensions must match reservation and available balance'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF TG_OP = 'INSERT' THEN
+        IF reservation_status <> 'active' THEN
+            RAISE EXCEPTION 'inventory reservation is not active'
+                USING ERRCODE = '55000';
+        END IF;
+
+        SELECT COALESCE(SUM(allocation.qty), 0)::BIGINT
+        INTO allocated_qty
+        FROM public.inventory_allocations allocation
+        WHERE allocation.tenant_id = NEW.tenant_id
+          AND allocation.inventory_owner_id = NEW.inventory_owner_id
+          AND allocation.reservation_id = NEW.reservation_id
+          AND allocation.deleted IS NULL
+          AND allocation.status = 'allocated';
+
+        IF allocated_qty + NEW.qty > reservation_qty THEN
+            RAISE EXCEPTION
+                'active allocations exceed reservation demand'
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF balance_on_hand - balance_reserved - balance_held < NEW.qty THEN
+            RAISE EXCEPTION
+                'insufficient available inventory to allocate'
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_inventory_hold(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_inventory_hold() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    balance_facility_id BIGINT;
+    balance_location_id BIGINT;
+    balance_license_plate_id BIGINT;
+    balance_item_batch_id BIGINT;
+    balance_item_id BIGINT;
+    balance_uom TEXT;
+    balance_status TEXT;
+    balance_on_hand BIGINT;
+    balance_reserved BIGINT;
+    balance_held BIGINT;
+    active_hold_qty BIGINT;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+           OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+           OR NEW.created IS DISTINCT FROM OLD.created
+           OR NEW.created_by IS DISTINCT FROM OLD.created_by
+           OR NEW.inventory_balance_id IS DISTINCT FROM
+               OLD.inventory_balance_id
+           OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+           OR NEW.location_id IS DISTINCT FROM OLD.location_id
+           OR NEW.license_plate_id IS DISTINCT FROM OLD.license_plate_id
+           OR NEW.item_batch_id IS DISTINCT FROM OLD.item_batch_id
+           OR NEW.item_id IS DISTINCT FROM OLD.item_id
+           OR NEW.uom IS DISTINCT FROM OLD.uom
+           OR NEW.inventory_status IS DISTINCT FROM OLD.inventory_status
+           OR NEW.qty IS DISTINCT FROM OLD.qty
+           OR NEW.reason_code IS DISTINCT FROM OLD.reason_code
+           OR NEW.note IS DISTINCT FROM OLD.note
+           OR NEW.reference_type IS DISTINCT FROM OLD.reference_type
+           OR NEW.reference_id IS DISTINCT FROM OLD.reference_id
+        THEN
+            RAISE EXCEPTION 'inventory hold dimensions are immutable'
+                USING ERRCODE = '55000';
+        END IF;
+
+        IF OLD.status = 'released' THEN
+            RAISE EXCEPTION 'released inventory hold is immutable'
+                USING ERRCODE = '55000';
+        END IF;
+
+        IF NEW.status = 'active'
+           AND (
+               NEW.modified IS DISTINCT FROM OLD.modified
+               OR NEW.deleted IS DISTINCT FROM OLD.deleted
+               OR NEW.released_by IS DISTINCT FROM OLD.released_by
+               OR NEW.released_at IS DISTINCT FROM OLD.released_at
+           )
+        THEN
+            RAISE EXCEPTION 'active inventory hold lifecycle is immutable'
+                USING ERRCODE = '55000';
+        ELSIF NEW.status = 'released'
+              AND (
+                  NEW.modified IS NULL
+                  OR NEW.deleted IS DISTINCT FROM NEW.modified
+                  OR NEW.released_at IS DISTINCT FROM NEW.modified
+                  OR NEW.released_by IS NULL
+              )
+        THEN
+            RAISE EXCEPTION 'invalid inventory hold release'
+                USING ERRCODE = '55000';
+        ELSIF NEW.status NOT IN ('active', 'released') THEN
+            RAISE EXCEPTION 'invalid inventory hold transition'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF NEW.status <> 'active'
+          OR NEW.deleted IS NOT NULL
+          OR NEW.released_by IS NOT NULL
+          OR NEW.released_at IS NOT NULL
+    THEN
+        RAISE EXCEPTION 'new inventory hold must be active'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT balance.facility_id, balance.location_id,
+           balance.license_plate_id, balance.item_batch_id, balance.item_id,
+           balance.uom, balance.status, balance.qty_on_hand,
+           balance.qty_reserved, balance.qty_held
+    INTO balance_facility_id, balance_location_id,
+         balance_license_plate_id, balance_item_batch_id, balance_item_id,
+         balance_uom, balance_status, balance_on_hand, balance_reserved,
+         balance_held
+    FROM public.inventory_balances balance
+    WHERE balance.tenant_id = NEW.tenant_id
+      AND balance.inventory_owner_id = NEW.inventory_owner_id
+      AND balance.id = NEW.inventory_balance_id
+      AND balance.deleted IS NULL
+    FOR UPDATE;
+
+    IF balance_on_hand IS NULL THEN
+        RAISE EXCEPTION 'hold inventory balance does not exist'
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF NEW.facility_id IS DISTINCT FROM balance_facility_id
+       OR NEW.location_id IS DISTINCT FROM balance_location_id
+       OR NEW.license_plate_id IS DISTINCT FROM balance_license_plate_id
+       OR NEW.item_batch_id IS DISTINCT FROM balance_item_batch_id
+       OR NEW.item_id IS DISTINCT FROM balance_item_id
+       OR NEW.uom IS DISTINCT FROM balance_uom
+       OR NEW.inventory_status IS DISTINCT FROM balance_status
+    THEN
+        RAISE EXCEPTION
+            'hold dimensions must match its inventory balance'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT COALESCE(SUM(hold.qty), 0)::BIGINT
+    INTO active_hold_qty
+    FROM public.inventory_holds hold
+    WHERE hold.tenant_id = NEW.tenant_id
+      AND hold.inventory_owner_id = NEW.inventory_owner_id
+      AND hold.inventory_balance_id = NEW.inventory_balance_id
+      AND hold.deleted IS NULL
+      AND hold.status = 'active';
+
+    IF balance_held IS DISTINCT FROM active_hold_qty THEN
+        RAISE EXCEPTION
+            'inventory balance held projection does not match active holds'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF TG_OP = 'INSERT'
+       AND balance_on_hand - balance_reserved - balance_held < NEW.qty
+    THEN
+        RAISE EXCEPTION
+            'insufficient uncommitted inventory to hold'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_inventory_reservation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_inventory_reservation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    line_qty BIGINT;
+    line_item_id BIGINT;
+    line_uom TEXT;
+    active_demand BIGINT;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+           OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+           OR NEW.created IS DISTINCT FROM OLD.created
+           OR NEW.created_by IS DISTINCT FROM OLD.created_by
+           OR NEW.order_id IS DISTINCT FROM OLD.order_id
+           OR NEW.order_item_id IS DISTINCT FROM OLD.order_item_id
+           OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+           OR NEW.item_id IS DISTINCT FROM OLD.item_id
+           OR NEW.uom IS DISTINCT FROM OLD.uom
+           OR NEW.qty IS DISTINCT FROM OLD.qty
+        THEN
+            RAISE EXCEPTION 'inventory reservation demand is immutable'
+                USING ERRCODE = '55000';
+        END IF;
+
+        IF OLD.status <> 'active'
+           AND (
+               NEW.status IS DISTINCT FROM OLD.status
+               OR NEW.deleted IS DISTINCT FROM OLD.deleted
+               OR NEW.modified IS DISTINCT FROM OLD.modified
+           )
+        THEN
+            RAISE EXCEPTION 'terminal inventory reservation is immutable'
+                USING ERRCODE = '55000';
+        END IF;
+
+        IF OLD.status = 'active'
+           AND NEW.status IN ('cancelled', 'fulfilled')
+           AND EXISTS (
+               SELECT 1
+               FROM public.inventory_allocations allocation
+               WHERE allocation.tenant_id = OLD.tenant_id
+                 AND allocation.inventory_owner_id =
+                     OLD.inventory_owner_id
+                 AND allocation.reservation_id = OLD.id
+                 AND allocation.deleted IS NULL
+                 AND allocation.status = 'allocated'
+           )
+        THEN
+            RAISE EXCEPTION
+                'active allocations must be released before reservation closure'
+                USING ERRCODE = '55000';
+        END IF;
+
+        RETURN NEW;
+    END IF;
+
+    IF NEW.status <> 'active' OR NEW.deleted IS NOT NULL THEN
+        RAISE EXCEPTION 'new inventory reservation must be active'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT order_line.qty, order_line.item_id, item.packaging_unit
+    INTO line_qty, line_item_id, line_uom
+    FROM public.order_items order_line
+    INNER JOIN public.orders customer_order
+        ON customer_order.tenant_id = order_line.tenant_id
+       AND customer_order.inventory_owner_id =
+           order_line.inventory_owner_id
+       AND customer_order.id = order_line.order_id
+       AND customer_order.deleted IS NULL
+       AND customer_order.status NOT IN ('shipped', 'cancelled', 'void')
+    INNER JOIN public.items item
+        ON item.tenant_id = order_line.tenant_id
+       AND item.id = order_line.item_id
+       AND item.deleted IS NULL
+    INNER JOIN public.inventory_owner_facilities assignment
+        ON assignment.tenant_id = order_line.tenant_id
+       AND assignment.inventory_owner_id =
+           order_line.inventory_owner_id
+       AND assignment.facility_id = NEW.facility_id
+       AND assignment.deleted IS NULL
+    WHERE order_line.tenant_id = NEW.tenant_id
+      AND order_line.inventory_owner_id = NEW.inventory_owner_id
+      AND order_line.order_id = NEW.order_id
+      AND order_line.id = NEW.order_item_id
+      AND order_line.deleted IS NULL
+    FOR UPDATE OF order_line;
+
+    IF line_qty IS NULL THEN
+        RAISE EXCEPTION
+            'reservation order line or owner-facility assignment is unavailable'
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF NEW.item_id IS DISTINCT FROM line_item_id
+       OR NEW.uom IS DISTINCT FROM line_uom
+    THEN
+        RAISE EXCEPTION
+            'reservation item and UOM must match its order line'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT COALESCE(SUM(reservation.qty), 0)::BIGINT
+    INTO active_demand
+    FROM public.inventory_reservations reservation
+    WHERE reservation.tenant_id = NEW.tenant_id
+      AND reservation.inventory_owner_id = NEW.inventory_owner_id
+      AND reservation.order_id = NEW.order_id
+      AND reservation.order_item_id = NEW.order_item_id
+      AND reservation.deleted IS NULL
+      AND reservation.status = 'active';
+
+    IF active_demand + NEW.qty > line_qty THEN
+        RAISE EXCEPTION
+            'active reservations exceed order-line demand'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_item_location_cycle_count_result(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_item_location_cycle_count_result() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    task_row RECORD;
+    balance_row RECORD;
+    transaction_matches BOOLEAN;
+    matching_entry_count BIGINT;
+    transaction_entry_count BIGINT;
+BEGIN
+    SELECT task.status,
+           task.assigned_user_id,
+           task.deleted,
+           task.lease_expires_at,
+           detail.inventory_owner_id,
+           detail.facility_id,
+           detail.location_id,
+           detail.item_id,
+           detail.inventory_balance_id
+    INTO task_row
+    FROM public.work_tasks task
+    JOIN public.cycle_count_item_location_tasks detail
+      ON detail.tenant_id = task.tenant_id
+     AND detail.task_id = task.id
+    WHERE task.tenant_id = NEW.tenant_id
+      AND task.id = NEW.task_id
+      AND task.task_type = 'cycle_count_item_location'
+    FOR UPDATE OF task, detail;
+
+    IF NOT FOUND
+       OR task_row.deleted IS NOT NULL
+       OR task_row.status <> 'in_progress'
+       OR task_row.assigned_user_id IS DISTINCT FROM NEW.confirmed_by
+       OR task_row.lease_expires_at IS NULL
+       OR task_row.lease_expires_at <= statement_timestamp()
+       OR task_row.inventory_owner_id IS DISTINCT FROM NEW.inventory_owner_id
+       OR task_row.facility_id IS DISTINCT FROM NEW.facility_id
+       OR task_row.location_id IS DISTINCT FROM NEW.location_id
+       OR task_row.item_id IS DISTINCT FROM NEW.item_id
+       OR task_row.inventory_balance_id
+            IS DISTINCT FROM NEW.inventory_balance_id
+    THEN
+        RAISE EXCEPTION
+            'cycle count result does not match an active task claim'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT balance.item_batch_id,
+           balance.license_plate_id,
+           balance.uom,
+           batch.lot,
+           batch.expiration,
+           batch.serial,
+           balance.status,
+           balance.qty_on_hand,
+           balance.qty_reserved,
+           balance.qty_held,
+           balance.deleted
+    INTO balance_row
+    FROM public.inventory_balances balance
+    JOIN public.item_batches batch
+      ON batch.tenant_id = balance.tenant_id
+     AND batch.inventory_owner_id = balance.inventory_owner_id
+     AND batch.id = balance.item_batch_id
+    WHERE balance.tenant_id = NEW.tenant_id
+      AND balance.inventory_owner_id = NEW.inventory_owner_id
+      AND balance.facility_id = NEW.facility_id
+      AND balance.location_id = NEW.location_id
+      AND balance.item_id = NEW.item_id
+      AND balance.id = NEW.inventory_balance_id
+    FOR UPDATE;
+
+    IF NOT FOUND
+       OR balance_row.deleted IS NOT NULL
+       OR balance_row.item_batch_id IS DISTINCT FROM NEW.item_batch_id
+       OR balance_row.license_plate_id IS DISTINCT FROM NEW.license_plate_id
+       OR balance_row.uom IS DISTINCT FROM NEW.uom
+       OR balance_row.lot IS DISTINCT FROM NEW.lot
+       OR balance_row.expiration IS DISTINCT FROM NEW.expiration
+       OR balance_row.serial IS DISTINCT FROM NEW.serial
+       OR balance_row.status IS DISTINCT FROM NEW.status
+       OR balance_row.qty_on_hand IS DISTINCT FROM NEW.counted_qty
+       OR balance_row.qty_reserved IS DISTINCT FROM NEW.system_qty_reserved
+       OR balance_row.qty_held IS DISTINCT FROM NEW.system_qty_held
+    THEN
+        RAISE EXCEPTION
+            'cycle count result does not match the adjusted balance'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.variance_qty <> 0 THEN
+        SELECT EXISTS (
+            SELECT 1
+            FROM public.inventory_transactions transaction
+            WHERE transaction.tenant_id = NEW.tenant_id
+              AND transaction.inventory_owner_id = NEW.inventory_owner_id
+              AND transaction.id = NEW.inventory_transaction_id
+              AND transaction.transaction_type = 'adjust'
+              AND transaction.actor_user_id = NEW.confirmed_by
+              AND transaction.reference_type =
+                  'cycle_count_item_location_task'
+              AND transaction.reference_id = NEW.task_id
+              AND transaction.operation =
+                  'task.confirm_item_location_cycle_count.v1'
+        )
+        INTO transaction_matches;
+
+        SELECT COUNT(*),
+               COUNT(*) FILTER (
+                   WHERE entry.facility_id = NEW.facility_id
+                     AND entry.location_id = NEW.location_id
+                     AND entry.item_batch_id = NEW.item_batch_id
+                     AND entry.item_id = NEW.item_id
+                     AND entry.license_plate_id
+                           IS NOT DISTINCT FROM NEW.license_plate_id
+                     AND entry.uom = NEW.uom
+                     AND entry.status = NEW.status
+                     AND entry.quantity_delta = NEW.variance_qty
+               )
+        INTO transaction_entry_count, matching_entry_count
+        FROM public.inventory_entries entry
+        WHERE entry.tenant_id = NEW.tenant_id
+          AND entry.inventory_owner_id = NEW.inventory_owner_id
+          AND entry.transaction_id = NEW.inventory_transaction_id;
+
+        IF NOT transaction_matches
+           OR transaction_entry_count <> 1
+           OR matching_entry_count <> 1
+        THEN
+            RAISE EXCEPTION
+                'cycle count adjustment does not match its result'
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_license_plate_location_from_balance(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_license_plate_location_from_balance() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        PERFORM public.assert_inventory_balance_license_plate_location_consistency(
+            OLD.tenant_id,
+            OLD.id
+        );
+        RETURN OLD;
+    END IF;
+
+    PERFORM public.assert_inventory_balance_license_plate_location_consistency(
+        NEW.tenant_id,
+        NEW.id
+    );
+
+    IF TG_OP = 'UPDATE'
+       AND (
+           OLD.tenant_id IS DISTINCT FROM NEW.tenant_id
+           OR OLD.id IS DISTINCT FROM NEW.id
+       )
+    THEN
+        PERFORM public.assert_inventory_balance_license_plate_location_consistency(
+            OLD.tenant_id,
+            OLD.id
+        );
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_license_plate_location_from_plate(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_license_plate_location_from_plate() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF TG_OP IN ('UPDATE', 'DELETE') THEN
+        PERFORM public.assert_license_plate_location_consistency(
+            OLD.tenant_id,
+            OLD.id
+        );
+    END IF;
+
+    IF TG_OP IN ('INSERT', 'UPDATE')
+       AND (
+           TG_OP = 'INSERT'
+           OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+           OR NEW.id IS DISTINCT FROM OLD.id
+       )
+    THEN
+        PERFORM public.assert_license_plate_location_consistency(
+            NEW.tenant_id,
+            NEW.id
+        );
+    ELSIF TG_OP = 'UPDATE' THEN
+        PERFORM public.assert_license_plate_location_consistency(
+            NEW.tenant_id,
+            NEW.id
+        );
+    END IF;
+
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_license_plate_putaway_result(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_license_plate_putaway_result() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    task_row RECORD;
+    plate_row RECORD;
+    destination_row RECORD;
+    plate_found BOOLEAN;
+    destination_found BOOLEAN;
+    transaction_matches BOOLEAN;
+    snapshot_balance_count BIGINT;
+    transaction_entry_count BIGINT;
+BEGIN
+    SELECT task.status,
+           task.deleted,
+           task.assigned_user_id,
+           task.completed_by,
+           task.completed_at,
+           detail.closed_at
+    INTO task_row
+    FROM public.work_tasks task
+    INNER JOIN public.license_plate_putaway_tasks detail
+        ON detail.tenant_id = task.tenant_id
+       AND detail.task_id = task.id
+    WHERE task.tenant_id = NEW.tenant_id
+      AND task.id = NEW.task_id
+      AND task.task_type = 'license_plate_putaway';
+
+    IF NOT FOUND
+       OR task_row.status <> 'completed'
+       OR task_row.deleted IS NOT NULL
+       OR task_row.assigned_user_id IS DISTINCT FROM NEW.confirmed_by
+       OR task_row.completed_by IS DISTINCT FROM NEW.confirmed_by
+       OR task_row.completed_at IS DISTINCT FROM NEW.confirmed_at
+       OR task_row.closed_at IS DISTINCT FROM NEW.confirmed_at
+    THEN
+        RAISE EXCEPTION
+            'license plate putaway result does not match its completed task'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT plate.inventory_owner_id,
+           plate.facility_id,
+           plate.location_id,
+           plate.barcode,
+           plate.deleted
+    INTO plate_row
+    FROM public.license_plates plate
+    WHERE plate.tenant_id = NEW.tenant_id
+      AND plate.id = NEW.license_plate_id;
+    plate_found := FOUND;
+
+    SELECT location.facility_id,
+           location.barcode,
+           location.active,
+           location.receivable,
+           location.deleted
+    INTO destination_row
+    FROM public.locations location
+    WHERE location.tenant_id = NEW.tenant_id
+      AND location.id = NEW.destination_location_id;
+    destination_found := FOUND;
+
+    IF NOT plate_found
+       OR NOT destination_found
+       OR plate_row.deleted IS NOT NULL
+       OR plate_row.inventory_owner_id
+            IS DISTINCT FROM NEW.inventory_owner_id
+       OR plate_row.facility_id IS DISTINCT FROM NEW.facility_id
+       OR plate_row.location_id
+            IS DISTINCT FROM NEW.destination_location_id
+       OR plate_row.barcode IS DISTINCT FROM NEW.license_plate_barcode
+       OR destination_row.deleted IS NOT NULL
+       OR NOT destination_row.active
+       OR destination_row.receivable
+       OR destination_row.facility_id IS DISTINCT FROM NEW.facility_id
+       OR destination_row.barcode
+            IS DISTINCT FROM NEW.destination_location_barcode
+    THEN
+        RAISE EXCEPTION
+            'license plate putaway result does not match its destination'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT COUNT(*)
+    INTO snapshot_balance_count
+    FROM public.license_plate_putaway_task_contents content
+    WHERE content.tenant_id = NEW.tenant_id
+      AND content.task_id = NEW.task_id;
+
+    IF snapshot_balance_count <> NEW.moved_balance_count
+       OR EXISTS (
+            SELECT 1
+            FROM public.license_plate_putaway_task_contents content
+            WHERE content.tenant_id = NEW.tenant_id
+              AND content.task_id = NEW.task_id
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM public.inventory_balances balance
+                  WHERE balance.tenant_id = NEW.tenant_id
+                    AND balance.inventory_owner_id =
+                        NEW.inventory_owner_id
+                    AND balance.facility_id = NEW.facility_id
+                    AND balance.license_plate_id =
+                        NEW.license_plate_id
+                    AND balance.id = content.inventory_balance_id
+                    AND balance.location_id =
+                        NEW.destination_location_id
+                    AND balance.item_batch_id =
+                        content.item_batch_id
+                    AND balance.item_id = content.item_id
+                    AND balance.uom = content.uom
+                    AND balance.status =
+                        content.inventory_status
+                    AND balance.qty_on_hand =
+                        content.planned_quantity
+                    AND balance.qty_reserved = 0
+                    AND balance.qty_held = 0
+                    AND balance.deleted IS NULL
+              )
+       )
+       OR EXISTS (
+            SELECT 1
+            FROM public.inventory_balances balance
+            WHERE balance.tenant_id = NEW.tenant_id
+              AND balance.inventory_owner_id = NEW.inventory_owner_id
+              AND balance.facility_id = NEW.facility_id
+              AND balance.license_plate_id = NEW.license_plate_id
+              AND balance.deleted IS NULL
+              AND balance.qty_on_hand > 0
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM public.license_plate_putaway_task_contents content
+                  WHERE content.tenant_id = NEW.tenant_id
+                    AND content.task_id = NEW.task_id
+                    AND content.inventory_balance_id = balance.id
+                    AND content.item_batch_id = balance.item_batch_id
+                    AND content.item_id = balance.item_id
+                    AND content.uom = balance.uom
+                    AND content.inventory_status = balance.status
+                    AND content.planned_quantity =
+                        balance.qty_on_hand
+              )
+       )
+    THEN
+        RAISE EXCEPTION
+            'license plate putaway result does not match its content snapshot'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.inventory_transactions transaction
+        WHERE transaction.tenant_id = NEW.tenant_id
+          AND transaction.inventory_owner_id = NEW.inventory_owner_id
+          AND transaction.id = NEW.inventory_transaction_id
+          AND transaction.transaction_type = 'move'
+          AND transaction.actor_user_id = NEW.confirmed_by
+          AND transaction.reference_type =
+              'license_plate_putaway_task'
+          AND transaction.reference_id = NEW.task_id
+          AND transaction.operation =
+              'task.confirm_license_plate_putaway.v1'
+    )
+    INTO transaction_matches;
+
+    SELECT COUNT(*)
+    INTO transaction_entry_count
+    FROM public.inventory_entries entry
+    WHERE entry.tenant_id = NEW.tenant_id
+      AND entry.inventory_owner_id = NEW.inventory_owner_id
+      AND entry.transaction_id = NEW.inventory_transaction_id;
+
+    IF NOT transaction_matches
+       OR transaction_entry_count <> 2 * NEW.moved_balance_count
+       OR EXISTS (
+            SELECT 1
+            FROM public.license_plate_putaway_task_contents content
+            WHERE content.tenant_id = NEW.tenant_id
+              AND content.task_id = NEW.task_id
+              AND (
+                  (
+                      SELECT COUNT(*)
+                      FROM public.inventory_entries entry
+                      WHERE entry.tenant_id = NEW.tenant_id
+                        AND entry.inventory_owner_id =
+                            NEW.inventory_owner_id
+                        AND entry.transaction_id =
+                            NEW.inventory_transaction_id
+                        AND entry.facility_id = NEW.facility_id
+                        AND entry.location_id =
+                            NEW.source_location_id
+                        AND entry.license_plate_id =
+                            NEW.license_plate_id
+                        AND entry.item_batch_id =
+                            content.item_batch_id
+                        AND entry.item_id = content.item_id
+                        AND entry.uom = content.uom
+                        AND entry.status =
+                            content.inventory_status
+                        AND entry.quantity_delta =
+                            -content.planned_quantity
+                  ) <> 1
+                  OR (
+                      SELECT COUNT(*)
+                      FROM public.inventory_entries entry
+                      WHERE entry.tenant_id = NEW.tenant_id
+                        AND entry.inventory_owner_id =
+                            NEW.inventory_owner_id
+                        AND entry.transaction_id =
+                            NEW.inventory_transaction_id
+                        AND entry.facility_id = NEW.facility_id
+                        AND entry.location_id =
+                            NEW.destination_location_id
+                        AND entry.license_plate_id =
+                            NEW.license_plate_id
+                        AND entry.item_batch_id =
+                            content.item_batch_id
+                        AND entry.item_id = content.item_id
+                        AND entry.uom = content.uom
+                        AND entry.status =
+                            content.inventory_status
+                        AND entry.quantity_delta =
+                            content.planned_quantity
+                  ) <> 1
+              )
+       )
+    THEN
+        RAISE EXCEPTION
+            'license plate putaway move transaction does not match its snapshot'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_license_plate_putaway_task(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_license_plate_putaway_task() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    task_row RECORD;
+    plate_row RECORD;
+    source_is_active BOOLEAN;
+    destination_is_active BOOLEAN;
+    owner_facility_is_active BOOLEAN;
+    current_balance_count BIGINT;
+    snapshot_balance_count BIGINT;
+BEGIN
+    SELECT task.task_type,
+           task.status,
+           task.deleted,
+           task.inventory_owner_id,
+           task.facility_id
+    INTO task_row
+    FROM public.work_tasks task
+    WHERE task.tenant_id = NEW.tenant_id
+      AND task.id = NEW.task_id
+    FOR SHARE;
+
+    IF NOT FOUND
+       OR task_row.task_type <> 'license_plate_putaway'
+       OR task_row.status NOT IN ('open', 'assigned')
+       OR task_row.deleted IS NOT NULL
+       OR task_row.inventory_owner_id
+            IS DISTINCT FROM NEW.inventory_owner_id
+       OR task_row.facility_id IS DISTINCT FROM NEW.facility_id
+       OR NEW.closed_at IS NOT NULL
+    THEN
+        RAISE EXCEPTION
+            'license plate putaway detail does not match an active task'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT plate.inventory_owner_id,
+           plate.facility_id,
+           plate.location_id,
+           plate.barcode,
+           plate.deleted
+    INTO plate_row
+    FROM public.license_plates plate
+    WHERE plate.tenant_id = NEW.tenant_id
+      AND plate.id = NEW.license_plate_id
+    FOR SHARE;
+
+    IF NOT FOUND
+       OR plate_row.deleted IS NOT NULL
+       OR plate_row.inventory_owner_id
+            IS DISTINCT FROM NEW.inventory_owner_id
+       OR plate_row.facility_id IS DISTINCT FROM NEW.facility_id
+       OR plate_row.location_id IS DISTINCT FROM NEW.source_location_id
+       OR plate_row.barcode IS NULL
+       OR btrim(plate_row.barcode) = ''
+    THEN
+        RAISE EXCEPTION
+            'license plate putaway source plate is not active at its source'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.locations location
+        WHERE location.tenant_id = NEW.tenant_id
+          AND location.facility_id = NEW.facility_id
+          AND location.id = NEW.source_location_id
+          AND location.deleted IS NULL
+          AND location.active
+          AND location.receivable
+    )
+    INTO source_is_active;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.locations location
+        WHERE location.tenant_id = NEW.tenant_id
+          AND location.facility_id = NEW.facility_id
+          AND location.id = NEW.destination_location_id
+          AND location.deleted IS NULL
+          AND location.active
+          AND NOT location.receivable
+          AND location.barcode IS NOT NULL
+          AND btrim(location.barcode) <> ''
+    )
+    INTO destination_is_active;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.inventory_owner_facilities assignment
+        WHERE assignment.tenant_id = NEW.tenant_id
+          AND assignment.inventory_owner_id = NEW.inventory_owner_id
+          AND assignment.facility_id = NEW.facility_id
+          AND assignment.deleted IS NULL
+    )
+    INTO owner_facility_is_active;
+
+    IF NOT source_is_active
+       OR NOT destination_is_active
+       OR NOT owner_facility_is_active
+    THEN
+        RAISE EXCEPTION
+            'license plate putaway locations and owner facility assignment must be active'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT COUNT(*)
+    INTO current_balance_count
+    FROM public.inventory_balances balance
+    WHERE balance.tenant_id = NEW.tenant_id
+      AND balance.inventory_owner_id = NEW.inventory_owner_id
+      AND balance.facility_id = NEW.facility_id
+      AND balance.license_plate_id = NEW.license_plate_id
+      AND balance.deleted IS NULL
+      AND balance.qty_on_hand > 0;
+
+    SELECT COUNT(*)
+    INTO snapshot_balance_count
+    FROM public.license_plate_putaway_task_contents content
+    WHERE content.tenant_id = NEW.tenant_id
+      AND content.task_id = NEW.task_id;
+
+    IF current_balance_count <> NEW.planned_balance_count
+       OR snapshot_balance_count <> NEW.planned_balance_count
+       OR EXISTS (
+            SELECT 1
+            FROM public.inventory_balances balance
+            WHERE balance.tenant_id = NEW.tenant_id
+              AND balance.inventory_owner_id = NEW.inventory_owner_id
+              AND balance.facility_id = NEW.facility_id
+              AND balance.license_plate_id = NEW.license_plate_id
+              AND balance.deleted IS NULL
+              AND balance.qty_on_hand > 0
+              AND (
+                  balance.location_id <> NEW.source_location_id
+                  OR balance.status <> 'available'
+                  OR balance.qty_reserved <> 0
+                  OR balance.qty_held <> 0
+                  OR NOT EXISTS (
+                      SELECT 1
+                      FROM public.license_plate_putaway_task_contents content
+                      WHERE content.tenant_id = NEW.tenant_id
+                        AND content.task_id = NEW.task_id
+                        AND content.inventory_owner_id =
+                            NEW.inventory_owner_id
+                        AND content.facility_id = NEW.facility_id
+                        AND content.license_plate_id =
+                            NEW.license_plate_id
+                        AND content.inventory_balance_id = balance.id
+                        AND content.item_batch_id = balance.item_batch_id
+                        AND content.item_id = balance.item_id
+                        AND content.uom = balance.uom
+                        AND content.inventory_status = balance.status
+                        AND content.planned_quantity =
+                            balance.qty_on_hand
+                  )
+              )
+       )
+       OR EXISTS (
+            SELECT 1
+            FROM public.license_plate_putaway_task_contents content
+            WHERE content.tenant_id = NEW.tenant_id
+              AND content.task_id = NEW.task_id
+              AND (
+                  content.inventory_owner_id <>
+                      NEW.inventory_owner_id
+                  OR content.facility_id <> NEW.facility_id
+                  OR content.license_plate_id <>
+                      NEW.license_plate_id
+                  OR NOT EXISTS (
+                      SELECT 1
+                      FROM public.inventory_balances balance
+                      WHERE balance.tenant_id = NEW.tenant_id
+                        AND balance.inventory_owner_id =
+                            NEW.inventory_owner_id
+                        AND balance.facility_id = NEW.facility_id
+                        AND balance.license_plate_id =
+                            NEW.license_plate_id
+                        AND balance.id =
+                            content.inventory_balance_id
+                        AND balance.location_id =
+                            NEW.source_location_id
+                        AND balance.item_batch_id =
+                            content.item_batch_id
+                        AND balance.item_id = content.item_id
+                        AND balance.uom = content.uom
+                        AND balance.status =
+                            content.inventory_status
+                        AND balance.qty_on_hand =
+                            content.planned_quantity
+                        AND balance.qty_reserved = 0
+                        AND balance.qty_held = 0
+                        AND balance.deleted IS NULL
+                  )
+              )
+       )
+    THEN
+        RAISE EXCEPTION
+            'license plate putaway snapshot must exactly match movable plate contents'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_putaway_result(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_putaway_result() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    task_row RECORD;
+    source_row RECORD;
+    destination_row RECORD;
+    transaction_matches BOOLEAN;
+    transaction_entry_count BIGINT;
+    source_entry_count BIGINT;
+    destination_entry_count BIGINT;
+BEGIN
+    SELECT task.status,
+           task.deleted,
+           task.assigned_user_id,
+           task.completed_by,
+           task.completed_at,
+           detail.closed_at
+    INTO task_row
+    FROM public.work_tasks task
+    INNER JOIN public.putaway_tasks detail
+        ON detail.tenant_id = task.tenant_id
+       AND detail.task_id = task.id
+    WHERE task.tenant_id = NEW.tenant_id
+      AND task.id = NEW.task_id
+      AND task.task_type = 'putaway';
+
+    IF NOT FOUND
+       OR task_row.status <> 'completed'
+       OR task_row.deleted IS NOT NULL
+       OR task_row.assigned_user_id IS DISTINCT FROM NEW.confirmed_by
+       OR task_row.completed_by IS DISTINCT FROM NEW.confirmed_by
+       OR task_row.completed_at IS DISTINCT FROM NEW.confirmed_at
+       OR task_row.closed_at IS DISTINCT FROM NEW.confirmed_at
+    THEN
+        RAISE EXCEPTION
+            'putaway result does not match its completed task'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT balance.location_id,
+           balance.license_plate_id,
+           balance.item_batch_id,
+           balance.item_id,
+           balance.status,
+           balance.deleted
+    INTO source_row
+    FROM public.inventory_balances balance
+    WHERE balance.tenant_id = NEW.tenant_id
+      AND balance.inventory_owner_id = NEW.inventory_owner_id
+      AND balance.facility_id = NEW.facility_id
+      AND balance.id = NEW.source_inventory_balance_id;
+
+    SELECT balance.location_id,
+           balance.license_plate_id,
+           balance.item_batch_id,
+           balance.item_id,
+           balance.status,
+           balance.qty_on_hand,
+           balance.deleted,
+           destination.barcode AS location_barcode,
+           destination.active AS location_is_active,
+           destination.receivable AS location_is_receivable,
+           destination.deleted AS location_deleted
+    INTO destination_row
+    FROM public.inventory_balances balance
+    INNER JOIN public.locations destination
+        ON destination.tenant_id = balance.tenant_id
+       AND destination.facility_id = balance.facility_id
+       AND destination.id = balance.location_id
+    WHERE balance.tenant_id = NEW.tenant_id
+      AND balance.inventory_owner_id = NEW.inventory_owner_id
+      AND balance.facility_id = NEW.facility_id
+      AND balance.id = NEW.destination_inventory_balance_id;
+
+    IF source_row.location_id IS DISTINCT FROM NEW.source_location_id
+       OR source_row.license_plate_id IS NOT NULL
+       OR source_row.item_batch_id IS DISTINCT FROM NEW.item_batch_id
+       OR source_row.item_id IS DISTINCT FROM NEW.item_id
+       OR source_row.status IS DISTINCT FROM NEW.inventory_status
+       OR source_row.deleted IS NOT NULL
+       OR destination_row.location_id
+            IS DISTINCT FROM NEW.destination_location_id
+       OR destination_row.license_plate_id IS NOT NULL
+       OR destination_row.item_batch_id IS DISTINCT FROM NEW.item_batch_id
+       OR destination_row.item_id IS DISTINCT FROM NEW.item_id
+       OR destination_row.status IS DISTINCT FROM NEW.inventory_status
+       OR destination_row.qty_on_hand < NEW.quantity
+       OR destination_row.deleted IS NOT NULL
+       OR destination_row.location_deleted IS NOT NULL
+       OR NOT destination_row.location_is_active
+       OR destination_row.location_is_receivable
+       OR destination_row.location_barcode
+            IS DISTINCT FROM NEW.destination_location_barcode
+    THEN
+        RAISE EXCEPTION
+            'putaway result does not match its inventory balances and destination'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.inventory_transactions transaction
+        WHERE transaction.tenant_id = NEW.tenant_id
+          AND transaction.inventory_owner_id = NEW.inventory_owner_id
+          AND transaction.id = NEW.inventory_transaction_id
+          AND transaction.transaction_type = 'move'
+          AND transaction.actor_user_id = NEW.confirmed_by
+          AND transaction.reference_type = 'putaway_task'
+          AND transaction.reference_id = NEW.task_id
+          AND transaction.operation = 'task.confirm_putaway.v1'
+    )
+    INTO transaction_matches;
+
+    SELECT COUNT(*),
+           COUNT(*) FILTER (
+               WHERE entry.facility_id = NEW.facility_id
+                 AND entry.location_id = NEW.source_location_id
+                 AND entry.license_plate_id IS NULL
+                 AND entry.item_batch_id = NEW.item_batch_id
+                 AND entry.item_id = NEW.item_id
+                 AND entry.status = NEW.inventory_status
+                 AND entry.quantity_delta = -NEW.quantity
+           ),
+           COUNT(*) FILTER (
+               WHERE entry.facility_id = NEW.facility_id
+                 AND entry.location_id = NEW.destination_location_id
+                 AND entry.license_plate_id IS NULL
+                 AND entry.item_batch_id = NEW.item_batch_id
+                 AND entry.item_id = NEW.item_id
+                 AND entry.status = NEW.inventory_status
+                 AND entry.quantity_delta = NEW.quantity
+           )
+    INTO
+        transaction_entry_count,
+        source_entry_count,
+        destination_entry_count
+    FROM public.inventory_entries entry
+    WHERE entry.tenant_id = NEW.tenant_id
+      AND entry.inventory_owner_id = NEW.inventory_owner_id
+      AND entry.transaction_id = NEW.inventory_transaction_id;
+
+    IF NOT transaction_matches
+       OR transaction_entry_count <> 2
+       OR source_entry_count <> 1
+       OR destination_entry_count <> 1
+    THEN
+        RAISE EXCEPTION
+            'putaway move transaction does not match its result'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_putaway_task(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_putaway_task() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    task_row RECORD;
+    source_row RECORD;
+    destination_is_active BOOLEAN;
+    owner_facility_is_active BOOLEAN;
+BEGIN
+    SELECT task.task_type,
+           task.status,
+           task.deleted,
+           task.inventory_owner_id,
+           task.facility_id
+    INTO task_row
+    FROM public.work_tasks task
+    WHERE task.tenant_id = NEW.tenant_id
+      AND task.id = NEW.task_id
+    FOR SHARE;
+
+    IF NOT FOUND
+       OR task_row.task_type <> 'putaway'
+       OR task_row.status NOT IN ('open', 'assigned')
+       OR task_row.deleted IS NOT NULL
+       OR task_row.inventory_owner_id
+            IS DISTINCT FROM NEW.inventory_owner_id
+       OR task_row.facility_id IS DISTINCT FROM NEW.facility_id
+       OR NEW.closed_at IS NOT NULL
+    THEN
+        RAISE EXCEPTION
+            'putaway detail does not match an active putaway task'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT balance.inventory_owner_id,
+           balance.facility_id,
+           balance.location_id,
+           balance.license_plate_id,
+           balance.item_batch_id,
+           balance.item_id,
+           balance.status,
+           balance.qty_on_hand,
+           balance.qty_reserved,
+           balance.qty_held,
+           balance.deleted AS balance_deleted,
+           source_location.deleted AS location_deleted,
+           source_location.active AS location_is_active,
+           source_location.receivable AS location_is_receivable
+    INTO source_row
+    FROM public.inventory_balances balance
+    INNER JOIN public.locations source_location
+        ON source_location.tenant_id = balance.tenant_id
+       AND source_location.facility_id = balance.facility_id
+       AND source_location.id = balance.location_id
+    WHERE balance.tenant_id = NEW.tenant_id
+      AND balance.id = NEW.source_inventory_balance_id
+    FOR SHARE;
+
+    IF NOT FOUND
+       OR NEW.inventory_status <> 'available'
+       OR source_row.balance_deleted IS NOT NULL
+       OR source_row.location_deleted IS NOT NULL
+       OR NOT source_row.location_is_active
+       OR NOT source_row.location_is_receivable
+       OR source_row.license_plate_id IS NOT NULL
+       OR source_row.inventory_owner_id
+            IS DISTINCT FROM NEW.inventory_owner_id
+       OR source_row.facility_id IS DISTINCT FROM NEW.facility_id
+       OR source_row.location_id IS DISTINCT FROM NEW.source_location_id
+       OR source_row.item_batch_id IS DISTINCT FROM NEW.item_batch_id
+       OR source_row.item_id IS DISTINCT FROM NEW.item_id
+       OR source_row.status IS DISTINCT FROM NEW.inventory_status
+       OR source_row.qty_on_hand
+            - source_row.qty_reserved
+            - source_row.qty_held < NEW.planned_quantity
+    THEN
+        RAISE EXCEPTION
+            'putaway detail does not match available loose source inventory'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.locations location
+        WHERE location.tenant_id = NEW.tenant_id
+          AND location.facility_id = NEW.facility_id
+          AND location.id = NEW.destination_location_id
+          AND location.deleted IS NULL
+          AND location.active
+          AND NOT location.receivable
+          AND location.barcode IS NOT NULL
+          AND btrim(location.barcode) <> ''
+    )
+    INTO destination_is_active;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.inventory_owner_facilities assignment
+        WHERE assignment.tenant_id = NEW.tenant_id
+          AND assignment.inventory_owner_id = NEW.inventory_owner_id
+          AND assignment.facility_id = NEW.facility_id
+          AND assignment.deleted IS NULL
+    )
+    INTO owner_facility_is_active;
+
+    IF NOT destination_is_active OR NOT owner_facility_is_active THEN
+        RAISE EXCEPTION
+            'putaway destination and owner facility assignment must be active and scannable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: web_session_identity(text, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.web_session_identity(p_token_hash text, p_idle_ttl_seconds integer) RETURNS TABLE(user_id bigint, tenant_id bigint)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF p_idle_ttl_seconds < 60 OR p_idle_ttl_seconds > 86400 THEN
+        RAISE EXCEPTION 'web session idle TTL must be between 60 and 86400 seconds'
+            USING ERRCODE = '22023';
+    END IF;
+
+    RETURN QUERY
+    UPDATE public.sessions session
+    SET last_seen_at = CURRENT_TIMESTAMP
+    FROM public.tenant_memberships membership,
+         public.tenants tenant
+    WHERE session.token = p_token_hash
+      AND session.purpose = 'web'
+      AND session.expires > CURRENT_TIMESTAMP
+      AND session.last_seen_at >
+          CURRENT_TIMESTAMP - p_idle_ttl_seconds * INTERVAL '1 second'
+      AND session.active_tenant_id IS NOT NULL
+      AND membership.tenant_id = session.active_tenant_id
+      AND membership.user_id = session.user_id
+      AND membership.deleted IS NULL
+      AND tenant.id = membership.tenant_id
+      AND tenant.deleted IS NULL
+      AND tenant.status = 'active'
+    RETURNING session.user_id, session.active_tenant_id;
+END;
+$$;
+
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: addresses; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.addresses (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    name text,
+    company text,
+    line1 text NOT NULL,
+    line2 text,
+    postal_code text,
+    country text NOT NULL,
+    phone text,
+    email text,
+    state text,
+    county text,
+    city text,
+    territory text,
+    district text,
+    validated timestamp with time zone
+);
+
+ALTER TABLE ONLY public.addresses FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: addresses_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.addresses ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.addresses_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: audit_location_counts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.audit_location_counts (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    started timestamp with time zone,
+    ended timestamp with time zone,
+    audit_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    location_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    lot text,
+    expiration timestamp with time zone,
+    serial text,
+    on_hand bigint NOT NULL,
+    count bigint NOT NULL,
+    approval_status text NOT NULL,
+    facility_id bigint NOT NULL,
+    uom text NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
+    CONSTRAINT audit_location_counts_approval_status_check CHECK ((approval_status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text]))),
+    CONSTRAINT audit_location_counts_check CHECK (((ended IS NULL) OR (started IS NULL) OR (ended >= started))),
+    CONSTRAINT audit_location_counts_count_check CHECK ((count >= 0)),
+    CONSTRAINT audit_location_counts_on_hand_check CHECK ((on_hand >= 0)),
+    CONSTRAINT audit_location_counts_revision_check CHECK ((revision > 0)),
+    CONSTRAINT audit_location_counts_uom_check CHECK ((btrim(uom) <> ''::text))
+);
+
+ALTER TABLE ONLY public.audit_location_counts FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: audit_location_counts_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.audit_location_counts ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.audit_location_counts_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: audit_wave_assignments; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.audit_wave_assignments (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    audit_wave_id bigint NOT NULL,
+    auditor_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.audit_wave_assignments FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: audit_wave_assignments_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.audit_wave_assignments ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.audit_wave_assignments_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: audit_wave_inventory_owners; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.audit_wave_inventory_owners (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    inventory_owner_id bigint NOT NULL,
+    audit_wave_id bigint NOT NULL,
+    facility_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.audit_wave_inventory_owners FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: audit_wave_inventory_owners_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.audit_wave_inventory_owners ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.audit_wave_inventory_owners_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: audit_wave_items; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.audit_wave_items (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    item_id bigint NOT NULL,
+    audit_wave_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.audit_wave_items FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: audit_wave_items_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.audit_wave_items ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.audit_wave_items_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: audit_wave_locations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.audit_wave_locations (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    started timestamp with time zone,
+    ended timestamp with time zone,
+    location_id bigint NOT NULL,
+    audit_wave_id bigint NOT NULL,
+    auditor_id bigint,
+    facility_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    CONSTRAINT audit_wave_locations_check CHECK (((ended IS NULL) OR (started IS NULL) OR (ended >= started)))
+);
+
+ALTER TABLE ONLY public.audit_wave_locations FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: audit_wave_locations_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.audit_wave_locations ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.audit_wave_locations_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: audit_waves; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.audit_waves (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    name text,
+    description text,
+    created_by bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.audit_waves FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: audit_waves_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.audit_waves ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.audit_waves_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: barcodes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.barcodes (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    name text NOT NULL,
+    type text NOT NULL,
+    item_id bigint NOT NULL,
+    notes text,
+    CONSTRAINT barcodes_active_name_nonblank CHECK (((deleted IS NOT NULL) OR (btrim(name) <> ''::text))),
+    CONSTRAINT barcodes_type_check CHECK ((type = ANY (ARRAY['code128'::text, 'gs1-128'::text, 'upc-a'::text, 'qr'::text])))
+);
+
+ALTER TABLE ONLY public.barcodes FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: barcodes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.barcodes ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.barcodes_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: break_master_pack_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.break_master_pack_tasks (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    location_id bigint NOT NULL,
+    master_item_id bigint NOT NULL,
+    single_item_id bigint NOT NULL,
+    master_qty bigint NOT NULL,
+    master_qty_completed bigint DEFAULT 0 NOT NULL,
+    inner_qty_snapshot bigint NOT NULL,
+    CONSTRAINT break_master_pack_tasks_check CHECK ((master_qty_completed <= master_qty)),
+    CONSTRAINT break_master_pack_tasks_inner_qty_snapshot_check CHECK ((inner_qty_snapshot > 1)),
+    CONSTRAINT break_master_pack_tasks_master_qty_check CHECK ((master_qty > 0)),
+    CONSTRAINT break_master_pack_tasks_master_qty_completed_check CHECK ((master_qty_completed >= 0))
+);
+
+ALTER TABLE ONLY public.break_master_pack_tasks FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: command_idempotency_records; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.command_idempotency_records (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    operation text NOT NULL,
+    idempotency_key text NOT NULL,
+    request_hash text NOT NULL,
+    result_json jsonb NOT NULL,
+    inventory_transaction_id bigint,
+    actor_user_id bigint,
+    request_id text,
+    result_schema_version integer DEFAULT 1 NOT NULL,
+    CONSTRAINT command_idempotency_records_idempotency_key_check CHECK ((btrim(idempotency_key) <> ''::text)),
+    CONSTRAINT command_idempotency_records_key_length_check CHECK (((char_length(idempotency_key) >= 1) AND (char_length(idempotency_key) <= 200))),
+    CONSTRAINT command_idempotency_records_operation_check CHECK ((btrim(operation) <> ''::text)),
+    CONSTRAINT command_idempotency_records_request_hash_check CHECK ((btrim(request_hash) <> ''::text)),
+    CONSTRAINT command_idempotency_records_request_id_check CHECK (((request_id IS NULL) OR ((btrim(request_id) <> ''::text) AND (char_length(request_id) <= 128)))),
+    CONSTRAINT command_idempotency_records_result_schema_version_check CHECK ((result_schema_version > 0))
+);
+
+ALTER TABLE ONLY public.command_idempotency_records FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: command_idempotency_records_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.command_idempotency_records ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.command_idempotency_records_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: cycle_count_item_location_results; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cycle_count_item_location_results (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    location_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    inventory_balance_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    license_plate_id bigint,
+    uom text NOT NULL,
+    lot text,
+    expiration timestamp with time zone,
+    serial text,
+    status text NOT NULL,
+    system_qty_on_hand bigint NOT NULL,
+    system_qty_reserved bigint NOT NULL,
+    counted_qty bigint NOT NULL,
+    variance_qty bigint NOT NULL,
+    inventory_transaction_id bigint,
+    confirmed_by bigint NOT NULL,
+    confirmed_at timestamp with time zone NOT NULL,
+    note text,
+    system_qty_held bigint NOT NULL,
+    CONSTRAINT cycle_count_item_location_results_check2 CHECK ((variance_qty = (counted_qty - system_qty_on_hand))),
+    CONSTRAINT cycle_count_item_location_results_check3 CHECK (((variance_qty = 0) = (inventory_transaction_id IS NULL))),
+    CONSTRAINT cycle_count_item_location_results_note_check CHECK (((note IS NULL) OR ((note = btrim(note)) AND ((char_length(note) >= 1) AND (char_length(note) <= 1000))))),
+    CONSTRAINT cycle_count_item_location_results_status_check CHECK ((status = ANY (ARRAY['available'::text, 'hold'::text, 'damaged'::text, 'quarantine'::text]))),
+    CONSTRAINT cycle_count_item_location_results_system_qty_on_hand_check CHECK ((system_qty_on_hand >= 0)),
+    CONSTRAINT cycle_count_item_location_results_system_qty_reserved_check CHECK ((system_qty_reserved >= 0)),
+    CONSTRAINT cycle_count_item_location_results_uom_check CHECK ((btrim(uom) <> ''::text)),
+    CONSTRAINT cycle_count_results_commitments_within_on_hand CHECK (((system_qty_reserved + system_qty_held) <= system_qty_on_hand)),
+    CONSTRAINT cycle_count_results_counted_at_least_commitments CHECK ((counted_qty >= (system_qty_reserved + system_qty_held))),
+    CONSTRAINT cycle_count_results_system_qty_held_nonnegative CHECK ((system_qty_held >= 0))
+);
+
+ALTER TABLE ONLY public.cycle_count_item_location_results FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: cycle_count_item_location_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cycle_count_item_location_tasks (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    location_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    inventory_balance_id bigint NOT NULL,
+    order_id bigint,
+    order_item_id bigint,
+    source text,
+    note text,
+    inventory_owner_id bigint NOT NULL,
+    CONSTRAINT cycle_count_item_location_tasks_scoped_references_check CHECK (((inventory_owner_id IS NOT NULL) OR ((inventory_balance_id IS NULL) AND (order_id IS NULL) AND (order_item_id IS NULL))))
+);
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: cycle_count_location_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cycle_count_location_tasks (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    location_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.cycle_count_location_tasks FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: dims; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.dims (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    length bigint,
+    width bigint,
+    height bigint,
+    length_uom text,
+    weight bigint,
+    weight_uom text,
+    CONSTRAINT dims_height_check CHECK (((height IS NULL) OR (height > 0))),
+    CONSTRAINT dims_length_check CHECK (((length IS NULL) OR (length > 0))),
+    CONSTRAINT dims_weight_check CHECK (((weight IS NULL) OR (weight > 0))),
+    CONSTRAINT dims_width_check CHECK (((width IS NULL) OR (width > 0)))
+);
+
+ALTER TABLE ONLY public.dims FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: dims_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.dims ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.dims_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: employee_facilities; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.employee_facilities (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    employee_id bigint NOT NULL,
+    facility_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.employee_facilities FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: employee_facilities_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.employee_facilities ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.employee_facilities_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: employees; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.employees (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    user_id bigint,
+    first_name text NOT NULL,
+    last_name text NOT NULL,
+    email text,
+    phone text,
+    title text NOT NULL,
+    type text NOT NULL,
+    hired timestamp with time zone NOT NULL,
+    terminated timestamp with time zone,
+    CONSTRAINT employees_check CHECK (((terminated IS NULL) OR (terminated >= hired))),
+    CONSTRAINT employees_first_name_check CHECK ((btrim(first_name) <> ''::text)),
+    CONSTRAINT employees_last_name_check CHECK ((btrim(last_name) <> ''::text)),
+    CONSTRAINT employees_title_check CHECK ((btrim(title) <> ''::text)),
+    CONSTRAINT employees_type_check CHECK ((btrim(type) <> ''::text))
+);
+
+ALTER TABLE ONLY public.employees FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: employees_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.employees ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.employees_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: facilities; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.facilities (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    name text,
+    address_id bigint
+);
+
+ALTER TABLE ONLY public.facilities FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: facilities_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.facilities ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.facilities_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: integration_inbox_keys; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.integration_inbox_keys (
+    tenant_id bigint NOT NULL,
+    source_key text NOT NULL,
+    deduplication_key text NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    receipt_id bigint NOT NULL,
+    inventory_owner_id bigint,
+    facility_id bigint,
+    content_type text NOT NULL,
+    payload_sha256 bytea NOT NULL,
+    CONSTRAINT integration_inbox_keys_content_type_check CHECK (((content_type = btrim(content_type)) AND ((char_length(content_type) >= 1) AND (char_length(content_type) <= 255)))),
+    CONSTRAINT integration_inbox_keys_deduplication_key_check CHECK (((deduplication_key = btrim(deduplication_key)) AND ((char_length(deduplication_key) >= 1) AND (char_length(deduplication_key) <= 500)))),
+    CONSTRAINT integration_inbox_keys_payload_sha256_check CHECK ((octet_length(payload_sha256) = 32)),
+    CONSTRAINT integration_inbox_keys_receipt_id_check CHECK ((receipt_id > 0)),
+    CONSTRAINT integration_inbox_keys_source_key_check CHECK (((source_key = btrim(source_key)) AND ((char_length(source_key) >= 1) AND (char_length(source_key) <= 200))))
+);
+
+ALTER TABLE ONLY public.integration_inbox_keys FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: integration_inbox_receipts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.integration_inbox_receipts (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint,
+    facility_id bigint,
+    received_at timestamp with time zone NOT NULL,
+    source_key text NOT NULL,
+    deduplication_key text NOT NULL,
+    content_type text NOT NULL,
+    raw_payload bytea NOT NULL,
+    payload_sha256 bytea NOT NULL,
+    request_id text,
+    CONSTRAINT integration_inbox_receipts_content_type_check CHECK (((content_type = btrim(content_type)) AND ((char_length(content_type) >= 1) AND (char_length(content_type) <= 255)))),
+    CONSTRAINT integration_inbox_receipts_deduplication_key_check CHECK (((deduplication_key = btrim(deduplication_key)) AND ((char_length(deduplication_key) >= 1) AND (char_length(deduplication_key) <= 500)))),
+    CONSTRAINT integration_inbox_receipts_payload_sha256_check CHECK ((octet_length(payload_sha256) = 32)),
+    CONSTRAINT integration_inbox_receipts_raw_payload_check CHECK ((octet_length(raw_payload) <= 16777216)),
+    CONSTRAINT integration_inbox_receipts_request_id_check CHECK (((request_id IS NULL) OR ((request_id = btrim(request_id)) AND ((char_length(request_id) >= 1) AND (char_length(request_id) <= 128))))),
+    CONSTRAINT integration_inbox_receipts_source_key_check CHECK (((source_key = btrim(source_key)) AND ((char_length(source_key) >= 1) AND (char_length(source_key) <= 200))))
+);
+
+ALTER TABLE ONLY public.integration_inbox_receipts FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: integration_inbox_receipts_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.integration_inbox_receipts ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.integration_inbox_receipts_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: inventory_allocations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventory_allocations (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    modified timestamp with time zone,
+    deleted timestamp with time zone,
+    created_by bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    inventory_balance_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    location_id bigint NOT NULL,
+    license_plate_id bigint,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    inventory_status text NOT NULL,
+    qty bigint NOT NULL,
+    status text DEFAULT 'allocated'::text NOT NULL,
+    CONSTRAINT inventory_allocations_check CHECK ((((status = 'allocated'::text) AND (deleted IS NULL)) OR ((status = ANY (ARRAY['released'::text, 'fulfilled'::text])) AND (deleted IS NOT NULL)))),
+    CONSTRAINT inventory_allocations_inventory_status_check CHECK ((inventory_status = ANY (ARRAY['available'::text, 'hold'::text, 'damaged'::text, 'quarantine'::text]))),
+    CONSTRAINT inventory_allocations_qty_check CHECK ((qty > 0)),
+    CONSTRAINT inventory_allocations_status_check CHECK ((status = ANY (ARRAY['allocated'::text, 'released'::text, 'fulfilled'::text]))),
+    CONSTRAINT inventory_allocations_uom_check CHECK ((btrim(uom) <> ''::text))
+);
+
+ALTER TABLE ONLY public.inventory_allocations FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: inventory_allocations_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_allocations ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.inventory_allocations_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: inventory_balances; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventory_balances (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    modified timestamp with time zone,
+    deleted timestamp with time zone,
+    facility_id bigint NOT NULL,
+    location_id bigint NOT NULL,
+    license_plate_id bigint,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    status text DEFAULT 'available'::text NOT NULL,
+    qty_on_hand bigint DEFAULT 0 NOT NULL,
+    qty_reserved bigint DEFAULT 0 NOT NULL,
+    qty_held bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT inventory_balances_check CHECK ((qty_reserved <= qty_on_hand)),
+    CONSTRAINT inventory_balances_commitments_within_on_hand CHECK (((qty_reserved + qty_held) <= qty_on_hand)),
+    CONSTRAINT inventory_balances_qty_held_nonnegative CHECK ((qty_held >= 0)),
+    CONSTRAINT inventory_balances_qty_on_hand_check CHECK ((qty_on_hand >= 0)),
+    CONSTRAINT inventory_balances_qty_reserved_check CHECK ((qty_reserved >= 0)),
+    CONSTRAINT inventory_balances_status_check CHECK ((status = ANY (ARRAY['available'::text, 'hold'::text, 'damaged'::text, 'quarantine'::text]))),
+    CONSTRAINT inventory_balances_uom_check CHECK ((btrim(uom) <> ''::text))
+);
+
+ALTER TABLE ONLY public.inventory_balances FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: inventory_balances_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_balances ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.inventory_balances_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: inventory_entries; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventory_entries (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    transaction_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    facility_id bigint NOT NULL,
+    location_id bigint NOT NULL,
+    license_plate_id bigint,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    lot text,
+    expiration timestamp with time zone,
+    serial text,
+    status text NOT NULL,
+    quantity_delta bigint NOT NULL,
+    CONSTRAINT inventory_entries_quantity_delta_check CHECK ((quantity_delta <> 0)),
+    CONSTRAINT inventory_entries_status_check CHECK ((status = ANY (ARRAY['available'::text, 'hold'::text, 'damaged'::text, 'quarantine'::text]))),
+    CONSTRAINT inventory_entries_uom_check CHECK ((btrim(uom) <> ''::text))
+);
+
+ALTER TABLE ONLY public.inventory_entries FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: inventory_entries_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_entries ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.inventory_entries_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: inventory_holds; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventory_holds (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    modified timestamp with time zone,
+    deleted timestamp with time zone,
+    created_by bigint NOT NULL,
+    released_by bigint,
+    released_at timestamp with time zone,
+    inventory_balance_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    location_id bigint NOT NULL,
+    license_plate_id bigint,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    inventory_status text NOT NULL,
+    qty bigint NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    reference_type text,
+    reference_id bigint,
+    status text DEFAULT 'active'::text NOT NULL,
+    CONSTRAINT inventory_holds_check CHECK (((reason_code <> 'other'::text) OR ((note IS NOT NULL) AND (btrim(note) <> ''::text)))),
+    CONSTRAINT inventory_holds_check1 CHECK ((((reference_type IS NULL) AND (reference_id IS NULL)) OR ((reference_type IS NOT NULL) AND (btrim(reference_type) <> ''::text) AND (reference_id IS NOT NULL) AND (reference_id > 0)))),
+    CONSTRAINT inventory_holds_check2 CHECK ((((status = 'active'::text) AND (deleted IS NULL) AND (released_by IS NULL) AND (released_at IS NULL)) OR ((status = 'released'::text) AND (deleted IS NOT NULL) AND (released_by IS NOT NULL) AND (released_at IS NOT NULL) AND (modified = released_at) AND (deleted = released_at)))),
+    CONSTRAINT inventory_holds_inventory_status_check CHECK ((inventory_status = ANY (ARRAY['available'::text, 'hold'::text, 'damaged'::text, 'quarantine'::text]))),
+    CONSTRAINT inventory_holds_qty_check CHECK ((qty > 0)),
+    CONSTRAINT inventory_holds_reason_code_check CHECK ((reason_code = ANY (ARRAY['quality_inspection'::text, 'damage_suspected'::text, 'inventory_discrepancy'::text, 'regulatory'::text, 'customer_request'::text, 'other'::text]))),
+    CONSTRAINT inventory_holds_status_check CHECK ((status = ANY (ARRAY['active'::text, 'released'::text]))),
+    CONSTRAINT inventory_holds_uom_check CHECK ((btrim(uom) <> ''::text))
+);
+
+ALTER TABLE ONLY public.inventory_holds FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: inventory_hold_reconciliation; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.inventory_hold_reconciliation WITH (security_invoker='true') AS
+ SELECT balance.id AS inventory_balance_id,
+    balance.tenant_id,
+    balance.inventory_owner_id,
+    balance.facility_id,
+    balance.location_id,
+    balance.license_plate_id,
+    balance.item_batch_id,
+    balance.item_id,
+    balance.uom,
+    balance.status AS inventory_status,
+    balance.qty_on_hand,
+    balance.qty_reserved,
+    allocation_projection.allocated_qty,
+    balance.qty_held,
+    hold_projection.held_qty,
+    GREATEST(((allocation_projection.allocated_qty + hold_projection.held_qty) - balance.qty_on_hand), (0)::bigint) AS overcommitted_qty,
+    array_remove(ARRAY[
+        CASE
+            WHEN (balance.qty_reserved IS DISTINCT FROM allocation_projection.allocated_qty) THEN 'allocation_projection_mismatch'::text
+            ELSE NULL::text
+        END,
+        CASE
+            WHEN (balance.qty_held IS DISTINCT FROM hold_projection.held_qty) THEN 'hold_projection_mismatch'::text
+            ELSE NULL::text
+        END,
+        CASE
+            WHEN ((allocation_projection.allocated_qty + hold_projection.held_qty) > balance.qty_on_hand) THEN 'commitments_exceed_on_hand'::text
+            ELSE NULL::text
+        END], NULL::text) AS issue_codes
+   FROM ((public.inventory_balances balance
+     CROSS JOIN LATERAL ( SELECT (COALESCE(sum(allocation.qty), (0)::numeric))::bigint AS allocated_qty
+           FROM public.inventory_allocations allocation
+          WHERE ((allocation.tenant_id = balance.tenant_id) AND (allocation.inventory_owner_id = balance.inventory_owner_id) AND (allocation.inventory_balance_id = balance.id) AND (allocation.deleted IS NULL) AND (allocation.status = 'allocated'::text))) allocation_projection)
+     CROSS JOIN LATERAL ( SELECT (COALESCE(sum(hold.qty), (0)::numeric))::bigint AS held_qty
+           FROM public.inventory_holds hold
+          WHERE ((hold.tenant_id = balance.tenant_id) AND (hold.inventory_owner_id = balance.inventory_owner_id) AND (hold.inventory_balance_id = balance.id) AND (hold.deleted IS NULL) AND (hold.status = 'active'::text))) hold_projection)
+  WHERE ((balance.qty_reserved IS DISTINCT FROM allocation_projection.allocated_qty) OR (balance.qty_held IS DISTINCT FROM hold_projection.held_qty) OR ((allocation_projection.allocated_qty + hold_projection.held_qty) > balance.qty_on_hand));
+
+
+--
+-- Name: inventory_holds_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_holds ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.inventory_holds_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: inventory_owner_facilities; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventory_owner_facilities (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.inventory_owner_facilities FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: inventory_owner_facilities_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_owner_facilities ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.inventory_owner_facilities_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: inventory_owner_items; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventory_owner_items (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    inventory_owner_id bigint NOT NULL,
+    item_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.inventory_owner_items FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: inventory_owner_items_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_owner_items ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.inventory_owner_items_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: inventory_owners; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventory_owners (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    name text NOT NULL,
+    email text NOT NULL
+);
+
+ALTER TABLE ONLY public.inventory_owners FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: inventory_owners_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_owners ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.inventory_owners_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: inventory_projection_changes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventory_projection_changes (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    transaction_id bigint NOT NULL,
+    inventory_balance_id bigint NOT NULL,
+    created timestamp with time zone DEFAULT statement_timestamp() NOT NULL,
+    facility_id bigint NOT NULL,
+    location_id bigint NOT NULL,
+    license_plate_id bigint,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    lot text,
+    expiration timestamp with time zone,
+    serial text,
+    status text NOT NULL,
+    quantity_delta bigint NOT NULL,
+    CONSTRAINT inventory_projection_changes_inventory_balance_id_check CHECK ((inventory_balance_id > 0)),
+    CONSTRAINT inventory_projection_changes_quantity_delta_check CHECK ((quantity_delta <> 0)),
+    CONSTRAINT inventory_projection_changes_status_check CHECK ((status = ANY (ARRAY['available'::text, 'hold'::text, 'damaged'::text, 'quarantine'::text]))),
+    CONSTRAINT inventory_projection_changes_uom_check CHECK ((btrim(uom) <> ''::text))
+);
+
+ALTER TABLE ONLY public.inventory_projection_changes FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: inventory_projection_changes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_projection_changes ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.inventory_projection_changes_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: inventory_reconciliation; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.inventory_reconciliation WITH (security_invoker='true') AS
+ WITH journal AS (
+         SELECT inventory_entries.tenant_id,
+            inventory_entries.inventory_owner_id,
+            inventory_entries.facility_id,
+            inventory_entries.location_id,
+            inventory_entries.license_plate_id,
+            inventory_entries.item_batch_id,
+            inventory_entries.item_id,
+            inventory_entries.uom,
+            inventory_entries.status,
+            (sum(inventory_entries.quantity_delta))::bigint AS journal_qty
+           FROM public.inventory_entries
+          WHERE (inventory_entries.tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)
+          GROUP BY inventory_entries.tenant_id, inventory_entries.inventory_owner_id, inventory_entries.facility_id, inventory_entries.location_id, inventory_entries.license_plate_id, inventory_entries.item_batch_id, inventory_entries.item_id, inventory_entries.uom, inventory_entries.status
+        ), projection AS (
+         SELECT inventory_balances.tenant_id,
+            inventory_balances.inventory_owner_id,
+            inventory_balances.facility_id,
+            inventory_balances.location_id,
+            inventory_balances.license_plate_id,
+            inventory_balances.item_batch_id,
+            inventory_balances.item_id,
+            inventory_balances.uom,
+            inventory_balances.status,
+            (sum(inventory_balances.qty_on_hand))::bigint AS projected_qty
+           FROM public.inventory_balances
+          WHERE ((inventory_balances.deleted IS NULL) AND (inventory_balances.tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint))
+          GROUP BY inventory_balances.tenant_id, inventory_balances.inventory_owner_id, inventory_balances.facility_id, inventory_balances.location_id, inventory_balances.license_plate_id, inventory_balances.item_batch_id, inventory_balances.item_id, inventory_balances.uom, inventory_balances.status
+        )
+ SELECT COALESCE(journal.tenant_id, projection.tenant_id) AS tenant_id,
+    COALESCE(journal.inventory_owner_id, projection.inventory_owner_id) AS inventory_owner_id,
+    COALESCE(journal.facility_id, projection.facility_id) AS facility_id,
+    COALESCE(journal.location_id, projection.location_id) AS location_id,
+    COALESCE(journal.license_plate_id, projection.license_plate_id) AS license_plate_id,
+    COALESCE(journal.item_batch_id, projection.item_batch_id) AS item_batch_id,
+    COALESCE(journal.item_id, projection.item_id) AS item_id,
+    COALESCE(journal.uom, projection.uom) AS uom,
+    COALESCE(journal.status, projection.status) AS status,
+    COALESCE(journal.journal_qty, (0)::bigint) AS journal_qty,
+    COALESCE(projection.projected_qty, (0)::bigint) AS projected_qty,
+    (COALESCE(projection.projected_qty, (0)::bigint) - COALESCE(journal.journal_qty, (0)::bigint)) AS variance
+   FROM (journal
+     FULL JOIN projection ON (((projection.tenant_id = journal.tenant_id) AND (projection.inventory_owner_id = journal.inventory_owner_id) AND (projection.facility_id = journal.facility_id) AND (projection.location_id = journal.location_id) AND (NOT (projection.license_plate_id IS DISTINCT FROM journal.license_plate_id)) AND (projection.item_batch_id = journal.item_batch_id) AND (projection.item_id = journal.item_id) AND (projection.uom = journal.uom) AND (projection.status = journal.status))))
+  WHERE (COALESCE(projection.projected_qty, (0)::bigint) <> COALESCE(journal.journal_qty, (0)::bigint));
+
+
+--
+-- Name: VIEW inventory_reconciliation; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.inventory_reconciliation IS 'wareboxes.tenant_contract.md5=663839d0885cf5a9c9cca9c2efa6a782';
+
+
+--
+-- Name: inventory_relocation_results; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventory_relocation_results (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    workflow text NOT NULL,
+    source_location_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    destination_location_barcode text NOT NULL,
+    inventory_transaction_id bigint NOT NULL,
+    source_inventory_balance_id bigint,
+    destination_inventory_balance_id bigint,
+    license_plate_id bigint,
+    license_plate_barcode text,
+    item_batch_id bigint,
+    item_id bigint,
+    uom text,
+    inventory_status text,
+    quantity bigint,
+    moved_balance_count bigint,
+    confirmed_by bigint NOT NULL,
+    confirmed_at timestamp with time zone NOT NULL,
+    CONSTRAINT inventory_relocation_results_check CHECK ((source_location_id <> destination_location_id)),
+    CONSTRAINT inventory_relocation_results_check1 CHECK ((((workflow = 'loose_balance'::text) AND (source_inventory_balance_id IS NOT NULL) AND (destination_inventory_balance_id IS NOT NULL) AND (source_inventory_balance_id <> destination_inventory_balance_id) AND (license_plate_id IS NULL) AND (license_plate_barcode IS NULL) AND (item_batch_id IS NOT NULL) AND (item_id IS NOT NULL) AND (uom IS NOT NULL) AND (inventory_status = ANY (ARRAY['available'::text, 'hold'::text, 'damaged'::text, 'quarantine'::text])) AND (quantity > 0) AND (moved_balance_count IS NULL)) OR ((workflow = 'license_plate'::text) AND (source_inventory_balance_id IS NULL) AND (destination_inventory_balance_id IS NULL) AND (license_plate_id IS NOT NULL) AND (length(TRIM(BOTH FROM license_plate_barcode)) > 0) AND (item_batch_id IS NULL) AND (item_id IS NULL) AND (uom IS NULL) AND (inventory_status IS NULL) AND (quantity IS NULL) AND (moved_balance_count > 0)))),
+    CONSTRAINT inventory_relocation_results_destination_location_barcode_check CHECK ((length(TRIM(BOTH FROM destination_location_barcode)) > 0))
+);
+
+ALTER TABLE ONLY public.inventory_relocation_results FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: inventory_relocation_task_contents; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventory_relocation_task_contents (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    license_plate_id bigint NOT NULL,
+    inventory_balance_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    inventory_status text NOT NULL,
+    planned_quantity bigint NOT NULL,
+    CONSTRAINT inventory_relocation_task_contents_inventory_status_check CHECK ((inventory_status = ANY (ARRAY['available'::text, 'hold'::text, 'damaged'::text, 'quarantine'::text]))),
+    CONSTRAINT inventory_relocation_task_contents_planned_quantity_check CHECK ((planned_quantity > 0))
+);
+
+ALTER TABLE ONLY public.inventory_relocation_task_contents FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: inventory_relocation_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventory_relocation_tasks (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    workflow text NOT NULL,
+    source_inventory_balance_id bigint,
+    license_plate_id bigint,
+    source_location_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    item_batch_id bigint,
+    item_id bigint,
+    uom text,
+    inventory_status text,
+    planned_quantity bigint,
+    planned_balance_count bigint,
+    closed_at timestamp with time zone,
+    CONSTRAINT inventory_relocation_tasks_check CHECK ((source_location_id <> destination_location_id)),
+    CONSTRAINT inventory_relocation_tasks_check1 CHECK ((((workflow = 'loose_balance'::text) AND (source_inventory_balance_id IS NOT NULL) AND (license_plate_id IS NULL) AND (item_batch_id IS NOT NULL) AND (item_id IS NOT NULL) AND (uom IS NOT NULL) AND (inventory_status = ANY (ARRAY['available'::text, 'hold'::text, 'damaged'::text, 'quarantine'::text])) AND (planned_quantity > 0) AND (planned_balance_count IS NULL)) OR ((workflow = 'license_plate'::text) AND (source_inventory_balance_id IS NULL) AND (license_plate_id IS NOT NULL) AND (item_batch_id IS NULL) AND (item_id IS NULL) AND (uom IS NULL) AND (inventory_status IS NULL) AND (planned_quantity IS NULL) AND (planned_balance_count > 0)))),
+    CONSTRAINT inventory_relocation_tasks_workflow_check CHECK ((workflow = ANY (ARRAY['loose_balance'::text, 'license_plate'::text])))
+);
+
+ALTER TABLE ONLY public.inventory_relocation_tasks FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: inventory_reservations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventory_reservations (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    modified timestamp with time zone,
+    deleted timestamp with time zone,
+    created_by bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    qty bigint NOT NULL,
+    status text DEFAULT 'active'::text NOT NULL,
+    CONSTRAINT inventory_reservations_check CHECK ((((status = 'active'::text) AND (deleted IS NULL)) OR ((status = ANY (ARRAY['cancelled'::text, 'fulfilled'::text])) AND (deleted IS NOT NULL)))),
+    CONSTRAINT inventory_reservations_qty_check CHECK ((qty > 0)),
+    CONSTRAINT inventory_reservations_status_check CHECK ((status = ANY (ARRAY['active'::text, 'cancelled'::text, 'fulfilled'::text]))),
+    CONSTRAINT inventory_reservations_uom_check CHECK ((btrim(uom) <> ''::text))
+);
+
+ALTER TABLE ONLY public.inventory_reservations FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: inventory_reservations_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_reservations ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.inventory_reservations_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: inventory_status_transitions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventory_status_transitions (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    transaction_id bigint NOT NULL,
+    source_balance_id bigint NOT NULL,
+    destination_balance_id bigint NOT NULL,
+    from_status text NOT NULL,
+    to_status text NOT NULL,
+    qty bigint NOT NULL,
+    reason_code text NOT NULL,
+    reason_note text,
+    reference_type text,
+    reference_id bigint,
+    created_by bigint NOT NULL,
+    created timestamp with time zone DEFAULT statement_timestamp() NOT NULL,
+    CONSTRAINT inventory_status_transitions_check CHECK ((source_balance_id <> destination_balance_id)),
+    CONSTRAINT inventory_status_transitions_check1 CHECK ((from_status <> to_status)),
+    CONSTRAINT inventory_status_transitions_check2 CHECK ((((reason_code = ANY (ARRAY['quality_inspection'::text, 'damage_suspected'::text, 'inventory_discrepancy'::text, 'regulatory_restriction'::text, 'customer_request'::text])) AND (to_status = ANY (ARRAY['hold'::text, 'quarantine'::text]))) OR ((reason_code = 'damage_confirmed'::text) AND (to_status = 'damaged'::text)) OR ((reason_code = ANY (ARRAY['inspection_passed'::text, 'discrepancy_resolved'::text, 'regulatory_release'::text, 'customer_release'::text])) AND (to_status = 'available'::text)) OR (reason_code = 'other'::text))),
+    CONSTRAINT inventory_status_transitions_check3 CHECK (((reason_code <> 'other'::text) OR ((reason_note IS NOT NULL) AND (btrim(reason_note) <> ''::text)))),
+    CONSTRAINT inventory_status_transitions_check4 CHECK ((((reference_type IS NULL) AND (reference_id IS NULL)) OR ((reference_type IS NOT NULL) AND (btrim(reference_type) <> ''::text) AND (reference_type = btrim(reference_type)) AND (char_length(reference_type) <= 100) AND (reference_id IS NOT NULL) AND (reference_id > 0)))),
+    CONSTRAINT inventory_status_transitions_from_status_check CHECK ((from_status = ANY (ARRAY['available'::text, 'hold'::text, 'damaged'::text, 'quarantine'::text]))),
+    CONSTRAINT inventory_status_transitions_qty_check CHECK ((qty > 0)),
+    CONSTRAINT inventory_status_transitions_reason_code_check CHECK ((reason_code = ANY (ARRAY['quality_inspection'::text, 'damage_suspected'::text, 'damage_confirmed'::text, 'inspection_passed'::text, 'inventory_discrepancy'::text, 'discrepancy_resolved'::text, 'regulatory_restriction'::text, 'regulatory_release'::text, 'customer_request'::text, 'customer_release'::text, 'other'::text]))),
+    CONSTRAINT inventory_status_transitions_reason_note_check CHECK (((reason_note IS NULL) OR ((btrim(reason_note) <> ''::text) AND (reason_note = btrim(reason_note)) AND (char_length(reason_note) <= 1000)))),
+    CONSTRAINT inventory_status_transitions_to_status_check CHECK ((to_status = ANY (ARRAY['available'::text, 'hold'::text, 'damaged'::text, 'quarantine'::text])))
+);
+
+ALTER TABLE ONLY public.inventory_status_transitions FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: inventory_status_transitions_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_status_transitions ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.inventory_status_transitions_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: inventory_transactions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inventory_transactions (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    actor_user_id bigint,
+    transaction_type text NOT NULL,
+    reason text,
+    reference_type text,
+    reference_id bigint,
+    correlation_id text,
+    operation text NOT NULL,
+    idempotency_key text,
+    request_hash text NOT NULL,
+    CONSTRAINT inventory_transactions_operation_check CHECK ((btrim(operation) <> ''::text)),
+    CONSTRAINT inventory_transactions_request_hash_check CHECK ((btrim(request_hash) <> ''::text)),
+    CONSTRAINT inventory_transactions_transaction_type_check CHECK ((transaction_type = ANY (ARRAY['receive'::text, 'move'::text, 'adjust'::text, 'ship'::text, 'status_change'::text])))
+);
+
+ALTER TABLE ONLY public.inventory_transactions FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: inventory_transactions_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_transactions ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.inventory_transactions_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: item_batches; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.item_batches (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    lot text,
+    load_id bigint,
+    order_id bigint,
+    expiration timestamp with time zone,
+    serial text,
+    CONSTRAINT item_batches_uom_check CHECK ((btrim(uom) <> ''::text))
+);
+
+ALTER TABLE ONLY public.item_batches FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: item_batches_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.item_batches ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.item_batches_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: item_pack_links; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.item_pack_links (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    master_item_id bigint NOT NULL,
+    single_item_id bigint NOT NULL,
+    inner_qty bigint NOT NULL,
+    notes text,
+    CONSTRAINT item_pack_links_check CHECK ((master_item_id <> single_item_id)),
+    CONSTRAINT item_pack_links_inner_qty_check CHECK ((inner_qty > 1))
+);
+
+ALTER TABLE ONLY public.item_pack_links FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: item_pack_links_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.item_pack_links ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.item_pack_links_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: items; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.items (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    description text,
+    notes text,
+    packaging_unit text NOT NULL,
+    dims_id bigint,
+    pallet_hi bigint,
+    pallet_ti bigint,
+    inner_units bigint,
+    CONSTRAINT items_inner_units_check CHECK (((inner_units IS NULL) OR (inner_units > 0))),
+    CONSTRAINT items_packaging_unit_check CHECK ((packaging_unit = ANY (ARRAY['each'::text, 'case'::text]))),
+    CONSTRAINT items_pallet_hi_check CHECK (((pallet_hi IS NULL) OR (pallet_hi > 0))),
+    CONSTRAINT items_pallet_ti_check CHECK (((pallet_ti IS NULL) OR (pallet_ti > 0)))
+);
+
+ALTER TABLE ONLY public.items FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: items_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.items ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.items_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: license_plate_putaway_results; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.license_plate_putaway_results (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    license_plate_id bigint NOT NULL,
+    license_plate_barcode text NOT NULL,
+    source_location_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    destination_location_barcode text NOT NULL,
+    inventory_transaction_id bigint NOT NULL,
+    moved_balance_count bigint NOT NULL,
+    confirmed_by bigint NOT NULL,
+    confirmed_at timestamp with time zone NOT NULL,
+    CONSTRAINT license_plate_putaway_result_destination_location_barcode_check CHECK ((btrim(destination_location_barcode) <> ''::text)),
+    CONSTRAINT license_plate_putaway_results_check CHECK ((source_location_id <> destination_location_id)),
+    CONSTRAINT license_plate_putaway_results_license_plate_barcode_check CHECK ((btrim(license_plate_barcode) <> ''::text)),
+    CONSTRAINT license_plate_putaway_results_moved_balance_count_check CHECK ((moved_balance_count > 0))
+);
+
+ALTER TABLE ONLY public.license_plate_putaway_results FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: license_plate_putaway_task_contents; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.license_plate_putaway_task_contents (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    license_plate_id bigint NOT NULL,
+    inventory_balance_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    inventory_status text NOT NULL,
+    planned_quantity bigint NOT NULL,
+    CONSTRAINT license_plate_putaway_task_contents_inventory_status_check CHECK ((inventory_status = 'available'::text)),
+    CONSTRAINT license_plate_putaway_task_contents_planned_quantity_check CHECK ((planned_quantity > 0)),
+    CONSTRAINT license_plate_putaway_task_contents_uom_check CHECK ((btrim(uom) <> ''::text))
+);
+
+ALTER TABLE ONLY public.license_plate_putaway_task_contents FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: license_plate_putaway_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.license_plate_putaway_tasks (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    license_plate_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    planned_balance_count bigint NOT NULL,
+    closed_at timestamp with time zone,
+    CONSTRAINT license_plate_putaway_tasks_check CHECK ((source_location_id <> destination_location_id)),
+    CONSTRAINT license_plate_putaway_tasks_planned_balance_count_check CHECK ((planned_balance_count > 0))
+);
+
+ALTER TABLE ONLY public.license_plate_putaway_tasks FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: license_plates; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.license_plates (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    barcode text,
+    facility_id bigint NOT NULL,
+    location_id bigint,
+    dims_id bigint
+);
+
+ALTER TABLE ONLY public.license_plates FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: license_plates_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.license_plates ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.license_plates_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: load_activity; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.load_activity (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    load_id bigint NOT NULL,
+    user_id bigint,
+    action text NOT NULL,
+    message text,
+    metadata_json text
+);
+
+ALTER TABLE ONLY public.load_activity FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: load_activity_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.load_activity ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.load_activity_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: load_files; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.load_files (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    load_id bigint NOT NULL,
+    original_name text NOT NULL,
+    name text NOT NULL,
+    path text NOT NULL,
+    content_type text,
+    category text DEFAULT 'general'::text NOT NULL,
+    CONSTRAINT load_files_category_check CHECK ((category = ANY (ARRAY['general'::text, 'invoice'::text])))
+);
+
+ALTER TABLE ONLY public.load_files FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: load_files_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.load_files ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.load_files_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: load_lines; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.load_lines (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    load_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    sku_id bigint,
+    expected_qty bigint NOT NULL,
+    received_qty bigint DEFAULT 0 NOT NULL,
+    rejected_qty bigint DEFAULT 0 NOT NULL,
+    missing_qty bigint DEFAULT 0 NOT NULL,
+    missing_confirmed_by bigint,
+    missing_confirmed_at timestamp with time zone,
+    lot text,
+    serial text,
+    expiration timestamp with time zone,
+    status text DEFAULT 'pending'::text NOT NULL,
+    CONSTRAINT load_lines_check CHECK ((((received_qty + rejected_qty) + missing_qty) <= expected_qty)),
+    CONSTRAINT load_lines_check1 CHECK ((((missing_qty = 0) AND (missing_confirmed_by IS NULL) AND (missing_confirmed_at IS NULL)) OR ((missing_qty > 0) AND (missing_confirmed_by IS NOT NULL) AND (missing_confirmed_at IS NOT NULL)))),
+    CONSTRAINT load_lines_expected_qty_check CHECK ((expected_qty > 0)),
+    CONSTRAINT load_lines_missing_qty_check CHECK ((missing_qty >= 0)),
+    CONSTRAINT load_lines_received_qty_check CHECK ((received_qty >= 0)),
+    CONSTRAINT load_lines_rejected_qty_check CHECK ((rejected_qty >= 0)),
+    CONSTRAINT load_lines_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'partial'::text, 'received'::text, 'rejected'::text, 'missing'::text])))
+);
+
+ALTER TABLE ONLY public.load_lines FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: load_lines_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.load_lines ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.load_lines_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: load_notes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.load_notes (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    load_id bigint NOT NULL,
+    note text NOT NULL
+);
+
+ALTER TABLE ONLY public.load_notes FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: load_notes_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.load_notes ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.load_notes_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: load_orders; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.load_orders (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    load_id bigint NOT NULL,
+    order_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.load_orders FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: load_orders_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.load_orders ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.load_orders_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: loads; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.loads (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    facility_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    status text DEFAULT 'planned'::text NOT NULL,
+    type text NOT NULL,
+    reference_number text,
+    invoice_number text,
+    carrier text,
+    trailer_number text,
+    seal_number text,
+    dock_door_location_id bigint,
+    expected_time timestamp with time zone,
+    appointment_time timestamp with time zone,
+    actual_time timestamp with time zone,
+    arrival timestamp with time zone,
+    departure timestamp with time zone,
+    rejected timestamp with time zone,
+    receive_completed boolean DEFAULT false NOT NULL,
+    closed timestamp with time zone,
+    checked_in_by bigint,
+    closed_by bigint,
+    execution_barcode text NOT NULL,
+    CONSTRAINT loads_execution_barcode_format_check CHECK (((execution_barcode = upper(btrim(execution_barcode))) AND ((octet_length(execution_barcode) >= 1) AND (octet_length(execution_barcode) <= 200)) AND (execution_barcode ~ '^[A-Z0-9][A-Z0-9._:-]{0,199}$'::text))),
+    CONSTRAINT loads_status_check CHECK ((status = ANY (ARRAY['planned'::text, 'scheduled'::text, 'arrived'::text, 'receiving'::text, 'received'::text, 'rejected'::text, 'closed'::text, 'cancelled'::text]))),
+    CONSTRAINT loads_type_check CHECK ((type = ANY (ARRAY['inbound'::text, 'outbound'::text])))
+);
+
+ALTER TABLE ONLY public.loads FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: loads_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.loads ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.loads_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: locations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.locations (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    facility_id bigint NOT NULL,
+    parent_location_id bigint,
+    barcode text,
+    name text,
+    type text NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    pickable boolean DEFAULT false NOT NULL,
+    receivable boolean DEFAULT false NOT NULL
+);
+
+ALTER TABLE ONLY public.locations FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: locations_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.locations ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.locations_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: order_activity; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.order_activity (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    order_id bigint NOT NULL,
+    action text NOT NULL
+);
+
+ALTER TABLE ONLY public.order_activity FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: order_activity_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_activity ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.order_activity_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: order_items; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.order_items (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    qty bigint NOT NULL,
+    item_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    item_batch_id bigint,
+    CONSTRAINT order_items_qty_check CHECK ((qty > 0))
+);
+
+ALTER TABLE ONLY public.order_items FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: order_items_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_items ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.order_items_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: order_tracking_numbers; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.order_tracking_numbers (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    order_id bigint NOT NULL,
+    tracking_number text NOT NULL,
+    carrier text,
+    service text
+);
+
+ALTER TABLE ONLY public.order_tracking_numbers FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: order_tracking_numbers_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_tracking_numbers ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.order_tracking_numbers_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: orders; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.orders (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    order_key text NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    rush boolean DEFAULT false NOT NULL,
+    status text DEFAULT 'open'::text NOT NULL,
+    address_id bigint NOT NULL,
+    confirmed timestamp with time zone,
+    closed timestamp with time zone,
+    ship_by timestamp with time zone,
+    wave_id bigint,
+    CONSTRAINT orders_status_check CHECK ((status = ANY (ARRAY['awaiting shipment'::text, 'shipped'::text, 'cancelled'::text, 'held'::text, 'processing'::text, 'open'::text, 'void'::text])))
+);
+
+ALTER TABLE ONLY public.orders FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: orders_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.orders ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.orders_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: outbox_aggregate_sequences; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.outbox_aggregate_sequences (
+    tenant_id bigint NOT NULL,
+    ordering_key text NOT NULL,
+    last_sequence bigint NOT NULL,
+    updated timestamp with time zone NOT NULL,
+    CONSTRAINT outbox_aggregate_sequences_last_sequence_check CHECK ((last_sequence > 0)),
+    CONSTRAINT outbox_aggregate_sequences_ordering_key_check CHECK ((btrim(ordering_key) <> ''::text))
+);
+
+ALTER TABLE ONLY public.outbox_aggregate_sequences FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: outbox_delivery_attempt_results; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.outbox_delivery_attempt_results (
+    tenant_id bigint NOT NULL,
+    outbox_event_id bigint NOT NULL,
+    claim_version bigint NOT NULL,
+    outcome text NOT NULL,
+    completed_at timestamp with time zone NOT NULL,
+    error text,
+    retry_after_seconds bigint,
+    CONSTRAINT outbox_delivery_attempt_results_check CHECK ((((outcome = 'published'::text) AND (error IS NULL) AND (retry_after_seconds IS NULL)) OR ((outcome = 'retry_scheduled'::text) AND (error IS NOT NULL) AND (retry_after_seconds IS NOT NULL)) OR ((outcome = ANY (ARRAY['permanent_failure'::text, 'retry_exhausted'::text])) AND (error IS NOT NULL) AND (retry_after_seconds IS NULL)) OR ((outcome = 'lease_lost'::text) AND (retry_after_seconds IS NULL)))),
+    CONSTRAINT outbox_delivery_attempt_results_error_check CHECK (((error IS NULL) OR ((btrim(error) <> ''::text) AND (char_length(error) <= 4000)))),
+    CONSTRAINT outbox_delivery_attempt_results_outcome_check CHECK ((outcome = ANY (ARRAY['published'::text, 'retry_scheduled'::text, 'permanent_failure'::text, 'retry_exhausted'::text, 'lease_lost'::text]))),
+    CONSTRAINT outbox_delivery_attempt_results_retry_after_seconds_check CHECK (((retry_after_seconds IS NULL) OR (retry_after_seconds >= 0)))
+);
+
+ALTER TABLE ONLY public.outbox_delivery_attempt_results FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: outbox_delivery_attempts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.outbox_delivery_attempts (
+    tenant_id bigint NOT NULL,
+    outbox_event_id bigint NOT NULL,
+    event_key text NOT NULL,
+    event_type text NOT NULL,
+    claim_version bigint NOT NULL,
+    replay_count integer NOT NULL,
+    attempt_number integer NOT NULL,
+    worker_id text NOT NULL,
+    publisher_name text NOT NULL,
+    claimed_at timestamp with time zone NOT NULL,
+    lease_expires_at timestamp with time zone NOT NULL,
+    CONSTRAINT outbox_delivery_attempts_attempt_number_check CHECK ((attempt_number > 0)),
+    CONSTRAINT outbox_delivery_attempts_check CHECK ((lease_expires_at > claimed_at)),
+    CONSTRAINT outbox_delivery_attempts_claim_version_check CHECK ((claim_version > 0)),
+    CONSTRAINT outbox_delivery_attempts_event_key_check CHECK ((btrim(event_key) <> ''::text)),
+    CONSTRAINT outbox_delivery_attempts_event_type_check CHECK ((btrim(event_type) <> ''::text)),
+    CONSTRAINT outbox_delivery_attempts_outbox_event_id_check CHECK ((outbox_event_id > 0)),
+    CONSTRAINT outbox_delivery_attempts_publisher_name_check CHECK (((btrim(publisher_name) <> ''::text) AND (char_length(publisher_name) <= 200))),
+    CONSTRAINT outbox_delivery_attempts_replay_count_check CHECK ((replay_count >= 0)),
+    CONSTRAINT outbox_delivery_attempts_worker_id_check CHECK (((btrim(worker_id) <> ''::text) AND (char_length(worker_id) <= 200)))
+);
+
+ALTER TABLE ONLY public.outbox_delivery_attempts FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: outbox_event_keys; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.outbox_event_keys (
+    tenant_id bigint NOT NULL,
+    event_key text NOT NULL,
+    created timestamp with time zone NOT NULL,
+    CONSTRAINT outbox_event_keys_event_key_check CHECK ((btrim(event_key) <> ''::text))
+);
+
+ALTER TABLE ONLY public.outbox_event_keys FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: outbox_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.outbox_events (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint,
+    facility_id bigint,
+    actor_user_id bigint,
+    created timestamp with time zone NOT NULL,
+    event_key text NOT NULL,
+    aggregate_type text NOT NULL,
+    aggregate_id text NOT NULL,
+    ordering_key text NOT NULL,
+    aggregate_sequence bigint NOT NULL,
+    event_type text NOT NULL,
+    schema_version integer NOT NULL,
+    payload jsonb NOT NULL,
+    occurred_at timestamp with time zone NOT NULL,
+    available_at timestamp with time zone NOT NULL,
+    claimed_at timestamp with time zone,
+    claimed_by text,
+    lease_expires_at timestamp with time zone,
+    claim_version bigint DEFAULT 0 NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    last_error text,
+    dead_lettered_at timestamp with time zone,
+    replay_count integer DEFAULT 0 NOT NULL,
+    discarded_at timestamp with time zone,
+    discard_reason text,
+    discarded_by_user_id bigint,
+    published_at timestamp with time zone,
+    CONSTRAINT outbox_events_aggregate_id_check CHECK ((btrim(aggregate_id) <> ''::text)),
+    CONSTRAINT outbox_events_aggregate_sequence_check CHECK ((aggregate_sequence > 0)),
+    CONSTRAINT outbox_events_aggregate_type_check CHECK ((btrim(aggregate_type) <> ''::text)),
+    CONSTRAINT outbox_events_attempts_check CHECK ((attempts >= 0)),
+    CONSTRAINT outbox_events_check CHECK (((claimed_at IS NULL) = (claimed_by IS NULL))),
+    CONSTRAINT outbox_events_check1 CHECK (((claimed_at IS NULL) = (lease_expires_at IS NULL))),
+    CONSTRAINT outbox_events_check2 CHECK ((((discarded_at IS NULL) AND (discard_reason IS NULL) AND (discarded_by_user_id IS NULL)) OR ((discarded_at IS NOT NULL) AND (discard_reason IS NOT NULL) AND (discarded_by_user_id IS NOT NULL)))),
+    CONSTRAINT outbox_events_check3 CHECK (((dead_lettered_at IS NULL) OR ((claimed_at IS NULL) AND (claimed_by IS NULL) AND (lease_expires_at IS NULL) AND (published_at IS NULL)))),
+    CONSTRAINT outbox_events_check4 CHECK (((published_at IS NULL) OR ((claimed_at IS NULL) AND (claimed_by IS NULL) AND (lease_expires_at IS NULL) AND (last_error IS NULL) AND (dead_lettered_at IS NULL) AND (discarded_at IS NULL)))),
+    CONSTRAINT outbox_events_claim_version_check CHECK ((claim_version >= 0)),
+    CONSTRAINT outbox_events_claimed_by_check CHECK (((claimed_by IS NULL) OR (btrim(claimed_by) <> ''::text))),
+    CONSTRAINT outbox_events_discard_reason_check CHECK (((discard_reason IS NULL) OR (btrim(discard_reason) <> ''::text))),
+    CONSTRAINT outbox_events_event_key_check CHECK ((btrim(event_key) <> ''::text)),
+    CONSTRAINT outbox_events_event_type_check CHECK ((btrim(event_type) <> ''::text)),
+    CONSTRAINT outbox_events_last_error_check CHECK (((last_error IS NULL) OR (btrim(last_error) <> ''::text))),
+    CONSTRAINT outbox_events_ordering_key_check CHECK ((btrim(ordering_key) <> ''::text)),
+    CONSTRAINT outbox_events_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
+    CONSTRAINT outbox_events_replay_count_check CHECK ((replay_count >= 0)),
+    CONSTRAINT outbox_events_schema_version_check CHECK ((schema_version > 0))
+);
+
+ALTER TABLE ONLY public.outbox_events FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: outbox_events_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.outbox_events ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.outbox_events_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: permissions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.permissions (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    name text NOT NULL,
+    description text
+);
+
+ALTER TABLE ONLY public.permissions FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: permissions_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.permissions ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.permissions_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: pick_waves; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.pick_waves (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    name text
+);
+
+ALTER TABLE ONLY public.pick_waves FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: pick_waves_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.pick_waves ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.pick_waves_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: putaway_results; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.putaway_results (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    destination_inventory_balance_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    inventory_status text NOT NULL,
+    quantity bigint NOT NULL,
+    inventory_transaction_id bigint NOT NULL,
+    confirmed_by bigint NOT NULL,
+    confirmed_at timestamp with time zone NOT NULL,
+    destination_location_barcode text NOT NULL,
+    CONSTRAINT putaway_results_check CHECK ((source_inventory_balance_id <> destination_inventory_balance_id)),
+    CONSTRAINT putaway_results_destination_barcode_nonblank CHECK ((btrim(destination_location_barcode) <> ''::text)),
+    CONSTRAINT putaway_results_inventory_status_check CHECK ((inventory_status = ANY (ARRAY['available'::text, 'hold'::text, 'damaged'::text, 'quarantine'::text]))),
+    CONSTRAINT putaway_results_quantity_check CHECK ((quantity > 0))
+);
+
+ALTER TABLE ONLY public.putaway_results FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: putaway_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.putaway_tasks (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    inventory_status text NOT NULL,
+    planned_quantity bigint NOT NULL,
+    closed_at timestamp with time zone,
+    CONSTRAINT putaway_tasks_check CHECK ((source_location_id <> destination_location_id)),
+    CONSTRAINT putaway_tasks_inventory_status_check CHECK ((inventory_status = ANY (ARRAY['available'::text, 'hold'::text, 'damaged'::text, 'quarantine'::text]))),
+    CONSTRAINT putaway_tasks_planned_quantity_check CHECK ((planned_quantity > 0))
+);
+
+ALTER TABLE ONLY public.putaway_tasks FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: role_permissions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.role_permissions (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    role_id bigint NOT NULL,
+    permission_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.role_permissions FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: role_permissions_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.role_permissions ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.role_permissions_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: roles; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.roles (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    name text NOT NULL,
+    description text,
+    parent_id bigint,
+    self_user_id bigint,
+    CONSTRAINT roles_check CHECK (((self_user_id IS NULL) OR (description = 'Self role'::text)))
+);
+
+ALTER TABLE ONLY public.roles FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: roles_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.roles ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.roles_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: sessions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sessions (
+    token text NOT NULL,
+    user_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    expires timestamp with time zone NOT NULL,
+    purpose text DEFAULT 'api'::text NOT NULL,
+    active_tenant_id bigint,
+    last_seen_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT sessions_purpose_check CHECK ((purpose = ANY (ARRAY['api'::text, 'web'::text]))),
+    CONSTRAINT sessions_web_context_check CHECK ((((purpose = 'api'::text) AND (active_tenant_id IS NULL)) OR (purpose = 'web'::text)))
+);
+
+
+--
+-- Name: skus; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.skus (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    name text NOT NULL,
+    item_id bigint NOT NULL,
+    notes text
+);
+
+ALTER TABLE ONLY public.skus FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: skus_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.skus ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.skus_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: tenant_memberships; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.tenant_memberships (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    user_id bigint NOT NULL,
+    created timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    deleted timestamp with time zone,
+    is_default boolean DEFAULT false NOT NULL,
+    all_facilities boolean DEFAULT true NOT NULL,
+    all_inventory_owners boolean DEFAULT true NOT NULL
+);
+
+ALTER TABLE ONLY public.tenant_memberships FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: tenant_memberships_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.tenant_memberships ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.tenant_memberships_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: tenants; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.tenants (
+    id bigint NOT NULL,
+    created timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    deleted timestamp with time zone,
+    slug text NOT NULL,
+    name text NOT NULL,
+    status text DEFAULT 'active'::text NOT NULL,
+    CONSTRAINT tenants_name_not_blank CHECK ((btrim(name) <> ''::text)),
+    CONSTRAINT tenants_slug_not_blank CHECK ((btrim(slug) <> ''::text)),
+    CONSTRAINT tenants_status_valid CHECK ((status = ANY (ARRAY['active'::text, 'suspended'::text])))
+);
+
+
+--
+-- Name: tenants_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.tenants ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.tenants_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.unpack_cancelled_order_task_lines (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    order_item_id bigint,
+    item_id bigint NOT NULL,
+    item_batch_id bigint,
+    inventory_balance_id bigint,
+    license_plate_id bigint,
+    source_location_id bigint,
+    destination_location_id bigint,
+    expected_qty bigint NOT NULL,
+    unpacked_qty bigint DEFAULT 0 NOT NULL,
+    missing_qty bigint DEFAULT 0 NOT NULL,
+    damaged_qty bigint DEFAULT 0 NOT NULL,
+    status text DEFAULT 'open'::text NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    CONSTRAINT unpack_cancelled_order_task_lines_check CHECK ((((unpacked_qty + missing_qty) + damaged_qty) <= expected_qty)),
+    CONSTRAINT unpack_cancelled_order_task_lines_damaged_qty_check CHECK ((damaged_qty >= 0)),
+    CONSTRAINT unpack_cancelled_order_task_lines_expected_qty_check CHECK ((expected_qty > 0)),
+    CONSTRAINT unpack_cancelled_order_task_lines_missing_qty_check CHECK ((missing_qty >= 0)),
+    CONSTRAINT unpack_cancelled_order_task_lines_status_check CHECK ((status = ANY (ARRAY['open'::text, 'partial'::text, 'completed'::text, 'exception'::text]))),
+    CONSTRAINT unpack_cancelled_order_task_lines_unpacked_qty_check CHECK ((unpacked_qty >= 0))
+);
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: unpack_cancelled_order_task_lines_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.unpack_cancelled_order_task_lines ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.unpack_cancelled_order_task_lines_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: unpack_cancelled_order_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.unpack_cancelled_order_tasks (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.unpack_cancelled_order_tasks FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: user_credentials; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_credentials (
+    user_id bigint NOT NULL,
+    password_hash text NOT NULL,
+    created timestamp with time zone NOT NULL
+);
+
+
+--
+-- Name: user_facilities; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_facilities (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    deleted timestamp with time zone,
+    user_id bigint NOT NULL,
+    facility_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.user_facilities FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: user_facilities_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.user_facilities ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.user_facilities_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: user_inventory_owners; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_inventory_owners (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    user_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.user_inventory_owners FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: user_inventory_owners_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.user_inventory_owners ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.user_inventory_owners_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: user_roles; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_roles (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    user_id bigint NOT NULL,
+    role_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.user_roles FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: user_roles_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.user_roles ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.user_roles_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: user_settings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_settings (
+    user_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    modified timestamp with time zone,
+    light_mode boolean DEFAULT false NOT NULL
+);
+
+
+--
+-- Name: users; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.users (
+    id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    deleted timestamp with time zone,
+    first_name text,
+    last_name text,
+    email text NOT NULL,
+    nick_name text,
+    phone text
+);
+
+
+--
+-- Name: users_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.users ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.users_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: work_task_progress; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.work_task_progress (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    task_id bigint NOT NULL,
+    task_line_id bigint,
+    user_id bigint,
+    action text NOT NULL,
+    qty_delta bigint,
+    from_location_id bigint,
+    to_location_id bigint,
+    note text,
+    metadata_json text,
+    facility_id bigint NOT NULL,
+    inventory_owner_id bigint,
+    CONSTRAINT work_task_progress_action_check CHECK ((action = ANY (ARRAY['started'::text, 'aborted'::text, 'expired'::text, 'scope_revoked'::text, 'completed'::text, 'cancelled'::text, 'progress'::text, 'unpacked'::text, 'missing'::text, 'damaged'::text, 'moved'::text, 'cycle_count_confirmed'::text, 'putaway_confirmed'::text, 'license_plate_putaway_confirmed'::text, 'putaway_heartbeat'::text, 'putaway_released'::text, 'inventory_relocation_confirmed'::text, 'inventory_relocation_heartbeat'::text, 'inventory_relocation_released'::text, 'cycle_count_heartbeat'::text, 'cycle_count_released'::text]))),
+    CONSTRAINT work_task_progress_qty_delta_check CHECK (((qty_delta IS NULL) OR (qty_delta > 0))),
+    CONSTRAINT work_task_progress_task_line_owner_check CHECK (((task_line_id IS NULL) OR (inventory_owner_id IS NOT NULL)))
+);
+
+ALTER TABLE ONLY public.work_task_progress FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: work_task_progress_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.work_task_progress ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.work_task_progress_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: work_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.work_tasks (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    modified timestamp with time zone,
+    deleted timestamp with time zone,
+    task_type text NOT NULL,
+    status text DEFAULT 'open'::text NOT NULL,
+    required_permission text DEFAULT 'wms'::text NOT NULL,
+    priority bigint DEFAULT 0 NOT NULL,
+    title text NOT NULL,
+    instructions text,
+    assigned_user_id bigint,
+    created_by bigint,
+    completed_by bigint,
+    scheduled_for timestamp with time zone,
+    due_at timestamp with time zone,
+    started_at timestamp with time zone,
+    lease_expires_at timestamp with time zone,
+    task_timeout_seconds bigint DEFAULT 1800 NOT NULL,
+    last_released_at timestamp with time zone,
+    release_count bigint DEFAULT 0 NOT NULL,
+    completed_at timestamp with time zone,
+    metadata_json text,
+    facility_id bigint,
+    inventory_owner_id bigint,
+    CONSTRAINT work_tasks_check CHECK (((lease_expires_at IS NULL) OR (status = ANY (ARRAY['assigned'::text, 'in_progress'::text])))),
+    CONSTRAINT work_tasks_check1 CHECK (((completed_at IS NULL) OR (status = ANY (ARRAY['completed'::text, 'cancelled'::text])))),
+    CONSTRAINT work_tasks_check2 CHECK (((started_at IS NULL) OR (status = ANY (ARRAY['in_progress'::text, 'completed'::text, 'cancelled'::text])))),
+    CONSTRAINT work_tasks_priority_check CHECK ((priority >= 0)),
+    CONSTRAINT work_tasks_release_count_check CHECK ((release_count >= 0)),
+    CONSTRAINT work_tasks_required_dimensions_check CHECK ((((task_type = ANY (ARRAY['cycle_count_item_location'::text, 'unpack_cancelled_order'::text, 'putaway'::text, 'license_plate_putaway'::text, 'inventory_relocation'::text])) AND (facility_id IS NOT NULL) AND (inventory_owner_id IS NOT NULL)) OR ((task_type = ANY (ARRAY['cycle_count_location'::text, 'break_master_pack'::text])) AND (facility_id IS NOT NULL)))),
+    CONSTRAINT work_tasks_status_check CHECK ((status = ANY (ARRAY['open'::text, 'assigned'::text, 'in_progress'::text, 'completed'::text, 'cancelled'::text]))),
+    CONSTRAINT work_tasks_task_timeout_seconds_check CHECK ((task_timeout_seconds > 0)),
+    CONSTRAINT work_tasks_task_type_check CHECK ((task_type = ANY (ARRAY['cycle_count_item_location'::text, 'cycle_count_location'::text, 'break_master_pack'::text, 'unpack_cancelled_order'::text, 'putaway'::text, 'license_plate_putaway'::text, 'inventory_relocation'::text])))
+);
+
+ALTER TABLE ONLY public.work_tasks FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: work_tasks_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.work_tasks ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.work_tasks_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: addresses addresses_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.addresses
+    ADD CONSTRAINT addresses_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: addresses addresses_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.addresses
+    ADD CONSTRAINT addresses_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: audit_location_counts audit_location_counts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_location_counts
+    ADD CONSTRAINT audit_location_counts_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: audit_location_counts audit_location_counts_tenant_owner_facility_id_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_location_counts
+    ADD CONSTRAINT audit_location_counts_tenant_owner_facility_id_unique UNIQUE (tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: audit_wave_assignments audit_wave_assignments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_assignments
+    ADD CONSTRAINT audit_wave_assignments_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: audit_wave_assignments audit_wave_assignments_tenant_id_audit_wave_id_auditor_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_assignments
+    ADD CONSTRAINT audit_wave_assignments_tenant_id_audit_wave_id_auditor_id_key UNIQUE (tenant_id, audit_wave_id, auditor_id);
+
+
+--
+-- Name: audit_wave_inventory_owners audit_wave_inventory_owners_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_inventory_owners
+    ADD CONSTRAINT audit_wave_inventory_owners_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: audit_wave_inventory_owners audit_wave_inventory_owners_tenant_id_audit_wave_id_invento_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_inventory_owners
+    ADD CONSTRAINT audit_wave_inventory_owners_tenant_id_audit_wave_id_invento_key UNIQUE (tenant_id, audit_wave_id, inventory_owner_id);
+
+
+--
+-- Name: audit_wave_items audit_wave_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_items
+    ADD CONSTRAINT audit_wave_items_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: audit_wave_items audit_wave_items_tenant_id_audit_wave_id_item_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_items
+    ADD CONSTRAINT audit_wave_items_tenant_id_audit_wave_id_item_id_key UNIQUE (tenant_id, audit_wave_id, item_id);
+
+
+--
+-- Name: audit_wave_locations audit_wave_locations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_locations
+    ADD CONSTRAINT audit_wave_locations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: audit_wave_locations audit_wave_locations_tenant_id_audit_wave_id_location_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_locations
+    ADD CONSTRAINT audit_wave_locations_tenant_id_audit_wave_id_location_id_key UNIQUE (tenant_id, audit_wave_id, location_id);
+
+
+--
+-- Name: audit_waves audit_waves_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_waves
+    ADD CONSTRAINT audit_waves_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: audit_waves audit_waves_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_waves
+    ADD CONSTRAINT audit_waves_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: audit_waves audit_waves_tenant_owner_facility_id_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_waves
+    ADD CONSTRAINT audit_waves_tenant_owner_facility_id_unique UNIQUE (tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: barcodes barcodes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.barcodes
+    ADD CONSTRAINT barcodes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: break_master_pack_tasks break_master_pack_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.break_master_pack_tasks
+    ADD CONSTRAINT break_master_pack_tasks_pkey PRIMARY KEY (tenant_id, task_id);
+
+
+--
+-- Name: command_idempotency_records command_idempotency_records_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.command_idempotency_records
+    ADD CONSTRAINT command_idempotency_records_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: command_idempotency_records command_idempotency_records_tenant_id_operation_idempotency_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.command_idempotency_records
+    ADD CONSTRAINT command_idempotency_records_tenant_id_operation_idempotency_key UNIQUE (tenant_id, operation, idempotency_key);
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_res_tenant_id_inventory_owner_id__key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_results
+    ADD CONSTRAINT cycle_count_item_location_res_tenant_id_inventory_owner_id__key UNIQUE (tenant_id, inventory_owner_id, inventory_transaction_id);
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_results_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_results
+    ADD CONSTRAINT cycle_count_item_location_results_pkey PRIMARY KEY (tenant_id, task_id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_pkey PRIMARY KEY (tenant_id, task_id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_target_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_target_unique UNIQUE (tenant_id, inventory_owner_id, facility_id, location_id, item_id, task_id, inventory_balance_id);
+
+
+--
+-- Name: cycle_count_location_tasks cycle_count_location_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_location_tasks
+    ADD CONSTRAINT cycle_count_location_tasks_pkey PRIMARY KEY (tenant_id, task_id);
+
+
+--
+-- Name: dims dims_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.dims
+    ADD CONSTRAINT dims_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: dims dims_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.dims
+    ADD CONSTRAINT dims_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: employee_facilities employee_facilities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.employee_facilities
+    ADD CONSTRAINT employee_facilities_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: employee_facilities employee_facilities_tenant_id_employee_id_facility_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.employee_facilities
+    ADD CONSTRAINT employee_facilities_tenant_id_employee_id_facility_id_key UNIQUE (tenant_id, employee_id, facility_id);
+
+
+--
+-- Name: employees employees_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.employees
+    ADD CONSTRAINT employees_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: employees employees_tenant_id_email_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.employees
+    ADD CONSTRAINT employees_tenant_id_email_key UNIQUE (tenant_id, email);
+
+
+--
+-- Name: employees employees_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.employees
+    ADD CONSTRAINT employees_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: facilities facilities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.facilities
+    ADD CONSTRAINT facilities_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: facilities facilities_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.facilities
+    ADD CONSTRAINT facilities_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: facilities facilities_tenant_id_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.facilities
+    ADD CONSTRAINT facilities_tenant_id_name_key UNIQUE (tenant_id, name);
+
+
+--
+-- Name: integration_inbox_keys integration_inbox_keys_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_inbox_keys
+    ADD CONSTRAINT integration_inbox_keys_pkey PRIMARY KEY (tenant_id, source_key, deduplication_key);
+
+
+--
+-- Name: integration_inbox_keys integration_inbox_keys_tenant_id_receipt_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_inbox_keys
+    ADD CONSTRAINT integration_inbox_keys_tenant_id_receipt_id_key UNIQUE (tenant_id, receipt_id);
+
+
+--
+-- Name: integration_inbox_receipts integration_inbox_receipts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_inbox_receipts
+    ADD CONSTRAINT integration_inbox_receipts_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: integration_inbox_receipts integration_inbox_receipts_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_inbox_receipts
+    ADD CONSTRAINT integration_inbox_receipts_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: inventory_allocations inventory_allocations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: inventory_allocations inventory_allocations_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: inventory_allocations inventory_allocations_tenant_id_inventory_owner_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_tenant_id_inventory_owner_id_id_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_balances inventory_balances_cycle_count_target_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_balances
+    ADD CONSTRAINT inventory_balances_cycle_count_target_unique UNIQUE (tenant_id, inventory_owner_id, facility_id, location_id, item_id, id);
+
+
+--
+-- Name: inventory_balances inventory_balances_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_balances
+    ADD CONSTRAINT inventory_balances_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: inventory_balances inventory_balances_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_balances
+    ADD CONSTRAINT inventory_balances_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: inventory_balances inventory_balances_tenant_id_inventory_owner_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_balances
+    ADD CONSTRAINT inventory_balances_tenant_id_inventory_owner_id_id_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_balances inventory_balances_tenant_owner_facility_id_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_balances
+    ADD CONSTRAINT inventory_balances_tenant_owner_facility_id_unique UNIQUE (tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: inventory_entries inventory_entries_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_entries
+    ADD CONSTRAINT inventory_entries_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: inventory_holds inventory_holds_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_holds
+    ADD CONSTRAINT inventory_holds_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: inventory_holds inventory_holds_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_holds
+    ADD CONSTRAINT inventory_holds_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: inventory_holds inventory_holds_tenant_id_inventory_owner_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_holds
+    ADD CONSTRAINT inventory_holds_tenant_id_inventory_owner_id_id_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_owner_facilities inventory_owner_facilities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_owner_facilities
+    ADD CONSTRAINT inventory_owner_facilities_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: inventory_owner_facilities inventory_owner_facilities_tenant_id_inventory_owner_id_fac_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_owner_facilities
+    ADD CONSTRAINT inventory_owner_facilities_tenant_id_inventory_owner_id_fac_key UNIQUE (tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: inventory_owner_items inventory_owner_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_owner_items
+    ADD CONSTRAINT inventory_owner_items_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: inventory_owner_items inventory_owner_items_tenant_id_inventory_owner_id_item_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_owner_items
+    ADD CONSTRAINT inventory_owner_items_tenant_id_inventory_owner_id_item_id_key UNIQUE (tenant_id, inventory_owner_id, item_id);
+
+
+--
+-- Name: inventory_owners inventory_owners_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_owners
+    ADD CONSTRAINT inventory_owners_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: inventory_owners inventory_owners_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_owners
+    ADD CONSTRAINT inventory_owners_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: inventory_owners inventory_owners_tenant_id_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_owners
+    ADD CONSTRAINT inventory_owners_tenant_id_name_key UNIQUE (tenant_id, name);
+
+
+--
+-- Name: inventory_projection_changes inventory_projection_changes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_projection_changes
+    ADD CONSTRAINT inventory_projection_changes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: inventory_projection_changes inventory_projection_changes_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_projection_changes
+    ADD CONSTRAINT inventory_projection_changes_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: inventory_relocation_results inventory_relocation_results_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_results
+    ADD CONSTRAINT inventory_relocation_results_pkey PRIMARY KEY (tenant_id, task_id);
+
+
+--
+-- Name: inventory_relocation_results inventory_relocation_results_tenant_id_inventory_owner_id_i_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_results
+    ADD CONSTRAINT inventory_relocation_results_tenant_id_inventory_owner_id_i_key UNIQUE (tenant_id, inventory_owner_id, inventory_transaction_id);
+
+
+--
+-- Name: inventory_relocation_task_contents inventory_relocation_task_contents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_task_contents
+    ADD CONSTRAINT inventory_relocation_task_contents_pkey PRIMARY KEY (tenant_id, task_id, inventory_balance_id);
+
+
+--
+-- Name: inventory_relocation_tasks inventory_relocation_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_tasks
+    ADD CONSTRAINT inventory_relocation_tasks_pkey PRIMARY KEY (tenant_id, task_id);
+
+
+--
+-- Name: inventory_reservations inventory_reservations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_reservations
+    ADD CONSTRAINT inventory_reservations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: inventory_reservations inventory_reservations_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_reservations
+    ADD CONSTRAINT inventory_reservations_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: inventory_reservations inventory_reservations_tenant_id_inventory_owner_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_reservations
+    ADD CONSTRAINT inventory_reservations_tenant_id_inventory_owner_id_id_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_status_transitions inventory_status_transitions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_status_transitions
+    ADD CONSTRAINT inventory_status_transitions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: inventory_status_transitions inventory_status_transitions_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_status_transitions
+    ADD CONSTRAINT inventory_status_transitions_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: inventory_status_transitions inventory_status_transitions_tenant_id_inventory_owner_id_i_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_status_transitions
+    ADD CONSTRAINT inventory_status_transitions_tenant_id_inventory_owner_id_i_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_status_transitions inventory_status_transitions_tenant_id_inventory_owner_id_t_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_status_transitions
+    ADD CONSTRAINT inventory_status_transitions_tenant_id_inventory_owner_id_t_key UNIQUE (tenant_id, inventory_owner_id, transaction_id);
+
+
+--
+-- Name: inventory_transactions inventory_transactions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_transactions
+    ADD CONSTRAINT inventory_transactions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: inventory_transactions inventory_transactions_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_transactions
+    ADD CONSTRAINT inventory_transactions_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: inventory_transactions inventory_transactions_tenant_id_inventory_owner_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_transactions
+    ADD CONSTRAINT inventory_transactions_tenant_id_inventory_owner_id_id_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: item_batches item_batches_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_batches
+    ADD CONSTRAINT item_batches_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: item_batches item_batches_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_batches
+    ADD CONSTRAINT item_batches_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: item_batches item_batches_tenant_id_inventory_owner_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_batches
+    ADD CONSTRAINT item_batches_tenant_id_inventory_owner_id_id_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: item_pack_links item_pack_links_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_pack_links
+    ADD CONSTRAINT item_pack_links_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: items items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.items
+    ADD CONSTRAINT items_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: items items_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.items
+    ADD CONSTRAINT items_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: license_plate_putaway_results license_plate_putaway_results_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_results
+    ADD CONSTRAINT license_plate_putaway_results_pkey PRIMARY KEY (tenant_id, task_id);
+
+
+--
+-- Name: license_plate_putaway_results license_plate_putaway_results_tenant_id_inventory_owner_id__key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_results
+    ADD CONSTRAINT license_plate_putaway_results_tenant_id_inventory_owner_id__key UNIQUE (tenant_id, inventory_owner_id, inventory_transaction_id);
+
+
+--
+-- Name: license_plate_putaway_task_contents license_plate_putaway_task_contents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_task_contents
+    ADD CONSTRAINT license_plate_putaway_task_contents_pkey PRIMARY KEY (tenant_id, task_id, inventory_balance_id);
+
+
+--
+-- Name: license_plate_putaway_tasks license_plate_putaway_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_tasks
+    ADD CONSTRAINT license_plate_putaway_tasks_pkey PRIMARY KEY (tenant_id, task_id);
+
+
+--
+-- Name: license_plate_putaway_tasks license_plate_putaway_tasks_tenant_id_task_id_inventory_ow_key1; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_tasks
+    ADD CONSTRAINT license_plate_putaway_tasks_tenant_id_task_id_inventory_ow_key1 UNIQUE (tenant_id, task_id, inventory_owner_id, facility_id, license_plate_id, source_location_id, destination_location_id, planned_balance_count);
+
+
+--
+-- Name: license_plate_putaway_tasks license_plate_putaway_tasks_tenant_id_task_id_inventory_own_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_tasks
+    ADD CONSTRAINT license_plate_putaway_tasks_tenant_id_task_id_inventory_own_key UNIQUE (tenant_id, task_id, inventory_owner_id, facility_id, license_plate_id);
+
+
+--
+-- Name: license_plates license_plates_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plates
+    ADD CONSTRAINT license_plates_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: license_plates license_plates_tenant_id_barcode_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plates
+    ADD CONSTRAINT license_plates_tenant_id_barcode_key UNIQUE (tenant_id, barcode);
+
+
+--
+-- Name: license_plates license_plates_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plates
+    ADD CONSTRAINT license_plates_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: license_plates license_plates_tenant_id_inventory_owner_id_facility_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plates
+    ADD CONSTRAINT license_plates_tenant_id_inventory_owner_id_facility_id_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: license_plates license_plates_tenant_id_inventory_owner_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plates
+    ADD CONSTRAINT license_plates_tenant_id_inventory_owner_id_id_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: load_activity load_activity_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_activity
+    ADD CONSTRAINT load_activity_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: load_files load_files_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_files
+    ADD CONSTRAINT load_files_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: load_lines load_lines_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_lines
+    ADD CONSTRAINT load_lines_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: load_notes load_notes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_notes
+    ADD CONSTRAINT load_notes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: load_orders load_orders_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_orders
+    ADD CONSTRAINT load_orders_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: loads loads_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.loads
+    ADD CONSTRAINT loads_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: loads loads_tenant_execution_barcode_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.loads
+    ADD CONSTRAINT loads_tenant_execution_barcode_unique UNIQUE (tenant_id, execution_barcode);
+
+
+--
+-- Name: loads loads_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.loads
+    ADD CONSTRAINT loads_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: loads loads_tenant_id_inventory_owner_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.loads
+    ADD CONSTRAINT loads_tenant_id_inventory_owner_id_id_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: locations locations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.locations
+    ADD CONSTRAINT locations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: locations locations_tenant_id_barcode_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.locations
+    ADD CONSTRAINT locations_tenant_id_barcode_key UNIQUE (tenant_id, barcode);
+
+
+--
+-- Name: locations locations_tenant_id_facility_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.locations
+    ADD CONSTRAINT locations_tenant_id_facility_id_id_key UNIQUE (tenant_id, facility_id, id);
+
+
+--
+-- Name: locations locations_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.locations
+    ADD CONSTRAINT locations_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: order_activity order_activity_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_activity
+    ADD CONSTRAINT order_activity_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: order_items order_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_items
+    ADD CONSTRAINT order_items_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: order_items order_items_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_items
+    ADD CONSTRAINT order_items_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: order_items order_items_tenant_id_inventory_owner_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_items
+    ADD CONSTRAINT order_items_tenant_id_inventory_owner_id_id_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: order_items order_items_tenant_owner_order_id_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_items
+    ADD CONSTRAINT order_items_tenant_owner_order_id_unique UNIQUE (tenant_id, inventory_owner_id, order_id, id);
+
+
+--
+-- Name: order_tracking_numbers order_tracking_numbers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_tracking_numbers
+    ADD CONSTRAINT order_tracking_numbers_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: order_tracking_numbers order_tracking_numbers_tenant_id_inventory_owner_id_order_i_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_tracking_numbers
+    ADD CONSTRAINT order_tracking_numbers_tenant_id_inventory_owner_id_order_i_key UNIQUE (tenant_id, inventory_owner_id, order_id, tracking_number);
+
+
+--
+-- Name: orders orders_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: orders orders_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: orders orders_tenant_id_inventory_owner_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_tenant_id_inventory_owner_id_id_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: orders orders_tenant_id_inventory_owner_id_order_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_tenant_id_inventory_owner_id_order_key_key UNIQUE (tenant_id, inventory_owner_id, order_key);
+
+
+--
+-- Name: outbox_aggregate_sequences outbox_aggregate_sequences_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_aggregate_sequences
+    ADD CONSTRAINT outbox_aggregate_sequences_pkey PRIMARY KEY (tenant_id, ordering_key);
+
+
+--
+-- Name: outbox_delivery_attempt_results outbox_delivery_attempt_results_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_delivery_attempt_results
+    ADD CONSTRAINT outbox_delivery_attempt_results_pkey PRIMARY KEY (tenant_id, outbox_event_id, claim_version);
+
+
+--
+-- Name: outbox_delivery_attempts outbox_delivery_attempts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_delivery_attempts
+    ADD CONSTRAINT outbox_delivery_attempts_pkey PRIMARY KEY (tenant_id, outbox_event_id, claim_version);
+
+
+--
+-- Name: outbox_delivery_attempts outbox_delivery_attempts_tenant_id_event_key_claim_version_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_delivery_attempts
+    ADD CONSTRAINT outbox_delivery_attempts_tenant_id_event_key_claim_version_key UNIQUE (tenant_id, event_key, claim_version);
+
+
+--
+-- Name: outbox_delivery_attempts outbox_delivery_attempts_tenant_id_event_key_replay_count_a_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_delivery_attempts
+    ADD CONSTRAINT outbox_delivery_attempts_tenant_id_event_key_replay_count_a_key UNIQUE (tenant_id, event_key, replay_count, attempt_number);
+
+
+--
+-- Name: outbox_event_keys outbox_event_keys_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_event_keys
+    ADD CONSTRAINT outbox_event_keys_pkey PRIMARY KEY (tenant_id, event_key);
+
+
+--
+-- Name: outbox_events outbox_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_events
+    ADD CONSTRAINT outbox_events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: outbox_events outbox_events_tenant_id_event_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_events
+    ADD CONSTRAINT outbox_events_tenant_id_event_key_key UNIQUE (tenant_id, event_key);
+
+
+--
+-- Name: outbox_events outbox_events_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_events
+    ADD CONSTRAINT outbox_events_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: outbox_events outbox_events_tenant_id_ordering_key_aggregate_sequence_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_events
+    ADD CONSTRAINT outbox_events_tenant_id_ordering_key_aggregate_sequence_key UNIQUE (tenant_id, ordering_key, aggregate_sequence);
+
+
+--
+-- Name: permissions permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.permissions
+    ADD CONSTRAINT permissions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: permissions permissions_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.permissions
+    ADD CONSTRAINT permissions_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: permissions permissions_tenant_id_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.permissions
+    ADD CONSTRAINT permissions_tenant_id_name_key UNIQUE (tenant_id, name);
+
+
+--
+-- Name: pick_waves pick_waves_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_waves
+    ADD CONSTRAINT pick_waves_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: pick_waves pick_waves_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_waves
+    ADD CONSTRAINT pick_waves_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: putaway_results putaway_results_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_results
+    ADD CONSTRAINT putaway_results_pkey PRIMARY KEY (tenant_id, task_id);
+
+
+--
+-- Name: putaway_results putaway_results_tenant_id_inventory_owner_id_inventory_tran_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_results
+    ADD CONSTRAINT putaway_results_tenant_id_inventory_owner_id_inventory_tran_key UNIQUE (tenant_id, inventory_owner_id, inventory_transaction_id);
+
+
+--
+-- Name: putaway_tasks putaway_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_tasks
+    ADD CONSTRAINT putaway_tasks_pkey PRIMARY KEY (tenant_id, task_id);
+
+
+--
+-- Name: putaway_tasks putaway_tasks_tenant_id_task_id_inventory_owner_id_facility_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_tasks
+    ADD CONSTRAINT putaway_tasks_tenant_id_task_id_inventory_owner_id_facility_key UNIQUE (tenant_id, task_id, inventory_owner_id, facility_id, source_inventory_balance_id, source_location_id, destination_location_id, item_batch_id, item_id, inventory_status, planned_quantity);
+
+
+--
+-- Name: role_permissions role_permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.role_permissions
+    ADD CONSTRAINT role_permissions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: role_permissions role_permissions_tenant_id_role_id_permission_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.role_permissions
+    ADD CONSTRAINT role_permissions_tenant_id_role_id_permission_id_key UNIQUE (tenant_id, role_id, permission_id);
+
+
+--
+-- Name: roles roles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.roles
+    ADD CONSTRAINT roles_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: roles roles_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.roles
+    ADD CONSTRAINT roles_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: roles roles_tenant_id_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.roles
+    ADD CONSTRAINT roles_tenant_id_name_key UNIQUE (tenant_id, name);
+
+
+--
+-- Name: roles roles_tenant_id_self_user_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.roles
+    ADD CONSTRAINT roles_tenant_id_self_user_id_key UNIQUE (tenant_id, self_user_id);
+
+
+--
+-- Name: sessions sessions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_pkey PRIMARY KEY (token);
+
+
+--
+-- Name: skus skus_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.skus
+    ADD CONSTRAINT skus_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: skus skus_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.skus
+    ADD CONSTRAINT skus_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: skus skus_tenant_id_item_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.skus
+    ADD CONSTRAINT skus_tenant_id_item_id_id_key UNIQUE (tenant_id, item_id, id);
+
+
+--
+-- Name: skus skus_tenant_id_item_id_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.skus
+    ADD CONSTRAINT skus_tenant_id_item_id_name_key UNIQUE (tenant_id, item_id, name);
+
+
+--
+-- Name: tenant_memberships tenant_memberships_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_memberships
+    ADD CONSTRAINT tenant_memberships_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tenant_memberships tenant_memberships_tenant_user_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_memberships
+    ADD CONSTRAINT tenant_memberships_tenant_user_unique UNIQUE (tenant_id, user_id);
+
+
+--
+-- Name: tenants tenants_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenants
+    ADD CONSTRAINT tenants_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tenants tenants_slug_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenants
+    ADD CONSTRAINT tenants_slug_unique UNIQUE (slug);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_scope_id_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_scope_id_unique UNIQUE (tenant_id, inventory_owner_id, facility_id, task_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_tasks unpack_cancelled_order_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_tasks
+    ADD CONSTRAINT unpack_cancelled_order_tasks_pkey PRIMARY KEY (tenant_id, task_id);
+
+
+--
+-- Name: unpack_cancelled_order_tasks unpack_cancelled_order_tasks_tenant_order_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_tasks
+    ADD CONSTRAINT unpack_cancelled_order_tasks_tenant_order_unique UNIQUE (tenant_id, order_id);
+
+
+--
+-- Name: unpack_cancelled_order_tasks unpack_cancelled_order_tasks_tenant_owner_facility_task_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_tasks
+    ADD CONSTRAINT unpack_cancelled_order_tasks_tenant_owner_facility_task_unique UNIQUE (tenant_id, inventory_owner_id, facility_id, task_id);
+
+
+--
+-- Name: user_credentials user_credentials_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_credentials
+    ADD CONSTRAINT user_credentials_pkey PRIMARY KEY (user_id);
+
+
+--
+-- Name: user_facilities user_facilities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_facilities
+    ADD CONSTRAINT user_facilities_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: user_facilities user_facilities_tenant_id_user_id_facility_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_facilities
+    ADD CONSTRAINT user_facilities_tenant_id_user_id_facility_id_key UNIQUE (tenant_id, user_id, facility_id);
+
+
+--
+-- Name: user_inventory_owners user_inventory_owners_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_inventory_owners
+    ADD CONSTRAINT user_inventory_owners_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: user_inventory_owners user_inventory_owners_tenant_id_user_id_inventory_owner_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_inventory_owners
+    ADD CONSTRAINT user_inventory_owners_tenant_id_user_id_inventory_owner_id_key UNIQUE (tenant_id, user_id, inventory_owner_id);
+
+
+--
+-- Name: user_roles user_roles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_roles
+    ADD CONSTRAINT user_roles_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: user_roles user_roles_tenant_id_user_id_role_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_roles
+    ADD CONSTRAINT user_roles_tenant_id_user_id_role_id_key UNIQUE (tenant_id, user_id, role_id);
+
+
+--
+-- Name: user_settings user_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_settings
+    ADD CONSTRAINT user_settings_pkey PRIMARY KEY (user_id);
+
+
+--
+-- Name: users users_email_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_email_key UNIQUE (email);
+
+
+--
+-- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: work_task_progress work_task_progress_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_task_progress
+    ADD CONSTRAINT work_task_progress_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: work_tasks work_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_tasks
+    ADD CONSTRAINT work_tasks_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: work_tasks work_tasks_tenant_facility_id_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_tasks
+    ADD CONSTRAINT work_tasks_tenant_facility_id_unique UNIQUE (tenant_id, facility_id, id);
+
+
+--
+-- Name: work_tasks work_tasks_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_tasks
+    ADD CONSTRAINT work_tasks_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: work_tasks work_tasks_tenant_owner_id_unique; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_tasks
+    ADD CONSTRAINT work_tasks_tenant_owner_id_unique UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: audit_location_counts_dimension_unique; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX audit_location_counts_dimension_unique ON public.audit_location_counts USING btree (tenant_id, audit_id, inventory_owner_id, facility_id, location_id, item_id, uom, lot, expiration, serial) NULLS NOT DISTINCT;
+
+
+--
+-- Name: barcodes_active_scanner_identity_unique_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX barcodes_active_scanner_identity_unique_idx ON public.barcodes USING btree (tenant_id, lower(name)) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_audit_location_counts_scope; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_audit_location_counts_scope ON public.audit_location_counts USING btree (tenant_id, facility_id, inventory_owner_id, audit_id, id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_audit_waves_scope; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_audit_waves_scope ON public.audit_waves USING btree (tenant_id, facility_id, inventory_owner_id, id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_break_master_pack_tasks_items; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_break_master_pack_tasks_items ON public.break_master_pack_tasks USING btree (tenant_id, master_item_id, single_item_id);
+
+
+--
+-- Name: idx_break_master_pack_tasks_location; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_break_master_pack_tasks_location ON public.break_master_pack_tasks USING btree (tenant_id, location_id);
+
+
+--
+-- Name: idx_cycle_count_item_location_tasks_location; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cycle_count_item_location_tasks_location ON public.cycle_count_item_location_tasks USING btree (tenant_id, location_id, item_id);
+
+
+--
+-- Name: idx_cycle_count_location_tasks_location; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cycle_count_location_tasks_location ON public.cycle_count_location_tasks USING btree (tenant_id, location_id);
+
+
+--
+-- Name: idx_employee_facilities_facility; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_employee_facilities_facility ON public.employee_facilities USING btree (tenant_id, facility_id);
+
+
+--
+-- Name: idx_employees_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_employees_user ON public.employees USING btree (tenant_id, user_id) WHERE (user_id IS NOT NULL);
+
+
+--
+-- Name: idx_inventory_balances_batch; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inventory_balances_batch ON public.inventory_balances USING btree (tenant_id, inventory_owner_id, item_batch_id);
+
+
+--
+-- Name: idx_inventory_balances_license_plate; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inventory_balances_license_plate ON public.inventory_balances USING btree (tenant_id, license_plate_id) WHERE ((deleted IS NULL) AND (license_plate_id IS NOT NULL));
+
+
+--
+-- Name: idx_inventory_balances_location; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inventory_balances_location ON public.inventory_balances USING btree (tenant_id, facility_id, location_id);
+
+
+--
+-- Name: idx_inventory_balances_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inventory_balances_lookup ON public.inventory_balances USING btree (tenant_id, inventory_owner_id, location_id, status, item_batch_id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_inventory_balances_loose_unique; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_inventory_balances_loose_unique ON public.inventory_balances USING btree (tenant_id, inventory_owner_id, location_id, item_batch_id, uom, status) WHERE (license_plate_id IS NULL);
+
+
+--
+-- Name: idx_inventory_balances_lp_unique; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_inventory_balances_lp_unique ON public.inventory_balances USING btree (tenant_id, inventory_owner_id, location_id, license_plate_id, item_batch_id, uom, status) WHERE (license_plate_id IS NOT NULL);
+
+
+--
+-- Name: idx_inventory_entries_dimensions; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inventory_entries_dimensions ON public.inventory_entries USING btree (tenant_id, inventory_owner_id, facility_id, location_id, item_id, uom, status);
+
+
+--
+-- Name: idx_inventory_entries_transaction; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inventory_entries_transaction ON public.inventory_entries USING btree (tenant_id, transaction_id, id);
+
+
+--
+-- Name: idx_inventory_owner_facilities_facility_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inventory_owner_facilities_facility_id ON public.inventory_owner_facilities USING btree (tenant_id, facility_id);
+
+
+--
+-- Name: idx_inventory_owner_facilities_inventory_owner_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inventory_owner_facilities_inventory_owner_id ON public.inventory_owner_facilities USING btree (tenant_id, inventory_owner_id);
+
+
+--
+-- Name: idx_inventory_transactions_reference; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inventory_transactions_reference ON public.inventory_transactions USING btree (tenant_id, inventory_owner_id, reference_type, reference_id) WHERE ((reference_type IS NOT NULL) AND (reference_id IS NOT NULL));
+
+
+--
+-- Name: idx_item_batches_item_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_item_batches_item_id ON public.item_batches USING btree (item_id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_item_batches_load_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_item_batches_load_id ON public.item_batches USING btree (load_id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_item_pack_links_active_unique; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_item_pack_links_active_unique ON public.item_pack_links USING btree (tenant_id, master_item_id, single_item_id, inner_qty) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_item_pack_links_master; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_item_pack_links_master ON public.item_pack_links USING btree (tenant_id, master_item_id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_item_pack_links_single; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_item_pack_links_single ON public.item_pack_links USING btree (tenant_id, single_item_id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_license_plates_facility_location; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_license_plates_facility_location ON public.license_plates USING btree (tenant_id, facility_id, location_id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_load_activity_load_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_load_activity_load_id ON public.load_activity USING btree (tenant_id, load_id);
+
+
+--
+-- Name: idx_load_files_load_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_load_files_load_id ON public.load_files USING btree (tenant_id, load_id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_load_lines_item; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_load_lines_item ON public.load_lines USING btree (tenant_id, item_id);
+
+
+--
+-- Name: idx_load_lines_load; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_load_lines_load ON public.load_lines USING btree (tenant_id, load_id);
+
+
+--
+-- Name: idx_load_lines_open; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_load_lines_open ON public.load_lines USING btree (tenant_id, load_id, status) WHERE ((deleted IS NULL) AND (status = ANY (ARRAY['pending'::text, 'partial'::text])));
+
+
+--
+-- Name: idx_load_notes_load_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_load_notes_load_id ON public.load_notes USING btree (tenant_id, load_id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_load_orders_load_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_load_orders_load_id ON public.load_orders USING btree (tenant_id, inventory_owner_id, load_id);
+
+
+--
+-- Name: idx_load_orders_order_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_load_orders_order_id ON public.load_orders USING btree (tenant_id, inventory_owner_id, order_id);
+
+
+--
+-- Name: idx_loads_active_work; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_loads_active_work ON public.loads USING btree (tenant_id, facility_id, inventory_owner_id, status, appointment_time) WHERE ((deleted IS NULL) AND (status <> ALL (ARRAY['closed'::text, 'cancelled'::text])));
+
+
+--
+-- Name: idx_loads_dock_door; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_loads_dock_door ON public.loads USING btree (tenant_id, dock_door_location_id);
+
+
+--
+-- Name: idx_loads_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_loads_status ON public.loads USING btree (tenant_id, status);
+
+
+--
+-- Name: idx_locations_facility_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_locations_facility_id ON public.locations USING btree (tenant_id, facility_id);
+
+
+--
+-- Name: idx_locations_parent_location_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_locations_parent_location_id ON public.locations USING btree (tenant_id, parent_location_id);
+
+
+--
+-- Name: idx_order_activity_order_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_order_activity_order_id ON public.order_activity USING btree (tenant_id, inventory_owner_id, order_id);
+
+
+--
+-- Name: idx_order_items_item_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_order_items_item_id ON public.order_items USING btree (tenant_id, item_id);
+
+
+--
+-- Name: idx_order_items_order_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_order_items_order_id ON public.order_items USING btree (tenant_id, inventory_owner_id, order_id);
+
+
+--
+-- Name: idx_order_tracking_numbers_order_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_order_tracking_numbers_order_id ON public.order_tracking_numbers USING btree (tenant_id, inventory_owner_id, order_id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_orders_inventory_owner_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_orders_inventory_owner_status ON public.orders USING btree (tenant_id, inventory_owner_id, status) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_orders_ship_by; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_orders_ship_by ON public.orders USING btree (tenant_id, ship_by) WHERE ((deleted IS NULL) AND (ship_by IS NOT NULL));
+
+
+--
+-- Name: idx_orders_status_created; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_orders_status_created ON public.orders USING btree (tenant_id, status, created DESC) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_role_permissions_permission_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_role_permissions_permission_id ON public.role_permissions USING btree (tenant_id, permission_id);
+
+
+--
+-- Name: idx_role_permissions_role_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_role_permissions_role_id ON public.role_permissions USING btree (tenant_id, role_id);
+
+
+--
+-- Name: idx_sessions_expires; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sessions_expires ON public.sessions USING btree (expires);
+
+
+--
+-- Name: idx_sessions_user_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sessions_user_id ON public.sessions USING btree (user_id);
+
+
+--
+-- Name: idx_unpack_cancelled_order_task_lines_task; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_unpack_cancelled_order_task_lines_task ON public.unpack_cancelled_order_task_lines USING btree (tenant_id, task_id, status);
+
+
+--
+-- Name: idx_unpack_cancelled_order_tasks_order; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_unpack_cancelled_order_tasks_order ON public.unpack_cancelled_order_tasks USING btree (tenant_id, order_id);
+
+
+--
+-- Name: idx_user_roles_role_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_user_roles_role_id ON public.user_roles USING btree (tenant_id, role_id);
+
+
+--
+-- Name: idx_user_roles_user_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_user_roles_user_id ON public.user_roles USING btree (tenant_id, user_id);
+
+
+--
+-- Name: idx_work_task_progress_task; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_work_task_progress_task ON public.work_task_progress USING btree (tenant_id, task_id, created);
+
+
+--
+-- Name: idx_work_tasks_assigned; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_work_tasks_assigned ON public.work_tasks USING btree (tenant_id, assigned_user_id, status, scheduled_for) WHERE ((deleted IS NULL) AND (assigned_user_id IS NOT NULL));
+
+
+--
+-- Name: idx_work_tasks_expiring_leases; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_work_tasks_expiring_leases ON public.work_tasks USING btree (tenant_id, lease_expires_at) WHERE ((deleted IS NULL) AND (status = ANY (ARRAY['assigned'::text, 'in_progress'::text])) AND (lease_expires_at IS NOT NULL));
+
+
+--
+-- Name: idx_work_tasks_one_active_per_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_work_tasks_one_active_per_user ON public.work_tasks USING btree (tenant_id, assigned_user_id) WHERE ((deleted IS NULL) AND (assigned_user_id IS NOT NULL) AND (status = ANY (ARRAY['assigned'::text, 'in_progress'::text])));
+
+
+--
+-- Name: idx_work_tasks_status_schedule; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_work_tasks_status_schedule ON public.work_tasks USING btree (tenant_id, status, required_permission, scheduled_for, priority DESC, created) WHERE (deleted IS NULL);
+
+
+--
+-- Name: integration_inbox_receipts_tenant_history_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX integration_inbox_receipts_tenant_history_idx ON public.integration_inbox_receipts USING btree (tenant_id, received_at, id);
+
+
+--
+-- Name: inventory_allocations_active_balance_reservation_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX inventory_allocations_active_balance_reservation_key ON public.inventory_allocations USING btree (tenant_id, inventory_owner_id, reservation_id, inventory_balance_id) WHERE ((deleted IS NULL) AND (status = 'allocated'::text));
+
+
+--
+-- Name: inventory_allocations_balance_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inventory_allocations_balance_idx ON public.inventory_allocations USING btree (tenant_id, inventory_owner_id, inventory_balance_id, status);
+
+
+--
+-- Name: inventory_allocations_reservation_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inventory_allocations_reservation_idx ON public.inventory_allocations USING btree (tenant_id, inventory_owner_id, reservation_id, status);
+
+
+--
+-- Name: inventory_holds_active_reference_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inventory_holds_active_reference_idx ON public.inventory_holds USING btree (tenant_id, reference_type, reference_id) WHERE ((deleted IS NULL) AND (status = 'active'::text) AND (reference_type IS NOT NULL));
+
+
+--
+-- Name: inventory_holds_balance_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inventory_holds_balance_idx ON public.inventory_holds USING btree (tenant_id, inventory_owner_id, inventory_balance_id, status);
+
+
+--
+-- Name: inventory_holds_owner_facility_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inventory_holds_owner_facility_idx ON public.inventory_holds USING btree (tenant_id, inventory_owner_id, facility_id, status);
+
+
+--
+-- Name: inventory_projection_changes_balance_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inventory_projection_changes_balance_idx ON public.inventory_projection_changes USING btree (tenant_id, inventory_owner_id, inventory_balance_id, id);
+
+
+--
+-- Name: inventory_projection_changes_transaction_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inventory_projection_changes_transaction_idx ON public.inventory_projection_changes USING btree (tenant_id, inventory_owner_id, transaction_id, id);
+
+
+--
+-- Name: inventory_relocation_one_active_balance_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX inventory_relocation_one_active_balance_idx ON public.inventory_relocation_tasks USING btree (tenant_id, inventory_owner_id, source_inventory_balance_id) WHERE ((closed_at IS NULL) AND (workflow = 'loose_balance'::text));
+
+
+--
+-- Name: inventory_relocation_one_active_plate_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX inventory_relocation_one_active_plate_idx ON public.inventory_relocation_tasks USING btree (tenant_id, inventory_owner_id, license_plate_id) WHERE ((closed_at IS NULL) AND (workflow = 'license_plate'::text));
+
+
+--
+-- Name: inventory_reservations_active_demand_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inventory_reservations_active_demand_idx ON public.inventory_reservations USING btree (tenant_id, inventory_owner_id, facility_id, item_id, uom) WHERE ((deleted IS NULL) AND (status = 'active'::text));
+
+
+--
+-- Name: inventory_reservations_order_line_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inventory_reservations_order_line_idx ON public.inventory_reservations USING btree (tenant_id, inventory_owner_id, order_id, order_item_id);
+
+
+--
+-- Name: inventory_status_transitions_destination_balance_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inventory_status_transitions_destination_balance_idx ON public.inventory_status_transitions USING btree (tenant_id, inventory_owner_id, destination_balance_id, created);
+
+
+--
+-- Name: inventory_status_transitions_reference_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inventory_status_transitions_reference_idx ON public.inventory_status_transitions USING btree (tenant_id, inventory_owner_id, reference_type, reference_id) WHERE (reference_type IS NOT NULL);
+
+
+--
+-- Name: inventory_status_transitions_source_balance_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inventory_status_transitions_source_balance_idx ON public.inventory_status_transitions USING btree (tenant_id, inventory_owner_id, source_balance_id, created);
+
+
+--
+-- Name: license_plate_putaway_task_contents_plate_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX license_plate_putaway_task_contents_plate_idx ON public.license_plate_putaway_task_contents USING btree (tenant_id, inventory_owner_id, facility_id, license_plate_id);
+
+
+--
+-- Name: license_plate_putaway_tasks_destination_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX license_plate_putaway_tasks_destination_idx ON public.license_plate_putaway_tasks USING btree (tenant_id, inventory_owner_id, facility_id, destination_location_id) WHERE (closed_at IS NULL);
+
+
+--
+-- Name: license_plate_putaway_tasks_one_active_plate_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX license_plate_putaway_tasks_one_active_plate_idx ON public.license_plate_putaway_tasks USING btree (tenant_id, inventory_owner_id, license_plate_id) WHERE (closed_at IS NULL);
+
+
+--
+-- Name: outbox_delivery_attempt_results_tenant_history_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX outbox_delivery_attempt_results_tenant_history_idx ON public.outbox_delivery_attempt_results USING btree (tenant_id, completed_at, outbox_event_id, claim_version);
+
+
+--
+-- Name: outbox_delivery_attempts_tenant_history_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX outbox_delivery_attempts_tenant_history_idx ON public.outbox_delivery_attempts USING btree (tenant_id, claimed_at, event_key, claim_version);
+
+
+--
+-- Name: outbox_events_owner_facility_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX outbox_events_owner_facility_idx ON public.outbox_events USING btree (tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: outbox_events_tenant_history_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX outbox_events_tenant_history_idx ON public.outbox_events USING btree (tenant_id, created, id);
+
+
+--
+-- Name: outbox_events_tenant_ordering_blocker_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX outbox_events_tenant_ordering_blocker_idx ON public.outbox_events USING btree (tenant_id, ordering_key, aggregate_sequence) WHERE ((published_at IS NULL) AND (discarded_at IS NULL));
+
+
+--
+-- Name: outbox_events_tenant_ready_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX outbox_events_tenant_ready_idx ON public.outbox_events USING btree (tenant_id, available_at, id) WHERE ((published_at IS NULL) AND (dead_lettered_at IS NULL) AND (discarded_at IS NULL));
+
+
+--
+-- Name: outbox_events_tenant_terminal_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX outbox_events_tenant_terminal_idx ON public.outbox_events USING btree (tenant_id, COALESCE(published_at, discarded_at), id) WHERE ((published_at IS NOT NULL) OR (discarded_at IS NOT NULL));
+
+
+--
+-- Name: putaway_tasks_destination_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX putaway_tasks_destination_idx ON public.putaway_tasks USING btree (tenant_id, inventory_owner_id, facility_id, destination_location_id) WHERE (closed_at IS NULL);
+
+
+--
+-- Name: putaway_tasks_one_active_source_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX putaway_tasks_one_active_source_idx ON public.putaway_tasks USING btree (tenant_id, inventory_owner_id, source_inventory_balance_id) WHERE (closed_at IS NULL);
+
+
+--
+-- Name: roles_parent_id_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX roles_parent_id_key ON public.roles USING btree (tenant_id, parent_id);
+
+
+--
+-- Name: sessions_web_expiry_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX sessions_web_expiry_idx ON public.sessions USING btree (expires, last_seen_at) WHERE (purpose = 'web'::text);
+
+
+--
+-- Name: tenant_memberships_one_default_per_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX tenant_memberships_one_default_per_user_idx ON public.tenant_memberships USING btree (user_id) WHERE ((deleted IS NULL) AND is_default);
+
+
+--
+-- Name: tenant_memberships_user_active_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX tenant_memberships_user_active_idx ON public.tenant_memberships USING btree (user_id, tenant_id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: user_facilities_facility_active_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX user_facilities_facility_active_idx ON public.user_facilities USING btree (tenant_id, facility_id, user_id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: user_facilities_user_active_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX user_facilities_user_active_idx ON public.user_facilities USING btree (tenant_id, user_id, facility_id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: user_inventory_owners_owner_active_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX user_inventory_owners_owner_active_idx ON public.user_inventory_owners USING btree (tenant_id, inventory_owner_id, user_id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: user_inventory_owners_user_active_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX user_inventory_owners_user_active_idx ON public.user_inventory_owners USING btree (tenant_id, user_id, inventory_owner_id) WHERE (deleted IS NULL);
+
+
+--
+-- Name: work_tasks_putaway_open_queue_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX work_tasks_putaway_open_queue_idx ON public.work_tasks USING btree (tenant_id, task_type, priority DESC, due_at, scheduled_for, created, id) WHERE ((deleted IS NULL) AND (status = 'open'::text) AND (task_type = ANY (ARRAY['putaway'::text, 'license_plate_putaway'::text])));
+
+
+--
+-- Name: work_tasks_scope_queue_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX work_tasks_scope_queue_idx ON public.work_tasks USING btree (tenant_id, facility_id, inventory_owner_id, status, required_permission, priority DESC, created) WHERE (deleted IS NULL);
+
+
+--
+-- Name: command_idempotency_records command_idempotency_records_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER command_idempotency_records_are_immutable BEFORE DELETE OR UPDATE ON public.command_idempotency_records FOR EACH ROW EXECUTE FUNCTION public.reject_inventory_journal_mutation();
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_results_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER cycle_count_item_location_results_are_immutable BEFORE DELETE OR UPDATE ON public.cycle_count_item_location_results FOR EACH ROW EXECUTE FUNCTION public.reject_cycle_count_result_mutation();
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_results_are_valid; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER cycle_count_item_location_results_are_valid BEFORE INSERT ON public.cycle_count_item_location_results FOR EACH ROW EXECUTE FUNCTION public.validate_item_location_cycle_count_result();
+
+
+--
+-- Name: employee_facilities employee_facility_preserves_assignment; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER employee_facility_preserves_assignment AFTER INSERT OR DELETE OR UPDATE ON public.employee_facilities DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.enforce_employee_active_facility();
+
+
+--
+-- Name: employees employee_requires_active_facility; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER employee_requires_active_facility AFTER INSERT OR UPDATE OF deleted ON public.employees DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.enforce_employee_active_facility();
+
+
+--
+-- Name: facilities facility_deletion_preserves_employee_assignment; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER facility_deletion_preserves_employee_assignment AFTER UPDATE OF deleted ON public.facilities DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.retire_deleted_facility_employee_assignments();
+
+
+--
+-- Name: integration_inbox_keys integration_inbox_keys_are_permanent; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER integration_inbox_keys_are_permanent BEFORE DELETE OR UPDATE ON public.integration_inbox_keys FOR EACH ROW EXECUTE FUNCTION public.protect_integration_inbox_key();
+
+
+--
+-- Name: integration_inbox_keys integration_inbox_keys_require_receipt; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER integration_inbox_keys_require_receipt BEFORE INSERT ON public.integration_inbox_keys FOR EACH ROW EXECUTE FUNCTION public.require_integration_inbox_receipt_for_key();
+
+
+--
+-- Name: integration_inbox_receipts integration_inbox_receipts_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER integration_inbox_receipts_are_immutable BEFORE UPDATE ON public.integration_inbox_receipts FOR EACH ROW EXECUTE FUNCTION public.protect_integration_inbox_receipt_envelope();
+
+
+--
+-- Name: inventory_allocations inventory_allocations_apply_projection; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_allocations_apply_projection AFTER INSERT OR UPDATE ON public.inventory_allocations FOR EACH ROW EXECUTE FUNCTION public.apply_inventory_allocation_projection();
+
+
+--
+-- Name: inventory_allocations inventory_allocations_prevent_delete; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_allocations_prevent_delete BEFORE DELETE ON public.inventory_allocations FOR EACH ROW EXECUTE FUNCTION public.inventory_allocation_cannot_be_deleted();
+
+
+--
+-- Name: inventory_allocations inventory_allocations_require_active_owner_facility; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_allocations_require_active_owner_facility BEFORE INSERT OR UPDATE OF tenant_id, inventory_owner_id, facility_id ON public.inventory_allocations FOR EACH ROW EXECUTE FUNCTION public.require_active_inventory_owner_facility();
+
+
+--
+-- Name: inventory_allocations inventory_allocations_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_allocations_validate BEFORE INSERT OR UPDATE ON public.inventory_allocations FOR EACH ROW EXECUTE FUNCTION public.validate_inventory_allocation();
+
+
+--
+-- Name: inventory_balances inventory_balances_capture_projection_change; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_balances_capture_projection_change AFTER INSERT OR DELETE OR UPDATE ON public.inventory_balances FOR EACH ROW EXECUTE FUNCTION public.capture_inventory_projection_change();
+
+
+--
+-- Name: inventory_balances inventory_balances_guard_commitments; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_balances_guard_commitments BEFORE INSERT OR UPDATE OF tenant_id, inventory_owner_id, facility_id, location_id, license_plate_id, item_batch_id, item_id, uom, status, qty_on_hand, qty_reserved, qty_held, deleted ON public.inventory_balances FOR EACH ROW EXECUTE FUNCTION public.guard_inventory_balance_commitments();
+
+
+--
+-- Name: inventory_balances inventory_balances_license_plate_location_is_consistent; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER inventory_balances_license_plate_location_is_consistent AFTER INSERT OR DELETE OR UPDATE ON public.inventory_balances DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_license_plate_location_from_balance();
+
+
+--
+-- Name: inventory_balances inventory_balances_match_batch; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_balances_match_batch BEFORE INSERT OR UPDATE OF tenant_id, inventory_owner_id, item_batch_id, item_id, uom ON public.inventory_balances FOR EACH ROW EXECUTE FUNCTION public.inventory_row_matches_batch();
+
+
+--
+-- Name: inventory_balances inventory_balances_prevent_mixed_item_lot_expiration; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_balances_prevent_mixed_item_lot_expiration BEFORE INSERT OR UPDATE OF location_id, item_batch_id, qty_on_hand, deleted ON public.inventory_balances FOR EACH ROW EXECUTE FUNCTION public.prevent_mixed_item_lot_expiration_per_location();
+
+
+--
+-- Name: inventory_balances inventory_balances_reject_direct_status_update; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_balances_reject_direct_status_update BEFORE UPDATE OF status ON public.inventory_balances FOR EACH ROW EXECUTE FUNCTION public.reject_direct_inventory_balance_status_update();
+
+
+--
+-- Name: inventory_balances inventory_balances_require_active_owner_facility; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_balances_require_active_owner_facility BEFORE INSERT OR UPDATE OF tenant_id, inventory_owner_id, facility_id ON public.inventory_balances FOR EACH ROW EXECUTE FUNCTION public.require_active_inventory_owner_facility();
+
+
+--
+-- Name: inventory_entries inventory_entries_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_entries_are_immutable BEFORE DELETE OR UPDATE ON public.inventory_entries FOR EACH ROW EXECUTE FUNCTION public.reject_inventory_journal_mutation();
+
+
+--
+-- Name: inventory_entries inventory_entries_match_batch; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_entries_match_batch BEFORE INSERT OR UPDATE OF tenant_id, inventory_owner_id, item_batch_id, item_id, uom, lot, expiration, serial ON public.inventory_entries FOR EACH ROW EXECUTE FUNCTION public.inventory_entry_matches_batch();
+
+
+--
+-- Name: inventory_entries inventory_entries_require_active_owner_facility; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_entries_require_active_owner_facility BEFORE INSERT OR UPDATE OF tenant_id, inventory_owner_id, facility_id ON public.inventory_entries FOR EACH ROW EXECUTE FUNCTION public.require_active_inventory_owner_facility();
+
+
+--
+-- Name: inventory_entries inventory_entries_require_open_transaction; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_entries_require_open_transaction BEFORE INSERT ON public.inventory_entries FOR EACH ROW EXECUTE FUNCTION public.require_open_inventory_transaction();
+
+
+--
+-- Name: inventory_holds inventory_holds_apply_projection; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_holds_apply_projection AFTER INSERT OR UPDATE ON public.inventory_holds FOR EACH ROW EXECUTE FUNCTION public.apply_inventory_hold_projection();
+
+
+--
+-- Name: inventory_holds inventory_holds_prevent_delete; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_holds_prevent_delete BEFORE DELETE ON public.inventory_holds FOR EACH ROW EXECUTE FUNCTION public.inventory_hold_cannot_be_deleted();
+
+
+--
+-- Name: inventory_holds inventory_holds_require_active_owner_facility; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_holds_require_active_owner_facility BEFORE INSERT OR UPDATE OF tenant_id, inventory_owner_id, facility_id ON public.inventory_holds FOR EACH ROW EXECUTE FUNCTION public.require_active_inventory_owner_facility();
+
+
+--
+-- Name: inventory_holds inventory_holds_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_holds_validate BEFORE INSERT OR UPDATE ON public.inventory_holds FOR EACH ROW EXECUTE FUNCTION public.validate_inventory_hold();
+
+
+--
+-- Name: inventory_owner_facilities inventory_owner_facilities_protect_active_references; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_owner_facilities_protect_active_references BEFORE DELETE OR UPDATE OF tenant_id, inventory_owner_id, facility_id, deleted ON public.inventory_owner_facilities FOR EACH ROW EXECUTE FUNCTION public.protect_inventory_owner_facility_assignment();
+
+
+--
+-- Name: inventory_owner_facilities inventory_owner_facilities_verify_retirement; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER inventory_owner_facilities_verify_retirement AFTER DELETE OR UPDATE ON public.inventory_owner_facilities DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.protect_inventory_owner_facility_assignment();
+
+
+--
+-- Name: inventory_projection_changes inventory_projection_changes_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_projection_changes_are_immutable BEFORE DELETE OR UPDATE ON public.inventory_projection_changes FOR EACH ROW EXECUTE FUNCTION public.reject_inventory_journal_mutation();
+
+
+--
+-- Name: inventory_relocation_results inventory_relocation_results_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_relocation_results_are_immutable BEFORE DELETE OR UPDATE ON public.inventory_relocation_results FOR EACH ROW EXECUTE FUNCTION public.reject_inventory_relocation_result_mutation();
+
+
+--
+-- Name: inventory_reservations inventory_reservations_require_active_owner_facility; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_reservations_require_active_owner_facility BEFORE INSERT OR UPDATE OF tenant_id, inventory_owner_id, facility_id ON public.inventory_reservations FOR EACH ROW EXECUTE FUNCTION public.require_active_inventory_owner_facility();
+
+
+--
+-- Name: inventory_reservations inventory_reservations_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_reservations_validate BEFORE INSERT OR UPDATE ON public.inventory_reservations FOR EACH ROW EXECUTE FUNCTION public.validate_inventory_reservation();
+
+
+--
+-- Name: inventory_transactions inventory_status_change_transaction_shape; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER inventory_status_change_transaction_shape AFTER INSERT ON public.inventory_transactions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.enforce_inventory_status_transition();
+
+
+--
+-- Name: inventory_status_transitions inventory_status_transition_audit_shape; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER inventory_status_transition_audit_shape AFTER INSERT ON public.inventory_status_transitions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.enforce_inventory_status_transition();
+
+
+--
+-- Name: inventory_status_transitions inventory_status_transitions_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_status_transitions_are_immutable BEFORE DELETE OR UPDATE ON public.inventory_status_transitions FOR EACH ROW EXECUTE FUNCTION public.reject_inventory_journal_mutation();
+
+
+--
+-- Name: inventory_transactions inventory_transactions_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER inventory_transactions_are_immutable BEFORE DELETE OR UPDATE ON public.inventory_transactions FOR EACH ROW EXECUTE FUNCTION public.reject_inventory_journal_mutation();
+
+
+--
+-- Name: inventory_transactions inventory_transactions_conserve_quantity; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER inventory_transactions_conserve_quantity AFTER INSERT ON public.inventory_transactions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.enforce_inventory_transaction_conservation();
+
+
+--
+-- Name: license_plate_putaway_results license_plate_putaway_results_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER license_plate_putaway_results_are_immutable BEFORE DELETE OR UPDATE ON public.license_plate_putaway_results FOR EACH ROW EXECUTE FUNCTION public.reject_license_plate_putaway_result_mutation();
+
+
+--
+-- Name: license_plate_putaway_results license_plate_putaway_results_are_valid; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER license_plate_putaway_results_are_valid AFTER INSERT ON public.license_plate_putaway_results DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_license_plate_putaway_result();
+
+
+--
+-- Name: license_plate_putaway_task_contents license_plate_putaway_task_contents_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER license_plate_putaway_task_contents_are_immutable BEFORE DELETE OR UPDATE ON public.license_plate_putaway_task_contents FOR EACH ROW EXECUTE FUNCTION public.reject_license_plate_putaway_content_mutation();
+
+
+--
+-- Name: license_plate_putaway_tasks license_plate_putaway_tasks_are_valid; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER license_plate_putaway_tasks_are_valid AFTER INSERT ON public.license_plate_putaway_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_license_plate_putaway_task();
+
+
+--
+-- Name: license_plate_putaway_tasks license_plate_putaway_tasks_guard_mutation; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER license_plate_putaway_tasks_guard_mutation BEFORE DELETE OR UPDATE ON public.license_plate_putaway_tasks FOR EACH ROW EXECUTE FUNCTION public.guard_license_plate_putaway_task_mutation();
+
+
+--
+-- Name: license_plates license_plates_location_is_consistent; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER license_plates_location_is_consistent AFTER INSERT OR DELETE OR UPDATE ON public.license_plates DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_license_plate_location_from_plate();
+
+
+--
+-- Name: license_plates license_plates_require_active_owner_facility; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER license_plates_require_active_owner_facility BEFORE INSERT OR UPDATE OF tenant_id, inventory_owner_id, facility_id ON public.license_plates FOR EACH ROW EXECUTE FUNCTION public.require_active_inventory_owner_facility();
+
+
+--
+-- Name: outbox_aggregate_sequences outbox_aggregate_sequences_are_monotonic; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER outbox_aggregate_sequences_are_monotonic BEFORE DELETE OR UPDATE ON public.outbox_aggregate_sequences FOR EACH ROW EXECUTE FUNCTION public.protect_outbox_aggregate_sequence_state();
+
+
+--
+-- Name: outbox_delivery_attempt_results outbox_delivery_attempt_results_are_append_only; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER outbox_delivery_attempt_results_are_append_only BEFORE DELETE OR UPDATE ON public.outbox_delivery_attempt_results FOR EACH ROW EXECUTE FUNCTION public.protect_outbox_delivery_attempt_history();
+
+
+--
+-- Name: outbox_delivery_attempts outbox_delivery_attempts_are_append_only; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER outbox_delivery_attempts_are_append_only BEFORE DELETE OR UPDATE ON public.outbox_delivery_attempts FOR EACH ROW EXECUTE FUNCTION public.protect_outbox_delivery_attempt_history();
+
+
+--
+-- Name: outbox_events outbox_event_envelopes_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER outbox_event_envelopes_are_immutable BEFORE UPDATE ON public.outbox_events FOR EACH ROW EXECUTE FUNCTION public.protect_outbox_event_envelope();
+
+
+--
+-- Name: outbox_event_keys outbox_event_keys_are_permanent; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER outbox_event_keys_are_permanent BEFORE DELETE OR UPDATE ON public.outbox_event_keys FOR EACH ROW EXECUTE FUNCTION public.protect_outbox_event_key_state();
+
+
+--
+-- Name: putaway_results putaway_results_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER putaway_results_are_immutable BEFORE DELETE OR UPDATE ON public.putaway_results FOR EACH ROW EXECUTE FUNCTION public.reject_putaway_result_mutation();
+
+
+--
+-- Name: putaway_results putaway_results_are_valid; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER putaway_results_are_valid AFTER INSERT ON public.putaway_results DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_putaway_result();
+
+
+--
+-- Name: putaway_tasks putaway_tasks_are_valid; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER putaway_tasks_are_valid BEFORE INSERT ON public.putaway_tasks FOR EACH ROW EXECUTE FUNCTION public.validate_putaway_task();
+
+
+--
+-- Name: putaway_tasks putaway_tasks_guard_mutation; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER putaway_tasks_guard_mutation BEFORE DELETE OR UPDATE ON public.putaway_tasks FOR EACH ROW EXECUTE FUNCTION public.guard_putaway_task_mutation();
+
+
+--
+-- Name: roles roles_hierarchy_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER roles_hierarchy_guard BEFORE INSERT OR UPDATE OF tenant_id, parent_id ON public.roles FOR EACH ROW EXECUTE FUNCTION public.guard_role_hierarchy();
+
+
+--
+-- Name: roles roles_self_role_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER roles_self_role_guard BEFORE UPDATE ON public.roles FOR EACH ROW EXECUTE FUNCTION public.guard_self_role();
+
+
+--
+-- Name: loads trg_load_execution_barcode_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_load_execution_barcode_immutable BEFORE UPDATE OF execution_barcode ON public.loads FOR EACH ROW EXECUTE FUNCTION public.enforce_load_execution_barcode_immutable();
+
+
+--
+-- Name: outbox_events unpublished_outbox_events_cannot_be_deleted; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER unpublished_outbox_events_cannot_be_deleted BEFORE DELETE ON public.outbox_events FOR EACH ROW EXECUTE FUNCTION public.protect_unpublished_outbox_event_deletion();
+
+
+--
+-- Name: user_roles user_roles_self_role_guard; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER user_roles_self_role_guard BEFORE UPDATE ON public.user_roles FOR EACH ROW EXECUTE FUNCTION public.guard_self_user_role();
+
+
+--
+-- Name: work_tasks work_task_dimensions_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER work_task_dimensions_are_immutable BEFORE UPDATE OF tenant_id, facility_id, inventory_owner_id, task_type ON public.work_tasks FOR EACH ROW EXECUTE FUNCTION public.protect_work_task_dimensions();
+
+
+--
+-- Name: work_tasks work_tasks_close_inventory_relocation_detail; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER work_tasks_close_inventory_relocation_detail AFTER UPDATE OF status, deleted ON public.work_tasks FOR EACH ROW EXECUTE FUNCTION public.close_inventory_relocation_task_detail();
+
+
+--
+-- Name: work_tasks work_tasks_close_license_plate_putaway_detail; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER work_tasks_close_license_plate_putaway_detail AFTER UPDATE OF status, deleted ON public.work_tasks FOR EACH ROW EXECUTE FUNCTION public.close_license_plate_putaway_task_detail();
+
+
+--
+-- Name: work_tasks work_tasks_close_putaway_detail; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER work_tasks_close_putaway_detail AFTER UPDATE OF status, deleted ON public.work_tasks FOR EACH ROW EXECUTE FUNCTION public.close_putaway_task_detail();
+
+
+--
+-- Name: work_tasks work_tasks_require_item_location_cycle_count_result; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER work_tasks_require_item_location_cycle_count_result BEFORE UPDATE OF status ON public.work_tasks FOR EACH ROW EXECUTE FUNCTION public.require_item_location_cycle_count_result();
+
+
+--
+-- Name: work_tasks work_tasks_require_license_plate_putaway_detail; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER work_tasks_require_license_plate_putaway_detail AFTER INSERT OR UPDATE ON public.work_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_license_plate_putaway_task_detail();
+
+
+--
+-- Name: work_tasks work_tasks_require_license_plate_putaway_result; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER work_tasks_require_license_plate_putaway_result AFTER INSERT OR UPDATE ON public.work_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_license_plate_putaway_result();
+
+
+--
+-- Name: work_tasks work_tasks_require_putaway_result; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER work_tasks_require_putaway_result AFTER INSERT OR UPDATE ON public.work_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_putaway_result();
+
+
+--
+-- Name: addresses addresses_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.addresses
+    ADD CONSTRAINT addresses_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: audit_location_counts audit_location_counts_facility_location_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_location_counts
+    ADD CONSTRAINT audit_location_counts_facility_location_fkey FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: audit_location_counts audit_location_counts_owner_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_location_counts
+    ADD CONSTRAINT audit_location_counts_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: audit_location_counts audit_location_counts_tenant_id_audit_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_location_counts
+    ADD CONSTRAINT audit_location_counts_tenant_id_audit_id_fkey FOREIGN KEY (tenant_id, audit_id) REFERENCES public.audit_waves(tenant_id, id);
+
+
+--
+-- Name: audit_location_counts audit_location_counts_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_location_counts
+    ADD CONSTRAINT audit_location_counts_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: audit_location_counts audit_location_counts_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_location_counts
+    ADD CONSTRAINT audit_location_counts_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: audit_location_counts audit_location_counts_tenant_id_inventory_owner_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_location_counts
+    ADD CONSTRAINT audit_location_counts_tenant_id_inventory_owner_id_item_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_id) REFERENCES public.inventory_owner_items(tenant_id, inventory_owner_id, item_id);
+
+
+--
+-- Name: audit_location_counts audit_location_counts_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_location_counts
+    ADD CONSTRAINT audit_location_counts_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: audit_location_counts audit_location_counts_tenant_id_location_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_location_counts
+    ADD CONSTRAINT audit_location_counts_tenant_id_location_id_fkey FOREIGN KEY (tenant_id, location_id) REFERENCES public.locations(tenant_id, id);
+
+
+--
+-- Name: audit_location_counts audit_location_counts_wave_scope_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_location_counts
+    ADD CONSTRAINT audit_location_counts_wave_scope_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, audit_id) REFERENCES public.audit_waves(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: audit_wave_assignments audit_wave_assignments_tenant_id_audit_wave_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_assignments
+    ADD CONSTRAINT audit_wave_assignments_tenant_id_audit_wave_id_fkey FOREIGN KEY (tenant_id, audit_wave_id) REFERENCES public.audit_waves(tenant_id, id);
+
+
+--
+-- Name: audit_wave_assignments audit_wave_assignments_tenant_id_auditor_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_assignments
+    ADD CONSTRAINT audit_wave_assignments_tenant_id_auditor_id_fkey FOREIGN KEY (tenant_id, auditor_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: audit_wave_assignments audit_wave_assignments_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_assignments
+    ADD CONSTRAINT audit_wave_assignments_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: audit_wave_assignments audit_wave_assignments_wave_scope_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_assignments
+    ADD CONSTRAINT audit_wave_assignments_wave_scope_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, audit_wave_id) REFERENCES public.audit_waves(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: audit_wave_inventory_owners audit_wave_inventory_owners_owner_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_inventory_owners
+    ADD CONSTRAINT audit_wave_inventory_owners_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: audit_wave_inventory_owners audit_wave_inventory_owners_tenant_id_audit_wave_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_inventory_owners
+    ADD CONSTRAINT audit_wave_inventory_owners_tenant_id_audit_wave_id_fkey FOREIGN KEY (tenant_id, audit_wave_id) REFERENCES public.audit_waves(tenant_id, id);
+
+
+--
+-- Name: audit_wave_inventory_owners audit_wave_inventory_owners_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_inventory_owners
+    ADD CONSTRAINT audit_wave_inventory_owners_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: audit_wave_inventory_owners audit_wave_inventory_owners_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_inventory_owners
+    ADD CONSTRAINT audit_wave_inventory_owners_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: audit_wave_inventory_owners audit_wave_inventory_owners_wave_scope_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_inventory_owners
+    ADD CONSTRAINT audit_wave_inventory_owners_wave_scope_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, audit_wave_id) REFERENCES public.audit_waves(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: audit_wave_items audit_wave_items_owner_item_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_items
+    ADD CONSTRAINT audit_wave_items_owner_item_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_id) REFERENCES public.inventory_owner_items(tenant_id, inventory_owner_id, item_id);
+
+
+--
+-- Name: audit_wave_items audit_wave_items_tenant_id_audit_wave_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_items
+    ADD CONSTRAINT audit_wave_items_tenant_id_audit_wave_id_fkey FOREIGN KEY (tenant_id, audit_wave_id) REFERENCES public.audit_waves(tenant_id, id);
+
+
+--
+-- Name: audit_wave_items audit_wave_items_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_items
+    ADD CONSTRAINT audit_wave_items_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: audit_wave_items audit_wave_items_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_items
+    ADD CONSTRAINT audit_wave_items_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: audit_wave_items audit_wave_items_wave_scope_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_items
+    ADD CONSTRAINT audit_wave_items_wave_scope_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, audit_wave_id) REFERENCES public.audit_waves(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: audit_wave_locations audit_wave_locations_facility_location_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_locations
+    ADD CONSTRAINT audit_wave_locations_facility_location_fkey FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: audit_wave_locations audit_wave_locations_owner_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_locations
+    ADD CONSTRAINT audit_wave_locations_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: audit_wave_locations audit_wave_locations_tenant_id_audit_wave_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_locations
+    ADD CONSTRAINT audit_wave_locations_tenant_id_audit_wave_id_fkey FOREIGN KEY (tenant_id, audit_wave_id) REFERENCES public.audit_waves(tenant_id, id);
+
+
+--
+-- Name: audit_wave_locations audit_wave_locations_tenant_id_auditor_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_locations
+    ADD CONSTRAINT audit_wave_locations_tenant_id_auditor_id_fkey FOREIGN KEY (tenant_id, auditor_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: audit_wave_locations audit_wave_locations_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_locations
+    ADD CONSTRAINT audit_wave_locations_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: audit_wave_locations audit_wave_locations_tenant_id_location_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_locations
+    ADD CONSTRAINT audit_wave_locations_tenant_id_location_id_fkey FOREIGN KEY (tenant_id, location_id) REFERENCES public.locations(tenant_id, id);
+
+
+--
+-- Name: audit_wave_locations audit_wave_locations_wave_scope_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_wave_locations
+    ADD CONSTRAINT audit_wave_locations_wave_scope_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, audit_wave_id) REFERENCES public.audit_waves(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: audit_waves audit_waves_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_waves
+    ADD CONSTRAINT audit_waves_facility_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: audit_waves audit_waves_inventory_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_waves
+    ADD CONSTRAINT audit_waves_inventory_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: audit_waves audit_waves_owner_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_waves
+    ADD CONSTRAINT audit_waves_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: audit_waves audit_waves_tenant_id_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_waves
+    ADD CONSTRAINT audit_waves_tenant_id_created_by_fkey FOREIGN KEY (tenant_id, created_by) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: audit_waves audit_waves_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_waves
+    ADD CONSTRAINT audit_waves_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: barcodes barcodes_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.barcodes
+    ADD CONSTRAINT barcodes_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: barcodes barcodes_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.barcodes
+    ADD CONSTRAINT barcodes_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: break_master_pack_tasks break_master_pack_tasks_task_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.break_master_pack_tasks
+    ADD CONSTRAINT break_master_pack_tasks_task_facility_fkey FOREIGN KEY (tenant_id, facility_id, task_id) REFERENCES public.work_tasks(tenant_id, facility_id, id);
+
+
+--
+-- Name: break_master_pack_tasks break_master_pack_tasks_tenant_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.break_master_pack_tasks
+    ADD CONSTRAINT break_master_pack_tasks_tenant_id_facility_id_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: break_master_pack_tasks break_master_pack_tasks_tenant_id_facility_id_location_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.break_master_pack_tasks
+    ADD CONSTRAINT break_master_pack_tasks_tenant_id_facility_id_location_id_fkey FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: break_master_pack_tasks break_master_pack_tasks_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.break_master_pack_tasks
+    ADD CONSTRAINT break_master_pack_tasks_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: break_master_pack_tasks break_master_pack_tasks_tenant_id_master_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.break_master_pack_tasks
+    ADD CONSTRAINT break_master_pack_tasks_tenant_id_master_item_id_fkey FOREIGN KEY (tenant_id, master_item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: break_master_pack_tasks break_master_pack_tasks_tenant_id_single_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.break_master_pack_tasks
+    ADD CONSTRAINT break_master_pack_tasks_tenant_id_single_item_id_fkey FOREIGN KEY (tenant_id, single_item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: break_master_pack_tasks break_master_pack_tasks_tenant_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.break_master_pack_tasks
+    ADD CONSTRAINT break_master_pack_tasks_tenant_id_task_id_fkey FOREIGN KEY (tenant_id, task_id) REFERENCES public.work_tasks(tenant_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: command_idempotency_records command_idempotency_records_actor_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.command_idempotency_records
+    ADD CONSTRAINT command_idempotency_records_actor_fkey FOREIGN KEY (tenant_id, actor_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: command_idempotency_records command_idempotency_records_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.command_idempotency_records
+    ADD CONSTRAINT command_idempotency_records_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: command_idempotency_records command_idempotency_records_tenant_id_inventory_transactio_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.command_idempotency_records
+    ADD CONSTRAINT command_idempotency_records_tenant_id_inventory_transactio_fkey FOREIGN KEY (tenant_id, inventory_transaction_id) REFERENCES public.inventory_transactions(tenant_id, id);
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_re_tenant_id_inventory_owner_id_fkey1; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_results
+    ADD CONSTRAINT cycle_count_item_location_re_tenant_id_inventory_owner_id_fkey1 FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_re_tenant_id_inventory_owner_id_fkey2; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_results
+    ADD CONSTRAINT cycle_count_item_location_re_tenant_id_inventory_owner_id_fkey2 FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_re_tenant_id_inventory_owner_id_fkey3; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_results
+    ADD CONSTRAINT cycle_count_item_location_re_tenant_id_inventory_owner_id_fkey3 FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_re_tenant_id_inventory_owner_id_fkey4; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_results
+    ADD CONSTRAINT cycle_count_item_location_re_tenant_id_inventory_owner_id_fkey4 FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_re_tenant_id_inventory_owner_id_fkey5; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_results
+    ADD CONSTRAINT cycle_count_item_location_re_tenant_id_inventory_owner_id_fkey5 FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, location_id, item_id, inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, location_id, item_id, id);
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_re_tenant_id_inventory_owner_id_fkey6; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_results
+    ADD CONSTRAINT cycle_count_item_location_re_tenant_id_inventory_owner_id_fkey6 FOREIGN KEY (tenant_id, inventory_owner_id, inventory_transaction_id) REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_res_tenant_id_facility_id_locati_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_results
+    ADD CONSTRAINT cycle_count_item_location_res_tenant_id_facility_id_locati_fkey FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_res_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_results
+    ADD CONSTRAINT cycle_count_item_location_res_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, location_id, item_id, task_id, inventory_balance_id) REFERENCES public.cycle_count_item_location_tasks(tenant_id, inventory_owner_id, facility_id, location_id, item_id, task_id, inventory_balance_id);
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_results_tenant_id_confirmed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_results
+    ADD CONSTRAINT cycle_count_item_location_results_tenant_id_confirmed_by_fkey FOREIGN KEY (tenant_id, confirmed_by) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_results_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_results
+    ADD CONSTRAINT cycle_count_item_location_results_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_results_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_results
+    ADD CONSTRAINT cycle_count_item_location_results_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tas_tenant_id_facility_id_locati_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tas_tenant_id_facility_id_locati_fkey FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tas_tenant_id_inventory_balance__fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tas_tenant_id_inventory_balance__fkey FOREIGN KEY (tenant_id, inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_balance_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_exact_balance_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_exact_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, location_id, item_id, inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, location_id, item_id, id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_order_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_order_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES public.orders(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_order_item_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_order_item_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_item_id) REFERENCES public.order_items(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_task_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_task_facility_fkey FOREIGN KEY (tenant_id, facility_id, task_id) REFERENCES public.work_tasks(tenant_id, facility_id, id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_task_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_task_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id, task_id) REFERENCES public.work_tasks(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_tenant_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_tenant_id_facility_id_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_tenant_id_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_tenant_id_order_id_fkey FOREIGN KEY (tenant_id, order_id) REFERENCES public.orders(tenant_id, id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_tenant_id_order_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_tenant_id_order_item_id_fkey FOREIGN KEY (tenant_id, order_item_id) REFERENCES public.order_items(tenant_id, id);
+
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_tenant_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_item_location_tasks
+    ADD CONSTRAINT cycle_count_item_location_tasks_tenant_id_task_id_fkey FOREIGN KEY (tenant_id, task_id) REFERENCES public.work_tasks(tenant_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: cycle_count_location_tasks cycle_count_location_tasks_task_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_location_tasks
+    ADD CONSTRAINT cycle_count_location_tasks_task_facility_fkey FOREIGN KEY (tenant_id, facility_id, task_id) REFERENCES public.work_tasks(tenant_id, facility_id, id);
+
+
+--
+-- Name: cycle_count_location_tasks cycle_count_location_tasks_tenant_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_location_tasks
+    ADD CONSTRAINT cycle_count_location_tasks_tenant_id_facility_id_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: cycle_count_location_tasks cycle_count_location_tasks_tenant_id_facility_id_location__fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_location_tasks
+    ADD CONSTRAINT cycle_count_location_tasks_tenant_id_facility_id_location__fkey FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: cycle_count_location_tasks cycle_count_location_tasks_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_location_tasks
+    ADD CONSTRAINT cycle_count_location_tasks_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: cycle_count_location_tasks cycle_count_location_tasks_tenant_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cycle_count_location_tasks
+    ADD CONSTRAINT cycle_count_location_tasks_tenant_id_task_id_fkey FOREIGN KEY (tenant_id, task_id) REFERENCES public.work_tasks(tenant_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: dims dims_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.dims
+    ADD CONSTRAINT dims_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: employee_facilities employee_facilities_tenant_id_employee_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.employee_facilities
+    ADD CONSTRAINT employee_facilities_tenant_id_employee_id_fkey FOREIGN KEY (tenant_id, employee_id) REFERENCES public.employees(tenant_id, id);
+
+
+--
+-- Name: employee_facilities employee_facilities_tenant_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.employee_facilities
+    ADD CONSTRAINT employee_facilities_tenant_id_facility_id_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: employee_facilities employee_facilities_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.employee_facilities
+    ADD CONSTRAINT employee_facilities_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: employees employees_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.employees
+    ADD CONSTRAINT employees_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: employees employees_tenant_id_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.employees
+    ADD CONSTRAINT employees_tenant_id_user_id_fkey FOREIGN KEY (tenant_id, user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: facilities facilities_tenant_id_address_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.facilities
+    ADD CONSTRAINT facilities_tenant_id_address_id_fkey FOREIGN KEY (tenant_id, address_id) REFERENCES public.addresses(tenant_id, id);
+
+
+--
+-- Name: facilities facilities_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.facilities
+    ADD CONSTRAINT facilities_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: integration_inbox_keys integration_inbox_keys_tenant_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_inbox_keys
+    ADD CONSTRAINT integration_inbox_keys_tenant_id_facility_id_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: integration_inbox_keys integration_inbox_keys_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_inbox_keys
+    ADD CONSTRAINT integration_inbox_keys_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: integration_inbox_keys integration_inbox_keys_tenant_id_inventory_owner_id_facili_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_inbox_keys
+    ADD CONSTRAINT integration_inbox_keys_tenant_id_inventory_owner_id_facili_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: integration_inbox_keys integration_inbox_keys_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_inbox_keys
+    ADD CONSTRAINT integration_inbox_keys_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: integration_inbox_receipts integration_inbox_receipts_tenant_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_inbox_receipts
+    ADD CONSTRAINT integration_inbox_receipts_tenant_id_facility_id_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: integration_inbox_receipts integration_inbox_receipts_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_inbox_receipts
+    ADD CONSTRAINT integration_inbox_receipts_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: integration_inbox_receipts integration_inbox_receipts_tenant_id_inventory_owner_id_fa_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_inbox_receipts
+    ADD CONSTRAINT integration_inbox_receipts_tenant_id_inventory_owner_id_fa_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: integration_inbox_receipts integration_inbox_receipts_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.integration_inbox_receipts
+    ADD CONSTRAINT integration_inbox_receipts_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: inventory_allocations inventory_allocations_tenant_id_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_tenant_id_created_by_fkey FOREIGN KEY (tenant_id, created_by) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: inventory_allocations inventory_allocations_tenant_id_facility_id_location_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_tenant_id_facility_id_location_id_fkey FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: inventory_allocations inventory_allocations_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: inventory_allocations inventory_allocations_tenant_id_inventory_owner_id_facili_fkey1; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_tenant_id_inventory_owner_id_facili_fkey1 FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: inventory_allocations inventory_allocations_tenant_id_inventory_owner_id_facilit_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_tenant_id_inventory_owner_id_facilit_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: inventory_allocations inventory_allocations_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: inventory_allocations inventory_allocations_tenant_id_inventory_owner_id_invento_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_tenant_id_inventory_owner_id_invento_fkey FOREIGN KEY (tenant_id, inventory_owner_id, inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_allocations inventory_allocations_tenant_id_inventory_owner_id_item_ba_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_tenant_id_inventory_owner_id_item_ba_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_allocations inventory_allocations_tenant_id_inventory_owner_id_reserva_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_tenant_id_inventory_owner_id_reserva_fkey FOREIGN KEY (tenant_id, inventory_owner_id, reservation_id) REFERENCES public.inventory_reservations(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_allocations inventory_allocations_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: inventory_balances inventory_balances_owner_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_balances
+    ADD CONSTRAINT inventory_balances_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: inventory_balances inventory_balances_tenant_id_facility_id_location_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_balances
+    ADD CONSTRAINT inventory_balances_tenant_id_facility_id_location_id_fkey FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: inventory_balances inventory_balances_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_balances
+    ADD CONSTRAINT inventory_balances_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: inventory_balances inventory_balances_tenant_id_inventory_owner_id_facility_i_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_balances
+    ADD CONSTRAINT inventory_balances_tenant_id_inventory_owner_id_facility_i_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: inventory_balances inventory_balances_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_balances
+    ADD CONSTRAINT inventory_balances_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: inventory_balances inventory_balances_tenant_id_inventory_owner_id_item_batch_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_balances
+    ADD CONSTRAINT inventory_balances_tenant_id_inventory_owner_id_item_batch_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_balances inventory_balances_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_balances
+    ADD CONSTRAINT inventory_balances_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: inventory_entries inventory_entries_owner_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_entries
+    ADD CONSTRAINT inventory_entries_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: inventory_entries inventory_entries_tenant_id_facility_id_location_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_entries
+    ADD CONSTRAINT inventory_entries_tenant_id_facility_id_location_id_fkey FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: inventory_entries inventory_entries_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_entries
+    ADD CONSTRAINT inventory_entries_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: inventory_entries inventory_entries_tenant_id_inventory_owner_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_entries
+    ADD CONSTRAINT inventory_entries_tenant_id_inventory_owner_id_facility_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: inventory_entries inventory_entries_tenant_id_inventory_owner_id_item_batch__fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_entries
+    ADD CONSTRAINT inventory_entries_tenant_id_inventory_owner_id_item_batch__fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_entries inventory_entries_tenant_id_inventory_owner_id_transaction_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_entries
+    ADD CONSTRAINT inventory_entries_tenant_id_inventory_owner_id_transaction_fkey FOREIGN KEY (tenant_id, inventory_owner_id, transaction_id) REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_entries inventory_entries_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_entries
+    ADD CONSTRAINT inventory_entries_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: inventory_holds inventory_holds_tenant_id_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_holds
+    ADD CONSTRAINT inventory_holds_tenant_id_created_by_fkey FOREIGN KEY (tenant_id, created_by) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: inventory_holds inventory_holds_tenant_id_facility_id_location_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_holds
+    ADD CONSTRAINT inventory_holds_tenant_id_facility_id_location_id_fkey FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: inventory_holds inventory_holds_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_holds
+    ADD CONSTRAINT inventory_holds_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: inventory_holds inventory_holds_tenant_id_inventory_owner_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_holds
+    ADD CONSTRAINT inventory_holds_tenant_id_inventory_owner_id_facility_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: inventory_holds inventory_holds_tenant_id_inventory_owner_id_facility_id_l_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_holds
+    ADD CONSTRAINT inventory_holds_tenant_id_inventory_owner_id_facility_id_l_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: inventory_holds inventory_holds_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_holds
+    ADD CONSTRAINT inventory_holds_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: inventory_holds inventory_holds_tenant_id_inventory_owner_id_inventory_bal_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_holds
+    ADD CONSTRAINT inventory_holds_tenant_id_inventory_owner_id_inventory_bal_fkey FOREIGN KEY (tenant_id, inventory_owner_id, inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_holds inventory_holds_tenant_id_inventory_owner_id_item_batch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_holds
+    ADD CONSTRAINT inventory_holds_tenant_id_inventory_owner_id_item_batch_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_holds inventory_holds_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_holds
+    ADD CONSTRAINT inventory_holds_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: inventory_holds inventory_holds_tenant_id_released_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_holds
+    ADD CONSTRAINT inventory_holds_tenant_id_released_by_fkey FOREIGN KEY (tenant_id, released_by) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: inventory_owner_facilities inventory_owner_facilities_tenant_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_owner_facilities
+    ADD CONSTRAINT inventory_owner_facilities_tenant_id_facility_id_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: inventory_owner_facilities inventory_owner_facilities_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_owner_facilities
+    ADD CONSTRAINT inventory_owner_facilities_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: inventory_owner_facilities inventory_owner_facilities_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_owner_facilities
+    ADD CONSTRAINT inventory_owner_facilities_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: inventory_owner_items inventory_owner_items_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_owner_items
+    ADD CONSTRAINT inventory_owner_items_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: inventory_owner_items inventory_owner_items_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_owner_items
+    ADD CONSTRAINT inventory_owner_items_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: inventory_owner_items inventory_owner_items_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_owner_items
+    ADD CONSTRAINT inventory_owner_items_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: inventory_owners inventory_owners_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_owners
+    ADD CONSTRAINT inventory_owners_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: inventory_projection_changes inventory_projection_changes_tenant_id_facility_id_locatio_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_projection_changes
+    ADD CONSTRAINT inventory_projection_changes_tenant_id_facility_id_locatio_fkey FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: inventory_projection_changes inventory_projection_changes_tenant_id_inventory_owner_id__fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_projection_changes
+    ADD CONSTRAINT inventory_projection_changes_tenant_id_inventory_owner_id__fkey FOREIGN KEY (tenant_id, inventory_owner_id, transaction_id) REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_projection_changes inventory_projection_changes_tenant_id_inventory_owner_id_fkey1; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_projection_changes
+    ADD CONSTRAINT inventory_projection_changes_tenant_id_inventory_owner_id_fkey1 FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_projection_changes inventory_projection_changes_tenant_id_inventory_owner_id_fkey2; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_projection_changes
+    ADD CONSTRAINT inventory_projection_changes_tenant_id_inventory_owner_id_fkey2 FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: inventory_projection_changes inventory_projection_changes_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_projection_changes
+    ADD CONSTRAINT inventory_projection_changes_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: inventory_relocation_results inventory_relocation_results_tenant_id_confirmed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_results
+    ADD CONSTRAINT inventory_relocation_results_tenant_id_confirmed_by_fkey FOREIGN KEY (tenant_id, confirmed_by) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: inventory_relocation_results inventory_relocation_results_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_results
+    ADD CONSTRAINT inventory_relocation_results_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: inventory_relocation_results inventory_relocation_results_tenant_id_inventory_owner_id__fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_results
+    ADD CONSTRAINT inventory_relocation_results_tenant_id_inventory_owner_id__fkey FOREIGN KEY (tenant_id, inventory_owner_id, inventory_transaction_id) REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_relocation_results inventory_relocation_results_tenant_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_results
+    ADD CONSTRAINT inventory_relocation_results_tenant_id_task_id_fkey FOREIGN KEY (tenant_id, task_id) REFERENCES public.inventory_relocation_tasks(tenant_id, task_id);
+
+
+--
+-- Name: inventory_relocation_task_contents inventory_relocation_task_con_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_task_contents
+    ADD CONSTRAINT inventory_relocation_task_con_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: inventory_relocation_task_contents inventory_relocation_task_contents_tenant_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_task_contents
+    ADD CONSTRAINT inventory_relocation_task_contents_tenant_id_task_id_fkey FOREIGN KEY (tenant_id, task_id) REFERENCES public.inventory_relocation_tasks(tenant_id, task_id);
+
+
+--
+-- Name: inventory_relocation_tasks inventory_relocation_tasks_tenant_id_facility_id_destinati_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_tasks
+    ADD CONSTRAINT inventory_relocation_tasks_tenant_id_facility_id_destinati_fkey FOREIGN KEY (tenant_id, facility_id, destination_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: inventory_relocation_tasks inventory_relocation_tasks_tenant_id_facility_id_source_lo_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_tasks
+    ADD CONSTRAINT inventory_relocation_tasks_tenant_id_facility_id_source_lo_fkey FOREIGN KEY (tenant_id, facility_id, source_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: inventory_relocation_tasks inventory_relocation_tasks_tenant_id_facility_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_tasks
+    ADD CONSTRAINT inventory_relocation_tasks_tenant_id_facility_id_task_id_fkey FOREIGN KEY (tenant_id, facility_id, task_id) REFERENCES public.work_tasks(tenant_id, facility_id, id);
+
+
+--
+-- Name: inventory_relocation_tasks inventory_relocation_tasks_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_tasks
+    ADD CONSTRAINT inventory_relocation_tasks_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: inventory_relocation_tasks inventory_relocation_tasks_tenant_id_inventory_owner_id_f_fkey1; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_tasks
+    ADD CONSTRAINT inventory_relocation_tasks_tenant_id_inventory_owner_id_f_fkey1 FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: inventory_relocation_tasks inventory_relocation_tasks_tenant_id_inventory_owner_id_f_fkey2; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_tasks
+    ADD CONSTRAINT inventory_relocation_tasks_tenant_id_inventory_owner_id_f_fkey2 FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: inventory_relocation_tasks inventory_relocation_tasks_tenant_id_inventory_owner_id_fa_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_tasks
+    ADD CONSTRAINT inventory_relocation_tasks_tenant_id_inventory_owner_id_fa_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: inventory_relocation_tasks inventory_relocation_tasks_tenant_id_inventory_owner_id_it_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_tasks
+    ADD CONSTRAINT inventory_relocation_tasks_tenant_id_inventory_owner_id_it_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_relocation_tasks inventory_relocation_tasks_tenant_id_inventory_owner_id_ta_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_tasks
+    ADD CONSTRAINT inventory_relocation_tasks_tenant_id_inventory_owner_id_ta_fkey FOREIGN KEY (tenant_id, inventory_owner_id, task_id) REFERENCES public.work_tasks(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_relocation_tasks inventory_relocation_tasks_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_relocation_tasks
+    ADD CONSTRAINT inventory_relocation_tasks_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: inventory_reservations inventory_reservations_tenant_id_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_reservations
+    ADD CONSTRAINT inventory_reservations_tenant_id_created_by_fkey FOREIGN KEY (tenant_id, created_by) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: inventory_reservations inventory_reservations_tenant_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_reservations
+    ADD CONSTRAINT inventory_reservations_tenant_id_facility_id_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: inventory_reservations inventory_reservations_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_reservations
+    ADD CONSTRAINT inventory_reservations_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: inventory_reservations inventory_reservations_tenant_id_inventory_owner_id_facili_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_reservations
+    ADD CONSTRAINT inventory_reservations_tenant_id_inventory_owner_id_facili_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: inventory_reservations inventory_reservations_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_reservations
+    ADD CONSTRAINT inventory_reservations_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: inventory_reservations inventory_reservations_tenant_id_inventory_owner_id_order__fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_reservations
+    ADD CONSTRAINT inventory_reservations_tenant_id_inventory_owner_id_order__fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES public.orders(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_reservations inventory_reservations_tenant_id_inventory_owner_id_order_fkey1; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_reservations
+    ADD CONSTRAINT inventory_reservations_tenant_id_inventory_owner_id_order_fkey1 FOREIGN KEY (tenant_id, inventory_owner_id, order_id, order_item_id) REFERENCES public.order_items(tenant_id, inventory_owner_id, order_id, id);
+
+
+--
+-- Name: inventory_reservations inventory_reservations_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_reservations
+    ADD CONSTRAINT inventory_reservations_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: inventory_status_transitions inventory_status_transitions_tenant_id_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_status_transitions
+    ADD CONSTRAINT inventory_status_transitions_tenant_id_created_by_fkey FOREIGN KEY (tenant_id, created_by) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: inventory_status_transitions inventory_status_transitions_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_status_transitions
+    ADD CONSTRAINT inventory_status_transitions_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: inventory_status_transitions inventory_status_transitions_tenant_id_inventory_owner_id__fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_status_transitions
+    ADD CONSTRAINT inventory_status_transitions_tenant_id_inventory_owner_id__fkey FOREIGN KEY (tenant_id, inventory_owner_id, transaction_id) REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_status_transitions inventory_status_transitions_tenant_id_inventory_owner_id_fkey1; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_status_transitions
+    ADD CONSTRAINT inventory_status_transitions_tenant_id_inventory_owner_id_fkey1 FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: inventory_status_transitions inventory_status_transitions_tenant_id_inventory_owner_id_fkey2; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_status_transitions
+    ADD CONSTRAINT inventory_status_transitions_tenant_id_inventory_owner_id_fkey2 FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: inventory_status_transitions inventory_status_transitions_tenant_id_inventory_owner_id_fkey3; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_status_transitions
+    ADD CONSTRAINT inventory_status_transitions_tenant_id_inventory_owner_id_fkey3 FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, destination_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: inventory_transactions inventory_transactions_actor_membership_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_transactions
+    ADD CONSTRAINT inventory_transactions_actor_membership_fkey FOREIGN KEY (tenant_id, actor_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: inventory_transactions inventory_transactions_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_transactions
+    ADD CONSTRAINT inventory_transactions_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: inventory_transactions inventory_transactions_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_transactions
+    ADD CONSTRAINT inventory_transactions_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: item_batches item_batches_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_batches
+    ADD CONSTRAINT item_batches_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: item_batches item_batches_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_batches
+    ADD CONSTRAINT item_batches_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: item_batches item_batches_tenant_id_inventory_owner_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_batches
+    ADD CONSTRAINT item_batches_tenant_id_inventory_owner_id_item_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_id) REFERENCES public.inventory_owner_items(tenant_id, inventory_owner_id, item_id);
+
+
+--
+-- Name: item_batches item_batches_tenant_id_inventory_owner_id_load_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_batches
+    ADD CONSTRAINT item_batches_tenant_id_inventory_owner_id_load_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, load_id) REFERENCES public.loads(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: item_batches item_batches_tenant_id_inventory_owner_id_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_batches
+    ADD CONSTRAINT item_batches_tenant_id_inventory_owner_id_order_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES public.orders(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: item_batches item_batches_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_batches
+    ADD CONSTRAINT item_batches_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: item_pack_links item_pack_links_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_pack_links
+    ADD CONSTRAINT item_pack_links_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: item_pack_links item_pack_links_tenant_id_master_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_pack_links
+    ADD CONSTRAINT item_pack_links_tenant_id_master_item_id_fkey FOREIGN KEY (tenant_id, master_item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: item_pack_links item_pack_links_tenant_id_single_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_pack_links
+    ADD CONSTRAINT item_pack_links_tenant_id_single_item_id_fkey FOREIGN KEY (tenant_id, single_item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: items items_tenant_id_dims_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.items
+    ADD CONSTRAINT items_tenant_id_dims_id_fkey FOREIGN KEY (tenant_id, dims_id) REFERENCES public.dims(tenant_id, id);
+
+
+--
+-- Name: items items_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.items
+    ADD CONSTRAINT items_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: license_plate_putaway_results license_plate_putaway_result_tenant_id_inventory_owner_id_fkey1; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_results
+    ADD CONSTRAINT license_plate_putaway_result_tenant_id_inventory_owner_id_fkey1 FOREIGN KEY (tenant_id, inventory_owner_id, inventory_transaction_id) REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: license_plate_putaway_results license_plate_putaway_results_tenant_id_confirmed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_results
+    ADD CONSTRAINT license_plate_putaway_results_tenant_id_confirmed_by_fkey FOREIGN KEY (tenant_id, confirmed_by) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: license_plate_putaway_results license_plate_putaway_results_tenant_id_facility_id_destin_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_results
+    ADD CONSTRAINT license_plate_putaway_results_tenant_id_facility_id_destin_fkey FOREIGN KEY (tenant_id, facility_id, destination_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: license_plate_putaway_results license_plate_putaway_results_tenant_id_facility_id_source_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_results
+    ADD CONSTRAINT license_plate_putaway_results_tenant_id_facility_id_source_fkey FOREIGN KEY (tenant_id, facility_id, source_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: license_plate_putaway_results license_plate_putaway_results_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_results
+    ADD CONSTRAINT license_plate_putaway_results_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: license_plate_putaway_results license_plate_putaway_results_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_results
+    ADD CONSTRAINT license_plate_putaway_results_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: license_plate_putaway_results license_plate_putaway_results_tenant_id_task_id_inventory__fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_results
+    ADD CONSTRAINT license_plate_putaway_results_tenant_id_task_id_inventory__fkey FOREIGN KEY (tenant_id, task_id, inventory_owner_id, facility_id, license_plate_id, source_location_id, destination_location_id, moved_balance_count) REFERENCES public.license_plate_putaway_tasks(tenant_id, task_id, inventory_owner_id, facility_id, license_plate_id, source_location_id, destination_location_id, planned_balance_count);
+
+
+--
+-- Name: license_plate_putaway_task_contents license_plate_putaway_task_c_tenant_id_inventory_owner_id_fkey1; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_task_contents
+    ADD CONSTRAINT license_plate_putaway_task_c_tenant_id_inventory_owner_id_fkey1 FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: license_plate_putaway_task_contents license_plate_putaway_task_co_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_task_contents
+    ADD CONSTRAINT license_plate_putaway_task_co_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: license_plate_putaway_task_contents license_plate_putaway_task_co_tenant_id_task_id_inventory__fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_task_contents
+    ADD CONSTRAINT license_plate_putaway_task_co_tenant_id_task_id_inventory__fkey FOREIGN KEY (tenant_id, task_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plate_putaway_tasks(tenant_id, task_id, inventory_owner_id, facility_id, license_plate_id);
+
+
+--
+-- Name: license_plate_putaway_task_contents license_plate_putaway_task_contents_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_task_contents
+    ADD CONSTRAINT license_plate_putaway_task_contents_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: license_plate_putaway_task_contents license_plate_putaway_task_contents_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_task_contents
+    ADD CONSTRAINT license_plate_putaway_task_contents_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: license_plate_putaway_tasks license_plate_putaway_tasks_tenant_id_facility_id_destinat_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_tasks
+    ADD CONSTRAINT license_plate_putaway_tasks_tenant_id_facility_id_destinat_fkey FOREIGN KEY (tenant_id, facility_id, destination_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: license_plate_putaway_tasks license_plate_putaway_tasks_tenant_id_facility_id_source_l_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_tasks
+    ADD CONSTRAINT license_plate_putaway_tasks_tenant_id_facility_id_source_l_fkey FOREIGN KEY (tenant_id, facility_id, source_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: license_plate_putaway_tasks license_plate_putaway_tasks_tenant_id_facility_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_tasks
+    ADD CONSTRAINT license_plate_putaway_tasks_tenant_id_facility_id_task_id_fkey FOREIGN KEY (tenant_id, facility_id, task_id) REFERENCES public.work_tasks(tenant_id, facility_id, id);
+
+
+--
+-- Name: license_plate_putaway_tasks license_plate_putaway_tasks_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_tasks
+    ADD CONSTRAINT license_plate_putaway_tasks_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: license_plate_putaway_tasks license_plate_putaway_tasks_tenant_id_inventory_owner_id__fkey1; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_tasks
+    ADD CONSTRAINT license_plate_putaway_tasks_tenant_id_inventory_owner_id__fkey1 FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: license_plate_putaway_tasks license_plate_putaway_tasks_tenant_id_inventory_owner_id_f_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_tasks
+    ADD CONSTRAINT license_plate_putaway_tasks_tenant_id_inventory_owner_id_f_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: license_plate_putaway_tasks license_plate_putaway_tasks_tenant_id_inventory_owner_id_t_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plate_putaway_tasks
+    ADD CONSTRAINT license_plate_putaway_tasks_tenant_id_inventory_owner_id_t_fkey FOREIGN KEY (tenant_id, inventory_owner_id, task_id) REFERENCES public.work_tasks(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: license_plates license_plates_owner_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plates
+    ADD CONSTRAINT license_plates_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: license_plates license_plates_tenant_id_dims_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plates
+    ADD CONSTRAINT license_plates_tenant_id_dims_id_fkey FOREIGN KEY (tenant_id, dims_id) REFERENCES public.dims(tenant_id, id);
+
+
+--
+-- Name: license_plates license_plates_tenant_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plates
+    ADD CONSTRAINT license_plates_tenant_id_facility_id_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: license_plates license_plates_tenant_id_facility_id_location_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plates
+    ADD CONSTRAINT license_plates_tenant_id_facility_id_location_id_fkey FOREIGN KEY (tenant_id, facility_id, location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: license_plates license_plates_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plates
+    ADD CONSTRAINT license_plates_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: license_plates license_plates_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.license_plates
+    ADD CONSTRAINT license_plates_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: load_activity load_activity_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_activity
+    ADD CONSTRAINT load_activity_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: load_activity load_activity_tenant_id_load_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_activity
+    ADD CONSTRAINT load_activity_tenant_id_load_id_fkey FOREIGN KEY (tenant_id, load_id) REFERENCES public.loads(tenant_id, id);
+
+
+--
+-- Name: load_activity load_activity_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_activity
+    ADD CONSTRAINT load_activity_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id);
+
+
+--
+-- Name: load_files load_files_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_files
+    ADD CONSTRAINT load_files_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: load_files load_files_tenant_id_load_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_files
+    ADD CONSTRAINT load_files_tenant_id_load_id_fkey FOREIGN KEY (tenant_id, load_id) REFERENCES public.loads(tenant_id, id);
+
+
+--
+-- Name: load_lines load_lines_missing_confirmed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_lines
+    ADD CONSTRAINT load_lines_missing_confirmed_by_fkey FOREIGN KEY (missing_confirmed_by) REFERENCES public.users(id);
+
+
+--
+-- Name: load_lines load_lines_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_lines
+    ADD CONSTRAINT load_lines_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: load_lines load_lines_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_lines
+    ADD CONSTRAINT load_lines_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: load_lines load_lines_tenant_id_item_id_sku_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_lines
+    ADD CONSTRAINT load_lines_tenant_id_item_id_sku_id_fkey FOREIGN KEY (tenant_id, item_id, sku_id) REFERENCES public.skus(tenant_id, item_id, id);
+
+
+--
+-- Name: load_lines load_lines_tenant_id_load_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_lines
+    ADD CONSTRAINT load_lines_tenant_id_load_id_fkey FOREIGN KEY (tenant_id, load_id) REFERENCES public.loads(tenant_id, id);
+
+
+--
+-- Name: load_notes load_notes_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_notes
+    ADD CONSTRAINT load_notes_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: load_notes load_notes_tenant_id_load_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_notes
+    ADD CONSTRAINT load_notes_tenant_id_load_id_fkey FOREIGN KEY (tenant_id, load_id) REFERENCES public.loads(tenant_id, id);
+
+
+--
+-- Name: load_orders load_orders_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_orders
+    ADD CONSTRAINT load_orders_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: load_orders load_orders_tenant_id_inventory_owner_id_load_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_orders
+    ADD CONSTRAINT load_orders_tenant_id_inventory_owner_id_load_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, load_id) REFERENCES public.loads(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: load_orders load_orders_tenant_id_inventory_owner_id_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.load_orders
+    ADD CONSTRAINT load_orders_tenant_id_inventory_owner_id_order_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES public.orders(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: loads loads_checked_in_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.loads
+    ADD CONSTRAINT loads_checked_in_by_fkey FOREIGN KEY (checked_in_by) REFERENCES public.users(id);
+
+
+--
+-- Name: loads loads_closed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.loads
+    ADD CONSTRAINT loads_closed_by_fkey FOREIGN KEY (closed_by) REFERENCES public.users(id);
+
+
+--
+-- Name: loads loads_tenant_id_facility_id_dock_door_location_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.loads
+    ADD CONSTRAINT loads_tenant_id_facility_id_dock_door_location_id_fkey FOREIGN KEY (tenant_id, facility_id, dock_door_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: loads loads_tenant_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.loads
+    ADD CONSTRAINT loads_tenant_id_facility_id_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: loads loads_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.loads
+    ADD CONSTRAINT loads_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: loads loads_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.loads
+    ADD CONSTRAINT loads_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: locations locations_parent_same_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.locations
+    ADD CONSTRAINT locations_parent_same_facility_fkey FOREIGN KEY (tenant_id, facility_id, parent_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: locations locations_tenant_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.locations
+    ADD CONSTRAINT locations_tenant_id_facility_id_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: locations locations_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.locations
+    ADD CONSTRAINT locations_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: order_activity order_activity_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_activity
+    ADD CONSTRAINT order_activity_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: order_activity order_activity_tenant_id_inventory_owner_id_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_activity
+    ADD CONSTRAINT order_activity_tenant_id_inventory_owner_id_order_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES public.orders(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: order_items order_items_item_batch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_items
+    ADD CONSTRAINT order_items_item_batch_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: order_items order_items_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_items
+    ADD CONSTRAINT order_items_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: order_items order_items_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_items
+    ADD CONSTRAINT order_items_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: order_items order_items_tenant_id_inventory_owner_id_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_items
+    ADD CONSTRAINT order_items_tenant_id_inventory_owner_id_order_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES public.orders(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: order_tracking_numbers order_tracking_numbers_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_tracking_numbers
+    ADD CONSTRAINT order_tracking_numbers_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: order_tracking_numbers order_tracking_numbers_tenant_id_inventory_owner_id_order__fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_tracking_numbers
+    ADD CONSTRAINT order_tracking_numbers_tenant_id_inventory_owner_id_order__fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES public.orders(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: orders orders_tenant_id_address_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_tenant_id_address_id_fkey FOREIGN KEY (tenant_id, address_id) REFERENCES public.addresses(tenant_id, id);
+
+
+--
+-- Name: orders orders_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: orders orders_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: orders orders_tenant_id_wave_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.orders
+    ADD CONSTRAINT orders_tenant_id_wave_id_fkey FOREIGN KEY (tenant_id, wave_id) REFERENCES public.pick_waves(tenant_id, id);
+
+
+--
+-- Name: outbox_aggregate_sequences outbox_aggregate_sequences_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_aggregate_sequences
+    ADD CONSTRAINT outbox_aggregate_sequences_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: outbox_delivery_attempt_results outbox_delivery_attempt_resul_tenant_id_outbox_event_id_cl_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_delivery_attempt_results
+    ADD CONSTRAINT outbox_delivery_attempt_resul_tenant_id_outbox_event_id_cl_fkey FOREIGN KEY (tenant_id, outbox_event_id, claim_version) REFERENCES public.outbox_delivery_attempts(tenant_id, outbox_event_id, claim_version);
+
+
+--
+-- Name: outbox_delivery_attempts outbox_delivery_attempts_tenant_id_event_key_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_delivery_attempts
+    ADD CONSTRAINT outbox_delivery_attempts_tenant_id_event_key_fkey FOREIGN KEY (tenant_id, event_key) REFERENCES public.outbox_event_keys(tenant_id, event_key);
+
+
+--
+-- Name: outbox_event_keys outbox_event_keys_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_event_keys
+    ADD CONSTRAINT outbox_event_keys_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: outbox_events outbox_events_owner_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_events
+    ADD CONSTRAINT outbox_events_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: outbox_events outbox_events_tenant_id_actor_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_events
+    ADD CONSTRAINT outbox_events_tenant_id_actor_user_id_fkey FOREIGN KEY (tenant_id, actor_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: outbox_events outbox_events_tenant_id_discarded_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_events
+    ADD CONSTRAINT outbox_events_tenant_id_discarded_by_user_id_fkey FOREIGN KEY (tenant_id, discarded_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: outbox_events outbox_events_tenant_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_events
+    ADD CONSTRAINT outbox_events_tenant_id_facility_id_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: outbox_events outbox_events_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_events
+    ADD CONSTRAINT outbox_events_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: outbox_events outbox_events_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.outbox_events
+    ADD CONSTRAINT outbox_events_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: permissions permissions_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.permissions
+    ADD CONSTRAINT permissions_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: pick_waves pick_waves_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_waves
+    ADD CONSTRAINT pick_waves_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: putaway_results putaway_results_tenant_id_confirmed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_results
+    ADD CONSTRAINT putaway_results_tenant_id_confirmed_by_fkey FOREIGN KEY (tenant_id, confirmed_by) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: putaway_results putaway_results_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_results
+    ADD CONSTRAINT putaway_results_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: putaway_results putaway_results_tenant_id_inventory_owner_id_facility_id_d_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_results
+    ADD CONSTRAINT putaway_results_tenant_id_inventory_owner_id_facility_id_d_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, destination_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: putaway_results putaway_results_tenant_id_inventory_owner_id_facility_id_s_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_results
+    ADD CONSTRAINT putaway_results_tenant_id_inventory_owner_id_facility_id_s_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: putaway_results putaway_results_tenant_id_inventory_owner_id_inventory_tra_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_results
+    ADD CONSTRAINT putaway_results_tenant_id_inventory_owner_id_inventory_tra_fkey FOREIGN KEY (tenant_id, inventory_owner_id, inventory_transaction_id) REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: putaway_results putaway_results_tenant_id_task_id_inventory_owner_id_facil_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_results
+    ADD CONSTRAINT putaway_results_tenant_id_task_id_inventory_owner_id_facil_fkey FOREIGN KEY (tenant_id, task_id, inventory_owner_id, facility_id, source_inventory_balance_id, source_location_id, destination_location_id, item_batch_id, item_id, inventory_status, quantity) REFERENCES public.putaway_tasks(tenant_id, task_id, inventory_owner_id, facility_id, source_inventory_balance_id, source_location_id, destination_location_id, item_batch_id, item_id, inventory_status, planned_quantity);
+
+
+--
+-- Name: putaway_tasks putaway_tasks_tenant_id_facility_id_destination_location_i_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_tasks
+    ADD CONSTRAINT putaway_tasks_tenant_id_facility_id_destination_location_i_fkey FOREIGN KEY (tenant_id, facility_id, destination_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: putaway_tasks putaway_tasks_tenant_id_facility_id_source_location_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_tasks
+    ADD CONSTRAINT putaway_tasks_tenant_id_facility_id_source_location_id_fkey FOREIGN KEY (tenant_id, facility_id, source_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: putaway_tasks putaway_tasks_tenant_id_facility_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_tasks
+    ADD CONSTRAINT putaway_tasks_tenant_id_facility_id_task_id_fkey FOREIGN KEY (tenant_id, facility_id, task_id) REFERENCES public.work_tasks(tenant_id, facility_id, id);
+
+
+--
+-- Name: putaway_tasks putaway_tasks_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_tasks
+    ADD CONSTRAINT putaway_tasks_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: putaway_tasks putaway_tasks_tenant_id_inventory_owner_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_tasks
+    ADD CONSTRAINT putaway_tasks_tenant_id_inventory_owner_id_facility_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: putaway_tasks putaway_tasks_tenant_id_inventory_owner_id_facility_id_sou_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_tasks
+    ADD CONSTRAINT putaway_tasks_tenant_id_inventory_owner_id_facility_id_sou_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: putaway_tasks putaway_tasks_tenant_id_inventory_owner_id_item_batch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_tasks
+    ADD CONSTRAINT putaway_tasks_tenant_id_inventory_owner_id_item_batch_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: putaway_tasks putaway_tasks_tenant_id_inventory_owner_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_tasks
+    ADD CONSTRAINT putaway_tasks_tenant_id_inventory_owner_id_task_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, task_id) REFERENCES public.work_tasks(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: putaway_tasks putaway_tasks_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.putaway_tasks
+    ADD CONSTRAINT putaway_tasks_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: role_permissions role_permissions_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.role_permissions
+    ADD CONSTRAINT role_permissions_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: role_permissions role_permissions_tenant_id_permission_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.role_permissions
+    ADD CONSTRAINT role_permissions_tenant_id_permission_id_fkey FOREIGN KEY (tenant_id, permission_id) REFERENCES public.permissions(tenant_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: role_permissions role_permissions_tenant_id_role_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.role_permissions
+    ADD CONSTRAINT role_permissions_tenant_id_role_id_fkey FOREIGN KEY (tenant_id, role_id) REFERENCES public.roles(tenant_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: roles roles_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.roles
+    ADD CONSTRAINT roles_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: roles roles_tenant_id_parent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.roles
+    ADD CONSTRAINT roles_tenant_id_parent_id_fkey FOREIGN KEY (tenant_id, parent_id) REFERENCES public.roles(tenant_id, id);
+
+
+--
+-- Name: roles roles_tenant_id_self_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.roles
+    ADD CONSTRAINT roles_tenant_id_self_user_id_fkey FOREIGN KEY (tenant_id, self_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: sessions sessions_active_membership_fk; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_active_membership_fk FOREIGN KEY (active_tenant_id, user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: sessions sessions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: skus skus_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.skus
+    ADD CONSTRAINT skus_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: skus skus_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.skus
+    ADD CONSTRAINT skus_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: tenant_memberships tenant_memberships_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_memberships
+    ADD CONSTRAINT tenant_memberships_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: tenant_memberships tenant_memberships_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_memberships
+    ADD CONSTRAINT tenant_memberships_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_l_tenant_id_destination_locati_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_l_tenant_id_destination_locati_fkey FOREIGN KEY (tenant_id, destination_location_id) REFERENCES public.locations(tenant_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_l_tenant_id_inventory_balance__fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_l_tenant_id_inventory_balance__fkey FOREIGN KEY (tenant_id, inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_l_tenant_id_source_location_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_l_tenant_id_source_location_id_fkey FOREIGN KEY (tenant_id, source_location_id) REFERENCES public.locations(tenant_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lin_tenant_id_license_plate_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lin_tenant_id_license_plate_id_fkey FOREIGN KEY (tenant_id, license_plate_id) REFERENCES public.license_plates(tenant_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_balance_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_balance_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_batch_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_batch_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_destination_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_destination_facility_fkey FOREIGN KEY (tenant_id, facility_id, destination_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_license_plate_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_license_plate_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_order_item_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_order_item_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_item_id) REFERENCES public.order_items(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_source_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_source_facility_fkey FOREIGN KEY (tenant_id, facility_id, source_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_task_scope_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_task_scope_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, task_id) REFERENCES public.unpack_cancelled_order_tasks(tenant_id, inventory_owner_id, facility_id, task_id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_tenant_id_item_batch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_tenant_id_item_batch_id_fkey FOREIGN KEY (tenant_id, item_batch_id) REFERENCES public.item_batches(tenant_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_tenant_id_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_tenant_id_order_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_tenant_id_order_item_id_fkey FOREIGN KEY (tenant_id, order_item_id) REFERENCES public.order_items(tenant_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_tenant_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_task_lines
+    ADD CONSTRAINT unpack_cancelled_order_task_lines_tenant_id_task_id_fkey FOREIGN KEY (tenant_id, task_id) REFERENCES public.unpack_cancelled_order_tasks(tenant_id, task_id) ON DELETE CASCADE;
+
+
+--
+-- Name: unpack_cancelled_order_tasks unpack_cancelled_order_tasks_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_tasks
+    ADD CONSTRAINT unpack_cancelled_order_tasks_facility_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_tasks unpack_cancelled_order_tasks_order_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_tasks
+    ADD CONSTRAINT unpack_cancelled_order_tasks_order_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES public.orders(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_tasks unpack_cancelled_order_tasks_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_tasks
+    ADD CONSTRAINT unpack_cancelled_order_tasks_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_tasks unpack_cancelled_order_tasks_task_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_tasks
+    ADD CONSTRAINT unpack_cancelled_order_tasks_task_facility_fkey FOREIGN KEY (tenant_id, facility_id, task_id) REFERENCES public.work_tasks(tenant_id, facility_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_tasks unpack_cancelled_order_tasks_task_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_tasks
+    ADD CONSTRAINT unpack_cancelled_order_tasks_task_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id, task_id) REFERENCES public.work_tasks(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_tasks unpack_cancelled_order_tasks_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_tasks
+    ADD CONSTRAINT unpack_cancelled_order_tasks_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: unpack_cancelled_order_tasks unpack_cancelled_order_tasks_tenant_id_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_tasks
+    ADD CONSTRAINT unpack_cancelled_order_tasks_tenant_id_order_id_fkey FOREIGN KEY (tenant_id, order_id) REFERENCES public.orders(tenant_id, id);
+
+
+--
+-- Name: unpack_cancelled_order_tasks unpack_cancelled_order_tasks_tenant_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.unpack_cancelled_order_tasks
+    ADD CONSTRAINT unpack_cancelled_order_tasks_tenant_id_task_id_fkey FOREIGN KEY (tenant_id, task_id) REFERENCES public.work_tasks(tenant_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_credentials user_credentials_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_credentials
+    ADD CONSTRAINT user_credentials_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_facilities user_facilities_tenant_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_facilities
+    ADD CONSTRAINT user_facilities_tenant_id_facility_id_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_facilities user_facilities_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_facilities
+    ADD CONSTRAINT user_facilities_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: user_facilities user_facilities_tenant_id_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_facilities
+    ADD CONSTRAINT user_facilities_tenant_id_user_id_fkey FOREIGN KEY (tenant_id, user_id) REFERENCES public.tenant_memberships(tenant_id, user_id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_inventory_owners user_inventory_owners_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_inventory_owners
+    ADD CONSTRAINT user_inventory_owners_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: user_inventory_owners user_inventory_owners_tenant_id_inventory_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_inventory_owners
+    ADD CONSTRAINT user_inventory_owners_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_inventory_owners user_inventory_owners_tenant_id_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_inventory_owners
+    ADD CONSTRAINT user_inventory_owners_tenant_id_user_id_fkey FOREIGN KEY (tenant_id, user_id) REFERENCES public.tenant_memberships(tenant_id, user_id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_roles user_roles_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_roles
+    ADD CONSTRAINT user_roles_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: user_roles user_roles_tenant_id_role_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_roles
+    ADD CONSTRAINT user_roles_tenant_id_role_id_fkey FOREIGN KEY (tenant_id, role_id) REFERENCES public.roles(tenant_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_roles user_roles_tenant_id_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_roles
+    ADD CONSTRAINT user_roles_tenant_id_user_id_fkey FOREIGN KEY (tenant_id, user_id) REFERENCES public.tenant_memberships(tenant_id, user_id) ON DELETE CASCADE;
+
+
+--
+-- Name: user_settings user_settings_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_settings
+    ADD CONSTRAINT user_settings_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: work_task_progress work_task_progress_from_location_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_task_progress
+    ADD CONSTRAINT work_task_progress_from_location_facility_fkey FOREIGN KEY (tenant_id, facility_id, from_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: work_task_progress work_task_progress_task_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_task_progress
+    ADD CONSTRAINT work_task_progress_task_facility_fkey FOREIGN KEY (tenant_id, facility_id, task_id) REFERENCES public.work_tasks(tenant_id, facility_id, id);
+
+
+--
+-- Name: work_task_progress work_task_progress_task_line_scope_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_task_progress
+    ADD CONSTRAINT work_task_progress_task_line_scope_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, task_id, task_line_id) REFERENCES public.unpack_cancelled_order_task_lines(tenant_id, inventory_owner_id, facility_id, task_id, id);
+
+
+--
+-- Name: work_task_progress work_task_progress_task_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_task_progress
+    ADD CONSTRAINT work_task_progress_task_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id, task_id) REFERENCES public.work_tasks(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: work_task_progress work_task_progress_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_task_progress
+    ADD CONSTRAINT work_task_progress_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: work_task_progress work_task_progress_tenant_id_from_location_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_task_progress
+    ADD CONSTRAINT work_task_progress_tenant_id_from_location_id_fkey FOREIGN KEY (tenant_id, from_location_id) REFERENCES public.locations(tenant_id, id);
+
+
+--
+-- Name: work_task_progress work_task_progress_tenant_id_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_task_progress
+    ADD CONSTRAINT work_task_progress_tenant_id_task_id_fkey FOREIGN KEY (tenant_id, task_id) REFERENCES public.work_tasks(tenant_id, id) ON DELETE CASCADE;
+
+
+--
+-- Name: work_task_progress work_task_progress_tenant_id_task_line_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_task_progress
+    ADD CONSTRAINT work_task_progress_tenant_id_task_line_id_fkey FOREIGN KEY (tenant_id, task_line_id) REFERENCES public.unpack_cancelled_order_task_lines(tenant_id, id);
+
+
+--
+-- Name: work_task_progress work_task_progress_tenant_id_to_location_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_task_progress
+    ADD CONSTRAINT work_task_progress_tenant_id_to_location_id_fkey FOREIGN KEY (tenant_id, to_location_id) REFERENCES public.locations(tenant_id, id);
+
+
+--
+-- Name: work_task_progress work_task_progress_tenant_id_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_task_progress
+    ADD CONSTRAINT work_task_progress_tenant_id_user_id_fkey FOREIGN KEY (tenant_id, user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: work_task_progress work_task_progress_to_location_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_task_progress
+    ADD CONSTRAINT work_task_progress_to_location_facility_fkey FOREIGN KEY (tenant_id, facility_id, to_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: work_tasks work_tasks_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_tasks
+    ADD CONSTRAINT work_tasks_facility_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: work_tasks work_tasks_inventory_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_tasks
+    ADD CONSTRAINT work_tasks_inventory_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: work_tasks work_tasks_tenant_id_assigned_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_tasks
+    ADD CONSTRAINT work_tasks_tenant_id_assigned_user_id_fkey FOREIGN KEY (tenant_id, assigned_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: work_tasks work_tasks_tenant_id_completed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_tasks
+    ADD CONSTRAINT work_tasks_tenant_id_completed_by_fkey FOREIGN KEY (tenant_id, completed_by) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: work_tasks work_tasks_tenant_id_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_tasks
+    ADD CONSTRAINT work_tasks_tenant_id_created_by_fkey FOREIGN KEY (tenant_id, created_by) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: work_tasks work_tasks_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_tasks
+    ADD CONSTRAINT work_tasks_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: addresses; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.addresses ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: addresses addresses_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY addresses_tenant_isolation ON public.addresses USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: audit_location_counts; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.audit_location_counts ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: audit_location_counts audit_location_counts_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY audit_location_counts_tenant_isolation ON public.audit_location_counts USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: audit_wave_assignments; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.audit_wave_assignments ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: audit_wave_assignments audit_wave_assignments_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY audit_wave_assignments_tenant_isolation ON public.audit_wave_assignments USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: audit_wave_inventory_owners; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.audit_wave_inventory_owners ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: audit_wave_inventory_owners audit_wave_inventory_owners_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY audit_wave_inventory_owners_tenant_isolation ON public.audit_wave_inventory_owners USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: audit_wave_items; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.audit_wave_items ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: audit_wave_items audit_wave_items_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY audit_wave_items_tenant_isolation ON public.audit_wave_items USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: audit_wave_locations; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.audit_wave_locations ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: audit_wave_locations audit_wave_locations_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY audit_wave_locations_tenant_isolation ON public.audit_wave_locations USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: audit_waves; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.audit_waves ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: audit_waves audit_waves_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY audit_waves_tenant_isolation ON public.audit_waves USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: barcodes; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.barcodes ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: barcodes barcodes_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY barcodes_tenant_isolation ON public.barcodes USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: break_master_pack_tasks; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.break_master_pack_tasks ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: break_master_pack_tasks break_master_pack_tasks_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY break_master_pack_tasks_tenant_isolation ON public.break_master_pack_tasks USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: command_idempotency_records; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.command_idempotency_records ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: command_idempotency_records command_idempotency_records_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY command_idempotency_records_tenant_isolation ON public.command_idempotency_records USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: cycle_count_item_location_results; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.cycle_count_item_location_results ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: cycle_count_item_location_results cycle_count_item_location_results_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY cycle_count_item_location_results_tenant_isolation ON public.cycle_count_item_location_results USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: cycle_count_item_location_tasks; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.cycle_count_item_location_tasks ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: cycle_count_item_location_tasks cycle_count_item_location_tasks_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY cycle_count_item_location_tasks_tenant_isolation ON public.cycle_count_item_location_tasks USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: cycle_count_location_tasks; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.cycle_count_location_tasks ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: cycle_count_location_tasks cycle_count_location_tasks_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY cycle_count_location_tasks_tenant_isolation ON public.cycle_count_location_tasks USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: dims; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.dims ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: dims dims_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY dims_tenant_isolation ON public.dims USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: employee_facilities; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.employee_facilities ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: employee_facilities employee_facilities_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY employee_facilities_tenant_isolation ON public.employee_facilities USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: employees; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.employees ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: employees employees_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY employees_tenant_isolation ON public.employees USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: facilities; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.facilities ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: facilities facilities_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY facilities_tenant_isolation ON public.facilities USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: integration_inbox_keys; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.integration_inbox_keys ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: integration_inbox_keys integration_inbox_keys_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY integration_inbox_keys_tenant_isolation ON public.integration_inbox_keys USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: integration_inbox_receipts; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.integration_inbox_receipts ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: integration_inbox_receipts integration_inbox_receipts_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY integration_inbox_receipts_tenant_isolation ON public.integration_inbox_receipts USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: inventory_allocations; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_allocations ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inventory_allocations inventory_allocations_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY inventory_allocations_tenant_isolation ON public.inventory_allocations USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: inventory_balances; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_balances ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inventory_balances inventory_balances_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY inventory_balances_tenant_isolation ON public.inventory_balances USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: inventory_entries; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_entries ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inventory_entries inventory_entries_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY inventory_entries_tenant_isolation ON public.inventory_entries USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: inventory_holds; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_holds ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inventory_holds inventory_holds_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY inventory_holds_tenant_isolation ON public.inventory_holds USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: inventory_owner_facilities; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_owner_facilities ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inventory_owner_facilities inventory_owner_facilities_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY inventory_owner_facilities_tenant_isolation ON public.inventory_owner_facilities USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: inventory_owner_items; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_owner_items ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inventory_owner_items inventory_owner_items_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY inventory_owner_items_tenant_isolation ON public.inventory_owner_items USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: inventory_owners; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_owners ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inventory_owners inventory_owners_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY inventory_owners_tenant_isolation ON public.inventory_owners USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: inventory_projection_changes; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_projection_changes ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inventory_projection_changes inventory_projection_changes_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY inventory_projection_changes_tenant_isolation ON public.inventory_projection_changes USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: inventory_relocation_results; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_relocation_results ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inventory_relocation_results inventory_relocation_results_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY inventory_relocation_results_tenant_isolation ON public.inventory_relocation_results USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: inventory_relocation_task_contents; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_relocation_task_contents ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inventory_relocation_task_contents inventory_relocation_task_contents_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY inventory_relocation_task_contents_tenant_isolation ON public.inventory_relocation_task_contents USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: inventory_relocation_tasks; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_relocation_tasks ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inventory_relocation_tasks inventory_relocation_tasks_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY inventory_relocation_tasks_tenant_isolation ON public.inventory_relocation_tasks USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: inventory_reservations; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_reservations ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inventory_reservations inventory_reservations_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY inventory_reservations_tenant_isolation ON public.inventory_reservations USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: inventory_status_transitions; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_status_transitions ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inventory_status_transitions inventory_status_transitions_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY inventory_status_transitions_tenant_isolation ON public.inventory_status_transitions USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: inventory_transactions; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inventory_transactions ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inventory_transactions inventory_transactions_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY inventory_transactions_tenant_isolation ON public.inventory_transactions USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: item_batches; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.item_batches ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: item_batches item_batches_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY item_batches_tenant_isolation ON public.item_batches USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: item_pack_links; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.item_pack_links ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: item_pack_links item_pack_links_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY item_pack_links_tenant_isolation ON public.item_pack_links USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: items; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.items ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: items items_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY items_tenant_isolation ON public.items USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: license_plate_putaway_results; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.license_plate_putaway_results ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: license_plate_putaway_results license_plate_putaway_results_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY license_plate_putaway_results_tenant_isolation ON public.license_plate_putaway_results USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: license_plate_putaway_task_contents; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.license_plate_putaway_task_contents ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: license_plate_putaway_task_contents license_plate_putaway_task_contents_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY license_plate_putaway_task_contents_tenant_isolation ON public.license_plate_putaway_task_contents USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: license_plate_putaway_tasks; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.license_plate_putaway_tasks ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: license_plate_putaway_tasks license_plate_putaway_tasks_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY license_plate_putaway_tasks_tenant_isolation ON public.license_plate_putaway_tasks USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: license_plates; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.license_plates ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: license_plates license_plates_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY license_plates_tenant_isolation ON public.license_plates USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: load_activity; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.load_activity ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: load_activity load_activity_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY load_activity_tenant_isolation ON public.load_activity USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: load_files; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.load_files ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: load_files load_files_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY load_files_tenant_isolation ON public.load_files USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: load_lines; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.load_lines ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: load_lines load_lines_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY load_lines_tenant_isolation ON public.load_lines USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: load_notes; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.load_notes ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: load_notes load_notes_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY load_notes_tenant_isolation ON public.load_notes USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: load_orders; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.load_orders ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: load_orders load_orders_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY load_orders_tenant_isolation ON public.load_orders USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: loads; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.loads ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: loads loads_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY loads_tenant_isolation ON public.loads USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: locations; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.locations ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: locations locations_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY locations_tenant_isolation ON public.locations USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: order_activity; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_activity ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: order_activity order_activity_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY order_activity_tenant_isolation ON public.order_activity USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: order_items; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_items ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: order_items order_items_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY order_items_tenant_isolation ON public.order_items USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: order_tracking_numbers; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_tracking_numbers ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: order_tracking_numbers order_tracking_numbers_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY order_tracking_numbers_tenant_isolation ON public.order_tracking_numbers USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: orders; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: orders orders_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY orders_tenant_isolation ON public.orders USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: outbox_aggregate_sequences; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.outbox_aggregate_sequences ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: outbox_aggregate_sequences outbox_aggregate_sequences_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY outbox_aggregate_sequences_tenant_isolation ON public.outbox_aggregate_sequences USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: outbox_delivery_attempt_results; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.outbox_delivery_attempt_results ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: outbox_delivery_attempt_results outbox_delivery_attempt_results_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY outbox_delivery_attempt_results_tenant_isolation ON public.outbox_delivery_attempt_results USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: outbox_delivery_attempts; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.outbox_delivery_attempts ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: outbox_delivery_attempts outbox_delivery_attempts_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY outbox_delivery_attempts_tenant_isolation ON public.outbox_delivery_attempts USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: outbox_event_keys; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.outbox_event_keys ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: outbox_event_keys outbox_event_keys_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY outbox_event_keys_tenant_isolation ON public.outbox_event_keys USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: outbox_events; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.outbox_events ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: outbox_events outbox_events_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY outbox_events_tenant_isolation ON public.outbox_events USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: permissions; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.permissions ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: permissions permissions_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY permissions_tenant_isolation ON public.permissions USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: pick_waves; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.pick_waves ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: pick_waves pick_waves_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY pick_waves_tenant_isolation ON public.pick_waves USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: putaway_results; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.putaway_results ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: putaway_results putaway_results_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY putaway_results_tenant_isolation ON public.putaway_results USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: putaway_tasks; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.putaway_tasks ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: putaway_tasks putaway_tasks_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY putaway_tasks_tenant_isolation ON public.putaway_tasks USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: role_permissions; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.role_permissions ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: role_permissions role_permissions_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY role_permissions_tenant_isolation ON public.role_permissions USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: roles; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.roles ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: roles roles_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY roles_tenant_isolation ON public.roles USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: skus; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.skus ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: skus skus_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY skus_tenant_isolation ON public.skus USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: tenant_memberships; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.tenant_memberships ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: tenant_memberships tenant_memberships_session_visibility; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_memberships_session_visibility ON public.tenant_memberships FOR SELECT USING ((user_id = public.session_user_id(NULLIF(current_setting('wareboxes.session_token_hash'::text, true), ''::text))));
+
+
+--
+-- Name: tenant_memberships tenant_memberships_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_memberships_tenant_isolation ON public.tenant_memberships USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: unpack_cancelled_order_task_lines; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.unpack_cancelled_order_task_lines ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: unpack_cancelled_order_task_lines unpack_cancelled_order_task_lines_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY unpack_cancelled_order_task_lines_tenant_isolation ON public.unpack_cancelled_order_task_lines USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: unpack_cancelled_order_tasks; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.unpack_cancelled_order_tasks ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: unpack_cancelled_order_tasks unpack_cancelled_order_tasks_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY unpack_cancelled_order_tasks_tenant_isolation ON public.unpack_cancelled_order_tasks USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: user_facilities; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.user_facilities ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: user_facilities user_facilities_session_visibility; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_facilities_session_visibility ON public.user_facilities FOR SELECT USING ((user_id = public.session_user_id(NULLIF(current_setting('wareboxes.session_token_hash'::text, true), ''::text))));
+
+
+--
+-- Name: user_facilities user_facilities_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_facilities_tenant_isolation ON public.user_facilities USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: user_inventory_owners; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.user_inventory_owners ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: user_inventory_owners user_inventory_owners_session_visibility; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_inventory_owners_session_visibility ON public.user_inventory_owners FOR SELECT USING ((user_id = public.session_user_id(NULLIF(current_setting('wareboxes.session_token_hash'::text, true), ''::text))));
+
+
+--
+-- Name: user_inventory_owners user_inventory_owners_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_inventory_owners_tenant_isolation ON public.user_inventory_owners USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: user_roles; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.user_roles ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: user_roles user_roles_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_roles_tenant_isolation ON public.user_roles USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: work_task_progress; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.work_task_progress ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: work_task_progress work_task_progress_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY work_task_progress_tenant_isolation ON public.work_task_progress USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: work_tasks; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.work_tasks ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: work_tasks work_tasks_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY work_tasks_tenant_isolation ON public.work_tasks USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: SCHEMA public; Type: ACL; Schema: -; Owner: -
+--
+
+GRANT USAGE ON SCHEMA public TO wareboxes_app;
+
+
+--
+-- Name: FUNCTION api_session_user_id(token_hash text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.api_session_user_id(token_hash text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.api_session_user_id(token_hash text) TO wareboxes_app;
+
+
+--
+-- Name: FUNCTION apply_inventory_allocation_projection(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.apply_inventory_allocation_projection() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION apply_inventory_hold_projection(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.apply_inventory_hold_projection() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION assert_employee_active_facility(checked_tenant_id bigint, checked_employee_id bigint); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.assert_employee_active_facility(checked_tenant_id bigint, checked_employee_id bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.assert_employee_active_facility(checked_tenant_id bigint, checked_employee_id bigint) TO wareboxes_app;
+
+
+--
+-- Name: FUNCTION assert_inventory_balance_license_plate_location_consistency(target_tenant_id bigint, target_inventory_balance_id bigint); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.assert_inventory_balance_license_plate_location_consistency(target_tenant_id bigint, target_inventory_balance_id bigint) FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION assert_license_plate_location_consistency(target_tenant_id bigint, target_license_plate_id bigint); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.assert_license_plate_location_consistency(target_tenant_id bigint, target_license_plate_id bigint) FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION capture_inventory_projection_change(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.capture_inventory_projection_change() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION close_license_plate_putaway_task_detail(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.close_license_plate_putaway_task_detail() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION close_putaway_task_detail(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.close_putaway_task_detail() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION create_session_record(token_hash text, user_id bigint); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.create_session_record(token_hash text, user_id bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.create_session_record(token_hash text, user_id bigint) TO wareboxes_app;
+
+
+--
+-- Name: FUNCTION create_web_session_record(p_token_hash text, p_user_id bigint, p_absolute_ttl_seconds integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.create_web_session_record(p_token_hash text, p_user_id bigint, p_absolute_ttl_seconds integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.create_web_session_record(p_token_hash text, p_user_id bigint, p_absolute_ttl_seconds integer) TO wareboxes_app;
+
+
+--
+-- Name: FUNCTION destroy_session_record(token_hash text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.destroy_session_record(token_hash text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.destroy_session_record(token_hash text) TO wareboxes_app;
+
+
+--
+-- Name: FUNCTION enforce_employee_active_facility(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.enforce_employee_active_facility() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION enforce_inventory_status_transition(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.enforce_inventory_status_transition() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION enforce_inventory_transaction_conservation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.enforce_inventory_transaction_conservation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION enforce_load_execution_barcode_immutable(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.enforce_load_execution_barcode_immutable() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION guard_inventory_balance_commitments(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.guard_inventory_balance_commitments() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION guard_license_plate_putaway_task_mutation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.guard_license_plate_putaway_task_mutation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION guard_putaway_task_mutation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.guard_putaway_task_mutation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION guard_role_hierarchy(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.guard_role_hierarchy() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION guard_self_role(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.guard_self_role() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION guard_self_user_role(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.guard_self_user_role() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION inventory_allocation_cannot_be_deleted(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.inventory_allocation_cannot_be_deleted() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION inventory_hold_cannot_be_deleted(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.inventory_hold_cannot_be_deleted() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION protect_inventory_owner_facility_assignment(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.protect_inventory_owner_facility_assignment() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION reject_direct_inventory_balance_status_update(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.reject_direct_inventory_balance_status_update() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION reject_license_plate_putaway_content_mutation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.reject_license_plate_putaway_content_mutation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION reject_license_plate_putaway_result_mutation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.reject_license_plate_putaway_result_mutation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION reject_putaway_result_mutation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.reject_putaway_result_mutation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION require_active_inventory_owner_facility(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.require_active_inventory_owner_facility() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION require_license_plate_putaway_result(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.require_license_plate_putaway_result() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION require_license_plate_putaway_task_detail(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.require_license_plate_putaway_task_detail() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION require_putaway_result(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.require_putaway_result() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION retire_deleted_facility_employee_assignments(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.retire_deleted_facility_employee_assignments() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION select_web_session_tenant(p_token_hash text, p_selected_tenant_id bigint); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.select_web_session_tenant(p_token_hash text, p_selected_tenant_id bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.select_web_session_tenant(p_token_hash text, p_selected_tenant_id bigint) TO wareboxes_app;
+
+
+--
+-- Name: FUNCTION session_user_id(token_hash text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.session_user_id(token_hash text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.session_user_id(token_hash text) TO wareboxes_app;
+
+
+--
+-- Name: FUNCTION validate_inventory_allocation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_inventory_allocation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_inventory_hold(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_inventory_hold() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_inventory_reservation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_inventory_reservation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_item_location_cycle_count_result(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_item_location_cycle_count_result() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_license_plate_location_from_balance(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_license_plate_location_from_balance() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_license_plate_location_from_plate(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_license_plate_location_from_plate() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_license_plate_putaway_result(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_license_plate_putaway_result() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_license_plate_putaway_task(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_license_plate_putaway_task() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_putaway_result(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_putaway_result() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_putaway_task(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_putaway_task() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION web_session_identity(p_token_hash text, p_idle_ttl_seconds integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.web_session_identity(p_token_hash text, p_idle_ttl_seconds integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.web_session_identity(p_token_hash text, p_idle_ttl_seconds integer) TO wareboxes_app;
+
+
+--
+-- Name: TABLE addresses; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.addresses TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE addresses_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.addresses_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE audit_location_counts; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.audit_location_counts TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE audit_location_counts_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.audit_location_counts_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE audit_waves; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.audit_waves TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE audit_waves_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.audit_waves_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE barcodes; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.barcodes TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE barcodes_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.barcodes_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE break_master_pack_tasks; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.break_master_pack_tasks TO wareboxes_app;
+
+
+--
+-- Name: TABLE command_idempotency_records; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.command_idempotency_records TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE command_idempotency_records_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.command_idempotency_records_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE cycle_count_item_location_results; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.cycle_count_item_location_results TO wareboxes_app;
+
+
+--
+-- Name: TABLE cycle_count_item_location_tasks; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.cycle_count_item_location_tasks TO wareboxes_app;
+
+
+--
+-- Name: TABLE cycle_count_location_tasks; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.cycle_count_location_tasks TO wareboxes_app;
+
+
+--
+-- Name: TABLE dims; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.dims TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE dims_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.dims_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE employee_facilities; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.employee_facilities TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE employee_facilities_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.employee_facilities_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE employees; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.employees TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE employees_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.employees_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE facilities; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.facilities TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE facilities_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.facilities_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE integration_inbox_keys; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.integration_inbox_keys TO wareboxes_app;
+
+
+--
+-- Name: TABLE integration_inbox_receipts; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.integration_inbox_receipts TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE integration_inbox_receipts_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.integration_inbox_receipts_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_allocations; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.inventory_allocations TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE inventory_allocations_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.inventory_allocations_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_balances; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.inventory_balances TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE inventory_balances_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.inventory_balances_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_entries; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.inventory_entries TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE inventory_entries_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.inventory_entries_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_holds; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.inventory_holds TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_hold_reconciliation; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT ON TABLE public.inventory_hold_reconciliation TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE inventory_holds_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.inventory_holds_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_owner_facilities; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.inventory_owner_facilities TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE inventory_owner_facilities_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.inventory_owner_facilities_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_owner_items; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.inventory_owner_items TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE inventory_owner_items_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.inventory_owner_items_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_owners; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.inventory_owners TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE inventory_owners_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.inventory_owners_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_projection_changes; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT ON TABLE public.inventory_projection_changes TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_reconciliation; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT ON TABLE public.inventory_reconciliation TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_relocation_results; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.inventory_relocation_results TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_relocation_task_contents; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.inventory_relocation_task_contents TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_relocation_tasks; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.inventory_relocation_tasks TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_reservations; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.inventory_reservations TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE inventory_reservations_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.inventory_reservations_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_status_transitions; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.inventory_status_transitions TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE inventory_status_transitions_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.inventory_status_transitions_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE inventory_transactions; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.inventory_transactions TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE inventory_transactions_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.inventory_transactions_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE item_batches; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.item_batches TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE item_batches_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.item_batches_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE item_pack_links; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.item_pack_links TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE item_pack_links_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.item_pack_links_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE items; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.items TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE items_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.items_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE license_plate_putaway_results; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.license_plate_putaway_results TO wareboxes_app;
+
+
+--
+-- Name: TABLE license_plate_putaway_task_contents; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.license_plate_putaway_task_contents TO wareboxes_app;
+
+
+--
+-- Name: TABLE license_plate_putaway_tasks; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.license_plate_putaway_tasks TO wareboxes_app;
+
+
+--
+-- Name: TABLE license_plates; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.license_plates TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE license_plates_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.license_plates_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE load_activity; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.load_activity TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE load_activity_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.load_activity_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE load_files; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.load_files TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE load_files_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.load_files_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE load_lines; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.load_lines TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE load_lines_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.load_lines_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE load_notes; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.load_notes TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE load_notes_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.load_notes_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE load_orders; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT ON TABLE public.load_orders TO wareboxes_app;
+
+
+--
+-- Name: TABLE loads; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.loads TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE loads_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.loads_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE locations; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.locations TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE locations_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.locations_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE order_activity; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.order_activity TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE order_activity_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.order_activity_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE order_items; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.order_items TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE order_items_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.order_items_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE order_tracking_numbers; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.order_tracking_numbers TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE order_tracking_numbers_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.order_tracking_numbers_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE orders; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.orders TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE orders_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.orders_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE outbox_aggregate_sequences; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.outbox_aggregate_sequences TO wareboxes_app;
+
+
+--
+-- Name: TABLE outbox_delivery_attempt_results; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.outbox_delivery_attempt_results TO wareboxes_app;
+
+
+--
+-- Name: TABLE outbox_delivery_attempts; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.outbox_delivery_attempts TO wareboxes_app;
+
+
+--
+-- Name: TABLE outbox_event_keys; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.outbox_event_keys TO wareboxes_app;
+
+
+--
+-- Name: TABLE outbox_events; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.outbox_events TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE outbox_events_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.outbox_events_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE permissions; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.permissions TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE permissions_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.permissions_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE putaway_results; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.putaway_results TO wareboxes_app;
+
+
+--
+-- Name: TABLE putaway_tasks; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.putaway_tasks TO wareboxes_app;
+
+
+--
+-- Name: TABLE role_permissions; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.role_permissions TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE role_permissions_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.role_permissions_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE roles; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.roles TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE roles_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.roles_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE skus; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.skus TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE skus_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.skus_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE tenant_memberships; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.tenant_memberships TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE tenant_memberships_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.tenant_memberships_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE tenants; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.tenants TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE tenants_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.tenants_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE unpack_cancelled_order_task_lines; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.unpack_cancelled_order_task_lines TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE unpack_cancelled_order_task_lines_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.unpack_cancelled_order_task_lines_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE unpack_cancelled_order_tasks; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.unpack_cancelled_order_tasks TO wareboxes_app;
+
+
+--
+-- Name: TABLE user_credentials; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.user_credentials TO wareboxes_app;
+
+
+--
+-- Name: TABLE user_facilities; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.user_facilities TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE user_facilities_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.user_facilities_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE user_inventory_owners; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.user_inventory_owners TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE user_inventory_owners_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.user_inventory_owners_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE user_roles; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.user_roles TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE user_roles_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.user_roles_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE user_settings; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.user_settings TO wareboxes_app;
+
+
+--
+-- Name: TABLE users; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.users TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE users_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.users_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE work_task_progress; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.work_task_progress TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE work_task_progress_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.work_task_progress_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE work_tasks; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.work_tasks TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE work_tasks_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.work_tasks_id_seq TO wareboxes_app;
+
+
+--
+-- PostgreSQL database dump complete
+--
+
+
+
+-- Database-scoped security is not represented by a schema-only dump.
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+DO $$
+BEGIN
+    EXECUTE format(
+        'REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC',
+        current_database()
+    );
+END
+$$;
+
+-- SQLx creates its migration journal before executing this baseline.
+REVOKE ALL ON TABLE public._sqlx_migrations FROM wareboxes_app;
+
+-- pg_dump clears the session search path while restoring fully qualified objects.
+-- SQLx records the migration with an unqualified journal table afterward.
+SELECT pg_catalog.set_config('search_path', 'public, pg_catalog', false);
