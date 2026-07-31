@@ -31,7 +31,7 @@ async fn require_scoped_location(
     location_id: i64,
     label: &'static str,
 ) -> AppResult<FacilityId> {
-    let facility_id = repo::locations::active_location_facility_in_scope(
+    let facility_id = wareboxes_persistence_postgres::locations::active_location_facility_in_scope(
         db,
         user.tenant.tenant_id,
         &user.tenant.site_scope,
@@ -39,7 +39,12 @@ async fn require_scoped_location(
     )
     .await?
     .ok_or_else(|| AppError::bad_request(format!("{label} not found")))?;
-    if repo::locations::location_active_state(db, user.tenant.tenant_id, location_id).await?
+    if wareboxes_persistence_postgres::locations::location_active_state(
+        db,
+        user.tenant.tenant_id,
+        location_id,
+    )
+    .await?
         != Some(true)
     {
         return Err(AppError::bad_request(format!("{label} is inactive")));

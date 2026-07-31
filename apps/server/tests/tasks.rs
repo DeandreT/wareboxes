@@ -42,10 +42,11 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     repo::roles::add_role_to_user(&db, tenant_id, assignee.id, wms_role)
         .await
         .unwrap();
-    let facility = repo::facilities::add_facility(&db, tenant_id, "Task DC")
-        .await
-        .unwrap();
-    let freezer = repo::locations::add_location(
+    let facility =
+        wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Task DC")
+            .await
+            .unwrap();
+    let freezer = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         facility,
@@ -59,7 +60,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     )
     .await
     .unwrap();
-    let shelf = repo::locations::add_location(
+    let shelf = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         facility,

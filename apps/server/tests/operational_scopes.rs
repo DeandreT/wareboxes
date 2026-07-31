@@ -101,12 +101,20 @@ async fn order_and_load_workflows_enforce_owner_and_facility_scopes() {
     )
     .await;
 
-    let allowed_facility = repo::facilities::add_facility(&db, tenant_id, "Allowed Operations DC")
-        .await
-        .unwrap();
-    let denied_facility = repo::facilities::add_facility(&db, tenant_id, "Denied Operations DC")
-        .await
-        .unwrap();
+    let allowed_facility = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        tenant_id,
+        "Allowed Operations DC",
+    )
+    .await
+    .unwrap();
+    let denied_facility = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        tenant_id,
+        "Denied Operations DC",
+    )
+    .await
+    .unwrap();
     let allowed_owner = repo::inventory_owners::add_inventory_owner(
         &db,
         tenant_id,
@@ -139,7 +147,7 @@ async fn order_and_load_workflows_enforce_owner_and_facility_scopes() {
     )
     .await
     .unwrap());
-    let allowed_location = repo::locations::add_location(
+    let allowed_location = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         allowed_facility,
@@ -153,7 +161,7 @@ async fn order_and_load_workflows_enforce_owner_and_facility_scopes() {
     )
     .await
     .unwrap();
-    let denied_location = repo::locations::add_location(
+    let denied_location = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         denied_facility,

@@ -36,12 +36,23 @@ async fn require_active_location_in_facility(
     location_id: i64,
     label: &'static str,
 ) -> AppResult<()> {
-    if !repo::locations::active_location_exists_in_facility(db, tenant_id, facility_id, location_id)
-        .await?
+    if !wareboxes_persistence_postgres::locations::active_location_exists_in_facility(
+        db,
+        tenant_id,
+        facility_id,
+        location_id,
+    )
+    .await?
     {
         return Err(AppError::bad_request(format!("{label} not found")));
     }
-    match repo::locations::location_active_state(db, tenant_id, location_id).await? {
+    match wareboxes_persistence_postgres::locations::location_active_state(
+        db,
+        tenant_id,
+        location_id,
+    )
+    .await?
+    {
         Some(true) => Ok(()),
         Some(false) => Err(AppError::bad_request(format!("{label} is inactive"))),
         None => Err(AppError::bad_request(format!("{label} not found"))),
@@ -171,7 +182,7 @@ pub async fn add(
     validate(&body)?;
     user.require_facility(body.facility_id)?;
     user.require_inventory_owner(body.inventory_owner_id)?;
-    if !repo::facilities::active_facility_exists_in_scope(
+    if !wareboxes_persistence_postgres::facilities::active_facility_exists_in_scope(
         &state.db,
         user.tenant.tenant_id,
         &user.tenant.site_scope,

@@ -76,9 +76,10 @@ async fn order_and_load_mutations_write_activity_history() {
         ]
     );
 
-    let facility = repo::facilities::add_facility(&db, tenant_id, "Activity DC")
-        .await
-        .unwrap();
+    let facility =
+        wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Activity DC")
+            .await
+            .unwrap();
     let load_id = repo::loads::add_load(
         &db,
         tenant_id,

@@ -18,7 +18,7 @@ pub(crate) async fn workspace_for_access(
     state: &AppState,
     access: &wareboxes_core::models::TenantAccess,
 ) -> AppResult<AccessScopeWorkspace> {
-    let facilities = repo::facilities::get_facilities_in_scope(
+    let facilities = wareboxes_persistence_postgres::facilities::get_facilities_in_scope(
         &state.db,
         access.tenant_id,
         &access.site_scope,

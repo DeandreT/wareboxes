@@ -5,7 +5,6 @@ use wareboxes_core::models::Location;
 
 use crate::auth::CurrentTenant;
 use crate::error::{AppError, AppResult};
-use crate::repo;
 use crate::routes::users::ShowDeleted;
 use crate::routes::validate;
 use crate::state::AppState;
@@ -18,15 +17,31 @@ pub async fn list(
     Query(q): Query<ShowDeleted>,
 ) -> AppResult<Json<Vec<Location>>> {
     user.require_permission(&state.db, PERM).await?;
-    Ok(Json(
-        repo::locations::get_locations_in_scope(
-            &state.db,
-            user.tenant.tenant_id,
-            &user.tenant.site_scope,
-            q.show_deleted,
-        )
-        .await?,
-    ))
+    let locations = wareboxes_persistence_postgres::locations::get_locations_in_scope(
+        &state.db,
+        user.tenant.tenant_id,
+        &user.tenant.site_scope,
+        q.show_deleted,
+    )
+    .await?
+    .into_iter()
+    .map(|location| Location {
+        id: location.id,
+        tenant_id: location.tenant_id,
+        created: location.created,
+        deleted: location.deleted,
+        facility_id: location.facility_id,
+        facility_name: location.facility_name,
+        parent_location_id: location.parent_location_id,
+        barcode: location.barcode,
+        name: location.name,
+        r#type: location.r#type,
+        active: location.active,
+        pickable: location.pickable,
+        receivable: location.receivable,
+    })
+    .collect();
+    Ok(Json(locations))
 }
 
 pub async fn add(
@@ -37,7 +52,7 @@ pub async fn add(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     user.require_facility(body.facility_id)?;
-    if !repo::facilities::active_facility_exists_in_scope(
+    if !wareboxes_persistence_postgres::facilities::active_facility_exists_in_scope(
         &state.db,
         user.tenant.tenant_id,
         &user.tenant.site_scope,
@@ -48,7 +63,7 @@ pub async fn add(
         return Err(AppError::bad_request("Facility not found"));
     }
     if let Some(parent_location_id) = body.parent_location_id {
-        if !repo::locations::active_location_exists_in_facility(
+        if !wareboxes_persistence_postgres::locations::active_location_exists_in_facility(
             &state.db,
             user.tenant.tenant_id,
             body.facility_id,
@@ -59,7 +74,7 @@ pub async fn add(
             return Err(AppError::bad_request("Parent location not found"));
         }
     }
-    let id = repo::locations::add_location(
+    let id = wareboxes_persistence_postgres::locations::add_location(
         &state.db,
         user.tenant.tenant_id,
         body.facility_id,
@@ -82,18 +97,19 @@ pub async fn update(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let Some(facility_id) = repo::locations::active_location_facility_in_scope(
-        &state.db,
-        user.tenant.tenant_id,
-        &user.tenant.site_scope,
-        body.location_id,
-    )
-    .await?
+    let Some(facility_id) =
+        wareboxes_persistence_postgres::locations::active_location_facility_in_scope(
+            &state.db,
+            user.tenant.tenant_id,
+            &user.tenant.site_scope,
+            body.location_id,
+        )
+        .await?
     else {
         return Ok(Json(false));
     };
     if let Some(parent_location_id) = body.parent_location_id {
-        if !repo::locations::active_location_exists_in_facility(
+        if !wareboxes_persistence_postgres::locations::active_location_exists_in_facility(
             &state.db,
             user.tenant.tenant_id,
             facility_id,
@@ -104,7 +120,7 @@ pub async fn update(
             return Err(AppError::bad_request("Parent location not found"));
         }
     }
-    let ok = repo::locations::update_location_in_scope(
+    let ok = wareboxes_persistence_postgres::locations::update_location_in_scope(
         &state.db,
         user.tenant.tenant_id,
         &user.tenant.site_scope,
@@ -129,7 +145,7 @@ pub async fn delete(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::locations::set_location_deleted_in_scope(
+        wareboxes_persistence_postgres::locations::set_location_deleted_in_scope(
             &state.db,
             user.tenant.tenant_id,
             &user.tenant.site_scope,
@@ -148,7 +164,7 @@ pub async fn restore(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     Ok(Json(
-        repo::locations::set_location_deleted_in_scope(
+        wareboxes_persistence_postgres::locations::set_location_deleted_in_scope(
             &state.db,
             user.tenant.tenant_id,
             &user.tenant.site_scope,

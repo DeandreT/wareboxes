@@ -103,12 +103,14 @@ async fn selected_resource_scopes_are_projected_and_enforced() {
     )
     .await;
 
-    let allowed_facility = repo::facilities::add_facility(&db, tenant_id, "Allowed DC")
-        .await
-        .unwrap();
-    let denied_facility = repo::facilities::add_facility(&db, tenant_id, "Denied DC")
-        .await
-        .unwrap();
+    let allowed_facility =
+        wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Allowed DC")
+            .await
+            .unwrap();
+    let denied_facility =
+        wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Denied DC")
+            .await
+            .unwrap();
     let allowed_owner = repo::inventory_owners::add_inventory_owner(
         &db,
         tenant_id,
@@ -130,7 +132,7 @@ async fn selected_resource_scopes_are_projected_and_enforced() {
             .assign_owner_to_facility(tenant_id, allowed_owner, facility_id)
             .await;
     }
-    let allowed_location = repo::locations::add_location(
+    let allowed_location = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         allowed_facility,
@@ -144,7 +146,7 @@ async fn selected_resource_scopes_are_projected_and_enforced() {
     )
     .await
     .unwrap();
-    let denied_location = repo::locations::add_location(
+    let denied_location = wareboxes_persistence_postgres::locations::add_location(
         &db,
         tenant_id,
         denied_facility,
@@ -368,9 +370,10 @@ async fn scope_replacement_is_atomic_and_delegation_cannot_escalate() {
     )
     .await;
 
-    let facility = repo::facilities::add_facility(&db, tenant_id, "Selected DC")
-        .await
-        .unwrap();
+    let facility =
+        wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Selected DC")
+            .await
+            .unwrap();
     let owner = repo::inventory_owners::add_inventory_owner(
         &db,
         tenant_id,
@@ -379,9 +382,13 @@ async fn scope_replacement_is_atomic_and_delegation_cannot_escalate() {
     )
     .await
     .unwrap();
-    let foreign_facility = repo::facilities::add_facility(&db, outsider_tenant_id, "Foreign DC")
-        .await
-        .unwrap();
+    let foreign_facility = wareboxes_persistence_postgres::facilities::add_facility(
+        &db,
+        outsider_tenant_id,
+        "Foreign DC",
+    )
+    .await
+    .unwrap();
 
     let administrator_token = auth::create_session(&db, administrator.id).await.unwrap();
     let operator_token = auth::create_session(&db, operator.id).await.unwrap();

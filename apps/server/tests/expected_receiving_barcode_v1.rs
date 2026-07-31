@@ -38,7 +38,7 @@ struct ReadyLoadSetup<'a> {
 }
 
 async fn create_ready_load(fixture: &Fixture, setup: ReadyLoadSetup<'_>) -> i64 {
-    let dock_id = repo::locations::add_location(
+    let dock_id = wareboxes_persistence_postgres::locations::add_location(
         &fixture.db,
         setup.tenant_id,
         setup.facility_id,

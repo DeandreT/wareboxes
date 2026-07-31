@@ -2,5 +2,6 @@
 
 mod context;
 pub mod outbox;
+pub mod topology;
 
 pub use context::CommandContext;
