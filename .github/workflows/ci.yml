@@ -40,6 +40,9 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      - name: Architecture boundaries
+        run: scripts/check-boundaries.sh
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
