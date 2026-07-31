@@ -256,7 +256,7 @@ async fn owner_and_facility_master_data_is_tenant_scoped() {
     )
     .await
     .unwrap();
-    let role = repo::roles::add_role(
+    let role = wareboxes_persistence_postgres::roles::add_role(
         &db,
         second_tenant,
         "master-data-admin",
@@ -264,10 +264,15 @@ async fn owner_and_facility_master_data_is_tenant_scoped() {
     )
     .await
     .unwrap();
-    repo::roles::add_role_permission(&db, second_tenant, role, permission)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(&db, second_tenant, operator.id, role)
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        &db,
+        second_tenant,
+        role,
+        permission,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(&db, second_tenant, operator.id, role)
         .await
         .unwrap();
     let token = auth::create_session(&db, operator.id).await.unwrap();
@@ -417,13 +422,23 @@ async fn locations_are_tenant_scoped_for_repositories_and_routes() {
     )
     .await
     .unwrap();
-    let role = repo::roles::add_role(&db, second_tenant, "location-wms", Some("Location WMS"))
-        .await
-        .unwrap();
-    repo::roles::add_role_permission(&db, second_tenant, role, permission)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(&db, second_tenant, operator.id, role)
+    let role = wareboxes_persistence_postgres::roles::add_role(
+        &db,
+        second_tenant,
+        "location-wms",
+        Some("Location WMS"),
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        &db,
+        second_tenant,
+        role,
+        permission,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(&db, second_tenant, operator.id, role)
         .await
         .unwrap();
     let token = auth::create_session(&db, operator.id).await.unwrap();
@@ -586,13 +601,23 @@ async fn item_catalog_is_tenant_scoped_for_repositories_and_routes() {
     )
     .await
     .unwrap();
-    let role = repo::roles::add_role(&db, second_tenant, "catalog-wms", Some("Catalog WMS"))
-        .await
-        .unwrap();
-    repo::roles::add_role_permission(&db, second_tenant, role, permission)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(&db, second_tenant, operator.id, role)
+    let role = wareboxes_persistence_postgres::roles::add_role(
+        &db,
+        second_tenant,
+        "catalog-wms",
+        Some("Catalog WMS"),
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        &db,
+        second_tenant,
+        role,
+        permission,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(&db, second_tenant, operator.id, role)
         .await
         .unwrap();
     let token = auth::create_session(&db, operator.id).await.unwrap();

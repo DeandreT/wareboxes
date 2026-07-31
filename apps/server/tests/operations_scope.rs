@@ -18,17 +18,24 @@ async fn grant_admin(db: &db::Db, tenant_id: TenantId, user_id: i64, role_name: 
     )
     .await
     .unwrap();
-    let role = repo::roles::add_role(db, tenant_id, role_name, Some("Operations admin"))
-        .await
-        .unwrap();
+    let role = wareboxes_persistence_postgres::roles::add_role(
+        db,
+        tenant_id,
+        role_name,
+        Some("Operations admin"),
+    )
+    .await
+    .unwrap();
+    assert!(wareboxes_persistence_postgres::roles::add_role_permission(
+        db, tenant_id, role, permission
+    )
+    .await
+    .unwrap());
     assert!(
-        repo::roles::add_role_permission(db, tenant_id, role, permission)
+        wareboxes_persistence_postgres::roles::add_role_to_user(db, tenant_id, user_id, role)
             .await
             .unwrap()
     );
-    assert!(repo::roles::add_role_to_user(db, tenant_id, user_id, role)
-        .await
-        .unwrap());
 }
 
 #[tokio::test]

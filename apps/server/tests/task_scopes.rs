@@ -111,7 +111,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
             .await
             .unwrap()
             .unwrap();
-    let operator_role = repo::roles::add_role(
+    let operator_role = wareboxes_persistence_postgres::roles::add_role(
         &fixture.db,
         tenant_id,
         "task-scope-worker-role",
@@ -119,9 +119,14 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     )
     .await
     .unwrap();
-    repo::roles::add_role_permission(&fixture.db, tenant_id, operator_role, wms_permission.id)
-        .await
-        .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_id,
+        operator_role,
+        wms_permission.id,
+    )
+    .await
+    .unwrap();
     let orders_permission = wareboxes_persistence_postgres::permissions::add_permission(
         &fixture.db,
         tenant_id,
@@ -130,12 +135,22 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     )
     .await
     .unwrap();
-    repo::roles::add_role_permission(&fixture.db, tenant_id, operator_role, orders_permission)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(&fixture.db, tenant_id, operator.id, operator_role)
-        .await
-        .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_id,
+        operator_role,
+        orders_permission,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_id,
+        operator.id,
+        operator_role,
+    )
+    .await
+    .unwrap();
 
     let allowed_facility = fixture.facility(tenant_id, "Allowed Task DC").await;
     let cross_facility = fixture.facility(tenant_id, "Cross Task DC").await;

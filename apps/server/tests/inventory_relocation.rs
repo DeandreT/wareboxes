@@ -102,7 +102,7 @@ async fn grant_wms_role(db: &db::Db, tenant_id: TenantId, user_ids: &[i64], role
             .await
             .unwrap()
             .expect("tenant has a WMS permission");
-    let role = repo::roles::add_role(
+    let role = wareboxes_persistence_postgres::roles::add_role(
         db,
         tenant_id,
         role_name,
@@ -110,15 +110,20 @@ async fn grant_wms_role(db: &db::Db, tenant_id: TenantId, user_ids: &[i64], role
     )
     .await
     .unwrap();
-    assert!(
-        repo::roles::add_role_permission(db, tenant_id, role, permission.id)
-            .await
-            .unwrap()
-    );
+    assert!(wareboxes_persistence_postgres::roles::add_role_permission(
+        db,
+        tenant_id,
+        role,
+        permission.id
+    )
+    .await
+    .unwrap());
     for user_id in user_ids {
-        assert!(repo::roles::add_role_to_user(db, tenant_id, *user_id, role)
-            .await
-            .unwrap());
+        assert!(wareboxes_persistence_postgres::roles::add_role_to_user(
+            db, tenant_id, *user_id, role
+        )
+        .await
+        .unwrap());
     }
 }
 

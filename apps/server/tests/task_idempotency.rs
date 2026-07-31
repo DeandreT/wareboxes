@@ -121,13 +121,18 @@ async fn grant_wms(db: &db::Db, tenant_id: TenantId, user_id: i64, suffix: &str)
             .await
             .unwrap()
             .unwrap();
-    let role = repo::roles::add_role(db, tenant_id, &format!("wms-{suffix}"), None)
+    let role = wareboxes_persistence_postgres::roles::add_role(
+        db,
+        tenant_id,
+        &format!("wms-{suffix}"),
+        None,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(db, tenant_id, role, permission.id)
         .await
         .unwrap();
-    repo::roles::add_role_permission(db, tenant_id, role, permission.id)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(db, tenant_id, user_id, role)
+    wareboxes_persistence_postgres::roles::add_role_to_user(db, tenant_id, user_id, role)
         .await
         .unwrap();
 }

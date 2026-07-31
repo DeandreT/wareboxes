@@ -7,7 +7,7 @@ use axum::http::{header, Request, StatusCode};
 use common::*;
 use leptos::prelude::LeptosOptions;
 use tower::ServiceExt;
-use wareboxes_api::{repo, routes, state::AppState, web_app};
+use wareboxes_api::{routes, state::AppState, web_app};
 use wareboxes_core::dto::LoginRequest;
 
 const HOST: &str = "wareboxes.test";
@@ -63,7 +63,7 @@ async fn authenticated_overview_and_orders_are_rendered_with_scoped_data() {
     )
     .await
     .unwrap();
-    let orders_role = repo::roles::add_role(
+    let orders_role = wareboxes_persistence_postgres::roles::add_role(
         &fixture.db,
         access.tenant_id,
         "SSR order operator",
@@ -71,7 +71,7 @@ async fn authenticated_overview_and_orders_are_rendered_with_scoped_data() {
     )
     .await
     .unwrap();
-    repo::roles::add_role_permission(
+    wareboxes_persistence_postgres::roles::add_role_permission(
         &fixture.db,
         access.tenant_id,
         orders_role,
@@ -79,9 +79,14 @@ async fn authenticated_overview_and_orders_are_rendered_with_scoped_data() {
     )
     .await
     .unwrap();
-    repo::roles::add_role_to_user(&fixture.db, access.tenant_id, user.id, orders_role)
-        .await
-        .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        access.tenant_id,
+        user.id,
+        orders_role,
+    )
+    .await
+    .unwrap();
 
     let facility_id = fixture
         .facility(access.tenant_id, "SSR West Facility")

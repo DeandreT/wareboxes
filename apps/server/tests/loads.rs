@@ -555,7 +555,7 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
     )
     .await
     .unwrap();
-    let tenant_b_role = repo::roles::add_role(
+    let tenant_b_role = wareboxes_persistence_postgres::roles::add_role(
         &fixture.db,
         tenant_b,
         "load-scope-operator@test.com-wms",
@@ -563,12 +563,22 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
     )
     .await
     .unwrap();
-    repo::roles::add_role_permission(&fixture.db, tenant_b, tenant_b_role, tenant_b_permission)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(&fixture.db, tenant_b, operator.id, tenant_b_role)
-        .await
-        .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_b,
+        tenant_b_role,
+        tenant_b_permission,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_b,
+        operator.id,
+        tenant_b_role,
+    )
+    .await
+    .unwrap();
 
     let facility = fixture.facility(tenant_a, "Scoped Load Facility").await;
     let dock = wareboxes_persistence_postgres::locations::add_location(

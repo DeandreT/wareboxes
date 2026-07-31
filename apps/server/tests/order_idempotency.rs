@@ -107,13 +107,18 @@ async fn grant_orders(db: &db::Db, tenant_id: TenantId, user_id: i64, suffix: &s
             .await
             .unwrap(),
         };
-    let role = repo::roles::add_role(db, tenant_id, &format!("orders-{suffix}"), None)
+    let role = wareboxes_persistence_postgres::roles::add_role(
+        db,
+        tenant_id,
+        &format!("orders-{suffix}"),
+        None,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(db, tenant_id, role, permission)
         .await
         .unwrap();
-    repo::roles::add_role_permission(db, tenant_id, role, permission)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(db, tenant_id, user_id, role)
+    wareboxes_persistence_postgres::roles::add_role_to_user(db, tenant_id, user_id, role)
         .await
         .unwrap();
     role
@@ -411,9 +416,14 @@ async fn order_cancellation_commands_are_replay_safe() {
     .await
     .unwrap();
     membership_tx.commit().await.unwrap();
-    repo::roles::add_role_to_user(&fixture.db, tenant_id, other_actor.id, orders_role)
-        .await
-        .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_id,
+        other_actor.id,
+        orders_role,
+    )
+    .await
+    .unwrap();
     let other_token = auth::create_session(&fixture.db, other_actor.id)
         .await
         .unwrap();

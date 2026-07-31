@@ -432,7 +432,7 @@ async fn license_plate_putaway_scopes_rls_and_acl_fail_closed() {
             .await
             .unwrap()
             .unwrap();
-    let role = repo::roles::add_role(
+    let role = wareboxes_persistence_postgres::roles::add_role(
         &fixture.db,
         tenant_id,
         "license-plate-putaway-scope-operator",
@@ -440,16 +440,22 @@ async fn license_plate_putaway_scopes_rls_and_acl_fail_closed() {
     )
     .await
     .unwrap();
-    assert!(
-        repo::roles::add_role_permission(&fixture.db, tenant_id, role, wms_permission.id,)
-            .await
-            .unwrap()
-    );
-    assert!(
-        repo::roles::add_role_to_user(&fixture.db, tenant_id, operator.id, role,)
-            .await
-            .unwrap()
-    );
+    assert!(wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_id,
+        role,
+        wms_permission.id,
+    )
+    .await
+    .unwrap());
+    assert!(wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_id,
+        operator.id,
+        role,
+    )
+    .await
+    .unwrap());
 
     let allowed_facility = fixture
         .facility(tenant_id, "License Plate Putaway Scope Allowed Facility")

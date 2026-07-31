@@ -108,9 +108,14 @@ async fn rbac_refs(fixture: &Fixture, email: &str, key: &str) -> RbacRefs {
     )
     .await
     .unwrap();
-    let role_id = repo::roles::add_role(&fixture.db, tenant_id, key, Some("RLS role"))
-        .await
-        .unwrap();
+    let role_id = wareboxes_persistence_postgres::roles::add_role(
+        &fixture.db,
+        tenant_id,
+        key,
+        Some("RLS role"),
+    )
+    .await
+    .unwrap();
     let unassigned_permission_id = wareboxes_persistence_postgres::permissions::add_permission(
         &fixture.db,
         tenant_id,
@@ -119,7 +124,7 @@ async fn rbac_refs(fixture: &Fixture, email: &str, key: &str) -> RbacRefs {
     )
     .await
     .unwrap();
-    let unassigned_role_id = repo::roles::add_role(
+    let unassigned_role_id = wareboxes_persistence_postgres::roles::add_role(
         &fixture.db,
         tenant_id,
         &format!("{key}-UNASSIGNED"),
@@ -127,16 +132,22 @@ async fn rbac_refs(fixture: &Fixture, email: &str, key: &str) -> RbacRefs {
     )
     .await
     .unwrap();
-    assert!(
-        repo::roles::add_role_permission(&fixture.db, tenant_id, role_id, permission_id)
-            .await
-            .unwrap()
-    );
-    assert!(
-        repo::roles::add_role_to_user(&fixture.db, tenant_id, user.id, role_id)
-            .await
-            .unwrap()
-    );
+    assert!(wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_id,
+        role_id,
+        permission_id
+    )
+    .await
+    .unwrap());
+    assert!(wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        role_id
+    )
+    .await
+    .unwrap());
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let (user_role_id, role_permission_id): (i64, i64) = sqlx::query_as(
@@ -175,7 +186,7 @@ async fn rbac_refs(fixture: &Fixture, email: &str, key: &str) -> RbacRefs {
 }
 
 async fn assert_repository_rbac(db: &db::Db, refs: RbacRefs, key: &str) {
-    let role = repo::roles::get_role(db, refs.tenant_id, refs.role_id)
+    let role = wareboxes_persistence_postgres::roles::get_role(db, refs.tenant_id, refs.role_id)
         .await
         .unwrap()
         .unwrap();

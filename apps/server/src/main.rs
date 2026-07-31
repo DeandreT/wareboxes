@@ -92,12 +92,19 @@ async fn bootstrap_admin(pool: &db::Db, cfg: &Config) -> anyhow::Result<()> {
     .await?;
 
     // register_user provisioned the self role; attach admin to it.
-    if let Some(self_role) = repo::roles::get_roles(pool, tenant_id, true, true)
-        .await?
-        .into_iter()
-        .find(|r| r.name == *email)
+    if let Some(self_role) =
+        wareboxes_persistence_postgres::roles::get_roles(pool, tenant_id, true, true)
+            .await?
+            .into_iter()
+            .find(|r| r.name == *email)
     {
-        repo::roles::add_role_permission(pool, tenant_id, self_role.id, perm_id).await?;
+        wareboxes_persistence_postgres::roles::add_role_permission(
+            pool,
+            tenant_id,
+            self_role.id,
+            perm_id,
+        )
+        .await?;
     }
     tracing::info!(%email, "bootstrapped admin user");
     Ok(())

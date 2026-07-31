@@ -328,7 +328,7 @@ async fn putaway_scope_denials_replays_and_rls_leave_no_hidden_effects() {
             .await
             .unwrap()
             .unwrap();
-    let operator_role = repo::roles::add_role(
+    let operator_role = wareboxes_persistence_postgres::roles::add_role(
         &fixture.db,
         tenant_id,
         "putaway-scope-operator",
@@ -336,7 +336,7 @@ async fn putaway_scope_denials_replays_and_rls_leave_no_hidden_effects() {
     )
     .await
     .unwrap();
-    assert!(repo::roles::add_role_permission(
+    assert!(wareboxes_persistence_postgres::roles::add_role_permission(
         &fixture.db,
         tenant_id,
         operator_role,
@@ -344,11 +344,14 @@ async fn putaway_scope_denials_replays_and_rls_leave_no_hidden_effects() {
     )
     .await
     .unwrap());
-    assert!(
-        repo::roles::add_role_to_user(&fixture.db, tenant_id, operator.id, operator_role,)
-            .await
-            .unwrap()
-    );
+    assert!(wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_id,
+        operator.id,
+        operator_role,
+    )
+    .await
+    .unwrap());
 
     let allowed_facility = fixture
         .facility(tenant_id, "Putaway Scope Allowed Facility")

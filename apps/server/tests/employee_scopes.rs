@@ -119,7 +119,7 @@ async fn employee_routes_and_repositories_enforce_facility_scope() {
     )
     .await
     .unwrap();
-    let role = repo::roles::add_role(
+    let role = wareboxes_persistence_postgres::roles::add_role(
         &db,
         tenant_id,
         "employee-scope-operator",
@@ -127,16 +127,19 @@ async fn employee_routes_and_repositories_enforce_facility_scope() {
     )
     .await
     .unwrap();
-    assert!(
-        repo::roles::add_role_permission(&db, tenant_id, role, permission)
-            .await
-            .unwrap()
-    );
-    assert!(
-        repo::roles::add_role_to_user(&db, tenant_id, operator.id, role)
-            .await
-            .unwrap()
-    );
+    assert!(wareboxes_persistence_postgres::roles::add_role_permission(
+        &db, tenant_id, role, permission
+    )
+    .await
+    .unwrap());
+    assert!(wareboxes_persistence_postgres::roles::add_role_to_user(
+        &db,
+        tenant_id,
+        operator.id,
+        role
+    )
+    .await
+    .unwrap());
 
     let allowed_facility_a = wareboxes_persistence_postgres::facilities::add_facility(
         &db,

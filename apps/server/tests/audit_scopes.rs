@@ -19,13 +19,18 @@ async fn grant_admin(db: &db::Db, tenant_id: TenantId, user_id: i64) {
     )
     .await
     .unwrap();
-    let role = repo::roles::add_role(db, tenant_id, "audit-scope-admin", Some("Audit admin"))
+    let role = wareboxes_persistence_postgres::roles::add_role(
+        db,
+        tenant_id,
+        "audit-scope-admin",
+        Some("Audit admin"),
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(db, tenant_id, role, permission)
         .await
         .unwrap();
-    repo::roles::add_role_permission(db, tenant_id, role, permission)
-        .await
-        .unwrap();
-    repo::roles::add_role_to_user(db, tenant_id, user_id, role)
+    wareboxes_persistence_postgres::roles::add_role_to_user(db, tenant_id, user_id, role)
         .await
         .unwrap();
 }
