@@ -18,7 +18,6 @@ mod inventory_locking;
 pub mod inventory_owners;
 pub mod inventory_rollup_v1;
 mod inventory_status_change;
-pub mod inventory_v1;
 pub mod items;
 pub mod license_plates;
 pub mod loads;
