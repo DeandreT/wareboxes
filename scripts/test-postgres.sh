@@ -69,17 +69,23 @@ if [[ ! "$WAREBOXES_TEST_RUN_ID" =~ ^[0-9]{1,16}$ ]]; then
 fi
 
 cleanup_test_databases() {
+  local cleanup_jobs="${WAREBOXES_TEST_CLEANUP_JOBS:-12}"
   local container_id
   local prefix="wareboxes_test_${WAREBOXES_TEST_RUN_ID}_"
+  if [[ ! "$cleanup_jobs" =~ ^[0-9]+$ ]] || ((cleanup_jobs < 1 || cleanup_jobs > 32)); then
+    echo "WAREBOXES_TEST_CLEANUP_JOBS must be between 1 and 32." >&2
+    return 1
+  fi
   container_id="$(docker compose ps -q postgres)"
   if [ -z "$container_id" ]; then
     return
   fi
 
-  docker exec -i "$container_id" bash -s -- "$prefix" <<'EOF'
+  docker exec -i "$container_id" bash -s -- "$prefix" "$cleanup_jobs" <<'EOF'
 set -euo pipefail
 prefix="$1"
-removed=0
+cleanup_jobs="$2"
+databases_to_remove=()
 mapfile -t databases < <(
   psql -U wareboxes_admin -d postgres -Atc \
     "SELECT datname FROM pg_database WHERE datname LIKE 'wareboxes_test_%' ORDER BY datname"
@@ -92,13 +98,13 @@ for database in "${databases[@]}"; do
     echo "refusing to remove unexpected test database name: $database" >&2
     exit 1
   fi
-  if dropdb -U wareboxes_admin --if-exists "$database"; then
-    removed=$((removed + 1))
-  else
-    echo "warning: could not remove active test database $database" >&2
-  fi
+  databases_to_remove+=("$database")
 done
-echo "removed $removed run-scoped test database(s)"
+if ((${#databases_to_remove[@]} > 0)); then
+  printf '%s\0' "${databases_to_remove[@]}" | xargs -0 -P "$cleanup_jobs" -n 1 \
+    bash -c 'dropdb -U wareboxes_admin --if-exists "$1" || echo "warning: could not remove active test database $1" >&2' _
+fi
+echo "removed ${#databases_to_remove[@]} run-scoped test database(s)"
 EOF
 }
 
