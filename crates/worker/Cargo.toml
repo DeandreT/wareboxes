@@ -8,7 +8,7 @@ description = "Wareboxes background worker engine"
 
 [dependencies]
 wareboxes-domain = { workspace = true }
-wareboxes-server = { workspace = true }
+wareboxes-api = { workspace = true }
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 thiserror = { workspace = true }

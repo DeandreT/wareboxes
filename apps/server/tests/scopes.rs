@@ -5,11 +5,11 @@ use axum::http::{header, Method, Request, StatusCode};
 use common::*;
 use serde_json::{json, Value};
 use tower::ServiceExt;
+use wareboxes_api::auth::TENANT_ID_HEADER;
+use wareboxes_api::routes;
+use wareboxes_api::state::AppState;
 use wareboxes_core::models::{Facility, InventoryOwner, Location, TenantAccess};
 use wareboxes_domain::{FacilityId, InventoryOwnerId};
-use wareboxes_server::auth::TENANT_ID_HEADER;
-use wareboxes_server::routes;
-use wareboxes_server::state::AppState;
 
 async fn grant_permissions(
     db: &db::Db,

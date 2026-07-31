@@ -4,13 +4,13 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use common::*;
 use tower::ServiceExt;
+use wareboxes_api::auth::TENANT_ID_HEADER;
+use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     ErrorReason, ErrorResponse, InventoryFacilityRollupPage, InventoryItemRollupPage,
     InventoryLocationRollupPage,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
-use wareboxes_server::auth::TENANT_ID_HEADER;
-use wareboxes_server::{routes, state::AppState};
 
 fn request(token: &str, tenant_id: TenantId, uri: &str) -> Request<Body> {
     Request::builder()

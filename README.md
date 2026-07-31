@@ -4,12 +4,13 @@ Wareboxes is a warehouse management system prototype.
 
 ## Workspace
 
-- `apps/server`: Axum HTTP API and Leptos SSR host backed by PostgreSQL and SQLx
+- `apps/server`: API and SSR process composition root
 - `apps/web-ops`: Leptos SSR operations web application
+- `apps/rf-android`: native Android warehouse execution client
+- `crates/api`: Axum routes, authentication, and Leptos SSR integration
 - `crates/core`: shared models, DTOs, and errors
 - `crates/barcodes`: barcode encoders
 - `migrations/postgres`: PostgreSQL migrations
-- `apps/rf-android`: native Android warehouse execution client
 - `scripts`: local development and test helpers
 
 ## Requirements

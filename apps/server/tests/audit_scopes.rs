@@ -5,10 +5,10 @@ use axum::http::{header, Method, Request, StatusCode};
 use common::*;
 use serde_json::{json, Value};
 use tower::ServiceExt;
+use wareboxes_api::auth::TENANT_ID_HEADER;
+use wareboxes_api::{routes, state::AppState};
 use wareboxes_core::dto::{AddAuditLocationCount, AuditLocationCountUpdate, UpdateUserAccessScope};
 use wareboxes_core::models::{AuditLocationCount, AuditWave};
-use wareboxes_server::auth::TENANT_ID_HEADER;
-use wareboxes_server::{routes, state::AppState};
 
 async fn grant_admin(db: &db::Db, tenant_id: TenantId, user_id: i64) {
     let permission = repo::permissions::add_permission(db, tenant_id, "admin", Some("Admin"))

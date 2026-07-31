@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "apps/rf-android",
     "apps/web-ops",
+    "crates/api",
     "crates/api-contract",
     "crates/domain",
     "crates/core",
@@ -19,10 +20,10 @@ rust-version = "1.92"
 
 [workspace.dependencies]
 wareboxes-api-contract = { path = "crates/api-contract" }
+wareboxes-api = { path = "crates/api" }
 wareboxes-domain = { path = "crates/domain" }
 wareboxes-core = { path = "crates/core" }
 wareboxes-barcodes = { path = "crates/barcodes" }
-wareboxes-server = { path = "apps/server" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

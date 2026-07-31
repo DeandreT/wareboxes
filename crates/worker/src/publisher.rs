@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use wareboxes_server::repo::outbox::OutboxEvent;
+use wareboxes_api::repo::outbox::OutboxEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureClass {

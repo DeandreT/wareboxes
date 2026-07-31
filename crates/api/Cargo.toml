@@ -1,0 +1,49 @@
+[package]
+name = "wareboxes-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Wareboxes HTTP API, authentication, and transport composition"
+
+[features]
+default = []
+ssr = [
+    "dep:leptos",
+    "dep:leptos_axum",
+    "dep:wareboxes-web-ops",
+    "wareboxes-web-ops/ssr",
+]
+
+[dependencies]
+wareboxes-api-contract = { workspace = true }
+wareboxes-domain = { workspace = true }
+wareboxes-core = { workspace = true }
+wareboxes-barcodes = { workspace = true }
+wareboxes-web-ops = { path = "../../apps/web-ops", default-features = false, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+axum = { version = "0.8", features = ["macros"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+sqlx = { version = "0.7", default-features = false, features = [
+    "runtime-tokio",
+    "macros",
+    "postgres",
+    "chrono",
+    "migrate",
+] }
+argon2 = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+validator = { version = "0.18", features = ["derive"] }
+cookie = "0.18"
+leptos = { workspace = true, features = ["ssr"], optional = true }
+leptos_axum = { workspace = true, optional = true }

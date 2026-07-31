@@ -4,11 +4,11 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, Response, StatusCode};
 use common::*;
 use tower::ServiceExt;
+use wareboxes_api::config::SecurityConfig;
+use wareboxes_api::{routes, state::AppState};
 use wareboxes_core::dto::{
     AccessScopeWorkspace, LoginRequest, SelectTenantRequest, WebSessionContext,
 };
-use wareboxes_server::config::SecurityConfig;
-use wareboxes_server::{routes, state::AppState};
 
 const HOST: &str = "wareboxes.test";
 const ORIGIN: &str = "http://wareboxes.test";

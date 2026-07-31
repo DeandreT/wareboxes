@@ -1,6 +1,7 @@
-//! Wareboxes WMS server library. Exposed so integration tests can drive the
-//! repository/auth/permission layer directly; `main.rs` is a thin binary over
-//! this crate.
+//! Wareboxes HTTP API and authentication boundary.
+//!
+//! Deployable processes compose this crate rather than owning reusable API
+//! behavior themselves.
 
 pub mod auth;
 pub mod config;

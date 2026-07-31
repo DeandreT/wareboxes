@@ -4,8 +4,8 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tokio::task::{JoinError, JoinSet};
+use wareboxes_api::repo::outbox::OutboxEvent;
 use wareboxes_domain::TenantId;
-use wareboxes_server::repo::outbox::OutboxEvent;
 
 use crate::publisher::{FailureClass, PublishError, Publisher};
 use crate::store::OutboxStore;

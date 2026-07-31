@@ -7,8 +7,8 @@ use axum::http::{header, Request, StatusCode};
 use common::*;
 use leptos::prelude::LeptosOptions;
 use tower::ServiceExt;
+use wareboxes_api::{repo, routes, state::AppState, web_app};
 use wareboxes_core::dto::LoginRequest;
-use wareboxes_server::{repo, routes, state::AppState, web_app};
 
 const HOST: &str = "wareboxes.test";
 const ORIGIN: &str = "http://wareboxes.test";

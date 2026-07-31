@@ -1,10 +1,10 @@
 mod common;
 
 use common::*;
-use wareboxes_domain::{FacilityId, InventoryOwnerId};
-use wareboxes_server::repo::integration_inbox::{
+use wareboxes_api::repo::integration_inbox::{
     self, IntegrationInboxReadScope, NewIntegrationInboxReceipt,
 };
+use wareboxes_domain::{FacilityId, InventoryOwnerId};
 
 async fn inbox_scope(
     fixture: &Fixture,

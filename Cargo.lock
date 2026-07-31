@@ -5296,6 +5296,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "wareboxes-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "axum",
+ "chrono",
+ "cookie",
+ "hex",
+ "leptos",
+ "leptos_axum",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "validator",
+ "wareboxes-api-contract",
+ "wareboxes-barcodes",
+ "wareboxes-core",
+ "wareboxes-domain",
+ "wareboxes-web-ops",
+]
+
+[[package]]
 name = "wareboxes-api-contract"
 version = "0.1.0"
 dependencies = [
@@ -5355,32 +5385,23 @@ name = "wareboxes-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "argon2",
  "axum",
- "chrono",
- "cookie",
  "dotenvy",
  "hex",
  "leptos",
- "leptos_axum",
- "rand 0.8.6",
  "serde",
  "serde_json",
  "sha2",
  "sqlx",
- "thiserror 1.0.69",
  "tokio",
  "tower",
- "tower-http",
  "tracing",
  "tracing-subscriber",
  "url",
- "validator",
+ "wareboxes-api",
  "wareboxes-api-contract",
- "wareboxes-barcodes",
  "wareboxes-core",
  "wareboxes-domain",
- "wareboxes-web-ops",
 ]
 
 [[package]]
@@ -5415,8 +5436,8 @@ dependencies = [
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
+ "wareboxes-api",
  "wareboxes-domain",
- "wareboxes-server",
 ]
 
 [[package]]

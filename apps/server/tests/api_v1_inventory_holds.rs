@@ -4,6 +4,8 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use common::*;
 use tower::ServiceExt;
+use wareboxes_api::auth::TENANT_ID_HEADER;
+use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     ErrorReason, ErrorResponse, InventoryHoldPage, InventoryHoldReason, InventoryHoldStatus,
     PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, ReleaseInventoryHoldRequest,
@@ -13,8 +15,6 @@ use wareboxes_core::models::{
     InventoryHoldReason as CoreHoldReason, OwnerScope, SiteScope, TenantAccess,
 };
 use wareboxes_domain::{CommandContext, FacilityId, InventoryOwnerId};
-use wareboxes_server::auth::TENANT_ID_HEADER;
-use wareboxes_server::{routes, state::AppState};
 
 fn command_context(access: &TenantAccess, key: &str) -> CommandContext {
     CommandContext {

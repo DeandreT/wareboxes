@@ -6,9 +6,9 @@ use axum::http::{header, Request, StatusCode};
 use axum::Json;
 use common::*;
 use tower::ServiceExt;
+use wareboxes_api::auth::TENANT_ID_HEADER;
+use wareboxes_api::{routes, state::AppState};
 use wareboxes_core::dto::{LoginRequest, RegisterRequest};
-use wareboxes_server::auth::TENANT_ID_HEADER;
-use wareboxes_server::{routes, state::AppState};
 
 #[tokio::test]
 async fn auth_and_hierarchical_rbac() {
@@ -242,7 +242,7 @@ async fn public_registration_is_disabled_by_default() {
         last_name: None,
     };
 
-    let result = wareboxes_server::routes::auth::register(State(state), Json(request)).await;
+    let result = wareboxes_api::routes::auth::register(State(state), Json(request)).await;
     assert!(matches!(result, Err(AppError::Core(CoreError::Forbidden))));
 
     auth::register_user(&db, "login@test.com", "supersecret", None, None)
@@ -252,7 +252,7 @@ async fn public_registration_is_disabled_by_default() {
         email: "login@test.com".to_string(),
         password: "supersecret".to_string(),
     };
-    let result = wareboxes_server::routes::auth::login(State(AppState::new(db)), Json(login)).await;
+    let result = wareboxes_api::routes::auth::login(State(AppState::new(db)), Json(login)).await;
     let session = result.unwrap().0;
     assert_eq!(session.user.email, "login@test.com");
     assert_eq!(session.active_tenant.user_id.get(), session.user.id);

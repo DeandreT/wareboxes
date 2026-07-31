@@ -7,6 +7,8 @@ use sqlx::Postgres;
 use tokio::sync::OnceCell;
 use url::Url;
 
+pub use wareboxes_api::error::AppError;
+pub use wareboxes_api::{auth, db, permissions, repo};
 pub use wareboxes_core::dto::{NewOrder, OrderUpdate};
 pub use wareboxes_core::models::{
     InventoryTransactionType, LoadLineStatus, LoadStatus, LoadType, OrderStatus,
@@ -14,8 +16,6 @@ pub use wareboxes_core::models::{
 };
 pub use wareboxes_core::CoreError;
 pub use wareboxes_domain::TenantId;
-pub use wareboxes_server::error::AppError;
-pub use wareboxes_server::{auth, db, permissions, repo};
 
 const DEFAULT_TEST_DATABASE_URL: &str =
     "postgres://wareboxes_admin:wareboxes_admin@127.0.0.1:5433/wareboxes";
