@@ -204,9 +204,13 @@ async fn assert_repository_rbac(db: &db::Db, refs: RbacRefs, key: &str) {
         .iter()
         .any(|permission| permission.id == refs.permission_id));
 
-    let user_permissions = permissions::get_user_permissions(db, refs.tenant_id, refs.user_id)
-        .await
-        .unwrap();
+    let user_permissions = wareboxes_persistence_postgres::authorization::get_user_permissions(
+        db,
+        refs.tenant_id,
+        refs.user_id,
+    )
+    .await
+    .unwrap();
     assert!(user_permissions
         .iter()
         .any(|permission| permission.name == key));
