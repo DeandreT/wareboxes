@@ -11,9 +11,14 @@ use wareboxes_core::dto::{AddAuditLocationCount, AuditLocationCountUpdate, Updat
 use wareboxes_core::models::{AuditLocationCount, AuditWave};
 
 async fn grant_admin(db: &db::Db, tenant_id: TenantId, user_id: i64) {
-    let permission = repo::permissions::add_permission(db, tenant_id, "admin", Some("Admin"))
-        .await
-        .unwrap();
+    let permission = wareboxes_persistence_postgres::permissions::add_permission(
+        db,
+        tenant_id,
+        "admin",
+        Some("Admin"),
+    )
+    .await
+    .unwrap();
     let role = repo::roles::add_role(db, tenant_id, "audit-scope-admin", Some("Audit admin"))
         .await
         .unwrap();

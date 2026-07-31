@@ -5,7 +5,6 @@ use wareboxes_core::models::Permission;
 
 use crate::auth::CurrentTenant;
 use crate::error::AppResult;
-use crate::repo;
 use crate::routes::users::ShowDeleted;
 use crate::routes::validate;
 use crate::state::AppState;
@@ -18,9 +17,21 @@ pub async fn list(
     Query(q): Query<ShowDeleted>,
 ) -> AppResult<Json<Vec<Permission>>> {
     user.require_permission(&state.db, PERM).await?;
-    let perms =
-        repo::permissions::get_permissions(&state.db, user.tenant.tenant_id, q.show_deleted)
-            .await?;
+    let perms = wareboxes_persistence_postgres::permissions::get_permissions(
+        &state.db,
+        user.tenant.tenant_id,
+        q.show_deleted,
+    )
+    .await?
+    .into_iter()
+    .map(|permission| Permission {
+        id: permission.id,
+        created: permission.created,
+        deleted: permission.deleted,
+        name: permission.name,
+        description: permission.description,
+    })
+    .collect();
     Ok(Json(perms))
 }
 
@@ -31,7 +42,7 @@ pub async fn add(
 ) -> AppResult<Json<i64>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let id = repo::permissions::add_permission(
+    let id = wareboxes_persistence_postgres::permissions::add_permission(
         &state.db,
         user.tenant.tenant_id,
         &body.name,
@@ -48,7 +59,7 @@ pub async fn update(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok = repo::permissions::update_permission(
+    let ok = wareboxes_persistence_postgres::permissions::update_permission(
         &state.db,
         user.tenant.tenant_id,
         body.permission_id,
@@ -66,9 +77,13 @@ pub async fn delete(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok =
-        repo::permissions::set_deleted(&state.db, user.tenant.tenant_id, body.permission_id, true)
-            .await?;
+    let ok = wareboxes_persistence_postgres::permissions::set_deleted(
+        &state.db,
+        user.tenant.tenant_id,
+        body.permission_id,
+        true,
+    )
+    .await?;
     Ok(Json(ok))
 }
 
@@ -79,8 +94,12 @@ pub async fn restore(
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
-    let ok =
-        repo::permissions::set_deleted(&state.db, user.tenant.tenant_id, body.permission_id, false)
-            .await?;
+    let ok = wareboxes_persistence_postgres::permissions::set_deleted(
+        &state.db,
+        user.tenant.tenant_id,
+        body.permission_id,
+        false,
+    )
+    .await?;
     Ok(Json(ok))
 }

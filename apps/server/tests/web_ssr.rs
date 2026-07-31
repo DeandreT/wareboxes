@@ -55,10 +55,14 @@ async fn authenticated_overview_and_orders_are_rendered_with_scoped_data() {
     let fixture = Fixture::new().await;
     let user = fixture.wms_user("ssr-operator@test.com").await;
     let access = default_tenant_for_user(&fixture.db, user.id).await.unwrap();
-    let orders_permission =
-        repo::permissions::add_permission(&fixture.db, access.tenant_id, "orders", Some("Orders"))
-            .await
-            .unwrap();
+    let orders_permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &fixture.db,
+        access.tenant_id,
+        "orders",
+        Some("Orders"),
+    )
+    .await
+    .unwrap();
     let orders_role = repo::roles::add_role(
         &fixture.db,
         access.tenant_id,

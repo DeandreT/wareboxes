@@ -30,9 +30,14 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     .await
     .unwrap();
     membership_tx.commit().await.unwrap();
-    let wms_perm = repo::permissions::add_permission(&db, tenant_id, "wms", Some("WMS"))
-        .await
-        .unwrap();
+    let wms_perm = wareboxes_persistence_postgres::permissions::add_permission(
+        &db,
+        tenant_id,
+        "wms",
+        Some("WMS"),
+    )
+    .await
+    .unwrap();
     let wms_role = repo::roles::add_role(&db, tenant_id, "task-wms", Some("task worker"))
         .await
         .unwrap();
@@ -797,10 +802,14 @@ async fn task_queue_is_tenant_isolated_and_claims_once() {
     tx.rollback().await.unwrap();
     assert_eq!(cancellation_events, 1);
 
-    let tenant_b_permission =
-        repo::permissions::add_permission(&fixture.db, tenant_b, "wms", Some("WMS"))
-            .await
-            .unwrap();
+    let tenant_b_permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &fixture.db,
+        tenant_b,
+        "wms",
+        Some("WMS"),
+    )
+    .await
+    .unwrap();
     let tenant_b_role = repo::roles::add_role(
         &fixture.db,
         tenant_b,

@@ -4,6 +4,7 @@ pub mod db;
 pub mod facilities;
 pub mod locations;
 pub mod outbox;
+pub mod permissions;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {

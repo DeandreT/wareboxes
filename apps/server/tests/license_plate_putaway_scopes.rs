@@ -427,10 +427,11 @@ async fn license_plate_putaway_scopes_rls_and_acl_fail_closed() {
         .await;
     let foreign_tenant_id = tenant_for_user(&fixture.db, operator.id).await;
     add_membership(&fixture.db, tenant_id, operator.id).await;
-    let wms_permission = repo::permissions::find_by_name(&fixture.db, tenant_id, "wms")
-        .await
-        .unwrap()
-        .unwrap();
+    let wms_permission =
+        wareboxes_persistence_postgres::permissions::find_by_name(&fixture.db, tenant_id, "wms")
+            .await
+            .unwrap()
+            .unwrap();
     let role = repo::roles::add_role(
         &fixture.db,
         tenant_id,

@@ -79,10 +79,11 @@ async fn add_membership(db: &db::Db, tenant_id: TenantId, user_id: i64) {
 }
 
 async fn grant_wms_role(db: &db::Db, tenant_id: TenantId, user_ids: &[i64]) {
-    let permission = repo::permissions::find_by_name(db, tenant_id, "wms")
-        .await
-        .unwrap()
-        .unwrap();
+    let permission =
+        wareboxes_persistence_postgres::permissions::find_by_name(db, tenant_id, "wms")
+            .await
+            .unwrap()
+            .unwrap();
     let role = repo::roles::add_role(
         db,
         tenant_id,

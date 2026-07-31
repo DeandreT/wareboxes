@@ -116,10 +116,11 @@ async fn create_break_task(
 }
 
 async fn grant_wms(db: &db::Db, tenant_id: TenantId, user_id: i64, suffix: &str) {
-    let permission = repo::permissions::find_by_name(db, tenant_id, "wms")
-        .await
-        .unwrap()
-        .unwrap();
+    let permission =
+        wareboxes_persistence_postgres::permissions::find_by_name(db, tenant_id, "wms")
+            .await
+            .unwrap()
+            .unwrap();
     let role = repo::roles::add_role(db, tenant_id, &format!("wms-{suffix}"), None)
         .await
         .unwrap();

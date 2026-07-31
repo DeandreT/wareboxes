@@ -190,9 +190,14 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
         .unwrap();
     membership_tx.commit().await.unwrap();
 
-    let permission = repo::permissions::add_permission(&fixture.db, tenant_id, "wms", Some("WMS"))
-        .await
-        .unwrap();
+    let permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &fixture.db,
+        tenant_id,
+        "wms",
+        Some("WMS"),
+    )
+    .await
+    .unwrap();
     let role = repo::roles::add_role(
         &fixture.db,
         tenant_id,

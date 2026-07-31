@@ -106,10 +106,11 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         .await
         .unwrap();
     membership_tx.commit().await.unwrap();
-    let wms_permission = repo::permissions::find_by_name(&fixture.db, tenant_id, "wms")
-        .await
-        .unwrap()
-        .unwrap();
+    let wms_permission =
+        wareboxes_persistence_postgres::permissions::find_by_name(&fixture.db, tenant_id, "wms")
+            .await
+            .unwrap()
+            .unwrap();
     let operator_role = repo::roles::add_role(
         &fixture.db,
         tenant_id,
@@ -121,10 +122,14 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     repo::roles::add_role_permission(&fixture.db, tenant_id, operator_role, wms_permission.id)
         .await
         .unwrap();
-    let orders_permission =
-        repo::permissions::add_permission(&fixture.db, tenant_id, "orders", Some("Orders"))
-            .await
-            .unwrap();
+    let orders_permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &fixture.db,
+        tenant_id,
+        "orders",
+        Some("Orders"),
+    )
+    .await
+    .unwrap();
     repo::roles::add_role_permission(&fixture.db, tenant_id, operator_role, orders_permission)
         .await
         .unwrap();

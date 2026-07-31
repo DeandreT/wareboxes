@@ -323,10 +323,11 @@ async fn putaway_scope_denials_replays_and_rls_leave_no_hidden_effects() {
     let operator = fixture.user("putaway-scope-operator@test.local").await;
     let foreign_tenant_id = tenant_for_user(&fixture.db, operator.id).await;
     add_membership(&fixture.db, tenant_id, operator.id).await;
-    let wms_permission = repo::permissions::find_by_name(&fixture.db, tenant_id, "wms")
-        .await
-        .unwrap()
-        .unwrap();
+    let wms_permission =
+        wareboxes_persistence_postgres::permissions::find_by_name(&fixture.db, tenant_id, "wms")
+            .await
+            .unwrap()
+            .unwrap();
     let operator_role = repo::roles::add_role(
         &fixture.db,
         tenant_id,
