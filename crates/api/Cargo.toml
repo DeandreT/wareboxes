@@ -20,6 +20,7 @@ wareboxes-api-contract = { workspace = true }
 wareboxes-domain = { workspace = true }
 wareboxes-core = { workspace = true }
 wareboxes-barcodes = { workspace = true }
+wareboxes-persistence-postgres = { workspace = true }
 wareboxes-web-ops = { path = "../../apps/web-ops", default-features = false, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

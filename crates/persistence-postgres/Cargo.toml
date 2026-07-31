@@ -1,0 +1,21 @@
+[package]
+name = "wareboxes-persistence-postgres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Wareboxes PostgreSQL connection, migration, and persistence primitives"
+
+[dependencies]
+wareboxes-core = { workspace = true }
+wareboxes-domain = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+sqlx = { version = "0.7", default-features = false, features = [
+    "runtime-tokio",
+    "macros",
+    "postgres",
+    "chrono",
+    "migrate",
+] }

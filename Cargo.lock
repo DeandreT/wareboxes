@@ -5322,6 +5322,7 @@ dependencies = [
  "wareboxes-barcodes",
  "wareboxes-core",
  "wareboxes-domain",
+ "wareboxes-persistence-postgres",
  "wareboxes-web-ops",
 ]
 
@@ -5356,6 +5357,18 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "wareboxes-persistence-postgres"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "sqlx",
+ "thiserror 1.0.69",
+ "wareboxes-core",
+ "wareboxes-domain",
 ]
 
 [[package]]

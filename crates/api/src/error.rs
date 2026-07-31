@@ -17,6 +17,17 @@ pub enum AppError {
     Other(#[from] anyhow::Error),
 }
 
+impl From<wareboxes_persistence_postgres::PersistenceError> for AppError {
+    fn from(error: wareboxes_persistence_postgres::PersistenceError) -> Self {
+        match error {
+            wareboxes_persistence_postgres::PersistenceError::Database(error) => Self::Db(error),
+            wareboxes_persistence_postgres::PersistenceError::AuthorizationContextConflict => {
+                Self::forbidden()
+            }
+        }
+    }
+}
+
 impl AppError {
     pub fn unauthorized() -> Self {
         Self::Core(CoreError::Unauthorized)

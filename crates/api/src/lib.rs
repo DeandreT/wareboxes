@@ -5,7 +5,7 @@
 
 pub mod auth;
 pub mod config;
-pub mod db;
+pub use wareboxes_persistence_postgres::db;
 pub mod error;
 pub mod permissions;
 pub mod repo;
