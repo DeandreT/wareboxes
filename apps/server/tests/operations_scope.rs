@@ -10,9 +10,14 @@ use wareboxes_core::models::{AuditLocationCount, AuditWave, Employee};
 use wareboxes_domain::SiteScope;
 
 async fn grant_admin(db: &db::Db, tenant_id: TenantId, user_id: i64, role_name: &str) {
-    let permission = repo::permissions::add_permission(db, tenant_id, "admin", Some("Admin"))
-        .await
-        .unwrap();
+    let permission = wareboxes_persistence_postgres::permissions::add_permission(
+        db,
+        tenant_id,
+        "admin",
+        Some("Admin"),
+    )
+    .await
+    .unwrap();
     let role = repo::roles::add_role(db, tenant_id, role_name, Some("Operations admin"))
         .await
         .unwrap();

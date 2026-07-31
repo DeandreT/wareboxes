@@ -83,9 +83,13 @@ async fn bootstrap_admin(pool: &db::Db, cfg: &Config) -> anyhow::Result<()> {
         (Err(error), _) => return Err(error),
         (Ok(_), Err(error)) => return Err(error.into()),
     };
-    let perm_id =
-        repo::permissions::add_permission(pool, tenant_id, "admin", Some("Admin permission"))
-            .await?;
+    let perm_id = wareboxes_persistence_postgres::permissions::add_permission(
+        pool,
+        tenant_id,
+        "admin",
+        Some("Admin permission"),
+    )
+    .await?;
 
     // register_user provisioned the self role; attach admin to it.
     if let Some(self_role) = repo::roles::get_roles(pool, tenant_id, true, true)

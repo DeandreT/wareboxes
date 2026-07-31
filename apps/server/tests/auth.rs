@@ -48,9 +48,14 @@ async fn auth_and_hierarchical_rbac() {
     assert_eq!(remaining_sessions, 0);
 
     // A child role inherits permissions assigned to its parent.
-    let perm = repo::permissions::add_permission(&db, tenant_id, "orders", Some("Orders"))
-        .await
-        .unwrap();
+    let perm = wareboxes_persistence_postgres::permissions::add_permission(
+        &db,
+        tenant_id,
+        "orders",
+        Some("Orders"),
+    )
+    .await
+    .unwrap();
     let parent = repo::roles::add_role(&db, tenant_id, "parent", Some("p"))
         .await
         .unwrap();
@@ -154,9 +159,14 @@ async fn auth_and_hierarchical_rbac() {
         .unwrap();
     assert_eq!(unauthorized.status(), StatusCode::FORBIDDEN);
 
-    let other_perm = repo::permissions::add_permission(&db, other_tenant, "orders", Some("Orders"))
-        .await
-        .unwrap();
+    let other_perm = wareboxes_persistence_postgres::permissions::add_permission(
+        &db,
+        other_tenant,
+        "orders",
+        Some("Orders"),
+    )
+    .await
+    .unwrap();
     let other_role = repo::roles::add_role(&db, other_tenant, "parent", Some("p"))
         .await
         .unwrap();

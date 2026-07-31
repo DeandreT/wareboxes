@@ -1,14 +1,14 @@
 //! Ported from `app/utils/permissions.ts` (the CRUD half).
 
 use sqlx::Row;
-use wareboxes_core::models::Permission;
+use wareboxes_application::authorization::PermissionReadModel;
 use wareboxes_domain::TenantId;
 
 use crate::db::{begin_tenant_transaction, now_iso, Db};
-use crate::error::AppResult;
+use crate::PersistenceResult;
 
-fn map(row: &sqlx::postgres::PgRow) -> AppResult<Permission> {
-    Ok(Permission {
+fn map(row: &sqlx::postgres::PgRow) -> PersistenceResult<PermissionReadModel> {
+    Ok(PermissionReadModel {
         id: row.try_get("id")?,
         created: row.try_get("created")?,
         deleted: row.try_get("deleted")?,
@@ -21,7 +21,7 @@ pub async fn get_permissions(
     db: &Db,
     tenant_id: TenantId,
     show_deleted: bool,
-) -> AppResult<Vec<Permission>> {
+) -> PersistenceResult<Vec<PermissionReadModel>> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let sql = if show_deleted {
         "SELECT id, created, deleted, name, description FROM permissions WHERE tenant_id = $1 ORDER BY created DESC"
@@ -32,16 +32,19 @@ pub async fn get_permissions(
         .bind(tenant_id.get())
         .fetch_all(&mut *tx)
         .await?;
-    let permissions = rows.iter().map(map).collect();
+    let permissions = rows
+        .iter()
+        .map(map)
+        .collect::<PersistenceResult<Vec<_>>>()?;
     tx.commit().await?;
-    permissions
+    Ok(permissions)
 }
 
 pub async fn find_by_name(
     db: &Db,
     tenant_id: TenantId,
     name: &str,
-) -> AppResult<Option<Permission>> {
+) -> PersistenceResult<Option<PermissionReadModel>> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let row = sqlx::query(
         "SELECT id, created, deleted, name, description FROM permissions WHERE tenant_id = $1 AND name = $2",
@@ -62,7 +65,7 @@ pub async fn add_permission(
     tenant_id: TenantId,
     name: &str,
     description: Option<&str>,
-) -> AppResult<i64> {
+) -> PersistenceResult<i64> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         r#"
@@ -89,7 +92,7 @@ pub async fn update_permission(
     id: i64,
     name: Option<&str>,
     description: Option<&str>,
-) -> AppResult<bool> {
+) -> PersistenceResult<bool> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query(
         r#"
@@ -109,7 +112,12 @@ pub async fn update_permission(
     Ok(res.rows_affected() > 0)
 }
 
-pub async fn set_deleted(db: &Db, tenant_id: TenantId, id: i64, deleted: bool) -> AppResult<bool> {
+pub async fn set_deleted(
+    db: &Db,
+    tenant_id: TenantId,
+    id: i64,
+    deleted: bool,
+) -> PersistenceResult<bool> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let res = sqlx::query("UPDATE permissions SET deleted = $1 WHERE tenant_id = $2 AND id = $3")
         .bind(if deleted { Some(now_iso()) } else { None })

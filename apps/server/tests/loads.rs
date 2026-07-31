@@ -547,10 +547,14 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
     .await
     .unwrap();
     membership_tx.commit().await.unwrap();
-    let tenant_b_permission =
-        repo::permissions::add_permission(&fixture.db, tenant_b, "wms", Some("WMS"))
-            .await
-            .unwrap();
+    let tenant_b_permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &fixture.db,
+        tenant_b,
+        "wms",
+        Some("WMS"),
+    )
+    .await
+    .unwrap();
     let tenant_b_role = repo::roles::add_role(
         &fixture.db,
         tenant_b,

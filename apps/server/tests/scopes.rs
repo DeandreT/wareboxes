@@ -79,13 +79,22 @@ async fn selected_resource_scopes_are_projected_and_enforced() {
         .unwrap();
     membership_tx.commit().await.unwrap();
 
-    let admin_permission =
-        repo::permissions::add_permission(&db, tenant_id, "admin", Some("Admin"))
-            .await
-            .unwrap();
-    let wms_permission = repo::permissions::add_permission(&db, tenant_id, "wms", Some("WMS"))
-        .await
-        .unwrap();
+    let admin_permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &db,
+        tenant_id,
+        "admin",
+        Some("Admin"),
+    )
+    .await
+    .unwrap();
+    let wms_permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &db,
+        tenant_id,
+        "wms",
+        Some("WMS"),
+    )
+    .await
+    .unwrap();
     grant_permissions(
         &db,
         tenant_id,
@@ -349,10 +358,14 @@ async fn scope_replacement_is_atomic_and_delegation_cannot_escalate() {
         .unwrap();
     membership_tx.commit().await.unwrap();
 
-    let admin_permission =
-        repo::permissions::add_permission(&db, tenant_id, "admin", Some("Admin"))
-            .await
-            .unwrap();
+    let admin_permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &db,
+        tenant_id,
+        "admin",
+        Some("Admin"),
+    )
+    .await
+    .unwrap();
     grant_permissions(
         &db,
         tenant_id,

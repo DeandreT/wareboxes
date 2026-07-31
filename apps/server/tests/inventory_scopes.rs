@@ -92,9 +92,14 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         .await
         .unwrap();
     membership_tx.commit().await.unwrap();
-    let permission = repo::permissions::add_permission(&db, tenant_id, "wms", Some("WMS"))
-        .await
-        .unwrap();
+    let permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &db,
+        tenant_id,
+        "wms",
+        Some("WMS"),
+    )
+    .await
+    .unwrap();
     let role = repo::roles::add_role(
         &db,
         tenant_id,

@@ -92,15 +92,21 @@ async fn response_json<T: serde::de::DeserializeOwned>(response: axum::response:
 }
 
 async fn grant_orders(db: &db::Db, tenant_id: TenantId, user_id: i64, suffix: &str) -> i64 {
-    let permission = match repo::permissions::find_by_name(db, tenant_id, "orders")
-        .await
-        .unwrap()
-    {
-        Some(permission) => permission.id,
-        None => repo::permissions::add_permission(db, tenant_id, "orders", Some("Orders"))
+    let permission =
+        match wareboxes_persistence_postgres::permissions::find_by_name(db, tenant_id, "orders")
+            .await
+            .unwrap()
+        {
+            Some(permission) => permission.id,
+            None => wareboxes_persistence_postgres::permissions::add_permission(
+                db,
+                tenant_id,
+                "orders",
+                Some("Orders"),
+            )
             .await
             .unwrap(),
-    };
+        };
     let role = repo::roles::add_role(db, tenant_id, &format!("orders-{suffix}"), None)
         .await
         .unwrap();

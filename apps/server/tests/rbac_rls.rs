@@ -100,14 +100,18 @@ async fn rbac_requires_tenant_context_and_exact_runtime_privileges() {
 async fn rbac_refs(fixture: &Fixture, email: &str, key: &str) -> RbacRefs {
     let user = fixture.user(email).await;
     let tenant_id = tenant_for_user(&fixture.db, user.id).await;
-    let permission_id =
-        repo::permissions::add_permission(&fixture.db, tenant_id, key, Some("RLS permission"))
-            .await
-            .unwrap();
+    let permission_id = wareboxes_persistence_postgres::permissions::add_permission(
+        &fixture.db,
+        tenant_id,
+        key,
+        Some("RLS permission"),
+    )
+    .await
+    .unwrap();
     let role_id = repo::roles::add_role(&fixture.db, tenant_id, key, Some("RLS role"))
         .await
         .unwrap();
-    let unassigned_permission_id = repo::permissions::add_permission(
+    let unassigned_permission_id = wareboxes_persistence_postgres::permissions::add_permission(
         &fixture.db,
         tenant_id,
         &format!("{key}-UNASSIGNED"),
@@ -181,9 +185,10 @@ async fn assert_repository_rbac(db: &db::Db, refs: RbacRefs, key: &str) {
         .iter()
         .any(|permission| permission.id == refs.permission_id));
 
-    let permissions = repo::permissions::get_permissions(db, refs.tenant_id, false)
-        .await
-        .unwrap();
+    let permissions =
+        wareboxes_persistence_postgres::permissions::get_permissions(db, refs.tenant_id, false)
+            .await
+            .unwrap();
     assert!(permissions
         .iter()
         .any(|permission| permission.id == refs.permission_id));

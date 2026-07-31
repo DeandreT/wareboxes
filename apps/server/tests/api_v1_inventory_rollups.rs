@@ -146,9 +146,14 @@ async fn inventory_rollups_are_typed_scoped_and_keyset_paginated() {
         .await
         .unwrap();
     membership_tx.commit().await.unwrap();
-    let permission = repo::permissions::add_permission(&fixture.db, tenant_id, "wms", Some("WMS"))
-        .await
-        .unwrap();
+    let permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &fixture.db,
+        tenant_id,
+        "wms",
+        Some("WMS"),
+    )
+    .await
+    .unwrap();
     let role = repo::roles::add_role(
         &fixture.db,
         tenant_id,

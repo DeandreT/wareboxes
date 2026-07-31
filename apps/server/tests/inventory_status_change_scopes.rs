@@ -165,9 +165,14 @@ async fn status_change_http_denials_and_revoked_replays_leave_no_effects() {
     add_membership(&fixture.db, tenant_id, operator.id).await;
     add_membership(&fixture.db, tenant_id, unprivileged.id).await;
 
-    let permission = repo::permissions::add_permission(&fixture.db, tenant_id, "wms", Some("WMS"))
-        .await
-        .unwrap();
+    let permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &fixture.db,
+        tenant_id,
+        "wms",
+        Some("WMS"),
+    )
+    .await
+    .unwrap();
     let role = repo::roles::add_role(
         &fixture.db,
         tenant_id,

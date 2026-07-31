@@ -155,10 +155,14 @@ async fn order_aggregate_is_isolated_by_selected_tenant() {
     .unwrap();
     membership_tx.commit().await.unwrap();
 
-    let permission =
-        repo::permissions::add_permission(&fixture.db, tenant_a, "orders", Some("Orders"))
-            .await
-            .unwrap();
+    let permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &fixture.db,
+        tenant_a,
+        "orders",
+        Some("Orders"),
+    )
+    .await
+    .unwrap();
     let role = repo::roles::add_role(
         &fixture.db,
         tenant_a,
@@ -173,10 +177,14 @@ async fn order_aggregate_is_isolated_by_selected_tenant() {
     repo::roles::add_role_to_user(&fixture.db, tenant_a, operator.id, role)
         .await
         .unwrap();
-    let permission_b =
-        repo::permissions::add_permission(&fixture.db, tenant_b, "orders", Some("Orders"))
-            .await
-            .unwrap();
+    let permission_b = wareboxes_persistence_postgres::permissions::add_permission(
+        &fixture.db,
+        tenant_b,
+        "orders",
+        Some("Orders"),
+    )
+    .await
+    .unwrap();
     let role_b = repo::roles::add_role(
         &fixture.db,
         tenant_b,

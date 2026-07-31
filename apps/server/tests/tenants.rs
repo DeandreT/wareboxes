@@ -248,9 +248,14 @@ async fn owner_and_facility_master_data_is_tenant_scoped() {
     .await
     .unwrap();
     membership_tx.commit().await.unwrap();
-    let permission = repo::permissions::add_permission(&db, second_tenant, "admin", Some("Admin"))
-        .await
-        .unwrap();
+    let permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &db,
+        second_tenant,
+        "admin",
+        Some("Admin"),
+    )
+    .await
+    .unwrap();
     let role = repo::roles::add_role(
         &db,
         second_tenant,
@@ -404,9 +409,14 @@ async fn locations_are_tenant_scoped_for_repositories_and_routes() {
     .await
     .unwrap();
     membership_tx.commit().await.unwrap();
-    let permission = repo::permissions::add_permission(&db, second_tenant, "wms", Some("WMS"))
-        .await
-        .unwrap();
+    let permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &db,
+        second_tenant,
+        "wms",
+        Some("WMS"),
+    )
+    .await
+    .unwrap();
     let role = repo::roles::add_role(&db, second_tenant, "location-wms", Some("Location WMS"))
         .await
         .unwrap();
@@ -568,9 +578,14 @@ async fn item_catalog_is_tenant_scoped_for_repositories_and_routes() {
     .await
     .unwrap();
     membership_tx.commit().await.unwrap();
-    let permission = repo::permissions::add_permission(&db, second_tenant, "wms", Some("WMS"))
-        .await
-        .unwrap();
+    let permission = wareboxes_persistence_postgres::permissions::add_permission(
+        &db,
+        second_tenant,
+        "wms",
+        Some("WMS"),
+    )
+    .await
+    .unwrap();
     let role = repo::roles::add_role(&db, second_tenant, "catalog-wms", Some("Catalog WMS"))
         .await
         .unwrap();

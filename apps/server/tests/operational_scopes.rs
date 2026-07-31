@@ -23,7 +23,7 @@ async fn grant_permissions(
         .await
         .unwrap();
     for permission_name in permission_names {
-        let permission = repo::permissions::add_permission(
+        let permission = wareboxes_persistence_postgres::permissions::add_permission(
             db,
             tenant_id,
             permission_name,
