@@ -7,7 +7,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
-use wareboxes_core::dto::{ErrorCode, ErrorResponse};
+use wareboxes_api_contract::web::{ErrorCode, ErrorResponse};
 
 use crate::error::AppError;
 

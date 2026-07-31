@@ -2,8 +2,8 @@ use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use sqlx::error::ErrorKind;
-use wareboxes_core::dto::{ErrorCode, ErrorResponse};
-use wareboxes_core::{CoreError, FieldError};
+use wareboxes_api_contract::web::{ErrorCode, ErrorResponse, FieldError};
+use wareboxes_core::CoreError;
 
 use crate::request_context::{current_request_id_or_new, REQUEST_ID_HEADER};
 
@@ -122,7 +122,13 @@ impl AppError {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 ErrorCode::ValidationFailed,
                 "validation failed".into(),
-                details,
+                details
+                    .into_iter()
+                    .map(|detail| FieldError {
+                        field: detail.field,
+                        message: detail.message,
+                    })
+                    .collect(),
             ),
             CoreError::Conflict(message) => (
                 StatusCode::CONFLICT,

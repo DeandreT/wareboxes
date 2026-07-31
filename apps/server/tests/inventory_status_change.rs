@@ -11,8 +11,9 @@ use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
+use wareboxes_api_contract::web::{ErrorCode, ErrorResponse};
 use wareboxes_application::CommandContext;
-use wareboxes_core::dto::{ChangeInventoryStatusResult, ErrorCode, ErrorResponse};
+use wareboxes_core::dto::ChangeInventoryStatusResult;
 use wareboxes_core::models::{
     InventoryHoldReason, InventoryStatus, InventoryStatusChangeReason, InventoryTransactionType,
     TenantAccess,

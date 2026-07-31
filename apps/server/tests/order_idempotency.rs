@@ -8,7 +8,8 @@ use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
-use wareboxes_core::dto::{ErrorCode, ErrorResponse, UpdateUserAccessScope};
+use wareboxes_api_contract::web::{ErrorCode, ErrorResponse};
+use wareboxes_core::dto::UpdateUserAccessScope;
 
 #[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
 struct OrderMetadataState {
