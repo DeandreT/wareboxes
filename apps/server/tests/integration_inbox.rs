@@ -1,10 +1,9 @@
 mod common;
 
 use common::*;
-use wareboxes_api::repo::integration_inbox::{
-    self, IntegrationInboxReadScope, NewIntegrationInboxReceipt,
-};
+use wareboxes_application::integration::{IntegrationInboxReadScope, NewIntegrationInboxReceipt};
 use wareboxes_domain::{FacilityId, InventoryOwnerId};
+use wareboxes_persistence_postgres::{integration_inbox, PersistenceError};
 
 async fn inbox_scope(
     fixture: &Fixture,
@@ -123,7 +122,7 @@ async fn raw_receipts_are_exact_and_identical_retries_return_the_original() {
     .await;
     assert!(matches!(
         oversized_result,
-        Err(AppError::Core(CoreError::BadRequest(_)))
+        Err(PersistenceError::InvalidInput(_))
     ));
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let oversized_rows: i64 = sqlx::query_scalar(
@@ -221,7 +220,7 @@ async fn deduplication_key_reuse_with_changed_content_or_scope_is_rejected() {
     .await;
     assert!(matches!(
         changed_payload,
-        Err(AppError::Core(CoreError::Conflict(_)))
+        Err(PersistenceError::Conflict(_))
     ));
 
     let changed_scope = integration_inbox::receive(
@@ -238,10 +237,7 @@ async fn deduplication_key_reuse_with_changed_content_or_scope_is_rejected() {
         },
     )
     .await;
-    assert!(matches!(
-        changed_scope,
-        Err(AppError::Core(CoreError::Conflict(_)))
-    ));
+    assert!(matches!(changed_scope, Err(PersistenceError::Conflict(_))));
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let stored_payload: Vec<u8> =
@@ -483,7 +479,7 @@ async fn inbox_tables_fail_closed_and_enforce_scoped_immutable_envelopes() {
     .await;
     assert!(matches!(
         archived_replay,
-        Err(AppError::Core(CoreError::Conflict(_)))
+        Err(PersistenceError::Conflict(_))
     ));
 
     let mut tenant_a_tx = tenant_tx(&fixture.db, tenant_a).await;

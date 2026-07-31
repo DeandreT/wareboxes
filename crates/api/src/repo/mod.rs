@@ -9,7 +9,6 @@ pub mod employees;
 pub mod expected_receiving;
 pub mod idempotency;
 pub mod inbound_receipt;
-pub mod integration_inbox;
 pub mod inventory;
 mod inventory_allocation;
 mod inventory_hold;

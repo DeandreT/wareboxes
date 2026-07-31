@@ -2,11 +2,14 @@
 
 use sha2::{Digest, Sha256};
 use sqlx::Row;
-use wareboxes_core::models::Timestamp;
+use wareboxes_application::integration::{
+    IntegrationInboxReadScope, IntegrationInboxReceipt, NewIntegrationInboxReceipt,
+    ReceiveIntegrationInboxResult,
+};
 use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
 
 use crate::db::{bind_tenant_context, Db};
-use crate::error::{AppError, AppResult};
+use crate::{PersistenceError, PersistenceResult};
 
 const MAX_SOURCE_KEY_CHARACTERS: usize = 200;
 const MAX_DEDUPLICATION_KEY_CHARACTERS: usize = 500;
@@ -14,78 +17,39 @@ const MAX_CONTENT_TYPE_CHARACTERS: usize = 255;
 const MAX_REQUEST_ID_CHARACTERS: usize = 128;
 const MAX_RAW_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
-pub struct NewIntegrationInboxReceipt<'a> {
-    pub tenant_id: TenantId,
-    pub inventory_owner_id: Option<InventoryOwnerId>,
-    pub facility_id: Option<FacilityId>,
-    pub source_key: &'a str,
-    pub deduplication_key: &'a str,
-    pub content_type: &'a str,
-    pub raw_payload: &'a [u8],
-    pub request_id: Option<&'a str>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IntegrationInboxReadScope {
-    pub tenant_id: TenantId,
-    pub inventory_owner_id: Option<InventoryOwnerId>,
-    pub facility_id: Option<FacilityId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IntegrationInboxReceipt {
-    pub id: i64,
-    pub tenant_id: TenantId,
-    pub inventory_owner_id: Option<InventoryOwnerId>,
-    pub facility_id: Option<FacilityId>,
-    pub received_at: Timestamp,
-    pub source_key: String,
-    pub deduplication_key: String,
-    pub content_type: String,
-    pub raw_payload: Vec<u8>,
-    pub payload_sha256: Vec<u8>,
-    pub request_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReceiveIntegrationInboxResult {
-    pub receipt: IntegrationInboxReceipt,
-    pub replayed: bool,
-}
-
-fn validate_key(value: &str, label: &str, maximum_characters: usize) -> AppResult<()> {
+fn validate_key(value: &str, label: &str, maximum_characters: usize) -> PersistenceResult<()> {
     if value.is_empty() || value.trim() != value {
-        return Err(AppError::bad_request(format!(
+        return Err(PersistenceError::invalid_input(format!(
             "{label} must be non-blank and cannot have surrounding whitespace"
         )));
     }
     if value.chars().count() > maximum_characters {
-        return Err(AppError::bad_request(format!(
+        return Err(PersistenceError::invalid_input(format!(
             "{label} cannot exceed {maximum_characters} characters"
         )));
     }
     Ok(())
 }
 
-fn map_optional_owner(row: &sqlx::postgres::PgRow) -> AppResult<Option<InventoryOwnerId>> {
+fn map_optional_owner(row: &sqlx::postgres::PgRow) -> PersistenceResult<Option<InventoryOwnerId>> {
     row.try_get::<Option<i64>, _>("inventory_owner_id")?
         .map(InventoryOwnerId::new)
         .transpose()
-        .map_err(|error| AppError::internal(error.to_string()))
+        .map_err(|error| PersistenceError::invalid_data(error.to_string()))
 }
 
-fn map_optional_facility(row: &sqlx::postgres::PgRow) -> AppResult<Option<FacilityId>> {
+fn map_optional_facility(row: &sqlx::postgres::PgRow) -> PersistenceResult<Option<FacilityId>> {
     row.try_get::<Option<i64>, _>("facility_id")?
         .map(FacilityId::new)
         .transpose()
-        .map_err(|error| AppError::internal(error.to_string()))
+        .map_err(|error| PersistenceError::invalid_data(error.to_string()))
 }
 
-fn map_receipt(row: &sqlx::postgres::PgRow) -> AppResult<IntegrationInboxReceipt> {
+fn map_receipt(row: &sqlx::postgres::PgRow) -> PersistenceResult<IntegrationInboxReceipt> {
     Ok(IntegrationInboxReceipt {
         id: row.try_get("id")?,
         tenant_id: TenantId::new(row.try_get("tenant_id")?)
-            .map_err(|error| AppError::internal(error.to_string()))?,
+            .map_err(|error| PersistenceError::invalid_data(error.to_string()))?,
         inventory_owner_id: map_optional_owner(row)?,
         facility_id: map_optional_facility(row)?,
         received_at: row.try_get("received_at")?,
@@ -120,7 +84,7 @@ fn same_envelope(
 pub async fn receive(
     db: &Db,
     receipt: &NewIntegrationInboxReceipt<'_>,
-) -> AppResult<ReceiveIntegrationInboxResult> {
+) -> PersistenceResult<ReceiveIntegrationInboxResult> {
     validate_key(
         receipt.source_key,
         "integration source key",
@@ -144,7 +108,7 @@ pub async fn receive(
         )?;
     }
     if receipt.raw_payload.len() > MAX_RAW_PAYLOAD_BYTES {
-        return Err(AppError::bad_request(format!(
+        return Err(PersistenceError::invalid_input(format!(
             "integration raw payload cannot exceed {MAX_RAW_PAYLOAD_BYTES} bytes"
         )));
     }
@@ -188,7 +152,7 @@ pub async fn receive(
             receipt,
             &payload_sha256,
         ) {
-            return Err(AppError::conflict(
+            return Err(PersistenceError::conflict(
                 "integration deduplication key was reused with a different payload or scope",
             ));
         }
@@ -196,12 +160,12 @@ pub async fn receive(
         let existing = get_in_transaction(&mut tx, receipt.tenant_id, receipt_id)
             .await?
             .ok_or_else(|| {
-                AppError::conflict(
+                PersistenceError::conflict(
                     "the original integration receipt is no longer available for replay",
                 )
             })?;
         if existing.raw_payload != receipt.raw_payload {
-            return Err(AppError::conflict(
+            return Err(PersistenceError::conflict(
                 "integration deduplication key payload hash collision detected",
             ));
         }
@@ -266,7 +230,7 @@ async fn get_in_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     receipt_id: i64,
-) -> AppResult<Option<IntegrationInboxReceipt>> {
+) -> PersistenceResult<Option<IntegrationInboxReceipt>> {
     let sql = format!(
         "SELECT {RECEIPT_COLUMNS} FROM integration_inbox_receipts WHERE tenant_id = $1 AND id = $2"
     );
@@ -284,9 +248,9 @@ pub async fn get(
     db: &Db,
     scope: IntegrationInboxReadScope,
     receipt_id: i64,
-) -> AppResult<Option<IntegrationInboxReceipt>> {
+) -> PersistenceResult<Option<IntegrationInboxReceipt>> {
     if receipt_id <= 0 {
-        return Err(AppError::bad_request(
+        return Err(PersistenceError::invalid_input(
             "integration inbox receipt ID must be positive",
         ));
     }
