@@ -91,18 +91,6 @@ pub struct SelectTenantRequest {
     pub tenant_id: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AccessScopeResource {
-    pub id: i64,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct AccessScopeWorkspace {
-    pub facilities: Vec<AccessScopeResource>,
-    pub inventory_owners: Vec<AccessScopeResource>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Validate, Default)]
 pub struct UserSettings {
     pub light_mode: bool,

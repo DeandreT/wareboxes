@@ -9,7 +9,8 @@ use wareboxes_api_contract::v1::{
     InventoryStatusTransitionResponse, OpaqueCursor, PlaceInventoryHoldRequest,
     PlaceInventoryHoldResponse, ReleaseInventoryHoldResponse,
 };
-use wareboxes_core::dto::{AccessScopeWorkspace, OrderPage, WebSessionContext};
+use wareboxes_api_contract::web::access::AccessScopeWorkspace;
+use wareboxes_core::dto::{OrderPage, WebSessionContext};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiError {

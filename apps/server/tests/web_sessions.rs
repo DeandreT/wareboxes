@@ -6,9 +6,8 @@ use common::*;
 use tower::ServiceExt;
 use wareboxes_api::config::SecurityConfig;
 use wareboxes_api::{routes, state::AppState};
-use wareboxes_core::dto::{
-    AccessScopeWorkspace, LoginRequest, SelectTenantRequest, WebSessionContext,
-};
+use wareboxes_api_contract::web::access::AccessScopeWorkspace;
+use wareboxes_core::dto::{LoginRequest, SelectTenantRequest, WebSessionContext};
 
 const HOST: &str = "wareboxes.test";
 const ORIGIN: &str = "http://wareboxes.test";

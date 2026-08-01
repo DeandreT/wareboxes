@@ -1,7 +1,6 @@
 use leptos::prelude::*;
-use wareboxes_core::dto::{
-    AccessScopeResource, AccessScopeWorkspace, CancelOrder, NewOrder, OrderPage, OrderUpdate,
-};
+use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
+use wareboxes_core::dto::{CancelOrder, NewOrder, OrderPage, OrderUpdate};
 use wareboxes_core::models::{Order, OrderStatus};
 
 use crate::api;
