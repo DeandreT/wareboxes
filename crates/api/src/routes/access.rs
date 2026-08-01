@@ -1,6 +1,6 @@
 use axum::extract::State;
 use axum::Json;
-use wareboxes_core::dto::{AccessScopeResource, AccessScopeWorkspace};
+use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 
 use crate::auth::CurrentTenant;
 use crate::error::AppResult;

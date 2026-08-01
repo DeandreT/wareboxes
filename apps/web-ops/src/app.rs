@@ -7,9 +7,8 @@ use leptos_router::{
 use wareboxes_api_contract::v1::{
     InventoryBalanceResponse, InventoryHoldResponse, InventoryHoldStatus, OpaqueCursor,
 };
-use wareboxes_core::dto::{
-    AccessScopeResource, AccessScopeWorkspace, OrderPage, WebSessionContext,
-};
+use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
+use wareboxes_core::dto::{OrderPage, WebSessionContext};
 use wareboxes_core::models::{Item, Load, Location};
 
 use crate::administration::{AdministrationArea, AdministrationWorkspace};

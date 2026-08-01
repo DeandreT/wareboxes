@@ -1,5 +1,6 @@
 use leptos::prelude::*;
-use wareboxes_core::dto::{AccessScopeResource, AccessScopeWorkspace, AddLoad};
+use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
+use wareboxes_core::dto::AddLoad;
 use wareboxes_core::models::{Item, Load, LoadStatus, LoadType, Location};
 
 use crate::api;
