@@ -1,7 +1,6 @@
 use sqlx::Row;
-use wareboxes_application::CommandContext;
+use wareboxes_application::{ApplicationError, CommandContext};
 use wareboxes_core::models::{TenantAccess, Timestamp, WorkTaskStatus, WorkTaskType};
-use wareboxes_core::CoreError;
 use wareboxes_domain::TenantId;
 
 use crate::db::{bind_tenant_context, now_iso, Db};
@@ -93,8 +92,10 @@ impl TaskDimensions {
 
 fn concealed_task_reference(error: AppError) -> AppError {
     match error {
-        AppError::Core(
-            CoreError::BadRequest(_) | CoreError::NotFound(_) | CoreError::Forbidden,
+        AppError::Application(
+            ApplicationError::InvalidRequest(_)
+            | ApplicationError::NotFound(_)
+            | ApplicationError::Forbidden,
         ) => AppError::not_found("task references"),
         other => other,
     }

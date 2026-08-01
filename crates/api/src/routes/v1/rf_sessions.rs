@@ -4,7 +4,7 @@ use wareboxes_api_contract::v1::{
     CreateRfSessionRequest, CreateRfSessionResponse, RfSessionOwnerScope, RfSessionSiteScope,
     RfSessionTenant,
 };
-use wareboxes_core::{CoreError, FieldError};
+use wareboxes_application::{ApplicationError, ValidationIssue};
 
 use super::error::{V1Error, V1Result};
 use crate::auth;
@@ -76,12 +76,12 @@ fn validate_request(body: &CreateRfSessionRequest) -> V1Result<()> {
     if violations.is_empty() {
         Ok(())
     } else {
-        Err(AppError::Core(CoreError::Validation(violations)).into())
+        Err(AppError::Application(ApplicationError::Validation(violations)).into())
     }
 }
 
 fn validate_credential_field(
-    violations: &mut Vec<FieldError>,
+    violations: &mut Vec<ValidationIssue>,
     field: &str,
     value: &str,
     max_length: usize,
@@ -97,7 +97,7 @@ fn validate_credential_field(
     };
 
     if let Some(message) = message {
-        violations.push(FieldError {
+        violations.push(ValidationIssue {
             field: field.to_owned(),
             message,
         });

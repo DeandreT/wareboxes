@@ -6,7 +6,7 @@ use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use validator::Validate;
-use wareboxes_core::field_errors;
+use wareboxes_application::{ApplicationError, ValidationIssue};
 
 use crate::error::{AppError, AppResult};
 use crate::request_context::{assign_request_id, REQUEST_ID_HEADER};
@@ -33,9 +33,23 @@ pub mod v1;
 /// Validate a request body the same way the Zod `safeParse` did, surfacing
 /// per-field messages.
 pub fn validate<T: Validate>(value: &T) -> AppResult<()> {
-    value
-        .validate()
-        .map_err(|e| AppError::Core(wareboxes_core::CoreError::Validation(field_errors(&e))))
+    value.validate().map_err(|errors| {
+        let mut issues = Vec::new();
+        for (field, errors) in errors.field_errors() {
+            for error in errors {
+                let message = error
+                    .message
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| format!("Invalid {field}"));
+                issues.push(ValidationIssue {
+                    field: field.to_owned(),
+                    message,
+                });
+            }
+        }
+        AppError::Application(ApplicationError::Validation(issues))
+    })
 }
 
 pub fn app(state: AppState) -> Router {

@@ -118,7 +118,10 @@ async fn inventory_owner_delete_blocked_by_open_orders() {
     let err = repo::inventory_owners::delete_inventory_owner(&db, tenant_id, acc)
         .await
         .unwrap_err();
-    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
+    assert!(matches!(
+        err,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
 
     // Ship the order, then deletion is allowed.
     let oid = repo::orders::get_orders(&db, tenant_id).await.unwrap()[0].id;

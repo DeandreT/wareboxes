@@ -575,7 +575,7 @@ async fn competing_status_changes_serialize_without_overdraw_or_deadlock() {
             Ok(result) => accepted.push(result),
             Err(error) => {
                 assert!(
-                    matches!(error, AppError::Core(CoreError::Conflict(_))),
+                    matches!(error, AppError::Application(ApplicationError::Conflict(_))),
                     "unexpected competing status-change error: {error:?}"
                 );
                 rejected += 1;

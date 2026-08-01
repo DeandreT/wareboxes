@@ -86,13 +86,19 @@ async fn selected_tenant_context_requires_an_active_membership() {
     let error = CurrentTenant::from_request_parts(&mut cross_tenant_parts, &state)
         .await
         .unwrap_err();
-    assert!(matches!(error, AppError::Core(CoreError::Forbidden)));
+    assert!(matches!(
+        error,
+        AppError::Application(ApplicationError::Forbidden)
+    ));
 
     let mut missing_parts = request_parts(&token, None);
     let error = CurrentTenant::from_request_parts(&mut missing_parts, &state)
         .await
         .unwrap_err();
-    assert!(matches!(error, AppError::Core(CoreError::BadRequest(_))));
+    assert!(matches!(
+        error,
+        AppError::Application(ApplicationError::InvalidRequest(_))
+    ));
 
     sqlx::query("UPDATE tenants SET status = 'suspended' WHERE id = $1")
         .bind(member_tenant.tenant_id.get())
@@ -103,7 +109,10 @@ async fn selected_tenant_context_requires_an_active_membership() {
     let error = CurrentTenant::from_request_parts(&mut suspended_parts, &state)
         .await
         .unwrap_err();
-    assert!(matches!(error, AppError::Core(CoreError::Forbidden)));
+    assert!(matches!(
+        error,
+        AppError::Application(ApplicationError::Forbidden)
+    ));
 }
 
 #[tokio::test]
@@ -580,7 +589,7 @@ async fn item_catalog_is_tenant_scoped_for_repositories_and_routes() {
             .unwrap_err();
     assert!(matches!(
         cross_pack_link,
-        AppError::Core(CoreError::BadRequest(_))
+        AppError::Application(ApplicationError::InvalidRequest(_))
     ));
 
     let mut membership_tx = tenant_tx(&db, second_tenant).await;

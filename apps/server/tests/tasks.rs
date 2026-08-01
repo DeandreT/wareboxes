@@ -280,7 +280,10 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, AppError::Core(CoreError::BadRequest(_))));
+    assert!(matches!(
+        err,
+        AppError::Application(ApplicationError::InvalidRequest(_))
+    ));
 
     let pack_link = repo::items::add_item_pack_link(
         &db,
@@ -327,7 +330,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     assert!(started.lease_expires_at.is_some());
     assert!(matches!(
         repo::tasks::complete_task(&db, tenant_id, cycle_a, assignee.id, None).await,
-        Err(AppError::Core(CoreError::Conflict(_)))
+        Err(AppError::Application(ApplicationError::Conflict(_)))
     ));
     assert!(repo::tasks::cancel_task(&db, tenant_id, cycle_a, user.id)
         .await
@@ -352,7 +355,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
             None,
         )
         .await,
-        Err(AppError::Core(CoreError::Conflict(_)))
+        Err(AppError::Application(ApplicationError::Conflict(_)))
     ));
     assert!(matches!(
         repo::tasks::record_task_progress(
@@ -368,7 +371,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
             None,
         )
         .await,
-        Err(AppError::Core(CoreError::Conflict(_)))
+        Err(AppError::Application(ApplicationError::Conflict(_)))
     ));
     assert!(
         repo::tasks::abort_task(&db, tenant_id, break_task, assignee.id)
@@ -411,7 +414,7 @@ async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
     assert_eq!(restarted.id, break_task);
     assert!(matches!(
         repo::tasks::complete_task(&db, tenant_id, break_task, assignee.id, Some(1)).await,
-        Err(AppError::Core(CoreError::Conflict(_)))
+        Err(AppError::Application(ApplicationError::Conflict(_)))
     ));
     assert!(
         repo::tasks::abort_task(&db, tenant_id, break_task, assignee.id)
@@ -578,11 +581,11 @@ async fn cancelled_order_unpack_task_is_facility_scoped_and_deduplicated() {
             Some("first two unpacked"),
         )
         .await,
-        Err(AppError::Core(CoreError::Conflict(_)))
+        Err(AppError::Application(ApplicationError::Conflict(_)))
     ));
     assert!(matches!(
         repo::tasks::complete_task(db, tenant_id, tasks[0].id, user.id, None).await,
-        Err(AppError::Core(CoreError::Conflict(_)))
+        Err(AppError::Application(ApplicationError::Conflict(_)))
     ));
     let mut tx = tenant_tx(db, tenant_id).await;
     let line: (i64, i64, i64, String) = sqlx::query_as(

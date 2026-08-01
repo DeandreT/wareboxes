@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use sqlx::{Postgres, Row, Transaction};
+use wareboxes_application::ApplicationError;
 use wareboxes_core::models::{Facility, InventoryOwner};
-use wareboxes_core::CoreError;
 use wareboxes_domain::{OwnerScope, SiteScope, TenantId};
 
 use crate::db::{begin_tenant_transaction, now_iso, Db};
@@ -385,7 +385,7 @@ pub async fn delete_inventory_owner(db: &Db, tenant_id: TenantId, id: i64) -> Ap
     .fetch_one(&mut *tx)
     .await?;
     if open > 0 {
-        return Err(AppError::Core(CoreError::Conflict(
+        return Err(AppError::Application(ApplicationError::Conflict(
             "Inventory owner has orders that are not shipped or cancelled".into(),
         )));
     }

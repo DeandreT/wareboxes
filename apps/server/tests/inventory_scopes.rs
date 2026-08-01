@@ -436,7 +436,7 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
     .unwrap_err();
     assert!(matches!(
         cross_facility,
-        AppError::Core(CoreError::Conflict(_))
+        AppError::Application(ApplicationError::Conflict(_))
     ));
     assert_eq!(
         repo::inventory::get_transactions(&db, tenant_id)

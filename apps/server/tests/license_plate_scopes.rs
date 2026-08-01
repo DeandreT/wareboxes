@@ -261,7 +261,7 @@ async fn license_plates_are_owner_and_facility_scoped() {
     .unwrap_err();
     assert!(matches!(
         cross_facility_assignment,
-        AppError::Core(CoreError::Conflict(_))
+        AppError::Application(ApplicationError::Conflict(_))
     ));
     tx.rollback().await.unwrap();
 
@@ -278,7 +278,7 @@ async fn license_plates_are_owner_and_facility_scoped() {
     .unwrap_err();
     assert!(matches!(
         cross_facility_move,
-        AppError::Core(CoreError::Conflict(_))
+        AppError::Application(ApplicationError::Conflict(_))
     ));
     assert!(repo::inventory::get_transactions(&db, tenant_id)
         .await

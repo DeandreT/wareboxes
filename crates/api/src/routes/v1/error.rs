@@ -4,7 +4,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use wareboxes_api_contract::v1::{ErrorReason, ErrorResponse, FieldViolation};
 use wareboxes_api_contract::web::{ErrorCode as WebErrorCode, ErrorResponse as WebErrorResponse};
-use wareboxes_core::CoreError;
+use wareboxes_application::ApplicationError;
 
 use crate::error::AppError;
 use crate::request_context::{current_request_id_or_new, REQUEST_ID_HEADER};
@@ -46,30 +46,30 @@ impl V1Error {
 impl From<AppError> for V1Error {
     fn from(error: AppError) -> Self {
         match error {
-            AppError::Core(core) => Self::from(core),
+            AppError::Application(error) => Self::from(error),
             AppError::Db(error) => Self::internal(format!("database error: {error}")),
             AppError::Other(error) => Self::internal(error.to_string()),
         }
     }
 }
 
-impl From<CoreError> for V1Error {
-    fn from(error: CoreError) -> Self {
+impl From<ApplicationError> for V1Error {
+    fn from(error: ApplicationError) -> Self {
         match error {
-            CoreError::Unauthorized => Self::simple(
+            ApplicationError::Unauthorized => Self::simple(
                 StatusCode::UNAUTHORIZED,
                 ErrorReason::Unauthorized,
                 "unauthorized",
             ),
-            CoreError::Forbidden => {
+            ApplicationError::Forbidden => {
                 Self::simple(StatusCode::FORBIDDEN, ErrorReason::Forbidden, "forbidden")
             }
-            CoreError::NotFound(resource) => Self::simple(
+            ApplicationError::NotFound(resource) => Self::simple(
                 StatusCode::NOT_FOUND,
                 ErrorReason::NotFound,
                 format!("not found: {resource}"),
             ),
-            CoreError::Validation(details) => Self {
+            ApplicationError::Validation(details) => Self {
                 status: StatusCode::UNPROCESSABLE_ENTITY,
                 reason: ErrorReason::ValidationFailed,
                 message: "validation failed".into(),
@@ -81,25 +81,25 @@ impl From<CoreError> for V1Error {
                     })
                     .collect(),
             },
-            CoreError::Conflict(message) => {
+            ApplicationError::Conflict(message) => {
                 Self::simple(StatusCode::CONFLICT, ErrorReason::Conflict, message)
             }
-            CoreError::IdempotencyKeyReused => Self::simple(
+            ApplicationError::IdempotencyKeyReused => Self::simple(
                 StatusCode::CONFLICT,
                 ErrorReason::IdempotencyKeyReused,
                 "idempotency key was already used with a different request",
             ),
-            CoreError::IdempotencyKeyRequired => Self::simple(
+            ApplicationError::IdempotencyKeyRequired => Self::simple(
                 StatusCode::BAD_REQUEST,
                 ErrorReason::IdempotencyKeyRequired,
                 "idempotency key is required",
             ),
-            CoreError::BadRequest(message) => Self::simple(
+            ApplicationError::InvalidRequest(message) => Self::simple(
                 StatusCode::BAD_REQUEST,
                 ErrorReason::InvalidRequest,
                 message,
             ),
-            CoreError::Internal(message) => Self::internal(message),
+            ApplicationError::Internal(message) => Self::internal(message),
         }
     }
 }

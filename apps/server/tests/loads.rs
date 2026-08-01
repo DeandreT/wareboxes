@@ -171,7 +171,10 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
+    assert!(matches!(
+        err,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
 
     let err = receive_expected_line(
         &db,
@@ -192,7 +195,10 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
+    assert!(matches!(
+        err,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
 
     assert!(repo::loads::update_load(
         &db,
@@ -356,7 +362,10 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
+    assert!(matches!(
+        err,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
 
     assert!(repo::loads::update_load(
         &db,
@@ -1094,10 +1103,16 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
+    assert!(matches!(
+        err,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
 
     let err = repo::license_plates::set_license_plate_deleted(&db, tenant_id, plate.id, true)
         .await
         .unwrap_err();
-    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
+    assert!(matches!(
+        err,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
 }

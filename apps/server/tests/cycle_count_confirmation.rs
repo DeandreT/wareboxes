@@ -350,7 +350,7 @@ async fn adjustment_is_atomic_replay_safe_and_reconciled() {
     .unwrap_err();
     assert!(matches!(
         changed_retry,
-        AppError::Core(CoreError::IdempotencyKeyReused)
+        AppError::Application(ApplicationError::IdempotencyKeyReused)
     ));
 
     assert_eq!(count.balance_quantities().await, (7, 0));
@@ -448,7 +448,10 @@ async fn count_below_reserved_quantity_rolls_back_every_effect() {
     .await
     .unwrap_err();
 
-    assert!(matches!(error, AppError::Core(CoreError::Conflict(_))));
+    assert!(matches!(
+        error,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
     assert_eq!(count.balance_quantities().await, (10, 6));
     assert_eq!(count.task_status().await, "in_progress");
     assert_eq!(count.effect_counts().await, (0, 0, 0, 0, 0, 0, 0));
@@ -484,7 +487,10 @@ async fn count_below_held_quantity_rolls_back_until_full_release() {
     .await
     .unwrap_err();
 
-    assert!(matches!(error, AppError::Core(CoreError::Conflict(_))));
+    assert!(matches!(
+        error,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
     assert_eq!(count.balance_quantities().await, (10, 0));
     assert_eq!(count.held_quantity().await, 6);
     assert_eq!(count.task_status().await, "in_progress");
@@ -557,7 +563,10 @@ async fn concurrent_different_keys_have_one_winner() {
 
     let winner = match (first, second) {
         (Ok(winner), Err(error)) | (Err(error), Ok(winner)) => {
-            assert!(matches!(error, AppError::Core(CoreError::Conflict(_))));
+            assert!(matches!(
+                error,
+                AppError::Application(ApplicationError::Conflict(_))
+            ));
             winner
         }
         outcomes => panic!("expected one successful confirmation and one conflict: {outcomes:?}"),

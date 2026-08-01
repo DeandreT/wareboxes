@@ -89,7 +89,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     .unwrap_err();
     assert!(matches!(
         missing_key,
-        AppError::Core(CoreError::IdempotencyKeyRequired)
+        AppError::Application(ApplicationError::IdempotencyKeyRequired)
     ));
     assert!(repo::inventory::get_transactions(&db, tenant_id)
         .await
@@ -147,7 +147,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     .unwrap_err();
     assert!(matches!(
         changed_retry,
-        AppError::Core(CoreError::IdempotencyKeyReused)
+        AppError::Application(ApplicationError::IdempotencyKeyReused)
     ));
 
     let peer = auth::register_user(&db, "wms-peer@test.com", "supersecret", None, None)
@@ -178,7 +178,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     .unwrap_err();
     assert!(matches!(
         cross_actor_retry,
-        AppError::Core(CoreError::IdempotencyKeyReused)
+        AppError::Application(ApplicationError::IdempotencyKeyReused)
     ));
 
     repo::inventory::move_inventory(
@@ -230,7 +230,10 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
+    assert!(matches!(
+        err,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
 
     repo::orders::add_order(&db, tenant_id, &new_order("INV-1", inventory_owner))
         .await
@@ -266,7 +269,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     .unwrap_err();
     assert!(matches!(
         changed_reservation_retry,
-        AppError::Core(CoreError::IdempotencyKeyReused)
+        AppError::Application(ApplicationError::IdempotencyKeyReused)
     ));
     let _allocation = repo::inventory::allocate_inventory(
         &db,
@@ -318,7 +321,10 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
+    assert!(matches!(
+        err,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
 
     let cancel_command = repo::inventory::CancelInventoryReservationCommand {
         reservation_id: reservation.reservation_id,
@@ -359,7 +365,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
     .unwrap_err();
     assert!(matches!(
         changed_cancel_retry,
-        AppError::Core(CoreError::IdempotencyKeyReused)
+        AppError::Application(ApplicationError::IdempotencyKeyReused)
     ));
     let balances = repo::inventory::get_balances(&db, tenant_id, false)
         .await
@@ -774,7 +780,7 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
     .unwrap_err();
     assert!(matches!(
         owner_mismatch,
-        AppError::Core(CoreError::Conflict(_))
+        AppError::Application(ApplicationError::Conflict(_))
     ));
 }
 
@@ -1290,7 +1296,10 @@ async fn inventory_rejects_mixed_lot_or_expiration_in_same_location() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
+    assert!(matches!(
+        err,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
 
     let err = repo::inventory::receive_inventory(
         &db,
@@ -1307,7 +1316,10 @@ async fn inventory_rejects_mixed_lot_or_expiration_in_same_location() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
+    assert!(matches!(
+        err,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
 
     repo::inventory::receive_inventory(
         &db,
@@ -1341,5 +1353,8 @@ async fn inventory_rejects_mixed_lot_or_expiration_in_same_location() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, AppError::Core(CoreError::Conflict(_))));
+    assert!(matches!(
+        err,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
 }

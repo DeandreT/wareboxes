@@ -15,7 +15,7 @@ use wareboxes_api_contract::v1::{
 use wareboxes_core::models::{
     InventoryRelocationClaim, InventoryRelocationClaimReleaseReason as CoreReleaseReason,
     InventoryRelocationClaimWork as CoreClaimWork, InventoryRelocationConfirmation,
-    InventoryRelocationConfirmationResult as CoreResult,
+    InventoryRelocationConfirmationResult as ConfirmationResult,
     InventoryRelocationWorkflow as CoreWorkflow, InventoryStatus,
 };
 
@@ -306,7 +306,7 @@ fn map_confirmation(
         confirmed_by: confirmation.confirmed_by,
         confirmed_at: confirmation.confirmed_at.to_rfc3339(),
         result: match confirmation.result {
-            CoreResult::LooseBalance {
+            ConfirmationResult::LooseBalance {
                 source_inventory_balance_id,
                 destination_inventory_balance_id,
                 item_batch_id,
@@ -323,7 +323,7 @@ fn map_confirmation(
                 uom,
                 quantity,
             },
-            CoreResult::LicensePlate {
+            ConfirmationResult::LicensePlate {
                 license_plate_id,
                 license_plate_barcode,
                 moved_balance_count,

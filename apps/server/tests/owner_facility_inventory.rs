@@ -87,7 +87,7 @@ async fn assert_assignment_retirement_rejected(
 
 fn assert_inactive_pair_conflict(error: AppError) {
     match error {
-        AppError::Core(CoreError::Conflict(message)) => {
+        AppError::Application(ApplicationError::Conflict(message)) => {
             assert!(
                 message.contains("not active") && message.contains("facility"),
                 "unexpected conflict: {message}"

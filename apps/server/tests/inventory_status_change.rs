@@ -296,7 +296,7 @@ async fn status_changes_round_trip_replay_and_preserve_committed_inventory() {
     .unwrap_err();
     assert!(matches!(
         over_capacity,
-        AppError::Core(CoreError::Conflict(_))
+        AppError::Application(ApplicationError::Conflict(_))
     ));
     assert_eq!(
         status_change_effects(&fixture.db, tenant_id).await,
@@ -379,7 +379,7 @@ async fn status_changes_round_trip_replay_and_preserve_committed_inventory() {
     .unwrap_err();
     assert!(matches!(
         changed_request,
-        AppError::Core(CoreError::IdempotencyKeyReused)
+        AppError::Application(ApplicationError::IdempotencyKeyReused)
     ));
     assert_eq!(
         status_change_effects(&fixture.db, tenant_id).await,

@@ -12,7 +12,11 @@ fn assert_boundary_rejection(error: AppError) {
     assert!(
         matches!(
             error,
-            AppError::Core(CoreError::Conflict(_) | CoreError::Forbidden | CoreError::NotFound(_))
+            AppError::Application(
+                ApplicationError::Conflict(_)
+                    | ApplicationError::Forbidden
+                    | ApplicationError::NotFound(_)
+            )
         ),
         "unexpected inventory boundary error: {error:?}"
     );
@@ -201,7 +205,7 @@ async fn soft_reservations_and_concrete_allocations_preserve_demand_and_stock() 
     .unwrap_err();
     assert!(matches!(
         changed_retry,
-        AppError::Core(CoreError::IdempotencyKeyReused)
+        AppError::Application(ApplicationError::IdempotencyKeyReused)
     ));
     assert!(repo::inventory::get_balances(&fixture.db, tenant_id, false)
         .await

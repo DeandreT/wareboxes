@@ -9,3 +9,4 @@ description = "Wareboxes application commands, queries, and workflow contracts"
 [dependencies]
 wareboxes-domain = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
