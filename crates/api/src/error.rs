@@ -3,14 +3,14 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use sqlx::error::ErrorKind;
 use wareboxes_api_contract::web::{ErrorCode, ErrorResponse, FieldError};
-use wareboxes_core::CoreError;
+use wareboxes_application::ApplicationError;
 
 use crate::request_context::{current_request_id_or_new, REQUEST_ID_HEADER};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error(transparent)]
-    Core(#[from] CoreError),
+    Application(#[from] ApplicationError),
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
@@ -39,86 +39,90 @@ impl From<wareboxes_persistence_postgres::PersistenceError> for AppError {
 
 impl AppError {
     pub fn unauthorized() -> Self {
-        Self::Core(CoreError::Unauthorized)
+        Self::Application(ApplicationError::Unauthorized)
     }
 
     pub fn forbidden() -> Self {
-        Self::Core(CoreError::Forbidden)
+        Self::Application(ApplicationError::Forbidden)
     }
 
     pub fn not_found(resource: impl Into<String>) -> Self {
-        Self::Core(CoreError::NotFound(resource.into()))
+        Self::Application(ApplicationError::NotFound(resource.into()))
     }
 
     pub fn bad_request(message: impl Into<String>) -> Self {
-        Self::Core(CoreError::BadRequest(message.into()))
+        Self::Application(ApplicationError::InvalidRequest(message.into()))
     }
 
     pub fn conflict(message: impl Into<String>) -> Self {
-        Self::Core(CoreError::Conflict(message.into()))
+        Self::Application(ApplicationError::Conflict(message.into()))
     }
 
     pub fn idempotency_key_reused() -> Self {
-        Self::Core(CoreError::IdempotencyKeyReused)
+        Self::Application(ApplicationError::IdempotencyKeyReused)
     }
 
     pub fn idempotency_key_required() -> Self {
-        Self::Core(CoreError::IdempotencyKeyRequired)
+        Self::Application(ApplicationError::IdempotencyKeyRequired)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::Core(CoreError::Internal(message.into()))
+        Self::Application(ApplicationError::Internal(message.into()))
     }
 
-    fn public_core(&self) -> CoreError {
+    fn public_application_error(&self) -> ApplicationError {
         match self {
-            AppError::Core(CoreError::Internal(_)) => CoreError::Internal("internal error".into()),
-            AppError::Core(core) => core.clone(),
-            AppError::Db(sqlx::Error::RowNotFound) => CoreError::NotFound("resource".to_string()),
+            AppError::Application(ApplicationError::Internal(_)) => {
+                ApplicationError::Internal("internal error".into())
+            }
+            AppError::Application(error) => error.clone(),
+            AppError::Db(sqlx::Error::RowNotFound) => {
+                ApplicationError::NotFound("resource".to_string())
+            }
             AppError::Db(sqlx::Error::Database(e)) if e.code().as_deref() == Some("55000") => {
-                CoreError::Conflict("operation violates current resource state".into())
+                ApplicationError::Conflict("operation violates current resource state".into())
             }
             AppError::Db(sqlx::Error::Database(e)) => match e.kind() {
                 ErrorKind::UniqueViolation => {
-                    CoreError::Conflict("unique constraint violated".into())
+                    ApplicationError::Conflict("unique constraint violated".into())
                 }
                 ErrorKind::ForeignKeyViolation => {
-                    CoreError::BadRequest("referenced resource does not exist".into())
+                    ApplicationError::InvalidRequest("referenced resource does not exist".into())
                 }
                 ErrorKind::NotNullViolation => {
-                    CoreError::BadRequest("required value is missing".into())
+                    ApplicationError::InvalidRequest("required value is missing".into())
                 }
                 ErrorKind::CheckViolation => {
-                    CoreError::BadRequest("constraint check failed".into())
+                    ApplicationError::InvalidRequest("constraint check failed".into())
                 }
-                _ => CoreError::Internal("database error".into()),
+                _ => ApplicationError::Internal("database error".into()),
             },
-            AppError::Db(_) => CoreError::Internal("database error".into()),
-            AppError::Other(_) => CoreError::Internal("internal error".into()),
+            AppError::Db(_) => ApplicationError::Internal("database error".into()),
+            AppError::Other(_) => ApplicationError::Internal("internal error".into()),
         }
     }
 
     fn public_contract(&self) -> (StatusCode, ErrorCode, String, Vec<FieldError>) {
-        match self.public_core() {
-            CoreError::Unauthorized => (
+        match self.public_application_error() {
+            ApplicationError::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
                 ErrorCode::Unauthorized,
                 "unauthorized".into(),
                 Vec::new(),
             ),
-            CoreError::Forbidden => (
+            ApplicationError::Forbidden => (
                 StatusCode::FORBIDDEN,
                 ErrorCode::Forbidden,
                 "forbidden".into(),
                 Vec::new(),
             ),
-            CoreError::NotFound(resource) => (
+            ApplicationError::NotFound(resource) => (
                 StatusCode::NOT_FOUND,
                 ErrorCode::NotFound,
                 format!("not found: {resource}"),
                 Vec::new(),
             ),
-            CoreError::Validation(details) => (
+            ApplicationError::Validation(details) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 ErrorCode::ValidationFailed,
                 "validation failed".into(),
@@ -130,31 +134,31 @@ impl AppError {
                     })
                     .collect(),
             ),
-            CoreError::Conflict(message) => (
+            ApplicationError::Conflict(message) => (
                 StatusCode::CONFLICT,
                 ErrorCode::Conflict,
                 message,
                 Vec::new(),
             ),
-            CoreError::IdempotencyKeyReused => (
+            ApplicationError::IdempotencyKeyReused => (
                 StatusCode::CONFLICT,
                 ErrorCode::IdempotencyKeyReused,
                 "idempotency key was already used with a different request".into(),
                 Vec::new(),
             ),
-            CoreError::IdempotencyKeyRequired => (
+            ApplicationError::IdempotencyKeyRequired => (
                 StatusCode::BAD_REQUEST,
                 ErrorCode::IdempotencyKeyRequired,
                 "idempotency key is required".into(),
                 Vec::new(),
             ),
-            CoreError::BadRequest(message) => (
+            ApplicationError::InvalidRequest(message) => (
                 StatusCode::BAD_REQUEST,
                 ErrorCode::InvalidRequest,
                 message,
                 Vec::new(),
             ),
-            CoreError::Internal(_) => (
+            ApplicationError::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ErrorCode::InternalError,
                 "internal error".into(),

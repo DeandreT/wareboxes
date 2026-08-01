@@ -9,12 +9,12 @@ use url::Url;
 
 pub use wareboxes_api::error::AppError;
 pub use wareboxes_api::{auth, db, permissions, repo};
+pub use wareboxes_application::ApplicationError;
 pub use wareboxes_core::dto::{NewOrder, OrderUpdate};
 pub use wareboxes_core::models::{
     InventoryTransactionType, LoadLineStatus, LoadStatus, LoadType, OrderStatus,
     WorkTaskProgressAction, WorkTaskStatus, WorkTaskType,
 };
-pub use wareboxes_core::CoreError;
 pub use wareboxes_domain::TenantId;
 
 const DEFAULT_TEST_DATABASE_URL: &str =

@@ -2,6 +2,7 @@
 
 pub mod authorization;
 mod context;
+mod error;
 pub mod identity;
 pub mod integration;
 pub mod inventory;
@@ -9,3 +10,4 @@ pub mod outbox;
 pub mod topology;
 
 pub use context::CommandContext;
+pub use error::{ApplicationError, ApplicationResult, ValidationIssue};

@@ -357,7 +357,8 @@ fn assert_conflict(error: AppError, expected: &str) {
     assert!(
         matches!(
             error,
-            AppError::Core(CoreError::Conflict(ref message)) if message.contains(expected)
+            AppError::Application(ApplicationError::Conflict(ref message))
+                if message.contains(expected)
         ),
         "unexpected concurrency rejection: {error:?}"
     );

@@ -22,7 +22,11 @@ fn assert_boundary_rejection(error: AppError) {
     assert!(
         matches!(
             error,
-            AppError::Core(CoreError::Conflict(_) | CoreError::Forbidden | CoreError::NotFound(_))
+            AppError::Application(
+                ApplicationError::Conflict(_)
+                    | ApplicationError::Forbidden
+                    | ApplicationError::NotFound(_)
+            )
         ),
         "unexpected inventory hold boundary error: {error:?}"
     );
@@ -204,7 +208,7 @@ async fn quantity_holds_cap_stock_are_replay_safe_and_release_fully() {
     .unwrap_err();
     assert!(matches!(
         changed_retry,
-        AppError::Core(CoreError::IdempotencyKeyReused)
+        AppError::Application(ApplicationError::IdempotencyKeyReused)
     ));
     assert_eq!(
         balance_quantities(&fixture.db, tenant_id, balance_a.balance_id).await,

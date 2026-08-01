@@ -290,7 +290,10 @@ async fn public_registration_is_disabled_by_default() {
     };
 
     let result = wareboxes_api::routes::auth::register(State(state), Json(request)).await;
-    assert!(matches!(result, Err(AppError::Core(CoreError::Forbidden))));
+    assert!(matches!(
+        result,
+        Err(AppError::Application(ApplicationError::Forbidden))
+    ));
 
     auth::register_user(&db, "login@test.com", "supersecret", None, None)
         .await

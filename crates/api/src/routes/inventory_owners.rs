@@ -41,7 +41,7 @@ pub async fn add(
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
     if !user.tenant.owner_scope.all_inventory_owners {
-        return Err(wareboxes_core::CoreError::Forbidden.into());
+        return Err(wareboxes_application::ApplicationError::Forbidden.into());
     }
     let id = repo::inventory_owners::add_inventory_owner(
         &state.db,

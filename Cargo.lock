@@ -5552,6 +5552,7 @@ name = "wareboxes-application"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "thiserror 1.0.69",
  "wareboxes-domain",
 ]
 
@@ -5566,7 +5567,6 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
  "validator",
  "wareboxes-domain",
 ]

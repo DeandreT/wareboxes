@@ -475,7 +475,7 @@ async fn license_plate_moves_serialize_allocations_and_holds() {
     let allocation_id = allocation_result.unwrap().allocation_id;
     let expected_location_id = match move_result {
         Ok(_) => source_location_id,
-        Err(AppError::Core(CoreError::Conflict(message))) => {
+        Err(AppError::Application(ApplicationError::Conflict(message))) => {
             assert!(message.contains("reserved or held inventory"));
             destination_location_id
         }
@@ -582,7 +582,7 @@ async fn license_plate_moves_serialize_allocations_and_holds() {
     .unwrap_err();
     assert!(matches!(
         held_move,
-        AppError::Core(CoreError::Conflict(ref message))
+        AppError::Application(ApplicationError::Conflict(ref message))
             if message.contains("reserved or held inventory")
     ));
 
@@ -681,7 +681,7 @@ async fn license_plate_moves_serialize_allocations_and_holds() {
     let hold_id = hold_result.unwrap().hold_id;
     let expected_location_id = match move_result {
         Ok(_) => destination_location_id,
-        Err(AppError::Core(CoreError::Conflict(message))) => {
+        Err(AppError::Application(ApplicationError::Conflict(message))) => {
             assert!(message.contains("reserved or held inventory"));
             source_location_id
         }
