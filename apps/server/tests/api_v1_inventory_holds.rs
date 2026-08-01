@@ -11,6 +11,10 @@ use wareboxes_api_contract::v1::{
     PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, ReleaseInventoryHoldRequest,
     ReleaseInventoryHoldResponse, IDEMPOTENCY_KEY_HEADER,
 };
+use wareboxes_application::inventory::{
+    InventoryHoldPageFilter, InventoryHoldReason as ApplicationInventoryHoldReason,
+    InventoryHoldStatus as ApplicationInventoryHoldStatus,
+};
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::{InventoryHoldReason as CoreHoldReason, TenantAccess};
 use wareboxes_domain::{FacilityId, InventoryOwnerId, OwnerScope, SiteScope};
@@ -182,48 +186,65 @@ async fn hold_repository_page_is_newest_first_scoped_and_display_ready() {
         inventory_owner_ids: vec![InventoryOwnerId::new(allowed_owner).unwrap()],
     };
 
-    let first_page = repo::inventory_hold_v1::get_inventory_hold_page(
+    let first_page = wareboxes_persistence_postgres::inventory_holds::get_inventory_hold_page(
         &fixture.db,
-        &restricted,
-        None,
-        1,
-        Some("active"),
+        restricted.tenant_id,
+        &restricted.site_scope,
+        &restricted.owner_scope,
+        InventoryHoldPageFilter {
+            before_id: None,
+            limit: 1,
+            status: Some(ApplicationInventoryHoldStatus::Active),
+        },
     )
     .await
     .unwrap();
-    assert_eq!(first_page.rows.len(), 1);
-    assert_eq!(first_page.rows[0].id, newest_active);
+    assert_eq!(first_page.items.len(), 1);
+    assert_eq!(first_page.items[0].id, newest_active);
     assert_eq!(first_page.next_before_id, Some(newest_active));
     assert_eq!(
-        first_page.rows[0].inventory_owner_name,
+        first_page.items[0].inventory_owner_name,
         "V1 Hold Allowed Owner"
     );
     assert_eq!(
-        first_page.rows[0].facility_name.as_deref(),
+        first_page.items[0].facility_name.as_deref(),
         Some("V1 Hold Allowed DC")
     );
     assert_eq!(
-        first_page.rows[0].location_barcode.as_deref(),
+        first_page.items[0].location_barcode.as_deref(),
         Some("V1-HOLD-ALLOWED")
     );
     assert_eq!(
-        first_page.rows[0].item_description.as_deref(),
+        first_page.items[0].item_description.as_deref(),
         Some("V1 Hold Allowed Item")
     );
-    assert_eq!(first_page.rows[0].license_plate_barcode, None);
+    assert_eq!(first_page.items[0].license_plate_barcode, None);
+    assert_eq!(
+        first_page.items[0].reason,
+        ApplicationInventoryHoldReason::QualityInspection
+    );
+    assert_eq!(
+        first_page.items[0].status,
+        ApplicationInventoryHoldStatus::Active
+    );
+    assert_eq!(first_page.items[0].quantity.get(), 4);
 
-    let second_page = repo::inventory_hold_v1::get_inventory_hold_page(
+    let second_page = wareboxes_persistence_postgres::inventory_holds::get_inventory_hold_page(
         &fixture.db,
-        &restricted,
-        first_page.next_before_id,
-        1,
-        Some("active"),
+        restricted.tenant_id,
+        &restricted.site_scope,
+        &restricted.owner_scope,
+        InventoryHoldPageFilter {
+            before_id: first_page.next_before_id,
+            limit: 1,
+            status: Some(ApplicationInventoryHoldStatus::Active),
+        },
     )
     .await
     .unwrap();
     assert_eq!(
         second_page
-            .rows
+            .items
             .iter()
             .map(|hold| hold.id)
             .collect::<Vec<_>>(),
@@ -231,24 +252,28 @@ async fn hold_repository_page_is_newest_first_scoped_and_display_ready() {
     );
     assert_eq!(second_page.next_before_id, None);
     assert!(!first_page
-        .rows
+        .items
         .iter()
-        .chain(&second_page.rows)
+        .chain(&second_page.items)
         .any(|hold| hold.id == denied_hold));
 
-    let released = repo::inventory_hold_v1::get_inventory_hold_page(
+    let released = wareboxes_persistence_postgres::inventory_holds::get_inventory_hold_page(
         &fixture.db,
-        &restricted,
-        None,
-        10,
-        Some("released"),
+        restricted.tenant_id,
+        &restricted.site_scope,
+        &restricted.owner_scope,
+        InventoryHoldPageFilter {
+            before_id: None,
+            limit: 10,
+            status: Some(ApplicationInventoryHoldStatus::Released),
+        },
     )
     .await
     .unwrap();
-    assert_eq!(released.rows.len(), 1);
-    assert_eq!(released.rows[0].id, released_hold);
-    assert!(released.rows[0].released_at.is_some());
-    assert_eq!(released.rows[0].released_by_user_id, Some(user.id));
+    assert_eq!(released.items.len(), 1);
+    assert_eq!(released.items[0].id, released_hold);
+    assert!(released.items[0].released_at.is_some());
+    assert_eq!(released.items[0].released_by_user_id, Some(user.id));
 }
 
 #[tokio::test]

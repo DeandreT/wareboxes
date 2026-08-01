@@ -5,6 +5,11 @@ use wareboxes_api_contract::v1::{
     InventoryHoldResponse, InventoryHoldStatus, OpaqueCursor, PlaceInventoryHoldRequest,
     PlaceInventoryHoldResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
 };
+use wareboxes_application::inventory::{
+    InventoryBalanceStatus as ApplicationInventoryBalanceStatus, InventoryHoldPageFilter,
+    InventoryHoldReadModel, InventoryHoldReason as ApplicationInventoryHoldReason,
+    InventoryHoldStatus as ApplicationInventoryHoldStatus,
+};
 use wareboxes_core::models::InventoryHoldReason as CoreHoldReason;
 
 use super::error::{V1Error, V1Result};
@@ -26,20 +31,20 @@ pub async fn list(
 ) -> V1Result<Json<InventoryHoldPage>> {
     user.require_permission(&state.db, PERMISSION).await?;
     let before_id = query.cursor.as_ref().map(decode_cursor).transpose()?;
-    let status = query.status.map(map_status_value);
-    let page = repo::inventory_hold_v1::get_inventory_hold_page(
+    let page = wareboxes_persistence_postgres::inventory_holds::get_inventory_hold_page(
         &state.db,
-        &user.tenant,
-        before_id,
-        query.limit.get(),
-        status,
+        user.tenant.tenant_id,
+        &user.tenant.site_scope,
+        &user.tenant.owner_scope,
+        InventoryHoldPageFilter {
+            before_id,
+            limit: query.limit.get(),
+            status: query.status.map(map_status_filter),
+        },
     )
-    .await?;
-    let items = page
-        .rows
-        .into_iter()
-        .map(map_response)
-        .collect::<V1Result<Vec<_>>>()?;
+    .await
+    .map_err(AppError::from)?;
+    let items = page.items.into_iter().map(map_response).collect();
     let next_cursor = page.next_before_id.map(encode_cursor).transpose()?;
 
     Ok(Json(InventoryHoldPage::new(items, next_cursor)))
@@ -138,19 +143,17 @@ fn validate_optional_text(value: Option<&str>, field: &str, maximum: usize) -> V
     Ok(())
 }
 
-fn map_response(
-    row: repo::inventory_hold_v1::InventoryHoldPageRow,
-) -> V1Result<InventoryHoldResponse> {
-    Ok(InventoryHoldResponse {
+fn map_response(row: InventoryHoldReadModel) -> InventoryHoldResponse {
+    InventoryHoldResponse {
         id: row.id,
         created_at: row.created_at.to_rfc3339(),
         created_by_user_id: row.created_by_user_id,
         released_at: row.released_at.map(|timestamp| timestamp.to_rfc3339()),
         released_by_user_id: row.released_by_user_id,
         inventory_balance_id: row.inventory_balance_id,
-        inventory_owner_id: row.inventory_owner_id,
+        inventory_owner_id: row.inventory_owner_id.get(),
         inventory_owner_name: row.inventory_owner_name,
-        facility_id: row.facility_id,
+        facility_id: row.facility_id.get(),
         facility_name: row.facility_name,
         location_id: row.location_id,
         location_barcode: row.location_barcode,
@@ -164,43 +167,42 @@ fn map_response(
         item_id: row.item_id,
         item_description: row.item_description,
         uom: row.uom,
-        inventory_status: map_inventory_status(&row.inventory_status)?,
-        quantity: row.quantity,
-        reason: map_hold_reason(&row.reason)?,
+        inventory_status: map_inventory_status(row.inventory_status),
+        quantity: row.quantity.get(),
+        reason: map_hold_reason(row.reason),
         note: row.note,
         reference_type: row.reference_type,
         reference_id: row.reference_id,
-        status: map_hold_status(&row.status)?,
-    })
-}
-
-fn map_inventory_status(value: &str) -> V1Result<InventoryBalanceStatus> {
-    match value {
-        "available" => Ok(InventoryBalanceStatus::Available),
-        "hold" => Ok(InventoryBalanceStatus::Hold),
-        "damaged" => Ok(InventoryBalanceStatus::Damaged),
-        "quarantine" => Ok(InventoryBalanceStatus::Quarantine),
-        _ => Err(V1Error::internal("unknown inventory balance status")),
+        status: map_hold_status(row.status),
     }
 }
 
-fn map_hold_reason(value: &str) -> V1Result<InventoryHoldReason> {
+fn map_inventory_status(value: ApplicationInventoryBalanceStatus) -> InventoryBalanceStatus {
     match value {
-        "quality_inspection" => Ok(InventoryHoldReason::QualityInspection),
-        "damage_suspected" => Ok(InventoryHoldReason::DamageSuspected),
-        "inventory_discrepancy" => Ok(InventoryHoldReason::InventoryDiscrepancy),
-        "regulatory" => Ok(InventoryHoldReason::Regulatory),
-        "customer_request" => Ok(InventoryHoldReason::CustomerRequest),
-        "other" => Ok(InventoryHoldReason::Other),
-        _ => Err(V1Error::internal("unknown inventory hold reason")),
+        ApplicationInventoryBalanceStatus::Available => InventoryBalanceStatus::Available,
+        ApplicationInventoryBalanceStatus::Hold => InventoryBalanceStatus::Hold,
+        ApplicationInventoryBalanceStatus::Damaged => InventoryBalanceStatus::Damaged,
+        ApplicationInventoryBalanceStatus::Quarantine => InventoryBalanceStatus::Quarantine,
     }
 }
 
-fn map_hold_status(value: &str) -> V1Result<InventoryHoldStatus> {
+fn map_hold_reason(value: ApplicationInventoryHoldReason) -> InventoryHoldReason {
     match value {
-        "active" => Ok(InventoryHoldStatus::Active),
-        "released" => Ok(InventoryHoldStatus::Released),
-        _ => Err(V1Error::internal("unknown inventory hold status")),
+        ApplicationInventoryHoldReason::QualityInspection => InventoryHoldReason::QualityInspection,
+        ApplicationInventoryHoldReason::DamageSuspected => InventoryHoldReason::DamageSuspected,
+        ApplicationInventoryHoldReason::InventoryDiscrepancy => {
+            InventoryHoldReason::InventoryDiscrepancy
+        }
+        ApplicationInventoryHoldReason::Regulatory => InventoryHoldReason::Regulatory,
+        ApplicationInventoryHoldReason::CustomerRequest => InventoryHoldReason::CustomerRequest,
+        ApplicationInventoryHoldReason::Other => InventoryHoldReason::Other,
+    }
+}
+
+fn map_hold_status(value: ApplicationInventoryHoldStatus) -> InventoryHoldStatus {
+    match value {
+        ApplicationInventoryHoldStatus::Active => InventoryHoldStatus::Active,
+        ApplicationInventoryHoldStatus::Released => InventoryHoldStatus::Released,
     }
 }
 
@@ -215,10 +217,10 @@ fn map_reason(reason: InventoryHoldReason) -> CoreHoldReason {
     }
 }
 
-fn map_status_value(status: InventoryHoldStatus) -> &'static str {
+fn map_status_filter(status: InventoryHoldStatus) -> ApplicationInventoryHoldStatus {
     match status {
-        InventoryHoldStatus::Active => "active",
-        InventoryHoldStatus::Released => "released",
+        InventoryHoldStatus::Active => ApplicationInventoryHoldStatus::Active,
+        InventoryHoldStatus::Released => ApplicationInventoryHoldStatus::Released,
     }
 }
 
