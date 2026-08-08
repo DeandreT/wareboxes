@@ -2569,6 +2569,22 @@ BEGIN
        OR packed_qty <> session_row.packed_qty
        OR open_count <> session_row.open_carton_count
        OR closed_count <> session_row.closed_carton_count
+       OR EXISTS (
+           SELECT 1
+           FROM public.outbound_effective_demand demand
+           WHERE demand.tenant_id = session_row.tenant_id
+             AND demand.inventory_owner_id = session_row.inventory_owner_id
+             AND demand.order_id = session_row.order_id
+             AND demand.effective_qty <> (
+                 SELECT COALESCE(SUM(allocation.planned_qty), 0)::BIGINT
+                 FROM public.packing_session_allocations allocation
+                 WHERE allocation.tenant_id = session_row.tenant_id
+                   AND allocation.inventory_owner_id = session_row.inventory_owner_id
+                   AND allocation.facility_id = session_row.facility_id
+                   AND allocation.packing_session_id = session_row.id
+                   AND allocation.order_item_id = demand.order_item_id
+             )
+       )
        OR (session_row.state = 'open' AND (
             order_status IS DISTINCT FROM 'packing'
             OR order_revision IS DISTINCT FROM session_row.revision
@@ -3110,6 +3126,49 @@ BEGIN
        OR content_count <> shipment_row.content_count
        OR packed_qty <> shipment_row.shipped_qty
        OR closed_carton_count <> shipment_row.carton_count
+       OR EXISTS (
+           SELECT 1
+           FROM public.outbound_effective_demand demand
+           WHERE demand.tenant_id = shipment_row.tenant_id
+             AND demand.inventory_owner_id = shipment_row.inventory_owner_id
+             AND demand.order_id = shipment_row.order_id
+             AND demand.effective_qty <> (
+                 SELECT COALESCE(SUM(content.packed_qty), 0)::BIGINT
+                 FROM public.carton_contents content
+                 WHERE content.tenant_id = shipment_row.tenant_id
+                   AND content.inventory_owner_id = shipment_row.inventory_owner_id
+                   AND content.facility_id = shipment_row.facility_id
+                   AND content.packing_session_id = shipment_row.packing_session_id
+                   AND content.order_item_id = demand.order_item_id
+             )
+       )
+       OR EXISTS (
+           SELECT 1
+           FROM public.inventory_reservations reservation
+           WHERE reservation.tenant_id = shipment_row.tenant_id
+             AND reservation.inventory_owner_id = shipment_row.inventory_owner_id
+             AND reservation.facility_id = shipment_row.facility_id
+             AND reservation.order_id = shipment_row.order_id
+             AND reservation.qty <> (
+                 SELECT COALESCE(SUM(content.packed_qty), 0)::BIGINT
+                 FROM public.carton_contents content
+                 WHERE content.tenant_id = reservation.tenant_id
+                   AND content.inventory_owner_id = reservation.inventory_owner_id
+                   AND content.facility_id = reservation.facility_id
+                   AND content.packing_session_id = shipment_row.packing_session_id
+                   AND content.order_item_id = reservation.order_item_id
+                   AND content.reservation_id = reservation.id
+             ) + (
+                 SELECT COALESCE(SUM(disposition.accepted_short_qty), 0)::BIGINT
+                 FROM public.pick_short_ship_dispositions disposition
+                 WHERE disposition.tenant_id = reservation.tenant_id
+                   AND disposition.inventory_owner_id = reservation.inventory_owner_id
+                   AND disposition.facility_id = reservation.facility_id
+                   AND disposition.order_id = reservation.order_id
+                   AND disposition.order_item_id = reservation.order_item_id
+                   AND disposition.reservation_id = reservation.id
+             )
+       )
        OR EXISTS (
            SELECT 1 FROM public.cartons carton
            WHERE carton.tenant_id = shipment_row.tenant_id
@@ -4144,6 +4203,43 @@ BEGIN
             USING ERRCODE = '55000';
     END IF;
 
+    IF NEW.status = 'resolved'
+       AND NEW.resolution IS NULL
+       AND NEW.recovery_terminal_qty = NEW.short_qty
+       AND NEW.reallocated_qty = NEW.short_qty
+       AND NEW.remaining_to_allocate_qty = 0
+       AND NEW.accepted_short_qty = 0
+    THEN
+        NEW.resolution := 'recovered';
+    END IF;
+
+    IF NEW.resolution IS DISTINCT FROM OLD.resolution
+       OR NEW.accepted_short_qty IS DISTINCT FROM OLD.accepted_short_qty
+    THEN
+        IF NOT (
+            OLD.status = 'awaiting_inventory'
+            AND OLD.resolution IS NULL
+            AND OLD.accepted_short_qty = 0
+            AND NEW.status = 'resolved'
+            AND NEW.resolution = 'short_ship'
+            AND NEW.accepted_short_qty = OLD.remaining_to_allocate_qty
+            AND NEW.reallocated_qty = OLD.reallocated_qty
+            AND NEW.recovery_terminal_qty = OLD.recovery_terminal_qty
+            AND NEW.remaining_to_allocate_qty = OLD.remaining_to_allocate_qty
+        ) AND NOT (
+            NEW.status = 'resolved'
+            AND NEW.resolution = 'recovered'
+            AND NEW.accepted_short_qty = 0
+            AND NEW.reallocated_qty = NEW.short_qty
+            AND NEW.recovery_terminal_qty = NEW.short_qty
+            AND NEW.remaining_to_allocate_qty = 0
+        )
+        THEN
+            RAISE EXCEPTION 'invalid pick shortage resolution transition'
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+
     IF NEW.revision <> OLD.revision + 1
        OR NEW.modified_at <= OLD.modified_at
        OR NEW.reallocated_qty < OLD.reallocated_qty
@@ -4152,6 +4248,176 @@ BEGIN
     THEN
         RAISE EXCEPTION 'invalid pick shortage lifecycle revision'
             USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: reject_pick_short_ship_disposition_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_pick_short_ship_disposition_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'pick short-ship dispositions are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: validate_pick_short_ship_disposition(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_pick_short_ship_disposition() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    shortage_row public.pick_shortages%ROWTYPE;
+    order_status TEXT;
+    order_revision BIGINT;
+    original_order_qty BIGINT;
+    original_line_qty BIGINT;
+    reservation_qty BIGINT;
+    previously_accepted_order_qty BIGINT;
+    previously_accepted_line_qty BIGINT;
+    previously_accepted_reservation_qty BIGINT;
+BEGIN
+    SELECT order_header.status, order_header.revision
+    INTO order_status, order_revision
+    FROM public.orders order_header
+    WHERE order_header.tenant_id = NEW.tenant_id
+      AND order_header.inventory_owner_id = NEW.inventory_owner_id
+      AND order_header.id = NEW.order_id
+      AND order_header.deleted IS NULL
+    FOR UPDATE OF order_header;
+
+    IF order_status IS DISTINCT FROM 'processing'
+       OR order_revision NOT IN (
+           NEW.expected_order_revision,
+           NEW.resulting_order_revision
+       )
+    THEN
+        RAISE EXCEPTION 'short-ship disposition order revision is stale or not processing'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT * INTO shortage_row
+    FROM public.pick_shortages shortage
+    WHERE shortage.tenant_id = NEW.tenant_id
+      AND shortage.inventory_owner_id = NEW.inventory_owner_id
+      AND shortage.facility_id = NEW.facility_id
+      AND shortage.order_release_id = NEW.order_release_id
+      AND shortage.order_id = NEW.order_id
+      AND shortage.order_item_id = NEW.order_item_id
+      AND shortage.reservation_id = NEW.reservation_id
+      AND shortage.id = NEW.pick_shortage_id
+    FOR UPDATE OF shortage;
+
+    IF NOT FOUND
+       OR shortage_row.revision NOT IN (
+           NEW.expected_shortage_revision,
+           NEW.resulting_shortage_revision
+       )
+       OR shortage_row.reallocated_qty <> shortage_row.recovery_terminal_qty
+       OR shortage_row.remaining_to_allocate_qty <= 0
+       OR shortage_row.accepted_short_qty NOT IN (0, NEW.accepted_short_qty)
+       OR shortage_row.remaining_to_allocate_qty <> NEW.accepted_short_qty
+       OR NOT (
+           (shortage_row.revision = NEW.expected_shortage_revision
+            AND shortage_row.status = 'awaiting_inventory'
+            AND shortage_row.resolution IS NULL
+            AND shortage_row.accepted_short_qty = 0
+            AND shortage_row.resolved_by_user_id IS NULL
+            AND shortage_row.resolved_at IS NULL)
+           OR
+           (shortage_row.revision = NEW.resulting_shortage_revision
+            AND shortage_row.status = 'resolved'
+            AND shortage_row.resolution = 'short_ship'
+            AND shortage_row.accepted_short_qty = NEW.accepted_short_qty
+            AND shortage_row.resolved_by_user_id = NEW.disposed_by_user_id
+            AND shortage_row.resolved_at = NEW.disposed_at)
+       )
+       OR NOT EXISTS (
+           SELECT 1
+           FROM public.inventory_holds discrepancy_hold
+           WHERE discrepancy_hold.tenant_id = shortage_row.tenant_id
+             AND discrepancy_hold.inventory_owner_id = shortage_row.inventory_owner_id
+             AND discrepancy_hold.facility_id = shortage_row.facility_id
+             AND discrepancy_hold.id = shortage_row.inventory_hold_id
+             AND discrepancy_hold.qty = shortage_row.short_qty
+             AND discrepancy_hold.reason_code = 'inventory_discrepancy'
+             AND discrepancy_hold.reference_type = 'pick_shortage_source'
+             AND discrepancy_hold.reference_id = shortage_row.pick_task_content_id
+             AND discrepancy_hold.status = 'active'
+             AND discrepancy_hold.deleted IS NULL
+       )
+    THEN
+        RAISE EXCEPTION 'short-ship disposition does not match an unresolved shortage and active discrepancy hold'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT COALESCE(SUM(order_line.qty), 0)::BIGINT
+    INTO original_order_qty
+    FROM public.order_items order_line
+    WHERE order_line.tenant_id = NEW.tenant_id
+      AND order_line.inventory_owner_id = NEW.inventory_owner_id
+      AND order_line.order_id = NEW.order_id
+      AND order_line.deleted IS NULL;
+
+    SELECT order_line.qty, reservation.qty
+    INTO original_line_qty, reservation_qty
+    FROM public.order_items order_line
+    INNER JOIN public.inventory_reservations reservation
+      ON reservation.tenant_id = order_line.tenant_id
+     AND reservation.inventory_owner_id = order_line.inventory_owner_id
+     AND reservation.order_id = order_line.order_id
+     AND reservation.order_item_id = order_line.id
+    WHERE order_line.tenant_id = NEW.tenant_id
+      AND order_line.inventory_owner_id = NEW.inventory_owner_id
+      AND order_line.order_id = NEW.order_id
+      AND order_line.id = NEW.order_item_id
+      AND order_line.deleted IS NULL
+      AND reservation.facility_id = NEW.facility_id
+      AND reservation.id = NEW.reservation_id
+      AND reservation.status = 'active'
+      AND reservation.deleted IS NULL;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'short-ship disposition requires active scoped demand'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT COALESCE(SUM(disposition.accepted_short_qty), 0)::BIGINT,
+           COALESCE(SUM(disposition.accepted_short_qty) FILTER (
+               WHERE disposition.order_item_id = NEW.order_item_id
+           ), 0)::BIGINT,
+           COALESCE(SUM(disposition.accepted_short_qty) FILTER (
+               WHERE disposition.reservation_id = NEW.reservation_id
+           ), 0)::BIGINT
+    INTO previously_accepted_order_qty,
+         previously_accepted_line_qty,
+         previously_accepted_reservation_qty
+    FROM public.pick_short_ship_dispositions disposition
+    WHERE disposition.tenant_id = NEW.tenant_id
+      AND disposition.inventory_owner_id = NEW.inventory_owner_id
+      AND disposition.order_id = NEW.order_id;
+
+    IF original_order_qty - previously_accepted_order_qty - NEW.accepted_short_qty <= 0 THEN
+        RAISE EXCEPTION 'short-ship disposition cannot reduce order effective demand to zero'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF original_line_qty - previously_accepted_line_qty - NEW.accepted_short_qty < 0
+       OR reservation_qty - previously_accepted_reservation_qty - NEW.accepted_short_qty < 0
+    THEN
+        RAISE EXCEPTION 'accepted short quantity exceeds original line or reservation demand'
+            USING ERRCODE = '23514';
     END IF;
 
     RETURN NEW;
@@ -4188,6 +4454,8 @@ BEGIN
     IF NEW.revision <> 1
        OR NEW.modified_at IS DISTINCT FROM NEW.reported_at
        OR NEW.status <> 'awaiting_inventory'
+       OR NEW.resolution IS NOT NULL
+       OR NEW.accepted_short_qty <> 0
        OR NEW.reallocated_qty <> 0
        OR NEW.recovery_terminal_qty <> 0
        OR NEW.remaining_to_allocate_qty <> NEW.short_qty
@@ -4463,13 +4731,23 @@ CREATE FUNCTION public.require_pick_shortage_consistency() RETURNS trigger
 DECLARE
     shortage_id BIGINT;
     shortage_row RECORD;
+    disposition_count BIGINT;
+    disposition_accepted_short_qty BIGINT;
+    disposition_resulting_shortage_revision BIGINT;
+    disposition_resulting_order_revision BIGINT;
+    disposition_disposed_by_user_id BIGINT;
+    disposition_disposed_at TIMESTAMPTZ;
     reallocated_qty BIGINT;
     recovery_terminal_qty BIGINT;
     expected_status TEXT;
+    expected_resolution TEXT;
+    expected_accepted_short_qty BIGINT;
     order_revision BIGINT;
 BEGIN
     IF TG_TABLE_NAME = 'pick_shortages' THEN
         shortage_id := NEW.id;
+    ELSIF TG_TABLE_NAME = 'pick_short_ship_dispositions' THEN
+        shortage_id := NEW.pick_shortage_id;
     ELSIF TG_TABLE_NAME = 'pick_tasks' THEN
         SELECT snapshot.pick_shortage_id
         INTO shortage_id
@@ -4525,18 +4803,57 @@ BEGIN
       AND snapshot.pick_shortage_id = shortage_row.id
       AND snapshot.source_kind = 'shortage_recovery';
 
-    IF reallocated_qty = recovery_terminal_qty
+    SELECT COUNT(*),
+           MAX(disposition.accepted_short_qty),
+           MAX(disposition.resulting_shortage_revision),
+           MAX(disposition.resulting_order_revision),
+           MAX(disposition.disposed_by_user_id),
+           MAX(disposition.disposed_at)
+    INTO disposition_count,
+         disposition_accepted_short_qty,
+         disposition_resulting_shortage_revision,
+         disposition_resulting_order_revision,
+         disposition_disposed_by_user_id,
+         disposition_disposed_at
+    FROM public.pick_short_ship_dispositions disposition
+    WHERE disposition.tenant_id = shortage_row.tenant_id
+      AND disposition.inventory_owner_id = shortage_row.inventory_owner_id
+      AND disposition.facility_id = shortage_row.facility_id
+      AND disposition.order_release_id = shortage_row.order_release_id
+      AND disposition.order_id = shortage_row.order_id
+      AND disposition.order_item_id = shortage_row.order_item_id
+      AND disposition.reservation_id = shortage_row.reservation_id
+      AND disposition.pick_shortage_id = shortage_row.id;
+
+    IF disposition_count = 1
+       AND reallocated_qty = recovery_terminal_qty
+       AND reallocated_qty < shortage_row.short_qty
+       AND disposition_accepted_short_qty = shortage_row.short_qty - reallocated_qty
+    THEN
+        expected_status := 'resolved';
+        expected_resolution := 'short_ship';
+        expected_accepted_short_qty := disposition_accepted_short_qty;
+    ELSIF disposition_count = 0
+       AND reallocated_qty = recovery_terminal_qty
        AND reallocated_qty < shortage_row.short_qty
     THEN
         expected_status := 'awaiting_inventory';
-    ELSIF recovery_terminal_qty < reallocated_qty
+        expected_resolution := NULL;
+        expected_accepted_short_qty := 0;
+    ELSIF disposition_count = 0
+          AND recovery_terminal_qty < reallocated_qty
           AND reallocated_qty <= shortage_row.short_qty
     THEN
         expected_status := 'recovery_in_progress';
-    ELSIF recovery_terminal_qty = shortage_row.short_qty
+        expected_resolution := NULL;
+        expected_accepted_short_qty := 0;
+    ELSIF disposition_count = 0
+          AND recovery_terminal_qty = shortage_row.short_qty
           AND reallocated_qty = shortage_row.short_qty
     THEN
         expected_status := 'resolved';
+        expected_resolution := 'recovered';
+        expected_accepted_short_qty := 0;
     ELSE
         RAISE EXCEPTION 'pick shortage recovery work does not conserve the shortage quantity'
             USING ERRCODE = '23514';
@@ -4553,7 +4870,15 @@ BEGIN
        OR shortage_row.recovery_terminal_qty <> recovery_terminal_qty
        OR shortage_row.remaining_to_allocate_qty <> shortage_row.short_qty - reallocated_qty
        OR shortage_row.status <> expected_status
+       OR shortage_row.resolution IS DISTINCT FROM expected_resolution
+       OR shortage_row.accepted_short_qty <> expected_accepted_short_qty
        OR order_revision < shortage_row.report_resulting_order_revision
+       OR (expected_resolution = 'short_ship' AND (
+            shortage_row.revision <> disposition_resulting_shortage_revision
+            OR shortage_row.resolved_by_user_id <> disposition_disposed_by_user_id
+            OR shortage_row.resolved_at <> disposition_disposed_at
+            OR order_revision < disposition_resulting_order_revision
+       ))
        OR NOT EXISTS (
            SELECT 1
            FROM public.pick_tasks task
@@ -4579,6 +4904,10 @@ BEGIN
              AND discrepancy_hold.id = shortage_row.inventory_hold_id
              AND discrepancy_hold.qty = shortage_row.short_qty
              AND discrepancy_hold.reason_code = 'inventory_discrepancy'
+             AND discrepancy_hold.reference_type = 'pick_shortage_source'
+             AND discrepancy_hold.reference_id = shortage_row.pick_task_content_id
+             AND discrepancy_hold.status = 'active'
+             AND discrepancy_hold.deleted IS NULL
        )
        OR (shortage_row.picked_qty > 0 AND NOT EXISTS (
            SELECT 1 FROM public.pick_confirmations confirmation
@@ -4593,12 +4922,22 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    IF TG_TABLE_NAME = 'pick_shortages'
-       AND TG_OP = 'INSERT'
-       AND order_revision <> shortage_row.report_resulting_order_revision
-    THEN
-        RAISE EXCEPTION 'pick shortage report did not advance the order revision exactly once'
-            USING ERRCODE = '23514';
+    IF TG_TABLE_NAME = 'pick_shortages' THEN
+        IF TG_OP = 'INSERT'
+           AND order_revision <> shortage_row.report_resulting_order_revision
+        THEN
+            RAISE EXCEPTION 'pick shortage report did not advance the order revision exactly once'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+
+    IF TG_TABLE_NAME = 'pick_short_ship_dispositions' THEN
+        IF shortage_row.revision <> NEW.resulting_shortage_revision
+           OR order_revision <> NEW.resulting_order_revision
+        THEN
+            RAISE EXCEPTION 'short-ship disposition did not advance shortage and order revisions exactly once'
+                USING ERRCODE = '23514';
+        END IF;
     END IF;
 
     RETURN NEW;
@@ -5558,6 +5897,79 @@ BEGIN
     IF active_demand + NEW.qty > line_qty THEN
         RAISE EXCEPTION
             'active reservations exceed order-line demand'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_fulfilled_reservation_effective_demand(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_fulfilled_reservation_effective_demand() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    packed_qty BIGINT;
+    accepted_short_qty BIGINT;
+BEGIN
+    IF NEW.status <> 'fulfilled' THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT COALESCE(SUM(content.packed_qty), 0)::BIGINT
+    INTO packed_qty
+    FROM public.shipments shipment
+    INNER JOIN public.carton_contents content
+      ON content.tenant_id = shipment.tenant_id
+     AND content.inventory_owner_id = shipment.inventory_owner_id
+     AND content.facility_id = shipment.facility_id
+     AND content.packing_session_id = shipment.packing_session_id
+     AND content.order_release_id = shipment.order_release_id
+     AND content.order_id = shipment.order_id
+    WHERE shipment.tenant_id = NEW.tenant_id
+      AND shipment.inventory_owner_id = NEW.inventory_owner_id
+      AND shipment.facility_id = NEW.facility_id
+      AND shipment.order_id = NEW.order_id
+      AND shipment.state = 'departed'
+      AND shipment.departed_at = NEW.modified
+      AND content.order_item_id = NEW.order_item_id
+      AND content.reservation_id = NEW.id;
+
+    SELECT COALESCE(SUM(disposition.accepted_short_qty), 0)::BIGINT
+    INTO accepted_short_qty
+    FROM public.pick_short_ship_dispositions disposition
+    WHERE disposition.tenant_id = NEW.tenant_id
+      AND disposition.inventory_owner_id = NEW.inventory_owner_id
+      AND disposition.facility_id = NEW.facility_id
+      AND disposition.order_id = NEW.order_id
+      AND disposition.order_item_id = NEW.order_item_id
+      AND disposition.reservation_id = NEW.id;
+
+    IF NEW.deleted IS DISTINCT FROM NEW.modified
+       OR packed_qty + accepted_short_qty <> NEW.qty
+       OR NOT EXISTS (
+           SELECT 1
+           FROM public.orders order_header
+           INNER JOIN public.shipments shipment
+             ON shipment.tenant_id = order_header.tenant_id
+            AND shipment.inventory_owner_id = order_header.inventory_owner_id
+            AND shipment.order_id = order_header.id
+           WHERE order_header.tenant_id = NEW.tenant_id
+             AND order_header.inventory_owner_id = NEW.inventory_owner_id
+             AND order_header.id = NEW.order_id
+             AND order_header.status = 'shipped'
+             AND order_header.deleted IS NULL
+             AND shipment.facility_id = NEW.facility_id
+             AND shipment.state = 'departed'
+             AND shipment.departed_at = NEW.modified
+       )
+    THEN
+        RAISE EXCEPTION 'fulfilled reservation does not reconcile to departed packed and accepted short demand'
             USING ERRCODE = '23514';
     END IF;
 
@@ -9650,6 +10062,53 @@ ALTER TABLE public.pick_shortage_reallocation_runs ALTER COLUMN id ADD GENERATED
 
 
 --
+-- Name: pick_short_ship_dispositions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.pick_short_ship_dispositions (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    order_release_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    pick_shortage_id bigint NOT NULL,
+    accepted_short_qty bigint NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    expected_shortage_revision bigint NOT NULL,
+    resulting_shortage_revision bigint NOT NULL,
+    expected_order_revision bigint NOT NULL,
+    resulting_order_revision bigint NOT NULL,
+    disposed_by_user_id bigint NOT NULL,
+    disposed_at timestamp with time zone NOT NULL,
+    CONSTRAINT pick_short_ship_dispositions_note_check CHECK (((note IS NULL) OR ((note = btrim(note)) AND (note <> ''::text) AND (char_length(note) <= 500))) AND ((reason_code <> 'other'::text) OR (note IS NOT NULL))),
+    CONSTRAINT pick_short_ship_dispositions_order_revision_check CHECK ((expected_order_revision > 0) AND (resulting_order_revision = (expected_order_revision + 1))),
+    CONSTRAINT pick_short_ship_dispositions_qty_check CHECK (accepted_short_qty > 0),
+    CONSTRAINT pick_short_ship_dispositions_reason_check CHECK ((reason_code = ANY (ARRAY['client_authorized'::text, 'inventory_unavailable'::text, 'ship_by_commitment'::text, 'other'::text]))),
+    CONSTRAINT pick_short_ship_dispositions_shortage_revision_check CHECK ((expected_shortage_revision > 0) AND (resulting_shortage_revision = (expected_shortage_revision + 1)))
+);
+
+ALTER TABLE ONLY public.pick_short_ship_dispositions FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: pick_short_ship_dispositions_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.pick_short_ship_dispositions ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.pick_short_ship_dispositions_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: pick_shortages; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -9694,13 +10153,15 @@ CREATE TABLE public.pick_shortages (
     modified_at timestamp with time zone NOT NULL,
     revision bigint DEFAULT 1 NOT NULL,
     status text DEFAULT 'awaiting_inventory'::text NOT NULL,
+    resolution text,
+    accepted_short_qty bigint DEFAULT 0 NOT NULL,
     reallocated_qty bigint DEFAULT 0 NOT NULL,
     recovery_terminal_qty bigint DEFAULT 0 NOT NULL,
     remaining_to_allocate_qty bigint NOT NULL,
     resolved_by_user_id bigint,
     resolved_at timestamp with time zone,
     CONSTRAINT pick_shortages_inventory_status_check CHECK (inventory_status = 'available'::text),
-    CONSTRAINT pick_shortages_lifecycle_check CHECK ((((status = 'awaiting_inventory'::text) AND (recovery_terminal_qty = reallocated_qty) AND (remaining_to_allocate_qty > 0) AND (resolved_by_user_id IS NULL) AND (resolved_at IS NULL)) OR ((status = 'recovery_in_progress'::text) AND (recovery_terminal_qty < reallocated_qty) AND (resolved_by_user_id IS NULL) AND (resolved_at IS NULL)) OR ((status = 'resolved'::text) AND (recovery_terminal_qty = short_qty) AND (reallocated_qty = short_qty) AND (remaining_to_allocate_qty = 0) AND (resolved_by_user_id IS NOT NULL) AND (resolved_at IS NOT NULL)))),
+    CONSTRAINT pick_shortages_lifecycle_check CHECK ((((status = 'awaiting_inventory'::text) AND (resolution IS NULL) AND (accepted_short_qty = 0) AND (recovery_terminal_qty = reallocated_qty) AND (remaining_to_allocate_qty > 0) AND (resolved_by_user_id IS NULL) AND (resolved_at IS NULL)) OR ((status = 'recovery_in_progress'::text) AND (resolution IS NULL) AND (accepted_short_qty = 0) AND (recovery_terminal_qty < reallocated_qty) AND (resolved_by_user_id IS NULL) AND (resolved_at IS NULL)) OR ((status = 'resolved'::text) AND (resolution = 'recovered'::text) AND (accepted_short_qty = 0) AND (recovery_terminal_qty = short_qty) AND (reallocated_qty = short_qty) AND (remaining_to_allocate_qty = 0) AND (resolved_by_user_id IS NOT NULL) AND (resolved_at IS NOT NULL)) OR ((status = 'resolved'::text) AND (resolution = 'short_ship'::text) AND (accepted_short_qty = remaining_to_allocate_qty) AND (accepted_short_qty > 0) AND (recovery_terminal_qty = reallocated_qty) AND (reallocated_qty < short_qty) AND (remaining_to_allocate_qty > 0) AND (resolved_by_user_id IS NOT NULL) AND (resolved_at IS NOT NULL)))),
     CONSTRAINT pick_shortages_movement_check CHECK ((((picked_qty = 0) AND (pick_confirmation_id IS NULL) AND (inventory_transaction_id IS NULL) AND (destination_inventory_allocation_id IS NULL) AND (destination_inventory_balance_id IS NULL) AND (destination_license_plate_id IS NULL)) OR ((picked_qty > 0) AND (pick_confirmation_id IS NOT NULL) AND (inventory_transaction_id IS NOT NULL) AND (destination_inventory_allocation_id IS NOT NULL) AND (destination_inventory_balance_id IS NOT NULL) AND (destination_license_plate_id IS NOT NULL)))),
     CONSTRAINT pick_shortages_note_check CHECK (((note IS NULL) OR ((note = btrim(note)) AND (note <> ''::text) AND (char_length(note) <= 500)))),
     CONSTRAINT pick_shortages_observed_evidence_check CHECK (((observed_item_barcode IS NULL) OR ((observed_item_barcode = btrim(observed_item_barcode)) AND (observed_item_barcode <> ''::text) AND (char_length(observed_item_barcode) <= 200))) AND ((observed_lot IS NULL) OR ((observed_lot = btrim(observed_lot)) AND (observed_lot <> ''::text) AND (char_length(observed_lot) <= 200))) AND ((observed_serial IS NULL) OR ((observed_serial = btrim(observed_serial)) AND (observed_serial <> ''::text) AND (char_length(observed_serial) <= 200)))),
@@ -9709,6 +10170,7 @@ CREATE TABLE public.pick_shortages (
     CONSTRAINT pick_shortages_reason_check CHECK ((reason_code = ANY (ARRAY['inventory_missing'::text, 'insufficient_quantity'::text, 'damaged_inventory'::text, 'wrong_inventory'::text, 'lot_or_serial_mismatch'::text, 'other'::text]))),
     CONSTRAINT pick_shortages_reason_evidence_check CHECK (((picked_qty = 0) OR (observed_item_barcode IS NOT NULL)) AND ((reason_code <> 'wrong_inventory'::text) OR (observed_item_barcode IS NOT NULL)) AND ((reason_code <> 'lot_or_serial_mismatch'::text) OR (observed_lot IS NOT NULL) OR (observed_serial IS NOT NULL)) AND ((reason_code <> 'other'::text) OR (note IS NOT NULL))),
     CONSTRAINT pick_shortages_revision_check CHECK (revision > 0),
+    CONSTRAINT pick_shortages_resolution_check CHECK ((resolution IS NULL) OR (resolution = ANY (ARRAY['recovered'::text, 'short_ship'::text]))),
     CONSTRAINT pick_shortages_status_check CHECK ((status = ANY (ARRAY['awaiting_inventory'::text, 'recovery_in_progress'::text, 'resolved'::text]))),
     CONSTRAINT pick_shortages_uom_check CHECK ((uom = btrim(uom)) AND (uom <> ''::text))
 );
@@ -9728,6 +10190,31 @@ ALTER TABLE public.pick_shortages ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTI
     NO MAXVALUE
     CACHE 1
 );
+
+
+--
+-- Name: outbound_effective_demand; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.outbound_effective_demand WITH (security_invoker='true') AS
+ SELECT order_line.tenant_id,
+    order_line.inventory_owner_id,
+    order_line.order_id,
+    order_line.id AS order_item_id,
+    order_line.item_id,
+    order_line.uom,
+    order_line.qty AS original_qty,
+    COALESCE(disposition.accepted_short_qty, (0)::numeric)::bigint AS accepted_short_qty,
+    (order_line.qty - COALESCE(disposition.accepted_short_qty, (0)::numeric))::bigint AS effective_qty
+   FROM (public.order_items order_line
+     LEFT JOIN ( SELECT accepted.tenant_id,
+            accepted.inventory_owner_id,
+            accepted.order_id,
+            accepted.order_item_id,
+            sum(accepted.accepted_short_qty) AS accepted_short_qty
+           FROM public.pick_short_ship_dispositions accepted
+          GROUP BY accepted.tenant_id, accepted.inventory_owner_id, accepted.order_id, accepted.order_item_id) disposition ON (((disposition.tenant_id = order_line.tenant_id) AND (disposition.inventory_owner_id = order_line.inventory_owner_id) AND (disposition.order_id = order_line.order_id) AND (disposition.order_item_id = order_line.id))))
+  WHERE (order_line.deleted IS NULL);
 
 
 --
@@ -11772,6 +12259,26 @@ ALTER TABLE ONLY public.pick_confirmations
 
 
 --
+-- Name: pick_short_ship_dispositions pick_short_ship_dispositions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_short_ship_dispositions
+    ADD CONSTRAINT pick_short_ship_dispositions_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.pick_short_ship_dispositions
+    ADD CONSTRAINT pick_short_ship_dispositions_tenant_id_key UNIQUE (tenant_id, id);
+
+
+ALTER TABLE ONLY public.pick_short_ship_dispositions
+    ADD CONSTRAINT pick_short_ship_dispositions_scope_key UNIQUE (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, pick_shortage_id, id);
+
+
+ALTER TABLE ONLY public.pick_short_ship_dispositions
+    ADD CONSTRAINT pick_short_ship_dispositions_shortage_key UNIQUE (tenant_id, inventory_owner_id, pick_shortage_id);
+
+
+--
 -- Name: pick_shortage_reallocation_runs pick_shortage_reallocation_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13001,6 +13508,13 @@ CREATE INDEX pick_shortage_reallocation_runs_shortage_history_idx ON public.pick
 
 
 --
+-- Name: pick_short_ship_dispositions_demand_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX pick_short_ship_dispositions_demand_idx ON public.pick_short_ship_dispositions USING btree (tenant_id, inventory_owner_id, order_id, order_item_id, reservation_id, pick_shortage_id);
+
+
+--
 -- Name: order_release_allocations_shortage_recovery_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -13327,6 +13841,9 @@ CREATE TRIGGER inventory_reservations_require_active_owner_facility BEFORE INSER
 --
 
 CREATE TRIGGER inventory_reservations_validate BEFORE INSERT OR UPDATE ON public.inventory_reservations FOR EACH ROW EXECUTE FUNCTION public.validate_inventory_reservation();
+
+
+CREATE CONSTRAINT TRIGGER inventory_reservations_require_effective_demand AFTER INSERT OR UPDATE ON public.inventory_reservations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_fulfilled_reservation_effective_demand();
 
 
 --
@@ -13674,6 +14191,15 @@ CREATE TRIGGER pick_shortage_reallocation_runs_validate BEFORE INSERT ON public.
 
 
 CREATE CONSTRAINT TRIGGER pick_shortage_reallocation_runs_require_execution AFTER INSERT ON public.pick_shortage_reallocation_runs DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_pick_shortage_reallocation_consistency();
+
+
+CREATE TRIGGER pick_short_ship_dispositions_are_immutable BEFORE DELETE OR UPDATE ON public.pick_short_ship_dispositions FOR EACH ROW EXECUTE FUNCTION public.reject_pick_short_ship_disposition_mutation();
+
+
+CREATE TRIGGER pick_short_ship_dispositions_validate BEFORE INSERT ON public.pick_short_ship_dispositions FOR EACH ROW EXECUTE FUNCTION public.validate_pick_short_ship_disposition();
+
+
+CREATE CONSTRAINT TRIGGER pick_short_ship_dispositions_require_consistency AFTER INSERT ON public.pick_short_ship_dispositions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_pick_shortage_consistency();
 
 
 CREATE TRIGGER pick_shortages_guard_mutation BEFORE DELETE OR UPDATE ON public.pick_shortages FOR EACH ROW EXECUTE FUNCTION public.guard_pick_shortage_mutation();
@@ -16553,6 +17079,38 @@ ALTER TABLE ONLY public.pick_shortage_reallocation_runs
 
 
 --
+-- Name: pick_short_ship_dispositions pick_short_ship_dispositions_tenant_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_short_ship_dispositions
+    ADD CONSTRAINT pick_short_ship_dispositions_tenant_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+ALTER TABLE ONLY public.pick_short_ship_dispositions
+    ADD CONSTRAINT pick_short_ship_dispositions_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+ALTER TABLE ONLY public.pick_short_ship_dispositions
+    ADD CONSTRAINT pick_short_ship_dispositions_release_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_id, order_release_id) REFERENCES public.order_releases(tenant_id, inventory_owner_id, facility_id, order_id, id);
+
+
+ALTER TABLE ONLY public.pick_short_ship_dispositions
+    ADD CONSTRAINT pick_short_ship_dispositions_order_item_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id, order_item_id) REFERENCES public.order_items(tenant_id, inventory_owner_id, order_id, id);
+
+
+ALTER TABLE ONLY public.pick_short_ship_dispositions
+    ADD CONSTRAINT pick_short_ship_dispositions_reservation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, reservation_id) REFERENCES public.inventory_reservations(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_short_ship_dispositions
+    ADD CONSTRAINT pick_short_ship_dispositions_shortage_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, pick_shortage_id) REFERENCES public.pick_shortages(tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, id);
+
+
+ALTER TABLE ONLY public.pick_short_ship_dispositions
+    ADD CONSTRAINT pick_short_ship_dispositions_disposed_by_fkey FOREIGN KEY (tenant_id, disposed_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
 -- Name: pick_shortages pick_shortages_tenant_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -18204,6 +18762,19 @@ CREATE POLICY pick_shortage_reallocation_runs_tenant_isolation ON public.pick_sh
 
 
 --
+-- Name: pick_short_ship_dispositions; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.pick_short_ship_dispositions ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: pick_short_ship_dispositions pick_short_ship_dispositions_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY pick_short_ship_dispositions_tenant_isolation ON public.pick_short_ship_dispositions USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
 -- Name: pick_shortages; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -18753,6 +19324,12 @@ REVOKE ALL ON FUNCTION public.require_completed_pick_content() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_pick_shortage_mutation() FROM PUBLIC;
 
 
+REVOKE ALL ON FUNCTION public.reject_pick_short_ship_disposition_mutation() FROM PUBLIC;
+
+
+REVOKE ALL ON FUNCTION public.validate_pick_short_ship_disposition() FROM PUBLIC;
+
+
 --
 -- Name: FUNCTION reject_pick_shortage_reallocation_run_mutation(); Type: ACL; Schema: public; Owner: -
 --
@@ -18793,6 +19370,9 @@ REVOKE ALL ON FUNCTION public.require_pick_shortage_consistency() FROM PUBLIC;
 --
 
 REVOKE ALL ON FUNCTION public.require_pick_shortage_reallocation_consistency() FROM PUBLIC;
+
+
+REVOKE ALL ON FUNCTION public.require_fulfilled_reservation_effective_demand() FROM PUBLIC;
 
 
 --
@@ -19729,6 +20309,20 @@ GRANT USAGE ON SEQUENCE public.pick_shortage_reallocation_runs_id_seq TO warebox
 
 
 --
+-- Name: TABLE pick_short_ship_dispositions; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.pick_short_ship_dispositions TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE pick_short_ship_dispositions_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.pick_short_ship_dispositions_id_seq TO wareboxes_app;
+
+
+--
 -- Name: TABLE pick_shortages; Type: ACL; Schema: public; Owner: -
 --
 
@@ -19740,6 +20334,13 @@ GRANT SELECT,INSERT,UPDATE ON TABLE public.pick_shortages TO wareboxes_app;
 --
 
 GRANT USAGE ON SEQUENCE public.pick_shortages_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE outbound_effective_demand; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT ON TABLE public.outbound_effective_demand TO wareboxes_app;
 
 
 --

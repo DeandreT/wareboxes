@@ -1,5 +1,7 @@
 .pick-shortage-workbench {
   grid-template-columns: minmax(0, 1.5fr) minmax(460px, 0.8fr);
+  height: calc(100vh - 108px);
+  overflow: hidden;
 }
 
 .shortage-toolbar {
@@ -58,6 +60,7 @@
 }
 
 .shortage-detail {
+  height: 100%;
   min-height: 620px;
 }
 
@@ -167,4 +170,90 @@
 
 .shortage-action-state {
   color: var(--ink-soft);
+}
+
+.short-ship-confirmation {
+  margin: 6px 10px;
+  padding: 7px;
+  gap: 5px;
+}
+
+.short-ship-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.short-ship-heading > div {
+  min-width: 0;
+}
+
+.short-ship-heading span {
+  display: block;
+  margin-top: 1px;
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.short-ship-impact {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+}
+
+.short-ship-impact > div {
+  min-width: 0;
+  padding: 6px 7px;
+  border-right: 1px solid var(--line);
+}
+
+.short-ship-impact > div:last-child {
+  border-right: 0;
+}
+
+.short-ship-impact dt {
+  color: var(--ink-soft);
+  font-size: 9px;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+
+.short-ship-impact dd {
+  margin: 2px 0 0;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
+}
+
+.short-ship-hold-warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 7px;
+  border: 1px solid var(--line-strong);
+  background: var(--amber-soft);
+  color: var(--ink) !important;
+}
+
+.short-ship-fields {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+}
+
+.short-ship-fields textarea {
+  min-height: 48px;
+}
+
+.short-ship-confirmation .shortage-retry-note,
+.short-ship-confirmation .inline-command-error {
+  margin: 0;
 }

@@ -6,6 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 pub const MAX_PICK_SCAN_VALUE_LENGTH: usize = 200;
 pub const MAX_PICK_SHORTAGE_NOTE_LENGTH: usize = 500;
+pub const MAX_PICK_SHORT_SHIP_NOTE_LENGTH: usize = 500;
 
 /// Completion state of one immutable piece of directed pick work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -127,6 +128,267 @@ impl PickShortageStatus {
             _ => None,
         }
     }
+}
+
+/// Durable terminal outcome of a resolved pick-shortage exception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickShortageResolution {
+    Recovered,
+    ShortShip,
+}
+
+impl PickShortageResolution {
+    pub const ALL: [Self; 2] = [Self::Recovered, Self::ShortShip];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Recovered => "recovered",
+            Self::ShortShip => "short_ship",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "recovered" => Some(Self::Recovered),
+            "short_ship" => Some(Self::ShortShip),
+            _ => None,
+        }
+    }
+}
+
+/// Business reason an authorized supervisor accepts unmet demand for shipment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickShortShipReason {
+    ClientAuthorized,
+    InventoryUnavailable,
+    ShipByCommitment,
+    Other,
+}
+
+impl PickShortShipReason {
+    pub const ALL: [Self; 4] = [
+        Self::ClientAuthorized,
+        Self::InventoryUnavailable,
+        Self::ShipByCommitment,
+        Self::Other,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ClientAuthorized => "client_authorized",
+            Self::InventoryUnavailable => "inventory_unavailable",
+            Self::ShipByCommitment => "ship_by_commitment",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "client_authorized" => Some(Self::ClientAuthorized),
+            "inventory_unavailable" => Some(Self::InventoryUnavailable),
+            "ship_by_commitment" => Some(Self::ShipByCommitment),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+
+    pub const fn requires_note(self) -> bool {
+        matches!(self, Self::Other)
+    }
+}
+
+/// Trimmed, nonblank supervisor context for a short-shipment disposition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct PickShortShipNote(String);
+
+impl PickShortShipNote {
+    pub fn new(value: impl Into<String>) -> Result<Self, PickingError> {
+        let value = value.into();
+        if value.is_empty() || value.trim() != value {
+            return Err(PickingError::InvalidShortShipNote);
+        }
+        if value.chars().count() > MAX_PICK_SHORT_SHIP_NOTE_LENGTH {
+            return Err(PickingError::ShortShipNoteTooLong);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PickShortShipNote {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(D::Error::custom)
+    }
+}
+
+/// Validated reason and context for accepting one shortage as a short shipment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PickShortShipDetails {
+    reason: PickShortShipReason,
+    note: Option<PickShortShipNote>,
+}
+
+impl PickShortShipDetails {
+    pub fn new(
+        reason: PickShortShipReason,
+        note: Option<PickShortShipNote>,
+    ) -> Result<Self, PickingError> {
+        if reason.requires_note() && note.is_none() {
+            return Err(PickingError::ShortShipNoteRequired);
+        }
+        Ok(Self { reason, note })
+    }
+
+    pub const fn reason(&self) -> PickShortShipReason {
+        self.reason
+    }
+
+    pub fn note(&self) -> Option<&PickShortShipNote> {
+        self.note.as_ref()
+    }
+
+    pub fn into_note(self) -> Option<PickShortShipNote> {
+        self.note
+    }
+}
+
+impl<'de> Deserialize<'de> for PickShortShipDetails {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawDetails {
+            reason: PickShortShipReason,
+            note: Option<PickShortShipNote>,
+        }
+
+        let raw = RawDetails::deserialize(deserializer)?;
+        Self::new(raw.reason, raw.note).map_err(D::Error::custom)
+    }
+}
+
+/// Original demand, cumulative accepted shortage, and remaining executable demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ShortShipDemandQuantities {
+    ordered: PickQuantity,
+    accepted_short: ActualPickQuantity,
+    effective: ActualPickQuantity,
+}
+
+impl ShortShipDemandQuantities {
+    pub const fn new(
+        ordered: PickQuantity,
+        accepted_short: ActualPickQuantity,
+    ) -> Result<Self, PickingError> {
+        if accepted_short.get() > ordered.get() {
+            return Err(PickingError::AcceptedShortExceedsDemand {
+                ordered: ordered.get(),
+                accepted_short: accepted_short.get(),
+            });
+        }
+        Ok(Self {
+            ordered,
+            accepted_short,
+            effective: ActualPickQuantity(ordered.get() - accepted_short.get()),
+        })
+    }
+
+    pub const fn ordered(self) -> PickQuantity {
+        self.ordered
+    }
+
+    pub const fn accepted_short(self) -> ActualPickQuantity {
+        self.accepted_short
+    }
+
+    pub const fn effective(self) -> ActualPickQuantity {
+        self.effective
+    }
+}
+
+impl<'de> Deserialize<'de> for ShortShipDemandQuantities {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawQuantities {
+            ordered: PickQuantity,
+            accepted_short: ActualPickQuantity,
+            effective: ActualPickQuantity,
+        }
+
+        let raw = RawQuantities::deserialize(deserializer)?;
+        let quantities = Self::new(raw.ordered, raw.accepted_short).map_err(D::Error::custom)?;
+        if quantities.effective != raw.effective {
+            return Err(D::Error::custom("short-shipment demand does not conserve"));
+        }
+        Ok(quantities)
+    }
+}
+
+/// Terminal transition returned when unmet, non-executable demand is accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PickShortShipTransition {
+    accepted_quantity: PickQuantity,
+    status: PickShortageStatus,
+    resolution: PickShortageResolution,
+}
+
+impl PickShortShipTransition {
+    pub const fn accepted_quantity(self) -> PickQuantity {
+        self.accepted_quantity
+    }
+
+    pub const fn status(self) -> PickShortageStatus {
+        self.status
+    }
+
+    pub const fn resolution(self) -> PickShortageResolution {
+        self.resolution
+    }
+}
+
+/// Resolves only shortage work whose replacement attempts are already terminal.
+pub fn resolve_pick_shortage_as_short_ship(
+    status: PickShortageStatus,
+    short_quantity: PickQuantity,
+    reallocated_quantity: ActualPickQuantity,
+    recovery_terminal_quantity: ActualPickQuantity,
+    remaining_to_allocate_quantity: ActualPickQuantity,
+) -> Result<PickShortShipTransition, PickingError> {
+    if !matches!(status, PickShortageStatus::AwaitingInventory) {
+        return Err(PickingError::ShortShipRequiresAwaitingInventory { status });
+    }
+    if remaining_to_allocate_quantity.is_zero() {
+        return Err(PickingError::NoShortageQuantityToAccept);
+    }
+    if reallocated_quantity != recovery_terminal_quantity
+        || reallocated_quantity
+            .get()
+            .checked_add(remaining_to_allocate_quantity.get())
+            != Some(short_quantity.get())
+    {
+        return Err(PickingError::InconsistentShortShipRecoveryQuantities);
+    }
+    Ok(PickShortShipTransition {
+        accepted_quantity: PickQuantity(remaining_to_allocate_quantity.get()),
+        status: PickShortageStatus::Resolved,
+        resolution: PickShortageResolution::ShortShip,
+    })
 }
 
 /// Positive optimistic revision of one pick-shortage exception.
@@ -483,6 +745,22 @@ pub enum PickingError {
     ShortageNoteTooLong,
     #[error("pick shortage reason other requires a note")]
     ShortageNoteRequired,
+    #[error("short-shipment note must be trimmed and nonblank")]
+    InvalidShortShipNote,
+    #[error("short-shipment note cannot exceed {MAX_PICK_SHORT_SHIP_NOTE_LENGTH} characters")]
+    ShortShipNoteTooLong,
+    #[error("short-shipment reason other requires a note")]
+    ShortShipNoteRequired,
+    #[error(
+        "only an awaiting-inventory shortage can be accepted for short shipment, got {status:?}"
+    )]
+    ShortShipRequiresAwaitingInventory { status: PickShortageStatus },
+    #[error("pick shortage has no remaining quantity to accept")]
+    NoShortageQuantityToAccept,
+    #[error("pick-shortage recovery quantities are inconsistent for short shipment")]
+    InconsistentShortShipRecoveryQuantities,
+    #[error("accepted short quantity {accepted_short} exceeds ordered quantity {ordered}")]
+    AcceptedShortExceedsDemand { ordered: i64, accepted_short: i64 },
 }
 
 #[cfg(test)]
@@ -619,5 +897,98 @@ mod tests {
             details.note().map(PickShortageNote::as_str),
             Some("Cycle count requested")
         );
+    }
+
+    #[test]
+    fn short_ship_values_have_stable_wire_names_and_validated_context() {
+        for resolution in PickShortageResolution::ALL {
+            assert_eq!(
+                PickShortageResolution::parse(resolution.as_str()),
+                Some(resolution)
+            );
+        }
+        for reason in PickShortShipReason::ALL {
+            assert_eq!(PickShortShipReason::parse(reason.as_str()), Some(reason));
+        }
+        assert_eq!(
+            serde_json::to_string(&PickShortageResolution::ShortShip).unwrap(),
+            r#""short_ship""#
+        );
+        assert_eq!(
+            PickShortShipDetails::new(PickShortShipReason::Other, None),
+            Err(PickingError::ShortShipNoteRequired)
+        );
+        assert_eq!(
+            PickShortShipNote::new(" padded "),
+            Err(PickingError::InvalidShortShipNote)
+        );
+        assert_eq!(
+            PickShortShipNote::new("x".repeat(MAX_PICK_SHORT_SHIP_NOTE_LENGTH + 1)),
+            Err(PickingError::ShortShipNoteTooLong)
+        );
+    }
+
+    #[test]
+    fn short_ship_transition_accepts_only_terminal_unmet_recovery_quantity() {
+        let transition = resolve_pick_shortage_as_short_ship(
+            PickShortageStatus::AwaitingInventory,
+            PickQuantity::new(5).unwrap(),
+            ActualPickQuantity::new(2).unwrap(),
+            ActualPickQuantity::new(2).unwrap(),
+            ActualPickQuantity::new(3).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(transition.accepted_quantity().get(), 3);
+        assert_eq!(transition.status(), PickShortageStatus::Resolved);
+        assert_eq!(transition.resolution(), PickShortageResolution::ShortShip);
+
+        assert_eq!(
+            resolve_pick_shortage_as_short_ship(
+                PickShortageStatus::RecoveryInProgress,
+                PickQuantity::new(5).unwrap(),
+                ActualPickQuantity::new(3).unwrap(),
+                ActualPickQuantity::new(1).unwrap(),
+                ActualPickQuantity::new(2).unwrap(),
+            ),
+            Err(PickingError::ShortShipRequiresAwaitingInventory {
+                status: PickShortageStatus::RecoveryInProgress,
+            })
+        );
+        assert_eq!(
+            resolve_pick_shortage_as_short_ship(
+                PickShortageStatus::AwaitingInventory,
+                PickQuantity::new(5).unwrap(),
+                ActualPickQuantity::new(2).unwrap(),
+                ActualPickQuantity::new(1).unwrap(),
+                ActualPickQuantity::new(3).unwrap(),
+            ),
+            Err(PickingError::InconsistentShortShipRecoveryQuantities)
+        );
+    }
+
+    #[test]
+    fn effective_demand_conserves_ordered_and_accepted_quantities() {
+        let quantities = ShortShipDemandQuantities::new(
+            PickQuantity::new(12).unwrap(),
+            ActualPickQuantity::new(3).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(quantities.ordered().get(), 12);
+        assert_eq!(quantities.accepted_short().get(), 3);
+        assert_eq!(quantities.effective().get(), 9);
+        assert_eq!(
+            ShortShipDemandQuantities::new(
+                PickQuantity::new(2).unwrap(),
+                ActualPickQuantity::new(3).unwrap(),
+            ),
+            Err(PickingError::AcceptedShortExceedsDemand {
+                ordered: 2,
+                accepted_short: 3,
+            })
+        );
+        assert!(serde_json::from_str::<ShortShipDemandQuantities>(
+            r#"{"ordered":12,"accepted_short":3,"effective":8}"#
+        )
+        .is_err());
     }
 }

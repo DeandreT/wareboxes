@@ -1,16 +1,19 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use wareboxes_api_contract::v1::{
+    AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
     AllocationExecutionStage as ApiExecutionStage, OpaqueCursor, OrderAllocationOutcome,
-    OrderAllocationStrategy, PickShortageAllocationResponse,
-    PickShortageDetails as ApiShortageDetails, PickShortageHoldResponse,
-    PickShortageMovementResponse, PickShortagePage as ApiShortagePage, PickShortagePageRequest,
-    PickShortageQuantitiesResponse, PickShortageReason as ApiShortageReason, PickShortageResponse,
-    PickShortageStatus as ApiShortageStatus, PickShortageTaskResponse,
+    OrderAllocationStrategy, PickOrderStatus, PickShortShipReason as ApiShortShipReason,
+    PickShortageAllocationResponse, PickShortageDetails as ApiShortageDetails,
+    PickShortageHoldResponse, PickShortageMovementResponse, PickShortagePage as ApiShortagePage,
+    PickShortagePageRequest, PickShortageQuantitiesResponse,
+    PickShortageReason as ApiShortageReason, PickShortageResolution as ApiShortageResolution,
+    PickShortageResponse, PickShortageStatus as ApiShortageStatus, PickShortageTaskResponse,
     ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReportPickShortageOutcome,
-    ReportPickShortageRequest, ReportPickShortageResponse, Revision,
+    ReportPickShortageRequest, ReportPickShortageResponse, Revision, ShortShipDemandResponse,
 };
 use wareboxes_application::picking::{
+    AcceptPickShortageAsShortShipCommand, AcceptPickShortageAsShortShipResult,
     PickShortageAllocationReadModel, PickShortageCursor, PickShortagePageQuery, PickShortageQuery,
     PickShortageReadModel, PickShortageTaskReadModel, ReallocatePickShortageCommand,
     ReallocatePickShortageResult, ReportPickShortageCommand,
@@ -18,9 +21,10 @@ use wareboxes_application::picking::{
 };
 use wareboxes_domain::{
     AllocationExecutionStage, AllocationOutcome, AllocationStrategy, FacilityId, InventoryOwnerId,
-    OrderId, OrderRevision, PickContentId, PickQuantity, PickScanValue, PickShortageDetails,
-    PickShortageId, PickShortageNote, PickShortageReason, PickShortageRevision, PickShortageStatus,
-    PickTaskId, Timestamp,
+    OrderId, OrderRevision, OrderStatus, PickContentId, PickQuantity, PickScanValue,
+    PickShortShipNote, PickShortShipReason, PickShortageDetails, PickShortageId, PickShortageNote,
+    PickShortageReason, PickShortageResolution, PickShortageRevision, PickShortageStatus,
+    PickTaskId, ShortShipDemandQuantities, Timestamp,
 };
 
 use super::error::{V1Error, V1Result};
@@ -73,6 +77,42 @@ pub async fn reallocate(
     let result =
         repo::picking::reallocate_shortage(&state.db, &user.tenant, &context, &command).await?;
     Ok(Json(map_reallocation(result)?))
+}
+
+pub async fn accept_short_shipment(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(shortage_id): Path<i64>,
+    Json(body): Json<AcceptPickShortageAsShortShipRequest>,
+) -> V1Result<Json<AcceptPickShortageAsShortShipResponse>> {
+    user.require_permission(&state.db, SUPERVISOR_PERMISSION)
+        .await?;
+    let command = short_ship_command(shortage_id, body)?;
+    let context = user.command_context(&idempotency_key);
+    let result =
+        repo::picking::accept_short_shipment(&state.db, &user.tenant, &context, &command).await?;
+    Ok(Json(map_short_ship_result(result)?))
+}
+
+fn short_ship_command(
+    shortage_id: i64,
+    body: AcceptPickShortageAsShortShipRequest,
+) -> V1Result<AcceptPickShortageAsShortShipCommand> {
+    let note = body
+        .note
+        .map(PickShortShipNote::new)
+        .transpose()
+        .map_err(domain_validation)?;
+    AcceptPickShortageAsShortShipCommand::new(
+        shortage_id_value(shortage_id)?,
+        PickShortageRevision::new(body.expected_shortage_revision.get())
+            .map_err(domain_validation)?,
+        OrderRevision::new(body.expected_order_revision.get()).map_err(domain_validation)?,
+        map_short_ship_reason_to_domain(body.reason),
+        note,
+    )
+    .map_err(domain_validation)
 }
 
 pub async fn get(
@@ -260,11 +300,60 @@ fn map_reallocation(
     })
 }
 
+fn map_short_ship_result(
+    result: AcceptPickShortageAsShortShipResult,
+) -> V1Result<AcceptPickShortageAsShortShipResponse> {
+    Ok(AcceptPickShortageAsShortShipResponse {
+        disposition_id: result.disposition_id.get(),
+        shortage_id: result.shortage_id.get(),
+        previous_shortage_status: map_status(result.previous_shortage_status),
+        shortage_status: map_status(result.shortage_status),
+        shortage_resolution: map_resolution(result.shortage_resolution),
+        shortage_revision: revision(result.shortage_revision.get())?,
+        order_id: result.order_id.get(),
+        order_line_id: result.order_line_id.get(),
+        previous_order_status: map_pick_order_status(result.previous_order_status)?,
+        order_status: map_pick_order_status(result.order_status)?,
+        order_revision: revision(result.order_revision.get())?,
+        order_ready_to_pack: result.order_ready_to_pack,
+        shortage_quantities: map_quantities(result.shortage_quantities),
+        reallocated_quantity: result.reallocated_quantity.get(),
+        recovery_terminal_quantity: result.recovery_terminal_quantity.get(),
+        accepted_short_quantity: result.accepted_short_quantity.get(),
+        line_demand: map_demand(result.line_demand),
+        order_demand: map_demand(result.order_demand),
+        inventory_hold_id: result.inventory_hold_id.get(),
+        reason: map_short_ship_reason(result.reason),
+        note: result.note.map(|note| note.as_str().to_owned()),
+        resolved_by: result.resolved_by.get(),
+        resolved_at: result.resolved_at.to_rfc3339(),
+    })
+}
+
+const fn map_demand(demand: ShortShipDemandQuantities) -> ShortShipDemandResponse {
+    ShortShipDemandResponse {
+        ordered: demand.ordered().get(),
+        accepted_short: demand.accepted_short().get(),
+        effective: demand.effective().get(),
+    }
+}
+
+fn map_pick_order_status(status: OrderStatus) -> V1Result<PickOrderStatus> {
+    match status {
+        OrderStatus::Processing => Ok(PickOrderStatus::Processing),
+        OrderStatus::AwaitingPacking => Ok(PickOrderStatus::AwaitingPacking),
+        _ => Err(V1Error::internal(
+            "short-shipment disposition produced an invalid order status",
+        )),
+    }
+}
+
 fn map_shortage(result: PickShortageReadModel) -> V1Result<PickShortageResponse> {
     Ok(PickShortageResponse {
         shortage_id: result.shortage_id.get(),
         shortage_revision: revision(result.shortage_revision.get())?,
         status: map_status(result.status),
+        resolution: result.resolution.map(map_resolution),
         inventory_owner_id: result.inventory_owner_id.get(),
         inventory_owner_name: result.inventory_owner_name,
         facility_id: result.facility_id.get(),
@@ -293,6 +382,7 @@ fn map_shortage(result: PickShortageReadModel) -> V1Result<PickShortageResponse>
         reallocated_quantity: result.reallocated_quantity.get(),
         recovery_terminal_quantity: result.recovery_terminal_quantity.get(),
         remaining_to_allocate_quantity: result.remaining_to_allocate_quantity.get(),
+        accepted_short_quantity: result.accepted_short_quantity.get(),
         observed_item_barcode: result.observed_item_barcode.map(PickScanValue::into_inner),
         observed_lot: result.observed_lot.map(PickScanValue::into_inner),
         observed_serial: result.observed_serial.map(PickScanValue::into_inner),
@@ -414,6 +504,31 @@ const fn map_status_to_domain(status: ApiShortageStatus) -> PickShortageStatus {
         ApiShortageStatus::AwaitingInventory => PickShortageStatus::AwaitingInventory,
         ApiShortageStatus::RecoveryInProgress => PickShortageStatus::RecoveryInProgress,
         ApiShortageStatus::Resolved => PickShortageStatus::Resolved,
+    }
+}
+
+const fn map_resolution(resolution: PickShortageResolution) -> ApiShortageResolution {
+    match resolution {
+        PickShortageResolution::Recovered => ApiShortageResolution::Recovered,
+        PickShortageResolution::ShortShip => ApiShortageResolution::ShortShip,
+    }
+}
+
+const fn map_short_ship_reason(reason: PickShortShipReason) -> ApiShortShipReason {
+    match reason {
+        PickShortShipReason::ClientAuthorized => ApiShortShipReason::ClientAuthorized,
+        PickShortShipReason::InventoryUnavailable => ApiShortShipReason::InventoryUnavailable,
+        PickShortShipReason::ShipByCommitment => ApiShortShipReason::ShipByCommitment,
+        PickShortShipReason::Other => ApiShortShipReason::Other,
+    }
+}
+
+const fn map_short_ship_reason_to_domain(reason: ApiShortShipReason) -> PickShortShipReason {
+    match reason {
+        ApiShortShipReason::ClientAuthorized => PickShortShipReason::ClientAuthorized,
+        ApiShortShipReason::InventoryUnavailable => PickShortShipReason::InventoryUnavailable,
+        ApiShortShipReason::ShipByCommitment => PickShortShipReason::ShipByCommitment,
+        ApiShortShipReason::Other => PickShortShipReason::Other,
     }
 }
 
@@ -584,5 +699,40 @@ mod tests {
             let cursor = OpaqueCursor::new(value).unwrap();
             assert!(decode_cursor(&cursor).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn short_ship_command_maps_revisions_reason_and_note() {
+        let command = short_ship_command(
+            11,
+            AcceptPickShortageAsShortShipRequest {
+                expected_shortage_revision: Revision::new(3).unwrap(),
+                expected_order_revision: Revision::new(8).unwrap(),
+                reason: ApiShortShipReason::ClientAuthorized,
+                note: Some("Client approved reduced quantity".to_owned()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(command.shortage_id().get(), 11);
+        assert_eq!(command.expected_shortage_revision().get(), 3);
+        assert_eq!(command.expected_order_revision().get(), 8);
+        assert_eq!(command.reason(), PickShortShipReason::ClientAuthorized);
+        assert_eq!(
+            command.note().map(PickShortShipNote::as_str),
+            Some("Client approved reduced quantity")
+        );
+    }
+
+    #[test]
+    fn short_ship_command_enforces_other_note_and_positive_path_id() {
+        let request = AcceptPickShortageAsShortShipRequest {
+            expected_shortage_revision: Revision::new(3).unwrap(),
+            expected_order_revision: Revision::new(8).unwrap(),
+            reason: ApiShortShipReason::Other,
+            note: None,
+        };
+        assert!(short_ship_command(11, request.clone()).is_err());
+        assert!(short_ship_command(0, request).is_err());
     }
 }

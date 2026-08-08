@@ -5,13 +5,17 @@ use wareboxes_domain::{
     ActualPickQuantity, AllocationExecutionStage, AllocationOutcome, AllocationQuantity,
     AllocationStrategy, FacilityId, InventoryAllocationId, InventoryBalanceId, InventoryHoldId,
     InventoryOwnerId, ItemBatchId, LicensePlateId, LocationId, OrderId, OrderLineId, OrderRevision,
-    PickClaimReleaseReason, PickContentId, PickContentState, PickQuantity, PickScanValue,
-    PickShortageDetails, PickShortageId, PickShortageQuantities, PickShortageReallocationRunId,
-    PickShortageRevision, PickShortageStatus, PickTaskId, Timestamp, UserId,
+    OrderStatus, PickClaimReleaseReason, PickContentId, PickContentState, PickQuantity,
+    PickScanValue, PickShortShipDetails, PickShortShipNote, PickShortShipReason,
+    PickShortageDetails, PickShortageDispositionId, PickShortageId, PickShortageQuantities,
+    PickShortageReallocationRunId, PickShortageResolution, PickShortageRevision,
+    PickShortageStatus, PickTaskId, ShortShipDemandQuantities, Timestamp, UserId,
 };
 
 pub const REPORT_PICK_SHORTAGE_OPERATION: &str = "picking.shortage.report.v1";
 pub const REALLOCATE_PICK_SHORTAGE_OPERATION: &str = "picking.shortage.reallocate.v1";
+pub const ACCEPT_PICK_SHORTAGE_AS_SHORT_SHIP_OPERATION: &str =
+    "picking.shortage.accept_short_ship.v1";
 
 /// Claims the next available waveless pick task for the current RF identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -283,6 +287,83 @@ pub struct ReallocatePickShortageResult {
     pub executed_at: Timestamp,
 }
 
+/// Resolves the server-derived unmet quantity as an authorized short shipment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AcceptPickShortageAsShortShipCommand {
+    shortage_id: PickShortageId,
+    expected_shortage_revision: PickShortageRevision,
+    expected_order_revision: OrderRevision,
+    reason: PickShortShipReason,
+    note: Option<PickShortShipNote>,
+}
+
+impl AcceptPickShortageAsShortShipCommand {
+    pub fn new(
+        shortage_id: PickShortageId,
+        expected_shortage_revision: PickShortageRevision,
+        expected_order_revision: OrderRevision,
+        reason: PickShortShipReason,
+        note: Option<PickShortShipNote>,
+    ) -> Result<Self, wareboxes_domain::PickingError> {
+        let details = PickShortShipDetails::new(reason, note)?;
+        Ok(Self {
+            shortage_id,
+            expected_shortage_revision,
+            expected_order_revision,
+            reason: details.reason(),
+            note: details.into_note(),
+        })
+    }
+
+    pub const fn shortage_id(&self) -> PickShortageId {
+        self.shortage_id
+    }
+
+    pub const fn expected_shortage_revision(&self) -> PickShortageRevision {
+        self.expected_shortage_revision
+    }
+
+    pub const fn expected_order_revision(&self) -> OrderRevision {
+        self.expected_order_revision
+    }
+
+    pub const fn reason(&self) -> PickShortShipReason {
+        self.reason
+    }
+
+    pub fn note(&self) -> Option<&PickShortShipNote> {
+        self.note.as_ref()
+    }
+}
+
+/// Replay-stable result of accepting one shortage as a short shipment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptPickShortageAsShortShipResult {
+    pub disposition_id: PickShortageDispositionId,
+    pub shortage_id: PickShortageId,
+    pub previous_shortage_status: PickShortageStatus,
+    pub shortage_status: PickShortageStatus,
+    pub shortage_resolution: PickShortageResolution,
+    pub shortage_revision: PickShortageRevision,
+    pub order_id: OrderId,
+    pub order_line_id: OrderLineId,
+    pub previous_order_status: OrderStatus,
+    pub order_status: OrderStatus,
+    pub order_revision: OrderRevision,
+    pub order_ready_to_pack: bool,
+    pub shortage_quantities: PickShortageQuantities,
+    pub reallocated_quantity: ActualPickQuantity,
+    pub recovery_terminal_quantity: ActualPickQuantity,
+    pub accepted_short_quantity: PickQuantity,
+    pub line_demand: ShortShipDemandQuantities,
+    pub order_demand: ShortShipDemandQuantities,
+    pub inventory_hold_id: InventoryHoldId,
+    pub reason: PickShortShipReason,
+    pub note: Option<PickShortShipNote>,
+    pub resolved_by: UserId,
+    pub resolved_at: Timestamp,
+}
+
 /// Reads one shortage by its path-derived identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PickShortageQuery {
@@ -314,6 +395,7 @@ pub struct PickShortageReadModel {
     pub shortage_id: PickShortageId,
     pub shortage_revision: PickShortageRevision,
     pub status: PickShortageStatus,
+    pub resolution: Option<PickShortageResolution>,
     pub inventory_owner_id: InventoryOwnerId,
     pub inventory_owner_name: String,
     pub facility_id: FacilityId,
@@ -340,6 +422,7 @@ pub struct PickShortageReadModel {
     pub reallocated_quantity: ActualPickQuantity,
     pub recovery_terminal_quantity: ActualPickQuantity,
     pub remaining_to_allocate_quantity: ActualPickQuantity,
+    pub accepted_short_quantity: ActualPickQuantity,
     pub observed_item_barcode: Option<PickScanValue>,
     pub observed_lot: Option<PickScanValue>,
     pub observed_serial: Option<PickScanValue>,
@@ -352,17 +435,54 @@ pub struct PickShortageReadModel {
 
 impl PickShortageReadModel {
     pub fn recovery_quantities_are_consistent(&self) -> bool {
-        recovery_quantities_are_consistent(
-            self.status,
-            self.quantities.short(),
-            self.reallocated_quantity,
-            self.recovery_terminal_quantity,
-            self.remaining_to_allocate_quantity,
-            self.resolved_at.is_some(),
-        )
+        shortage_recovery_quantities_are_consistent(self)
     }
 }
 
+fn shortage_recovery_quantities_are_consistent(shortage: &PickShortageReadModel) -> bool {
+    let short_quantity = shortage.quantities.short();
+    let reallocated_quantity = shortage.reallocated_quantity;
+    let recovery_terminal_quantity = shortage.recovery_terminal_quantity;
+    let remaining_to_allocate_quantity = shortage.remaining_to_allocate_quantity;
+    let accepted_short_quantity = shortage.accepted_short_quantity;
+    recovery_terminal_quantity.get() <= reallocated_quantity.get()
+        && reallocated_quantity
+            .get()
+            .checked_add(remaining_to_allocate_quantity.get())
+            == Some(short_quantity.get())
+        && match shortage.status {
+            PickShortageStatus::AwaitingInventory => {
+                shortage.resolution.is_none()
+                    && accepted_short_quantity.is_zero()
+                    && reallocated_quantity == recovery_terminal_quantity
+                    && recovery_terminal_quantity.get() < short_quantity.get()
+                    && shortage.resolved_at.is_none()
+            }
+            PickShortageStatus::RecoveryInProgress => {
+                shortage.resolution.is_none()
+                    && accepted_short_quantity.is_zero()
+                    && recovery_terminal_quantity.get() < reallocated_quantity.get()
+                    && shortage.resolved_at.is_none()
+            }
+            PickShortageStatus::Resolved => match shortage.resolution {
+                Some(PickShortageResolution::Recovered) => {
+                    accepted_short_quantity.is_zero()
+                        && remaining_to_allocate_quantity.is_zero()
+                        && recovery_terminal_quantity.get() == short_quantity.get()
+                        && shortage.resolved_at.is_some()
+                }
+                Some(PickShortageResolution::ShortShip) => {
+                    !accepted_short_quantity.is_zero()
+                        && accepted_short_quantity == remaining_to_allocate_quantity
+                        && recovery_terminal_quantity == reallocated_quantity
+                        && shortage.resolved_at.is_some()
+                }
+                None => false,
+            },
+        }
+}
+
+#[cfg(test)]
 fn recovery_quantities_are_consistent(
     status: PickShortageStatus,
     short_quantity: PickQuantity,
@@ -371,6 +491,8 @@ fn recovery_quantities_are_consistent(
     remaining_to_allocate_quantity: ActualPickQuantity,
     is_resolved: bool,
 ) -> bool {
+    let resolution =
+        matches!(status, PickShortageStatus::Resolved).then_some(PickShortageResolution::Recovered);
     recovery_terminal_quantity.get() <= reallocated_quantity.get()
         && reallocated_quantity
             .get()
@@ -378,15 +500,19 @@ fn recovery_quantities_are_consistent(
             == Some(short_quantity.get())
         && match status {
             PickShortageStatus::AwaitingInventory => {
-                reallocated_quantity == recovery_terminal_quantity
+                resolution.is_none()
+                    && reallocated_quantity == recovery_terminal_quantity
                     && recovery_terminal_quantity.get() < short_quantity.get()
                     && !is_resolved
             }
             PickShortageStatus::RecoveryInProgress => {
-                recovery_terminal_quantity.get() < reallocated_quantity.get() && !is_resolved
+                resolution.is_none()
+                    && recovery_terminal_quantity.get() < reallocated_quantity.get()
+                    && !is_resolved
             }
             PickShortageStatus::Resolved => {
-                remaining_to_allocate_quantity.is_zero()
+                resolution == Some(PickShortageResolution::Recovered)
+                    && remaining_to_allocate_quantity.is_zero()
                     && recovery_terminal_quantity.get() == short_quantity.get()
                     && is_resolved
             }
@@ -434,6 +560,10 @@ mod tests {
         assert_eq!(
             REALLOCATE_PICK_SHORTAGE_OPERATION,
             "picking.shortage.reallocate.v1"
+        );
+        assert_eq!(
+            ACCEPT_PICK_SHORTAGE_AS_SHORT_SHIP_OPERATION,
+            "picking.shortage.accept_short_ship.v1"
         );
 
         let command = ReportPickShortageCommand {
@@ -543,5 +673,91 @@ mod tests {
     fn shortage_reallocation_uses_a_distinct_run_identity() {
         let run_id = PickShortageReallocationRunId::new(41).unwrap();
         assert_eq!(run_id.get(), 41);
+    }
+
+    #[test]
+    fn short_ship_command_is_revisioned_and_does_not_accept_a_quantity() {
+        let command = AcceptPickShortageAsShortShipCommand::new(
+            PickShortageId::new(21).unwrap(),
+            PickShortageRevision::new(3).unwrap(),
+            OrderRevision::new(8).unwrap(),
+            PickShortShipReason::ClientAuthorized,
+            Some(PickShortShipNote::new("Client approved the reduced shipment").unwrap()),
+        )
+        .unwrap();
+
+        assert_eq!(command.shortage_id().get(), 21);
+        assert_eq!(command.expected_shortage_revision().get(), 3);
+        assert_eq!(command.expected_order_revision().get(), 8);
+        assert_eq!(
+            serde_json::to_value(command).unwrap(),
+            json!({
+                "shortage_id": 21,
+                "expected_shortage_revision": 3,
+                "expected_order_revision": 8,
+                "reason": "client_authorized",
+                "note": "Client approved the reduced shipment"
+            })
+        );
+        assert_eq!(
+            AcceptPickShortageAsShortShipCommand::new(
+                PickShortageId::new(21).unwrap(),
+                PickShortageRevision::new(3).unwrap(),
+                OrderRevision::new(8).unwrap(),
+                PickShortShipReason::Other,
+                None,
+            ),
+            Err(wareboxes_domain::PickingError::ShortShipNoteRequired)
+        );
+    }
+
+    #[test]
+    fn short_ship_result_carries_effective_line_and_order_demand() {
+        let result = AcceptPickShortageAsShortShipResult {
+            disposition_id: PickShortageDispositionId::new(31).unwrap(),
+            shortage_id: PickShortageId::new(21).unwrap(),
+            previous_shortage_status: PickShortageStatus::AwaitingInventory,
+            shortage_status: PickShortageStatus::Resolved,
+            shortage_resolution: PickShortageResolution::ShortShip,
+            shortage_revision: PickShortageRevision::new(4).unwrap(),
+            order_id: OrderId::new(11).unwrap(),
+            order_line_id: OrderLineId::new(12).unwrap(),
+            previous_order_status: OrderStatus::Processing,
+            order_status: OrderStatus::AwaitingPacking,
+            order_revision: OrderRevision::new(9).unwrap(),
+            order_ready_to_pack: true,
+            shortage_quantities: PickShortageQuantities::new(
+                PickQuantity::new(5).unwrap(),
+                ActualPickQuantity::new(2).unwrap(),
+            )
+            .unwrap(),
+            reallocated_quantity: ActualPickQuantity::ZERO,
+            recovery_terminal_quantity: ActualPickQuantity::ZERO,
+            accepted_short_quantity: PickQuantity::new(3).unwrap(),
+            line_demand: ShortShipDemandQuantities::new(
+                PickQuantity::new(5).unwrap(),
+                ActualPickQuantity::new(3).unwrap(),
+            )
+            .unwrap(),
+            order_demand: ShortShipDemandQuantities::new(
+                PickQuantity::new(12).unwrap(),
+                ActualPickQuantity::new(3).unwrap(),
+            )
+            .unwrap(),
+            inventory_hold_id: InventoryHoldId::new(41).unwrap(),
+            reason: PickShortShipReason::InventoryUnavailable,
+            note: None,
+            resolved_by: UserId::new(51).unwrap(),
+            resolved_at: "2026-08-08T20:00:00Z".parse().unwrap(),
+        };
+
+        let encoded = serde_json::to_value(&result).unwrap();
+        assert_eq!(encoded["accepted_short_quantity"], 3);
+        assert_eq!(encoded["line_demand"]["effective"], 2);
+        assert_eq!(encoded["order_demand"]["effective"], 9);
+        assert_eq!(
+            serde_json::from_value::<AcceptPickShortageAsShortShipResult>(encoded).unwrap(),
+            result
+        );
     }
 }

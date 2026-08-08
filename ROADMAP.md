@@ -121,16 +121,16 @@ record. Wareboxes owns facility execution and its auditable inventory consequenc
 - Discrete, batch, cluster, case, pallet, zone, and cart workflows as required by
   supported profiles.
 - Pick confirmation, typed short-pick evidence, discrepancy holds, explicit
-  supervisor reallocation, substitutions, reversals, staging, consolidation,
-  and exception resolution.
+  supervisor reallocation and short-shipment disposition, substitutions, reversals,
+  staging, consolidation, and exception resolution.
 - Cartonization, packing, scale and printer support, outbound QA, documents, labels,
   carrier adapters, manifesting, tracking, and shipment confirmation.
 - Facility shipping-origin configuration with immutable address history, optimistic
   revisions, scope enforcement, and audit evidence.
-- Full-order parcel shipment creation from closed cartons with immutable origin,
-  destination, and carton snapshots; exact carton-to-tracking assignment; and
-  scan-confirmed departure that posts the inventory journal and order transition
-  atomically.
+- Parcel shipment creation from closed cartons with immutable origin, destination,
+  and carton snapshots; conserved ordered, shipped, and accepted-short demand;
+  exact carton-to-tracking assignment; and scan-confirmed departure that posts the
+  inventory journal and order transition atomically.
 - A cursor-paginated desktop shipping queue for readiness resolution, manifesting,
   tracking entry, exact retry recovery, and physical departure verification.
 - Outbound load planning, staging-lane selection, trailer loading sequence, and

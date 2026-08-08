@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Revision;
 
-/// Public lifecycle of one full-order parcel shipment.
+/// Public lifecycle of one parcel shipment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShipmentStatus {
@@ -11,7 +11,7 @@ pub enum ShipmentStatus {
     Departed,
 }
 
-/// Order state exposed by the first complete-shipment workflow.
+/// Order state exposed by the parcel-shipment workflow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShipmentOrderStatus {
@@ -95,6 +95,15 @@ pub struct ShipmentCartonResponse {
     pub tracking_number: Option<String>,
 }
 
+/// Ordered, physically shipped, and accepted-short quantities for one shipment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShipmentDemandResponse {
+    pub ordered_quantity: i64,
+    pub shipped_quantity: i64,
+    pub accepted_short_quantity: i64,
+}
+
 /// Complete shipment read model used for create, resume, and operator display.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -109,6 +118,7 @@ pub struct ShipmentResponse {
     pub revision: Revision,
     pub order_status: ShipmentOrderStatus,
     pub order_revision: Revision,
+    pub demand: ShipmentDemandResponse,
     pub cartons: Vec<ShipmentCartonResponse>,
     pub manifest: Option<ManualCarrierManifestResponse>,
     pub created_by: i64,
@@ -148,6 +158,7 @@ pub struct ConfirmShipmentDepartureResponse {
     pub order_status: ShipmentOrderStatus,
     pub order_revision: Revision,
     pub scanned_carton_count: i64,
+    pub demand: ShipmentDemandResponse,
     pub departed_by: i64,
     pub departed_at: String,
 }
@@ -223,6 +234,11 @@ mod tests {
             order_status: ShipmentOrderStatus::Shipped,
             order_revision: Revision::new(10).unwrap(),
             scanned_carton_count: 2,
+            demand: ShipmentDemandResponse {
+                ordered_quantity: 7,
+                shipped_quantity: 5,
+                accepted_short_quantity: 2,
+            },
             departed_by: 4,
             departed_at: "2026-08-08T22:00:00Z".into(),
         };
@@ -237,6 +253,11 @@ mod tests {
                 "order_status": "shipped",
                 "order_revision": 10,
                 "scanned_carton_count": 2,
+                "demand": {
+                    "ordered_quantity": 7,
+                    "shipped_quantity": 5,
+                    "accepted_short_quantity": 2
+                },
                 "departed_by": 4,
                 "departed_at": "2026-08-08T22:00:00Z"
             })

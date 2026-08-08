@@ -370,6 +370,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'pick_shortage_reallocation_runs_tenant_isolation'
                 ),
                 (
+                    'pick_short_ship_dispositions',
+                    'pick_short_ship_dispositions_tenant_isolation'
+                ),
+                (
                     'pick_shortages',
                     'pick_shortages_tenant_isolation'
                 ),

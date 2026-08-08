@@ -15,7 +15,7 @@ use wareboxes_persistence_postgres::db::{bind_tenant_context, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, require_permission_tx, ScopeBindings};
 
-use super::positive;
+use super::{order_demand_tx, positive};
 
 pub async fn get_shipment(
     db: &Db,
@@ -43,6 +43,7 @@ pub(super) async fn load_shipment_tx(
                order_header.order_key, order_header.status AS order_status,
                order_header.revision AS order_revision, shipment.inventory_owner_id,
                shipment.facility_id, shipment.state, shipment.revision,
+               shipment.shipped_qty,
                shipment.created_by_user_id, shipment.created_at,
                confirmation.confirmed_by_user_id AS departed_by_user_id,
                shipment.departed_at
@@ -74,12 +75,20 @@ pub(super) async fn load_shipment_tx(
     let manifest = load_manifest_tx(tx, tenant_id, shipment_id).await?;
     let status_text: String = row.try_get("state")?;
     let order_status_text: String = row.try_get("order_status")?;
+    let order_id = positive(row.try_get("order_id")?, OrderId::new)?;
+    let inventory_owner_id = positive(row.try_get("inventory_owner_id")?, InventoryOwnerId::new)?;
+    let demand = order_demand_tx(tx, tenant_id, inventory_owner_id, order_id).await?;
+    if demand.effective().get() != row.try_get::<i64, _>("shipped_qty")? {
+        return Err(AppError::internal(
+            "shipment quantity does not match effective order demand",
+        ));
+    }
     let shipment = ShipmentReadModel {
         shipment_id: positive(row.try_get("id")?, ShipmentId::new)?,
         packing_session_id: positive(row.try_get("packing_session_id")?, PackSessionId::new)?,
-        order_id: positive(row.try_get("order_id")?, OrderId::new)?,
+        order_id,
         order_key: row.try_get("order_key")?,
-        inventory_owner_id: positive(row.try_get("inventory_owner_id")?, InventoryOwnerId::new)?,
+        inventory_owner_id,
         facility_id: positive(row.try_get("facility_id")?, FacilityId::new)?,
         status: ShipmentStatus::parse(&status_text)
             .ok_or_else(|| AppError::internal("shipment has an invalid status"))?,
@@ -87,6 +96,7 @@ pub(super) async fn load_shipment_tx(
         order_status: OrderStatus::parse(&order_status_text)
             .ok_or_else(|| AppError::internal("shipment order has an invalid status"))?,
         order_revision: positive(row.try_get("order_revision")?, OrderRevision::new)?,
+        demand,
         cartons,
         manifest,
         created_by: positive(row.try_get("created_by_user_id")?, UserId::new)?,

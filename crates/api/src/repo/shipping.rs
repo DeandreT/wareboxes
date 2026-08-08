@@ -19,8 +19,9 @@ use sqlx::Row;
 use wareboxes_application::outbox::NewOutboxEvent;
 use wareboxes_application::shipping::ShipmentReadModel;
 use wareboxes_domain::{
-    FacilityId, InventoryOwnerId, OrderId, OrderRevision, OrderStatus, PackSessionId, ShipmentId,
-    ShipmentRevision, ShipmentStatus, TenantId, Timestamp,
+    ActualPickQuantity, FacilityId, InventoryOwnerId, OrderId, OrderRevision, OrderStatus,
+    PackSessionId, PickQuantity, ShipmentId, ShipmentRevision, ShipmentStatus,
+    ShortShipDemandQuantities, TenantId, Timestamp,
 };
 use wareboxes_persistence_postgres::outbox;
 
@@ -49,6 +50,7 @@ struct LockedShipment {
     revision: ShipmentRevision,
     carton_count: i64,
     shipped_qty: i64,
+    demand: ShortShipDemandQuantities,
 }
 
 async fn order_hint_for_session_tx(
@@ -142,19 +144,57 @@ async fn lock_shipment_tx(
     .await?
     .ok_or_else(|| AppError::not_found("shipment"))?;
     let status_text: String = row.try_get("state")?;
+    let inventory_owner_id = positive(row.try_get("inventory_owner_id")?, InventoryOwnerId::new)?;
+    let order_id = positive(row.try_get("order_id")?, OrderId::new)?;
+    let shipped_qty = row.try_get("shipped_qty")?;
+    let demand = order_demand_tx(tx, tenant_id, inventory_owner_id, order_id).await?;
+    if demand.effective().get() != shipped_qty {
+        return Err(AppError::internal(
+            "shipment quantity does not match effective order demand",
+        ));
+    }
     Ok(LockedShipment {
         id: positive(row.try_get("id")?, ShipmentId::new)?,
         packing_session_id: positive(row.try_get("packing_session_id")?, PackSessionId::new)?,
         order_release_id: row.try_get("order_release_id")?,
-        order_id: positive(row.try_get("order_id")?, OrderId::new)?,
-        inventory_owner_id: positive(row.try_get("inventory_owner_id")?, InventoryOwnerId::new)?,
+        order_id,
+        inventory_owner_id,
         facility_id: positive(row.try_get("facility_id")?, FacilityId::new)?,
         status: ShipmentStatus::parse(&status_text)
             .ok_or_else(|| AppError::internal("shipment has an invalid status"))?,
         revision: positive(row.try_get("revision")?, ShipmentRevision::new)?,
         carton_count: row.try_get("carton_count")?,
-        shipped_qty: row.try_get("shipped_qty")?,
+        shipped_qty,
+        demand,
     })
+}
+
+pub(super) async fn order_demand_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    inventory_owner_id: InventoryOwnerId,
+    order_id: OrderId,
+) -> AppResult<ShortShipDemandQuantities> {
+    let row = sqlx::query(
+        r#"
+        SELECT COALESCE(SUM(original_qty), 0)::BIGINT AS ordered_quantity,
+               COALESCE(SUM(accepted_short_qty), 0)::BIGINT AS accepted_short_quantity
+        FROM outbound_effective_demand
+        WHERE tenant_id = $1 AND inventory_owner_id = $2 AND order_id = $3
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id.get())
+    .bind(order_id.get())
+    .fetch_one(&mut **tx)
+    .await?;
+    ShortShipDemandQuantities::new(
+        PickQuantity::new(row.try_get("ordered_quantity")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        ActualPickQuantity::new(row.try_get("accepted_short_quantity")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+    )
+    .map_err(|error| AppError::internal(error.to_string()))
 }
 
 async fn require_replayed_shipment_visible_tx(

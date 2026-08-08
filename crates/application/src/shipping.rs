@@ -1,11 +1,11 @@
-//! Application contracts for full-order parcel shipment execution.
+//! Application contracts for parcel shipment execution.
 
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
     CarrierCode, CarrierManifestId, CarrierServiceCode, CartonId, CartonTrackingAssignment,
     FacilityId, InventoryOwnerId, ManifestReference, OrderId, OrderRevision, OrderStatus,
     PackSessionId, ShipmentId, ShipmentRevision, ShipmentScanValue, ShipmentStatus,
-    ShipmentTrackingAssignmentId, Timestamp, TrackingNumber, UserId,
+    ShipmentTrackingAssignmentId, ShortShipDemandQuantities, Timestamp, TrackingNumber, UserId,
 };
 
 pub const CREATE_SHIPMENT_OPERATION: &str = "shipping.shipment.create.v1";
@@ -75,6 +75,7 @@ pub struct ShipmentReadModel {
     pub revision: ShipmentRevision,
     pub order_status: OrderStatus,
     pub order_revision: OrderRevision,
+    pub demand: ShortShipDemandQuantities,
     pub cartons: Vec<ShipmentCartonReadModel>,
     pub manifest: Option<ManualCarrierManifestReadModel>,
     pub created_by: UserId,
@@ -87,6 +88,14 @@ impl ShipmentReadModel {
     /// Checks state-dependent facts that repository read models must preserve.
     pub fn is_consistent(&self) -> bool {
         if self.cartons.is_empty() {
+            return false;
+        }
+        let carton_quantity = self.cartons.iter().try_fold(0_i64, |total, carton| {
+            total.checked_add(carton.packed_quantity)
+        });
+        if carton_quantity != Some(self.demand.effective().get())
+            || self.demand.effective().is_zero()
+        {
             return false;
         }
         match self.status {
@@ -186,6 +195,7 @@ pub struct ConfirmShipmentDepartureResult {
     pub order_status: OrderStatus,
     pub order_revision: OrderRevision,
     pub scanned_carton_count: i64,
+    pub demand: ShortShipDemandQuantities,
     pub departed_by: UserId,
     pub departed_at: Timestamp,
 }
@@ -209,6 +219,11 @@ mod tests {
             revision: ShipmentRevision::new(2).unwrap(),
             order_status: OrderStatus::AwaitingShipment,
             order_revision: OrderRevision::new(8).unwrap(),
+            demand: ShortShipDemandQuantities::new(
+                wareboxes_domain::PickQuantity::new(2).unwrap(),
+                wareboxes_domain::ActualPickQuantity::ZERO,
+            )
+            .unwrap(),
             cartons: vec![ShipmentCartonReadModel {
                 carton_id,
                 carton_barcode: ShipmentScanValue::new("CARTON-8").unwrap(),

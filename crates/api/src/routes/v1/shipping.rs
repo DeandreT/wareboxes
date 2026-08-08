@@ -4,7 +4,8 @@ use wareboxes_api_contract::v1::{
     ConfirmShipmentDepartureRequest, ConfirmShipmentDepartureResponse, CreateShipmentRequest,
     CreateShipmentResponse, ManualCarrierManifestResponse, RecordManualManifestRequest,
     RecordManualManifestResponse, Revision, ShipmentCartonResponse, ShipmentCartonTrackingResponse,
-    ShipmentOrderStatus, ShipmentResponse, ShipmentStatus as ApiShipmentStatus,
+    ShipmentDemandResponse, ShipmentOrderStatus, ShipmentResponse,
+    ShipmentStatus as ApiShipmentStatus,
 };
 use wareboxes_application::shipping::{
     ConfirmShipmentDepartureCommand, ConfirmShipmentDepartureResult, CreateShipmentCommand,
@@ -147,6 +148,7 @@ fn map_shipment(shipment: ShipmentReadModel) -> V1Result<ShipmentResponse> {
         revision: revision(shipment.revision.get())?,
         order_status: map_order_status(shipment.order_status)?,
         order_revision: revision(shipment.order_revision.get())?,
+        demand: map_demand(shipment.demand),
         cartons: shipment
             .cartons
             .into_iter()
@@ -219,9 +221,18 @@ fn map_departure(
         order_status: map_order_status(result.order_status)?,
         order_revision: revision(result.order_revision.get())?,
         scanned_carton_count: result.scanned_carton_count,
+        demand: map_demand(result.demand),
         departed_by: result.departed_by.get(),
         departed_at: result.departed_at.to_rfc3339(),
     })
+}
+
+const fn map_demand(demand: wareboxes_domain::ShortShipDemandQuantities) -> ShipmentDemandResponse {
+    ShipmentDemandResponse {
+        ordered_quantity: demand.ordered().get(),
+        shipped_quantity: demand.effective().get(),
+        accepted_short_quantity: demand.accepted_short().get(),
+    }
 }
 
 const fn map_shipment_status(status: ShipmentStatus) -> ApiShipmentStatus {

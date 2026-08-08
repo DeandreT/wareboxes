@@ -19,7 +19,7 @@ use crate::repo::orders::insert_order_activity_tx;
 
 use super::read_model::load_shipment_tx;
 use super::{
-    enqueue_order_event_tx, lock_order_tx, order_hint_for_session_tx, positive,
+    enqueue_order_event_tx, lock_order_tx, order_demand_tx, order_hint_for_session_tx, positive,
     require_replayed_shipment_visible_tx,
 };
 
@@ -112,6 +112,18 @@ pub async fn create_shipment(
     let shipment_status = validate_creation(order.status, session.state, &identities)
         .map_err(|error| AppError::conflict(error.to_string()))?;
     validate_session_totals(&session, &cartons)?;
+    let demand = order_demand_tx(
+        &mut tx,
+        access.tenant_id,
+        order.inventory_owner_id,
+        order.id,
+    )
+    .await?;
+    if demand.effective().get() != session.shipped_qty {
+        return Err(AppError::conflict(
+            "packing quantity does not match effective order demand",
+        ));
+    }
     let (origin_address_id, destination_address_id) = lock_shipping_addresses_tx(
         &mut tx,
         access.tenant_id,
@@ -231,7 +243,9 @@ pub async fn create_shipment(
             "order_key": order.order_key,
             "facility_id": session.facility_id,
             "carton_count": session.carton_count,
+            "ordered_quantity": demand.ordered(),
             "shipped_quantity": session.shipped_qty,
+            "accepted_short_quantity": demand.accepted_short(),
             "expected_order_revision": order.revision,
             "order_revision": resulting_revision,
             "created_at": created_at,

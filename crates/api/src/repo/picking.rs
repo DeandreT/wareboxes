@@ -3,6 +3,8 @@
 mod claim;
 mod confirmation;
 mod lifecycle;
+mod readiness;
+mod short_shipment;
 mod shortage;
 mod shortage_read_model;
 mod shortage_reallocation;
@@ -10,6 +12,8 @@ mod shortage_reallocation;
 pub use claim::{claim_by_id, claim_next, current};
 pub use confirmation::confirm_content;
 pub use lifecycle::{heartbeat, release_claim};
+pub(in crate::repo) use readiness::order_pick_readiness_tx;
+pub use short_shipment::accept_short_shipment;
 pub use shortage::report_shortage;
 pub use shortage_read_model::{get_shortage, list_shortages};
 pub use shortage_reallocation::reallocate_shortage;
