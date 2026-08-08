@@ -5,7 +5,8 @@ use wareboxes_domain::TenantId;
 
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
-use crate::repo::idempotency::{require_command_context, PreparedCommand};
+use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
 use super::access::{current_scope_tx, lock_user_tx, ScopeBindings};
 use execution::user_can_execute_task_tx;
@@ -284,7 +285,7 @@ async fn create_item_location_cycle_count_task_with_scope(
 ) -> AppResult<i64> {
     let prepared = command
         .map(|command| {
-            PreparedCommand::new(
+            PreparedCommand::new_v1(
                 command,
                 "task.create_item_location_cycle_count.v1",
                 &(
@@ -402,7 +403,7 @@ async fn create_item_location_cycle_count_task_with_scope(
             .execute(&mut *tx)
             .await?;
         return match prepared {
-            Some(prepared) => prepared.commit(tx, existing).await,
+            Some(prepared) => Ok(prepared.commit(tx, existing).await?),
             None => {
                 tx.commit().await?;
                 Ok(existing)
@@ -453,7 +454,7 @@ async fn create_item_location_cycle_count_task_with_scope(
     .execute(&mut *tx)
     .await?;
     match prepared {
-        Some(prepared) => prepared.commit(tx, task_id).await,
+        Some(prepared) => Ok(prepared.commit(tx, task_id).await?),
         None => {
             tx.commit().await?;
             Ok(task_id)
@@ -474,7 +475,7 @@ pub async fn create_item_location_cycle_count_task_in_scope(
     inventory_balance_id: i64,
     note: Option<&str>,
 ) -> AppResult<i64> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     create_item_location_cycle_count_task_with_scope(
         db,
         access.tenant_id,
@@ -536,7 +537,7 @@ async fn create_location_cycle_count_task_with_scope(
 ) -> AppResult<i64> {
     let prepared = command
         .map(|command| {
-            PreparedCommand::new(
+            PreparedCommand::new_v1(
                 command,
                 "task.create_location_cycle_count.v1",
                 &(
@@ -616,7 +617,7 @@ async fn create_location_cycle_count_task_with_scope(
     .execute(&mut *tx)
     .await?;
     match prepared {
-        Some(prepared) => prepared.commit(tx, task_id).await,
+        Some(prepared) => Ok(prepared.commit(tx, task_id).await?),
         None => {
             tx.commit().await?;
             Ok(task_id)
@@ -636,7 +637,7 @@ pub async fn create_location_cycle_count_task_in_scope(
     due_at: Option<Timestamp>,
     instructions: Option<String>,
 ) -> AppResult<i64> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     create_location_cycle_count_task_with_scope(
         db,
         access.tenant_id,
@@ -709,7 +710,7 @@ async fn create_break_master_pack_task_with_scope(
     }
     let prepared = command
         .map(|command| {
-            PreparedCommand::new(
+            PreparedCommand::new_v1(
                 command,
                 "task.create_break_master_pack.v1",
                 &(
@@ -835,7 +836,7 @@ async fn create_break_master_pack_task_with_scope(
     .execute(&mut *tx)
     .await?;
     match prepared {
-        Some(prepared) => prepared.commit(tx, task_id).await,
+        Some(prepared) => Ok(prepared.commit(tx, task_id).await?),
         None => {
             tx.commit().await?;
             Ok(task_id)
@@ -858,7 +859,7 @@ pub async fn create_break_master_pack_task_in_scope(
     due_at: Option<Timestamp>,
     instructions: Option<String>,
 ) -> AppResult<i64> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     create_break_master_pack_task_with_scope(
         db,
         access.tenant_id,
@@ -1087,8 +1088,8 @@ pub async fn create_unpack_cancelled_order_task_in_scope(
     due_at: Option<Timestamp>,
     instructions: Option<String>,
 ) -> AppResult<i64> {
-    require_command_context(access, command)?;
-    let prepared = PreparedCommand::new(
+    command.require_actor(access.tenant_id, access.user_id)?;
+    let prepared = PreparedCommand::new_v1(
         command,
         "task.create_unpack_cancelled_order.v1",
         &(
@@ -1135,7 +1136,7 @@ pub async fn create_unpack_cancelled_order_task_in_scope(
         Some(&current_scope),
     )
     .await?;
-    prepared.commit(tx, task_id).await
+    Ok(prepared.commit(tx, task_id).await?)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -9,9 +9,10 @@ use wareboxes_domain::{FacilityId, InventoryOwnerId};
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
-use crate::repo::idempotency::{require_command_context, PreparedCommand};
 use crate::repo::inventory;
-use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
+use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
+use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 use super::inventory_relocation::{
@@ -42,7 +43,7 @@ pub async fn confirm_inventory_relocation_in_scope(
     scanned_destination_location_barcode: &str,
     scanned_license_plate_barcode: Option<&str>,
 ) -> AppResult<InventoryRelocationConfirmation> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     if task_id <= 0 {
         return Err(AppError::bad_request(
             "inventory relocation task ID must be positive",
@@ -55,7 +56,7 @@ pub async fn confirm_inventory_relocation_in_scope(
     if let Some(barcode) = scanned_license_plate_barcode {
         validate_barcode(barcode, "license plate barcode")?;
     }
-    let prepared = PreparedCommand::new(
+    let prepared = PreparedCommand::new_v1(
         command,
         CONFIRM_OPERATION,
         &(
@@ -126,9 +127,9 @@ pub async fn confirm_inventory_relocation_in_scope(
     complete_relocation_task(&mut tx, access, command, &result).await?;
     enqueue_confirmation(&mut tx, command, &result).await?;
     let transaction_id = result.inventory_transaction_id;
-    prepared
+    Ok(prepared
         .commit_with_inventory_transaction(tx, result, Some(transaction_id))
-        .await
+        .await?)
 }
 
 async fn lock_relocation_target(
@@ -208,7 +209,7 @@ async fn confirm_loose(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     access: &TenantAccess,
     command: &CommandContext,
-    prepared: &PreparedCommand<'_>,
+    prepared: &PreparedCommand,
     target: &RelocationTarget,
     destination_barcode: String,
 ) -> AppResult<InventoryRelocationConfirmation> {
@@ -364,7 +365,7 @@ async fn confirm_plate(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     access: &TenantAccess,
     command: &CommandContext,
-    prepared: &PreparedCommand<'_>,
+    prepared: &PreparedCommand,
     target: &RelocationTarget,
     destination_barcode: String,
     scanned_plate_barcode: &str,
@@ -624,13 +625,13 @@ async fn begin_relocation_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     access: &TenantAccess,
     command: &CommandContext,
-    prepared: &PreparedCommand<'_>,
+    prepared: &PreparedCommand,
     task_id: i64,
     inventory_owner_id: i64,
     facility_id: i64,
 ) -> AppResult<i64> {
     let owner_facility = inventory_journal::owner_facility_scope(inventory_owner_id, facility_id)?;
-    match inventory_journal::begin_transaction(
+    inventory_journal::begin_transaction(
         tx,
         &JournalCommand {
             tenant_id: access.tenant_id,
@@ -644,16 +645,9 @@ async fn begin_relocation_transaction(
             operation: CONFIRM_OPERATION,
             idempotency_key: Some(prepared.idempotency_key()),
             request_hash: prepared.request_hash(),
-            record_idempotency: false,
         },
     )
-    .await?
-    {
-        JournalStart::New(transaction_id) => Ok(transaction_id),
-        JournalStart::Replay(_) => Err(AppError::internal(
-            "inventory relocation journal replay bypassed command replay",
-        )),
-    }
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]

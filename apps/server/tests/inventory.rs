@@ -6,6 +6,7 @@ use common::*;
 use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::{routes, state::AppState};
+use wareboxes_core::dto::UpdateUserAccessScope;
 
 #[tokio::test]
 async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
@@ -848,6 +849,28 @@ async fn concurrent_inventory_retries_apply_effects_once() {
         transaction_ids.insert(result.unwrap().unwrap());
     }
     assert_eq!(transaction_ids.len(), 1);
+    let receipt_transaction_id = *transaction_ids.first().unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let durable_receipt_effects: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT (SELECT COUNT(*) FROM inventory_transactions
+                WHERE tenant_id = $1 AND operation = 'receive_inventory'
+                  AND idempotency_key = 'concurrent-receipt-key'),
+               (SELECT COUNT(*) FROM command_idempotency_records
+                WHERE tenant_id = $1 AND operation = 'receive_inventory'
+                  AND idempotency_key = 'concurrent-receipt-key'),
+               (SELECT COUNT(*) FROM outbox_events
+                WHERE tenant_id = $1 AND aggregate_type = 'inventory_transaction'
+                  AND aggregate_id = $2)
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(receipt_transaction_id.to_string())
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(durable_receipt_effects, (1, 1, 1));
 
     let balances = repo::inventory::get_balances(&fixture.db, tenant_id, false)
         .await
@@ -1047,6 +1070,39 @@ async fn concurrent_inventory_retries_apply_effects_once() {
         .await
         .unwrap();
     assert_eq!(missing_tenant.status(), StatusCode::BAD_REQUEST);
+
+    repo::tenants::update_user_access_scope(
+        &fixture.db,
+        tenant_id,
+        &UpdateUserAccessScope {
+            user_id: actor_id,
+            all_facilities: false,
+            facility_ids: Vec::new(),
+            all_inventory_owners: false,
+            inventory_owner_ids: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let revoked_receipt_replay = repo::inventory::receive_inventory(
+        &fixture.db,
+        tenant_id,
+        actor_id,
+        batch,
+        receiving,
+        25,
+        None,
+        Some("concurrent receipt"),
+        None,
+        None,
+        "concurrent-receipt-key",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        revoked_receipt_replay,
+        AppError::Application(ApplicationError::Forbidden)
+    ));
 }
 
 #[tokio::test]

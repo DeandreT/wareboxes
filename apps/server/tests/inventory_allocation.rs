@@ -237,6 +237,27 @@ async fn soft_reservations_and_concrete_allocations_preserve_demand_and_stock() 
             .unwrap(),
         allocation
     );
+    let peer = fixture.user("inventory-allocation-peer@test.local").await;
+    let mut peer_membership_tx = tenant_tx(&fixture.db, tenant_id).await;
+    sqlx::query("INSERT INTO tenant_memberships (tenant_id, user_id) VALUES ($1, $2)")
+        .bind(tenant_id.get())
+        .bind(peer.id)
+        .execute(&mut *peer_membership_tx)
+        .await
+        .unwrap();
+    peer_membership_tx.commit().await.unwrap();
+    let peer_access = repo::tenants::access_for_user(&fixture.db, peer.id, tenant_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let cross_actor_replay =
+        repo::inventory::allocate_inventory(&fixture.db, &peer_access, &allocation_command)
+            .await
+            .unwrap_err();
+    assert!(matches!(
+        cross_actor_replay,
+        AppError::Application(ApplicationError::IdempotencyKeyReused)
+    ));
     let balances = repo::inventory::get_balances(&fixture.db, tenant_id, false)
         .await
         .unwrap();

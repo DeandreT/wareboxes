@@ -1,16 +1,16 @@
 //! Immutable inventory journal primitives shared by inventory workflows.
 
+use sqlx::Row;
+use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_core::models::{InventoryStatus, InventoryTransactionType};
 use wareboxes_domain::{OwnerFacilityScope, TenantId};
 
 use crate::db::{bind_tenant_context, now_iso};
 use crate::error::{AppError, AppResult};
+use crate::repo::access::ScopeBindings;
 
+use wareboxes_persistence_postgres::idempotency::load_stored_result;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
-
-pub(crate) use super::idempotency::{
-    record_command_result, replayed_result, replayed_transaction, request_hash, NewCommandResult,
-};
 
 pub(crate) struct JournalCommand<'a> {
     pub tenant_id: TenantId,
@@ -24,12 +24,6 @@ pub(crate) struct JournalCommand<'a> {
     pub operation: &'a str,
     pub idempotency_key: Option<&'a str>,
     pub request_hash: &'a str,
-    pub record_idempotency: bool,
-}
-
-pub(crate) enum JournalStart {
-    New(i64),
-    Replay(i64),
 }
 
 pub(crate) struct JournalEntry {
@@ -90,28 +84,110 @@ pub(crate) async fn lock_active_owner_facility_tx(
     Ok(())
 }
 
+pub(crate) async fn authorize_transaction_replay_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    scope: &ScopeBindings,
+    transaction_id: Option<i64>,
+) -> AppResult<i64> {
+    let transaction_id = transaction_id.ok_or_else(|| {
+        AppError::internal("stored inventory command has no inventory transaction")
+    })?;
+    let row = sqlx::query(
+        r#"
+        SELECT transaction.inventory_owner_id,
+               ARRAY(
+                   SELECT DISTINCT entry.facility_id
+                   FROM inventory_entries entry
+                   WHERE entry.tenant_id = transaction.tenant_id
+                     AND entry.transaction_id = transaction.id
+                   ORDER BY entry.facility_id
+               ) AS facility_ids,
+               EXISTS (
+                   SELECT 1
+                   FROM inventory_owners owner
+                   WHERE owner.tenant_id = transaction.tenant_id
+                     AND owner.id = transaction.inventory_owner_id
+                     AND owner.deleted IS NULL
+               ) AS owner_active,
+               NOT EXISTS (
+                   SELECT 1
+                   FROM inventory_entries entry
+                   WHERE entry.tenant_id = transaction.tenant_id
+                     AND entry.transaction_id = transaction.id
+                     AND (
+                         NOT EXISTS (
+                             SELECT 1
+                             FROM facilities facility
+                             WHERE facility.tenant_id = entry.tenant_id
+                               AND facility.id = entry.facility_id
+                               AND facility.deleted IS NULL
+                         )
+                         OR NOT EXISTS (
+                             SELECT 1
+                             FROM inventory_owner_facilities assignment
+                             WHERE assignment.tenant_id = entry.tenant_id
+                               AND assignment.inventory_owner_id = transaction.inventory_owner_id
+                               AND assignment.facility_id = entry.facility_id
+                               AND assignment.deleted IS NULL
+                         )
+                     )
+               ) AS facilities_active
+        FROM inventory_transactions transaction
+        WHERE transaction.tenant_id = $1 AND transaction.id = $2
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(transaction_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::internal("stored command inventory transaction was not found"))?;
+    let inventory_owner_id: i64 = row.try_get("inventory_owner_id")?;
+    let facility_ids: Vec<i64> = row.try_get("facility_ids")?;
+    let owner_active: bool = row.try_get("owner_active")?;
+    let facilities_active: bool = row.try_get("facilities_active")?;
+    if !owner_active
+        || !facilities_active
+        || !scope.includes_inventory_owner(inventory_owner_id)
+        || facility_ids.is_empty()
+        || facility_ids
+            .iter()
+            .any(|facility_id| !scope.includes_facility(*facility_id))
+    {
+        return Err(AppError::forbidden());
+    }
+    Ok(transaction_id)
+}
+
+pub(crate) async fn replayed_inventory_transaction_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    prepared: &PreparedCommand,
+    scope: &ScopeBindings,
+) -> AppResult<Option<i64>> {
+    let Some(stored) = load_stored_result(tx, prepared).await? else {
+        return Ok(None);
+    };
+    let linked_transaction_id = stored.inventory_transaction_id();
+    let result = prepared.resolve_replay::<i64>(stored)?;
+    let authorized_transaction_id =
+        authorize_transaction_replay_tx(tx, prepared.tenant_id(), scope, linked_transaction_id)
+            .await?;
+    if result != authorized_transaction_id {
+        return Err(AppError::internal(
+            "stored inventory command result does not match its inventory transaction",
+        ));
+    }
+    Ok(Some(result))
+}
+
 pub(crate) async fn begin_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     command: &JournalCommand<'_>,
-) -> AppResult<JournalStart> {
+) -> AppResult<i64> {
     if command.operation.trim().is_empty() {
         return Err(AppError::internal("journal operation cannot be blank"));
     }
     lock_active_owner_facility_tx(tx, command.tenant_id, command.owner_facility).await?;
-
-    if command.record_idempotency {
-        if let Some(transaction_id) = replayed_transaction(
-            tx,
-            command.tenant_id,
-            command.operation,
-            command.idempotency_key,
-            command.request_hash,
-        )
-        .await?
-        {
-            return Ok(JournalStart::Replay(transaction_id));
-        }
-    }
 
     let occurred_at = now_iso();
     let transaction_id: i64 = sqlx::query_scalar(
@@ -185,29 +261,7 @@ pub(crate) async fn begin_transaction(
     )
     .await?;
 
-    if command.record_idempotency {
-        if let Some(idempotency_key) = command.idempotency_key {
-            sqlx::query(
-                r#"
-            INSERT INTO command_idempotency_records
-                (tenant_id, created, operation, idempotency_key, request_hash,
-                 result_json, inventory_transaction_id, actor_user_id)
-            VALUES ($1, $2, $3, $4, $5, to_jsonb($6::BIGINT), $6, $7)
-            "#,
-            )
-            .bind(command.tenant_id.get())
-            .bind(now_iso())
-            .bind(command.operation)
-            .bind(idempotency_key)
-            .bind(command.request_hash)
-            .bind(transaction_id)
-            .bind(command.actor_user_id)
-            .execute(&mut **tx)
-            .await?;
-        }
-    }
-
-    Ok(JournalStart::New(transaction_id))
+    Ok(transaction_id)
 }
 
 pub(crate) async fn append_entry(

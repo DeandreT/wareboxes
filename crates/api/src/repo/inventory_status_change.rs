@@ -12,9 +12,10 @@ use wareboxes_domain::TenantId;
 use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
-use crate::repo::idempotency::{require_command_context, PreparedCommand};
-use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
+use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
 use crate::repo::inventory_locking::{balance_license_plate_hint, lock_license_plate};
+use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 const OPERATION: &str = "inventory.status_change.v1";
@@ -469,9 +470,9 @@ pub async fn change_inventory_status(
     context: &CommandContext,
     command: &ChangeInventoryStatusCommand<'_>,
 ) -> AppResult<ChangeInventoryStatusResult> {
-    require_command_context(access, context)?;
+    context.require_actor(access.tenant_id, access.user_id)?;
     let command = validate_command(command)?;
-    let prepared = PreparedCommand::new(context, OPERATION, &command)?;
+    let prepared = PreparedCommand::new_v1(context, OPERATION, &command)?;
     let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, context.actor_id.get()).await?;
 
@@ -522,7 +523,7 @@ pub async fn change_inventory_status(
 
     let owner_facility =
         inventory_journal::owner_facility_scope(source.inventory_owner_id, source.facility_id)?;
-    let transaction_id = match inventory_journal::begin_transaction(
+    let transaction_id = inventory_journal::begin_transaction(
         &mut tx,
         &JournalCommand {
             tenant_id: access.tenant_id,
@@ -536,18 +537,9 @@ pub async fn change_inventory_status(
             operation: OPERATION,
             idempotency_key: Some(prepared.idempotency_key()),
             request_hash: prepared.request_hash(),
-            record_idempotency: false,
         },
     )
-    .await?
-    {
-        JournalStart::New(transaction_id) => transaction_id,
-        JournalStart::Replay(_) => {
-            return Err(AppError::internal(
-                "status-change journal replay bypassed command replay",
-            ));
-        }
-    };
+    .await?;
 
     decrement_source_balance(&mut tx, access.tenant_id, &source, command.qty).await?;
     let target_balance_id = increment_target_balance(
@@ -609,7 +601,7 @@ pub async fn change_inventory_status(
         from_status: source.status,
         to_status: command.to_status,
     };
-    prepared
+    Ok(prepared
         .commit_with_inventory_transaction(tx, result, Some(transaction_id))
-        .await
+        .await?)
 }

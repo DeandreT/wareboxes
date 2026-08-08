@@ -10,6 +10,7 @@ description = "Wareboxes PostgreSQL connection, migration, and persistence primi
 wareboxes-application = { workspace = true }
 wareboxes-domain = { workspace = true }
 chrono = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 thiserror = { workspace = true }

@@ -9,7 +9,8 @@ use wareboxes_domain::InventoryOwnerId;
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
-use crate::repo::idempotency::{require_command_context, PreparedCommand};
+use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
 use super::leasing::{release_expired_tasks_tx, release_inaccessible_active_tasks_tx};
 use super::{insert_progress_tx, TaskDimensions};
@@ -412,8 +413,8 @@ pub async fn claim_next_inventory_relocation_in_scope(
     command: &CommandContext,
     workflow: InventoryRelocationWorkflow,
 ) -> AppResult<Option<InventoryRelocationClaim>> {
-    require_command_context(access, command)?;
-    let prepared = PreparedCommand::new(command, CLAIM_NEXT_OPERATION, &workflow)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
+    let prepared = PreparedCommand::new_v1(command, CLAIM_NEXT_OPERATION, &workflow)?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, command.actor_id.get()).await?;
@@ -526,7 +527,7 @@ pub async fn claim_next_inventory_relocation_in_scope(
         }
         None => None,
     };
-    prepared.commit(tx, claim).await
+    Ok(prepared.commit(tx, claim).await?)
 }
 
 pub async fn claim_inventory_relocation_in_scope(
@@ -535,13 +536,13 @@ pub async fn claim_inventory_relocation_in_scope(
     command: &CommandContext,
     task_id: i64,
 ) -> AppResult<InventoryRelocationClaim> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     if task_id <= 0 {
         return Err(AppError::bad_request(
             "inventory relocation task ID must be positive",
         ));
     }
-    let prepared = PreparedCommand::new(command, CLAIM_BY_ID_OPERATION, &task_id)?;
+    let prepared = PreparedCommand::new_v1(command, CLAIM_BY_ID_OPERATION, &task_id)?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, command.actor_id.get()).await?;
@@ -597,7 +598,7 @@ pub async fn claim_inventory_relocation_in_scope(
     {
         let claim =
             load_relocation_claim_tx(&mut tx, access, task_id, command.actor_id.get()).await?;
-        return prepared.commit(tx, claim).await;
+        return Ok(prepared.commit(tx, claim).await?);
     }
     if !matches!(status.as_str(), "open" | "assigned")
         || assigned_user_id.is_some_and(|assigned| assigned != command.actor_id.get())
@@ -665,7 +666,7 @@ pub async fn claim_inventory_relocation_in_scope(
     )
     .await?;
     let claim = load_relocation_claim_tx(&mut tx, access, task_id, command.actor_id.get()).await?;
-    prepared.commit(tx, claim).await
+    Ok(prepared.commit(tx, claim).await?)
 }
 
 pub async fn current_inventory_relocation_claim_in_scope(

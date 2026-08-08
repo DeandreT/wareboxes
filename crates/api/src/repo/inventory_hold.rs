@@ -13,8 +13,9 @@ use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
 use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
-use crate::repo::idempotency::{require_command_context, PreparedCommand};
 use crate::repo::inventory_locking::{balance_license_plate_hint, lock_license_plate};
+use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 const PLACE_OPERATION: &str = "inventory_hold.place.v1";
@@ -414,9 +415,9 @@ pub async fn place_inventory_hold(
     context: &CommandContext,
     command: &PlaceInventoryHoldCommand<'_>,
 ) -> AppResult<PlaceInventoryHoldResult> {
-    require_command_context(access, context)?;
+    context.require_actor(access.tenant_id, access.user_id)?;
     let command = validate_place_command(command)?;
-    let prepared = PreparedCommand::new(context, PLACE_OPERATION, &command)?;
+    let prepared = PreparedCommand::new_v1(context, PLACE_OPERATION, &command)?;
     let now = now_iso();
     let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, context.actor_id.get()).await?;
@@ -520,9 +521,9 @@ pub async fn place_inventory_hold(
     )
     .await?;
 
-    prepared
+    Ok(prepared
         .commit(tx, PlaceInventoryHoldResult { hold_id })
-        .await
+        .await?)
 }
 
 pub async fn release_inventory_hold(
@@ -531,11 +532,11 @@ pub async fn release_inventory_hold(
     context: &CommandContext,
     command: &ReleaseInventoryHoldCommand,
 ) -> AppResult<ReleaseInventoryHoldResult> {
-    require_command_context(access, context)?;
+    context.require_actor(access.tenant_id, access.user_id)?;
     if command.hold_id <= 0 {
         return Err(AppError::bad_request("inventory hold ID must be positive"));
     }
-    let prepared = PreparedCommand::new(context, RELEASE_OPERATION, command)?;
+    let prepared = PreparedCommand::new_v1(context, RELEASE_OPERATION, command)?;
     let now = now_iso();
     let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, context.actor_id.get()).await?;
@@ -636,7 +637,7 @@ pub async fn release_inventory_hold(
     )
     .await?;
 
-    prepared
+    Ok(prepared
         .commit(
             tx,
             ReleaseInventoryHoldResult {
@@ -644,5 +645,5 @@ pub async fn release_inventory_hold(
                 released_qty: hold.qty,
             },
         )
-        .await
+        .await?)
 }

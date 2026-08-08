@@ -15,8 +15,9 @@ use wareboxes_domain::{InventoryOwnerId, TenantId};
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
-use crate::repo::idempotency::{require_command_context, PreparedCommand};
 use crate::repo::{address, tasks};
+use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
 const MUTABLE: &str = "('cancelled', 'held', 'open', 'void')";
 
@@ -1154,7 +1155,7 @@ pub async fn update_order_metadata(
     command: &CommandContext,
     update: &OrderUpdate,
 ) -> AppResult<bool> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     let has_address = update.line1.is_some()
         || update.line2.is_some()
         || update.city.is_some()
@@ -1180,7 +1181,7 @@ pub async fn update_order_metadata(
         ));
     }
 
-    let prepared = PreparedCommand::new(command, "order.update_metadata.v1", update)?;
+    let prepared = PreparedCommand::new_v1(command, "order.update_metadata.v1", update)?;
     let tenant_id = access.tenant_id;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
@@ -1289,7 +1290,7 @@ pub async fn update_order_metadata(
         "updated order metadata",
     )
     .await?;
-    prepared.commit(tx, true).await
+    Ok(prepared.commit(tx, true).await?)
 }
 
 async fn require_replayed_order_visible_tx(
@@ -1327,8 +1328,8 @@ pub async fn cancel_order_with_unpack_task(
     order_id: i64,
     facility_id: i64,
 ) -> AppResult<Option<i64>> {
-    require_command_context(access, command)?;
-    let prepared = PreparedCommand::new(command, "order.cancel.v1", &(order_id, facility_id))?;
+    command.require_actor(access.tenant_id, access.user_id)?;
+    let prepared = PreparedCommand::new_v1(command, "order.cancel.v1", &(order_id, facility_id))?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, command.actor_id.get()).await?;
@@ -1398,7 +1399,7 @@ pub async fn cancel_order_with_unpack_task(
         Some(&scope),
     )
     .await?;
-    prepared.commit(tx, task_id).await.map(Some)
+    Ok(Some(prepared.commit(tx, task_id).await?))
 }
 
 pub async fn delete_order(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {

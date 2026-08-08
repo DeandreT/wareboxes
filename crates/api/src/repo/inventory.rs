@@ -7,16 +7,18 @@ pub use super::inventory_status_change::*;
 use std::collections::HashMap;
 
 use sqlx::Row;
+use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_core::models::{
     InventoryBalance, InventoryEntry, InventoryReconciliationIssue, InventoryStatus,
     InventoryTransaction, InventoryTransactionType, ItemBatch, TenantAccess, Timestamp,
 };
-use wareboxes_domain::{InventoryOwnerId, TenantId};
+use wareboxes_domain::{InventoryOwnerId, TenantId, UserId};
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
 use crate::db::{begin_tenant_transaction, bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
-use crate::repo::access::ScopeBindings;
-use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
+use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
+use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
 
 fn parse_inventory_status(s: &str) -> AppResult<InventoryStatus> {
     InventoryStatus::parse(s)
@@ -639,28 +641,29 @@ pub async fn receive_inventory(
         return Err(AppError::bad_request("quantity must be positive"));
     }
     let status = status.unwrap_or_default();
+    let actor_id = UserId::new(user_id).map_err(|error| AppError::internal(error.to_string()))?;
+    let prepared = PreparedCommand::from_parts_v1(
+        tenant_id,
+        actor_id,
+        None,
+        idempotency_key,
+        "receive_inventory",
+        &(
+            item_batch_id,
+            to_location_id,
+            qty,
+            status.as_str(),
+            reason,
+            reference_type,
+            reference_id,
+        ),
+    )?;
     let now = now_iso();
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
-
-    let request_hash = inventory_journal::request_hash(&(
-        user_id,
-        item_batch_id,
-        to_location_id,
-        qty,
-        status.as_str(),
-        reason,
-        reference_type,
-        reference_id,
-    ))?;
-    if let Some(transaction_id) = inventory_journal::replayed_transaction(
-        &mut tx,
-        tenant_id,
-        "receive_inventory",
-        Some(idempotency_key),
-        &request_hash,
-    )
-    .await?
+    let scope = lock_current_scope_tx(&mut tx, tenant_id, user_id).await?;
+    if let Some(transaction_id) =
+        inventory_journal::replayed_inventory_transaction_tx(&mut tx, &prepared, &scope).await?
     {
         tx.commit().await?;
         return Ok(transaction_id);
@@ -691,8 +694,11 @@ pub async fn receive_inventory(
     .fetch_one(&mut *tx)
     .await?;
     let owner_facility = inventory_journal::owner_facility_scope(inventory_owner_id, facility_id)?;
-
-    let transaction_id = match inventory_journal::begin_transaction(
+    if !scope.includes_inventory_owner(inventory_owner_id) || !scope.includes_facility(facility_id)
+    {
+        return Err(AppError::forbidden());
+    }
+    let transaction_id = inventory_journal::begin_transaction(
         &mut tx,
         &JournalCommand {
             tenant_id,
@@ -705,18 +711,10 @@ pub async fn receive_inventory(
             correlation_id: None,
             operation: "receive_inventory",
             idempotency_key: Some(idempotency_key),
-            request_hash: &request_hash,
-            record_idempotency: true,
+            request_hash: prepared.request_hash(),
         },
     )
-    .await?
-    {
-        JournalStart::New(id) => id,
-        JournalStart::Replay(id) => {
-            tx.commit().await?;
-            return Ok(id);
-        }
-    };
+    .await?;
 
     ensure_location_accepts_batch_tx(
         &mut tx,
@@ -769,8 +767,10 @@ pub async fn receive_inventory(
     )
     .await?;
 
-    tx.commit().await?;
-    Ok(transaction_id)
+    prepared
+        .commit_with_inventory_transaction(tx, transaction_id, Some(transaction_id))
+        .await
+        .map_err(AppError::from)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -798,29 +798,30 @@ pub async fn move_inventory(
     }
 
     let status = status.unwrap_or_default();
+    let actor_id = UserId::new(user_id).map_err(|error| AppError::internal(error.to_string()))?;
+    let prepared = PreparedCommand::from_parts_v1(
+        tenant_id,
+        actor_id,
+        None,
+        idempotency_key,
+        "move_inventory",
+        &(
+            item_batch_id,
+            from_location_id,
+            to_location_id,
+            qty,
+            status.as_str(),
+            reason,
+            reference_type,
+            reference_id,
+        ),
+    )?;
     let now = now_iso();
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
-
-    let request_hash = inventory_journal::request_hash(&(
-        user_id,
-        item_batch_id,
-        from_location_id,
-        to_location_id,
-        qty,
-        status.as_str(),
-        reason,
-        reference_type,
-        reference_id,
-    ))?;
-    if let Some(transaction_id) = inventory_journal::replayed_transaction(
-        &mut tx,
-        tenant_id,
-        "move_inventory",
-        Some(idempotency_key),
-        &request_hash,
-    )
-    .await?
+    let scope = lock_current_scope_tx(&mut tx, tenant_id, user_id).await?;
+    if let Some(transaction_id) =
+        inventory_journal::replayed_inventory_transaction_tx(&mut tx, &prepared, &scope).await?
     {
         tx.commit().await?;
         return Ok(transaction_id);
@@ -865,8 +866,12 @@ pub async fn move_inventory(
     }
     let owner_facility =
         inventory_journal::owner_facility_scope(inventory_owner_id, source_facility_id)?;
-
-    let transaction_id = match inventory_journal::begin_transaction(
+    if !scope.includes_inventory_owner(inventory_owner_id)
+        || !scope.includes_facility(source_facility_id)
+    {
+        return Err(AppError::forbidden());
+    }
+    let transaction_id = inventory_journal::begin_transaction(
         &mut tx,
         &JournalCommand {
             tenant_id,
@@ -879,18 +884,10 @@ pub async fn move_inventory(
             correlation_id: None,
             operation: "move_inventory",
             idempotency_key: Some(idempotency_key),
-            request_hash: &request_hash,
-            record_idempotency: true,
+            request_hash: prepared.request_hash(),
         },
     )
-    .await?
-    {
-        JournalStart::New(id) => id,
-        JournalStart::Replay(id) => {
-            tx.commit().await?;
-            return Ok(id);
-        }
-    };
+    .await?;
 
     ensure_location_accepts_batch_tx(
         &mut tx,
@@ -975,8 +972,10 @@ pub async fn move_inventory(
         .await?;
     }
 
-    tx.commit().await?;
-    Ok(transaction_id)
+    prepared
+        .commit_with_inventory_transaction(tx, transaction_id, Some(transaction_id))
+        .await
+        .map_err(AppError::from)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1018,26 +1017,27 @@ pub async fn split_move_inventory(
     let mut ordered_destinations = destinations.to_vec();
     ordered_destinations.sort_unstable_by_key(|(location_id, _)| *location_id);
 
+    let actor_id = UserId::new(user_id).map_err(|error| AppError::internal(error.to_string()))?;
+    let prepared = PreparedCommand::from_parts_v1(
+        tenant_id,
+        actor_id,
+        None,
+        idempotency_key,
+        "split_move_inventory",
+        &(
+            from_inventory_balance_id,
+            destinations,
+            reason,
+            reference_type,
+            reference_id,
+        ),
+    )?;
     let now = now_iso();
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
-
-    let request_hash = inventory_journal::request_hash(&(
-        user_id,
-        from_inventory_balance_id,
-        destinations,
-        reason,
-        reference_type,
-        reference_id,
-    ))?;
-    if let Some(transaction_id) = inventory_journal::replayed_transaction(
-        &mut tx,
-        tenant_id,
-        "split_move_inventory",
-        Some(idempotency_key),
-        &request_hash,
-    )
-    .await?
+    let scope = lock_current_scope_tx(&mut tx, tenant_id, user_id).await?;
+    if let Some(transaction_id) =
+        inventory_journal::replayed_inventory_transaction_tx(&mut tx, &prepared, &scope).await?
     {
         tx.commit().await?;
         return Ok(transaction_id);
@@ -1135,8 +1135,12 @@ pub async fn split_move_inventory(
     }
     let owner_facility =
         inventory_journal::owner_facility_scope(inventory_owner_id, source_facility_id)?;
-
-    let transaction_id = match inventory_journal::begin_transaction(
+    if !scope.includes_inventory_owner(inventory_owner_id)
+        || !scope.includes_facility(source_facility_id)
+    {
+        return Err(AppError::forbidden());
+    }
+    let transaction_id = inventory_journal::begin_transaction(
         &mut tx,
         &JournalCommand {
             tenant_id,
@@ -1149,18 +1153,10 @@ pub async fn split_move_inventory(
             correlation_id: None,
             operation: "split_move_inventory",
             idempotency_key: Some(idempotency_key),
-            request_hash: &request_hash,
-            record_idempotency: true,
+            request_hash: prepared.request_hash(),
         },
     )
-    .await?
-    {
-        JournalStart::New(id) => id,
-        JournalStart::Replay(id) => {
-            tx.commit().await?;
-            return Ok(id);
-        }
-    };
+    .await?;
 
     let res = sqlx::query(
         r#"
@@ -1252,6 +1248,8 @@ pub async fn split_move_inventory(
         .await?;
     }
 
-    tx.commit().await?;
-    Ok(transaction_id)
+    prepared
+        .commit_with_inventory_transaction(tx, transaction_id, Some(transaction_id))
+        .await
+        .map_err(AppError::from)
 }

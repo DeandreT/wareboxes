@@ -8,9 +8,10 @@ use wareboxes_domain::{FacilityId, InventoryOwnerId};
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::lock_current_scope_tx;
-use crate::repo::idempotency::{require_command_context, PreparedCommand};
-use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
+use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
 use crate::repo::inventory_locking::{balance_license_plate_hint, lock_license_plate};
+use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 use super::{insert_progress_tx, require_replayed_task_visible_tx, TaskDimensions};
@@ -251,7 +252,7 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
     note: Option<&str>,
     scans: Option<CountScans<'_>>,
 ) -> AppResult<ItemLocationCycleCountConfirmation> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     if task_id <= 0 {
         return Err(AppError::bad_request("task ID must be positive"));
     }
@@ -259,7 +260,7 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
         return Err(AppError::bad_request("counted quantity cannot be negative"));
     }
     let note = validated_note(note)?;
-    let prepared = PreparedCommand::new(
+    let prepared = PreparedCommand::new_v1(
         command,
         OPERATION,
         &(task_id, counted_quantity, note, &scans),
@@ -312,7 +313,7 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
     } else {
         let owner_facility =
             inventory_journal::owner_facility_scope(target.inventory_owner_id, target.facility_id)?;
-        let transaction_id = match inventory_journal::begin_transaction(
+        let transaction_id = inventory_journal::begin_transaction(
             &mut tx,
             &JournalCommand {
                 tenant_id: access.tenant_id,
@@ -326,18 +327,9 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
                 operation: OPERATION,
                 idempotency_key: Some(prepared.idempotency_key()),
                 request_hash: prepared.request_hash(),
-                record_idempotency: false,
             },
         )
-        .await?
-        {
-            JournalStart::New(transaction_id) => transaction_id,
-            JournalStart::Replay(_) => {
-                return Err(AppError::internal(
-                    "cycle count journal replay bypassed command replay",
-                ));
-            }
-        };
+        .await?;
 
         inventory_journal::append_entry(
             &mut tx,
@@ -539,9 +531,9 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
     )
     .await?;
 
-    prepared
+    Ok(prepared
         .commit_with_inventory_transaction(tx, confirmation, inventory_transaction_id)
-        .await
+        .await?)
 }
 
 async fn validate_scans_tx(

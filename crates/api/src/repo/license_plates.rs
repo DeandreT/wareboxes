@@ -1,16 +1,18 @@
 //! License plate/container records for grouping inventory under a scannable ID.
 
 use sqlx::Row;
+use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_core::models::{
     InventoryStatus, InventoryTransactionType, LicensePlate, LicensePlateContent, TenantAccess,
 };
-use wareboxes_domain::{InventoryOwnerId, TenantId};
+use wareboxes_domain::{InventoryOwnerId, TenantId, UserId};
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
-use crate::repo::access::ScopeBindings;
+use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 use crate::repo::inventory;
-use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
+use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
 
 fn parse_inventory_status(s: &str) -> AppResult<InventoryStatus> {
     InventoryStatus::parse(s)
@@ -387,19 +389,21 @@ pub async fn move_license_plate(
     reason: Option<&str>,
     idempotency_key: &str,
 ) -> AppResult<i64> {
+    let actor_id = UserId::new(user_id).map_err(|error| AppError::internal(error.to_string()))?;
+    let prepared = PreparedCommand::from_parts_v1(
+        tenant_id,
+        actor_id,
+        None,
+        idempotency_key,
+        "move_license_plate",
+        &(id, to_location_id, reason),
+    )?;
     let now = now_iso();
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
-
-    let request_hash = inventory_journal::request_hash(&(user_id, id, to_location_id, reason))?;
-    if let Some(transaction_id) = inventory_journal::replayed_transaction(
-        &mut tx,
-        tenant_id,
-        "move_license_plate",
-        Some(idempotency_key),
-        &request_hash,
-    )
-    .await?
+    let scope = lock_current_scope_tx(&mut tx, tenant_id, user_id).await?;
+    if let Some(transaction_id) =
+        inventory_journal::replayed_inventory_transaction_tx(&mut tx, &prepared, &scope).await?
     {
         tx.commit().await?;
         return Ok(transaction_id);
@@ -418,6 +422,11 @@ pub async fn move_license_plate(
     let plate_location: Option<i64> = plate.try_get("location_id")?;
     let owner_facility =
         inventory_journal::owner_facility_scope(inventory_owner_id, plate_facility_id)?;
+    if !scope.includes_inventory_owner(inventory_owner_id)
+        || !scope.includes_facility(plate_facility_id)
+    {
+        return Err(AppError::forbidden());
+    }
     let active_putaway: Option<i64> = sqlx::query_scalar(
         r#"
         SELECT task_id
@@ -440,7 +449,7 @@ pub async fn move_license_plate(
         ));
     }
 
-    let transaction_id = match inventory_journal::begin_transaction(
+    let transaction_id = inventory_journal::begin_transaction(
         &mut tx,
         &JournalCommand {
             tenant_id,
@@ -453,18 +462,10 @@ pub async fn move_license_plate(
             correlation_id: None,
             operation: "move_license_plate",
             idempotency_key: Some(idempotency_key),
-            request_hash: &request_hash,
-            record_idempotency: true,
+            request_hash: prepared.request_hash(),
         },
     )
-    .await?
-    {
-        JournalStart::New(id) => id,
-        JournalStart::Replay(id) => {
-            tx.commit().await?;
-            return Ok(id);
-        }
-    };
+    .await?;
 
     let destination_facility_id: i64 = sqlx::query_scalar(
         "SELECT facility_id FROM locations WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL AND active",
@@ -665,8 +666,10 @@ pub async fn move_license_plate(
         }
     }
 
-    tx.commit().await?;
-    Ok(transaction_id)
+    prepared
+        .commit_with_inventory_transaction(tx, transaction_id, Some(transaction_id))
+        .await
+        .map_err(AppError::from)
 }
 
 pub async fn set_license_plate_deleted(

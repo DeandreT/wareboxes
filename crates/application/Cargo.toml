@@ -8,5 +8,8 @@ description = "Wareboxes application commands, queries, and workflow contracts"
 
 [dependencies]
 wareboxes-domain = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
+hex = "0.4"
 thiserror = { workspace = true }

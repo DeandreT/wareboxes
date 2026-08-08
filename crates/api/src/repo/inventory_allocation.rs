@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use sqlx::Row;
+use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_core::dto::{
     AllocateInventoryResult, CancelInventoryAllocationResult, CancelInventoryReservationResult,
     CreateInventoryReservationResult,
@@ -12,13 +13,14 @@ use wareboxes_core::models::{
     ReservationStatus, TenantAccess, Timestamp,
 };
 use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
+use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 use crate::db::{begin_tenant_transaction, bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 use crate::repo::inventory_journal;
 use crate::repo::inventory_locking::{balance_license_plate_hint, lock_license_plate};
-use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 fn parse_inventory_status(s: &str) -> AppResult<InventoryStatus> {
     InventoryStatus::parse(s)
@@ -421,6 +423,19 @@ pub async fn create_inventory_reservation(
 
     let tenant_id = access.tenant_id;
     let actor_user_id = access.user_id.get();
+    let prepared = PreparedCommand::from_parts_v1(
+        tenant_id,
+        access.user_id,
+        None,
+        command.idempotency_key,
+        "create_inventory_reservation",
+        &(
+            command.order_id,
+            command.order_item_id,
+            command.facility_id,
+            command.qty,
+        ),
+    )?;
     let now = now_iso();
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, tenant_id, actor_user_id).await?;
@@ -452,20 +467,9 @@ pub async fn create_inventory_reservation(
     let inventory_owner_id: i64 = order_line.try_get("inventory_owner_id")?;
     require_command_scope(&scope, inventory_owner_id, command.facility_id)?;
 
-    let request_hash = inventory_journal::request_hash(&(
-        command.order_id,
-        command.order_item_id,
-        command.facility_id,
-        command.qty,
-    ))?;
-    if let Some(result) = inventory_journal::replayed_result::<CreateInventoryReservationResult>(
-        &mut tx,
-        tenant_id,
-        "create_inventory_reservation",
-        Some(command.idempotency_key),
-        &request_hash,
-    )
-    .await?
+    if let Some(result) = prepared
+        .replayed::<CreateInventoryReservationResult>(&mut tx)
+        .await?
     {
         tx.commit().await?;
         return Ok(result);
@@ -569,21 +573,7 @@ pub async fn create_inventory_reservation(
     .await?;
 
     let result = CreateInventoryReservationResult { reservation_id };
-    inventory_journal::record_command_result(
-        &mut tx,
-        &inventory_journal::NewCommandResult {
-            tenant_id,
-            operation: "create_inventory_reservation",
-            idempotency_key: command.idempotency_key,
-            request_hash: &request_hash,
-            result: &result,
-            inventory_transaction_id: None,
-            actor_user_id,
-        },
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(result)
+    prepared.commit(tx, result).await.map_err(AppError::from)
 }
 
 pub async fn allocate_inventory(
@@ -597,6 +587,18 @@ pub async fn allocate_inventory(
 
     let tenant_id = access.tenant_id;
     let actor_user_id = access.user_id.get();
+    let prepared = PreparedCommand::from_parts_v1(
+        tenant_id,
+        access.user_id,
+        None,
+        command.idempotency_key,
+        "allocate_inventory",
+        &(
+            command.reservation_id,
+            command.inventory_balance_id,
+            command.qty,
+        ),
+    )?;
     let now = now_iso();
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, tenant_id, actor_user_id).await?;
@@ -629,19 +631,9 @@ pub async fn allocate_inventory(
     let balance_facility_id: i64 = balance.try_get("facility_id")?;
     require_command_scope(&scope, balance_owner_id, balance_facility_id)?;
 
-    let request_hash = inventory_journal::request_hash(&(
-        command.reservation_id,
-        command.inventory_balance_id,
-        command.qty,
-    ))?;
-    if let Some(result) = inventory_journal::replayed_result::<AllocateInventoryResult>(
-        &mut tx,
-        tenant_id,
-        "allocate_inventory",
-        Some(command.idempotency_key),
-        &request_hash,
-    )
-    .await?
+    if let Some(result) = prepared
+        .replayed::<AllocateInventoryResult>(&mut tx)
+        .await?
     {
         tx.commit().await?;
         return Ok(result);
@@ -763,21 +755,7 @@ pub async fn allocate_inventory(
     .await?;
 
     let result = AllocateInventoryResult { allocation_id };
-    inventory_journal::record_command_result(
-        &mut tx,
-        &inventory_journal::NewCommandResult {
-            tenant_id,
-            operation: "allocate_inventory",
-            idempotency_key: command.idempotency_key,
-            request_hash: &request_hash,
-            result: &result,
-            inventory_transaction_id: None,
-            actor_user_id,
-        },
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(result)
+    prepared.commit(tx, result).await.map_err(AppError::from)
 }
 
 pub async fn cancel_inventory_allocation(
@@ -787,6 +765,14 @@ pub async fn cancel_inventory_allocation(
 ) -> AppResult<CancelInventoryAllocationResult> {
     let tenant_id = access.tenant_id;
     let actor_user_id = access.user_id.get();
+    let prepared = PreparedCommand::from_parts_v1(
+        tenant_id,
+        access.user_id,
+        None,
+        command.idempotency_key,
+        "cancel_inventory_allocation",
+        &command.allocation_id,
+    )?;
     let now = now_iso();
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, tenant_id, actor_user_id).await?;
@@ -843,15 +829,9 @@ pub async fn cancel_inventory_allocation(
         allocation.facility_id,
     )?;
 
-    let request_hash = inventory_journal::request_hash(&(command.allocation_id, reservation_id))?;
-    if let Some(result) = inventory_journal::replayed_result::<CancelInventoryAllocationResult>(
-        &mut tx,
-        tenant_id,
-        "cancel_inventory_allocation",
-        Some(command.idempotency_key),
-        &request_hash,
-    )
-    .await?
+    if let Some(result) = prepared
+        .replayed::<CancelInventoryAllocationResult>(&mut tx)
+        .await?
     {
         tx.commit().await?;
         return Ok(result);
@@ -905,21 +885,7 @@ pub async fn cancel_inventory_allocation(
         allocation_id: allocation.id,
         released_qty: allocation.qty,
     };
-    inventory_journal::record_command_result(
-        &mut tx,
-        &inventory_journal::NewCommandResult {
-            tenant_id,
-            operation: "cancel_inventory_allocation",
-            idempotency_key: command.idempotency_key,
-            request_hash: &request_hash,
-            result: &result,
-            inventory_transaction_id: None,
-            actor_user_id,
-        },
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(result)
+    prepared.commit(tx, result).await.map_err(AppError::from)
 }
 
 pub async fn cancel_inventory_reservation(
@@ -929,6 +895,14 @@ pub async fn cancel_inventory_reservation(
 ) -> AppResult<CancelInventoryReservationResult> {
     let tenant_id = access.tenant_id;
     let actor_user_id = access.user_id.get();
+    let prepared = PreparedCommand::from_parts_v1(
+        tenant_id,
+        access.user_id,
+        None,
+        command.idempotency_key,
+        "cancel_inventory_reservation",
+        &command.reservation_id,
+    )?;
     let now = now_iso();
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, tenant_id, actor_user_id).await?;
@@ -939,16 +913,9 @@ pub async fn cancel_inventory_reservation(
         reservation.facility_id,
     )?;
 
-    let request_hash =
-        inventory_journal::request_hash(&(command.reservation_id, reservation.order_id))?;
-    if let Some(result) = inventory_journal::replayed_result::<CancelInventoryReservationResult>(
-        &mut tx,
-        tenant_id,
-        "cancel_inventory_reservation",
-        Some(command.idempotency_key),
-        &request_hash,
-    )
-    .await?
+    if let Some(result) = prepared
+        .replayed::<CancelInventoryReservationResult>(&mut tx)
+        .await?
     {
         tx.commit().await?;
         return Ok(result);
@@ -1105,19 +1072,5 @@ pub async fn cancel_inventory_reservation(
         reservation_id: command.reservation_id,
         released_qty,
     };
-    inventory_journal::record_command_result(
-        &mut tx,
-        &inventory_journal::NewCommandResult {
-            tenant_id,
-            operation: "cancel_inventory_reservation",
-            idempotency_key: command.idempotency_key,
-            request_hash: &request_hash,
-            result: &result,
-            inventory_transaction_id: None,
-            actor_user_id,
-        },
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(result)
+    prepared.commit(tx, result).await.map_err(AppError::from)
 }

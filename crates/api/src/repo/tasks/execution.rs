@@ -5,10 +5,11 @@ use wareboxes_domain::TenantId;
 
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
-use crate::repo::idempotency::PreparedCommand;
+use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
 use super::leasing::{release_expired_tasks_tx, release_inaccessible_active_tasks_tx};
-use super::{map_task, require_command_context, ScopeBindings, TaskDimensions};
+use super::{map_task, ScopeBindings, TaskDimensions};
 use crate::repo::access::lock_current_scope_tx;
 
 pub async fn start_next_task(
@@ -35,7 +36,7 @@ pub async fn start_next_task_in_scope(
     command: &CommandContext,
     task_type: Option<WorkTaskType>,
 ) -> AppResult<Option<WorkTask>> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     start_next_task_with_scope(
         db,
         access.tenant_id,
@@ -58,7 +59,7 @@ async fn start_next_task_with_scope(
     command: Option<&CommandContext>,
 ) -> AppResult<Option<WorkTask>> {
     let prepared = command
-        .map(|command| PreparedCommand::new(command, "task.start_next.v1", &task_type))
+        .map(|command| PreparedCommand::new_v1(command, "task.start_next.v1", &task_type))
         .transpose()?;
     let permissions =
         wareboxes_persistence_postgres::authorization::get_user_permissions(db, tenant_id, user_id)
@@ -187,7 +188,7 @@ async fn start_next_task_with_scope(
     }
     let task = row.as_ref().map(map_task).transpose()?;
     match prepared {
-        Some(prepared) => prepared.commit(tx, task).await,
+        Some(prepared) => Ok(prepared.commit(tx, task).await?),
         None => {
             tx.commit().await?;
             Ok(task)
@@ -264,7 +265,7 @@ pub async fn start_task_in_scope(
     command: &CommandContext,
     task_id: i64,
 ) -> AppResult<bool> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     start_task_with_scope(
         db,
         access.tenant_id,
@@ -287,7 +288,7 @@ async fn start_task_with_scope(
     command: Option<&CommandContext>,
 ) -> AppResult<bool> {
     let prepared = command
-        .map(|command| PreparedCommand::new(command, "task.start.v1", &task_id))
+        .map(|command| PreparedCommand::new_v1(command, "task.start.v1", &task_id))
         .transpose()?;
     let now = now_iso();
     let mut tx = db.begin().await?;
@@ -392,7 +393,7 @@ async fn start_task_with_scope(
         return Ok(false);
     }
     match prepared {
-        Some(prepared) => prepared.commit(tx, started).await,
+        Some(prepared) => Ok(prepared.commit(tx, started).await?),
         None => {
             tx.commit().await?;
             Ok(started)
@@ -455,7 +456,6 @@ pub async fn record_task_progress(
         from_location_id,
         to_location_id,
         note,
-        None,
     )
     .await
 }
@@ -467,34 +467,16 @@ async fn record_task_progress_with_scope(
     _user_id: i64,
     scope_user_id: Option<i64>,
     task_id: i64,
-    task_line_id: Option<i64>,
-    action: WorkTaskProgressAction,
+    _task_line_id: Option<i64>,
+    _action: WorkTaskProgressAction,
     qty_completed: i64,
-    from_location_id: Option<i64>,
-    to_location_id: Option<i64>,
-    note: Option<&str>,
-    command: Option<&CommandContext>,
+    _from_location_id: Option<i64>,
+    _to_location_id: Option<i64>,
+    _note: Option<&str>,
 ) -> AppResult<bool> {
     if qty_completed <= 0 {
         return Err(AppError::bad_request("completed quantity must be positive"));
     }
-    let _prepared = command
-        .map(|command| {
-            PreparedCommand::new(
-                command,
-                "task.progress.v1",
-                &(
-                    task_id,
-                    task_line_id,
-                    action,
-                    qty_completed,
-                    from_location_id,
-                    to_location_id,
-                    note,
-                ),
-            )
-        })
-        .transpose()?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
     if let Some(scope_user_id) = scope_user_id {
@@ -522,7 +504,7 @@ pub async fn record_task_progress_in_scope(
     to_location_id: Option<i64>,
     note: Option<&str>,
 ) -> AppResult<bool> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     record_task_progress_with_scope(
         db,
         access.tenant_id,
@@ -535,7 +517,6 @@ pub async fn record_task_progress_in_scope(
         from_location_id,
         to_location_id,
         note,
-        Some(command),
     )
     .await
 }
@@ -547,7 +528,7 @@ pub async fn complete_task(
     user_id: i64,
     qty_completed: Option<i64>,
 ) -> AppResult<bool> {
-    complete_task_with_scope(db, tenant_id, task_id, user_id, qty_completed, None, None).await
+    complete_task_with_scope(db, tenant_id, task_id, user_id, qty_completed, None).await
 }
 
 async fn complete_task_with_scope(
@@ -557,14 +538,10 @@ async fn complete_task_with_scope(
     _user_id: i64,
     qty_completed: Option<i64>,
     scope_user_id: Option<i64>,
-    command: Option<&CommandContext>,
 ) -> AppResult<bool> {
     if qty_completed.is_some_and(|quantity| quantity <= 0) {
         return Err(AppError::bad_request("completed quantity must be positive"));
     }
-    let _prepared = command
-        .map(|command| PreparedCommand::new(command, "task.complete.v1", &(task_id, qty_completed)))
-        .transpose()?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
     if let Some(scope_user_id) = scope_user_id {
@@ -586,7 +563,7 @@ pub async fn complete_task_in_scope(
     task_id: i64,
     qty_completed: Option<i64>,
 ) -> AppResult<bool> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     complete_task_with_scope(
         db,
         access.tenant_id,
@@ -594,7 +571,6 @@ pub async fn complete_task_in_scope(
         command.actor_id.get(),
         qty_completed,
         Some(command.actor_id.get()),
-        Some(command),
     )
     .await
 }
@@ -617,7 +593,7 @@ async fn abort_task_with_scope(
     command: Option<&CommandContext>,
 ) -> AppResult<bool> {
     let prepared = command
-        .map(|command| PreparedCommand::new(command, "task.abort.v1", &task_id))
+        .map(|command| PreparedCommand::new_v1(command, "task.abort.v1", &task_id))
         .transpose()?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
@@ -680,7 +656,7 @@ async fn abort_task_with_scope(
         return Ok(false);
     }
     match prepared {
-        Some(prepared) => prepared.commit(tx, aborted).await,
+        Some(prepared) => Ok(prepared.commit(tx, aborted).await?),
         None => {
             tx.commit().await?;
             Ok(aborted)
@@ -694,7 +670,7 @@ pub async fn abort_task_in_scope(
     command: &CommandContext,
     task_id: i64,
 ) -> AppResult<bool> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     abort_task_with_scope(
         db,
         access.tenant_id,
@@ -724,7 +700,7 @@ async fn cancel_task_with_scope(
     command: Option<&CommandContext>,
 ) -> AppResult<bool> {
     let prepared = command
-        .map(|command| PreparedCommand::new(command, "task.cancel.v1", &task_id))
+        .map(|command| PreparedCommand::new_v1(command, "task.cancel.v1", &task_id))
         .transpose()?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
@@ -783,7 +759,7 @@ async fn cancel_task_with_scope(
         return Ok(false);
     }
     match prepared {
-        Some(prepared) => prepared.commit(tx, cancelled).await,
+        Some(prepared) => Ok(prepared.commit(tx, cancelled).await?),
         None => {
             tx.commit().await?;
             Ok(cancelled)
@@ -797,7 +773,7 @@ pub async fn cancel_task_in_scope(
     command: &CommandContext,
     task_id: i64,
 ) -> AppResult<bool> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     cancel_task_with_scope(
         db,
         access.tenant_id,

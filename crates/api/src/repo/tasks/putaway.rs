@@ -9,9 +9,10 @@ use wareboxes_domain::{FacilityId, InventoryOwnerId};
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
-use crate::repo::idempotency::{require_command_context, PreparedCommand};
 use crate::repo::inventory;
-use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
+use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
+use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 use super::{
@@ -232,7 +233,7 @@ pub async fn create_putaway_task_in_scope(
     due_at: Option<Timestamp>,
     instructions: Option<&str>,
 ) -> AppResult<i64> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     validate_creation(
         source_inventory_balance_id,
         destination_location_id,
@@ -240,7 +241,7 @@ pub async fn create_putaway_task_in_scope(
         priority,
         instructions,
     )?;
-    let prepared = PreparedCommand::new(
+    let prepared = PreparedCommand::new_v1(
         command,
         CREATE_OPERATION,
         &(
@@ -380,7 +381,7 @@ pub async fn create_putaway_task_in_scope(
     .execute(&mut *tx)
     .await?;
 
-    prepared.commit(tx, task_id).await
+    Ok(prepared.commit(tx, task_id).await?)
 }
 
 async fn lock_putaway_target(
@@ -519,12 +520,12 @@ pub async fn confirm_putaway_in_scope(
     task_id: i64,
     scanned_destination_location_barcode: &str,
 ) -> AppResult<PutawayConfirmation> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     if task_id <= 0 {
         return Err(AppError::bad_request("putaway task ID must be positive"));
     }
     validate_scanned_barcode(scanned_destination_location_barcode)?;
-    let prepared = PreparedCommand::new(
+    let prepared = PreparedCommand::new_v1(
         command,
         CONFIRM_OPERATION,
         &(task_id, scanned_destination_location_barcode),
@@ -576,7 +577,7 @@ pub async fn confirm_putaway_in_scope(
 
     let owner_facility =
         inventory_journal::owner_facility_scope(target.inventory_owner_id, target.facility_id)?;
-    let transaction_id = match inventory_journal::begin_transaction(
+    let transaction_id = inventory_journal::begin_transaction(
         &mut tx,
         &JournalCommand {
             tenant_id: access.tenant_id,
@@ -590,18 +591,9 @@ pub async fn confirm_putaway_in_scope(
             operation: CONFIRM_OPERATION,
             idempotency_key: Some(prepared.idempotency_key()),
             request_hash: prepared.request_hash(),
-            record_idempotency: false,
         },
     )
-    .await?
-    {
-        JournalStart::New(transaction_id) => transaction_id,
-        JournalStart::Replay(_) => {
-            return Err(AppError::internal(
-                "putaway journal replay bypassed command replay",
-            ));
-        }
-    };
+    .await?;
 
     inventory::ensure_location_accepts_batch_tx(
         &mut tx,
@@ -859,7 +851,7 @@ pub async fn confirm_putaway_in_scope(
     )
     .await?;
 
-    prepared
+    Ok(prepared
         .commit_with_inventory_transaction(tx, result, Some(transaction_id))
-        .await
+        .await?)
 }

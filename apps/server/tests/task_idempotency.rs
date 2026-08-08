@@ -1078,6 +1078,22 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     )
     .await
     .unwrap();
+    let revoked_release_replay = send(
+        &app,
+        &token,
+        tenant_id,
+        "/api/tasks/release-expired",
+        Some("release-sweep-1"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(revoked_release_replay.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json::<ErrorResponse>(revoked_release_replay)
+            .await
+            .code,
+        ErrorCode::IdempotencyKeyReused
+    );
     let revoked_replay = send(
         &app,
         &token,
