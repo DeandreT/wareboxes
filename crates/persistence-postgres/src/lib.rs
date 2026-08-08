@@ -6,6 +6,7 @@ pub mod facilities;
 pub mod integration_inbox;
 pub mod inventory_balances;
 pub mod inventory_holds;
+pub mod inventory_rollups;
 pub mod locations;
 pub mod outbox;
 pub mod permissions;

@@ -3,6 +3,7 @@ use wareboxes_domain::{FacilityId, InventoryOwnerId, Timestamp};
 pub const MAX_INVENTORY_BALANCE_PAGE_SIZE: u16 = 1_000;
 pub const MAX_INVENTORY_BALANCE_QUERY_LENGTH: usize = 200;
 pub const MAX_INVENTORY_HOLD_PAGE_SIZE: u16 = 1_000;
+pub const MAX_INVENTORY_ROLLUP_PAGE_SIZE: u16 = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InventoryBalanceStatus {
@@ -225,6 +226,184 @@ pub struct InventoryHoldPage {
     pub next_before_id: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocationRollupCursor {
+    pub inventory_owner_id: InventoryOwnerId,
+    pub item_id: i64,
+    pub location_id: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FacilityRollupCursor {
+    pub inventory_owner_id: InventoryOwnerId,
+    pub item_id: i64,
+    pub facility_id: FacilityId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemRollupCursor {
+    pub inventory_owner_id: InventoryOwnerId,
+    pub item_id: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryRollupQuantityError {
+    EmptyUom,
+    NegativeQuantity,
+    CommittedQuantityExceedsOnHand,
+    AvailableQuantityExceedsUncommitted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryRollupQuantity {
+    uom: String,
+    on_hand: i64,
+    reserved: i64,
+    held: i64,
+    available: i64,
+}
+
+impl InventoryRollupQuantity {
+    pub fn new(
+        uom: String,
+        on_hand: i64,
+        reserved: i64,
+        held: i64,
+        available: i64,
+    ) -> Result<Self, InventoryRollupQuantityError> {
+        if uom.trim().is_empty() {
+            return Err(InventoryRollupQuantityError::EmptyUom);
+        }
+        if on_hand < 0 || reserved < 0 || held < 0 || available < 0 {
+            return Err(InventoryRollupQuantityError::NegativeQuantity);
+        }
+        let uncommitted = on_hand
+            .checked_sub(reserved)
+            .and_then(|quantity| quantity.checked_sub(held))
+            .ok_or(InventoryRollupQuantityError::CommittedQuantityExceedsOnHand)?;
+        if uncommitted < 0 {
+            return Err(InventoryRollupQuantityError::CommittedQuantityExceedsOnHand);
+        }
+        if available > uncommitted {
+            return Err(InventoryRollupQuantityError::AvailableQuantityExceedsUncommitted);
+        }
+        Ok(Self {
+            uom,
+            on_hand,
+            reserved,
+            held,
+            available,
+        })
+    }
+
+    pub fn into_parts(self) -> (String, i64, i64, i64, i64) {
+        (
+            self.uom,
+            self.on_hand,
+            self.reserved,
+            self.held,
+            self.available,
+        )
+    }
+
+    pub const fn on_hand(&self) -> i64 {
+        self.on_hand
+    }
+
+    pub const fn reserved(&self) -> i64 {
+        self.reserved
+    }
+
+    pub const fn held(&self) -> i64 {
+        self.held
+    }
+
+    pub const fn available(&self) -> i64 {
+        self.available
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InventoryRollupCount(i64);
+
+impl InventoryRollupCount {
+    pub const fn new(value: i64) -> Option<Self> {
+        if value > 0 {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryLocationRollupReadModel {
+    pub inventory_owner_id: InventoryOwnerId,
+    pub inventory_owner_name: String,
+    pub item_id: i64,
+    pub item_description: Option<String>,
+    pub primary_sku: Option<String>,
+    pub facility_id: FacilityId,
+    pub facility_name: Option<String>,
+    pub location_id: i64,
+    pub location_name: Option<String>,
+    pub location_barcode: Option<String>,
+    pub quantities: Vec<InventoryRollupQuantity>,
+    pub balance_count: InventoryRollupCount,
+    pub batch_count: InventoryRollupCount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryLocationRollupPage {
+    pub items: Vec<InventoryLocationRollupReadModel>,
+    pub next_cursor: Option<LocationRollupCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryFacilityRollupReadModel {
+    pub inventory_owner_id: InventoryOwnerId,
+    pub inventory_owner_name: String,
+    pub item_id: i64,
+    pub item_description: Option<String>,
+    pub primary_sku: Option<String>,
+    pub facility_id: FacilityId,
+    pub facility_name: Option<String>,
+    pub quantities: Vec<InventoryRollupQuantity>,
+    pub balance_count: InventoryRollupCount,
+    pub batch_count: InventoryRollupCount,
+    pub location_count: InventoryRollupCount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryFacilityRollupPage {
+    pub items: Vec<InventoryFacilityRollupReadModel>,
+    pub next_cursor: Option<FacilityRollupCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryItemRollupReadModel {
+    pub inventory_owner_id: InventoryOwnerId,
+    pub inventory_owner_name: String,
+    pub item_id: i64,
+    pub item_description: Option<String>,
+    pub primary_sku: Option<String>,
+    pub quantities: Vec<InventoryRollupQuantity>,
+    pub balance_count: InventoryRollupCount,
+    pub batch_count: InventoryRollupCount,
+    pub location_count: InventoryRollupCount,
+    pub facility_count: InventoryRollupCount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryItemRollupPage {
+    pub items: Vec<InventoryItemRollupReadModel>,
+    pub next_cursor: Option<ItemRollupCursor>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +459,32 @@ mod tests {
         );
         assert_eq!(InventoryHoldQuantity::new(0), None);
         assert_eq!(InventoryHoldQuantity::new(-1), None);
+    }
+
+    #[test]
+    fn rollup_quantities_reject_invalid_aggregates() {
+        let quantity = InventoryRollupQuantity::new("each".to_owned(), 12, 3, 2, 7).unwrap();
+        assert_eq!(quantity.into_parts(), ("each".to_owned(), 12, 3, 2, 7));
+        assert_eq!(
+            InventoryRollupQuantity::new(" ".to_owned(), 1, 0, 0, 1),
+            Err(InventoryRollupQuantityError::EmptyUom)
+        );
+        assert_eq!(
+            InventoryRollupQuantity::new("each".to_owned(), 4, 3, 2, 0),
+            Err(InventoryRollupQuantityError::CommittedQuantityExceedsOnHand)
+        );
+        assert_eq!(
+            InventoryRollupQuantity::new("each".to_owned(), 5, 1, 1, 4),
+            Err(InventoryRollupQuantityError::AvailableQuantityExceedsUncommitted)
+        );
+    }
+
+    #[test]
+    fn rollup_counts_must_be_positive() {
+        assert_eq!(
+            InventoryRollupCount::new(2).map(InventoryRollupCount::get),
+            Some(2)
+        );
+        assert_eq!(InventoryRollupCount::new(0), None);
     }
 }
