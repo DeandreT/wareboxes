@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::expected_receiving::ConfirmationIntent;
+use crate::picking::{PickClaim, PickingCommand};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -20,6 +21,7 @@ pub enum ClaimOperation {
     Putaway,
     InventoryRelocation,
     CycleCount,
+    Picking,
 }
 
 impl From<MovementOperation> for ClaimOperation {
@@ -360,6 +362,7 @@ pub enum RfCommand {
     Putaway(PutawayCommand),
     InventoryRelocation(InventoryRelocationCommand),
     CycleCount(CycleCountCommand),
+    Picking(PickingCommand),
     ExpectedReceipt(Box<ConfirmationIntent>),
 }
 
@@ -369,6 +372,7 @@ impl RfCommand {
             Self::Putaway(_) => Some(MovementOperation::Putaway),
             Self::InventoryRelocation(_) => Some(MovementOperation::InventoryRelocation),
             Self::CycleCount(_) => None,
+            Self::Picking(_) => None,
             Self::ExpectedReceipt(_) => None,
         }
     }
@@ -439,13 +443,35 @@ enum CommandLane {
 pub enum CommandOutcome {
     PutawayClaimed(Option<Box<PutawayClaim>>),
     InventoryRelocationClaimed(Option<Box<InventoryRelocationClaim>>),
-    PutawayConfirmed { task_id: i64 },
-    InventoryRelocationConfirmed { task_id: i64 },
-    PutawayReleased { task_id: i64 },
-    InventoryRelocationReleased { task_id: i64 },
+    PutawayConfirmed {
+        task_id: i64,
+    },
+    InventoryRelocationConfirmed {
+        task_id: i64,
+    },
+    PutawayReleased {
+        task_id: i64,
+    },
+    InventoryRelocationReleased {
+        task_id: i64,
+    },
     CycleCountClaimed(Option<Box<crate::cycle_count::CycleCountClaim>>),
-    CycleCountConfirmed { task_id: i64 },
-    CycleCountReleased { task_id: i64 },
+    CycleCountConfirmed {
+        task_id: i64,
+    },
+    CycleCountReleased {
+        task_id: i64,
+    },
+    PickClaimed(Option<Box<PickClaim>>),
+    PickConfirmed {
+        task_id: i64,
+        content_id: i64,
+        task_completed: bool,
+        order_ready_to_pack: bool,
+    },
+    PickReleased {
+        task_id: i64,
+    },
     ExpectedReceipt(crate::expected_receiving::ConfirmationResult),
 }
 
@@ -849,7 +875,10 @@ impl MovementWorkflow {
             CommandOutcome::ExpectedReceipt(_)
             | CommandOutcome::CycleCountClaimed(_)
             | CommandOutcome::CycleCountConfirmed { .. }
-            | CommandOutcome::CycleCountReleased { .. } => {
+            | CommandOutcome::CycleCountReleased { .. }
+            | CommandOutcome::PickClaimed(_)
+            | CommandOutcome::PickConfirmed { .. }
+            | CommandOutcome::PickReleased { .. } => {
                 self.require_reconciliation("Recorded result does not match the workflow".into());
                 return Transition::Applied;
             }

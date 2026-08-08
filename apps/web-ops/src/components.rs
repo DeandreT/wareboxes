@@ -2,7 +2,7 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 use lucide_leptos::{
     ArrowRightLeft, Boxes, Building2, ClipboardList, LayoutDashboard, LockKeyhole, LockKeyholeOpen,
-    LogOut, Plus, Printer, RefreshCw, Search, ShieldCheck, Trash2, TriangleAlert,
+    LogOut, PackageOpen, Plus, Printer, RefreshCw, Search, ShieldCheck, Trash2, TriangleAlert,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -24,6 +24,7 @@ pub enum UiIcon {
     Permissions,
     Print,
     Refresh,
+    Release,
     Remove,
     Roles,
     Search,
@@ -54,6 +55,7 @@ pub fn Icon(icon: UiIcon) -> impl IntoView {
                 UiIcon::Permissions => view! { <LockKeyhole size=16/> }.into_any(),
                 UiIcon::Print => view! { <Printer size=16/> }.into_any(),
                 UiIcon::Refresh => view! { <RefreshCw size=16/> }.into_any(),
+                UiIcon::Release => view! { <PackageOpen size=16/> }.into_any(),
                 UiIcon::Remove => view! { <Trash2 size=16/> }.into_any(),
                 UiIcon::Roles => view! { <ShieldCheck size=16/> }.into_any(),
                 UiIcon::Search => view! { <Search size=16/> }.into_any(),

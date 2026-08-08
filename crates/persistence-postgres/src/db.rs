@@ -354,6 +354,18 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'pick_waves_tenant_isolation'
                 ),
                 (
+                    'pick_tasks',
+                    'pick_tasks_tenant_isolation'
+                ),
+                (
+                    'pick_task_contents',
+                    'pick_task_contents_tenant_isolation'
+                ),
+                (
+                    'pick_confirmations',
+                    'pick_confirmations_tenant_isolation'
+                ),
+                (
                     'facilities',
                     'facilities_tenant_isolation'
                 ),
@@ -444,6 +456,14 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'order_cancellations',
                     'order_cancellations_tenant_isolation'
+                ),
+                (
+                    'order_releases',
+                    'order_releases_tenant_isolation'
+                ),
+                (
+                    'order_release_allocations',
+                    'order_release_allocations_tenant_isolation'
                 ),
                 (
                     'load_activity',

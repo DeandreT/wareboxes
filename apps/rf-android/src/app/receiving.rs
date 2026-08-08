@@ -27,17 +27,25 @@ mod tests;
 pub(super) enum WorkMode {
     Receive,
     Putaway,
+    Pick,
     Relocate,
     Count,
 }
 
 impl WorkMode {
-    const ALL: [Self; 4] = [Self::Receive, Self::Putaway, Self::Relocate, Self::Count];
+    const ALL: [Self; 5] = [
+        Self::Receive,
+        Self::Putaway,
+        Self::Pick,
+        Self::Relocate,
+        Self::Count,
+    ];
 
     const fn label(self) -> &'static str {
         match self {
             Self::Receive => "Receive",
             Self::Putaway => "Putaway",
+            Self::Pick => "Pick",
             Self::Relocate => "Relocate",
             Self::Count => "Count",
         }
@@ -160,6 +168,7 @@ impl RfApp {
                     let icon = match self.work_mode {
                         WorkMode::Receive => Icon::PackagePlus,
                         WorkMode::Putaway => Icon::PackageOpen,
+                        WorkMode::Pick => Icon::ScanBarcode,
                         WorkMode::Relocate => Icon::Move,
                         WorkMode::Count => Icon::ClipboardCheck,
                     };
@@ -183,16 +192,21 @@ impl RfApp {
             self.workflow.activity(),
             self.receiving.activity(),
             self.cycle_count.activity(),
+            self.picking.activity(),
         );
-        let segment_width = (ui.available_width() - 24.0) / 4.0;
+        let segment_width = (ui.available_width() - 32.0) / 5.0;
         ui.horizontal(|ui| {
+            ui.spacing_mut().button_padding.x = 3.0;
             for mode in WorkMode::ALL {
                 let selected = self.work_mode == mode;
                 let response = ui
                     .add_enabled(
                         selected || switching_allowed,
-                        egui::Button::selectable(selected, mode.label())
-                            .min_size(egui::vec2(segment_width, 48.0)),
+                        egui::Button::selectable(
+                            selected,
+                            egui::RichText::new(mode.label()).small(),
+                        )
+                        .min_size(egui::vec2(segment_width, 48.0)),
                     )
                     .on_disabled_hover_text("Finish or recover current work before switching");
                 if response.clicked() && switching_allowed {
@@ -204,10 +218,11 @@ impl RfApp {
                         WorkMode::Relocate => self
                             .workflow
                             .select_operation(MovementOperation::InventoryRelocation),
-                        WorkMode::Receive | WorkMode::Count => {}
+                        WorkMode::Receive | WorkMode::Pick | WorkMode::Count => {}
                     }
                     self.receiving_ui.focus = None;
                     self.scan_focus = None;
+                    self.pick_scan_focus = None;
                 }
             }
         });
@@ -231,6 +246,9 @@ impl RfApp {
             WorkMode::Count => self
                 .heartbeat_header()
                 .unwrap_or_else(|| activity_status(self.cycle_count.activity())),
+            WorkMode::Pick => self
+                .heartbeat_header()
+                .unwrap_or_else(|| activity_status(self.picking.activity())),
             WorkMode::Receive => match self.receiving.activity() {
                 ReceivingActivity::AwaitingLoad | ReceivingActivity::LoadComplete => {
                     ("READY", Self::accent())
@@ -942,6 +960,7 @@ impl RfApp {
             "receiving-recovery" => self.load_receiving_preview(ReceivingPreview::Recovery),
             "receiving-reconcile" => self.load_receiving_preview(ReceivingPreview::Reconcile),
             "count-active" => self.load_count_preview(),
+            "pick-active" => self.load_pick_preview(),
             _ => {}
         }
     }
@@ -1033,9 +1052,11 @@ fn work_mode_switch_allowed(
     putaway: Activity,
     receiving: ReceivingActivity,
     count: Activity,
+    picking: Activity,
 ) -> bool {
     putaway == Activity::Idle
         && count == Activity::Idle
+        && picking == Activity::Idle
         && matches!(
             receiving,
             ReceivingActivity::AwaitingLoad | ReceivingActivity::LoadComplete

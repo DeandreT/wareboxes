@@ -9,6 +9,7 @@ use wareboxes_api_contract::v1::{ErrorReason, ErrorResponse};
 use crate::command_store::{CommandStore, ExecutionScope};
 use crate::cycle_count::{CountScanStage, CycleCountWorkflow};
 use crate::expected_receiving::{ExpectedReceivingReducer, ReceivingEffect};
+use crate::picking::{PickScanStage, PickingWorkflow};
 use crate::transport::{NetworkEvent, ServerEndpoint};
 use crate::workflow::{
     Activity, InventoryRelocationClaim, Location, MovementClaimDetails, MovementKind, MovementWork,
@@ -17,6 +18,7 @@ use crate::workflow::{
 
 mod cycle_count_ui;
 mod heartbeat;
+mod picking_ui;
 mod receiving;
 mod session;
 
@@ -46,6 +48,8 @@ pub struct RfApp {
     effects: VecDeque<WorkflowEffect>,
     cycle_count: CycleCountWorkflow,
     cycle_count_effects: VecDeque<WorkflowEffect>,
+    picking: PickingWorkflow,
+    picking_effects: VecDeque<WorkflowEffect>,
     receiving: ExpectedReceivingReducer,
     receiving_effects: VecDeque<ReceivingEffect>,
     receiving_request: Option<session::ReceivingRequest>,
@@ -76,6 +80,7 @@ pub struct RfApp {
     device_id: String,
     scan_focus: Option<(i64, ScanStage)>,
     count_scan_focus: Option<(i64, CountScanStage)>,
+    pick_scan_focus: Option<(i64, PickScanStage)>,
     field_focus_pending: bool,
     heartbeat: heartbeat::HeartbeatRuntime,
 }
@@ -105,6 +110,8 @@ impl RfApp {
             effects: VecDeque::new(),
             cycle_count: CycleCountWorkflow::default(),
             cycle_count_effects: VecDeque::new(),
+            picking: PickingWorkflow::default(),
+            picking_effects: VecDeque::new(),
             receiving: ExpectedReceivingReducer::default(),
             receiving_effects: VecDeque::new(),
             receiving_request: None,
@@ -135,6 +142,7 @@ impl RfApp {
             device_id: format!("rf-{}", uuid::Uuid::new_v4()),
             scan_focus: None,
             count_scan_focus: None,
+            pick_scan_focus: None,
             field_focus_pending: true,
             heartbeat: heartbeat::HeartbeatRuntime::new(),
         }
@@ -181,6 +189,8 @@ impl RfApp {
             effects: VecDeque::new(),
             cycle_count: CycleCountWorkflow::default(),
             cycle_count_effects: VecDeque::new(),
+            picking: PickingWorkflow::default(),
+            picking_effects: VecDeque::new(),
             receiving: ExpectedReceivingReducer::default(),
             receiving_effects: VecDeque::new(),
             receiving_request: None,
@@ -211,6 +221,7 @@ impl RfApp {
             device_id,
             scan_focus: None,
             count_scan_focus: None,
+            pick_scan_focus: None,
             field_focus_pending: true,
             heartbeat: heartbeat::HeartbeatRuntime::new(),
         };
@@ -1174,6 +1185,7 @@ impl eframe::App for RfApp {
             self.work_mode = WorkMode::Receive;
         }
         self.effects.extend(self.cycle_count_effects.drain(..));
+        self.effects.extend(self.picking_effects.drain(..));
         self.persist_queued_commands();
         self.dispatch_queued_commands(root_ui.ctx());
         self.maintain_claim_heartbeat(root_ui.ctx());
@@ -1209,7 +1221,10 @@ impl eframe::App for RfApp {
                     .show(ui, |ui| {
                         if matches!(
                             self.work_mode,
-                            WorkMode::Putaway | WorkMode::Relocate | WorkMode::Count
+                            WorkMode::Putaway
+                                | WorkMode::Relocate
+                                | WorkMode::Count
+                                | WorkMode::Pick
                         ) && let Some(notice) = self.connectivity_notice.clone()
                         {
                             Self::message_band(ui, Self::warning(), Icon::WifiOff, &notice);
@@ -1245,6 +1260,7 @@ impl eframe::App for RfApp {
                             match self.work_mode {
                                 WorkMode::Receive => self.receiving_view(ui),
                                 WorkMode::Count => self.count_view(ui),
+                                WorkMode::Pick => self.pick_view(ui),
                                 WorkMode::Putaway | WorkMode::Relocate => {
                                     if self.workflow.claim().is_some() {
                                         self.active_work(ui);

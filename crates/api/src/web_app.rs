@@ -131,19 +131,23 @@ async fn workspace_bootstrap(
                 balances,
                 balance_next_cursor,
                 access: access_workspace,
+                locations: Vec::new(),
             })
         }
         WorkspaceBootstrapSection::Orders => {
             if !has_permission(session, "orders") {
                 return Ok(WorkspaceBootstrapData::default());
             }
-            let (orders, access) = tokio::try_join!(
+            let load_locations = routes::locations::list_for_access(state, access, false);
+            let (orders, access_workspace, locations) = tokio::try_join!(
                 repo::orders::get_orders_page_in_scope(&state.db, access, 50, 0, None, None),
                 routes::access::workspace_for_access(state, access),
+                load_locations,
             )?;
             Ok(WorkspaceBootstrapData {
                 orders: Some(orders),
-                access,
+                access: access_workspace,
+                locations,
                 ..WorkspaceBootstrapData::default()
             })
         }

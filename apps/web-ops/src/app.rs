@@ -51,6 +51,7 @@ pub struct WorkspaceBootstrapData {
     pub balances: Vec<InventoryBalanceResponse>,
     pub balance_next_cursor: Option<OpaqueCursor>,
     pub access: AccessScopeWorkspace,
+    pub locations: Vec<Location>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -92,6 +93,7 @@ impl From<WorkspaceBootstrapData> for WorkspaceData {
             balances: bootstrap.balances,
             balance_next_cursor: bootstrap.balance_next_cursor,
             access: bootstrap.access,
+            locations: bootstrap.locations,
             ..Self::default()
         }
     }
@@ -501,6 +503,7 @@ async fn load_workspace(
         Section::Orders if has_permission(session, "orders") => {
             data.orders = Some(api::orders().await?);
             data.access = api::access().await?;
+            data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
         }
         Section::Loads if has_permission(session, "wms") => {
             data.loads = api::internal_get("/api/loads?offset=0&limit=500").await?;
@@ -945,6 +948,7 @@ fn Orders(data: WorkspaceData, on_unauthorized: Callback<()>) -> impl IntoView {
         <OrdersWorkbench
             initial_page
             access=data.access
+            locations=data.locations
             on_unauthorized
         />
     }

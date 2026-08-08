@@ -12,7 +12,9 @@ mod license_plate_putaway;
 mod order_allocations;
 mod order_cancellations;
 mod order_holds;
+mod order_releases;
 mod orders;
+mod picking;
 mod putaway;
 mod putaway_claim_lifecycle;
 mod putaway_claims;
@@ -130,6 +132,19 @@ pub fn router() -> Router<AppState> {
         .route(
             "/orders/{order_id}/cancellations",
             post(order_cancellations::create),
+        )
+        .route("/orders/{order_id}/releases", post(order_releases::create))
+        .route("/picking-claims/next", post(picking::claim_next))
+        .route("/picking-claims/current", get(picking::current))
+        .route("/picking-claims/{task_id}", post(picking::claim_by_id))
+        .route(
+            "/picking-claims/{task_id}/heartbeats",
+            post(picking::heartbeat),
+        )
+        .route("/picking-claims/{task_id}/releases", post(picking::release))
+        .route(
+            "/picking-tasks/{task_id}/contents/{content_id}/confirmations",
+            post(picking::confirm),
         )
         .route(
             "/inventory-owners/{inventory_owner_id}/order-entry-items",

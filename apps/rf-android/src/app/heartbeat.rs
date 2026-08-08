@@ -14,7 +14,7 @@ use crate::transport::{
 };
 use crate::wire::{
     decode_cycle_count_heartbeat_response, decode_heartbeat_response,
-    decode_relocation_heartbeat_response,
+    decode_pick_heartbeat_response, decode_relocation_heartbeat_response,
 };
 use crate::workflow::{Activity, ClaimOperation};
 
@@ -63,7 +63,15 @@ impl RfApp {
             return;
         }
 
-        let active_claim = if self.cycle_count.activity() == Activity::Active {
+        let active_claim = if self.picking.activity() == Activity::Active {
+            self.picking.claim().map(|claim| {
+                (
+                    ClaimOperation::Picking,
+                    claim.task_id,
+                    claim.lease_expires_at.clone(),
+                )
+            })
+        } else if self.cycle_count.activity() == Activity::Active {
             self.cycle_count.claim().map(|claim| {
                 (
                     ClaimOperation::CycleCount,
@@ -222,6 +230,13 @@ impl RfApp {
             return;
         }
         let active_matches = match operation {
+            ClaimOperation::Picking => {
+                self.picking.activity() == Activity::Active
+                    && self
+                        .picking
+                        .claim()
+                        .is_some_and(|claim| claim.task_id == task_id)
+            }
             ClaimOperation::CycleCount => {
                 self.cycle_count.activity() == Activity::Active
                     && self
@@ -286,6 +301,17 @@ impl RfApp {
                                 response.lease_expires_at,
                             )
                         })
+                }
+                ClaimOperation::Picking => {
+                    decode_pick_heartbeat_response(task_id, response.status, &response.body).map(
+                        |response| {
+                            (
+                                response.task_id,
+                                response.heartbeat_at,
+                                response.lease_expires_at,
+                            )
+                        },
+                    )
                 }
             };
             let (heartbeat_task_id, heartbeat_at, lease_expires_at) = match heartbeat {
@@ -489,6 +515,8 @@ impl RfApp {
             .unwrap_or_else(|| {
                 if self.cycle_count.activity() == Activity::Active {
                     ClaimOperation::CycleCount
+                } else if self.picking.activity() == Activity::Active {
+                    ClaimOperation::Picking
                 } else {
                     self.workflow.operation().into()
                 }
@@ -501,10 +529,12 @@ impl RfApp {
     }
 
     fn require_lease_reconciliation(&mut self, operation: ClaimOperation, message: &str) {
-        if operation == ClaimOperation::CycleCount {
-            self.cycle_count.require_reconciliation(message.into());
-        } else {
-            self.workflow.require_reconciliation(message.into());
+        match operation {
+            ClaimOperation::CycleCount => self.cycle_count.require_reconciliation(message.into()),
+            ClaimOperation::Picking => self.picking.require_reconciliation(message.into()),
+            ClaimOperation::Putaway | ClaimOperation::InventoryRelocation => {
+                self.workflow.require_reconciliation(message.into());
+            }
         }
     }
 

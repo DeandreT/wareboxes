@@ -3,6 +3,8 @@
 mod allocation;
 mod order;
 mod order_cancellation;
+mod order_release;
+mod picking;
 mod tenant;
 
 pub use allocation::{
@@ -23,6 +25,11 @@ pub use order::{
 pub use order_cancellation::{
     CancellationNote, OrderCancellationDetails, OrderCancellationError, OrderCancellationReason,
     MAX_CANCELLATION_NOTE_LENGTH,
+};
+pub use order_release::{release_order, OrderReleaseError};
+pub use picking::{
+    PickClaimReleaseReason, PickContentState, PickQuantity, PickScanValue, PickingError,
+    MAX_PICK_SCAN_VALUE_LENGTH,
 };
 pub use tenant::TenantStatus;
 
@@ -91,6 +98,9 @@ positive_id!(UserId, "user ID");
 positive_id!(OrderId, "order ID");
 positive_id!(OrderLineId, "order line ID");
 positive_id!(OrderCancellationId, "order cancellation ID");
+positive_id!(OrderReleaseId, "order release ID");
+positive_id!(PickTaskId, "pick task ID");
+positive_id!(PickContentId, "pick content ID");
 positive_id!(AllocationRunId, "allocation run ID");
 positive_id!(InventoryReservationId, "inventory reservation ID");
 positive_id!(InventoryAllocationId, "inventory allocation ID");

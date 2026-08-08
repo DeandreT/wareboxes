@@ -261,6 +261,9 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "audit_wave_assignments_tenant_isolation",
         ),
         ("pick_waves", "pick_waves_tenant_isolation"),
+        ("pick_tasks", "pick_tasks_tenant_isolation"),
+        ("pick_task_contents", "pick_task_contents_tenant_isolation"),
+        ("pick_confirmations", "pick_confirmations_tenant_isolation"),
         ("facilities", "facilities_tenant_isolation"),
         ("locations", "locations_tenant_isolation"),
         ("inventory_owners", "inventory_owners_tenant_isolation"),
@@ -356,6 +359,11 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         (
             "order_cancellations",
             "order_cancellations_tenant_isolation",
+        ),
+        ("order_releases", "order_releases_tenant_isolation"),
+        (
+            "order_release_allocations",
+            "order_release_allocations_tenant_isolation",
         ),
         ("inventory_holds", "inventory_holds_tenant_isolation"),
         (

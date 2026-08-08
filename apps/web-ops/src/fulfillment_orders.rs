@@ -8,7 +8,7 @@ use wareboxes_api_contract::v1::{
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 use wareboxes_core::dto::{OrderPage, OrderUpdate};
-use wareboxes_core::models::{Order, OrderStatus};
+use wareboxes_core::models::{Location, Order, OrderStatus};
 
 use crate::api;
 use crate::components::{Icon, SearchField, UiIcon};
@@ -56,6 +56,7 @@ struct DraftOrderLine {
 pub fn OrdersWorkbench(
     initial_page: OrderPage,
     access: AccessScopeWorkspace,
+    locations: Vec<Location>,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     let page = RwSignal::new(initial_page);
@@ -73,6 +74,7 @@ pub fn OrdersWorkbench(
     });
     let toasts = use_toast_bus();
     let detail_facilities = StoredValue::new(access.facilities);
+    let detail_locations = StoredValue::new(locations);
     let create_clients = StoredValue::new(access.inventory_owners);
 
     let run_search = move |offset: i64| {
@@ -381,6 +383,7 @@ pub fn OrdersWorkbench(
                                                 <OrderDetailPanel
                                                     order
                                                     facilities=detail_facilities.get_value()
+                                                    locations=detail_locations.get_value()
                                                     pending=selected_pending
                                                     load_error=selected_error
                                                     on_refreshed=refresh_after_command
@@ -948,6 +951,7 @@ fn CreateOrderPanel(
 fn OrderDetailPanel(
     order: Order,
     facilities: Vec<AccessScopeResource>,
+    locations: Vec<Location>,
     pending: RwSignal<bool>,
     load_error: RwSignal<Option<String>>,
     on_refreshed: Callback<i64>,
@@ -991,6 +995,7 @@ fn OrderDetailPanel(
             .collect::<Vec<_>>(),
     );
     let facilities = StoredValue::new(facilities);
+    let locations = StoredValue::new(locations);
     let toasts = use_toast_bus();
 
     let save = move |event: leptos::ev::SubmitEvent| {
@@ -1416,6 +1421,7 @@ fn OrderDetailPanel(
                     <OrderAllocationPanel
                         order_id
                         facilities=facilities.get_value()
+                        locations=locations.get_value()
                         on_refreshed
                         on_unauthorized
                     />
