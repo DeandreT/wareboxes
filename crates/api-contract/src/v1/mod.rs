@@ -17,6 +17,7 @@ mod order_allocation;
 mod order_cancellation;
 mod order_hold;
 mod order_release;
+mod outbound_load;
 mod packing;
 mod picking;
 mod putaway;
@@ -103,6 +104,20 @@ pub use order_hold::{
     ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
 };
 pub use order_release::{OrderReleaseStatus, ReleaseOrderRequest, ReleaseOrderResponse};
+pub use outbound_load::{
+    CancelOutboundLoadRequest, CancelOutboundLoadResponse, CompleteOutboundLoadLoadingRequest,
+    CompleteOutboundLoadLoadingResponse, ConfirmOutboundLoadDepartureRequest,
+    ConfirmOutboundLoadDepartureResponse, LoadOutboundCartonRequest, MovePackedCartonResponse,
+    OutboundLoadCancellationReason, OutboundLoadCartonResponse, OutboundLoadProgressResponse,
+    OutboundLoadQueueEntryResponse, OutboundLoadQueuePage, OutboundLoadQueuePageRequest,
+    OutboundLoadResponse, OutboundLoadShipmentDepartureResponse, OutboundLoadShipmentResponse,
+    OutboundLoadStatus, PackedCartonContentPositionResponse, PackedCartonMovementDetailResponse,
+    PackedCartonMovementKind, PackedCartonMovementResponse, PackedCartonPositionResponse,
+    PackedCartonPositionStateResponse, PlanOutboundLoadCartonRequest, PlanOutboundLoadRequest,
+    PlanOutboundLoadResponse, PlanOutboundLoadShipmentRequest, ReleaseOutboundLoadRequest,
+    ReleaseOutboundLoadResponse, StageOutboundCartonRequest, StartOutboundLoadLoadingRequest,
+    StartOutboundLoadLoadingResponse, UnloadOutboundCartonRequest, UnstageOutboundCartonRequest,
+};
 pub use packing::{
     CartonDimensions, CartonMeasurements, CloseCartonRequest, CloseCartonResponse,
     CreateCartonRequest, CreateCartonResponse, DimensionMillimeters, OpenPackSessionRequest,

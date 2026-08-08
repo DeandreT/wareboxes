@@ -5,6 +5,7 @@ mod facility;
 mod order;
 mod order_cancellation;
 mod order_release;
+mod outbound_load;
 mod packing;
 mod picking;
 mod replenishment;
@@ -40,6 +41,20 @@ pub use order_cancellation::{
     MAX_CANCELLATION_NOTE_LENGTH,
 };
 pub use order_release::{release_order, OrderReleaseError};
+pub use outbound_load::{
+    cancel_outbound_load, complete_outbound_load_loading, depart_outbound_load,
+    depart_packed_carton, load_packed_carton, record_outbound_carton_loaded,
+    record_outbound_carton_staged, record_outbound_carton_unloaded,
+    record_outbound_carton_unstaged, release_outbound_load, stage_packed_carton,
+    start_outbound_load_loading, unload_packed_carton, unstage_packed_carton,
+    OutboundLoadCancellationDetails, OutboundLoadCancellationNote, OutboundLoadCancellationReason,
+    OutboundLoadError, OutboundLoadProgress, OutboundLoadReference, OutboundLoadRevision,
+    OutboundLoadScanValue, OutboundLoadStatus, OutboundLoadTransition, PackedCartonMovementKind,
+    PackedCartonPositionRevision, PackedCartonPositionState, SealNumber, TrailerNumber,
+    MAX_OUTBOUND_LOAD_CANCELLATION_NOTE_LENGTH, MAX_OUTBOUND_LOAD_REFERENCE_LENGTH,
+    MAX_OUTBOUND_LOAD_SCAN_VALUE_LENGTH, MAX_OUTBOUND_LOAD_SEAL_NUMBER_LENGTH,
+    MAX_OUTBOUND_LOAD_TRAILER_NUMBER_LENGTH,
+};
 pub use packing::{
     begin_packing, complete_packing, continue_packing, open_carton, CartonDimensions,
     CartonMeasurements, CartonStatus, DimensionMillimeters, PackQuantity, PackScanValue,
@@ -166,6 +181,12 @@ positive_id!(PackSessionId, "pack session ID");
 positive_id!(CartonId, "carton ID");
 positive_id!(CartonContentId, "carton content ID");
 positive_id!(ShipmentId, "shipment ID");
+positive_id!(OutboundLoadId, "outbound load ID");
+positive_id!(OutboundLoadShipmentId, "outbound load shipment ID");
+positive_id!(OutboundLoadCartonId, "outbound load carton ID");
+positive_id!(PackedCartonPositionId, "packed carton position ID");
+positive_id!(PackedCartonMovementId, "packed carton movement ID");
+positive_id!(OutboundLoadCancellationId, "outbound load cancellation ID");
 positive_id!(CarrierManifestId, "carrier manifest ID");
 positive_id!(
     ShipmentTrackingAssignmentId,

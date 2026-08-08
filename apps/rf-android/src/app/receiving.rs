@@ -30,16 +30,18 @@ pub(super) enum WorkMode {
     Pick,
     Relocate,
     Replenish,
+    OutboundLoad,
     Count,
 }
 
 impl WorkMode {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Receive,
         Self::Putaway,
         Self::Pick,
         Self::Relocate,
         Self::Replenish,
+        Self::OutboundLoad,
         Self::Count,
     ];
 
@@ -50,6 +52,7 @@ impl WorkMode {
             Self::Pick => "Pick",
             Self::Relocate => "Relocate",
             Self::Replenish => "Replenish",
+            Self::OutboundLoad => "Load",
             Self::Count => "Count",
         }
     }
@@ -57,6 +60,7 @@ impl WorkMode {
     const fn tab_label(self) -> &'static str {
         match self {
             Self::Replenish => "Replen.",
+            Self::OutboundLoad => "Load",
             _ => self.label(),
         }
     }
@@ -68,6 +72,7 @@ impl WorkMode {
             Self::Pick => "Pick",
             Self::Relocate => "Move",
             Self::Replenish => "Repl",
+            Self::OutboundLoad => "Load",
             Self::Count => "Count",
         }
     }
@@ -192,6 +197,7 @@ impl RfApp {
                         WorkMode::Pick => Icon::ScanBarcode,
                         WorkMode::Relocate => Icon::Move,
                         WorkMode::Replenish => Icon::RefreshCw,
+                        WorkMode::OutboundLoad => Icon::Truck,
                         WorkMode::Count => Icon::ClipboardCheck,
                     };
                     ui.label(Self::icon(icon).color(Self::accent()));
@@ -216,8 +222,9 @@ impl RfApp {
             self.cycle_count.activity(),
             self.picking.activity(),
             self.replenishment.activity(),
+            self.outbound_load.activity(),
         );
-        let segment_width = (ui.available_width() - 40.0) / 6.0;
+        let segment_width = (ui.available_width() - 48.0) / 7.0;
         let compact_tabs = ui.available_width() < 420.0;
         ui.horizontal(|ui| {
             ui.spacing_mut().button_padding.x = 3.0;
@@ -250,12 +257,14 @@ impl RfApp {
                         WorkMode::Receive
                         | WorkMode::Pick
                         | WorkMode::Replenish
+                        | WorkMode::OutboundLoad
                         | WorkMode::Count => {}
                     }
                     self.receiving_ui.focus = None;
                     self.scan_focus = None;
                     self.pick_scan_focus = None;
                     self.replenishment_scan_focus = None;
+                    self.outbound_load_scan_focus = None;
                 }
             }
         });
@@ -285,6 +294,7 @@ impl RfApp {
             WorkMode::Replenish => self
                 .heartbeat_header()
                 .unwrap_or_else(|| activity_status(self.replenishment.activity())),
+            WorkMode::OutboundLoad => activity_status(self.outbound_load.activity()),
             WorkMode::Receive => match self.receiving.activity() {
                 ReceivingActivity::AwaitingLoad | ReceivingActivity::LoadComplete => {
                     ("READY", Self::accent())
@@ -999,6 +1009,7 @@ impl RfApp {
             "pick-active" => self.load_pick_preview(),
             "pick-shortage" => self.load_pick_shortage_preview(),
             "replenishment-active" => self.load_replenishment_preview(),
+            "outbound-load-active" => self.load_outbound_load_preview(),
             _ => {}
         }
     }
@@ -1092,11 +1103,13 @@ fn work_mode_switch_allowed(
     count: Activity,
     picking: Activity,
     replenishment: Activity,
+    outbound_load: Activity,
 ) -> bool {
     putaway == Activity::Idle
         && count == Activity::Idle
         && picking == Activity::Idle
         && replenishment == Activity::Idle
+        && outbound_load == Activity::Idle
         && matches!(
             receiving,
             ReceivingActivity::AwaitingLoad | ReceivingActivity::LoadComplete

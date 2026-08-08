@@ -45,6 +45,7 @@ use crate::workflow::{
     MovementWork, PutawayClaim, PutawayCommand, ReleaseReason, RfCommand,
 };
 
+mod outbound_load;
 mod replenishment;
 
 pub use replenishment::{
@@ -92,6 +93,7 @@ pub enum ResponseKind {
     ReplenishmentClaim,
     ReplenishmentConfirmation,
     ReplenishmentRelease,
+    OutboundCartonMovement,
     ExpectedReceiptConfirmation,
 }
 
@@ -125,6 +127,8 @@ pub enum WireRequestError {
     InvalidPickShortageField { field: &'static str },
     #[error("replenishment command contains invalid persisted state")]
     InvalidReplenishmentCommand,
+    #[error("outbound-load command contains invalid persisted state")]
+    InvalidOutboundLoadCommand,
     #[error("load ID must be positive")]
     InvalidLoadId,
     #[error("load line ID must be positive")]
@@ -520,6 +524,7 @@ pub fn build_durable_request(
             )
         }
         RfCommand::Replenishment(command) => replenishment::build_command_parts(command)?,
+        RfCommand::OutboundLoad(command) => outbound_load::build_command_parts(command)?,
         RfCommand::ExpectedReceipt(intent) => {
             if !intent.is_current_and_valid() {
                 return Err(WireRequestError::InvalidExpectedReceiptField {
@@ -668,6 +673,7 @@ pub fn decode_command_response(
         | ResponseKind::ReplenishmentClaim
         | ResponseKind::ReplenishmentConfirmation
         | ResponseKind::ReplenishmentRelease => replenishment::decode_outcome(response_kind, body),
+        ResponseKind::OutboundCartonMovement => outbound_load::decode_response(body),
         ResponseKind::ExpectedReceiptConfirmation => {
             let response = decode_expected_receipt_confirmation_response_from_body(status, body)?;
             Ok(CommandOutcome::ExpectedReceipt(response))

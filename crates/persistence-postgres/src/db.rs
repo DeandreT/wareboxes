@@ -398,6 +398,18 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'carton_contents_tenant_isolation'
                 ),
                 (
+                    'packed_inventory_positions',
+                    'packed_inventory_positions_tenant_isolation'
+                ),
+                (
+                    'packed_carton_move_confirmations',
+                    'packed_carton_move_confirmations_tenant_isolation'
+                ),
+                (
+                    'packed_carton_move_details',
+                    'packed_carton_move_details_tenant_isolation'
+                ),
+                (
                     'shipments',
                     'shipments_tenant_isolation'
                 ),
@@ -420,6 +432,22 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'shipment_confirmations',
                     'shipment_confirmations_tenant_isolation'
+                ),
+                (
+                    'outbound_loads',
+                    'outbound_loads_tenant_isolation'
+                ),
+                (
+                    'outbound_load_shipments',
+                    'outbound_load_shipments_tenant_isolation'
+                ),
+                (
+                    'outbound_load_cartons',
+                    'outbound_load_cartons_tenant_isolation'
+                ),
+                (
+                    'outbound_load_cancellations',
+                    'outbound_load_cancellations_tenant_isolation'
                 ),
                 (
                     'facilities',

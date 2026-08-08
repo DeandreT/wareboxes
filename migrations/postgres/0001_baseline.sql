@@ -4783,20 +4783,48 @@ BEGIN
        )
        OR EXISTS (
            SELECT 1
-           FROM public.carton_contents content
+           FROM public.packed_inventory_positions position
+           INNER JOIN public.carton_contents content
+             ON content.tenant_id = position.tenant_id
+            AND content.inventory_owner_id = position.inventory_owner_id
+            AND content.id = position.carton_content_id
+           LEFT JOIN LATERAL (
+               SELECT detail.destination_inventory_allocation_id,
+                      detail.destination_inventory_balance_id
+               FROM public.packed_carton_move_details detail
+               JOIN public.packed_carton_move_confirmations movement
+                 ON movement.tenant_id = detail.tenant_id
+                AND movement.inventory_owner_id = detail.inventory_owner_id
+                AND movement.id = detail.move_confirmation_id
+               WHERE detail.tenant_id = position.tenant_id
+                 AND detail.inventory_owner_id = position.inventory_owner_id
+                 AND detail.packed_position_id = position.id
+               ORDER BY movement.moved_at DESC, movement.id DESC
+               LIMIT 1
+           ) move_detail ON TRUE
            INNER JOIN public.inventory_allocations allocation
-             ON allocation.tenant_id = content.tenant_id
-            AND allocation.inventory_owner_id = content.inventory_owner_id
-            AND allocation.facility_id = content.facility_id
-            AND allocation.id = content.destination_inventory_allocation_id
+             ON allocation.tenant_id = position.tenant_id
+            AND allocation.inventory_owner_id = position.inventory_owner_id
+            AND allocation.facility_id = position.facility_id
+            AND allocation.id = COALESCE(
+                move_detail.destination_inventory_allocation_id,
+                content.destination_inventory_allocation_id)
            INNER JOIN public.inventory_balances balance
-             ON balance.tenant_id = content.tenant_id
-            AND balance.inventory_owner_id = content.inventory_owner_id
-            AND balance.facility_id = content.facility_id
-            AND balance.id = content.destination_inventory_balance_id
-           WHERE content.tenant_id = shipment_row.tenant_id
-             AND content.inventory_owner_id = shipment_row.inventory_owner_id
-             AND content.facility_id = shipment_row.facility_id
+             ON balance.tenant_id = position.tenant_id
+            AND balance.inventory_owner_id = position.inventory_owner_id
+            AND balance.facility_id = position.facility_id
+            AND balance.id = COALESCE(
+                move_detail.destination_inventory_balance_id,
+                content.destination_inventory_balance_id)
+           WHERE position.tenant_id = shipment_row.tenant_id
+             AND position.inventory_owner_id = shipment_row.inventory_owner_id
+             AND position.facility_id = shipment_row.facility_id
+             AND position.carton_id IN (
+                 SELECT shipment_carton.carton_id
+                 FROM public.shipment_cartons shipment_carton
+                 WHERE shipment_carton.tenant_id = shipment_row.tenant_id
+                   AND shipment_carton.inventory_owner_id = shipment_row.inventory_owner_id
+                   AND shipment_carton.shipment_id = shipment_row.id)
              AND content.packing_session_id = shipment_row.packing_session_id
              AND (allocation.status <> 'fulfilled'
                   OR allocation.modified IS DISTINCT FROM shipment_row.departed_at
@@ -4817,27 +4845,57 @@ BEGIN
        )
        OR EXISTS (
            WITH expected AS (
-               SELECT content.facility_id,
-                      content.destination_location_id AS location_id,
-                      content.destination_license_plate_id AS license_plate_id,
-                      content.item_batch_id, content.item_id, content.uom,
+               SELECT position.facility_id,
+                      source_balance.location_id,
+                      source_balance.license_plate_id,
+                      position.item_batch_id, position.item_id, position.uom,
                       batch.lot, batch.expiration, batch.serial,
-                      content.inventory_status AS status,
-                      -SUM(content.packed_qty)::bigint AS quantity_delta
-               FROM public.carton_contents content
+                      position.inventory_status AS status,
+                      -SUM(position.packed_qty)::bigint AS quantity_delta
+               FROM public.packed_inventory_positions position
+               INNER JOIN public.carton_contents content
+                 ON content.tenant_id = position.tenant_id
+                AND content.inventory_owner_id = position.inventory_owner_id
+                AND content.id = position.carton_content_id
+               LEFT JOIN LATERAL (
+                   SELECT detail.destination_inventory_balance_id
+                   FROM public.packed_carton_move_details detail
+                   JOIN public.packed_carton_move_confirmations movement
+                     ON movement.tenant_id = detail.tenant_id
+                    AND movement.inventory_owner_id = detail.inventory_owner_id
+                    AND movement.id = detail.move_confirmation_id
+                   WHERE detail.tenant_id = position.tenant_id
+                     AND detail.inventory_owner_id = position.inventory_owner_id
+                     AND detail.packed_position_id = position.id
+                   ORDER BY movement.moved_at DESC, movement.id DESC
+                   LIMIT 1
+               ) move_detail ON TRUE
+               INNER JOIN public.inventory_balances source_balance
+                 ON source_balance.tenant_id = position.tenant_id
+                AND source_balance.inventory_owner_id = position.inventory_owner_id
+                AND source_balance.facility_id = position.facility_id
+                AND source_balance.id = COALESCE(
+                    move_detail.destination_inventory_balance_id,
+                    content.destination_inventory_balance_id)
                INNER JOIN public.item_batches batch
-                 ON batch.tenant_id = content.tenant_id
-                AND batch.inventory_owner_id = content.inventory_owner_id
-                AND batch.id = content.item_batch_id
-               WHERE content.tenant_id = shipment_row.tenant_id
-                 AND content.inventory_owner_id = shipment_row.inventory_owner_id
-                 AND content.facility_id = shipment_row.facility_id
+                 ON batch.tenant_id = position.tenant_id
+                AND batch.inventory_owner_id = position.inventory_owner_id
+                AND batch.id = position.item_batch_id
+               WHERE position.tenant_id = shipment_row.tenant_id
+                 AND position.inventory_owner_id = shipment_row.inventory_owner_id
+                 AND position.facility_id = shipment_row.facility_id
                  AND content.packing_session_id = shipment_row.packing_session_id
-               GROUP BY content.facility_id, content.destination_location_id,
-                        content.destination_license_plate_id,
-                        content.item_batch_id, content.item_id, content.uom,
+                 AND position.carton_id IN (
+                     SELECT shipment_carton.carton_id
+                     FROM public.shipment_cartons shipment_carton
+                     WHERE shipment_carton.tenant_id = shipment_row.tenant_id
+                       AND shipment_carton.inventory_owner_id = shipment_row.inventory_owner_id
+                       AND shipment_carton.shipment_id = shipment_row.id)
+               GROUP BY position.facility_id, source_balance.location_id,
+                        source_balance.license_plate_id,
+                        position.item_batch_id, position.item_id, position.uom,
                         batch.lot, batch.expiration, batch.serial,
-                        content.inventory_status
+                        position.inventory_status
            ), actual AS (
                SELECT entry.facility_id, entry.location_id, entry.license_plate_id,
                       entry.item_batch_id, entry.item_id, entry.uom,
@@ -23110,6 +23168,1523 @@ GRANT USAGE ON SEQUENCE public.facility_shipping_origin_configurations_id_seq TO
 
 
 --
+-- Typed outbound-load execution and movable packed-carton projection.
+
+ALTER TABLE ONLY public.carton_contents
+    ADD CONSTRAINT carton_contents_scope_id_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, carton_id, id);
+
+CREATE TABLE public.packed_inventory_positions (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    carton_id bigint NOT NULL,
+    carton_content_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    inventory_status text NOT NULL,
+    packed_qty bigint NOT NULL,
+    state text DEFAULT 'packed' NOT NULL,
+    outbound_load_id bigint,
+    outbound_load_carton_id bigint,
+    load_sequence bigint,
+    current_inventory_allocation_id bigint,
+    current_inventory_balance_id bigint,
+    current_location_id bigint,
+    current_license_plate_id bigint,
+    revision bigint DEFAULT 1 NOT NULL,
+    positioned_at timestamp with time zone NOT NULL,
+    departure_inventory_transaction_id bigint,
+    departed_at timestamp with time zone,
+    CONSTRAINT packed_inventory_positions_pkey PRIMARY KEY (id),
+    CONSTRAINT packed_inventory_positions_content_key UNIQUE
+        (tenant_id, inventory_owner_id, facility_id, carton_id, carton_content_id),
+    CONSTRAINT packed_inventory_positions_scope_id_key UNIQUE
+        (tenant_id, inventory_owner_id, facility_id, carton_id, id),
+    CONSTRAINT packed_inventory_positions_qty_check CHECK (packed_qty > 0),
+    CONSTRAINT packed_inventory_positions_revision_check CHECK (revision > 0),
+    CONSTRAINT packed_inventory_positions_state_check CHECK
+        (state IN ('packed', 'staged', 'loaded', 'departed')),
+    CONSTRAINT packed_inventory_positions_load_sequence_check CHECK
+        (load_sequence IS NULL OR load_sequence > 0),
+    CONSTRAINT packed_inventory_positions_fields_check CHECK (
+        (state = 'packed'
+            AND outbound_load_id IS NULL AND outbound_load_carton_id IS NULL
+            AND load_sequence IS NULL
+            AND current_inventory_allocation_id IS NOT NULL
+            AND current_inventory_balance_id IS NOT NULL
+            AND current_location_id IS NOT NULL
+            AND current_license_plate_id IS NOT NULL
+            AND departure_inventory_transaction_id IS NULL AND departed_at IS NULL)
+        OR (state = 'staged'
+            AND outbound_load_id IS NOT NULL AND outbound_load_carton_id IS NOT NULL
+            AND load_sequence IS NOT NULL
+            AND current_inventory_allocation_id IS NOT NULL
+            AND current_inventory_balance_id IS NOT NULL
+            AND current_location_id IS NOT NULL
+            AND current_license_plate_id IS NOT NULL
+            AND departure_inventory_transaction_id IS NULL AND departed_at IS NULL)
+        OR (state = 'loaded'
+            AND outbound_load_id IS NOT NULL AND outbound_load_carton_id IS NOT NULL
+            AND load_sequence IS NOT NULL
+            AND current_inventory_allocation_id IS NOT NULL
+            AND current_inventory_balance_id IS NOT NULL
+            AND current_location_id IS NOT NULL
+            AND current_license_plate_id IS NOT NULL
+            AND departure_inventory_transaction_id IS NULL AND departed_at IS NULL)
+        OR (state = 'departed'
+            AND ((outbound_load_id IS NULL AND outbound_load_carton_id IS NULL AND load_sequence IS NULL)
+                 OR (outbound_load_id IS NOT NULL AND outbound_load_carton_id IS NOT NULL AND load_sequence IS NOT NULL))
+            AND current_inventory_allocation_id IS NULL
+            AND current_inventory_balance_id IS NULL
+            AND current_location_id IS NULL
+            AND current_license_plate_id IS NULL
+            AND departure_inventory_transaction_id IS NOT NULL AND departed_at IS NOT NULL)
+    ),
+    CONSTRAINT packed_inventory_positions_uom_check CHECK
+        (uom = btrim(uom) AND uom <> ''),
+    CONSTRAINT packed_inventory_positions_inventory_status_check CHECK
+        (inventory_status = 'available')
+);
+ALTER TABLE ONLY public.packed_inventory_positions FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE public.outbound_loads (
+    id bigint GENERATED ALWAYS AS IDENTITY
+        (SEQUENCE NAME public.outbound_loads_id_seq) NOT NULL,
+    tenant_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    load_reference text NOT NULL,
+    load_barcode text NOT NULL,
+    carrier text NOT NULL,
+    state text DEFAULT 'planned' NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
+    staging_lane_location_id bigint NOT NULL,
+    dock_door_location_id bigint,
+    virtual_trailer_location_id bigint NOT NULL,
+    trailer_number text,
+    seal_number text,
+    scheduled_departure_at timestamp with time zone,
+    shipment_count bigint NOT NULL,
+    carton_count bigint NOT NULL,
+    planned_by_user_id bigint NOT NULL,
+    planned_at timestamp with time zone NOT NULL,
+    released_by_user_id bigint,
+    released_at timestamp with time zone,
+    loading_started_by_user_id bigint,
+    loading_started_at timestamp with time zone,
+    ready_to_depart_by_user_id bigint,
+    ready_to_depart_at timestamp with time zone,
+    departed_by_user_id bigint,
+    departed_at timestamp with time zone,
+    cancelled_by_user_id bigint,
+    cancelled_at timestamp with time zone,
+    CONSTRAINT outbound_loads_pkey PRIMARY KEY (id),
+    CONSTRAINT outbound_loads_tenant_id_id_key UNIQUE (tenant_id, id),
+    CONSTRAINT outbound_loads_scope_id_key UNIQUE (tenant_id, facility_id, id),
+    CONSTRAINT outbound_loads_reference_key UNIQUE (tenant_id, load_reference),
+    CONSTRAINT outbound_loads_barcode_key UNIQUE (tenant_id, load_barcode),
+    CONSTRAINT outbound_loads_counts_check CHECK (shipment_count > 0 AND carton_count > 0),
+    CONSTRAINT outbound_loads_revision_check CHECK (revision > 0),
+    CONSTRAINT outbound_loads_state_check CHECK
+        (state IN ('planned', 'staging', 'loading', 'ready_to_depart', 'departed', 'cancelled')),
+    CONSTRAINT outbound_loads_reference_check CHECK
+        (load_reference = btrim(load_reference) AND load_reference <> '' AND char_length(load_reference) <= 100),
+    CONSTRAINT outbound_loads_barcode_check CHECK
+        (load_barcode = btrim(load_barcode) AND load_barcode <> '' AND char_length(load_barcode) <= 200),
+    CONSTRAINT outbound_loads_carrier_check CHECK
+        (carrier = btrim(carrier) AND carrier <> '' AND char_length(carrier) <= 100),
+    CONSTRAINT outbound_loads_trailer_check CHECK
+        (trailer_number IS NULL OR (trailer_number = btrim(trailer_number) AND trailer_number <> '' AND char_length(trailer_number) <= 100)),
+    CONSTRAINT outbound_loads_seal_check CHECK
+        (seal_number IS NULL OR (seal_number = btrim(seal_number) AND seal_number <> '' AND char_length(seal_number) <= 100))
+);
+ALTER TABLE ONLY public.outbound_loads FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE public.outbound_load_shipments (
+    id bigint GENERATED ALWAYS AS IDENTITY
+        (SEQUENCE NAME public.outbound_load_shipments_id_seq) NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    outbound_load_id bigint NOT NULL,
+    shipment_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    shipment_sequence bigint NOT NULL,
+    expected_shipment_revision bigint NOT NULL,
+    expected_order_revision bigint NOT NULL,
+    carton_count bigint NOT NULL,
+    shipped_qty bigint NOT NULL,
+    carrier text NOT NULL,
+    closed_at timestamp with time zone,
+    CONSTRAINT outbound_load_shipments_pkey PRIMARY KEY (id),
+    CONSTRAINT outbound_load_shipments_scope_id_key UNIQUE
+        (tenant_id, inventory_owner_id, facility_id, outbound_load_id, id),
+    CONSTRAINT outbound_load_shipments_load_shipment_key UNIQUE
+        (tenant_id, outbound_load_id, shipment_id),
+    CONSTRAINT outbound_load_shipments_load_sequence_key UNIQUE
+        (tenant_id, outbound_load_id, shipment_sequence),
+    CONSTRAINT outbound_load_shipments_counts_check CHECK
+        (shipment_sequence > 0 AND carton_count > 0 AND shipped_qty > 0),
+    CONSTRAINT outbound_load_shipments_revisions_check CHECK
+        (expected_shipment_revision > 0 AND expected_order_revision > 0),
+    CONSTRAINT outbound_load_shipments_carrier_check CHECK
+        (carrier = btrim(carrier) AND carrier <> '' AND char_length(carrier) <= 100)
+);
+ALTER TABLE ONLY public.outbound_load_shipments FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE public.outbound_load_cartons (
+    id bigint GENERATED ALWAYS AS IDENTITY
+        (SEQUENCE NAME public.outbound_load_cartons_id_seq) NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    outbound_load_id bigint NOT NULL,
+    outbound_load_shipment_id bigint NOT NULL,
+    shipment_id bigint NOT NULL,
+    shipment_carton_id bigint NOT NULL,
+    carton_id bigint NOT NULL,
+    license_plate_id bigint NOT NULL,
+    carton_barcode text NOT NULL,
+    shipment_sequence bigint NOT NULL,
+    load_sequence bigint NOT NULL,
+    original_location_id bigint NOT NULL,
+    content_count bigint NOT NULL,
+    packed_qty bigint NOT NULL,
+    state text DEFAULT 'planned' NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
+    last_move_confirmation_id bigint,
+    staged_at timestamp with time zone,
+    loaded_at timestamp with time zone,
+    departed_at timestamp with time zone,
+    closed_at timestamp with time zone,
+    CONSTRAINT outbound_load_cartons_pkey PRIMARY KEY (id),
+    CONSTRAINT outbound_load_cartons_scope_id_key UNIQUE
+        (tenant_id, inventory_owner_id, facility_id, outbound_load_id, id),
+    CONSTRAINT outbound_load_cartons_load_carton_key UNIQUE
+        (tenant_id, outbound_load_id, carton_id),
+    CONSTRAINT outbound_load_cartons_load_sequence_key UNIQUE
+        (tenant_id, outbound_load_id, load_sequence),
+    CONSTRAINT outbound_load_cartons_counts_check CHECK
+        (shipment_sequence > 0 AND load_sequence > 0 AND content_count > 0 AND packed_qty > 0),
+    CONSTRAINT outbound_load_cartons_revision_check CHECK (revision > 0),
+    CONSTRAINT outbound_load_cartons_state_check CHECK
+        (state IN ('planned', 'staged', 'loaded', 'departed')),
+    CONSTRAINT outbound_load_cartons_barcode_check CHECK
+        (carton_barcode = btrim(carton_barcode) AND carton_barcode <> '' AND char_length(carton_barcode) <= 200)
+);
+ALTER TABLE ONLY public.outbound_load_cartons FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE public.packed_carton_move_confirmations (
+    id bigint GENERATED ALWAYS AS IDENTITY
+        (SEQUENCE NAME public.packed_carton_move_confirmations_id_seq) NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    outbound_load_id bigint NOT NULL,
+    outbound_load_carton_id bigint NOT NULL,
+    carton_id bigint NOT NULL,
+    license_plate_id bigint NOT NULL,
+    movement_kind text NOT NULL,
+    inventory_transaction_id bigint NOT NULL,
+    expected_position_revision bigint NOT NULL,
+    resulting_position_revision bigint NOT NULL,
+    expected_load_revision bigint NOT NULL,
+    resulting_load_revision bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    detail_count bigint NOT NULL,
+    moved_qty bigint NOT NULL,
+    moved_by_user_id bigint NOT NULL,
+    moved_at timestamp with time zone NOT NULL,
+    CONSTRAINT packed_carton_move_confirmations_pkey PRIMARY KEY (id),
+    CONSTRAINT packed_carton_move_confirmations_scope_id_key UNIQUE
+        (tenant_id, inventory_owner_id, facility_id, outbound_load_id, outbound_load_carton_id, id),
+    CONSTRAINT packed_carton_move_confirmations_transaction_key UNIQUE
+        (tenant_id, inventory_owner_id, inventory_transaction_id),
+    CONSTRAINT packed_carton_move_confirmations_revision_key UNIQUE
+        (tenant_id, outbound_load_carton_id, resulting_position_revision),
+    CONSTRAINT packed_carton_move_confirmations_kind_check CHECK
+        (movement_kind IN ('stage', 'load', 'unload', 'unstage')),
+    CONSTRAINT packed_carton_move_confirmations_counts_check CHECK
+        (detail_count > 0 AND moved_qty > 0),
+    CONSTRAINT packed_carton_move_confirmations_revisions_check CHECK
+        (expected_position_revision > 0
+         AND resulting_position_revision = expected_position_revision + 1
+         AND expected_load_revision > 0
+         AND resulting_load_revision IN (expected_load_revision, expected_load_revision + 1)),
+    CONSTRAINT packed_carton_move_confirmations_locations_check CHECK
+        (source_location_id <> destination_location_id)
+);
+ALTER TABLE ONLY public.packed_carton_move_confirmations FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE public.packed_carton_move_details (
+    id bigint GENERATED ALWAYS AS IDENTITY
+        (SEQUENCE NAME public.packed_carton_move_details_id_seq) NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    move_confirmation_id bigint NOT NULL,
+    carton_id bigint NOT NULL,
+    packed_position_id bigint NOT NULL,
+    carton_content_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    inventory_status text NOT NULL,
+    source_inventory_allocation_id bigint NOT NULL,
+    destination_inventory_allocation_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    destination_inventory_balance_id bigint NOT NULL,
+    quantity bigint NOT NULL,
+    CONSTRAINT packed_carton_move_details_pkey PRIMARY KEY (id),
+    CONSTRAINT packed_carton_move_details_confirmation_position_key UNIQUE
+        (tenant_id, move_confirmation_id, packed_position_id),
+    CONSTRAINT packed_carton_move_details_allocations_check CHECK
+        (source_inventory_allocation_id <> destination_inventory_allocation_id),
+    CONSTRAINT packed_carton_move_details_balances_check CHECK
+        (source_inventory_balance_id <> destination_inventory_balance_id),
+    CONSTRAINT packed_carton_move_details_qty_check CHECK (quantity > 0),
+    CONSTRAINT packed_carton_move_details_uom_check CHECK
+        (uom = btrim(uom) AND uom <> ''),
+    CONSTRAINT packed_carton_move_details_inventory_status_check CHECK
+        (inventory_status = 'available')
+);
+ALTER TABLE ONLY public.packed_carton_move_details FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE public.outbound_load_cancellations (
+    id bigint GENERATED ALWAYS AS IDENTITY
+        (SEQUENCE NAME public.outbound_load_cancellations_id_seq) NOT NULL,
+    tenant_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    outbound_load_id bigint NOT NULL,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    cancelled_by_user_id bigint NOT NULL,
+    cancelled_at timestamp with time zone NOT NULL,
+    CONSTRAINT outbound_load_cancellations_pkey PRIMARY KEY (id),
+    CONSTRAINT outbound_load_cancellations_load_key UNIQUE (tenant_id, outbound_load_id),
+    CONSTRAINT outbound_load_cancellations_revision_check CHECK
+        (expected_revision > 0 AND resulting_revision = expected_revision + 1),
+    CONSTRAINT outbound_load_cancellations_reason_check CHECK
+        (reason_code IN ('route_cancelled', 'carrier_cancelled', 'equipment_unavailable', 'planning_error', 'other')),
+    CONSTRAINT outbound_load_cancellations_note_check CHECK
+        (note IS NULL OR (note = btrim(note) AND note <> '' AND char_length(note) <= 500)),
+    CONSTRAINT outbound_load_cancellations_other_note_check CHECK
+        (reason_code <> 'other' OR note IS NOT NULL)
+);
+ALTER TABLE ONLY public.outbound_load_cancellations FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE ONLY public.packed_inventory_positions
+    ADD CONSTRAINT packed_inventory_positions_content_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, carton_id, carton_content_id)
+    REFERENCES public.carton_contents (tenant_id, inventory_owner_id, facility_id, carton_id, id);
+ALTER TABLE ONLY public.packed_inventory_positions
+    ADD CONSTRAINT packed_inventory_positions_reservation_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, reservation_id)
+    REFERENCES public.inventory_reservations (tenant_id, inventory_owner_id, id);
+ALTER TABLE ONLY public.packed_inventory_positions
+    ADD CONSTRAINT packed_inventory_positions_item_batch_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id)
+    REFERENCES public.item_batches (tenant_id, inventory_owner_id, id);
+ALTER TABLE ONLY public.packed_inventory_positions
+    ADD CONSTRAINT packed_inventory_positions_item_fkey
+    FOREIGN KEY (tenant_id, item_id) REFERENCES public.items (tenant_id, id);
+ALTER TABLE ONLY public.packed_inventory_positions
+    ADD CONSTRAINT packed_inventory_positions_current_allocation_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, current_inventory_allocation_id)
+    REFERENCES public.inventory_allocations (tenant_id, inventory_owner_id, facility_id, id);
+ALTER TABLE ONLY public.packed_inventory_positions
+    ADD CONSTRAINT packed_inventory_positions_current_balance_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, current_inventory_balance_id)
+    REFERENCES public.inventory_balances (tenant_id, inventory_owner_id, id);
+ALTER TABLE ONLY public.packed_inventory_positions
+    ADD CONSTRAINT packed_inventory_positions_current_location_fkey
+    FOREIGN KEY (tenant_id, facility_id, current_location_id)
+    REFERENCES public.locations (tenant_id, facility_id, id);
+ALTER TABLE ONLY public.packed_inventory_positions
+    ADD CONSTRAINT packed_inventory_positions_current_plate_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, current_license_plate_id)
+    REFERENCES public.license_plates (tenant_id, inventory_owner_id, facility_id, id);
+ALTER TABLE ONLY public.packed_inventory_positions
+    ADD CONSTRAINT packed_inventory_positions_departure_transaction_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, departure_inventory_transaction_id)
+    REFERENCES public.inventory_transactions (tenant_id, inventory_owner_id, id);
+
+ALTER TABLE ONLY public.outbound_loads
+    ADD CONSTRAINT outbound_loads_facility_fkey
+    FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities (tenant_id, id);
+ALTER TABLE ONLY public.outbound_loads
+    ADD CONSTRAINT outbound_loads_staging_location_fkey
+    FOREIGN KEY (tenant_id, facility_id, staging_lane_location_id)
+    REFERENCES public.locations (tenant_id, facility_id, id);
+ALTER TABLE ONLY public.outbound_loads
+    ADD CONSTRAINT outbound_loads_dock_location_fkey
+    FOREIGN KEY (tenant_id, facility_id, dock_door_location_id)
+    REFERENCES public.locations (tenant_id, facility_id, id);
+ALTER TABLE ONLY public.outbound_loads
+    ADD CONSTRAINT outbound_loads_virtual_location_fkey
+    FOREIGN KEY (tenant_id, facility_id, virtual_trailer_location_id)
+    REFERENCES public.locations (tenant_id, facility_id, id);
+ALTER TABLE ONLY public.outbound_loads
+    ADD CONSTRAINT outbound_loads_planned_by_fkey
+    FOREIGN KEY (tenant_id, planned_by_user_id) REFERENCES public.tenant_memberships (tenant_id, user_id);
+ALTER TABLE ONLY public.outbound_loads
+    ADD CONSTRAINT outbound_loads_released_by_fkey
+    FOREIGN KEY (tenant_id, released_by_user_id) REFERENCES public.tenant_memberships (tenant_id, user_id);
+ALTER TABLE ONLY public.outbound_loads
+    ADD CONSTRAINT outbound_loads_loading_started_by_fkey
+    FOREIGN KEY (tenant_id, loading_started_by_user_id) REFERENCES public.tenant_memberships (tenant_id, user_id);
+ALTER TABLE ONLY public.outbound_loads
+    ADD CONSTRAINT outbound_loads_ready_by_fkey
+    FOREIGN KEY (tenant_id, ready_to_depart_by_user_id) REFERENCES public.tenant_memberships (tenant_id, user_id);
+ALTER TABLE ONLY public.outbound_loads
+    ADD CONSTRAINT outbound_loads_departed_by_fkey
+    FOREIGN KEY (tenant_id, departed_by_user_id) REFERENCES public.tenant_memberships (tenant_id, user_id);
+ALTER TABLE ONLY public.outbound_loads
+    ADD CONSTRAINT outbound_loads_cancelled_by_fkey
+    FOREIGN KEY (tenant_id, cancelled_by_user_id) REFERENCES public.tenant_memberships (tenant_id, user_id);
+
+ALTER TABLE ONLY public.outbound_load_shipments
+    ADD CONSTRAINT outbound_load_shipments_load_fkey
+    FOREIGN KEY (tenant_id, facility_id, outbound_load_id)
+    REFERENCES public.outbound_loads (tenant_id, facility_id, id);
+ALTER TABLE ONLY public.outbound_load_shipments
+    ADD CONSTRAINT outbound_load_shipments_shipment_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, shipment_id)
+    REFERENCES public.shipments (tenant_id, inventory_owner_id, facility_id, id);
+ALTER TABLE ONLY public.outbound_load_shipments
+    ADD CONSTRAINT outbound_load_shipments_order_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_id)
+    REFERENCES public.orders (tenant_id, inventory_owner_id, id);
+
+ALTER TABLE ONLY public.outbound_load_cartons
+    ADD CONSTRAINT outbound_load_cartons_load_fkey
+    FOREIGN KEY (tenant_id, facility_id, outbound_load_id)
+    REFERENCES public.outbound_loads (tenant_id, facility_id, id);
+ALTER TABLE ONLY public.outbound_load_cartons
+    ADD CONSTRAINT outbound_load_cartons_load_shipment_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, outbound_load_id, outbound_load_shipment_id)
+    REFERENCES public.outbound_load_shipments
+        (tenant_id, inventory_owner_id, facility_id, outbound_load_id, id);
+ALTER TABLE ONLY public.outbound_load_cartons
+    ADD CONSTRAINT outbound_load_cartons_shipment_carton_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, shipment_id, shipment_carton_id)
+    REFERENCES public.shipment_cartons
+        (tenant_id, inventory_owner_id, facility_id, shipment_id, id);
+ALTER TABLE ONLY public.outbound_load_cartons
+    ADD CONSTRAINT outbound_load_cartons_plate_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id)
+    REFERENCES public.license_plates (tenant_id, inventory_owner_id, facility_id, id);
+ALTER TABLE ONLY public.outbound_load_cartons
+    ADD CONSTRAINT outbound_load_cartons_original_location_fkey
+    FOREIGN KEY (tenant_id, facility_id, original_location_id)
+    REFERENCES public.locations (tenant_id, facility_id, id);
+
+ALTER TABLE ONLY public.packed_carton_move_confirmations
+    ADD CONSTRAINT packed_carton_move_confirmations_load_carton_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, outbound_load_id, outbound_load_carton_id)
+    REFERENCES public.outbound_load_cartons
+        (tenant_id, inventory_owner_id, facility_id, outbound_load_id, id);
+ALTER TABLE ONLY public.packed_carton_move_confirmations
+    ADD CONSTRAINT packed_carton_move_confirmations_transaction_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, inventory_transaction_id)
+    REFERENCES public.inventory_transactions (tenant_id, inventory_owner_id, id);
+ALTER TABLE ONLY public.packed_carton_move_confirmations
+    ADD CONSTRAINT packed_carton_move_confirmations_source_location_fkey
+    FOREIGN KEY (tenant_id, facility_id, source_location_id)
+    REFERENCES public.locations (tenant_id, facility_id, id);
+ALTER TABLE ONLY public.packed_carton_move_confirmations
+    ADD CONSTRAINT packed_carton_move_confirmations_destination_location_fkey
+    FOREIGN KEY (tenant_id, facility_id, destination_location_id)
+    REFERENCES public.locations (tenant_id, facility_id, id);
+ALTER TABLE ONLY public.packed_carton_move_confirmations
+    ADD CONSTRAINT packed_carton_move_confirmations_actor_fkey
+    FOREIGN KEY (tenant_id, moved_by_user_id) REFERENCES public.tenant_memberships (tenant_id, user_id);
+
+ALTER TABLE ONLY public.packed_carton_move_confirmations
+    ADD CONSTRAINT packed_carton_move_confirmations_tenant_owner_id_key
+    UNIQUE (tenant_id, inventory_owner_id, id);
+ALTER TABLE ONLY public.packed_carton_move_details
+    ADD CONSTRAINT packed_carton_move_details_confirmation_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, move_confirmation_id)
+    REFERENCES public.packed_carton_move_confirmations (tenant_id, inventory_owner_id, id);
+ALTER TABLE ONLY public.packed_carton_move_details
+    ADD CONSTRAINT packed_carton_move_details_position_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, carton_id, packed_position_id)
+    REFERENCES public.packed_inventory_positions
+        (tenant_id, inventory_owner_id, facility_id, carton_id, id);
+ALTER TABLE ONLY public.packed_carton_move_details
+    ADD CONSTRAINT packed_carton_move_details_content_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, carton_id, carton_content_id)
+    REFERENCES public.carton_contents
+        (tenant_id, inventory_owner_id, facility_id, carton_id, id);
+ALTER TABLE ONLY public.packed_carton_move_details
+    ADD CONSTRAINT packed_carton_move_details_reservation_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, reservation_id)
+    REFERENCES public.inventory_reservations (tenant_id, inventory_owner_id, id);
+ALTER TABLE ONLY public.packed_carton_move_details
+    ADD CONSTRAINT packed_carton_move_details_source_allocation_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, source_inventory_allocation_id)
+    REFERENCES public.inventory_allocations (tenant_id, inventory_owner_id, id);
+ALTER TABLE ONLY public.packed_carton_move_details
+    ADD CONSTRAINT packed_carton_move_details_destination_allocation_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, destination_inventory_allocation_id)
+    REFERENCES public.inventory_allocations (tenant_id, inventory_owner_id, id);
+ALTER TABLE ONLY public.packed_carton_move_details
+    ADD CONSTRAINT packed_carton_move_details_source_balance_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, source_inventory_balance_id)
+    REFERENCES public.inventory_balances (tenant_id, inventory_owner_id, id);
+ALTER TABLE ONLY public.packed_carton_move_details
+    ADD CONSTRAINT packed_carton_move_details_destination_balance_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, destination_inventory_balance_id)
+    REFERENCES public.inventory_balances (tenant_id, inventory_owner_id, id);
+
+ALTER TABLE ONLY public.packed_inventory_positions
+    ADD CONSTRAINT packed_inventory_positions_load_fkey
+    FOREIGN KEY (tenant_id, facility_id, outbound_load_id)
+    REFERENCES public.outbound_loads (tenant_id, facility_id, id);
+ALTER TABLE ONLY public.packed_inventory_positions
+    ADD CONSTRAINT packed_inventory_positions_load_carton_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, outbound_load_id, outbound_load_carton_id)
+    REFERENCES public.outbound_load_cartons
+        (tenant_id, inventory_owner_id, facility_id, outbound_load_id, id);
+ALTER TABLE ONLY public.outbound_load_cartons
+    ADD CONSTRAINT outbound_load_cartons_last_move_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, outbound_load_id, id, last_move_confirmation_id)
+    REFERENCES public.packed_carton_move_confirmations
+        (tenant_id, inventory_owner_id, facility_id, outbound_load_id, outbound_load_carton_id, id)
+    DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE ONLY public.outbound_load_cancellations
+    ADD CONSTRAINT outbound_load_cancellations_load_fkey
+    FOREIGN KEY (tenant_id, facility_id, outbound_load_id)
+    REFERENCES public.outbound_loads (tenant_id, facility_id, id);
+ALTER TABLE ONLY public.outbound_load_cancellations
+    ADD CONSTRAINT outbound_load_cancellations_actor_fkey
+    FOREIGN KEY (tenant_id, cancelled_by_user_id) REFERENCES public.tenant_memberships (tenant_id, user_id);
+
+CREATE UNIQUE INDEX outbound_loads_active_staging_lane_idx
+    ON public.outbound_loads (tenant_id, facility_id, staging_lane_location_id)
+    WHERE state NOT IN ('departed', 'cancelled');
+CREATE UNIQUE INDEX outbound_loads_active_dock_door_idx
+    ON public.outbound_loads (tenant_id, facility_id, dock_door_location_id)
+    WHERE dock_door_location_id IS NOT NULL AND state NOT IN ('departed', 'cancelled');
+CREATE UNIQUE INDEX outbound_loads_active_trailer_number_idx
+    ON public.outbound_loads (tenant_id, facility_id, trailer_number)
+    WHERE trailer_number IS NOT NULL AND state NOT IN ('departed', 'cancelled');
+CREATE UNIQUE INDEX outbound_loads_active_virtual_trailer_idx
+    ON public.outbound_loads (tenant_id, facility_id, virtual_trailer_location_id)
+    WHERE state NOT IN ('departed', 'cancelled');
+CREATE UNIQUE INDEX outbound_load_shipments_active_shipment_idx
+    ON public.outbound_load_shipments (tenant_id, inventory_owner_id, shipment_id)
+    WHERE closed_at IS NULL;
+CREATE UNIQUE INDEX outbound_load_cartons_active_shipment_carton_idx
+    ON public.outbound_load_cartons (tenant_id, inventory_owner_id, shipment_carton_id)
+    WHERE closed_at IS NULL;
+CREATE UNIQUE INDEX outbound_load_cartons_active_license_plate_idx
+    ON public.outbound_load_cartons (tenant_id, inventory_owner_id, license_plate_id)
+    WHERE closed_at IS NULL;
+CREATE INDEX outbound_loads_queue_idx
+    ON public.outbound_loads
+        (tenant_id, facility_id, scheduled_departure_at NULLS FIRST, id)
+    WHERE state NOT IN ('departed', 'cancelled');
+CREATE INDEX outbound_load_cartons_execution_idx
+    ON public.outbound_load_cartons (tenant_id, outbound_load_id, state, load_sequence, id);
+CREATE INDEX packed_inventory_positions_carton_idx
+    ON public.packed_inventory_positions (tenant_id, carton_id, id);
+
+CREATE POLICY packed_inventory_positions_tenant_isolation
+    ON public.packed_inventory_positions
+    USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+    WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+CREATE POLICY packed_carton_move_confirmations_tenant_isolation
+    ON public.packed_carton_move_confirmations
+    USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+    WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+CREATE POLICY packed_carton_move_details_tenant_isolation
+    ON public.packed_carton_move_details
+    USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+    WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+CREATE POLICY outbound_loads_tenant_isolation
+    ON public.outbound_loads
+    USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+    WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+CREATE POLICY outbound_load_shipments_tenant_isolation
+    ON public.outbound_load_shipments
+    USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+    WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+CREATE POLICY outbound_load_cartons_tenant_isolation
+    ON public.outbound_load_cartons
+    USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+    WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+CREATE POLICY outbound_load_cancellations_tenant_isolation
+    ON public.outbound_load_cancellations
+    USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+    WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+ALTER TABLE public.packed_inventory_positions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.packed_carton_move_confirmations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.packed_carton_move_details ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.outbound_loads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.outbound_load_shipments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.outbound_load_cartons ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.outbound_load_cancellations ENABLE ROW LEVEL SECURITY;
+
+GRANT SELECT ON TABLE public.packed_inventory_positions TO wareboxes_app;
+GRANT UPDATE (
+    state, outbound_load_id, outbound_load_carton_id, load_sequence,
+    current_inventory_allocation_id, current_inventory_balance_id,
+    current_location_id, current_license_plate_id, revision, positioned_at,
+    departure_inventory_transaction_id, departed_at
+) ON TABLE public.packed_inventory_positions TO wareboxes_app;
+GRANT SELECT,INSERT ON TABLE public.packed_carton_move_confirmations TO wareboxes_app;
+GRANT SELECT,INSERT ON TABLE public.packed_carton_move_details TO wareboxes_app;
+GRANT SELECT,INSERT ON TABLE public.outbound_loads TO wareboxes_app;
+GRANT UPDATE (
+    state, revision, dock_door_location_id, trailer_number, seal_number,
+    released_by_user_id, released_at, loading_started_by_user_id,
+    loading_started_at, ready_to_depart_by_user_id, ready_to_depart_at,
+    departed_by_user_id, departed_at, cancelled_by_user_id, cancelled_at
+) ON TABLE public.outbound_loads TO wareboxes_app;
+GRANT SELECT,INSERT ON TABLE public.outbound_load_shipments TO wareboxes_app;
+GRANT UPDATE (closed_at) ON TABLE public.outbound_load_shipments TO wareboxes_app;
+GRANT SELECT,INSERT ON TABLE public.outbound_load_cartons TO wareboxes_app;
+GRANT UPDATE (
+    state, revision, last_move_confirmation_id, staged_at, loaded_at,
+    departed_at, closed_at
+) ON TABLE public.outbound_load_cartons TO wareboxes_app;
+GRANT SELECT,INSERT ON TABLE public.outbound_load_cancellations TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.packed_carton_move_confirmations_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.packed_carton_move_details_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.outbound_loads_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.outbound_load_shipments_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.outbound_load_cartons_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.outbound_load_cancellations_id_seq TO wareboxes_app;
+
+CREATE FUNCTION public.initialize_packed_inventory_position() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    INSERT INTO public.packed_inventory_positions (
+        id, tenant_id, inventory_owner_id, facility_id, carton_id,
+        carton_content_id, reservation_id, item_batch_id, item_id, uom,
+        inventory_status, packed_qty, state,
+        current_inventory_allocation_id, current_inventory_balance_id,
+        current_location_id, current_license_plate_id, revision, positioned_at
+    ) VALUES (
+        NEW.id, NEW.tenant_id, NEW.inventory_owner_id, NEW.facility_id,
+        NEW.carton_id, NEW.id, NEW.reservation_id, NEW.item_batch_id,
+        NEW.item_id, NEW.uom, NEW.inventory_status, NEW.packed_qty, 'packed',
+        NEW.destination_inventory_allocation_id,
+        NEW.destination_inventory_balance_id, NEW.destination_location_id,
+        NEW.destination_license_plate_id, 1, NEW.packed_at
+    );
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_packed_inventory_position_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    original_location_id BIGINT;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'packed inventory positions cannot be deleted'
+            USING ERRCODE = '55000';
+    END IF;
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.carton_id IS DISTINCT FROM OLD.carton_id
+       OR NEW.carton_content_id IS DISTINCT FROM OLD.carton_content_id
+       OR NEW.reservation_id IS DISTINCT FROM OLD.reservation_id
+       OR NEW.item_batch_id IS DISTINCT FROM OLD.item_batch_id
+       OR NEW.item_id IS DISTINCT FROM OLD.item_id
+       OR NEW.uom IS DISTINCT FROM OLD.uom
+       OR NEW.inventory_status IS DISTINCT FROM OLD.inventory_status
+       OR NEW.packed_qty IS DISTINCT FROM OLD.packed_qty
+    THEN
+        RAISE EXCEPTION 'packed inventory position identity is immutable'
+            USING ERRCODE = '55000';
+    END IF;
+    IF OLD.state = 'departed' THEN
+        RAISE EXCEPTION 'departed packed inventory positions are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+    IF NEW.revision <> OLD.revision + 1 OR NEW.positioned_at < OLD.positioned_at THEN
+        RAISE EXCEPTION 'packed inventory position revision is stale'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT content.destination_location_id INTO original_location_id
+    FROM public.carton_contents content
+    WHERE content.tenant_id = OLD.tenant_id
+      AND content.inventory_owner_id = OLD.inventory_owner_id
+      AND content.id = OLD.carton_content_id;
+
+    IF OLD.state = 'packed' AND NEW.state = 'staged' THEN
+        IF OLD.current_location_id <> original_location_id
+           OR NEW.outbound_load_id IS NULL
+           OR NEW.outbound_load_carton_id IS NULL
+        THEN
+            RAISE EXCEPTION 'packed carton cannot be staged from its current position'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF OLD.state = 'staged' AND NEW.state = 'loaded' THEN
+        IF NEW.outbound_load_id IS DISTINCT FROM OLD.outbound_load_id
+           OR NEW.outbound_load_carton_id IS DISTINCT FROM OLD.outbound_load_carton_id
+           OR NEW.load_sequence IS DISTINCT FROM OLD.load_sequence
+        THEN
+            RAISE EXCEPTION 'staged carton load identity changed'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF OLD.state = 'loaded' AND NEW.state = 'staged' THEN
+        IF NEW.outbound_load_id IS DISTINCT FROM OLD.outbound_load_id
+           OR NEW.outbound_load_carton_id IS DISTINCT FROM OLD.outbound_load_carton_id
+           OR NEW.load_sequence IS DISTINCT FROM OLD.load_sequence
+        THEN
+            RAISE EXCEPTION 'loaded carton unload identity changed'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF OLD.state = 'staged' AND NEW.state = 'packed' THEN
+        IF NEW.current_location_id IS DISTINCT FROM original_location_id THEN
+            RAISE EXCEPTION 'unstaged carton must return to its original packing location'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF OLD.state IN ('packed', 'loaded') AND NEW.state = 'departed' THEN
+        IF OLD.state = 'packed' AND NEW.outbound_load_id IS NOT NULL THEN
+            RAISE EXCEPTION 'direct shipment departure cannot add a load identity'
+                USING ERRCODE = '55000';
+        END IF;
+        IF OLD.state = 'loaded'
+           AND (NEW.outbound_load_id IS DISTINCT FROM OLD.outbound_load_id
+                OR NEW.outbound_load_carton_id IS DISTINCT FROM OLD.outbound_load_carton_id
+                OR NEW.load_sequence IS DISTINCT FROM OLD.load_sequence)
+        THEN
+            RAISE EXCEPTION 'load departure identity changed'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'invalid packed inventory position transition'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.require_packed_inventory_position_evidence() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    expected_kind TEXT;
+BEGIN
+    IF NEW.state = 'departed' THEN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM public.shipment_confirmations confirmation
+            JOIN public.shipment_cartons shipment_carton
+              ON shipment_carton.tenant_id = confirmation.tenant_id
+             AND shipment_carton.inventory_owner_id = confirmation.inventory_owner_id
+             AND shipment_carton.facility_id = confirmation.facility_id
+             AND shipment_carton.shipment_id = confirmation.shipment_id
+             AND shipment_carton.carton_id = NEW.carton_id
+            WHERE confirmation.tenant_id = NEW.tenant_id
+              AND confirmation.inventory_owner_id = NEW.inventory_owner_id
+              AND confirmation.inventory_transaction_id = NEW.departure_inventory_transaction_id
+              AND confirmation.confirmed_at = NEW.departed_at
+        ) THEN
+            RAISE EXCEPTION 'departed packed position lacks shipment evidence'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NULL;
+    END IF;
+
+    expected_kind := CASE
+        WHEN OLD.state = 'packed' AND NEW.state = 'staged' THEN 'stage'
+        WHEN OLD.state = 'staged' AND NEW.state = 'loaded' THEN 'load'
+        WHEN OLD.state = 'loaded' AND NEW.state = 'staged' THEN 'unload'
+        WHEN OLD.state = 'staged' AND NEW.state = 'packed' THEN 'unstage'
+    END;
+    IF expected_kind IS NULL OR NOT EXISTS (
+        SELECT 1
+        FROM public.packed_carton_move_details detail
+        JOIN public.packed_carton_move_confirmations confirmation
+          ON confirmation.tenant_id = detail.tenant_id
+         AND confirmation.inventory_owner_id = detail.inventory_owner_id
+         AND confirmation.id = detail.move_confirmation_id
+        WHERE detail.tenant_id = NEW.tenant_id
+          AND detail.inventory_owner_id = NEW.inventory_owner_id
+          AND detail.packed_position_id = NEW.id
+          AND detail.source_inventory_allocation_id = OLD.current_inventory_allocation_id
+          AND detail.source_inventory_balance_id = OLD.current_inventory_balance_id
+          AND detail.destination_inventory_allocation_id = NEW.current_inventory_allocation_id
+          AND detail.destination_inventory_balance_id = NEW.current_inventory_balance_id
+          AND confirmation.movement_kind = expected_kind
+          AND confirmation.resulting_position_revision = NEW.revision
+          AND confirmation.moved_at = NEW.positioned_at
+    ) THEN
+        RAISE EXCEPTION 'packed position update lacks exact movement evidence'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.validate_outbound_load() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    staging_valid BOOLEAN;
+    dock_valid BOOLEAN;
+    trailer_valid BOOLEAN;
+BEGIN
+    SELECT location.active AND location.deleted IS NULL
+           AND location.barcode IS NOT NULL AND btrim(location.barcode) <> ''
+           AND lower(location.type) = 'staging'
+           AND NOT location.pickable AND NOT location.receivable
+    INTO staging_valid
+    FROM public.locations location
+    WHERE location.tenant_id = NEW.tenant_id
+      AND location.facility_id = NEW.facility_id
+      AND location.id = NEW.staging_lane_location_id
+    FOR SHARE;
+    SELECT location.active AND location.deleted IS NULL
+           AND location.barcode IS NOT NULL AND btrim(location.barcode) <> ''
+           AND lower(location.type) = 'outbound_trailer'
+           AND NOT location.pickable AND NOT location.receivable
+    INTO trailer_valid
+    FROM public.locations location
+    WHERE location.tenant_id = NEW.tenant_id
+      AND location.facility_id = NEW.facility_id
+      AND location.id = NEW.virtual_trailer_location_id
+    FOR SHARE;
+    IF staging_valid IS DISTINCT FROM TRUE OR trailer_valid IS DISTINCT FROM TRUE
+       OR NEW.staging_lane_location_id = NEW.virtual_trailer_location_id
+    THEN
+        RAISE EXCEPTION 'outbound load staging or trailer location is invalid'
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.dock_door_location_id IS NOT NULL THEN
+        SELECT location.active AND location.deleted IS NULL
+               AND location.barcode IS NOT NULL AND btrim(location.barcode) <> ''
+               AND lower(location.type) = 'dock'
+               AND NOT location.pickable AND NOT location.receivable
+        INTO dock_valid
+        FROM public.locations location
+        WHERE location.tenant_id = NEW.tenant_id
+          AND location.facility_id = NEW.facility_id
+          AND location.id = NEW.dock_door_location_id
+        FOR SHARE;
+        IF dock_valid IS DISTINCT FROM TRUE
+           OR NEW.dock_door_location_id IN
+              (NEW.staging_lane_location_id, NEW.virtual_trailer_location_id)
+        THEN
+            RAISE EXCEPTION 'outbound load dock location is invalid'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+    IF (NEW.state = 'planned' AND
+        (NEW.revision <> 1 OR NEW.released_by_user_id IS NOT NULL OR NEW.released_at IS NOT NULL
+         OR NEW.dock_door_location_id IS NOT NULL OR NEW.trailer_number IS NOT NULL
+         OR NEW.seal_number IS NOT NULL OR NEW.loading_started_by_user_id IS NOT NULL
+         OR NEW.loading_started_at IS NOT NULL OR NEW.ready_to_depart_by_user_id IS NOT NULL
+         OR NEW.ready_to_depart_at IS NOT NULL OR NEW.departed_by_user_id IS NOT NULL
+         OR NEW.departed_at IS NOT NULL OR NEW.cancelled_by_user_id IS NOT NULL
+         OR NEW.cancelled_at IS NOT NULL))
+       OR (NEW.state = 'staging' AND
+           (NEW.released_by_user_id IS NULL OR NEW.released_at IS NULL
+            OR NEW.dock_door_location_id IS NOT NULL OR NEW.trailer_number IS NOT NULL
+            OR NEW.seal_number IS NOT NULL OR NEW.loading_started_at IS NOT NULL
+            OR NEW.ready_to_depart_at IS NOT NULL OR NEW.departed_at IS NOT NULL
+            OR NEW.cancelled_at IS NOT NULL))
+       OR (NEW.state = 'loading' AND
+           (NEW.released_at IS NULL OR NEW.loading_started_at IS NULL
+            OR NEW.dock_door_location_id IS NULL OR NEW.trailer_number IS NULL
+            OR NEW.seal_number IS NOT NULL OR NEW.ready_to_depart_at IS NOT NULL
+            OR NEW.departed_at IS NOT NULL OR NEW.cancelled_at IS NOT NULL))
+       OR (NEW.state = 'ready_to_depart' AND
+           (NEW.loading_started_at IS NULL OR NEW.ready_to_depart_at IS NULL
+            OR NEW.dock_door_location_id IS NULL OR NEW.trailer_number IS NULL
+            OR NEW.seal_number IS NULL OR NEW.departed_at IS NOT NULL
+            OR NEW.cancelled_at IS NOT NULL))
+       OR (NEW.state = 'departed' AND
+           (NEW.ready_to_depart_at IS NULL OR NEW.departed_at IS NULL
+            OR NEW.seal_number IS NULL OR NEW.cancelled_at IS NOT NULL))
+       OR (NEW.state = 'cancelled' AND
+           (NEW.cancelled_at IS NULL OR NEW.departed_at IS NOT NULL))
+    THEN
+        RAISE EXCEPTION 'outbound load lifecycle fields are inconsistent'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_outbound_load_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'outbound loads cannot be deleted' USING ERRCODE = '55000';
+    END IF;
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.load_reference IS DISTINCT FROM OLD.load_reference
+       OR NEW.load_barcode IS DISTINCT FROM OLD.load_barcode
+       OR NEW.carrier IS DISTINCT FROM OLD.carrier
+       OR NEW.staging_lane_location_id IS DISTINCT FROM OLD.staging_lane_location_id
+       OR NEW.virtual_trailer_location_id IS DISTINCT FROM OLD.virtual_trailer_location_id
+       OR NEW.scheduled_departure_at IS DISTINCT FROM OLD.scheduled_departure_at
+       OR NEW.shipment_count IS DISTINCT FROM OLD.shipment_count
+       OR NEW.carton_count IS DISTINCT FROM OLD.carton_count
+       OR NEW.planned_by_user_id IS DISTINCT FROM OLD.planned_by_user_id
+       OR NEW.planned_at IS DISTINCT FROM OLD.planned_at
+    THEN
+        RAISE EXCEPTION 'outbound load plan is immutable' USING ERRCODE = '55000';
+    END IF;
+    IF OLD.state IN ('departed', 'cancelled') THEN
+        RAISE EXCEPTION 'terminal outbound load is immutable' USING ERRCODE = '55000';
+    END IF;
+    IF NEW.revision <> OLD.revision + 1 THEN
+        RAISE EXCEPTION 'outbound load revision is stale' USING ERRCODE = '55000';
+    END IF;
+
+    IF OLD.state = 'planned' AND NEW.state = 'staging' THEN
+        IF NEW.released_by_user_id IS NULL OR NEW.released_at IS NULL
+           OR NEW.dock_door_location_id IS NOT NULL OR NEW.trailer_number IS NOT NULL
+        THEN
+            RAISE EXCEPTION 'outbound load release evidence is incomplete'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF OLD.state = 'staging' AND NEW.state = 'loading' THEN
+        IF NEW.dock_door_location_id IS NULL OR NEW.trailer_number IS NULL
+           OR NEW.loading_started_by_user_id IS NULL OR NEW.loading_started_at IS NULL
+        THEN
+            RAISE EXCEPTION 'outbound load loading-start evidence is incomplete'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF OLD.state = 'loading' AND NEW.state = 'ready_to_depart' THEN
+        IF NEW.seal_number IS NULL OR NEW.ready_to_depart_by_user_id IS NULL
+           OR NEW.ready_to_depart_at IS NULL
+        THEN
+            RAISE EXCEPTION 'outbound load completion evidence is incomplete'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF OLD.state = 'ready_to_depart' AND NEW.state = 'loading' THEN
+        IF NEW.seal_number IS NOT NULL OR NEW.ready_to_depart_by_user_id IS NOT NULL
+           OR NEW.ready_to_depart_at IS NOT NULL
+        THEN
+            RAISE EXCEPTION 'reopened outbound load must clear readiness fields'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF OLD.state = 'ready_to_depart' AND NEW.state = 'departed' THEN
+        IF NEW.departed_by_user_id IS NULL OR NEW.departed_at IS NULL THEN
+            RAISE EXCEPTION 'outbound load departure evidence is incomplete'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF OLD.state IN ('planned', 'staging', 'loading') AND NEW.state = 'cancelled' THEN
+        IF NEW.cancelled_by_user_id IS NULL OR NEW.cancelled_at IS NULL THEN
+            RAISE EXCEPTION 'outbound load cancellation evidence is incomplete'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'invalid outbound load state transition' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_outbound_load_shipment() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    matches BOOLEAN;
+BEGIN
+    SELECT load.state = 'planned'
+           AND load.carrier = NEW.carrier
+           AND shipment.state = 'manifested'
+           AND shipment.revision = NEW.expected_shipment_revision
+           AND shipment.order_id = NEW.order_id
+           AND shipment.carton_count = NEW.carton_count
+           AND shipment.shipped_qty = NEW.shipped_qty
+           AND orders.status = 'awaiting shipment'
+           AND orders.revision = NEW.expected_order_revision
+           AND manifest.carrier = NEW.carrier
+    INTO matches
+    FROM public.outbound_loads load
+    JOIN public.shipments shipment
+      ON shipment.tenant_id = load.tenant_id
+     AND shipment.inventory_owner_id = NEW.inventory_owner_id
+     AND shipment.facility_id = load.facility_id
+     AND shipment.id = NEW.shipment_id
+    JOIN public.orders orders
+      ON orders.tenant_id = shipment.tenant_id
+     AND orders.inventory_owner_id = shipment.inventory_owner_id
+     AND orders.id = shipment.order_id
+     AND orders.deleted IS NULL
+    JOIN public.shipment_manifests manifest
+      ON manifest.tenant_id = shipment.tenant_id
+     AND manifest.inventory_owner_id = shipment.inventory_owner_id
+     AND manifest.shipment_id = shipment.id
+    WHERE load.tenant_id = NEW.tenant_id
+      AND load.facility_id = NEW.facility_id
+      AND load.id = NEW.outbound_load_id
+    FOR SHARE OF shipment, orders;
+    IF matches IS DISTINCT FROM TRUE THEN
+        RAISE EXCEPTION 'outbound load shipment is not executable'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_outbound_load_shipment_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE load_state TEXT;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'outbound load shipment membership is immutable'
+            USING ERRCODE = '55000';
+    END IF;
+    IF ROW(NEW.id, NEW.tenant_id, NEW.inventory_owner_id, NEW.facility_id,
+           NEW.outbound_load_id, NEW.shipment_id, NEW.order_id,
+           NEW.shipment_sequence, NEW.expected_shipment_revision,
+           NEW.expected_order_revision, NEW.carton_count, NEW.shipped_qty,
+           NEW.carrier)
+       IS DISTINCT FROM
+       ROW(OLD.id, OLD.tenant_id, OLD.inventory_owner_id, OLD.facility_id,
+           OLD.outbound_load_id, OLD.shipment_id, OLD.order_id,
+           OLD.shipment_sequence, OLD.expected_shipment_revision,
+           OLD.expected_order_revision, OLD.carton_count, OLD.shipped_qty,
+           OLD.carrier)
+    THEN
+        RAISE EXCEPTION 'outbound load shipment membership is immutable'
+            USING ERRCODE = '55000';
+    END IF;
+    SELECT state INTO load_state FROM public.outbound_loads
+    WHERE tenant_id = OLD.tenant_id AND id = OLD.outbound_load_id;
+    IF OLD.closed_at IS NOT NULL OR NEW.closed_at IS NULL
+       OR load_state NOT IN ('departed', 'cancelled')
+    THEN
+        RAISE EXCEPTION 'outbound load shipment cannot be closed'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_outbound_load_carton() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    matches BOOLEAN;
+BEGIN
+    SELECT load.state = 'planned'
+           AND link.shipment_id = NEW.shipment_id
+           AND link.shipment_sequence = NEW.shipment_sequence
+           AND shipment_carton.carton_id = NEW.carton_id
+           AND shipment_carton.license_plate_id = NEW.license_plate_id
+           AND shipment_carton.carton_barcode = NEW.carton_barcode
+           AND shipment_carton.content_count = NEW.content_count
+           AND shipment_carton.packed_qty = NEW.packed_qty
+           AND NEW.original_location_id = ALL (
+               SELECT position.current_location_id
+               FROM public.packed_inventory_positions position
+               WHERE position.tenant_id = NEW.tenant_id
+                 AND position.inventory_owner_id = NEW.inventory_owner_id
+                 AND position.facility_id = NEW.facility_id
+                 AND position.carton_id = NEW.carton_id
+                 AND position.state = 'packed'
+                 AND position.revision = 1
+           )
+           AND NEW.content_count = (
+               SELECT COUNT(*) FROM public.packed_inventory_positions position
+               WHERE position.tenant_id = NEW.tenant_id
+                 AND position.inventory_owner_id = NEW.inventory_owner_id
+                 AND position.carton_id = NEW.carton_id
+           )
+    INTO matches
+    FROM public.outbound_loads load
+    JOIN public.outbound_load_shipments link
+      ON link.tenant_id = load.tenant_id
+     AND link.facility_id = load.facility_id
+     AND link.outbound_load_id = load.id
+     AND link.inventory_owner_id = NEW.inventory_owner_id
+     AND link.id = NEW.outbound_load_shipment_id
+    JOIN public.shipment_cartons shipment_carton
+      ON shipment_carton.tenant_id = link.tenant_id
+     AND shipment_carton.inventory_owner_id = link.inventory_owner_id
+     AND shipment_carton.facility_id = link.facility_id
+     AND shipment_carton.shipment_id = link.shipment_id
+     AND shipment_carton.id = NEW.shipment_carton_id
+    WHERE load.tenant_id = NEW.tenant_id
+      AND load.id = NEW.outbound_load_id;
+    IF matches IS DISTINCT FROM TRUE THEN
+        RAISE EXCEPTION 'outbound load carton does not match packed shipment evidence'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_outbound_load_carton_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE load_state TEXT;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'outbound load cartons cannot be deleted' USING ERRCODE = '55000';
+    END IF;
+    IF ROW(NEW.id, NEW.tenant_id, NEW.inventory_owner_id, NEW.facility_id,
+           NEW.outbound_load_id, NEW.outbound_load_shipment_id, NEW.shipment_id,
+           NEW.shipment_carton_id, NEW.carton_id, NEW.license_plate_id,
+           NEW.carton_barcode, NEW.shipment_sequence, NEW.load_sequence,
+           NEW.original_location_id, NEW.content_count, NEW.packed_qty)
+       IS DISTINCT FROM
+       ROW(OLD.id, OLD.tenant_id, OLD.inventory_owner_id, OLD.facility_id,
+           OLD.outbound_load_id, OLD.outbound_load_shipment_id, OLD.shipment_id,
+           OLD.shipment_carton_id, OLD.carton_id, OLD.license_plate_id,
+           OLD.carton_barcode, OLD.shipment_sequence, OLD.load_sequence,
+           OLD.original_location_id, OLD.content_count, OLD.packed_qty)
+    THEN
+        RAISE EXCEPTION 'outbound load carton plan is immutable' USING ERRCODE = '55000';
+    END IF;
+    IF OLD.state = 'departed' OR OLD.closed_at IS NOT NULL
+       OR NEW.revision <> OLD.revision + 1
+    THEN
+        RAISE EXCEPTION 'outbound load carton revision is stale' USING ERRCODE = '55000';
+    END IF;
+    SELECT state INTO load_state FROM public.outbound_loads
+    WHERE tenant_id = OLD.tenant_id AND id = OLD.outbound_load_id;
+    IF OLD.state = 'planned' AND NEW.state = 'staged' AND load_state IN ('staging', 'loading') THEN
+        IF NEW.last_move_confirmation_id IS NULL OR NEW.staged_at IS NULL THEN
+            RAISE EXCEPTION 'carton stage evidence is incomplete' USING ERRCODE = '23514';
+        END IF;
+    ELSIF OLD.state = 'staged' AND NEW.state = 'loaded' AND load_state = 'loading' THEN
+        IF NEW.last_move_confirmation_id IS NULL OR NEW.loaded_at IS NULL THEN
+            RAISE EXCEPTION 'carton load evidence is incomplete' USING ERRCODE = '23514';
+        END IF;
+    ELSIF OLD.state = 'loaded' AND NEW.state = 'staged' AND load_state = 'loading' THEN
+        IF NEW.last_move_confirmation_id IS NULL OR NEW.loaded_at IS NOT NULL THEN
+            RAISE EXCEPTION 'carton unload evidence is incomplete' USING ERRCODE = '23514';
+        END IF;
+    ELSIF OLD.state = 'staged' AND NEW.state = 'planned' AND load_state IN ('staging', 'loading') THEN
+        IF NEW.last_move_confirmation_id IS NULL OR NEW.staged_at IS NOT NULL THEN
+            RAISE EXCEPTION 'carton unstage evidence is incomplete' USING ERRCODE = '23514';
+        END IF;
+    ELSIF OLD.state = 'loaded' AND NEW.state = 'departed' AND load_state = 'departed' THEN
+        IF NEW.departed_at IS NULL OR NEW.closed_at IS DISTINCT FROM NEW.departed_at THEN
+            RAISE EXCEPTION 'carton departure evidence is incomplete' USING ERRCODE = '23514';
+        END IF;
+    ELSIF OLD.state = 'planned' AND NEW.state = 'planned' AND load_state = 'cancelled' THEN
+        IF NEW.closed_at IS NULL THEN
+            RAISE EXCEPTION 'cancelled load carton was not closed' USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'invalid outbound load carton transition' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_packed_carton_move_confirmation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    expected_operation TEXT;
+    valid BOOLEAN;
+BEGIN
+    expected_operation := CASE NEW.movement_kind
+        WHEN 'stage' THEN 'outbound.load.carton.stage.v1'
+        WHEN 'load' THEN 'outbound.load.carton.load.v1'
+        WHEN 'unload' THEN 'outbound.load.carton.unload.v1'
+        WHEN 'unstage' THEN 'outbound.load.carton.unstage.v1'
+    END;
+    SELECT transaction.transaction_type = 'move'
+           AND transaction.operation = expected_operation
+           AND transaction.reference_type = 'outbound_load_carton'
+           AND transaction.reference_id = NEW.outbound_load_carton_id
+           AND transaction.actor_user_id = NEW.moved_by_user_id
+           AND carton.carton_id = NEW.carton_id
+           AND carton.license_plate_id = NEW.license_plate_id
+           AND carton.revision = NEW.resulting_position_revision
+           AND load.revision = NEW.resulting_load_revision
+    INTO valid
+    FROM public.inventory_transactions transaction
+    JOIN public.outbound_load_cartons carton
+      ON carton.tenant_id = NEW.tenant_id
+     AND carton.inventory_owner_id = NEW.inventory_owner_id
+     AND carton.facility_id = NEW.facility_id
+     AND carton.outbound_load_id = NEW.outbound_load_id
+     AND carton.id = NEW.outbound_load_carton_id
+    JOIN public.outbound_loads load
+      ON load.tenant_id = carton.tenant_id
+     AND load.facility_id = carton.facility_id
+     AND load.id = carton.outbound_load_id
+    WHERE transaction.tenant_id = NEW.tenant_id
+      AND transaction.inventory_owner_id = NEW.inventory_owner_id
+      AND transaction.id = NEW.inventory_transaction_id;
+    IF valid IS DISTINCT FROM TRUE THEN
+        RAISE EXCEPTION 'packed carton movement header is inconsistent'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_packed_carton_move_detail() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE valid BOOLEAN;
+BEGIN
+    SELECT confirmation.carton_id = NEW.carton_id
+           AND position.carton_content_id = NEW.carton_content_id
+           AND position.reservation_id = NEW.reservation_id
+           AND position.item_batch_id = NEW.item_batch_id
+           AND position.item_id = NEW.item_id
+           AND position.uom = NEW.uom
+           AND position.inventory_status = NEW.inventory_status
+           AND position.packed_qty = NEW.quantity
+           AND position.current_inventory_allocation_id = NEW.destination_inventory_allocation_id
+           AND position.current_inventory_balance_id = NEW.destination_inventory_balance_id
+    INTO valid
+    FROM public.packed_carton_move_confirmations confirmation
+    JOIN public.packed_inventory_positions position
+      ON position.tenant_id = confirmation.tenant_id
+     AND position.inventory_owner_id = confirmation.inventory_owner_id
+     AND position.facility_id = confirmation.facility_id
+     AND position.carton_id = confirmation.carton_id
+     AND position.id = NEW.packed_position_id
+    WHERE confirmation.tenant_id = NEW.tenant_id
+      AND confirmation.inventory_owner_id = NEW.inventory_owner_id
+      AND confirmation.id = NEW.move_confirmation_id;
+    IF valid IS DISTINCT FROM TRUE THEN
+        RAISE EXCEPTION 'packed carton movement detail is inconsistent'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.reject_packed_carton_move_ledger_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'packed carton movement evidence is immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE FUNCTION public.require_packed_carton_move_consistency() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    confirmation_id BIGINT;
+    expected_count BIGINT;
+    expected_qty BIGINT;
+    expected_transaction_id BIGINT;
+BEGIN
+    IF TG_TABLE_NAME = 'packed_carton_move_confirmations' THEN
+        confirmation_id := NEW.id;
+    ELSE
+        confirmation_id := NEW.move_confirmation_id;
+    END IF;
+    SELECT detail_count, moved_qty, inventory_transaction_id
+    INTO expected_count, expected_qty, expected_transaction_id
+    FROM public.packed_carton_move_confirmations
+    WHERE tenant_id = NEW.tenant_id AND id = confirmation_id;
+    IF expected_count IS NULL THEN RETURN NULL; END IF;
+    IF (SELECT COUNT(*) FROM public.packed_carton_move_details
+        WHERE tenant_id = NEW.tenant_id AND move_confirmation_id = confirmation_id) <> expected_count
+       OR (SELECT COALESCE(SUM(quantity), 0) FROM public.packed_carton_move_details
+           WHERE tenant_id = NEW.tenant_id AND move_confirmation_id = confirmation_id) <> expected_qty
+       OR (SELECT COUNT(*) FROM public.inventory_entries
+           WHERE tenant_id = NEW.tenant_id
+             AND transaction_id = expected_transaction_id) <> expected_count * 2
+       OR (SELECT COALESCE(SUM(quantity_delta), 0) FROM public.inventory_entries
+           WHERE tenant_id = NEW.tenant_id
+             AND transaction_id = expected_transaction_id) <> 0
+    THEN
+        RAISE EXCEPTION 'packed carton movement does not reconcile'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.require_outbound_load_consistency() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    load_id BIGINT;
+    load_row RECORD;
+    shipment_rows BIGINT;
+    carton_rows BIGINT;
+    staged_rows BIGINT;
+    loaded_rows BIGINT;
+    departed_rows BIGINT;
+    closed_shipment_rows BIGINT;
+    closed_carton_rows BIGINT;
+BEGIN
+    IF TG_TABLE_NAME = 'outbound_loads' THEN
+        load_id := NEW.id;
+    ELSE
+        load_id := NEW.outbound_load_id;
+    END IF;
+    SELECT * INTO load_row FROM public.outbound_loads
+    WHERE tenant_id = NEW.tenant_id AND id = load_id;
+    IF load_row.id IS NULL THEN RETURN NULL; END IF;
+    SELECT COUNT(*), COUNT(*) FILTER (WHERE closed_at IS NOT NULL)
+    INTO shipment_rows, closed_shipment_rows
+    FROM public.outbound_load_shipments
+    WHERE tenant_id = NEW.tenant_id AND outbound_load_id = load_id;
+    SELECT COUNT(*),
+           COUNT(*) FILTER (WHERE state = 'staged'),
+           COUNT(*) FILTER (WHERE state = 'loaded'),
+           COUNT(*) FILTER (WHERE state = 'departed'),
+           COUNT(*) FILTER (WHERE closed_at IS NOT NULL)
+    INTO carton_rows, staged_rows, loaded_rows, departed_rows, closed_carton_rows
+    FROM public.outbound_load_cartons
+    WHERE tenant_id = NEW.tenant_id AND outbound_load_id = load_id;
+    IF shipment_rows <> load_row.shipment_count
+       OR carton_rows <> load_row.carton_count
+       OR (SELECT COUNT(DISTINCT shipment_sequence) FROM public.outbound_load_shipments
+           WHERE tenant_id = NEW.tenant_id AND outbound_load_id = load_id) <> shipment_rows
+       OR (SELECT COALESCE(MAX(shipment_sequence), 0) FROM public.outbound_load_shipments
+           WHERE tenant_id = NEW.tenant_id AND outbound_load_id = load_id) <> shipment_rows
+       OR (SELECT COUNT(DISTINCT load_sequence) FROM public.outbound_load_cartons
+           WHERE tenant_id = NEW.tenant_id AND outbound_load_id = load_id) <> carton_rows
+       OR (SELECT COALESCE(MAX(load_sequence), 0) FROM public.outbound_load_cartons
+           WHERE tenant_id = NEW.tenant_id AND outbound_load_id = load_id) <> carton_rows
+    THEN
+        RAISE EXCEPTION 'outbound load plan does not reconcile'
+            USING ERRCODE = '23514';
+    END IF;
+    IF load_row.state = 'planned' AND (staged_rows <> 0 OR loaded_rows <> 0 OR departed_rows <> 0)
+       OR load_row.state = 'staging' AND (loaded_rows <> 0 OR departed_rows <> 0)
+       OR load_row.state = 'ready_to_depart' AND loaded_rows <> carton_rows
+       OR load_row.state = 'departed'
+          AND (departed_rows <> carton_rows OR closed_carton_rows <> carton_rows
+               OR closed_shipment_rows <> shipment_rows
+               OR EXISTS (SELECT 1 FROM public.outbound_load_shipments link
+                           JOIN public.shipments shipment
+                             ON shipment.tenant_id = link.tenant_id
+                            AND shipment.inventory_owner_id = link.inventory_owner_id
+                            AND shipment.id = link.shipment_id
+                           WHERE link.tenant_id = NEW.tenant_id
+                             AND link.outbound_load_id = load_id
+                             AND shipment.state <> 'departed'))
+       OR load_row.state = 'cancelled'
+          AND (staged_rows <> 0 OR loaded_rows <> 0 OR departed_rows <> 0
+               OR closed_carton_rows <> carton_rows OR closed_shipment_rows <> shipment_rows)
+    THEN
+        RAISE EXCEPTION 'outbound load execution state does not reconcile'
+            USING ERRCODE = '23514';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM public.outbound_load_cartons carton
+        WHERE carton.tenant_id = NEW.tenant_id
+          AND carton.outbound_load_id = load_id
+          AND EXISTS (
+              SELECT 1 FROM public.packed_inventory_positions position
+              WHERE position.tenant_id = carton.tenant_id
+                AND position.inventory_owner_id = carton.inventory_owner_id
+                AND position.carton_id = carton.carton_id
+                AND ((load_row.state <> 'cancelled' AND position.revision <> carton.revision)
+                     OR (carton.state = 'planned' AND position.state <> 'packed')
+                     OR (carton.state <> 'planned' AND position.state <> carton.state)
+                     OR CASE carton.state
+                          WHEN 'planned' THEN position.current_location_id <> carton.original_location_id
+                          ELSE position.outbound_load_carton_id <> carton.id
+                        END)
+          )
+    ) THEN
+        RAISE EXCEPTION 'outbound load cartons disagree with packed positions'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.validate_outbound_load_cancellation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM public.outbound_loads load
+        WHERE load.tenant_id = NEW.tenant_id
+          AND load.facility_id = NEW.facility_id
+          AND load.id = NEW.outbound_load_id
+          AND load.state = 'cancelled'
+          AND load.revision = NEW.resulting_revision
+          AND load.cancelled_by_user_id = NEW.cancelled_by_user_id
+          AND load.cancelled_at = NEW.cancelled_at
+    ) THEN
+        RAISE EXCEPTION 'outbound load cancellation evidence is inconsistent'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.reject_outbound_load_cancellation_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'outbound load cancellation evidence is immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE FUNCTION public.reject_assigned_shipment_direct_departure() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF OLD.state <> 'departed' AND NEW.state = 'departed'
+       AND EXISTS (
+           SELECT 1
+           FROM public.outbound_load_shipments link
+           JOIN public.outbound_loads load
+             ON load.tenant_id = link.tenant_id
+            AND load.facility_id = link.facility_id
+            AND load.id = link.outbound_load_id
+           WHERE link.tenant_id = NEW.tenant_id
+             AND link.inventory_owner_id = NEW.inventory_owner_id
+             AND link.shipment_id = NEW.id
+             AND link.closed_at IS NULL
+             AND load.state <> 'departed'
+       )
+    THEN
+        RAISE EXCEPTION 'shipment is assigned to an active outbound load'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER carton_contents_initialize_packed_position
+AFTER INSERT ON public.carton_contents
+FOR EACH ROW EXECUTE FUNCTION public.initialize_packed_inventory_position();
+
+CREATE TRIGGER packed_inventory_positions_guard_mutation
+BEFORE DELETE OR UPDATE ON public.packed_inventory_positions
+FOR EACH ROW EXECUTE FUNCTION public.guard_packed_inventory_position_mutation();
+CREATE CONSTRAINT TRIGGER packed_inventory_positions_require_evidence
+AFTER UPDATE ON public.packed_inventory_positions
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_packed_inventory_position_evidence();
+
+CREATE TRIGGER packed_carton_move_confirmations_validate
+BEFORE INSERT ON public.packed_carton_move_confirmations
+FOR EACH ROW EXECUTE FUNCTION public.validate_packed_carton_move_confirmation();
+CREATE TRIGGER packed_carton_move_confirmations_are_immutable
+BEFORE DELETE OR UPDATE ON public.packed_carton_move_confirmations
+FOR EACH ROW EXECUTE FUNCTION public.reject_packed_carton_move_ledger_mutation();
+CREATE CONSTRAINT TRIGGER packed_carton_move_confirmations_require_consistency
+AFTER INSERT ON public.packed_carton_move_confirmations
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_packed_carton_move_consistency();
+
+CREATE TRIGGER packed_carton_move_details_validate
+BEFORE INSERT ON public.packed_carton_move_details
+FOR EACH ROW EXECUTE FUNCTION public.validate_packed_carton_move_detail();
+CREATE TRIGGER packed_carton_move_details_are_immutable
+BEFORE DELETE OR UPDATE ON public.packed_carton_move_details
+FOR EACH ROW EXECUTE FUNCTION public.reject_packed_carton_move_ledger_mutation();
+CREATE CONSTRAINT TRIGGER packed_carton_move_details_require_consistency
+AFTER INSERT ON public.packed_carton_move_details
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_packed_carton_move_consistency();
+
+CREATE TRIGGER outbound_loads_validate
+BEFORE INSERT OR UPDATE ON public.outbound_loads
+FOR EACH ROW EXECUTE FUNCTION public.validate_outbound_load();
+CREATE TRIGGER outbound_loads_guard_mutation
+BEFORE DELETE OR UPDATE ON public.outbound_loads
+FOR EACH ROW EXECUTE FUNCTION public.guard_outbound_load_mutation();
+CREATE CONSTRAINT TRIGGER outbound_loads_require_consistency
+AFTER INSERT OR UPDATE ON public.outbound_loads
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_outbound_load_consistency();
+
+CREATE TRIGGER outbound_load_shipments_validate
+BEFORE INSERT ON public.outbound_load_shipments
+FOR EACH ROW EXECUTE FUNCTION public.validate_outbound_load_shipment();
+CREATE TRIGGER outbound_load_shipments_guard_mutation
+BEFORE DELETE OR UPDATE ON public.outbound_load_shipments
+FOR EACH ROW EXECUTE FUNCTION public.guard_outbound_load_shipment_mutation();
+CREATE CONSTRAINT TRIGGER outbound_load_shipments_require_consistency
+AFTER INSERT OR UPDATE ON public.outbound_load_shipments
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_outbound_load_consistency();
+
+CREATE TRIGGER outbound_load_cartons_validate
+BEFORE INSERT ON public.outbound_load_cartons
+FOR EACH ROW EXECUTE FUNCTION public.validate_outbound_load_carton();
+CREATE TRIGGER outbound_load_cartons_guard_mutation
+BEFORE DELETE OR UPDATE ON public.outbound_load_cartons
+FOR EACH ROW EXECUTE FUNCTION public.guard_outbound_load_carton_mutation();
+CREATE CONSTRAINT TRIGGER outbound_load_cartons_require_consistency
+AFTER INSERT OR UPDATE ON public.outbound_load_cartons
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_outbound_load_consistency();
+
+CREATE TRIGGER outbound_load_cancellations_validate
+BEFORE INSERT ON public.outbound_load_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.validate_outbound_load_cancellation();
+CREATE TRIGGER outbound_load_cancellations_are_immutable
+BEFORE DELETE OR UPDATE ON public.outbound_load_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.reject_outbound_load_cancellation_mutation();
+
+CREATE TRIGGER shipments_reject_assigned_direct_departure
+BEFORE UPDATE OF state ON public.shipments
+FOR EACH ROW EXECUTE FUNCTION public.reject_assigned_shipment_direct_departure();
+
+REVOKE ALL ON FUNCTION public.initialize_packed_inventory_position() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_packed_inventory_position_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_packed_inventory_position_evidence() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_outbound_load() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_outbound_load_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_outbound_load_shipment() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_outbound_load_shipment_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_outbound_load_carton() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_outbound_load_carton_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_packed_carton_move_confirmation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_packed_carton_move_detail() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_packed_carton_move_ledger_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_packed_carton_move_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_outbound_load_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_outbound_load_cancellation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_outbound_load_cancellation_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_assigned_shipment_direct_departure() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

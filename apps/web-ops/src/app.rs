@@ -6,7 +6,8 @@ use leptos_router::{
 };
 use wareboxes_api_contract::v1::{
     InventoryBalanceResponse, InventoryHoldResponse, InventoryHoldStatus, OpaqueCursor,
-    PackingQueuePage, ReplenishmentPolicyPage, ReplenishmentQueuePage, ShippingQueuePage,
+    OutboundLoadQueuePage, PackingQueuePage, ReplenishmentPolicyPage, ReplenishmentQueuePage,
+    ShippingQueuePage,
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 use wareboxes_core::dto::{OrderPage, WebSessionContext};
@@ -23,6 +24,7 @@ use crate::inventory_disposition::InventoryDispositionWorkbench;
 use crate::inventory_holds::QuantityHoldsWorkbench;
 use crate::inventory_integrity::InventoryIntegrityWorkbench;
 use crate::orders::OrderTable;
+use crate::outbound_loads::OutboundLoadsWorkspace;
 use crate::packing::PackingWorkspace;
 use crate::preferences::provide_display_preferences;
 use crate::replenishment::ReplenishmentWorkspace;
@@ -47,6 +49,7 @@ pub enum WorkspaceBootstrapSection {
     Orders,
     Packing,
     Shipping,
+    OutboundLoads,
     Inventory,
     Replenishment,
     Access,
@@ -57,6 +60,7 @@ pub struct WorkspaceBootstrapData {
     pub orders: Option<OrderPage>,
     pub packing_queue: Option<PackingQueuePage>,
     pub shipping_queue: Option<ShippingQueuePage>,
+    pub outbound_load_queue: Option<OutboundLoadQueuePage>,
     pub replenishment_policies: Option<ReplenishmentPolicyPage>,
     pub replenishment_queue: Option<ReplenishmentQueuePage>,
     pub balances: Vec<InventoryBalanceResponse>,
@@ -89,6 +93,7 @@ struct WorkspaceData {
     orders: Option<OrderPage>,
     packing_queue: Option<PackingQueuePage>,
     shipping_queue: Option<ShippingQueuePage>,
+    outbound_load_queue: Option<OutboundLoadQueuePage>,
     replenishment_policies: Option<ReplenishmentPolicyPage>,
     replenishment_queue: Option<ReplenishmentQueuePage>,
     balances: Vec<InventoryBalanceResponse>,
@@ -107,6 +112,7 @@ impl From<WorkspaceBootstrapData> for WorkspaceData {
             orders: bootstrap.orders,
             packing_queue: bootstrap.packing_queue,
             shipping_queue: bootstrap.shipping_queue,
+            outbound_load_queue: bootstrap.outbound_load_queue,
             replenishment_policies: bootstrap.replenishment_policies,
             replenishment_queue: bootstrap.replenishment_queue,
             balances: bootstrap.balances,
@@ -132,6 +138,7 @@ pub(crate) enum Section {
     Orders,
     Packing,
     Shipping,
+    OutboundLoads,
     Loads,
     Catalog,
     Inventory,
@@ -150,6 +157,7 @@ impl Section {
             Self::Orders => Some(WorkspaceBootstrapSection::Orders),
             Self::Packing => Some(WorkspaceBootstrapSection::Packing),
             Self::Shipping => Some(WorkspaceBootstrapSection::Shipping),
+            Self::OutboundLoads => Some(WorkspaceBootstrapSection::OutboundLoads),
             Self::Inventory => Some(WorkspaceBootstrapSection::Inventory),
             Self::Replenishment => Some(WorkspaceBootstrapSection::Replenishment),
             Self::Access => Some(WorkspaceBootstrapSection::Access),
@@ -239,6 +247,7 @@ pub fn App() -> impl IntoView {
         <Stylesheet id="wareboxes-order-allocation" href="/order-allocation.css"/>
         <Stylesheet id="wareboxes-packing" href="/packing.css"/>
         <Stylesheet id="wareboxes-shipping" href="/shipping.css"/>
+        <Stylesheet id="wareboxes-outbound-loads" href="/outbound-loads.css"/>
         <Stylesheet id="wareboxes-replenishment" href="/replenishment.css"/>
         <Stylesheet id="wareboxes-catalog" href="/catalog.css"/>
         <Stylesheet id="wareboxes-administration" href="/administration.css"/>
@@ -250,6 +259,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("orders") view=OrdersPage/>
                     <Route path=StaticSegment("packing") view=PackingPage/>
                     <Route path=StaticSegment("shipping") view=ShippingPage/>
+                    <Route path=StaticSegment("outbound-loads") view=OutboundLoadsPage/>
                     <Route path=StaticSegment("loads") view=LoadsPage/>
                     <Route path=StaticSegment("catalog") view=CatalogPage/>
                     <Route path=StaticSegment("inventory") view=InventoryPage/>
@@ -547,6 +557,14 @@ async fn load_workspace(
                 Some(api::internal_get("/api/v1/shipping-queue?limit=100").await?);
             data.access = api::access().await?;
         }
+        Section::OutboundLoads if has_permission(session, "wms") => {
+            data.outbound_load_queue =
+                Some(api::internal_get("/api/v1/outbound-loads?limit=100").await?);
+            data.shipping_queue =
+                Some(api::internal_get("/api/v1/shipping-queue?limit=100").await?);
+            data.access = api::access().await?;
+            data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
+        }
         Section::Loads if has_permission(session, "wms") => {
             data.loads = api::internal_get("/api/loads?offset=0&limit=500").await?;
             data.access = api::access().await?;
@@ -587,6 +605,7 @@ async fn load_workspace(
         Section::Orders
         | Section::Packing
         | Section::Shipping
+        | Section::OutboundLoads
         | Section::Loads
         | Section::Catalog
         | Section::Inventory
@@ -617,6 +636,11 @@ fn PackingPage() -> impl IntoView {
 #[component]
 fn ShippingPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::Shipping/> }
+}
+
+#[component]
+fn OutboundLoadsPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::OutboundLoads/> }
 }
 
 #[component]
@@ -731,6 +755,17 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                     initial_queue=data.shipping_queue.unwrap_or_else(|| ShippingQueuePage::new(Vec::new(), None))
                     access=data.access
                     can_configure_origins=has_permission(&session, "admin")
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::OutboundLoads if has_permission(&session, "wms") => view! {
+                <OutboundLoadsWorkspace
+                    initial_queue=data.outbound_load_queue.unwrap_or_else(|| OutboundLoadQueuePage::new(Vec::new(), None))
+                    shipping_queue=data.shipping_queue.unwrap_or_else(|| ShippingQueuePage::new(Vec::new(), None))
+                    access=data.access
+                    locations=data.locations
+                    can_supervise=has_permission(&session, "wms_supervisor")
                     on_unauthorized=session_expired_callback()
                 />
             }

@@ -26,6 +26,7 @@ pub(super) const fn name(kind: ResponseKind) -> &'static str {
         ResponseKind::ReplenishmentClaim => "replenishment_claim",
         ResponseKind::ReplenishmentConfirmation => "replenishment_confirmation",
         ResponseKind::ReplenishmentRelease => "replenishment_release",
+        ResponseKind::OutboundCartonMovement => "outbound_carton_movement",
         ResponseKind::ExpectedReceiptConfirmation => "expected_receipt_confirmation",
     }
 }
@@ -54,6 +55,7 @@ pub(super) fn parse(value: &str) -> Result<ResponseKind, CommandStoreError> {
         "replenishment_claim" => Ok(ResponseKind::ReplenishmentClaim),
         "replenishment_confirmation" => Ok(ResponseKind::ReplenishmentConfirmation),
         "replenishment_release" => Ok(ResponseKind::ReplenishmentRelease),
+        "outbound_carton_movement" => Ok(ResponseKind::OutboundCartonMovement),
         "expected_receipt_confirmation" => Ok(ResponseKind::ExpectedReceiptConfirmation),
         _ => Err(CommandStoreError::CorruptRecord(
             "unknown response kind".into(),

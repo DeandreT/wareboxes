@@ -62,6 +62,7 @@ pub enum CommandOperation {
     PickConfirmation,
     PickShortageReport,
     ReplenishmentConfirmation,
+    OutboundCartonMovement,
 }
 
 impl CommandOperation {
@@ -77,6 +78,7 @@ impl CommandOperation {
             Self::PickConfirmation => "pick_confirmation",
             Self::PickShortageReport => "pick_shortage_report",
             Self::ReplenishmentConfirmation => "replenishment_confirmation",
+            Self::OutboundCartonMovement => "outbound_carton_movement",
         }
     }
 
@@ -92,6 +94,7 @@ impl CommandOperation {
             "pick_confirmation" => Ok(Self::PickConfirmation),
             "pick_shortage_report" => Ok(Self::PickShortageReport),
             "replenishment_confirmation" => Ok(Self::ReplenishmentConfirmation),
+            "outbound_carton_movement" => Ok(Self::OutboundCartonMovement),
             _ => Err(CommandStoreError::CorruptRecord(
                 "unknown command operation".into(),
             )),
@@ -135,6 +138,7 @@ impl From<&RfCommand> for CommandOperation {
             RfCommand::Picking(PickingCommand::ReportShortage(_)) => Self::PickShortageReport,
             RfCommand::Picking(PickingCommand::Release { .. }) => Self::Release,
             RfCommand::Replenishment(command) => replenishment::command_operation(command),
+            RfCommand::OutboundLoad(_) => Self::OutboundCartonMovement,
         }
     }
 }

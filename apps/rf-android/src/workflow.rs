@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::expected_receiving::ConfirmationIntent;
+use crate::outbound_load::OutboundLoadCommand;
 use crate::picking::{PickClaim, PickShortageReportResult, PickingCommand};
 use crate::replenishment::{
     ReplenishmentClaim, ReplenishmentCommand, ReplenishmentConfirmationResult,
@@ -368,6 +369,7 @@ pub enum RfCommand {
     CycleCount(CycleCountCommand),
     Picking(PickingCommand),
     Replenishment(ReplenishmentCommand),
+    OutboundLoad(OutboundLoadCommand),
     ExpectedReceipt(Box<ConfirmationIntent>),
 }
 
@@ -379,6 +381,7 @@ impl RfCommand {
             Self::CycleCount(_) => None,
             Self::Picking(_) => None,
             Self::Replenishment(_) => None,
+            Self::OutboundLoad(_) => None,
             Self::ExpectedReceipt(_) => None,
         }
     }
@@ -484,6 +487,7 @@ pub enum CommandOutcome {
     ReplenishmentReleased {
         work_id: i64,
     },
+    OutboundCartonMoved(Box<wareboxes_api_contract::v1::MovePackedCartonResponse>),
     ExpectedReceipt(crate::expected_receiving::ConfirmationResult),
 }
 
@@ -894,7 +898,8 @@ impl MovementWorkflow {
             | CommandOutcome::PickReleased { .. }
             | CommandOutcome::ReplenishmentClaimed(_)
             | CommandOutcome::ReplenishmentConfirmed(_)
-            | CommandOutcome::ReplenishmentReleased { .. } => {
+            | CommandOutcome::ReplenishmentReleased { .. }
+            | CommandOutcome::OutboundCartonMoved(_) => {
                 self.require_reconciliation("Recorded result does not match the workflow".into());
                 return Transition::Applied;
             }

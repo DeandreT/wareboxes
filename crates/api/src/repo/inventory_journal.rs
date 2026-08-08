@@ -3,7 +3,7 @@
 use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_core::models::{InventoryStatus, InventoryTransactionType};
-use wareboxes_domain::{OwnerFacilityScope, TenantId};
+use wareboxes_domain::{OwnerFacilityScope, TenantId, Timestamp};
 
 use crate::db::{bind_tenant_context, now_iso};
 use crate::error::{AppError, AppResult};
@@ -184,12 +184,41 @@ pub(crate) async fn begin_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     command: &JournalCommand<'_>,
 ) -> AppResult<i64> {
+    begin_transaction_at(tx, command, now_iso(), false).await
+}
+
+pub(crate) async fn begin_batched_transaction_at(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    command: &JournalCommand<'_>,
+    occurred_at: Timestamp,
+) -> AppResult<i64> {
+    begin_transaction_at(tx, command, occurred_at, true).await
+}
+
+async fn begin_transaction_at(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    command: &JournalCommand<'_>,
+    occurred_at: Timestamp,
+    replace_context: bool,
+) -> AppResult<i64> {
     if command.operation.trim().is_empty() {
         return Err(AppError::internal("journal operation cannot be blank"));
     }
     lock_active_owner_facility_tx(tx, command.tenant_id, command.owner_facility).await?;
 
-    let occurred_at = now_iso();
+    let existing_transaction_id: Option<String> = sqlx::query_scalar(
+        "SELECT NULLIF(current_setting('wareboxes.inventory_transaction_id', true), '')",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    if !replace_context {
+        if let Some(existing_transaction_id) = existing_transaction_id {
+            return Err(AppError::internal(format!(
+                "database transaction already contains inventory transaction {existing_transaction_id}"
+            )));
+        }
+    }
+
     let transaction_id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO inventory_transactions
@@ -215,16 +244,6 @@ pub(crate) async fn begin_transaction(
     .fetch_one(&mut **tx)
     .await?;
 
-    let existing_transaction_id: Option<String> = sqlx::query_scalar(
-        "SELECT NULLIF(current_setting('wareboxes.inventory_transaction_id', true), '')",
-    )
-    .fetch_one(&mut **tx)
-    .await?;
-    if let Some(existing_transaction_id) = existing_transaction_id {
-        return Err(AppError::internal(format!(
-            "database transaction already contains inventory transaction {existing_transaction_id}"
-        )));
-    }
     sqlx::query_scalar::<_, String>(
         "SELECT set_config('wareboxes.inventory_transaction_id', $1, true)",
     )

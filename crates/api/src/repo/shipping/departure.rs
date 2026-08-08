@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_application::outbound_load::OutboundLoadShipmentDepartureResult;
 use wareboxes_application::shipping::{
     ConfirmShipmentDepartureCommand, ConfirmShipmentDepartureResult,
     CONFIRM_SHIPMENT_DEPARTURE_OPERATION,
@@ -9,13 +10,15 @@ use wareboxes_application::shipping::{
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::{InventoryStatus, InventoryTransactionType, TenantAccess};
 use wareboxes_domain::{
-    confirm_shipment_departure as validate_departure, CartonId, ShipmentCartonIdentity,
-    ShipmentScanValue, ShippingError, TenantId, UserId,
+    confirm_shipment_departure as validate_departure, CartonId, OrderId, OrderRevision,
+    ShipmentCartonIdentity, ShipmentId, ShipmentRevision, ShipmentScanValue, ShipmentStatus,
+    ShippingError, TenantId, UserId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
 use crate::error::{AppError, AppResult};
+use crate::repo::access::ScopeBindings;
 use crate::repo::access::{lock_current_scope_tx, require_permission_tx};
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
 use crate::repo::inventory_locking;
@@ -42,6 +45,14 @@ struct BalanceDeparture {
     item_batch_id: i64,
     status: InventoryStatus,
     quantity: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OutboundLoadShipmentTarget {
+    pub shipment_id: ShipmentId,
+    pub order_id: OrderId,
+    pub expected_shipment_revision: ShipmentRevision,
+    pub expected_order_revision: OrderRevision,
 }
 
 pub async fn confirm_departure(
@@ -94,16 +105,11 @@ pub async fn confirm_departure(
     )
     .map_err(departure_validation_error)?;
 
-    let hints =
-        departure_hints_tx(&mut tx, access.tenant_id, shipment.packing_session_id.get()).await?;
+    let hints = departure_hints_tx(&mut tx, access.tenant_id, shipment.id, "packed").await?;
     lock_departure_inventory_tx(&mut tx, access.tenant_id, shipment.order_id.get(), &hints).await?;
-    let balances = validate_departure_inventory_tx(
-        &mut tx,
-        access.tenant_id,
-        shipment.packing_session_id.get(),
-        &hints,
-    )
-    .await?;
+    let balances =
+        validate_departure_inventory_tx(&mut tx, access.tenant_id, shipment.id, "packed", &hints)
+            .await?;
     let shipped_qty = balances.values().try_fold(0_i64, |total, balance| {
         total
             .checked_add(balance.quantity)
@@ -157,6 +163,14 @@ pub async fn confirm_departure(
     .await?;
     fulfill_reservations_tx(&mut tx, access.tenant_id, &hints, departed_at).await?;
     depart_license_plates_tx(&mut tx, access.tenant_id, &hints, departed_at).await?;
+    depart_packed_positions_tx(
+        &mut tx,
+        access.tenant_id,
+        shipment.id,
+        transaction_id,
+        departed_at,
+    )
+    .await?;
 
     let next_shipment_revision = shipment
         .revision
@@ -294,6 +308,221 @@ pub async fn confirm_departure(
         .await?)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn depart_for_outbound_load_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    access: &TenantAccess,
+    scope: &ScopeBindings,
+    context: &CommandContext,
+    prepared: &PreparedCommand,
+    target: OutboundLoadShipmentTarget,
+    departed_at: wareboxes_domain::Timestamp,
+) -> AppResult<OutboundLoadShipmentDepartureResult> {
+    let order = lock_order_tx(tx, access.tenant_id, target.order_id, scope).await?;
+    let shipment = lock_shipment_tx(tx, access.tenant_id, target.shipment_id, scope).await?;
+    if shipment.order_id != order.id
+        || shipment.inventory_owner_id != order.inventory_owner_id
+        || shipment.status != ShipmentStatus::Manifested
+        || order.status != wareboxes_domain::OrderStatus::AwaitingShipment
+    {
+        return Err(AppError::conflict(
+            "outbound load shipment is no longer ready to depart",
+        ));
+    }
+    if shipment.revision != target.expected_shipment_revision
+        || order.revision != target.expected_order_revision
+    {
+        return Err(AppError::conflict(
+            "outbound load shipment departure revision is stale",
+        ));
+    }
+    let hints = departure_hints_tx(tx, access.tenant_id, shipment.id, "loaded").await?;
+    lock_departure_inventory_tx(tx, access.tenant_id, shipment.order_id.get(), &hints).await?;
+    let balances =
+        validate_departure_inventory_tx(tx, access.tenant_id, shipment.id, "loaded", &hints)
+            .await?;
+    let shipped_qty = balances.values().try_fold(0_i64, |total, balance| {
+        total
+            .checked_add(balance.quantity)
+            .ok_or_else(|| AppError::internal("departure quantity exceeds i64"))
+    })?;
+    if shipped_qty != shipment.shipped_qty {
+        return Err(AppError::conflict(
+            "loaded inventory does not match shipment quantity",
+        ));
+    }
+    let manifest_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM shipment_manifests WHERE tenant_id=$1 AND shipment_id=$2",
+    )
+    .bind(access.tenant_id.get())
+    .bind(shipment.id.get())
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::conflict("shipment has no carrier manifest"))?;
+    let owner_facility = inventory_journal::owner_facility_scope(
+        shipment.inventory_owner_id.get(),
+        shipment.facility_id.get(),
+    )?;
+    let transaction_id = inventory_journal::begin_batched_transaction_at(
+        tx,
+        &JournalCommand {
+            tenant_id: access.tenant_id,
+            owner_facility,
+            actor_user_id: context.actor_id.get(),
+            transaction_type: InventoryTransactionType::Ship,
+            reason: Some("confirm outbound load shipment departure"),
+            reference_type: Some("shipment"),
+            reference_id: Some(shipment.id.get()),
+            correlation_id: Some(&context.request_id),
+            operation: CONFIRM_SHIPMENT_DEPARTURE_OPERATION,
+            idempotency_key: Some(prepared.idempotency_key()),
+            request_hash: prepared.request_hash(),
+        },
+        departed_at,
+    )
+    .await?;
+    fulfill_allocations_tx(tx, access.tenant_id, &hints, departed_at).await?;
+    consume_balances_tx(
+        tx,
+        access.tenant_id,
+        owner_facility,
+        transaction_id,
+        &balances,
+        departed_at,
+    )
+    .await?;
+    fulfill_reservations_tx(tx, access.tenant_id, &hints, departed_at).await?;
+    depart_license_plates_tx(tx, access.tenant_id, &hints, departed_at).await?;
+    depart_packed_positions_tx(
+        tx,
+        access.tenant_id,
+        shipment.id,
+        transaction_id,
+        departed_at,
+    )
+    .await?;
+    let next_shipment_revision = shipment
+        .revision
+        .checked_next()
+        .ok_or_else(|| AppError::internal("shipment revision overflow"))?;
+    let next_order_revision = order
+        .revision
+        .checked_next()
+        .ok_or_else(|| AppError::internal("order revision overflow"))?;
+    require_updated(
+        sqlx::query(
+            "UPDATE shipments SET state='departed',revision=$3,departed_at=$4 WHERE tenant_id=$1 AND id=$2 AND state='manifested' AND revision=$5",
+        )
+        .bind(access.tenant_id.get())
+        .bind(shipment.id.get())
+        .bind(next_shipment_revision.get())
+        .bind(departed_at)
+        .bind(shipment.revision.get())
+        .execute(&mut **tx)
+        .await?
+        .rows_affected(),
+        "shipment changed during outbound load departure",
+    )?;
+    require_updated(
+        sqlx::query(
+            "UPDATE orders SET status='shipped',revision=$3 WHERE tenant_id=$1 AND id=$2 AND status='awaiting shipment' AND revision=$4",
+        )
+        .bind(access.tenant_id.get())
+        .bind(order.id.get())
+        .bind(next_order_revision.get())
+        .bind(order.revision.get())
+        .execute(&mut **tx)
+        .await?
+        .rows_affected(),
+        "order changed during outbound load departure",
+    )?;
+    sqlx::query(
+        r#"
+        INSERT INTO shipment_confirmations (
+            tenant_id,inventory_owner_id,facility_id,shipment_id,manifest_id,
+            packing_session_id,order_release_id,order_id,inventory_transaction_id,
+            expected_shipment_revision,resulting_shipment_revision,
+            expected_order_revision,resulting_order_revision,carton_count,shipped_qty,
+            confirmed_by_user_id,confirmed_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(shipment.inventory_owner_id.get())
+    .bind(shipment.facility_id.get())
+    .bind(shipment.id.get())
+    .bind(manifest_id)
+    .bind(shipment.packing_session_id.get())
+    .bind(shipment.order_release_id)
+    .bind(shipment.order_id.get())
+    .bind(transaction_id)
+    .bind(shipment.revision.get())
+    .bind(next_shipment_revision.get())
+    .bind(order.revision.get())
+    .bind(next_order_revision.get())
+    .bind(shipment.carton_count)
+    .bind(shipment.shipped_qty)
+    .bind(context.actor_id.get())
+    .bind(departed_at)
+    .execute(&mut **tx)
+    .await?;
+    insert_order_activity_tx(
+        tx,
+        access.tenant_id,
+        shipment.inventory_owner_id,
+        shipment.order_id.get(),
+        Some(context.actor_id.get()),
+        &format!(
+            "departed shipment {} on outbound load with {} carton(s)",
+            shipment.id, shipment.carton_count
+        ),
+    )
+    .await?;
+    enqueue_order_event_tx(
+        tx,
+        access.tenant_id,
+        shipment.inventory_owner_id,
+        shipment.facility_id,
+        context.actor_id.get(),
+        shipment.order_id,
+        "shipping.shipment_departed",
+        &format!("shipment:{}:departed", shipment.id.get()),
+        serde_json::json!({
+            "shipment_id": shipment.id,
+            "order_id": shipment.order_id,
+            "inventory_transaction_id": transaction_id,
+            "carton_count": shipment.carton_count,
+            "ordered_quantity": shipment.demand.ordered(),
+            "shipped_quantity": shipment.shipped_qty,
+            "accepted_short_quantity": shipment.demand.accepted_short(),
+            "shipment_revision": next_shipment_revision,
+            "order_revision": next_order_revision,
+            "departed_at": departed_at,
+        }),
+        departed_at,
+    )
+    .await?;
+    Ok(OutboundLoadShipmentDepartureResult {
+        shipment_id: shipment.id,
+        order_id: shipment.order_id,
+        inventory_owner_id: shipment.inventory_owner_id,
+        inventory_transaction_id: transaction_id,
+        shipment_status: ShipmentStatus::Departed,
+        shipment_revision: next_shipment_revision,
+        order_status: wareboxes_domain::OrderStatus::Shipped,
+        order_revision: next_order_revision,
+        demand: shipment.demand,
+    })
+}
+
+fn require_updated(rows: u64, message: &'static str) -> AppResult<()> {
+    if rows == 1 {
+        Ok(())
+    } else {
+        Err(AppError::conflict(message))
+    }
+}
+
 fn departure_validation_error(error: ShippingError) -> AppError {
     match error {
         ShippingError::DepartureCartonSetMismatch => AppError::bad_request(error.to_string()),
@@ -332,20 +561,29 @@ async fn shipment_carton_identities_tx(
 async fn departure_hints_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
-    packing_session_id: i64,
+    shipment_id: wareboxes_domain::ShipmentId,
+    required_state: &str,
 ) -> AppResult<Vec<DepartureHint>> {
     let rows = sqlx::query(
         r#"
-        SELECT destination_inventory_allocation_id AS allocation_id,
-               destination_inventory_balance_id AS balance_id,
-               reservation_id, destination_license_plate_id AS license_plate_id
-        FROM carton_contents
-        WHERE tenant_id = $1 AND packing_session_id = $2
-        ORDER BY destination_inventory_allocation_id
+        SELECT position.current_inventory_allocation_id AS allocation_id,
+               position.current_inventory_balance_id AS balance_id,
+               position.reservation_id,
+               position.current_license_plate_id AS license_plate_id
+        FROM shipment_cartons shipment_carton
+        JOIN packed_inventory_positions position
+          ON position.tenant_id=shipment_carton.tenant_id
+         AND position.inventory_owner_id=shipment_carton.inventory_owner_id
+         AND position.facility_id=shipment_carton.facility_id
+         AND position.carton_id=shipment_carton.carton_id
+        WHERE shipment_carton.tenant_id=$1 AND shipment_carton.shipment_id=$2
+          AND position.state=$3
+        ORDER BY position.current_inventory_allocation_id
         "#,
     )
     .bind(tenant_id.get())
-    .bind(packing_session_id)
+    .bind(shipment_id.get())
+    .bind(required_state)
     .fetch_all(&mut **tx)
     .await?;
     if rows.is_empty() {
@@ -447,16 +685,17 @@ async fn lock_exact_ids_tx(
 async fn validate_departure_inventory_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
-    packing_session_id: i64,
+    shipment_id: wareboxes_domain::ShipmentId,
+    required_state: &str,
     hints: &[DepartureHint],
 ) -> AppResult<BTreeMap<i64, BalanceDeparture>> {
     let rows = sqlx::query(
         r#"
-        SELECT content.destination_inventory_allocation_id AS allocation_id,
-               content.destination_inventory_balance_id AS balance_id,
-               content.destination_location_id AS location_id,
-               content.destination_license_plate_id AS license_plate_id,
-               content.item_batch_id, content.inventory_status, content.packed_qty,
+        SELECT position.current_inventory_allocation_id AS allocation_id,
+               position.current_inventory_balance_id AS balance_id,
+               position.current_location_id AS location_id,
+               position.current_license_plate_id AS license_plate_id,
+               position.item_batch_id, position.inventory_status, position.packed_qty,
                allocation.status AS allocation_status,
                allocation.execution_stage AS allocation_execution_stage,
                allocation.deleted AS allocation_deleted,
@@ -466,33 +705,40 @@ async fn validate_departure_inventory_tx(
                plate.location_id AS plate_location_id, plate.deleted AS plate_deleted,
                reservation.status AS reservation_status,
                reservation.deleted AS reservation_deleted
-        FROM carton_contents content
+        FROM shipment_cartons shipment_carton
+        INNER JOIN packed_inventory_positions position
+          ON position.tenant_id=shipment_carton.tenant_id
+         AND position.inventory_owner_id=shipment_carton.inventory_owner_id
+         AND position.facility_id=shipment_carton.facility_id
+         AND position.carton_id=shipment_carton.carton_id
         INNER JOIN inventory_allocations allocation
-          ON allocation.tenant_id = content.tenant_id
-         AND allocation.inventory_owner_id = content.inventory_owner_id
-         AND allocation.facility_id = content.facility_id
-         AND allocation.id = content.destination_inventory_allocation_id
+          ON allocation.tenant_id = position.tenant_id
+         AND allocation.inventory_owner_id = position.inventory_owner_id
+         AND allocation.facility_id = position.facility_id
+         AND allocation.id = position.current_inventory_allocation_id
         INNER JOIN inventory_balances balance
-          ON balance.tenant_id = content.tenant_id
-         AND balance.inventory_owner_id = content.inventory_owner_id
-         AND balance.facility_id = content.facility_id
-         AND balance.id = content.destination_inventory_balance_id
+          ON balance.tenant_id = position.tenant_id
+         AND balance.inventory_owner_id = position.inventory_owner_id
+         AND balance.facility_id = position.facility_id
+         AND balance.id = position.current_inventory_balance_id
         INNER JOIN license_plates plate
-          ON plate.tenant_id = content.tenant_id
-         AND plate.inventory_owner_id = content.inventory_owner_id
-         AND plate.facility_id = content.facility_id
-         AND plate.id = content.destination_license_plate_id
+          ON plate.tenant_id = position.tenant_id
+         AND plate.inventory_owner_id = position.inventory_owner_id
+         AND plate.facility_id = position.facility_id
+         AND plate.id = position.current_license_plate_id
         INNER JOIN inventory_reservations reservation
-          ON reservation.tenant_id = content.tenant_id
-         AND reservation.inventory_owner_id = content.inventory_owner_id
-         AND reservation.facility_id = content.facility_id
-         AND reservation.id = content.reservation_id
-        WHERE content.tenant_id = $1 AND content.packing_session_id = $2
-        ORDER BY content.destination_inventory_allocation_id
+          ON reservation.tenant_id = position.tenant_id
+         AND reservation.inventory_owner_id = position.inventory_owner_id
+         AND reservation.facility_id = position.facility_id
+         AND reservation.id = position.reservation_id
+        WHERE shipment_carton.tenant_id=$1 AND shipment_carton.shipment_id=$2
+          AND position.state=$3
+        ORDER BY position.current_inventory_allocation_id
         "#,
     )
     .bind(tenant_id.get())
-    .bind(packing_session_id)
+    .bind(shipment_id.get())
+    .bind(required_state)
     .fetch_all(&mut **tx)
     .await?;
     if rows.len() != hints.len() {
@@ -724,6 +970,43 @@ async fn depart_license_plates_tx(
                 "shipment carton changed during departure",
             ));
         }
+    }
+    Ok(())
+}
+
+async fn depart_packed_positions_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    shipment_id: wareboxes_domain::ShipmentId,
+    inventory_transaction_id: i64,
+    departed_at: wareboxes_domain::Timestamp,
+) -> AppResult<()> {
+    let updated = sqlx::query(
+        r#"
+        UPDATE packed_inventory_positions position
+        SET state='departed',current_inventory_allocation_id=NULL,
+            current_inventory_balance_id=NULL,current_location_id=NULL,
+            current_license_plate_id=NULL,revision=position.revision+1,
+            positioned_at=$3,departure_inventory_transaction_id=$4,departed_at=$3
+        FROM shipment_cartons shipment_carton
+        WHERE shipment_carton.tenant_id=$1 AND shipment_carton.shipment_id=$2
+          AND shipment_carton.inventory_owner_id=position.inventory_owner_id
+          AND shipment_carton.facility_id=position.facility_id
+          AND shipment_carton.carton_id=position.carton_id
+          AND position.tenant_id=shipment_carton.tenant_id
+          AND position.state IN ('packed','loaded')
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(shipment_id.get())
+    .bind(departed_at)
+    .bind(inventory_transaction_id)
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::conflict(
+            "shipment packed positions changed during departure",
+        ));
     }
     Ok(())
 }

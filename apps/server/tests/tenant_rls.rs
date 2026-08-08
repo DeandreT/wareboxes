@@ -275,6 +275,18 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         ),
         ("cartons", "cartons_tenant_isolation"),
         ("carton_contents", "carton_contents_tenant_isolation"),
+        (
+            "packed_inventory_positions",
+            "packed_inventory_positions_tenant_isolation",
+        ),
+        (
+            "packed_carton_move_confirmations",
+            "packed_carton_move_confirmations_tenant_isolation",
+        ),
+        (
+            "packed_carton_move_details",
+            "packed_carton_move_details_tenant_isolation",
+        ),
         ("shipments", "shipments_tenant_isolation"),
         (
             "shipment_address_snapshots",
@@ -289,6 +301,19 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         (
             "shipment_confirmations",
             "shipment_confirmations_tenant_isolation",
+        ),
+        ("outbound_loads", "outbound_loads_tenant_isolation"),
+        (
+            "outbound_load_shipments",
+            "outbound_load_shipments_tenant_isolation",
+        ),
+        (
+            "outbound_load_cartons",
+            "outbound_load_cartons_tenant_isolation",
+        ),
+        (
+            "outbound_load_cancellations",
+            "outbound_load_cancellations_tenant_isolation",
         ),
         ("facilities", "facilities_tenant_isolation"),
         (

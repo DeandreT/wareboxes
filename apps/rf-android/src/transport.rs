@@ -134,6 +134,11 @@ pub enum NetworkEvent {
         request_id: String,
         response: Result<NetworkResponse, String>,
     },
+    OutboundLoadLookup {
+        barcode: String,
+        request_id: String,
+        response: Result<NetworkResponse, String>,
+    },
     Command {
         record_id: i64,
         attempt_id: String,
@@ -268,6 +273,24 @@ pub fn build_expected_receiving_barcode_lookup_request(
     Ok(request)
 }
 
+pub fn build_outbound_load_lookup_request(
+    transport: &AuthenticatedTransport<'_>,
+    barcode: &str,
+    request_id: &str,
+) -> Result<ehttp::Request, TransportBuildError> {
+    let barcode = barcode.trim();
+    if barcode.is_empty() || barcode.len() > 200 || barcode.chars().any(char::is_control) {
+        return Err(TransportBuildError::InvalidLoadBarcode);
+    }
+    let mut request = ehttp::Request::get(
+        transport
+            .endpoint
+            .api_url_with_segment("/api/v1/outbound-loads/by-barcode", barcode)?,
+    );
+    request.headers = authenticated_headers(transport, request_id);
+    Ok(request)
+}
+
 pub fn build_command_request(
     transport: &AuthenticatedTransport<'_>,
     attempt: &DispatchAttempt,
@@ -395,6 +418,26 @@ pub fn send_expected_receiving_barcode_lookup(
             .map(NetworkResponse::from)
             .map_err(|error| error.to_string());
         let _ = sender.send(NetworkEvent::ExpectedReceivingBarcodeLookup {
+            barcode,
+            request_id,
+            response,
+        });
+        context.request_repaint();
+    });
+}
+
+pub fn send_outbound_load_lookup(
+    request: ehttp::Request,
+    barcode: String,
+    request_id: String,
+    sender: Sender<NetworkEvent>,
+    context: egui::Context,
+) {
+    ehttp::fetch(request, move |result| {
+        let response = result
+            .map(NetworkResponse::from)
+            .map_err(|error| error.to_string());
+        let _ = sender.send(NetworkEvent::OutboundLoadLookup {
             barcode,
             request_id,
             response,

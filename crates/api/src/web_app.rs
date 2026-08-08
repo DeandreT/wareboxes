@@ -91,6 +91,7 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
         "/orders" | "/orders/" => Some(WorkspaceBootstrapSection::Orders),
         "/packing" | "/packing/" => Some(WorkspaceBootstrapSection::Packing),
         "/shipping" | "/shipping/" => Some(WorkspaceBootstrapSection::Shipping),
+        "/outbound-loads" | "/outbound-loads/" => Some(WorkspaceBootstrapSection::OutboundLoads),
         "/replenishment" | "/replenishment/" => Some(WorkspaceBootstrapSection::Replenishment),
         "/inventory" | "/inventory/" => Some(WorkspaceBootstrapSection::Inventory),
         "/access" | "/access/" => Some(WorkspaceBootstrapSection::Access),
@@ -133,6 +134,7 @@ async fn workspace_bootstrap(
                 orders,
                 packing_queue: None,
                 shipping_queue: None,
+                outbound_load_queue: None,
                 replenishment_policies: None,
                 replenishment_queue: None,
                 balances,
@@ -185,6 +187,24 @@ async fn workspace_bootstrap(
             Ok(WorkspaceBootstrapData {
                 shipping_queue: Some(shipping_queue),
                 access: access_workspace,
+                ..WorkspaceBootstrapData::default()
+            })
+        }
+        WorkspaceBootstrapSection::OutboundLoads => {
+            if !has_permission(session, "wms") {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            let (outbound_load_queue, shipping_queue, access_workspace, locations) = tokio::try_join!(
+                routes::v1::outbound_loads::page_for_access(state, access, None, None, 100,),
+                routes::v1::shipping_queue::page_for_access(state, access, None, None, 100,),
+                routes::access::workspace_for_access(state, access),
+                routes::locations::list_for_access(state, access, false),
+            )?;
+            Ok(WorkspaceBootstrapData {
+                outbound_load_queue: Some(outbound_load_queue),
+                shipping_queue: Some(shipping_queue),
+                access: access_workspace,
+                locations,
                 ..WorkspaceBootstrapData::default()
             })
         }
@@ -251,6 +271,10 @@ mod tests {
         assert_eq!(
             section_for_path("/shipping"),
             Some(WorkspaceBootstrapSection::Shipping)
+        );
+        assert_eq!(
+            section_for_path("/outbound-loads"),
+            Some(WorkspaceBootstrapSection::OutboundLoads)
         );
         assert_eq!(
             section_for_path("/replenishment"),

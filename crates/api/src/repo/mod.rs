@@ -24,6 +24,7 @@ pub mod order_cancellation;
 pub mod order_creation;
 pub mod order_release;
 pub mod orders;
+pub mod outbound_load;
 pub mod packing;
 pub mod picking;
 pub mod replenishment;

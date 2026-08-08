@@ -21,6 +21,7 @@ mod inventory_holds;
 mod inventory_integrity;
 mod inventory_rollups;
 mod orders;
+mod outbound_loads;
 mod packing;
 mod preferences;
 mod replenishment;

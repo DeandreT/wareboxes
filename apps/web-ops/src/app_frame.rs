@@ -138,8 +138,14 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                 active=section == Section::Shipping
                             />
                             <NavItem
+                                href="/outbound-loads"
+                                label="Outbound loads"
+                                icon=UiIcon::Shipping
+                                active=section == Section::OutboundLoads
+                            />
+                            <NavItem
                                 href="/loads"
-                                label="Loads"
+                                label="Inbound loads"
                                 icon=UiIcon::Loads
                                 active=section == Section::Loads
                             />

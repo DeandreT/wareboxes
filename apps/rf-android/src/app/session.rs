@@ -231,6 +231,11 @@ impl RfApp {
                 } => {
                     self.handle_receiving_barcode_response(context, &barcode, &request_id, response)
                 }
+                NetworkEvent::OutboundLoadLookup {
+                    barcode,
+                    request_id,
+                    response,
+                } => self.handle_outbound_load_lookup(&barcode, &request_id, response),
                 NetworkEvent::Command {
                     record_id,
                     attempt_id,
@@ -383,6 +388,10 @@ impl RfApp {
         }
         if matches!(record.draft.command, RfCommand::Replenishment(_)) {
             self.restore_replenishment_command(context, record);
+            return;
+        }
+        if matches!(record.draft.command, RfCommand::OutboundLoad(_)) {
+            self.restore_outbound_load_command(record);
             return;
         }
         if let Some(operation) = record.draft.command.movement_operation() {
@@ -915,8 +924,12 @@ impl RfApp {
             let is_cycle_count = matches!(draft.command, RfCommand::CycleCount(_));
             let is_picking = matches!(draft.command, RfCommand::Picking(_));
             let is_replenishment = matches!(draft.command, RfCommand::Replenishment(_));
+            let is_outbound_load = matches!(draft.command, RfCommand::OutboundLoad(_));
             let Some(store) = self.command_store.as_mut() else {
-                if is_replenishment {
+                if is_outbound_load {
+                    self.outbound_load
+                        .require_reconciliation("Durable device storage is unavailable".into());
+                } else if is_replenishment {
                     self.replenishment
                         .require_reconciliation("Durable device storage is unavailable".into());
                 } else {
@@ -926,7 +939,12 @@ impl RfApp {
                 continue;
             };
             let Some(scope) = self.execution_scope.as_ref() else {
-                if is_replenishment {
+                if is_outbound_load {
+                    self.outbound_load.require_reconciliation(
+                        "The carton move cannot be stored without an authenticated device scope"
+                            .into(),
+                    );
+                } else if is_replenishment {
                     self.replenishment.require_reconciliation(
                         "The replenishment cannot be stored without an authenticated device scope"
                             .into(),
@@ -956,6 +974,11 @@ impl RfApp {
                             .replenishment
                             .command_persisted(&command_id, record.record_id);
                         self.emit_replenishment_transition(transition);
+                    } else if is_outbound_load {
+                        let transition = self
+                            .outbound_load
+                            .command_persisted(&command_id, record.record_id);
+                        self.emit_outbound_load_transition(transition);
                     } else {
                         let transition = self
                             .workflow
@@ -975,6 +998,10 @@ impl RfApp {
                     } else if is_replenishment {
                         self.replenishment.require_reconciliation(format!(
                             "The replenishment could not be stored durably: {error}"
+                        ));
+                    } else if is_outbound_load {
+                        self.outbound_load.require_reconciliation(format!(
+                            "The carton move could not be stored durably: {error}"
                         ));
                     } else {
                         self.workflow.require_reconciliation(format!(
@@ -1020,6 +1047,10 @@ impl RfApp {
                         self.replenishment.require_reconciliation(
                             "The saved replenishment could not enter network dispatch.".into(),
                         );
+                    } else if self.outbound_load.owns_record(record_id) {
+                        self.outbound_load.require_reconciliation(
+                            "The saved carton move could not enter network dispatch.".into(),
+                        );
                     } else {
                         self.workflow.require_reconciliation(
                             "The saved command could not enter network dispatch.".into(),
@@ -1054,6 +1085,10 @@ impl RfApp {
                         self.replenishment.require_reconciliation(
                             "The saved replenishment failed its integrity check.".into(),
                         );
+                    } else if self.outbound_load.owns_record(record_id) {
+                        self.outbound_load.require_reconciliation(
+                            "The saved carton move failed its integrity check.".into(),
+                        );
                     } else {
                         self.workflow.require_reconciliation(
                             "The saved command failed its integrity check.".into(),
@@ -1068,6 +1103,8 @@ impl RfApp {
                 self.picking.dispatch_started(record_id);
             } else if matches!(attempt.command.draft.command, RfCommand::Replenishment(_)) {
                 self.replenishment.dispatch_started(record_id);
+            } else if matches!(attempt.command.draft.command, RfCommand::OutboundLoad(_)) {
+                self.outbound_load.dispatch_started(record_id);
             } else {
                 self.workflow.dispatch_started(record_id);
             }
@@ -1107,6 +1144,10 @@ impl RfApp {
             } else if self.replenishment.owns_record(record_id) {
                 self.replenishment.require_reconciliation(
                     "The authenticated device scope was lost during replenishment dispatch.".into(),
+                );
+            } else if self.outbound_load.owns_record(record_id) {
+                self.outbound_load.require_reconciliation(
+                    "The authenticated device scope was lost during carton dispatch.".into(),
                 );
             } else {
                 self.workflow.require_reconciliation(
@@ -1152,6 +1193,11 @@ impl RfApp {
                             record_id,
                             "The server may have received the replenishment. Check it before continuing.",
                         );
+                    } else if matches!(stored.draft.command, RfCommand::OutboundLoad(_)) {
+                        self.outbound_load.dispatch_ambiguous(
+                            record_id,
+                            "The server may have received the carton move. Check it before continuing.",
+                        );
                     } else {
                         self.workflow.dispatch_ambiguous(
                             record_id,
@@ -1179,6 +1225,10 @@ impl RfApp {
                     } else if self.replenishment.owns_record(record_id) {
                         self.replenishment.require_reconciliation(
                             "The interrupted replenishment could not be saved for recovery.".into(),
+                        );
+                    } else if self.outbound_load.owns_record(record_id) {
+                        self.outbound_load.require_reconciliation(
+                            "The interrupted carton move could not be saved for recovery.".into(),
                         );
                     } else {
                         self.workflow.require_reconciliation(
@@ -1217,6 +1267,10 @@ impl RfApp {
                     self.replenishment.require_reconciliation(
                         "The retryable replenishment result could not be saved.".into(),
                     );
+                } else if self.outbound_load.owns_record(record_id) {
+                    self.outbound_load.require_reconciliation(
+                        "The retryable carton-move result could not be saved.".into(),
+                    );
                 } else {
                     self.workflow.require_reconciliation(
                         "The retryable server result could not be saved.".into(),
@@ -1228,6 +1282,7 @@ impl RfApp {
             let is_cycle_count = matches!(stored.draft.command, RfCommand::CycleCount(_));
             let is_picking = matches!(stored.draft.command, RfCommand::Picking(_));
             let is_replenishment = matches!(stored.draft.command, RfCommand::Replenishment(_));
+            let is_outbound_load = matches!(stored.draft.command, RfCommand::OutboundLoad(_));
             if response.status == 401 {
                 if is_receiving {
                     if let Some(runtime) = self.receiving_command.as_mut() {
@@ -1254,6 +1309,12 @@ impl RfApp {
                         record_id,
                         stored.draft,
                         "Sign in with the same operator account to recover this saved replenishment.",
+                    );
+                } else if is_outbound_load {
+                    self.outbound_load.restore_ambiguous_command(
+                        record_id,
+                        stored.draft,
+                        "Sign in with the same operator account to recover this saved carton move.",
                     );
                 } else {
                     self.workflow.restore_ambiguous_command(
@@ -1294,6 +1355,11 @@ impl RfApp {
                         record_id,
                         "The service is temporarily unavailable. Check the saved replenishment again.",
                     );
+                } else if is_outbound_load {
+                    self.outbound_load.dispatch_ambiguous(
+                        record_id,
+                        "The service is temporarily unavailable. Check the saved carton move again.",
+                    );
                 } else {
                     self.workflow.dispatch_ambiguous(
                         record_id,
@@ -1331,6 +1397,10 @@ impl RfApp {
                 } else if self.replenishment.owns_record(record_id) {
                     self.replenishment.require_reconciliation(
                         "The replenishment result could not be stored durably.".into(),
+                    );
+                } else if self.outbound_load.owns_record(record_id) {
+                    self.outbound_load.require_reconciliation(
+                        "The carton-move result could not be stored durably.".into(),
                     );
                 } else {
                     self.workflow.require_reconciliation(
@@ -1379,6 +1449,10 @@ impl RfApp {
                             | crate::workflow::CommandOutcome::ReplenishmentConfirmed(_)
                             | crate::workflow::CommandOutcome::ReplenishmentReleased { .. }
                     );
+                    let is_outbound_load = matches!(
+                        &outcome,
+                        crate::workflow::CommandOutcome::OutboundCartonMoved(_)
+                    );
                     if is_replenishment
                         && (!self.replenishment.accepts_outcome(record_id, &outcome)
                             || matches!(
@@ -1394,6 +1468,21 @@ impl RfApp {
                         );
                         return;
                     }
+                    if is_outbound_load
+                        && (!self.outbound_load.accepts_outcome(record_id, &outcome)
+                            || matches!(
+                                &outcome,
+                                crate::workflow::CommandOutcome::OutboundCartonMoved(result)
+                                    if result.movement.moved_by != scope.operator_id
+                            ))
+                    {
+                        self.require_outbound_load_record_reconciliation(
+                            scope,
+                            record_id,
+                            "The carton-move result conflicts with the saved load or scans.",
+                        );
+                        return;
+                    }
                     if self
                         .finalize_record(scope, record_id, CommandStatus::Completed, None)
                         .is_some()
@@ -1405,6 +1494,9 @@ impl RfApp {
                             self.picking.durable_outcome_recorded(record_id, outcome);
                         } else if is_replenishment {
                             self.replenishment
+                                .durable_outcome_recorded(record_id, outcome);
+                        } else if is_outbound_load {
+                            self.outbound_load
                                 .durable_outcome_recorded(record_id, outcome);
                         } else {
                             self.workflow.durable_outcome_recorded(record_id, outcome);
@@ -1436,6 +1528,12 @@ impl RfApp {
                             scope,
                             record_id,
                             "The server returned an invalid replenishment result.",
+                        );
+                    } else if matches!(recorded.draft.command, RfCommand::OutboundLoad(_)) {
+                        self.require_outbound_load_record_reconciliation(
+                            scope,
+                            record_id,
+                            "The server returned an invalid carton-move result.",
                         );
                     } else {
                         self.require_record_reconciliation(
@@ -1475,6 +1573,9 @@ impl RfApp {
                 } else if matches!(recorded.draft.command, RfCommand::Replenishment(_)) {
                     self.replenishment
                         .durable_rejection_recorded(record_id, message);
+                } else if matches!(recorded.draft.command, RfCommand::OutboundLoad(_)) {
+                    self.outbound_load
+                        .durable_rejection_recorded(record_id, message);
                 } else {
                     self.workflow.durable_rejection_recorded(record_id, message);
                 }
@@ -1492,6 +1593,8 @@ impl RfApp {
                 self.require_pick_record_reconciliation(scope, record_id, &message);
             } else if matches!(recorded.draft.command, RfCommand::Replenishment(_)) {
                 self.require_replenishment_record_reconciliation(scope, record_id, &message);
+            } else if matches!(recorded.draft.command, RfCommand::OutboundLoad(_)) {
+                self.require_outbound_load_record_reconciliation(scope, record_id, &message);
             } else {
                 self.require_record_reconciliation(scope, record_id, &message);
             }
@@ -1681,6 +1784,8 @@ impl RfApp {
                 self.cycle_count.require_reconciliation(message.into());
             } else if self.replenishment.owns_record(record_id) {
                 self.replenishment.require_reconciliation(message.into());
+            } else if self.outbound_load.owns_record(record_id) {
+                self.outbound_load.require_reconciliation(message.into());
             } else {
                 self.workflow.require_reconciliation(message.into());
             }
@@ -1741,6 +1846,25 @@ impl RfApp {
             .is_some()
         {
             self.replenishment.require_reconciliation(message.into());
+        }
+    }
+
+    fn require_outbound_load_record_reconciliation(
+        &mut self,
+        scope: &ExecutionScope,
+        record_id: i64,
+        message: &str,
+    ) {
+        if self
+            .finalize_record(
+                scope,
+                record_id,
+                CommandStatus::ReconcileRequired,
+                Some(message),
+            )
+            .is_some()
+        {
+            self.outbound_load.require_reconciliation(message.into());
         }
     }
 

@@ -45,7 +45,14 @@ impl V1Error {
 
 impl From<AppError> for V1Error {
     fn from(error: AppError) -> Self {
-        Self::from(error.public_application_error())
+        if matches!(&error, AppError::Db(_)) {
+            tracing::debug!(error = %error, "v1 database error normalized");
+        }
+        let public_error = error.public_application_error();
+        if matches!(public_error, ApplicationError::Internal(_)) {
+            tracing::error!(error = %error, "v1 application error normalized");
+        }
+        Self::from(public_error)
     }
 }
 

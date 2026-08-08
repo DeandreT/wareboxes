@@ -8,6 +8,7 @@ mod read_model;
 
 pub use creation::create_shipment;
 pub use departure::confirm_departure;
+pub(crate) use departure::{depart_for_outbound_load_tx, OutboundLoadShipmentTarget};
 pub use manifest::record_manual_manifest;
 pub use queue::{
     shipping_queue, ShippingQueueCursor, ShippingQueueEntry, ShippingQueuePage,

@@ -15,6 +15,7 @@ mod order_cancellations;
 mod order_holds;
 mod order_releases;
 mod orders;
+pub(crate) mod outbound_loads;
 pub(crate) mod packing;
 mod pick_shortages;
 mod picking;
@@ -142,6 +143,55 @@ pub fn router() -> Router<AppState> {
             post(shipping::confirm_departure),
         )
         .route("/shipping-queue", get(shipping_queue::queue))
+        .route(
+            "/outbound-loads",
+            get(outbound_loads::list).post(outbound_loads::plan),
+        )
+        .route(
+            "/outbound-loads/by-barcode/{load_barcode}",
+            get(outbound_loads::get_by_barcode),
+        )
+        .route("/outbound-loads/{load_id}", get(outbound_loads::get))
+        .route(
+            "/outbound-loads/{load_id}/releases",
+            post(outbound_loads::release),
+        )
+        .route(
+            "/outbound-loads/{load_id}/loading-starts",
+            post(outbound_loads::start_loading),
+        )
+        .route(
+            "/outbound-loads/{load_id}/loading-completions",
+            post(outbound_loads::complete_loading),
+        )
+        .route(
+            "/outbound-loads/{load_id}/departures",
+            post(outbound_loads::depart),
+        )
+        .route(
+            "/outbound-loads/{load_id}/cancellations",
+            post(outbound_loads::cancel),
+        )
+        .route(
+            "/outbound-loads/{load_id}/cartons/{carton_id}/staging-movements",
+            post(outbound_loads::stage),
+        )
+        .route(
+            "/outbound-loads/{load_id}/cartons/{carton_id}/loading-movements",
+            post(outbound_loads::load_carton),
+        )
+        .route(
+            "/outbound-loads/{load_id}/cartons/{carton_id}/unloading-movements",
+            post(outbound_loads::unload),
+        )
+        .route(
+            "/outbound-loads/{load_id}/cartons/{carton_id}/unstaging-movements",
+            post(outbound_loads::unstage),
+        )
+        .route(
+            "/packed-cartons/{carton_id}/position",
+            get(outbound_loads::position),
+        )
         .route("/packing-queue", get(packing::queue))
         .route(
             "/orders/{order_id}/allocation-runs",

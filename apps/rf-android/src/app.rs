@@ -9,6 +9,7 @@ use wareboxes_api_contract::v1::{ErrorReason, ErrorResponse};
 use crate::command_store::{CommandStore, ExecutionScope};
 use crate::cycle_count::{CountScanStage, CycleCountWorkflow};
 use crate::expected_receiving::{ExpectedReceivingReducer, ReceivingEffect};
+use crate::outbound_load::{OutboundLoadScanStage, OutboundLoadWorkflow};
 use crate::picking::{PickScanStage, PickingWorkflow};
 use crate::replenishment::{ReplenishmentScanStage, ReplenishmentWorkflow};
 use crate::transport::{NetworkEvent, ServerEndpoint};
@@ -19,6 +20,8 @@ use crate::workflow::{
 
 mod cycle_count_ui;
 mod heartbeat;
+mod outbound_load_session;
+mod outbound_load_ui;
 mod picking_ui;
 mod receiving;
 mod replenishment_session;
@@ -55,6 +58,8 @@ pub struct RfApp {
     picking_effects: VecDeque<WorkflowEffect>,
     replenishment: ReplenishmentWorkflow,
     replenishment_effects: VecDeque<WorkflowEffect>,
+    outbound_load: OutboundLoadWorkflow,
+    outbound_load_effects: VecDeque<WorkflowEffect>,
     receiving: ExpectedReceivingReducer,
     receiving_effects: VecDeque<ReceivingEffect>,
     receiving_request: Option<session::ReceivingRequest>,
@@ -87,6 +92,9 @@ pub struct RfApp {
     count_scan_focus: Option<(i64, CountScanStage)>,
     pick_scan_focus: Option<(i64, PickScanStage)>,
     replenishment_scan_focus: Option<(i64, ReplenishmentScanStage)>,
+    outbound_load_scan_focus: Option<(i64, OutboundLoadScanStage)>,
+    outbound_load_barcode_draft: String,
+    expected_outbound_load_request_id: Option<String>,
     replenishment_task_id_draft: String,
     field_focus_pending: bool,
     heartbeat: heartbeat::HeartbeatRuntime,
@@ -121,6 +129,8 @@ impl RfApp {
             picking_effects: VecDeque::new(),
             replenishment: ReplenishmentWorkflow::default(),
             replenishment_effects: VecDeque::new(),
+            outbound_load: OutboundLoadWorkflow::default(),
+            outbound_load_effects: VecDeque::new(),
             receiving: ExpectedReceivingReducer::default(),
             receiving_effects: VecDeque::new(),
             receiving_request: None,
@@ -153,6 +163,9 @@ impl RfApp {
             count_scan_focus: None,
             pick_scan_focus: None,
             replenishment_scan_focus: None,
+            outbound_load_scan_focus: None,
+            outbound_load_barcode_draft: String::new(),
+            expected_outbound_load_request_id: None,
             replenishment_task_id_draft: String::new(),
             field_focus_pending: true,
             heartbeat: heartbeat::HeartbeatRuntime::new(),
@@ -204,6 +217,8 @@ impl RfApp {
             picking_effects: VecDeque::new(),
             replenishment: ReplenishmentWorkflow::default(),
             replenishment_effects: VecDeque::new(),
+            outbound_load: OutboundLoadWorkflow::default(),
+            outbound_load_effects: VecDeque::new(),
             receiving: ExpectedReceivingReducer::default(),
             receiving_effects: VecDeque::new(),
             receiving_request: None,
@@ -236,6 +251,9 @@ impl RfApp {
             count_scan_focus: None,
             pick_scan_focus: None,
             replenishment_scan_focus: None,
+            outbound_load_scan_focus: None,
+            outbound_load_barcode_draft: String::new(),
+            expected_outbound_load_request_id: None,
             replenishment_task_id_draft: String::new(),
             field_focus_pending: true,
             heartbeat: heartbeat::HeartbeatRuntime::new(),
@@ -1132,12 +1150,14 @@ const fn can_retry_connectivity_check(
     cycle_count: Activity,
     picking: Activity,
     replenishment: Activity,
+    outbound_load: Activity,
     request_pending: bool,
 ) -> bool {
     matches!(movement, Activity::Idle)
         && matches!(cycle_count, Activity::Idle)
         && matches!(picking, Activity::Idle)
         && matches!(replenishment, Activity::Idle)
+        && matches!(outbound_load, Activity::Idle)
         && !request_pending
 }
 
@@ -1216,6 +1236,7 @@ impl eframe::App for RfApp {
         self.effects.extend(self.cycle_count_effects.drain(..));
         self.effects.extend(self.picking_effects.drain(..));
         self.effects.extend(self.replenishment_effects.drain(..));
+        self.effects.extend(self.outbound_load_effects.drain(..));
         self.persist_queued_commands();
         self.dispatch_queued_commands(root_ui.ctx());
         self.maintain_claim_heartbeat(root_ui.ctx());
@@ -1256,6 +1277,7 @@ impl eframe::App for RfApp {
                                 | WorkMode::Count
                                 | WorkMode::Pick
                                 | WorkMode::Replenish
+                                | WorkMode::OutboundLoad
                         ) && let Some(notice) = self.connectivity_notice.clone()
                         {
                             Self::message_band(ui, Self::warning(), Icon::WifiOff, &notice);
@@ -1264,6 +1286,7 @@ impl eframe::App for RfApp {
                                 self.cycle_count.activity(),
                                 self.picking.activity(),
                                 self.replenishment.activity(),
+                                self.outbound_load.activity(),
                                 self.expected_claim_request_id.is_some(),
                             ) && ui
                                 .add_sized(
@@ -1292,6 +1315,7 @@ impl eframe::App for RfApp {
                                 WorkMode::Count => self.count_view(ui),
                                 WorkMode::Pick => self.pick_view(ui),
                                 WorkMode::Replenish => self.replenishment_view(ui),
+                                WorkMode::OutboundLoad => self.outbound_load_view(ui),
                                 WorkMode::Putaway | WorkMode::Relocate => {
                                     if self.workflow.claim().is_some() {
                                         self.active_work(ui);
@@ -1341,9 +1365,19 @@ mod tests {
             Activity::Idle,
             Activity::Idle,
             Activity::Idle,
+            Activity::Idle,
             false,
         ));
         assert!(!can_retry_connectivity_check(
+            Activity::Idle,
+            Activity::Idle,
+            Activity::Active,
+            Activity::Idle,
+            Activity::Idle,
+            false,
+        ));
+        assert!(!can_retry_connectivity_check(
+            Activity::Idle,
             Activity::Idle,
             Activity::Idle,
             Activity::Active,
@@ -1352,12 +1386,6 @@ mod tests {
         ));
         assert!(!can_retry_connectivity_check(
             Activity::Idle,
-            Activity::Idle,
-            Activity::Idle,
-            Activity::Active,
-            false,
-        ));
-        assert!(!can_retry_connectivity_check(
             Activity::Idle,
             Activity::Idle,
             Activity::Idle,
