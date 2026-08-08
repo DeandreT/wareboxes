@@ -1,7 +1,9 @@
 //! Domain identifiers and invariants shared across application boundaries.
 
+mod order;
 mod tenant;
 
+pub use order::{OrderHoldReason, OrderHoldTransitionError, OrderStatus};
 pub use tenant::TenantStatus;
 
 use chrono::{DateTime, Utc};

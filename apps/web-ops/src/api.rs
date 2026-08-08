@@ -7,7 +7,8 @@ use wareboxes_api_contract::v1::{
 use wareboxes_api_contract::v1::{
     InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
     InventoryStatusTransitionResponse, OpaqueCursor, PlaceInventoryHoldRequest,
-    PlaceInventoryHoldResponse, ReleaseInventoryHoldResponse,
+    PlaceInventoryHoldResponse, PlaceOrderHoldRequest, PlaceOrderHoldResponse,
+    ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 use wareboxes_core::dto::{OrderPage, WebSessionContext};
@@ -40,8 +41,9 @@ mod browser {
         CreateInventoryRelocationTaskResponse, CreateInventoryStatusTransitionRequest,
         InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
         InventoryStatusTransitionResponse, OpaqueCursor, OrderPage, PlaceInventoryHoldRequest,
-        PlaceInventoryHoldResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
-        WebSessionContext,
+        PlaceInventoryHoldResponse, PlaceOrderHoldRequest, PlaceOrderHoldResponse,
+        ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
+        ReleaseOrderHoldResponse, WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -159,6 +161,33 @@ mod browser {
         post(
             &format!("/api/v1/inventory/holds/{hold_id}/releases"),
             &ReleaseInventoryHoldRequest::default(),
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn place_order_hold(
+        order_id: i64,
+        request: &PlaceOrderHoldRequest,
+        idempotency_key: &str,
+    ) -> Result<PlaceOrderHoldResponse, ApiError> {
+        post(
+            &format!("/api/v1/orders/{order_id}/holds"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn release_order_hold(
+        order_id: i64,
+        hold_id: i64,
+        request: &ReleaseOrderHoldRequest,
+        idempotency_key: &str,
+    ) -> Result<ReleaseOrderHoldResponse, ApiError> {
+        post(
+            &format!("/api/v1/orders/{order_id}/holds/{hold_id}/releases"),
+            request,
             idempotency_key,
         )
         .await
@@ -360,6 +389,25 @@ pub async fn release_hold(
     _hold_id: i64,
     _idempotency_key: &str,
 ) -> Result<ReleaseInventoryHoldResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn place_order_hold(
+    _order_id: i64,
+    _request: &PlaceOrderHoldRequest,
+    _idempotency_key: &str,
+) -> Result<PlaceOrderHoldResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn release_order_hold(
+    _order_id: i64,
+    _hold_id: i64,
+    _request: &ReleaseOrderHoldRequest,
+    _idempotency_key: &str,
+) -> Result<ReleaseOrderHoldResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

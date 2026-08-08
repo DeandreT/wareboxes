@@ -5438,6 +5438,46 @@ ALTER TABLE public.order_activity ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTI
 
 
 --
+-- Name: order_holds; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.order_holds (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    created_by_user_id bigint NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    released_at timestamp with time zone,
+    released_by_user_id bigint,
+    release_note text,
+    CONSTRAINT order_holds_reason_code_check CHECK ((reason_code = ANY (ARRAY['address_review'::text, 'compliance_review'::text, 'customer_request'::text, 'inventory_shortage'::text, 'payment_review'::text, 'other'::text]))),
+    CONSTRAINT order_holds_other_note_check CHECK (((reason_code <> 'other'::text) OR (note IS NOT NULL))),
+    CONSTRAINT order_holds_note_check CHECK (((note IS NULL) OR ((note = btrim(note)) AND (note <> ''::text) AND (char_length(note) <= 1000)))),
+    CONSTRAINT order_holds_release_note_check CHECK (((release_note IS NULL) OR ((release_note = btrim(release_note)) AND (release_note <> ''::text) AND (char_length(release_note) <= 1000)))),
+    CONSTRAINT order_holds_release_attribution_check CHECK ((((released_at IS NULL) AND (released_by_user_id IS NULL)) OR ((released_at IS NOT NULL) AND (released_by_user_id IS NOT NULL))))
+);
+
+ALTER TABLE ONLY public.order_holds FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: order_holds_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_holds ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.order_holds_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: order_items; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7119,6 +7159,22 @@ ALTER TABLE ONLY public.order_activity
 
 
 --
+-- Name: order_holds order_holds_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_holds
+    ADD CONSTRAINT order_holds_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: order_holds order_holds_tenant_id_inventory_owner_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_holds
+    ADD CONSTRAINT order_holds_tenant_id_inventory_owner_id_id_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
 -- Name: order_items order_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -7923,6 +7979,20 @@ CREATE INDEX idx_locations_parent_location_id ON public.locations USING btree (t
 --
 
 CREATE INDEX idx_order_activity_order_id ON public.order_activity USING btree (tenant_id, inventory_owner_id, order_id);
+
+
+--
+-- Name: idx_order_holds_order_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_order_holds_order_id ON public.order_holds USING btree (tenant_id, inventory_owner_id, order_id, created DESC);
+
+
+--
+-- Name: order_holds_active_reason_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX order_holds_active_reason_key ON public.order_holds USING btree (tenant_id, inventory_owner_id, order_id, reason_code) WHERE (released_at IS NULL);
 
 
 --
@@ -10689,6 +10759,38 @@ ALTER TABLE ONLY public.order_activity
 
 
 --
+-- Name: order_holds order_holds_tenant_id_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_holds
+    ADD CONSTRAINT order_holds_tenant_id_created_by_user_id_fkey FOREIGN KEY (tenant_id, created_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: order_holds order_holds_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_holds
+    ADD CONSTRAINT order_holds_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: order_holds order_holds_tenant_id_inventory_owner_id_order_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_holds
+    ADD CONSTRAINT order_holds_tenant_id_inventory_owner_id_order_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES public.orders(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: order_holds order_holds_tenant_id_released_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_holds
+    ADD CONSTRAINT order_holds_tenant_id_released_by_user_id_fkey FOREIGN KEY (tenant_id, released_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
 -- Name: order_items order_items_item_batch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -12121,6 +12223,19 @@ CREATE POLICY order_activity_tenant_isolation ON public.order_activity USING ((t
 
 
 --
+-- Name: order_holds; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_holds ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: order_holds order_holds_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY order_holds_tenant_isolation ON public.order_holds USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
 -- Name: order_items; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -13321,6 +13436,20 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.order_activity TO wareboxes_ap
 --
 
 GRANT SELECT,USAGE ON SEQUENCE public.order_activity_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE order_holds; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.order_holds TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE order_holds_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,USAGE ON SEQUENCE public.order_holds_id_seq TO wareboxes_app;
 
 
 --

@@ -3,12 +3,14 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use wareboxes_application::CommandContext;
 use wareboxes_core::dto::{NewOrder, OrderPage, OrderUpdate, Paged, SummaryCount};
 use wareboxes_core::models::{
     AllocationStatus, InventoryAllocation, InventoryReservation, InventoryStatus, Order,
-    OrderActivity, OrderItem, OrderStatus, OrderTrackingNumber, ReservationStatus, TenantAccess,
+    OrderActivity, OrderHold, OrderHoldReason, OrderItem, OrderStatus, OrderTrackingNumber,
+    ReservationStatus, TenantAccess,
 };
 use wareboxes_domain::{InventoryOwnerId, TenantId};
 
@@ -18,6 +20,7 @@ use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 use crate::repo::{address, tasks};
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
+use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 const MUTABLE: &str = "('cancelled', 'held', 'open', 'void')";
 
@@ -59,6 +62,7 @@ fn map_order(row: &sqlx::postgres::PgRow) -> AppResult<Order> {
         tracking_numbers: Vec::new(),
         reservations: Vec::new(),
         activity: Vec::new(),
+        holds: Vec::new(),
         ordered_qty: 0,
         reserved_qty: 0,
         out_of_stock: false,
@@ -76,6 +80,31 @@ fn map_order_activity(row: &sqlx::postgres::PgRow) -> AppResult<OrderActivity> {
         deleted: row.try_get("deleted")?,
         order_id: row.try_get("order_id")?,
         action: row.try_get("action")?,
+    })
+}
+
+fn map_order_hold(row: &sqlx::postgres::PgRow) -> AppResult<OrderHold> {
+    let id: i64 = row.try_get("id")?;
+    let reason_value: String = row.try_get("reason_code")?;
+    let reason = OrderHoldReason::parse(&reason_value).ok_or_else(|| {
+        AppError::internal(format!(
+            "order hold {id} has unknown reason code {reason_value:?}"
+        ))
+    })?;
+    Ok(OrderHold {
+        id,
+        tenant_id: TenantId::new(row.try_get("tenant_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        inventory_owner_id: InventoryOwnerId::new(row.try_get("inventory_owner_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        order_id: row.try_get("order_id")?,
+        created: row.try_get("created")?,
+        created_by_user_id: row.try_get("created_by_user_id")?,
+        reason,
+        note: row.try_get("note")?,
+        released_at: row.try_get("released_at")?,
+        released_by_user_id: row.try_get("released_by_user_id")?,
+        release_note: row.try_get("release_note")?,
     })
 }
 
@@ -554,6 +583,28 @@ async fn activity_for_order(
     Ok(activity)
 }
 
+async fn holds_for_order(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    order_id: i64,
+) -> AppResult<Vec<OrderHold>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, tenant_id, inventory_owner_id, order_id, created,
+               created_by_user_id, reason_code, note, released_at,
+               released_by_user_id, release_note
+        FROM order_holds
+        WHERE tenant_id = $1 AND order_id = $2
+        ORDER BY created DESC, id DESC
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(order_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    rows.iter().map(map_order_hold).collect()
+}
+
 pub async fn get_orders(db: &Db, tenant_id: TenantId) -> AppResult<Vec<Order>> {
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
@@ -815,6 +866,7 @@ async fn get_order_with_scope(
     order.reservations =
         reservations_for_order_in_scope(&mut tx, tenant_id, order.id, scope).await?;
     order.activity = activity_for_order(&mut tx, tenant_id, order.id).await?;
+    order.holds = holds_for_order(&mut tx, tenant_id, order.id).await?;
     apply_order_stock_state(&mut order, &available, &reserved);
 
     tx.commit().await?;
@@ -1319,6 +1371,373 @@ async fn require_replayed_order_visible_tx(
     } else {
         Err(AppError::not_found("order"))
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrderHoldCommandResult {
+    pub order_id: i64,
+    pub hold_id: i64,
+    pub order_status: OrderStatus,
+    pub active_hold_count: i64,
+}
+
+pub async fn place_order_hold(
+    db: &Db,
+    access: &TenantAccess,
+    command: &CommandContext,
+    order_id: i64,
+    reason: OrderHoldReason,
+    note: Option<&str>,
+) -> AppResult<OrderHoldCommandResult> {
+    command.require_actor(access.tenant_id, access.user_id)?;
+    validate_hold_note(note, reason == OrderHoldReason::Other)?;
+    if order_id <= 0 {
+        return Err(AppError::bad_request("order ID must be positive"));
+    }
+    let prepared =
+        PreparedCommand::new_v1(command, "order.place_hold.v1", &(order_id, reason, note))?;
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    let scope = lock_current_scope_tx(&mut tx, access.tenant_id, command.actor_id.get()).await?;
+    if let Some(result) = prepared.replayed::<OrderHoldCommandResult>(&mut tx).await? {
+        require_replayed_order_visible_tx(&mut tx, access.tenant_id, order_id, &scope).await?;
+        tx.commit().await?;
+        return Ok(result);
+    }
+
+    let row = sqlx::query(
+        r#"
+        SELECT inventory_owner_id, status
+        FROM orders
+        WHERE tenant_id = $1
+          AND id = $2
+          AND deleted IS NULL
+          AND ($3 OR inventory_owner_id = ANY($4))
+        FOR UPDATE
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(order_id)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        return Err(AppError::not_found("order"));
+    };
+    let inventory_owner_id = InventoryOwnerId::new(row.try_get("inventory_owner_id")?)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let current_status_value: String = row.try_get("status")?;
+    let current_status = OrderStatus::parse(&current_status_value).ok_or_else(|| {
+        AppError::internal(format!(
+            "order {order_id} has unknown status {current_status_value:?}"
+        ))
+    })?;
+    let order_status = current_status
+        .place_hold()
+        .map_err(|error| AppError::conflict(error.to_string()))?;
+    let duplicate: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM order_holds
+            WHERE tenant_id = $1
+              AND inventory_owner_id = $2
+              AND order_id = $3
+              AND reason_code = $4
+              AND released_at IS NULL
+        )
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(inventory_owner_id.get())
+    .bind(order_id)
+    .bind(reason.as_str())
+    .fetch_one(&mut *tx)
+    .await?;
+    if duplicate {
+        return Err(AppError::conflict(format!(
+            "order already has an active {} hold",
+            reason.as_str()
+        )));
+    }
+
+    let occurred_at = now_iso();
+    let hold_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO order_holds
+            (tenant_id, inventory_owner_id, order_id, created,
+             created_by_user_id, reason_code, note)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(inventory_owner_id.get())
+    .bind(order_id)
+    .bind(occurred_at)
+    .bind(command.actor_id.get())
+    .bind(reason.as_str())
+    .bind(note)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE orders SET status = $1 WHERE tenant_id = $2 AND id = $3")
+        .bind(order_status.as_str())
+        .bind(access.tenant_id.get())
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    insert_order_activity_tx(
+        &mut tx,
+        access.tenant_id,
+        inventory_owner_id,
+        order_id,
+        "placed order hold",
+    )
+    .await?;
+    let active_hold_count = active_order_hold_count_tx(&mut tx, access.tenant_id, order_id).await?;
+    enqueue_order_hold_event(
+        &mut tx,
+        access.tenant_id,
+        inventory_owner_id,
+        command.actor_id.get(),
+        order_id,
+        hold_id,
+        "placed",
+        occurred_at,
+        serde_json::json!({
+            "order_id": order_id,
+            "order_hold_id": hold_id,
+            "reason": reason.as_str(),
+            "order_status": order_status.as_str(),
+            "active_hold_count": active_hold_count,
+        }),
+    )
+    .await?;
+    let result = OrderHoldCommandResult {
+        order_id,
+        hold_id,
+        order_status,
+        active_hold_count,
+    };
+    Ok(prepared.commit(tx, result).await?)
+}
+
+pub async fn release_order_hold(
+    db: &Db,
+    access: &TenantAccess,
+    command: &CommandContext,
+    order_id: i64,
+    hold_id: i64,
+    note: Option<&str>,
+) -> AppResult<OrderHoldCommandResult> {
+    command.require_actor(access.tenant_id, access.user_id)?;
+    validate_hold_note(note, false)?;
+    if order_id <= 0 || hold_id <= 0 {
+        return Err(AppError::bad_request(
+            "order ID and order hold ID must be positive",
+        ));
+    }
+    let prepared =
+        PreparedCommand::new_v1(command, "order.release_hold.v1", &(order_id, hold_id, note))?;
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    let scope = lock_current_scope_tx(&mut tx, access.tenant_id, command.actor_id.get()).await?;
+    if let Some(result) = prepared.replayed::<OrderHoldCommandResult>(&mut tx).await? {
+        require_replayed_order_visible_tx(&mut tx, access.tenant_id, order_id, &scope).await?;
+        tx.commit().await?;
+        return Ok(result);
+    }
+
+    let row = sqlx::query(
+        r#"
+        SELECT hold.inventory_owner_id, hold.released_at, orders.status
+        FROM order_holds hold
+        INNER JOIN orders
+            ON orders.tenant_id = hold.tenant_id
+           AND orders.inventory_owner_id = hold.inventory_owner_id
+           AND orders.id = hold.order_id
+        WHERE hold.tenant_id = $1
+          AND hold.order_id = $2
+          AND hold.id = $3
+          AND orders.deleted IS NULL
+          AND ($4 OR hold.inventory_owner_id = ANY($5))
+        FOR UPDATE OF hold, orders
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(order_id)
+    .bind(hold_id)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        return Err(AppError::not_found("order hold"));
+    };
+    if row
+        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("released_at")?
+        .is_some()
+    {
+        return Err(AppError::conflict("order hold is already released"));
+    }
+    let inventory_owner_id = InventoryOwnerId::new(row.try_get("inventory_owner_id")?)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let current_status_value: String = row.try_get("status")?;
+    let current_status = OrderStatus::parse(&current_status_value).ok_or_else(|| {
+        AppError::internal(format!(
+            "order {order_id} has unknown status {current_status_value:?}"
+        ))
+    })?;
+    let occurred_at = now_iso();
+    sqlx::query(
+        r#"
+        UPDATE order_holds
+        SET released_at = $1, released_by_user_id = $2, release_note = $3
+        WHERE tenant_id = $4 AND order_id = $5 AND id = $6 AND released_at IS NULL
+        "#,
+    )
+    .bind(occurred_at)
+    .bind(command.actor_id.get())
+    .bind(note)
+    .bind(access.tenant_id.get())
+    .bind(order_id)
+    .bind(hold_id)
+    .execute(&mut *tx)
+    .await?;
+    let active_hold_count = active_order_hold_count_tx(&mut tx, access.tenant_id, order_id).await?;
+    let order_status = current_status
+        .release_hold(active_hold_count > 0)
+        .map_err(|error| AppError::conflict(error.to_string()))?;
+    sqlx::query("UPDATE orders SET status = $1 WHERE tenant_id = $2 AND id = $3")
+        .bind(order_status.as_str())
+        .bind(access.tenant_id.get())
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    insert_order_activity_tx(
+        &mut tx,
+        access.tenant_id,
+        inventory_owner_id,
+        order_id,
+        "released order hold",
+    )
+    .await?;
+    enqueue_order_hold_event(
+        &mut tx,
+        access.tenant_id,
+        inventory_owner_id,
+        command.actor_id.get(),
+        order_id,
+        hold_id,
+        "released",
+        occurred_at,
+        serde_json::json!({
+            "order_id": order_id,
+            "order_hold_id": hold_id,
+            "order_status": order_status.as_str(),
+            "active_hold_count": active_hold_count,
+        }),
+    )
+    .await?;
+    let result = OrderHoldCommandResult {
+        order_id,
+        hold_id,
+        order_status,
+        active_hold_count,
+    };
+    Ok(prepared.commit(tx, result).await?)
+}
+
+fn validate_hold_note(note: Option<&str>, required: bool) -> AppResult<()> {
+    if required && note.is_none() {
+        return Err(AppError::bad_request(
+            "note is required when the hold reason is other",
+        ));
+    }
+    if let Some(note) = note {
+        if note.trim() != note || note.is_empty() {
+            return Err(AppError::bad_request(
+                "order hold note must be trimmed and nonempty",
+            ));
+        }
+        if note.chars().count() > 1_000 {
+            return Err(AppError::bad_request(
+                "order hold note cannot exceed 1000 characters",
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn active_order_hold_count_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    order_id: i64,
+) -> AppResult<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT COUNT(*)::BIGINT FROM order_holds WHERE tenant_id = $1 AND order_id = $2 AND released_at IS NULL",
+    )
+    .bind(tenant_id.get())
+    .bind(order_id)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enqueue_order_hold_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    inventory_owner_id: InventoryOwnerId,
+    actor_user_id: i64,
+    order_id: i64,
+    hold_id: i64,
+    transition: &str,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    payload: serde_json::Value,
+) -> AppResult<()> {
+    let ordering_key = format!("order:{order_id}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("outbox-sequence:{tenant_id}:{ordering_key}"))
+        .execute(&mut **tx)
+        .await?;
+    let aggregate_sequence: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(
+            (SELECT last_sequence
+             FROM outbox_aggregate_sequences
+             WHERE tenant_id = $1 AND ordering_key = $2),
+            0
+        ) + 1
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(&ordering_key)
+    .fetch_one(&mut **tx)
+    .await?;
+    let event_key = format!("order-hold:{hold_id}:{transition}");
+    let aggregate_id = order_id.to_string();
+    let event_type = format!("order.hold.{transition}");
+    outbox::enqueue(
+        tx,
+        &NewOutboxEvent {
+            tenant_id,
+            inventory_owner_id: Some(inventory_owner_id),
+            facility_id: None,
+            actor_user_id: Some(actor_user_id),
+            event_key: &event_key,
+            aggregate_type: "order",
+            aggregate_id: &aggregate_id,
+            ordering_key: &ordering_key,
+            aggregate_sequence,
+            event_type: &event_type,
+            schema_version: 1,
+            payload: &payload,
+            occurred_at,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 pub async fn cancel_order_with_unpack_task(

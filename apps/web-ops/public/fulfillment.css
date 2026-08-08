@@ -300,6 +300,7 @@
 .fulfillment-form textarea,
 .confirmation-panel input,
 .confirmation-panel select,
+.confirmation-panel textarea,
 .note-entry textarea {
   width: 100%;
   min-width: 0;
@@ -318,9 +319,17 @@
 .fulfillment-form textarea:focus,
 .confirmation-panel input:focus,
 .confirmation-panel select:focus,
+.confirmation-panel textarea:focus,
 .note-entry textarea:focus {
   border-color: var(--blue);
   outline: 2px solid rgb(39 102 176 / 16%);
+}
+
+.confirmation-panel textarea {
+  min-height: 58px;
+  padding: 6px 7px;
+  line-height: 1.35;
+  resize: vertical;
 }
 
 .form-grid .checkbox-label {
@@ -400,6 +409,22 @@
   font-weight: 500;
 }
 
+.order-hold-panel {
+  border-color: #d6b66c;
+  border-left-color: #a66b00;
+  background: #fff8e6;
+}
+
+.release-hold-panel {
+  border-color: var(--line-strong);
+  border-left-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+[data-theme="dark"] .order-hold-panel {
+  background: #292314;
+}
+
 .arrival-confirmation {
   border-color: var(--line-strong);
   border-left-color: var(--blue);
@@ -471,6 +496,39 @@
 .detail-table td {
   height: 29px;
   padding: 4px 7px;
+}
+
+.order-holds-table {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+}
+
+.order-holds-table th:nth-child(1) {
+  width: 43%;
+}
+
+.order-holds-table th:nth-child(2) {
+  width: 31%;
+}
+
+.order-holds-table th:nth-child(3) {
+  width: 26%;
+}
+
+.order-hold-state-line {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.order-holds-table .order-hold-release-action {
+  width: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
 }
 
 .tracking-list,

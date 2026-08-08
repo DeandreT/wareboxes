@@ -1,10 +1,13 @@
 use leptos::prelude::*;
+use wareboxes_api_contract::v1::{
+    OrderHoldReason as OrderHoldRequestReason, PlaceOrderHoldRequest, ReleaseOrderHoldRequest,
+};
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 use wareboxes_core::dto::{CancelOrder, NewOrder, OrderPage, OrderUpdate};
 use wareboxes_core::models::{Order, OrderStatus};
 
 use crate::api;
-use crate::components::SearchField;
+use crate::components::{Icon, SearchField, UiIcon};
 use crate::fulfillment_shared::{
     cmp_option_str, optional_text, order_destination, order_status_class, parse_optional_timestamp,
     query_encode, short_timestamp, timestamp_input,
@@ -30,6 +33,7 @@ enum OrderDetailTab {
     Header,
     Lines,
     Fulfillment,
+    Holds,
     Activity,
 }
 
@@ -624,6 +628,11 @@ fn OrderDetailPanel(
     let command_pending = RwSignal::new(false);
     let command_error = RwSignal::new(None::<String>);
     let cancel_open = RwSignal::new(false);
+    let hold_open = RwSignal::new(false);
+    let hold_reason = RwSignal::new("customer_request".to_owned());
+    let hold_note = RwSignal::new(String::new());
+    let release_candidate = RwSignal::new(None::<i64>);
+    let release_note = RwSignal::new(String::new());
     let facility_id = RwSignal::new(
         facilities
             .first()
@@ -753,6 +762,84 @@ fn OrderDetailPanel(
         });
     };
 
+    let place_hold = move |_| {
+        if command_pending.get_untracked() {
+            return;
+        }
+        let Some(reason) = parse_order_hold_reason(&hold_reason.get_untracked()) else {
+            command_error.set(Some("Choose a valid hold reason.".to_owned()));
+            return;
+        };
+        let note = optional_text(&hold_note.get_untracked());
+        if reason == OrderHoldRequestReason::Other && note.is_none() {
+            command_error.set(Some("Add a note for an Other hold.".to_owned()));
+            return;
+        }
+        let request = PlaceOrderHoldRequest { reason, note };
+        command_pending.set(true);
+        command_error.set(None);
+        let idempotency_key = api::new_idempotency_key();
+        leptos::task::spawn_local(async move {
+            match api::place_order_hold(order_id, &request, &idempotency_key).await {
+                Ok(result) => {
+                    hold_open.set(false);
+                    hold_note.set(String::new());
+                    command_pending.set(false);
+                    toasts.success(format!(
+                        "Order hold #{} placed. {} active hold(s).",
+                        result.hold_id, result.active_hold_count
+                    ));
+                    on_refreshed.run(order_id);
+                }
+                Err(api_error) if api_error.unauthorized => on_unauthorized.run(()),
+                Err(api_error) => {
+                    toasts.error(api_error.message.clone());
+                    command_error.set(Some(api_error.message));
+                    command_pending.set(false);
+                }
+            }
+        });
+    };
+
+    let release_hold = move |_| {
+        if command_pending.get_untracked() {
+            return;
+        }
+        let Some(hold_id) = release_candidate.get_untracked() else {
+            return;
+        };
+        let request = ReleaseOrderHoldRequest {
+            note: optional_text(&release_note.get_untracked()),
+        };
+        command_pending.set(true);
+        command_error.set(None);
+        let idempotency_key = api::new_idempotency_key();
+        leptos::task::spawn_local(async move {
+            match api::release_order_hold(order_id, hold_id, &request, &idempotency_key).await {
+                Ok(result) => {
+                    release_candidate.set(None);
+                    release_note.set(String::new());
+                    command_pending.set(false);
+                    toasts.success(if result.active_hold_count == 0 {
+                        "The last order hold was released; the order is open.".to_owned()
+                    } else {
+                        format!(
+                            "Hold #{hold_id} released. {} active hold(s) remain.",
+                            result.active_hold_count
+                        )
+                    });
+                    on_refreshed.run(order_id);
+                }
+                Err(api_error) if api_error.unauthorized => on_unauthorized.run(()),
+                Err(api_error) => {
+                    toasts.error(api_error.message.clone());
+                    command_error.set(Some(api_error.message));
+                    command_pending.set(false);
+                }
+            }
+        });
+    };
+
     view! {
         <div class="fulfillment-detail-content">
             <div class="detail-heading">
@@ -785,6 +872,7 @@ fn OrderDetailPanel(
                     (OrderDetailTab::Header, "Header"),
                     (OrderDetailTab::Lines, "Lines"),
                     (OrderDetailTab::Fulfillment, "Fulfillment"),
+                    (OrderDetailTab::Holds, "Holds"),
                     (OrderDetailTab::Activity, "Activity"),
                 ]
                     .into_iter()
@@ -895,6 +983,21 @@ fn OrderDetailPanel(
                         <button class="button primary-action" type="submit" disabled=move || command_pending.get()>
                             {move || if command_pending.get() { "Saving" } else { "Save header" }}
                         </button>
+                        {can_place_order_hold(order.status).then(|| {
+                            view! {
+                                <button
+                                    class="button secondary-action"
+                                    type="button"
+                                    on:click=move |_| {
+                                        cancel_open.set(false);
+                                        hold_open.set(true);
+                                    }
+                                >
+                                    <Icon icon=UiIcon::Holds/>
+                                    "Place hold"
+                                </button>
+                            }
+                        })}
                         {can_cancel_order(order.status).then(|| {
                             view! {
                                 <button
@@ -907,6 +1010,53 @@ fn OrderDetailPanel(
                             }
                         })}
                     </div>
+                    <Show when=move || hold_open.get()>
+                        <section class="confirmation-panel order-hold-panel" role="dialog" aria-labelledby="place-order-hold-title">
+                            <h3 id="place-order-hold-title">"Place order hold"</h3>
+                            <p>"Block release and execution until every active hold is cleared."</p>
+                            <label>
+                                <span>"Reason"</span>
+                                <select
+                                    prop:value=move || hold_reason.get()
+                                    on:change=move |event| hold_reason.set(event_target_value(&event))
+                                >
+                                    <option value="address_review">"Address review"</option>
+                                    <option value="compliance_review">"Compliance review"</option>
+                                    <option value="customer_request">"Client request"</option>
+                                    <option value="inventory_shortage">"Inventory shortage"</option>
+                                    <option value="payment_review">"Payment review"</option>
+                                    <option value="other">"Other"</option>
+                                </select>
+                            </label>
+                            <label>
+                                <span>"Note"</span>
+                                <textarea
+                                    maxlength="1000"
+                                    rows="3"
+                                    prop:value=move || hold_note.get()
+                                    on:input=move |event| hold_note.set(event_target_value(&event))
+                                ></textarea>
+                            </label>
+                            <div class="form-actions">
+                                <button
+                                    type="button"
+                                    class="button primary-action"
+                                    disabled=move || command_pending.get()
+                                    on:click=place_hold
+                                >
+                                    <Icon icon=UiIcon::Holds/>
+                                    {move || if command_pending.get() { "Placing" } else { "Place hold" }}
+                                </button>
+                                <button
+                                    type="button"
+                                    class="button secondary-action"
+                                    on:click=move |_| hold_open.set(false)
+                                >
+                                    "Close"
+                                </button>
+                            </div>
+                        </section>
+                    </Show>
                     <Show when=move || cancel_open.get()>
                         <section class="confirmation-panel" role="alertdialog" aria-labelledby="cancel-order-title">
                             <h3 id="cancel-order-title">"Cancel this order?"</h3>
@@ -1081,6 +1231,138 @@ fn OrderDetailPanel(
                 </div>
             </Show>
 
+            <Show when=move || tab.get() == OrderDetailTab::Holds>
+                <div class="detail-section-stack">
+                    <section class="detail-section">
+                        <div class="detail-section-title">
+                            <h3>"Order holds"</h3>
+                            <span>{format!(
+                                "{} active / {} total",
+                                order.holds.iter().filter(|hold| hold.is_active()).count(),
+                                order.holds.len()
+                            )}</span>
+                        </div>
+                        <div class="table-scroll">
+                            <table class="data-table detail-table order-holds-table">
+                                <thead>
+                                    <tr>
+                                        <th>"Hold"</th><th>"Placed"</th><th>"State"</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {order
+                                        .holds
+                                        .clone()
+                                        .into_iter()
+                                        .map(|hold| {
+                                            let active = hold.is_active();
+                                            let hold_detail = hold
+                                                .note
+                                                .as_deref()
+                                                .map_or_else(
+                                                    || format!("#{}", hold.id),
+                                                    |note| format!("#{} - {note}", hold.id),
+                                                );
+                                            let hold_detail_title = hold_detail.clone();
+                                            let released_detail = hold.released_at.map(|released_at| {
+                                                format!(
+                                                    "{} - User #{}",
+                                                    short_timestamp(released_at),
+                                                    hold.released_by_user_id.unwrap_or_default()
+                                                )
+                                            });
+                                            view! {
+                                                <tr>
+                                                    <td>
+                                                        <strong>{order_hold_reason_label(hold.reason.as_str())}</strong>
+                                                        <small class="cell-detail" title=hold_detail_title>{hold_detail}</small>
+                                                    </td>
+                                                    <td>
+                                                        <strong>{short_timestamp(hold.created)}</strong>
+                                                        <small class="cell-detail">{format!("User #{}", hold.created_by_user_id)}</small>
+                                                    </td>
+                                                    <td>
+                                                        <div class="order-hold-state-line">
+                                                            <span class=if active { "status held" } else { "status muted" }>
+                                                                {if active { "Active" } else { "Released" }}
+                                                            </span>
+                                                            {active.then(|| {
+                                                                let hold_id = hold.id;
+                                                                view! {
+                                                                    <button
+                                                                        type="button"
+                                                                        class="button table-action order-hold-release-action"
+                                                                        title="Release order hold"
+                                                                        aria-label="Release order hold"
+                                                                        on:click=move |_| {
+                                                                            release_note.set(String::new());
+                                                                            release_candidate.set(Some(hold_id));
+                                                                        }
+                                                                    >
+                                                                        <Icon icon=UiIcon::Unlock/>
+                                                                    </button>
+                                                                }
+                                                            })}
+                                                        </div>
+                                                        {released_detail.map(|detail| {
+                                                            let title = detail.clone();
+                                                            view! { <small class="cell-detail" title=title>{detail}</small> }
+                                                        })}
+                                                        {hold.release_note.map(|note| {
+                                                            let title = note.clone();
+                                                            view! { <small class="cell-detail" title=title>{note}</small> }
+                                                        })}
+                                                    </td>
+                                                </tr>
+                                            }
+                                        })
+                                        .collect_view()}
+                                </tbody>
+                            </table>
+                            {order.holds.is_empty().then(|| {
+                                view! { <p class="empty-state">"No order holds have been recorded."</p> }
+                            })}
+                        </div>
+                    </section>
+                    <Show when=move || release_candidate.get().is_some()>
+                        <section class="confirmation-panel release-hold-panel" role="alertdialog" aria-labelledby="release-order-hold-title">
+                            <h3 id="release-order-hold-title">{move || format!(
+                                "Release hold #{}?",
+                                release_candidate.get().unwrap_or_default()
+                            )}</h3>
+                            <p>"The order stays blocked when another active hold remains."</p>
+                            <label>
+                                <span>"Release note"</span>
+                                <textarea
+                                    maxlength="1000"
+                                    rows="3"
+                                    prop:value=move || release_note.get()
+                                    on:input=move |event| release_note.set(event_target_value(&event))
+                                ></textarea>
+                            </label>
+                            <div class="form-actions">
+                                <button
+                                    type="button"
+                                    class="button primary-action"
+                                    disabled=move || command_pending.get()
+                                    on:click=release_hold
+                                >
+                                    <Icon icon=UiIcon::Unlock/>
+                                    {move || if command_pending.get() { "Releasing" } else { "Release hold" }}
+                                </button>
+                                <button
+                                    type="button"
+                                    class="button secondary-action"
+                                    on:click=move |_| release_candidate.set(None)
+                                >
+                                    "Keep hold"
+                                </button>
+                            </div>
+                        </section>
+                    </Show>
+                </div>
+            </Show>
+
             <Show when=move || tab.get() == OrderDetailTab::Activity>
                 <div class="detail-section">
                     <div class="detail-section-title">
@@ -1166,6 +1448,34 @@ fn can_cancel_order(status: OrderStatus) -> bool {
             | OrderStatus::Processing
             | OrderStatus::AwaitingShipment
     )
+}
+
+fn can_place_order_hold(status: OrderStatus) -> bool {
+    matches!(status, OrderStatus::Open | OrderStatus::Held)
+}
+
+fn parse_order_hold_reason(value: &str) -> Option<OrderHoldRequestReason> {
+    match value {
+        "address_review" => Some(OrderHoldRequestReason::AddressReview),
+        "compliance_review" => Some(OrderHoldRequestReason::ComplianceReview),
+        "customer_request" => Some(OrderHoldRequestReason::CustomerRequest),
+        "inventory_shortage" => Some(OrderHoldRequestReason::InventoryShortage),
+        "payment_review" => Some(OrderHoldRequestReason::PaymentReview),
+        "other" => Some(OrderHoldRequestReason::Other),
+        _ => None,
+    }
+}
+
+fn order_hold_reason_label(value: &str) -> &'static str {
+    match value {
+        "address_review" => "Address review",
+        "compliance_review" => "Compliance review",
+        "customer_request" => "Client request",
+        "inventory_shortage" => "Inventory shortage",
+        "payment_review" => "Payment review",
+        "other" => "Other",
+        _ => "Unknown",
+    }
 }
 
 fn title_case(value: &str) -> String {
