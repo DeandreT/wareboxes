@@ -973,7 +973,7 @@ async fn order_summaries(
             status,
             out_of_stock: false,
         });
-        if matches!(status, OrderStatus::Open | OrderStatus::AwaitingShipment) {
+        if matches!(status, OrderStatus::Open) {
             let inventory_owner_id: i64 = row.try_get("inventory_owner_id")?;
             let item_id: Option<i64> = row.try_get("item_id")?;
             let qty: Option<i64> = row.try_get("qty")?;
@@ -992,6 +992,8 @@ async fn order_summaries(
 
     let mut out_of_stock = 0_i64;
     let mut awaiting = 0_i64;
+    let mut awaiting_packing = 0_i64;
+    let mut packing = 0_i64;
     let mut processing = 0_i64;
     let mut open = 0_i64;
     let mut held = 0_i64;
@@ -1003,7 +1005,9 @@ async fn order_summaries(
             continue;
         }
         match order.status {
+            OrderStatus::AwaitingPacking => awaiting_packing += 1,
             OrderStatus::AwaitingShipment => awaiting += 1,
+            OrderStatus::Packing => packing += 1,
             OrderStatus::Processing => processing += 1,
             OrderStatus::Open => open += 1,
             OrderStatus::Held => held += 1,
@@ -1016,6 +1020,8 @@ async fn order_summaries(
     let summaries = [
         ("out_of_stock", "Out of Stock", out_of_stock),
         ("processing", "Partial Pick", processing),
+        ("awaiting packing", "Awaiting Packing", awaiting_packing),
+        ("packing", "Packing", packing),
         ("held", "Held", held),
         ("awaiting shipment", "Awaiting Shipment", awaiting),
         ("open", "Open", open),

@@ -1,13 +1,16 @@
 #[cfg(target_arch = "wasm32")]
 use wareboxes_api_contract::v1::ReleaseInventoryHoldRequest;
 use wareboxes_api_contract::v1::{
-    CancelOrderRequest, CancelOrderResponse, CreateFulfillmentOrderRequest,
+    CancelOrderRequest, CancelOrderResponse, CloseCartonRequest, CloseCartonResponse,
+    CreateCartonRequest, CreateCartonResponse, CreateFulfillmentOrderRequest,
     CreateFulfillmentOrderResponse, InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
-    InventoryStatusTransitionResponse, OpaqueCursor, OrderAllocationReadinessResponse,
-    OrderEntryItemResponse, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
-    PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
-    PlanOrderAllocationResponse, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
-    ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
+    InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
+    OpenPackSessionResponse, OrderAllocationReadinessResponse, OrderEntryItemResponse,
+    PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
+    PackingQueuePage, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
+    PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
+    ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
+    ReleaseOrderRequest, ReleaseOrderResponse, VoidCartonRequest, VoidCartonResponse,
 };
 use wareboxes_api_contract::v1::{
     CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
@@ -44,15 +47,19 @@ mod browser {
 
     use super::{
         AccessScopeWorkspace, ApiError, CancelOrderRequest, CancelOrderResponse,
+        CloseCartonRequest, CloseCartonResponse, CreateCartonRequest, CreateCartonResponse,
         CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse,
         CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
         CreateInventoryStatusTransitionRequest, InventoryBalancePage, InventoryHoldPage,
         InventoryHoldStatus, InventoryStatusTransitionResponse, OpaqueCursor,
-        OrderAllocationReadinessResponse, OrderEntryItemResponse, OrderPage,
+        OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
+        OrderEntryItemResponse, OrderPage, PackPickedAllocationRequest,
+        PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage,
         PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
         PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
         ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
-        ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse, WebSessionContext,
+        ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse, VoidCartonRequest,
+        VoidCartonResponse, WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -172,6 +179,96 @@ mod browser {
     ) -> Result<CancelOrderResponse, ApiError> {
         post(
             &format!("/api/v1/orders/{order_id}/cancellations"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn pack_session_for_order(
+        order_id: i64,
+    ) -> Result<Option<PackSessionResponse>, ApiError> {
+        get(&format!("/api/v1/orders/{order_id}/packing-session")).await
+    }
+
+    pub async fn packing_queue(
+        facility_id: Option<i64>,
+        cursor: Option<&OpaqueCursor>,
+    ) -> Result<PackingQueuePage, ApiError> {
+        let mut path = "/api/v1/packing-queue?limit=100".to_owned();
+        if let Some(facility_id) = facility_id {
+            path.push_str("&facility_id=");
+            path.push_str(&facility_id.to_string());
+        }
+        if let Some(cursor) = cursor {
+            path.push_str("&cursor=");
+            path.push_str(&urlencoding::encode(cursor.as_str()));
+        }
+        get(&path).await
+    }
+
+    pub async fn open_pack_session(
+        order_id: i64,
+        request: &OpenPackSessionRequest,
+        idempotency_key: &str,
+    ) -> Result<OpenPackSessionResponse, ApiError> {
+        post(
+            &format!("/api/v1/orders/{order_id}/packing-sessions"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn create_pack_carton(
+        session_id: i64,
+        request: &CreateCartonRequest,
+        idempotency_key: &str,
+    ) -> Result<CreateCartonResponse, ApiError> {
+        post(
+            &format!("/api/v1/packing-sessions/{session_id}/cartons"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn pack_allocation(
+        session_id: i64,
+        carton_id: i64,
+        request: &PackPickedAllocationRequest,
+        idempotency_key: &str,
+    ) -> Result<PackPickedAllocationResponse, ApiError> {
+        post(
+            &format!("/api/v1/packing-sessions/{session_id}/cartons/{carton_id}/contents"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn close_pack_carton(
+        session_id: i64,
+        carton_id: i64,
+        request: &CloseCartonRequest,
+        idempotency_key: &str,
+    ) -> Result<CloseCartonResponse, ApiError> {
+        post(
+            &format!("/api/v1/packing-sessions/{session_id}/cartons/{carton_id}/closures"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn void_pack_carton(
+        session_id: i64,
+        carton_id: i64,
+        request: &VoidCartonRequest,
+        idempotency_key: &str,
+    ) -> Result<VoidCartonResponse, ApiError> {
+        post(
+            &format!("/api/v1/packing-sessions/{session_id}/cartons/{carton_id}/voids"),
             request,
             idempotency_key,
         )
@@ -468,6 +565,69 @@ pub async fn cancel_order(
     _request: &CancelOrderRequest,
     _idempotency_key: &str,
 ) -> Result<CancelOrderResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn pack_session_for_order(
+    _order_id: i64,
+) -> Result<Option<PackSessionResponse>, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn packing_queue(
+    _facility_id: Option<i64>,
+    _cursor: Option<&OpaqueCursor>,
+) -> Result<PackingQueuePage, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn open_pack_session(
+    _order_id: i64,
+    _request: &OpenPackSessionRequest,
+    _idempotency_key: &str,
+) -> Result<OpenPackSessionResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn create_pack_carton(
+    _session_id: i64,
+    _request: &CreateCartonRequest,
+    _idempotency_key: &str,
+) -> Result<CreateCartonResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn pack_allocation(
+    _session_id: i64,
+    _carton_id: i64,
+    _request: &PackPickedAllocationRequest,
+    _idempotency_key: &str,
+) -> Result<PackPickedAllocationResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn close_pack_carton(
+    _session_id: i64,
+    _carton_id: i64,
+    _request: &CloseCartonRequest,
+    _idempotency_key: &str,
+) -> Result<CloseCartonResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn void_pack_carton(
+    _session_id: i64,
+    _carton_id: i64,
+    _request: &VoidCartonRequest,
+    _idempotency_key: &str,
+) -> Result<VoidCartonResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

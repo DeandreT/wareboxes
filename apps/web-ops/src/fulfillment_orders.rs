@@ -1777,6 +1777,8 @@ mod tests {
         assert!(can_cancel_order(OrderStatus::Held));
         assert!(!can_cancel_order(OrderStatus::Processing));
         assert!(!can_cancel_order(OrderStatus::AwaitingShipment));
+        assert!(!can_cancel_order(OrderStatus::AwaitingPacking));
+        assert!(!can_cancel_order(OrderStatus::Packing));
         assert!(!can_cancel_order(OrderStatus::Shipped));
         assert!(!can_cancel_order(OrderStatus::Cancelled));
         assert!(!can_cancel_order(OrderStatus::Void));

@@ -125,6 +125,12 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                     {can_view_inventory.then(|| {
                         view! {
                             <NavItem
+                                href="/packing"
+                                label="Packing"
+                                icon=UiIcon::Packing
+                                active=section == Section::Packing
+                            />
+                            <NavItem
                                 href="/loads"
                                 label="Loads"
                                 icon=UiIcon::Loads

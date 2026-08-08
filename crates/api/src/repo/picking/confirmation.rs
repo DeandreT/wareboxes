@@ -6,8 +6,8 @@ use wareboxes_application::CommandContext;
 use wareboxes_core::models::{InventoryStatus, InventoryTransactionType, TenantAccess};
 use wareboxes_domain::{
     InventoryAllocationId, InventoryBalanceId, InventoryOwnerId, LicensePlateId, LocationId,
-    OrderId, OrderRevision, OrderStatus, PickContentState, PickQuantity, PickTaskId, TenantId,
-    Timestamp, UserId,
+    OrderId, OrderRevision, OrderStatus, PickContentId, PickContentState, PickQuantity, PickTaskId,
+    TenantId, Timestamp, UserId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
@@ -16,6 +16,7 @@ use wareboxes_persistence_postgres::outbox;
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, require_permission_tx, ScopeBindings};
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
+use crate::repo::inventory_locking;
 use crate::repo::orders::insert_order_activity_tx;
 
 use super::CONFIRM_OPERATION;
@@ -94,6 +95,15 @@ pub async fn confirm_content(
     if order.status != OrderStatus::Processing {
         return Err(AppError::conflict("order is not in picking execution"));
     }
+    lock_pick_license_plates_tx(
+        &mut tx,
+        access.tenant_id,
+        command.task_id,
+        command.content_id,
+        command.destination_license_plate_barcode.as_str(),
+        &scope,
+    )
+    .await?;
     let target = lock_pick_target_tx(
         &mut tx,
         access.tenant_id,
@@ -113,6 +123,14 @@ pub async fn confirm_content(
         access.tenant_id,
         &target,
         command.destination_license_plate_barcode.as_str(),
+    )
+    .await?;
+    bind_outbound_order_container_tx(
+        &mut tx,
+        access.tenant_id,
+        context.actor_id.get(),
+        &target,
+        destination_plate.id,
     )
     .await?;
 
@@ -217,7 +235,7 @@ pub async fn confirm_content(
     .await?;
     let order_ready_to_pack = remaining_pick_count == 0;
     let (order_status, order_revision) = if order_ready_to_pack {
-        advance_order_to_awaiting_shipment_tx(&mut tx, access.tenant_id, &order, target.order_id)
+        advance_order_to_awaiting_packing_tx(&mut tx, access.tenant_id, &order, target.order_id)
             .await?
     } else {
         (order.status, order.revision)
@@ -320,6 +338,53 @@ async fn lock_order_tx(
         revision: OrderRevision::new(row.try_get("revision")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
     })
+}
+
+async fn lock_pick_license_plates_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    task_id: PickTaskId,
+    content_id: PickContentId,
+    destination_barcode: &str,
+    scope: &ScopeBindings,
+) -> AppResult<()> {
+    let row = sqlx::query(
+        r#"
+        SELECT content.source_license_plate_id,
+               (
+                   SELECT plate.id FROM license_plates plate
+                   WHERE plate.tenant_id = task.tenant_id
+                     AND plate.inventory_owner_id = task.inventory_owner_id
+                     AND plate.facility_id = task.facility_id
+                     AND plate.barcode = $4 AND plate.deleted IS NULL
+               ) AS destination_license_plate_id
+        FROM pick_tasks task
+        INNER JOIN pick_task_contents content
+          ON content.tenant_id = task.tenant_id AND content.task_id = task.id
+        WHERE task.tenant_id = $1 AND task.id = $2 AND content.id = $3
+          AND ($5 OR task.facility_id = ANY($6))
+          AND ($7 OR task.inventory_owner_id = ANY($8))
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(task_id.get())
+    .bind(content_id.get())
+    .bind(destination_barcode)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::conflict("pick claim is not active for this content"))?;
+    let mut plate_ids = Vec::with_capacity(2);
+    if let Some(id) = row.try_get::<Option<i64>, _>("source_license_plate_id")? {
+        plate_ids.push(id);
+    }
+    if let Some(id) = row.try_get::<Option<i64>, _>("destination_license_plate_id")? {
+        plate_ids.push(id);
+    }
+    inventory_locking::lock_license_plates(tx, tenant_id, plate_ids).await
 }
 
 async fn lock_pick_target_tx(
@@ -603,6 +668,85 @@ async fn lock_destination_plate_tx(
     Ok(DestinationPlate { id })
 }
 
+async fn bind_outbound_order_container_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    actor_user_id: i64,
+    target: &PickTarget,
+    destination_plate_id: LicensePlateId,
+) -> AppResult<()> {
+    let existing = sqlx::query(
+        r#"
+        SELECT order_release_id, order_id, destination_location_id
+        FROM outbound_order_containers
+        WHERE tenant_id = $1 AND inventory_owner_id = $2
+          AND facility_id = $3 AND license_plate_id = $4
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(target.inventory_owner_id.get())
+    .bind(target.facility_id)
+    .bind(destination_plate_id.get())
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(existing) = existing {
+        let matches_order = existing.try_get::<i64, _>("order_release_id")? == target.release_id
+            && existing.try_get::<i64, _>("order_id")? == target.order_id.get()
+            && existing.try_get::<i64, _>("destination_location_id")?
+                == target.destination_location_id.get();
+        return if matches_order {
+            Ok(())
+        } else {
+            Err(AppError::conflict(
+                "destination license plate is assigned to another outbound order",
+            ))
+        };
+    }
+
+    let occupied_balance_ids: Vec<i64> = sqlx::query_scalar(
+        r#"
+        SELECT id FROM inventory_balances
+        WHERE tenant_id = $1 AND inventory_owner_id = $2
+          AND facility_id = $3 AND license_plate_id = $4
+          AND deleted IS NULL AND qty_on_hand > 0
+        ORDER BY id FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(target.inventory_owner_id.get())
+    .bind(target.facility_id)
+    .bind(destination_plate_id.get())
+    .fetch_all(&mut **tx)
+    .await?;
+    if !occupied_balance_ids.is_empty() {
+        return Err(AppError::conflict(
+            "unassigned destination license plate is not empty",
+        ));
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO outbound_order_containers (
+            tenant_id, inventory_owner_id, facility_id, order_release_id,
+            order_id, destination_location_id, license_plate_id,
+            created_by_user_id, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(target.inventory_owner_id.get())
+    .bind(target.facility_id)
+    .bind(target.release_id)
+    .bind(target.order_id.get())
+    .bind(target.destination_location_id.get())
+    .bind(destination_plate_id.get())
+    .bind(actor_user_id)
+    .bind(now_iso())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 async fn fulfill_source_allocation_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
@@ -803,7 +947,7 @@ async fn remaining_pick_count_tx(
     .await?)
 }
 
-async fn advance_order_to_awaiting_shipment_tx(
+async fn advance_order_to_awaiting_packing_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     order: &LockedOrder,
@@ -815,7 +959,7 @@ async fn advance_order_to_awaiting_shipment_tx(
         .ok_or_else(|| AppError::internal("order revision overflow"))?;
     let updated = sqlx::query(
         r#"
-        UPDATE orders SET status = 'awaiting shipment', revision = $1
+        UPDATE orders SET status = 'awaiting packing', revision = $1
         WHERE tenant_id = $2 AND id = $3 AND status = 'processing' AND revision = $4
         "#,
     )
@@ -828,7 +972,7 @@ async fn advance_order_to_awaiting_shipment_tx(
     if updated.rows_affected() != 1 {
         return Err(AppError::conflict("order changed during pick confirmation"));
     }
-    Ok((OrderStatus::AwaitingShipment, revision))
+    Ok((OrderStatus::AwaitingPacking, revision))
 }
 
 #[allow(clippy::too_many_arguments)]

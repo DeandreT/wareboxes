@@ -37,7 +37,7 @@ pub fn with_web_app_options(api: Router, state: AppState, options: LeptosOptions
                     Some(match workspace_bootstrap(&state, session, section).await {
                         Ok(data) => WorkspaceBootstrap {
                             section,
-                            content: WorkspaceBootstrapContent::Ready(data),
+                            content: WorkspaceBootstrapContent::Ready(Box::new(data)),
                         },
                         Err(error) => {
                             tracing::warn!(
@@ -89,6 +89,7 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
     match path {
         "/" => Some(WorkspaceBootstrapSection::Overview),
         "/orders" | "/orders/" => Some(WorkspaceBootstrapSection::Orders),
+        "/packing" | "/packing/" => Some(WorkspaceBootstrapSection::Packing),
         "/inventory" | "/inventory/" => Some(WorkspaceBootstrapSection::Inventory),
         "/access" | "/access/" => Some(WorkspaceBootstrapSection::Access),
         _ => None,
@@ -128,6 +129,7 @@ async fn workspace_bootstrap(
                 balances.map_or_else(|| (Vec::new(), None), |page| (page.items, page.next_cursor));
             Ok(WorkspaceBootstrapData {
                 orders,
+                packing_queue: None,
                 balances,
                 balance_next_cursor,
                 access: access_workspace,
@@ -146,6 +148,22 @@ async fn workspace_bootstrap(
             )?;
             Ok(WorkspaceBootstrapData {
                 orders: Some(orders),
+                access: access_workspace,
+                locations,
+                ..WorkspaceBootstrapData::default()
+            })
+        }
+        WorkspaceBootstrapSection::Packing => {
+            if !has_permission(session, "wms") {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            let (packing_queue, access_workspace, locations) = tokio::try_join!(
+                routes::v1::packing::page_for_access(state, access, None, None, 100),
+                routes::access::workspace_for_access(state, access),
+                routes::locations::list_for_access(state, access, false),
+            )?;
+            Ok(WorkspaceBootstrapData {
+                packing_queue: Some(packing_queue),
                 access: access_workspace,
                 locations,
                 ..WorkspaceBootstrapData::default()
@@ -191,6 +209,10 @@ mod tests {
         assert_eq!(
             section_for_path("/orders"),
             Some(WorkspaceBootstrapSection::Orders)
+        );
+        assert_eq!(
+            section_for_path("/packing"),
+            Some(WorkspaceBootstrapSection::Packing)
         );
         assert_eq!(
             section_for_path("/inventory/holds"),

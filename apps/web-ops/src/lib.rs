@@ -19,6 +19,7 @@ mod inventory_holds;
 mod inventory_integrity;
 mod inventory_rollups;
 mod orders;
+mod packing;
 mod preferences;
 mod sorting;
 mod toast;

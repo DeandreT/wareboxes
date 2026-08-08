@@ -332,7 +332,9 @@ pub const fn assess_order_allocation_readiness(
                 OrderAllocationReadiness::Ready
             }
         }
-        OrderStatus::AwaitingShipment if remaining_quantity == 0 => {
+        OrderStatus::AwaitingPacking | OrderStatus::Packing | OrderStatus::AwaitingShipment
+            if remaining_quantity == 0 =>
+        {
             OrderAllocationReadiness::AlreadyFullyAllocated
         }
         _ => {

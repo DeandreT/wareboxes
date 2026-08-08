@@ -71,7 +71,10 @@ pub(super) fn order_status_class(status: OrderStatus) -> &'static str {
         OrderStatus::Shipped => "status shipped",
         OrderStatus::Cancelled | OrderStatus::Void => "status muted",
         OrderStatus::Held => "status held",
-        OrderStatus::Processing | OrderStatus::AwaitingShipment => "status processing",
+        OrderStatus::Processing
+        | OrderStatus::AwaitingPacking
+        | OrderStatus::Packing
+        | OrderStatus::AwaitingShipment => "status processing",
         OrderStatus::Open => "status open",
     }
 }

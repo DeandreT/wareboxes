@@ -4,6 +4,7 @@ mod allocation;
 mod order;
 mod order_cancellation;
 mod order_release;
+mod packing;
 mod picking;
 mod tenant;
 
@@ -27,6 +28,11 @@ pub use order_cancellation::{
     MAX_CANCELLATION_NOTE_LENGTH,
 };
 pub use order_release::{release_order, OrderReleaseError};
+pub use packing::{
+    begin_packing, complete_packing, continue_packing, open_carton, CartonDimensions,
+    CartonMeasurements, CartonStatus, DimensionMillimeters, PackQuantity, PackScanValue,
+    PackSessionStatus, PackingError, PackingProgress, WeightGrams, MAX_PACK_SCAN_VALUE_LENGTH,
+};
 pub use picking::{
     PickClaimReleaseReason, PickContentState, PickQuantity, PickScanValue, PickingError,
     MAX_PICK_SCAN_VALUE_LENGTH,
@@ -101,6 +107,9 @@ positive_id!(OrderCancellationId, "order cancellation ID");
 positive_id!(OrderReleaseId, "order release ID");
 positive_id!(PickTaskId, "pick task ID");
 positive_id!(PickContentId, "pick content ID");
+positive_id!(PackSessionId, "pack session ID");
+positive_id!(CartonId, "carton ID");
+positive_id!(CartonContentId, "carton content ID");
 positive_id!(AllocationRunId, "allocation run ID");
 positive_id!(InventoryReservationId, "inventory reservation ID");
 positive_id!(InventoryAllocationId, "inventory allocation ID");

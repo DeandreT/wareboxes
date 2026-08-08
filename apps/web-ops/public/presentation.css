@@ -378,15 +378,20 @@ html[data-theme="dark"] {
 }
 
 .toast-viewport {
+  position: fixed;
+  z-index: 1000;
+  top: 64px;
+  right: 16px;
   display: grid;
-  width: 100%;
+  width: min(420px, calc(100vw - 228px));
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
   gap: 7px;
-  margin-bottom: 10px;
+  pointer-events: none;
 }
 
 .toast-viewport.hidden {
   display: none;
-  margin-bottom: 0;
 }
 
 .toast {
@@ -401,6 +406,7 @@ html[data-theme="dark"] {
   background: var(--surface);
   box-shadow: var(--shadow);
   color: var(--ink);
+  pointer-events: auto;
   animation: toast-enter 140ms ease-out;
 }
 
