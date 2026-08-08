@@ -286,20 +286,8 @@ async fn inventory_routes_enforce_owner_and_facility_scopes() {
         .unwrap();
     let allowed_balance_id = allowed_balance.id;
     let denied_balance_id = denied_balance.id;
-    repo::orders::add_order(
-        &db,
-        tenant_id,
-        &new_order("INV-SCOPE-ALLOWED-ORDER", allowed_owner),
-    )
-    .await
-    .unwrap();
-    repo::orders::add_order(
-        &db,
-        tenant_id,
-        &new_order("INV-SCOPE-DENIED-ORDER", denied_owner),
-    )
-    .await
-    .unwrap();
+    insert_test_order_header(&db, tenant_id, "INV-SCOPE-ALLOWED-ORDER", allowed_owner).await;
+    insert_test_order_header(&db, tenant_id, "INV-SCOPE-DENIED-ORDER", denied_owner).await;
     let orders = repo::orders::get_orders(&db, tenant_id).await.unwrap();
     let allowed_order = orders
         .iter()

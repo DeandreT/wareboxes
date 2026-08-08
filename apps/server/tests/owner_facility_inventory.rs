@@ -250,7 +250,7 @@ async fn owner_facility_pair_is_enforced_across_inventory_boundaries() {
     tx.rollback().await.unwrap();
 
     let order_id = fixture
-        .order(
+        .order_header(
             tenant_id,
             "OWNER-FACILITY-INVALID-RESERVATION",
             inventory_owner_id,
@@ -571,7 +571,7 @@ async fn owner_facility_pair_is_enforced_across_inventory_boundaries() {
         .unwrap()
         .id;
     let reservation_order = fixture
-        .order(
+        .order_header(
             tenant_id,
             "OWNER-FACILITY-RESERVATION-GUARD",
             reservation_owner,

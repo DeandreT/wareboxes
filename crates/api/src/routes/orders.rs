@@ -1,7 +1,7 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
-use wareboxes_core::dto::{CancelOrder, NewOrder, OrderIdRequest, OrderPage, OrderUpdate};
+use wareboxes_core::dto::{CancelOrder, OrderIdRequest, OrderPage, OrderUpdate};
 use wareboxes_core::models::{Order, OrderStatus};
 
 use crate::auth::CurrentTenant;
@@ -54,28 +54,6 @@ pub async fn get(
     user.require_permission(&state.db, PERM).await?;
     let order = repo::orders::get_order_in_scope(&state.db, &user.tenant, order_id).await?;
     Ok(Json(order))
-}
-
-pub async fn add(
-    State(state): State<AppState>,
-    user: CurrentTenant,
-    Json(body): Json<NewOrder>,
-) -> AppResult<Json<bool>> {
-    user.require_permission(&state.db, PERM).await?;
-    validate(&body)?;
-    user.require_inventory_owner(body.inventory_owner_id)?;
-    if !repo::inventory_owners::active_inventory_owner_exists_in_scope(
-        &state.db,
-        user.tenant.tenant_id,
-        &user.tenant.owner_scope,
-        body.inventory_owner_id,
-    )
-    .await?
-    {
-        return Err(AppError::bad_request("Inventory owner not found"));
-    }
-    let ok = repo::orders::add_order(&state.db, user.tenant.tenant_id, &body).await?;
-    Ok(Json(ok))
 }
 
 pub async fn update(

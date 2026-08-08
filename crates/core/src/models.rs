@@ -142,11 +142,13 @@ pub struct OrderItem {
     pub inventory_owner_id: InventoryOwnerId,
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
+    pub line_key: String,
+    pub line_number: i64,
     pub qty: i64,
     pub item_id: i64,
     pub item_description: Option<String>,
     pub order_id: i64,
-    pub item_batch_id: Option<i64>,
+    pub uom: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -170,6 +172,7 @@ pub struct OrderActivity {
     pub created: Timestamp,
     pub deleted: Option<Timestamp>,
     pub order_id: i64,
+    pub actor_user_id: Option<i64>,
     pub action: String,
 }
 
@@ -206,6 +209,7 @@ pub struct Order {
     pub rush: bool,
     pub status: OrderStatus,
     pub address_id: i64,
+    pub revision: i64,
     pub confirmed: Option<Timestamp>,
     pub closed: Option<Timestamp>,
     pub ship_by: Option<Timestamp>,

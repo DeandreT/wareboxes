@@ -443,7 +443,7 @@ pub async fn create_inventory_reservation(
         r#"
         SELECT orders.inventory_owner_id, orders.status AS order_status,
                orders.deleted AS order_deleted, order_item.item_id,
-               order_item.qty AS ordered_qty, item.packaging_unit AS uom,
+               order_item.qty AS ordered_qty, order_item.uom,
                order_item.deleted AS order_item_deleted
         FROM orders
         INNER JOIN order_items order_item
@@ -451,9 +451,6 @@ pub async fn create_inventory_reservation(
            AND order_item.inventory_owner_id = orders.inventory_owner_id
            AND order_item.order_id = orders.id
            AND order_item.id = $3
-        INNER JOIN items item
-            ON item.tenant_id = order_item.tenant_id
-           AND item.id = order_item.item_id
         WHERE orders.tenant_id = $1 AND orders.id = $2
         FOR UPDATE OF orders, order_item
         "#,

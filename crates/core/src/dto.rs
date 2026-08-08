@@ -245,22 +245,6 @@ pub struct ReplaceInventoryOwnerFacilities {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct NewOrder {
-    #[validate(length(min = 1, message = "Order key is required"))]
-    pub order_key: String,
-    pub rush: Option<bool>,
-    pub ship_by: Option<Timestamp>,
-    pub line1: Option<String>,
-    pub line2: Option<String>,
-    pub city: String,
-    pub state: String,
-    pub postal_code: String,
-    pub country: String,
-    #[validate(range(min = 1, message = "Invalid inventory owner ID"))]
-    pub inventory_owner_id: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct OrderUpdate {
     #[validate(range(min = 1, message = "Invalid order ID"))]

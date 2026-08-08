@@ -298,7 +298,7 @@ async fn inventory_rollups_are_typed_scoped_and_keyset_paginated() {
     .await;
 
     let order_id = fixture
-        .order(tenant_id, "ROLLUP-COMMITMENTS", allowed_owner)
+        .order_header(tenant_id, "ROLLUP-COMMITMENTS", allowed_owner)
         .await;
     fixture
         .allocated_reservation(

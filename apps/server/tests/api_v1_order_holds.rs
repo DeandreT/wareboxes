@@ -75,9 +75,11 @@ async fn order_holds_are_scoped_replay_safe_and_release_only_after_the_last_hold
     let owner_id = fixture
         .inventory_owner(tenant_id, "Order Hold Client")
         .await;
-    let order_id = fixture.order(tenant_id, "ORDER-HOLD-001", owner_id).await;
+    let order_id = fixture
+        .order_header(tenant_id, "ORDER-HOLD-001", owner_id)
+        .await;
     let concurrent_order_id = fixture
-        .order(tenant_id, "ORDER-HOLD-CONCURRENT", owner_id)
+        .order_header(tenant_id, "ORDER-HOLD-CONCURRENT", owner_id)
         .await;
     let token = auth::create_session(&fixture.db, user.id).await.unwrap();
     let app = routes::app(AppState::new(fixture.db.clone()));

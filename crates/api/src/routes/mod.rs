@@ -106,7 +106,6 @@ pub fn app(state: AppState) -> Router {
         // orders
         .route("/orders", get(orders::list))
         .route("/orders/{order_id}", get(orders::get))
-        .route("/orders/add", post(orders::add))
         .route("/orders/update", post(orders::update))
         .route("/orders/cancel", post(orders::cancel))
         .route("/orders/delete", post(orders::delete))

@@ -46,13 +46,13 @@ async fn typed_task_details_require_a_transaction_local_tenant_context() {
         .inventory_owner(tenant_b, "Task Detail Owner B")
         .await;
     let order_a = fixture
-        .order(tenant_a, "TASK-DETAIL-ORDER-A", owner_a)
+        .order_header(tenant_a, "TASK-DETAIL-ORDER-A", owner_a)
         .await;
     let carrier_order_a = fixture
-        .order(tenant_a, "TASK-DETAIL-CARRIER-ORDER-A", owner_a)
+        .order_header(tenant_a, "TASK-DETAIL-CARRIER-ORDER-A", owner_a)
         .await;
     let order_b = fixture
-        .order(tenant_b, "TASK-DETAIL-ORDER-B", owner_b)
+        .order_header(tenant_b, "TASK-DETAIL-ORDER-B", owner_b)
         .await;
     let item_batch_a = repo::inventory::add_item_batch(
         &fixture.db,

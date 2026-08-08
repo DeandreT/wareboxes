@@ -18,11 +18,7 @@ async fn order_status_guards_and_soft_delete() {
         .inventory_owner(tenant_id, "Order Guards Owner")
         .await;
 
-    assert!(
-        repo::orders::add_order(db, tenant_id, &new_order("O1", owner_id))
-            .await
-            .unwrap()
-    );
+    insert_test_order_header(db, tenant_id, "O1", owner_id).await;
     let orders = repo::orders::get_orders(db, tenant_id).await.unwrap();
     assert_eq!(orders.len(), 1);
     assert_eq!(orders[0].status, OrderStatus::Open);
@@ -36,11 +32,7 @@ async fn order_status_guards_and_soft_delete() {
         .is_empty());
 
     // A shipped order is no longer mutable or deletable.
-    assert!(
-        repo::orders::add_order(db, tenant_id, &new_order("O2", owner_id))
-            .await
-            .unwrap()
-    );
+    insert_test_order_header(db, tenant_id, "O2", owner_id).await;
     let id2 = repo::orders::get_orders(db, tenant_id).await.unwrap()[0].id;
     let mut tx = tenant_tx(db, tenant_id).await;
     sqlx::query("UPDATE orders SET status = 'shipped' WHERE tenant_id = $1 AND id = $2")
@@ -66,9 +58,7 @@ async fn order_pagination_filters_and_reports_total() {
         .await;
 
     for key in ["PAGE-A", "PAGE-B", "OTHER-C"] {
-        repo::orders::add_order(db, tenant_id, &new_order(key, owner_id))
-            .await
-            .unwrap();
+        insert_test_order_header(db, tenant_id, key, owner_id).await;
     }
 
     let page = repo::orders::get_orders_page(db, tenant_id, 2, 0, None, Some("PAGE"))
@@ -111,9 +101,7 @@ async fn inventory_owner_delete_blocked_by_open_orders() {
     let acc = repo::inventory_owners::add_inventory_owner(&db, tenant_id, "Acme", "ops@acme.test")
         .await
         .unwrap();
-    repo::orders::add_order(&db, tenant_id, &new_order("A1", acc))
-        .await
-        .unwrap();
+    insert_test_order_header(&db, tenant_id, "A1", acc).await;
 
     let err = repo::inventory_owners::delete_inventory_owner(&db, tenant_id, acc)
         .await
@@ -225,8 +213,12 @@ async fn order_aggregate_is_isolated_by_selected_tenant() {
 
     let owner_a = fixture.inventory_owner(tenant_a, "Tenant A Owner").await;
     let owner_b = fixture.inventory_owner(tenant_b, "Tenant B Owner").await;
-    let order_a = fixture.order(tenant_a, "TENANT-A-ORDER", owner_a).await;
-    let order_b = fixture.order(tenant_b, "TENANT-B-ORDER", owner_b).await;
+    let order_a = fixture
+        .order_header(tenant_a, "TENANT-A-ORDER", owner_a)
+        .await;
+    let order_b = fixture
+        .order_header(tenant_b, "TENANT-B-ORDER", owner_b)
+        .await;
 
     assert!(repo::orders::get_order(&fixture.db, tenant_b, order_a)
         .await
@@ -322,7 +314,9 @@ async fn concurrent_order_delete_and_restore_have_single_winners() {
     let owner_id = fixture
         .inventory_owner(tenant_id, "Concurrent Order Owner")
         .await;
-    let order_id = fixture.order(tenant_id, "CONCURRENT-ORDER", owner_id).await;
+    let order_id = fixture
+        .order_header(tenant_id, "CONCURRENT-ORDER", owner_id)
+        .await;
 
     let first_db = fixture.db.clone();
     let second_db = fixture.db.clone();

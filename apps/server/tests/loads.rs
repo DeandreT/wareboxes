@@ -659,7 +659,9 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
     )
     .await
     .unwrap();
-    let tenant_a_order = fixture.order(tenant_a, "SCOPED-LOAD-ORDER-A", owner).await;
+    let tenant_a_order = fixture
+        .order_header(tenant_a, "SCOPED-LOAD-ORDER-A", owner)
+        .await;
     let admin_db = admin_db_for(&fixture.db).await;
     sqlx::query(
         "INSERT INTO load_orders (tenant_id, inventory_owner_id, created, load_id, order_id) VALUES ($1, $2, $3, $4, $5)",
@@ -676,7 +678,7 @@ async fn load_aggregate_is_isolated_by_selected_tenant() {
         .inventory_owner(tenant_b, "Other Tenant Owner")
         .await;
     let tenant_b_order = fixture
-        .order(tenant_b, "SCOPED-LOAD-ORDER-B", tenant_b_owner)
+        .order_header(tenant_b, "SCOPED-LOAD-ORDER-B", tenant_b_owner)
         .await;
     assert!(sqlx::query(
         "INSERT INTO load_orders (tenant_id, inventory_owner_id, created, load_id, order_id) VALUES ($1, $2, $3, $4, $5)",
@@ -1092,16 +1094,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     assert_eq!(moved.location_id, Some(reserve));
     assert_eq!(moved.contents[0].location_id, reserve);
 
-    repo::orders::add_order(&db, tenant_id, &new_order("LP-RES-1", inventory_owner))
-        .await
-        .unwrap();
-    let order_id = repo::orders::get_orders(&db, tenant_id)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|o| o.order_key == "LP-RES-1")
-        .unwrap()
-        .id;
+    let order_id = insert_test_order_header(&db, tenant_id, "LP-RES-1", inventory_owner).await;
     fixture
         .allocated_reservation(
             tenant_id,

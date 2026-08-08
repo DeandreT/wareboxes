@@ -215,7 +215,7 @@ async fn status_changes_round_trip_replay_and_preserve_committed_inventory() {
         .await;
 
     let order_id = fixture
-        .order(tenant_id, "STATUS-CHANGE-ORDER", owner_id)
+        .order_header(tenant_id, "STATUS-CHANGE-ORDER", owner_id)
         .await;
     fixture
         .allocated_reservation(

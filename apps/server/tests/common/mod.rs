@@ -10,7 +10,7 @@ use url::Url;
 pub use wareboxes_api::error::AppError;
 pub use wareboxes_api::{auth, db, permissions, repo};
 pub use wareboxes_application::ApplicationError;
-pub use wareboxes_core::dto::{NewOrder, OrderUpdate};
+pub use wareboxes_core::dto::OrderUpdate;
 pub use wareboxes_core::models::{
     InventoryTransactionType, LoadLineStatus, LoadStatus, LoadType, OrderStatus,
     WorkTaskProgressAction, WorkTaskStatus, WorkTaskType,
@@ -366,19 +366,58 @@ async fn unlock_template_exclusive(
     assert!(unlocked, "exclusive test template lock was not held");
 }
 
-pub fn new_order(key: &str, inventory_owner_id: i64) -> NewOrder {
-    NewOrder {
-        order_key: key.to_string(),
-        rush: Some(false),
-        ship_by: None,
-        line1: Some("1 Main St".into()),
-        line2: None,
-        city: "Reno".into(),
-        state: "NV".into(),
-        postal_code: "89501".into(),
-        country: "US".into(),
-        inventory_owner_id,
-    }
+pub async fn insert_test_order_header(
+    db: &db::Db,
+    tenant_id: TenantId,
+    key: &str,
+    inventory_owner_id: i64,
+) -> i64 {
+    let mut tx = tenant_tx(db, tenant_id).await;
+    let address_id = repo::address::insert_address_tx(
+        &mut tx,
+        tenant_id,
+        Some("1 Main St"),
+        None,
+        Some("Reno"),
+        Some("NV"),
+        Some("89501"),
+        Some("US"),
+    )
+    .await
+    .unwrap();
+    let created = db::now_iso();
+    let order_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO orders
+            (tenant_id, inventory_owner_id, order_key, created, rush, status, address_id)
+        VALUES ($1, $2, $3, $4, false, 'open', $5)
+        RETURNING id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id)
+    .bind(key)
+    .bind(created)
+    .bind(address_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO order_activity
+            (tenant_id, inventory_owner_id, created, order_id, action)
+        VALUES ($1, $2, $3, $4, 'created order')
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id)
+    .bind(created)
+    .bind(order_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    order_id
 }
 
 pub struct Fixture {
@@ -525,17 +564,13 @@ impl Fixture {
         .unwrap()
     }
 
-    pub async fn order(&self, tenant_id: TenantId, key: &str, inventory_owner_id: i64) -> i64 {
-        repo::orders::add_order(&self.db, tenant_id, &new_order(key, inventory_owner_id))
-            .await
-            .unwrap();
-        repo::orders::get_orders(&self.db, tenant_id)
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|order| order.order_key == key)
-            .unwrap()
-            .id
+    pub async fn order_header(
+        &self,
+        tenant_id: TenantId,
+        key: &str,
+        inventory_owner_id: i64,
+    ) -> i64 {
+        insert_test_order_header(&self.db, tenant_id, key, inventory_owner_id).await
     }
 
     pub async fn order_item(
@@ -546,13 +581,49 @@ impl Fixture {
         qty: i64,
     ) -> i64 {
         let mut tx = tenant_tx(&self.db, tenant_id).await;
+        sqlx::query("SELECT id FROM orders WHERE tenant_id = $1 AND id = $2 FOR UPDATE")
+            .bind(tenant_id.get())
+            .bind(order_id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            INSERT INTO inventory_owner_items
+                (tenant_id, created, inventory_owner_id, item_id)
+            SELECT orders.tenant_id, $1, orders.inventory_owner_id, $2
+            FROM orders
+            WHERE orders.tenant_id = $3 AND orders.id = $4
+            ON CONFLICT (tenant_id, inventory_owner_id, item_id) DO UPDATE
+            SET deleted = NULL
+            "#,
+        )
+        .bind(db::now_iso())
+        .bind(item_id)
+        .bind(tenant_id.get())
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
         let id = sqlx::query_scalar(
             r#"
+            WITH next_line AS (
+                SELECT COALESCE(MAX(line_number), 0) + 1 AS line_number
+                FROM order_items
+                WHERE tenant_id = $4 AND order_id = $5
+            )
             INSERT INTO order_items
-                (tenant_id, inventory_owner_id, created, qty, item_id, order_id)
-            SELECT tenant_id, inventory_owner_id, $1, $2, $3, id
+                (tenant_id, inventory_owner_id, created, line_key, line_number,
+                 qty, item_id, order_id, uom)
+            SELECT orders.tenant_id, orders.inventory_owner_id, $1,
+                   'fixture-' || next_line.line_number::TEXT, next_line.line_number,
+                   $2, $3, orders.id, items.packaging_unit
             FROM orders
-            WHERE tenant_id = $4 AND id = $5
+            INNER JOIN items
+                ON items.tenant_id = orders.tenant_id
+               AND items.id = $3
+            CROSS JOIN next_line
+            WHERE orders.tenant_id = $4 AND orders.id = $5
             RETURNING id
             "#,
         )

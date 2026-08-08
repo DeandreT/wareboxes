@@ -138,7 +138,7 @@ async fn reservation_refs(
     .await
     .unwrap();
     let order_id = fixture
-        .order(tenant_id, &format!("{name} Order"), inventory_owner_id)
+        .order_header(tenant_id, &format!("{name} Order"), inventory_owner_id)
         .await;
     let order_item_id = fixture.order_item(tenant_id, order_id, item_id, 10).await;
     repo::inventory::receive_inventory(

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use wareboxes_application::CommandContext;
-use wareboxes_core::dto::{NewOrder, OrderPage, OrderUpdate, Paged, SummaryCount};
+use wareboxes_core::dto::{OrderPage, OrderUpdate, Paged, SummaryCount};
 use wareboxes_core::models::{
     AllocationStatus, InventoryAllocation, InventoryReservation, InventoryStatus, Order,
     OrderActivity, OrderHold, OrderHoldReason, OrderItem, OrderStatus, OrderTrackingNumber,
@@ -46,6 +46,7 @@ fn map_order(row: &sqlx::postgres::PgRow) -> AppResult<Order> {
         rush: row.try_get("rush")?,
         status,
         address_id: row.try_get("address_id")?,
+        revision: row.try_get("revision")?,
         confirmed: row.try_get("confirmed")?,
         closed: row.try_get("closed")?,
         ship_by: row.try_get("ship_by")?,
@@ -79,6 +80,7 @@ fn map_order_activity(row: &sqlx::postgres::PgRow) -> AppResult<OrderActivity> {
         created: row.try_get("created")?,
         deleted: row.try_get("deleted")?,
         order_id: row.try_get("order_id")?,
+        actor_user_id: row.try_get("actor_user_id")?,
         action: row.try_get("action")?,
     })
 }
@@ -117,11 +119,13 @@ fn map_order_item(row: &sqlx::postgres::PgRow) -> AppResult<OrderItem> {
             .map_err(|error| AppError::internal(error.to_string()))?,
         created: row.try_get("created")?,
         deleted: row.try_get("deleted")?,
+        line_key: row.try_get("line_key")?,
+        line_number: row.try_get("line_number")?,
         qty: row.try_get("qty")?,
         item_id: row.try_get("item_id")?,
         item_description: row.try_get("item_description")?,
         order_id: row.try_get("order_id")?,
-        item_batch_id: row.try_get("item_batch_id")?,
+        uom: row.try_get("uom")?,
     })
 }
 
@@ -208,10 +212,12 @@ async fn items_by_order(
     let rows = sqlx::query(
         r#"
         SELECT oi.id, oi.tenant_id, oi.inventory_owner_id, oi.created, oi.deleted,
-               oi.qty, oi.item_id, i.description AS item_description, oi.order_id, oi.item_batch_id
+               oi.line_key, oi.line_number, oi.qty, oi.item_id, i.description AS item_description,
+               oi.order_id, oi.uom
         FROM order_items oi
         LEFT JOIN items i ON i.tenant_id = oi.tenant_id AND i.id = oi.item_id
         WHERE oi.tenant_id = $1 AND oi.deleted IS NULL
+        ORDER BY oi.order_id, oi.line_number
         "#,
     )
     .bind(tenant_id.get())
@@ -236,10 +242,12 @@ async fn items_by_order_ids(
     let rows = sqlx::query(
         r#"
         SELECT oi.id, oi.tenant_id, oi.inventory_owner_id, oi.created, oi.deleted,
-               oi.qty, oi.item_id, i.description AS item_description, oi.order_id, oi.item_batch_id
+               oi.line_key, oi.line_number, oi.qty, oi.item_id, i.description AS item_description,
+               oi.order_id, oi.uom
         FROM order_items oi
         LEFT JOIN items i ON i.tenant_id = oi.tenant_id AND i.id = oi.item_id
         WHERE oi.tenant_id = $1 AND oi.deleted IS NULL AND oi.order_id = ANY($2)
+        ORDER BY oi.order_id, oi.line_number
         "#,
     )
     .bind(tenant_id.get())
@@ -564,7 +572,8 @@ async fn activity_for_order(
 ) -> AppResult<Vec<OrderActivity>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, tenant_id, inventory_owner_id, created, deleted, order_id, action
+        SELECT id, tenant_id, inventory_owner_id, created, deleted, order_id,
+               actor_user_id, action
         FROM order_activity
         WHERE tenant_id = $1
           AND deleted IS NULL
@@ -612,7 +621,7 @@ pub async fn get_orders(db: &Db, tenant_id: TenantId) -> AppResult<Vec<Order>> {
         r#"
         SELECT o.id AS id, o.tenant_id AS tenant_id, o.order_key AS order_key, o.created AS created,
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
-               o.address_id AS address_id, o.confirmed AS confirmed,
+               o.address_id AS address_id, o.revision AS revision, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
                o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
@@ -747,7 +756,7 @@ async fn get_orders_page_with_scope(
         r#"
         SELECT o.id AS id, o.tenant_id AS tenant_id, o.order_key AS order_key, o.created AS created,
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
-               o.address_id AS address_id, o.confirmed AS confirmed,
+               o.address_id AS address_id, o.revision AS revision, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
                o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
@@ -827,7 +836,7 @@ async fn get_order_with_scope(
         r#"
         SELECT o.id AS id, o.tenant_id AS tenant_id, o.order_key AS order_key, o.created AS created,
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
-               o.address_id AS address_id, o.confirmed AS confirmed,
+               o.address_id AS address_id, o.revision AS revision, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
                o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
@@ -1032,7 +1041,7 @@ pub async fn orders_by_load(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i
         SELECT lo.load_id AS load_id,
                o.id AS id, o.tenant_id AS tenant_id, o.order_key AS order_key, o.created AS created,
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
-               o.address_id AS address_id, o.confirmed AS confirmed,
+               o.address_id AS address_id, o.revision AS revision, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
                o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
@@ -1078,7 +1087,7 @@ pub async fn orders_for_load(db: &Db, tenant_id: TenantId, load_id: i64) -> AppR
         r#"
         SELECT o.id AS id, o.tenant_id AS tenant_id, o.order_key AS order_key, o.created AS created,
                o.deleted AS deleted, o.rush AS rush, o.status AS status,
-               o.address_id AS address_id, o.confirmed AS confirmed,
+               o.address_id AS address_id, o.revision AS revision, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
                o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
@@ -1129,65 +1138,20 @@ pub async fn orders_for_load(db: &Db, tenant_id: TenantId, load_id: i64) -> AppR
     Ok(orders)
 }
 
-pub async fn add_order(db: &Db, tenant_id: TenantId, o: &NewOrder) -> AppResult<bool> {
-    let inventory_owner_id = InventoryOwnerId::new(o.inventory_owner_id)
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
-    let mut tx = db.begin().await?;
-    bind_tenant_context(&mut tx, tenant_id).await?;
-    let address_id = address::insert_address_tx(
-        &mut tx,
-        tenant_id,
-        o.line1.as_deref(),
-        o.line2.as_deref(),
-        Some(&o.city),
-        Some(&o.state),
-        Some(&o.postal_code),
-        Some(&o.country),
-    )
-    .await?;
-
-    let order_id: i64 = sqlx::query_scalar(
-        r#"
-        INSERT INTO orders
-            (tenant_id, inventory_owner_id, order_key, created, rush, status, address_id, ship_by)
-        VALUES ($1, $2, $3, $4, $5, 'open', $6, $7)
-        RETURNING id
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(inventory_owner_id.get())
-    .bind(&o.order_key)
-    .bind(now_iso())
-    .bind(o.rush.unwrap_or(false))
-    .bind(address_id)
-    .bind(o.ship_by)
-    .fetch_one(&mut *tx)
-    .await?;
-    insert_order_activity_tx(
-        &mut tx,
-        tenant_id,
-        inventory_owner_id,
-        order_id,
-        "created order",
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(true)
-}
-
-async fn insert_order_activity_tx(
+pub(crate) async fn insert_order_activity_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     inventory_owner_id: InventoryOwnerId,
     order_id: i64,
+    actor_user_id: Option<i64>,
     action: &str,
 ) -> AppResult<i64> {
     bind_tenant_context(tx, tenant_id).await?;
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO order_activity
-            (tenant_id, inventory_owner_id, created, order_id, action)
-        VALUES ($1, $2, $3, $4, $5)
+            (tenant_id, inventory_owner_id, created, order_id, actor_user_id, action)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING id
         "#,
     )
@@ -1195,6 +1159,7 @@ async fn insert_order_activity_tx(
     .bind(inventory_owner_id.get())
     .bind(now_iso())
     .bind(order_id)
+    .bind(actor_user_id)
     .bind(action)
     .fetch_one(&mut **tx)
     .await?;
@@ -1313,7 +1278,8 @@ pub async fn update_order_metadata(
             order_key = COALESCE($1, order_key),
             rush = COALESCE($2, rush),
             ship_by = COALESCE($3, ship_by),
-            address_id = COALESCE($4, address_id)
+            address_id = COALESCE($4, address_id),
+            revision = revision + 1
         WHERE tenant_id = $5
           AND id = $6
         RETURNING inventory_owner_id
@@ -1339,13 +1305,14 @@ pub async fn update_order_metadata(
         tenant_id,
         inventory_owner_id,
         update.order_id,
+        Some(command.actor_id.get()),
         "updated order metadata",
     )
     .await?;
     Ok(prepared.commit(tx, true).await?)
 }
 
-async fn require_replayed_order_visible_tx(
+pub(crate) async fn require_replayed_order_visible_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     order_id: i64,
@@ -1481,17 +1448,20 @@ pub async fn place_order_hold(
     .bind(note)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("UPDATE orders SET status = $1 WHERE tenant_id = $2 AND id = $3")
-        .bind(order_status.as_str())
-        .bind(access.tenant_id.get())
-        .bind(order_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE orders SET status = $1, revision = revision + 1 WHERE tenant_id = $2 AND id = $3",
+    )
+    .bind(order_status.as_str())
+    .bind(access.tenant_id.get())
+    .bind(order_id)
+    .execute(&mut *tx)
+    .await?;
     insert_order_activity_tx(
         &mut tx,
         access.tenant_id,
         inventory_owner_id,
         order_id,
+        Some(command.actor_id.get()),
         "placed order hold",
     )
     .await?;
@@ -1609,17 +1579,20 @@ pub async fn release_order_hold(
     let order_status = current_status
         .release_hold(active_hold_count > 0)
         .map_err(|error| AppError::conflict(error.to_string()))?;
-    sqlx::query("UPDATE orders SET status = $1 WHERE tenant_id = $2 AND id = $3")
-        .bind(order_status.as_str())
-        .bind(access.tenant_id.get())
-        .bind(order_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE orders SET status = $1, revision = revision + 1 WHERE tenant_id = $2 AND id = $3",
+    )
+    .bind(order_status.as_str())
+    .bind(access.tenant_id.get())
+    .bind(order_id)
+    .execute(&mut *tx)
+    .await?;
     insert_order_activity_tx(
         &mut tx,
         access.tenant_id,
         inventory_owner_id,
         order_id,
+        Some(command.actor_id.get()),
         "released order hold",
     )
     .await?;
@@ -1790,7 +1763,9 @@ pub async fn cancel_order_with_unpack_task(
     let inventory_owner_id = InventoryOwnerId::new(inventory_owner_id)
         .map_err(|error| AppError::internal(error.to_string()))?;
     if status != "cancelled" {
-        sqlx::query("UPDATE orders SET status = 'cancelled' WHERE tenant_id = $1 AND id = $2")
+        sqlx::query(
+            "UPDATE orders SET status = 'cancelled', revision = revision + 1 WHERE tenant_id = $1 AND id = $2",
+        )
             .bind(access.tenant_id.get())
             .bind(order_id)
             .execute(&mut *tx)
@@ -1800,6 +1775,7 @@ pub async fn cancel_order_with_unpack_task(
             access.tenant_id,
             inventory_owner_id,
             order_id,
+            Some(command.actor_id.get()),
             "cancelled order",
         )
         .await?;
@@ -1824,7 +1800,7 @@ pub async fn cancel_order_with_unpack_task(
 pub async fn delete_order(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
     let sql = format!(
         r#"
-        UPDATE orders SET deleted = $1
+        UPDATE orders SET deleted = $1, revision = revision + 1
         WHERE tenant_id = $2
           AND id = $3
           AND deleted IS NULL
@@ -1861,8 +1837,15 @@ pub async fn delete_order(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bo
     if let Some(inventory_owner_id) = inventory_owner_id {
         let inventory_owner_id = InventoryOwnerId::new(inventory_owner_id)
             .map_err(|error| AppError::internal(error.to_string()))?;
-        insert_order_activity_tx(&mut tx, tenant_id, inventory_owner_id, id, "deleted order")
-            .await?;
+        insert_order_activity_tx(
+            &mut tx,
+            tenant_id,
+            inventory_owner_id,
+            id,
+            None,
+            "deleted order",
+        )
+        .await?;
     }
     tx.commit().await?;
     Ok(inventory_owner_id.is_some())
@@ -1874,7 +1857,7 @@ pub async fn restore_order(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<b
     let inventory_owner_id: Option<i64> = sqlx::query_scalar(
         r#"
         UPDATE orders
-        SET deleted = NULL
+        SET deleted = NULL, revision = revision + 1
         WHERE tenant_id = $1 AND id = $2 AND deleted IS NOT NULL
         RETURNING inventory_owner_id
         "#,
@@ -1886,8 +1869,15 @@ pub async fn restore_order(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<b
     if let Some(inventory_owner_id) = inventory_owner_id {
         let inventory_owner_id = InventoryOwnerId::new(inventory_owner_id)
             .map_err(|error| AppError::internal(error.to_string()))?;
-        insert_order_activity_tx(&mut tx, tenant_id, inventory_owner_id, id, "restored order")
-            .await?;
+        insert_order_activity_tx(
+            &mut tx,
+            tenant_id,
+            inventory_owner_id,
+            id,
+            None,
+            "restored order",
+        )
+        .await?;
     }
     tx.commit().await?;
     Ok(inventory_owner_id.is_some())

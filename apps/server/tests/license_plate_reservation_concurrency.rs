@@ -225,7 +225,7 @@ async fn license_plate_moves_serialize_allocations_and_holds() {
     tx.rollback().await.unwrap();
 
     let order_id = fixture
-        .order(tenant_id, "LP-RESERVATION-RACE-ORDER", inventory_owner_id)
+        .order_header(tenant_id, "LP-RESERVATION-RACE-ORDER", inventory_owner_id)
         .await;
     let order_item_id = fixture.order_item(tenant_id, order_id, item_id, 1).await;
     let reservation = repo::inventory::create_inventory_reservation(

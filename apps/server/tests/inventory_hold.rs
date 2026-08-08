@@ -164,7 +164,9 @@ async fn quantity_holds_cap_stock_are_replay_safe_and_release_fully() {
         .location(tenant_id, facility_id, "HOLD-DESTINATION")
         .await;
 
-    let order_a = fixture.order(tenant_id, "HOLD-ORDER-A", owner_id).await;
+    let order_a = fixture
+        .order_header(tenant_id, "HOLD-ORDER-A", owner_id)
+        .await;
     fixture
         .allocated_reservation(
             tenant_id,
@@ -366,7 +368,9 @@ async fn quantity_holds_cap_stock_are_replay_safe_and_release_fully() {
     )
     .await
     .unwrap();
-    let order_b = fixture.order(tenant_id, "HOLD-ORDER-B", owner_id).await;
+    let order_b = fixture
+        .order_header(tenant_id, "HOLD-ORDER-B", owner_id)
+        .await;
     let reservation_b = fixture
         .reservation_for_balance(
             tenant_id,
@@ -453,7 +457,7 @@ async fn concurrent_hold_and_allocation_share_one_balance_capacity() {
         )
         .await;
     let order_id = fixture
-        .order(access.tenant_id, "HOLD-ALLOCATION-RACE-ORDER", owner_id)
+        .order_header(access.tenant_id, "HOLD-ALLOCATION-RACE-ORDER", owner_id)
         .await;
     let reservation_id = fixture
         .reservation_for_balance(

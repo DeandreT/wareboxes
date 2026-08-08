@@ -3,7 +3,15 @@
 mod order;
 mod tenant;
 
-pub use order::{OrderHoldReason, OrderHoldTransitionError, OrderStatus};
+pub use order::{
+    CatalogItemId, FulfillmentOrderDemandLine, NewFulfillmentOrder, OrderCreationError,
+    OrderCreationField, OrderHoldReason, OrderHoldTransitionError, OrderKey, OrderLineKey,
+    OrderQuantity, OrderStatus, RequestedUom, ShippingDestination,
+    MAX_DESTINATION_ADDRESS_LINE_LENGTH, MAX_DESTINATION_CITY_LENGTH,
+    MAX_DESTINATION_COUNTRY_LENGTH, MAX_DESTINATION_POSTAL_CODE_LENGTH,
+    MAX_DESTINATION_REGION_LENGTH, MAX_ORDER_KEY_LENGTH, MAX_ORDER_LINE_KEY_LENGTH,
+    MAX_REQUESTED_UOM_LENGTH,
+};
 pub use tenant::TenantStatus;
 
 use chrono::{DateTime, Utc};

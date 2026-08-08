@@ -113,7 +113,9 @@ async fn order_tracking_numbers_require_a_transaction_local_tenant_context() {
 
 async fn tracking_refs(fixture: &Fixture, tenant_id: TenantId, name: &str) -> TrackingRefs {
     let inventory_owner_id = fixture.inventory_owner(tenant_id, name).await;
-    let order_id = fixture.order(tenant_id, name, inventory_owner_id).await;
+    let order_id = fixture
+        .order_header(tenant_id, name, inventory_owner_id)
+        .await;
     TrackingRefs {
         tenant_id,
         inventory_owner_id,

@@ -196,12 +196,8 @@ async fn order_and_load_workflows_enforce_owner_and_facility_scopes() {
     .await
     .unwrap();
 
-    repo::orders::add_order(&db, tenant_id, &new_order("OPS-ALLOWED", allowed_owner))
-        .await
-        .unwrap();
-    repo::orders::add_order(&db, tenant_id, &new_order("OPS-DENIED", denied_owner))
-        .await
-        .unwrap();
+    insert_test_order_header(&db, tenant_id, "OPS-ALLOWED", allowed_owner).await;
+    insert_test_order_header(&db, tenant_id, "OPS-DENIED", denied_owner).await;
     let orders = repo::orders::get_orders(&db, tenant_id).await.unwrap();
     let allowed_order = orders
         .iter()
@@ -350,19 +346,6 @@ async fn order_and_load_workflows_enforce_owner_and_facility_scopes() {
         .await
         .unwrap();
     tx.commit().await.unwrap();
-
-    let response = app
-        .clone()
-        .oneshot(api_request(
-            &token,
-            tenant_id,
-            Method::POST,
-            "/api/orders/add",
-            Some(serde_json::to_value(new_order("OPS-FORBIDDEN", denied_owner)).unwrap()),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
     let response = app
         .clone()

@@ -1055,9 +1055,9 @@ pub(crate) async fn create_unpack_cancelled_order_task_tx(
         r#"
         INSERT INTO unpack_cancelled_order_task_lines (
             tenant_id, facility_id, inventory_owner_id, task_id, order_item_id, item_id,
-            item_batch_id, expected_qty
+            expected_qty
         )
-        SELECT $1, $2, $3, $4, oi.id, oi.item_id, oi.item_batch_id, oi.qty
+        SELECT $1, $2, $3, $4, oi.id, oi.item_id, oi.qty
         FROM order_items oi
         WHERE oi.tenant_id = $1
           AND oi.inventory_owner_id = $3

@@ -17,8 +17,12 @@ async fn activity_rows_require_a_transaction_local_tenant_context() {
         .await;
     let facility_a = fixture.facility(tenant_a, "Activity RLS Facility A").await;
     let facility_b = fixture.facility(tenant_b, "Activity RLS Facility B").await;
-    let order_a = fixture.order(tenant_a, "ACTIVITY-RLS-ORDER", owner_a).await;
-    let order_b = fixture.order(tenant_b, "ACTIVITY-RLS-ORDER", owner_b).await;
+    let order_a = fixture
+        .order_header(tenant_a, "ACTIVITY-RLS-ORDER", owner_a)
+        .await;
+    let order_b = fixture
+        .order_header(tenant_b, "ACTIVITY-RLS-ORDER", owner_b)
+        .await;
     let load_a = add_load(
         &fixture,
         tenant_a,
