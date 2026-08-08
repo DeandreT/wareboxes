@@ -2,18 +2,22 @@
 use wareboxes_api_contract::v1::ReleaseInventoryHoldRequest;
 use wareboxes_api_contract::v1::{
     AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
-    CancelOrderRequest, CancelOrderResponse, CloseCartonRequest, CloseCartonResponse,
-    ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,
-    CreateCartonRequest, CreateCartonResponse, CreateFulfillmentOrderRequest,
-    CreateFulfillmentOrderResponse, InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
-    InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
-    OpenPackSessionResponse, OrderAllocationReadinessResponse, OrderEntryItemResponse,
-    PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
-    PackingQueuePage, PickShortagePage, PickShortageResponse, PickShortageStatus,
-    PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
-    PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
+    CancelOrderRequest, CancelOrderResponse, CancelReplenishmentWorkRequest, CloseCartonRequest,
+    CloseCartonResponse, ConfigureFacilityShippingOriginRequest,
+    ConfigureFacilityShippingOriginResponse, ConfigureReplenishmentPolicyRequest,
+    ConfigureReplenishmentPolicyResponse, CreateCartonRequest, CreateCartonResponse,
+    CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse, InventoryBalancePage,
+    InventoryHoldPage, InventoryHoldStatus, InventoryStatusTransitionResponse, OpaqueCursor,
+    OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
+    OrderEntryItemResponse, PackPickedAllocationRequest, PackPickedAllocationResponse,
+    PackSessionResponse, PackingQueuePage, PickShortagePage, PickShortageResponse,
+    PickShortageStatus, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
+    PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
+    PlanOrderAllocationResponse, PlanReplenishmentRequest, PlanReplenishmentResponse,
     ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleaseInventoryHoldResponse,
     ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
+    ReplenishmentPolicyPage, ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse,
+    ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
     VoidCartonRequest, VoidCartonResponse,
 };
 use wareboxes_api_contract::v1::{
@@ -52,21 +56,26 @@ mod browser {
     use super::{
         AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
         AccessScopeWorkspace, ApiError, CancelOrderRequest, CancelOrderResponse,
-        CloseCartonRequest, CloseCartonResponse, ConfigureFacilityShippingOriginRequest,
-        ConfigureFacilityShippingOriginResponse, CreateCartonRequest, CreateCartonResponse,
-        CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse,
-        CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
-        CreateInventoryStatusTransitionRequest, InventoryBalancePage, InventoryHoldPage,
-        InventoryHoldStatus, InventoryStatusTransitionResponse, OpaqueCursor,
-        OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
-        OrderEntryItemResponse, OrderPage, PackPickedAllocationRequest,
-        PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage, PickShortagePage,
-        PickShortageResponse, PickShortageStatus, PlaceInventoryHoldRequest,
-        PlaceInventoryHoldResponse, PlaceOrderHoldRequest, PlaceOrderHoldResponse,
-        PlanOrderAllocationRequest, PlanOrderAllocationResponse, ReallocatePickShortageRequest,
+        CancelReplenishmentWorkRequest, CloseCartonRequest, CloseCartonResponse,
+        ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,
+        ConfigureReplenishmentPolicyRequest, ConfigureReplenishmentPolicyResponse,
+        CreateCartonRequest, CreateCartonResponse, CreateFulfillmentOrderRequest,
+        CreateFulfillmentOrderResponse, CreateInventoryRelocationTaskRequest,
+        CreateInventoryRelocationTaskResponse, CreateInventoryStatusTransitionRequest,
+        InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
+        InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
+        OpenPackSessionResponse, OrderAllocationReadinessResponse, OrderEntryItemResponse,
+        OrderPage, PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
+        PackingQueuePage, PickShortagePage, PickShortageResponse, PickShortageStatus,
+        PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
+        PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
+        PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
         ReallocatePickShortageResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
         ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest,
-        ReleaseOrderResponse, VoidCartonRequest, VoidCartonResponse, WebSessionContext,
+        ReleaseOrderResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
+        ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
+        RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse, VoidCartonRequest,
+        VoidCartonResponse, WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -468,6 +477,88 @@ mod browser {
         .await
     }
 
+    pub async fn replenishment_policies(
+        facility_id: Option<i64>,
+        inventory_owner_id: Option<i64>,
+        item_id: Option<i64>,
+        pick_face_location_id: Option<i64>,
+        cursor: Option<&OpaqueCursor>,
+    ) -> Result<ReplenishmentPolicyPage, ApiError> {
+        get(&super::replenishment_policy_page_path(
+            facility_id,
+            inventory_owner_id,
+            item_id,
+            pick_face_location_id,
+            cursor,
+        ))
+        .await
+    }
+
+    pub async fn replenishment_queue(
+        facility_id: Option<i64>,
+        inventory_owner_id: Option<i64>,
+        item_id: Option<i64>,
+        pick_face_location_id: Option<i64>,
+        status: Option<ReplenishmentWorkStatus>,
+        cursor: Option<&OpaqueCursor>,
+    ) -> Result<ReplenishmentQueuePage, ApiError> {
+        get(&super::replenishment_queue_page_path(
+            facility_id,
+            inventory_owner_id,
+            item_id,
+            pick_face_location_id,
+            status,
+            cursor,
+        ))
+        .await
+    }
+
+    pub async fn configure_replenishment_policy(
+        request: &ConfigureReplenishmentPolicyRequest,
+        idempotency_key: &str,
+    ) -> Result<ConfigureReplenishmentPolicyResponse, ApiError> {
+        post("/api/v1/replenishment-policies", request, idempotency_key).await
+    }
+
+    pub async fn retire_replenishment_policy(
+        policy_id: i64,
+        request: &RetireReplenishmentPolicyRequest,
+        idempotency_key: &str,
+    ) -> Result<RetireReplenishmentPolicyResponse, ApiError> {
+        post(
+            &format!("/api/v1/replenishment-policies/{policy_id}/retirements"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn plan_replenishment(
+        policy_id: i64,
+        request: &PlanReplenishmentRequest,
+        idempotency_key: &str,
+    ) -> Result<PlanReplenishmentResponse, ApiError> {
+        post(
+            &format!("/api/v1/replenishment-policies/{policy_id}/plan-runs"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn cancel_replenishment_work(
+        work_id: i64,
+        request: &CancelReplenishmentWorkRequest,
+        idempotency_key: &str,
+    ) -> Result<ReplenishmentWorkCancellationResponse, ApiError> {
+        post(
+            &super::replenishment_cancellation_path(work_id),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
     pub fn new_idempotency_key() -> String {
         uuid::Uuid::new_v4().to_string()
     }
@@ -857,6 +948,175 @@ pub async fn accept_pick_shortage_as_short_ship(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub async fn replenishment_policies(
+    _facility_id: Option<i64>,
+    _inventory_owner_id: Option<i64>,
+    _item_id: Option<i64>,
+    _pick_face_location_id: Option<i64>,
+    _cursor: Option<&OpaqueCursor>,
+) -> Result<ReplenishmentPolicyPage, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn replenishment_queue(
+    _facility_id: Option<i64>,
+    _inventory_owner_id: Option<i64>,
+    _item_id: Option<i64>,
+    _pick_face_location_id: Option<i64>,
+    _status: Option<ReplenishmentWorkStatus>,
+    _cursor: Option<&OpaqueCursor>,
+) -> Result<ReplenishmentQueuePage, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn configure_replenishment_policy(
+    _request: &ConfigureReplenishmentPolicyRequest,
+    _idempotency_key: &str,
+) -> Result<ConfigureReplenishmentPolicyResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn retire_replenishment_policy(
+    _policy_id: i64,
+    _request: &RetireReplenishmentPolicyRequest,
+    _idempotency_key: &str,
+) -> Result<RetireReplenishmentPolicyResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn plan_replenishment(
+    _policy_id: i64,
+    _request: &PlanReplenishmentRequest,
+    _idempotency_key: &str,
+) -> Result<PlanReplenishmentResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn cancel_replenishment_work(
+    _work_id: i64,
+    _request: &CancelReplenishmentWorkRequest,
+    _idempotency_key: &str,
+) -> Result<ReplenishmentWorkCancellationResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn new_idempotency_key() -> String {
     "server-rendering-does-not-submit-commands".to_owned()
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn replenishment_policy_page_path(
+    facility_id: Option<i64>,
+    inventory_owner_id: Option<i64>,
+    item_id: Option<i64>,
+    pick_face_location_id: Option<i64>,
+    cursor: Option<&OpaqueCursor>,
+) -> String {
+    let mut path = "/api/v1/replenishment-policies?limit=100".to_owned();
+    append_optional_id(&mut path, "facility_id", facility_id);
+    append_optional_id(&mut path, "inventory_owner_id", inventory_owner_id);
+    append_optional_id(&mut path, "item_id", item_id);
+    append_optional_id(&mut path, "pick_face_location_id", pick_face_location_id);
+    append_cursor(&mut path, cursor);
+    path
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn replenishment_queue_page_path(
+    facility_id: Option<i64>,
+    inventory_owner_id: Option<i64>,
+    item_id: Option<i64>,
+    pick_face_location_id: Option<i64>,
+    status: Option<ReplenishmentWorkStatus>,
+    cursor: Option<&OpaqueCursor>,
+) -> String {
+    let mut path = "/api/v1/replenishment-queue?limit=100".to_owned();
+    append_optional_id(&mut path, "facility_id", facility_id);
+    append_optional_id(&mut path, "inventory_owner_id", inventory_owner_id);
+    append_optional_id(&mut path, "item_id", item_id);
+    append_optional_id(&mut path, "pick_face_location_id", pick_face_location_id);
+    if let Some(status) = status {
+        path.push_str("&status=");
+        path.push_str(replenishment_work_status_wire(status));
+    }
+    append_cursor(&mut path, cursor);
+    path
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn replenishment_cancellation_path(work_id: i64) -> String {
+    format!("/api/v1/replenishment-tasks/{work_id}/cancellations")
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn append_optional_id(path: &mut String, name: &str, value: Option<i64>) {
+    if let Some(value) = value {
+        path.push('&');
+        path.push_str(name);
+        path.push('=');
+        path.push_str(&value.to_string());
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn append_cursor(path: &mut String, cursor: Option<&OpaqueCursor>) {
+    if let Some(cursor) = cursor {
+        path.push_str("&cursor=");
+        path.push_str(&urlencoding::encode(cursor.as_str()));
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+const fn replenishment_work_status_wire(status: ReplenishmentWorkStatus) -> &'static str {
+    match status {
+        ReplenishmentWorkStatus::Pending => "pending",
+        ReplenishmentWorkStatus::Claimed => "claimed",
+        ReplenishmentWorkStatus::Completed => "completed",
+        ReplenishmentWorkStatus::Cancelled => "cancelled",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replenishment_policy_cursor_is_encoded_and_filters_are_stable() {
+        let cursor = OpaqueCursor::new("rp1.a.2.a.a.0000000000000007".to_owned()).unwrap();
+        assert_eq!(
+            replenishment_policy_page_path(Some(3), Some(4), Some(5), Some(6), Some(&cursor)),
+            "/api/v1/replenishment-policies?limit=100&facility_id=3&inventory_owner_id=4&item_id=5&pick_face_location_id=6&cursor=rp1.a.2.a.a.0000000000000007"
+        );
+    }
+
+    #[test]
+    fn replenishment_queue_omits_status_for_the_open_work_default() {
+        assert_eq!(
+            replenishment_queue_page_path(None, None, None, None, None, None),
+            "/api/v1/replenishment-queue?limit=100"
+        );
+        assert!(replenishment_queue_page_path(
+            None,
+            None,
+            None,
+            None,
+            Some(ReplenishmentWorkStatus::Claimed),
+            None
+        )
+        .ends_with("&status=claimed"));
+    }
+
+    #[test]
+    fn replenishment_cancellation_targets_one_typed_work_resource() {
+        assert_eq!(
+            replenishment_cancellation_path(42),
+            "/api/v1/replenishment-tasks/42/cancellations"
+        );
+    }
 }

@@ -14,6 +14,7 @@ pub mod order_release;
 pub mod outbox;
 pub mod packing;
 pub mod picking;
+pub mod replenishment;
 pub mod shipping;
 pub mod topology;
 

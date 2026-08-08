@@ -214,7 +214,7 @@ pub(super) async fn release_expired_tasks_with_scope(
     Ok(count)
 }
 
-pub(super) async fn release_expired_tasks_tx(
+pub(in crate::repo) async fn release_expired_tasks_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     assigned_user_id: Option<i64>,
@@ -262,7 +262,7 @@ pub(super) async fn release_expired_tasks_tx(
     Ok(task_ids)
 }
 
-pub(super) async fn release_inaccessible_active_tasks_tx(
+pub(in crate::repo) async fn release_inaccessible_active_tasks_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     user_id: i64,

@@ -45,6 +45,14 @@ use crate::workflow::{
     MovementWork, PutawayClaim, PutawayCommand, ReleaseReason, RfCommand,
 };
 
+mod replenishment;
+
+pub use replenishment::{
+    build_heartbeat_request_parts as build_replenishment_heartbeat_request_parts,
+    decode_claim_response as decode_replenishment_claim_response,
+    decode_heartbeat_response as decode_replenishment_heartbeat_response,
+};
+
 pub const JSON_CONTENT_TYPE: &str = "application/json";
 pub const EXPECTED_RECEIVING_BARCODE_LOOKUP_PATH: &str =
     "/api/v1/expected-receiving/loads/by-barcode";
@@ -80,6 +88,10 @@ pub enum ResponseKind {
     PickConfirmation,
     PickShortageReport,
     PickRelease,
+    ReplenishmentOptionalClaim,
+    ReplenishmentClaim,
+    ReplenishmentConfirmation,
+    ReplenishmentRelease,
     ExpectedReceiptConfirmation,
 }
 
@@ -111,6 +123,8 @@ pub enum WireRequestError {
     InvalidPickContentId,
     #[error("pick shortage contains invalid {field}")]
     InvalidPickShortageField { field: &'static str },
+    #[error("replenishment command contains invalid persisted state")]
+    InvalidReplenishmentCommand,
     #[error("load ID must be positive")]
     InvalidLoadId,
     #[error("load line ID must be positive")]
@@ -154,6 +168,8 @@ pub enum WireResponseError {
     InvalidExpectedReceiptConfirmation,
     #[error("the warehouse service returned an invalid pick-shortage result")]
     InvalidPickShortageResponse,
+    #[error("the warehouse service returned an invalid replenishment result")]
+    InvalidReplenishmentResponse,
     #[error(
         "the expected receipt response line ID {actual} does not match requested line {expected}"
     )]
@@ -503,6 +519,7 @@ pub fn build_durable_request(
                 ResponseKind::PickRelease,
             )
         }
+        RfCommand::Replenishment(command) => replenishment::build_command_parts(command)?,
         RfCommand::ExpectedReceipt(intent) => {
             if !intent.is_current_and_valid() {
                 return Err(WireRequestError::InvalidExpectedReceiptField {
@@ -647,6 +664,10 @@ pub fn decode_command_response(
                 task_id: response.task_id,
             })
         }
+        ResponseKind::ReplenishmentOptionalClaim
+        | ResponseKind::ReplenishmentClaim
+        | ResponseKind::ReplenishmentConfirmation
+        | ResponseKind::ReplenishmentRelease => replenishment::decode_outcome(response_kind, body),
         ResponseKind::ExpectedReceiptConfirmation => {
             let response = decode_expected_receipt_confirmation_response_from_body(status, body)?;
             Ok(CommandOutcome::ExpectedReceipt(response))

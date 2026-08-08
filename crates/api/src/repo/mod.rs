@@ -26,6 +26,7 @@ pub mod order_release;
 pub mod orders;
 pub mod packing;
 pub mod picking;
+pub mod replenishment;
 pub mod shipping;
 pub mod tasks;
 pub mod tenants;

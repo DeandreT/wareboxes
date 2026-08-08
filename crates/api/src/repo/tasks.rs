@@ -56,20 +56,20 @@ pub(crate) async fn release_tasks_outside_scope_tx(
     leasing::release_inaccessible_active_tasks_tx(tx, tenant_id, user_id, scope).await
 }
 
-struct NewWorkTask {
-    facility_id: Option<i64>,
-    inventory_owner_id: Option<i64>,
-    task_type: WorkTaskType,
-    title: String,
-    instructions: Option<String>,
-    required_permission: String,
-    priority: i64,
-    task_timeout_seconds: i64,
-    assigned_user_id: Option<i64>,
-    created_by: Option<i64>,
-    scheduled_for: Option<Timestamp>,
-    due_at: Option<Timestamp>,
-    metadata_json: Option<String>,
+pub(in crate::repo) struct NewWorkTask {
+    pub(in crate::repo) facility_id: Option<i64>,
+    pub(in crate::repo) inventory_owner_id: Option<i64>,
+    pub(in crate::repo) task_type: WorkTaskType,
+    pub(in crate::repo) title: String,
+    pub(in crate::repo) instructions: Option<String>,
+    pub(in crate::repo) required_permission: String,
+    pub(in crate::repo) priority: i64,
+    pub(in crate::repo) task_timeout_seconds: i64,
+    pub(in crate::repo) assigned_user_id: Option<i64>,
+    pub(in crate::repo) created_by: Option<i64>,
+    pub(in crate::repo) scheduled_for: Option<Timestamp>,
+    pub(in crate::repo) due_at: Option<Timestamp>,
+    pub(in crate::repo) metadata_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,11 +151,11 @@ async fn lock_current_task_scope_tx(
     current_scope_tx(tx, tenant_id, scope_user_id).await
 }
 
-fn task_permission(_task_type: WorkTaskType) -> &'static str {
+pub(in crate::repo) fn task_permission(_task_type: WorkTaskType) -> &'static str {
     "wms"
 }
 
-fn task_timeout_seconds(task_type: WorkTaskType) -> i64 {
+pub(in crate::repo) fn task_timeout_seconds(task_type: WorkTaskType) -> i64 {
     match task_type {
         WorkTaskType::CycleCountItemLocation => 30 * 60,
         WorkTaskType::CycleCountLocation => 60 * 60,
@@ -164,10 +164,11 @@ fn task_timeout_seconds(task_type: WorkTaskType) -> i64 {
         WorkTaskType::Putaway => 30 * 60,
         WorkTaskType::LicensePlatePutaway => 30 * 60,
         WorkTaskType::InventoryRelocation => 30 * 60,
+        WorkTaskType::Replenishment => 30 * 60,
     }
 }
 
-async fn insert_task_tx(
+pub(in crate::repo) async fn insert_task_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     task: NewWorkTask,

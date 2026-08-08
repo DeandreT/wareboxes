@@ -579,6 +579,1531 @@ $$;
 
 
 --
+-- Name: close_replenishment_task_detail(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.close_replenishment_task_detail() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NEW.task_type = 'replenishment'
+       AND (
+           NEW.deleted IS NOT NULL
+           OR NEW.status IN ('completed', 'cancelled')
+       )
+    THEN
+        UPDATE public.replenishment_tasks
+        SET closed_at = COALESCE(
+            NEW.completed_at,
+            NEW.deleted,
+            statement_timestamp()
+        )
+        WHERE tenant_id = NEW.tenant_id
+          AND task_id = NEW.id
+          AND closed_at IS NULL;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: claim_loose_inventory_movement_source(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.claim_loose_inventory_movement_source() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    claim_kind text;
+    claimed_at_value timestamp with time zone;
+BEGIN
+    IF TG_TABLE_NAME = 'inventory_relocation_tasks' THEN
+        IF NEW.workflow <> 'loose_balance' THEN
+            RETURN NEW;
+        END IF;
+        claim_kind := 'inventory_relocation';
+    ELSIF TG_TABLE_NAME = 'putaway_tasks' THEN
+        claim_kind := 'putaway';
+    ELSIF TG_TABLE_NAME = 'replenishment_tasks' THEN
+        claim_kind := 'replenishment';
+    ELSE
+        RAISE EXCEPTION 'unsupported loose inventory movement source table'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT task.created
+    INTO claimed_at_value
+    FROM public.work_tasks task
+    WHERE task.tenant_id = NEW.tenant_id
+      AND task.id = NEW.task_id
+      AND task.inventory_owner_id = NEW.inventory_owner_id
+      AND task.facility_id = NEW.facility_id
+      AND task.task_type = claim_kind;
+
+    IF claimed_at_value IS NULL THEN
+        RAISE EXCEPTION 'loose inventory movement work task is missing'
+            USING ERRCODE = '23514';
+    END IF;
+
+    INSERT INTO public.loose_inventory_movement_claims (
+        tenant_id,
+        inventory_owner_id,
+        facility_id,
+        source_inventory_balance_id,
+        work_task_id,
+        work_kind,
+        claimed_at
+    )
+    VALUES (
+        NEW.tenant_id,
+        NEW.inventory_owner_id,
+        NEW.facility_id,
+        NEW.source_inventory_balance_id,
+        NEW.task_id,
+        claim_kind,
+        claimed_at_value
+    );
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: release_loose_inventory_movement_source(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.release_loose_inventory_movement_source() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    claim_kind text;
+    affected_rows bigint;
+BEGIN
+    IF OLD.closed_at IS NOT NULL OR NEW.closed_at IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    IF TG_TABLE_NAME = 'inventory_relocation_tasks' THEN
+        IF NEW.workflow <> 'loose_balance' THEN
+            RETURN NEW;
+        END IF;
+        claim_kind := 'inventory_relocation';
+    ELSIF TG_TABLE_NAME = 'putaway_tasks' THEN
+        claim_kind := 'putaway';
+    ELSIF TG_TABLE_NAME = 'replenishment_tasks' THEN
+        claim_kind := 'replenishment';
+    ELSE
+        RAISE EXCEPTION 'unsupported loose inventory movement source table'
+            USING ERRCODE = '23514';
+    END IF;
+
+    UPDATE public.loose_inventory_movement_claims
+    SET released_at = NEW.closed_at
+    WHERE tenant_id = NEW.tenant_id
+      AND work_task_id = NEW.task_id
+      AND work_kind = claim_kind
+      AND released_at IS NULL;
+
+    GET DIAGNOSTICS affected_rows = ROW_COUNT;
+    IF affected_rows <> 1 THEN
+        RAISE EXCEPTION 'active loose inventory movement claim is missing'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_loose_inventory_movement_claim_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_loose_inventory_movement_claim_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'loose inventory movement claims are immutable'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.id <> OLD.id
+       OR NEW.tenant_id <> OLD.tenant_id
+       OR NEW.inventory_owner_id <> OLD.inventory_owner_id
+       OR NEW.facility_id <> OLD.facility_id
+       OR NEW.source_inventory_balance_id <> OLD.source_inventory_balance_id
+       OR NEW.work_task_id <> OLD.work_task_id
+       OR NEW.work_kind <> OLD.work_kind
+       OR NEW.claimed_at <> OLD.claimed_at
+       OR OLD.released_at IS NOT NULL
+       OR NEW.released_at IS NULL
+    THEN
+        RAISE EXCEPTION 'loose inventory movement claim facts are immutable'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_replenishment_policy(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_replenishment_policy() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    predecessor_revision bigint;
+    predecessor_tenant_id bigint;
+    predecessor_owner_id bigint;
+    predecessor_facility_id bigint;
+    predecessor_pick_face_location_id bigint;
+    predecessor_item_id bigint;
+    predecessor_uom text;
+    predecessor_effective_to timestamp with time zone;
+    predecessor_retired_by_user_id bigint;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        concat_ws(
+            ':',
+            'replenishment_policy',
+            NEW.tenant_id,
+            NEW.inventory_owner_id,
+            NEW.facility_id,
+            NEW.pick_face_location_id,
+            NEW.item_id,
+            NEW.uom
+        ),
+        0
+    ));
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.inventory_owner_facilities assignment
+        WHERE assignment.tenant_id = NEW.tenant_id
+          AND assignment.inventory_owner_id = NEW.inventory_owner_id
+          AND assignment.facility_id = NEW.facility_id
+          AND assignment.deleted IS NULL
+    ) THEN
+        RAISE EXCEPTION 'replenishment policy owner-facility assignment is inactive'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.inventory_owner_items owner_item
+        WHERE owner_item.tenant_id = NEW.tenant_id
+          AND owner_item.inventory_owner_id = NEW.inventory_owner_id
+          AND owner_item.item_id = NEW.item_id
+          AND owner_item.deleted IS NULL
+    ) THEN
+        RAISE EXCEPTION 'replenishment policy owner-item assignment is inactive'
+            USING ERRCODE = '23514';
+    END IF;
+
+    PERFORM location.id
+    FROM public.locations location
+    WHERE location.tenant_id = NEW.tenant_id
+      AND location.facility_id = NEW.facility_id
+      AND location.id = NEW.pick_face_location_id
+      AND location.deleted IS NULL
+      AND location.active
+      AND NULLIF(btrim(location.barcode), '') IS NOT NULL
+      AND location.pickable
+      AND NOT location.receivable
+    FOR SHARE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'replenishment pick face must be active, scannable, pickable, and non-receivable'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.supersedes_policy_id IS NULL THEN
+        IF NEW.revision <> 1 THEN
+            RAISE EXCEPTION 'initial replenishment policy revision must be one'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    SELECT predecessor.revision,
+           predecessor.tenant_id,
+           predecessor.inventory_owner_id,
+           predecessor.facility_id,
+           predecessor.pick_face_location_id,
+           predecessor.item_id,
+           predecessor.uom,
+           predecessor.effective_to,
+           predecessor.retired_by_user_id
+    INTO predecessor_revision,
+         predecessor_tenant_id,
+         predecessor_owner_id,
+         predecessor_facility_id,
+         predecessor_pick_face_location_id,
+         predecessor_item_id,
+         predecessor_uom,
+         predecessor_effective_to,
+         predecessor_retired_by_user_id
+    FROM public.replenishment_policies predecessor
+    WHERE predecessor.id = NEW.supersedes_policy_id;
+
+    IF NOT FOUND
+       OR predecessor_tenant_id <> NEW.tenant_id
+       OR predecessor_owner_id <> NEW.inventory_owner_id
+       OR predecessor_facility_id <> NEW.facility_id
+       OR predecessor_pick_face_location_id <> NEW.pick_face_location_id
+       OR predecessor_item_id <> NEW.item_id
+       OR predecessor_uom <> NEW.uom
+       OR NEW.revision <> predecessor_revision + 1
+       OR predecessor_effective_to IS NULL
+       OR NEW.effective_from < predecessor_effective_to
+       OR predecessor_retired_by_user_id IS NULL
+       OR EXISTS (
+           SELECT 1
+           FROM public.replenishment_policies newer
+           WHERE newer.tenant_id = NEW.tenant_id
+             AND newer.inventory_owner_id = NEW.inventory_owner_id
+             AND newer.facility_id = NEW.facility_id
+             AND newer.pick_face_location_id = NEW.pick_face_location_id
+             AND newer.item_id = NEW.item_id
+             AND newer.uom = NEW.uom
+             AND newer.revision > predecessor_revision
+       )
+    THEN
+        RAISE EXCEPTION 'replenishment policy successor does not match its closed predecessor'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_replenishment_policy_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_replenishment_policy_mutation() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'replenishment policies are immutable'
+            USING ERRCODE = '23514';
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        concat_ws(
+            ':',
+            'replenishment_policy',
+            OLD.tenant_id,
+            OLD.inventory_owner_id,
+            OLD.facility_id,
+            OLD.pick_face_location_id,
+            OLD.item_id,
+            OLD.uom
+        ),
+        0
+    ));
+
+    IF NEW.id <> OLD.id
+       OR NEW.tenant_id <> OLD.tenant_id
+       OR NEW.inventory_owner_id <> OLD.inventory_owner_id
+       OR NEW.facility_id <> OLD.facility_id
+       OR NEW.pick_face_location_id <> OLD.pick_face_location_id
+       OR NEW.item_id <> OLD.item_id
+       OR NEW.uom <> OLD.uom
+       OR NEW.minimum_qty <> OLD.minimum_qty
+       OR NEW.target_qty <> OLD.target_qty
+       OR NEW.revision <> OLD.revision
+       OR NEW.supersedes_policy_id IS DISTINCT FROM OLD.supersedes_policy_id
+       OR NEW.source_location_count <> OLD.source_location_count
+       OR NEW.effective_from <> OLD.effective_from
+       OR NEW.configured_by_user_id <> OLD.configured_by_user_id
+       OR NEW.configured_at <> OLD.configured_at
+       OR OLD.effective_to IS NOT NULL
+       OR NEW.effective_to IS NULL
+       OR NEW.retired_by_user_id IS NULL
+       OR NEW.effective_to <= OLD.effective_from
+    THEN
+        RAISE EXCEPTION 'only active replenishment policy retirement is allowed'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.replenishment_tasks task
+        WHERE task.tenant_id = OLD.tenant_id
+          AND task.policy_id = OLD.id
+          AND task.closed_at IS NULL
+    ) THEN
+        RAISE EXCEPTION 'replenishment policy has active inbound work'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_replenishment_policy_source(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_replenishment_policy_source() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.replenishment_policies policy
+        WHERE policy.id = NEW.policy_id
+          AND policy.tenant_id = NEW.tenant_id
+          AND policy.inventory_owner_id = NEW.inventory_owner_id
+          AND policy.facility_id = NEW.facility_id
+          AND policy.effective_to IS NULL
+    ) THEN
+        RAISE EXCEPTION 'replenishment source requires an active scoped policy'
+            USING ERRCODE = '23514';
+    END IF;
+
+    PERFORM location.id
+    FROM public.locations location
+    WHERE location.id = NEW.source_location_id
+      AND location.tenant_id = NEW.tenant_id
+      AND location.facility_id = NEW.facility_id
+      AND location.deleted IS NULL
+      AND location.active
+      AND NULLIF(btrim(location.barcode), '') IS NOT NULL
+      AND NOT location.pickable
+      AND NOT location.receivable
+    FOR SHARE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'replenishment reserve source must be active, scannable, non-pickable, and non-receivable'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: reject_replenishment_policy_source_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_replenishment_policy_source_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'replenishment policy sources are immutable'
+        USING ERRCODE = '23514';
+END;
+$$;
+
+
+--
+-- Name: require_replenishment_policy_source_count(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_replenishment_policy_source_count() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    checked_tenant_id bigint;
+    checked_policy_id bigint;
+BEGIN
+    IF TG_TABLE_NAME = 'replenishment_policies' THEN
+        checked_tenant_id := NEW.tenant_id;
+        checked_policy_id := NEW.id;
+    ELSE
+        checked_tenant_id := NEW.tenant_id;
+        checked_policy_id := NEW.policy_id;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.replenishment_policies policy
+        WHERE policy.tenant_id = checked_tenant_id
+          AND policy.id = checked_policy_id
+          AND policy.source_location_count = (
+              SELECT count(*)
+              FROM public.replenishment_policy_sources source
+              WHERE source.tenant_id = checked_tenant_id
+                AND source.policy_id = checked_policy_id
+          )
+          AND policy.source_location_count > 0
+    ) THEN
+        RAISE EXCEPTION 'replenishment policy source count is inconsistent'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_replenishment_plan_run(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_replenishment_plan_run() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    policy_minimum_qty bigint;
+    policy_target_qty bigint;
+    policy_revision bigint;
+    policy_source_count bigint;
+    policy_pick_face_location_id bigint;
+    computed_pick_face_free_qty bigint;
+    computed_active_inbound_qty bigint;
+    computed_projected_free_qty bigint;
+    computed_unallocated_demand_qty bigint;
+    computed_required_level_qty bigint;
+    computed_target_gap_qty bigint;
+    computed_reserve_free_qty bigint;
+    computed_planned_qty bigint;
+    computed_outcome text;
+BEGIN
+    SELECT policy.minimum_qty,
+           policy.target_qty,
+           policy.revision,
+           policy.source_location_count,
+           policy.pick_face_location_id
+    INTO policy_minimum_qty,
+         policy_target_qty,
+         policy_revision,
+         policy_source_count,
+         policy_pick_face_location_id
+    FROM public.replenishment_policies policy
+    WHERE policy.id = NEW.policy_id
+      AND policy.tenant_id = NEW.tenant_id
+      AND policy.inventory_owner_id = NEW.inventory_owner_id
+      AND policy.facility_id = NEW.facility_id
+      AND policy.item_id = NEW.item_id
+      AND policy.uom = NEW.uom
+      AND policy.effective_from <= NEW.planned_at
+      AND (policy.effective_to IS NULL OR policy.effective_to > NEW.planned_at)
+    FOR UPDATE;
+
+    IF NOT FOUND
+       OR policy_revision <> NEW.policy_revision
+       OR policy_minimum_qty <> NEW.minimum_qty
+       OR policy_target_qty <> NEW.target_qty
+       OR policy_source_count <> NEW.source_location_count
+       OR policy_pick_face_location_id <> NEW.pick_face_location_id
+    THEN
+        RAISE EXCEPTION 'replenishment plan policy snapshot is stale or out of scope'
+            USING ERRCODE = '55000';
+    END IF;
+
+    PERFORM location.id
+    FROM public.locations location
+    WHERE location.tenant_id = NEW.tenant_id
+      AND location.facility_id = NEW.facility_id
+      AND (
+          location.id = NEW.pick_face_location_id
+          OR EXISTS (
+              SELECT 1
+              FROM public.replenishment_policy_sources source
+              WHERE source.tenant_id = NEW.tenant_id
+                AND source.inventory_owner_id = NEW.inventory_owner_id
+                AND source.facility_id = NEW.facility_id
+                AND source.policy_id = NEW.policy_id
+                AND source.source_location_id = location.id
+          )
+      )
+    ORDER BY location.id
+    FOR SHARE;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.locations pick_face
+        WHERE pick_face.tenant_id = NEW.tenant_id
+          AND pick_face.facility_id = NEW.facility_id
+          AND pick_face.id = NEW.pick_face_location_id
+          AND pick_face.deleted IS NULL
+          AND pick_face.active
+          AND NULLIF(btrim(pick_face.barcode), '') IS NOT NULL
+          AND pick_face.pickable
+          AND NOT pick_face.receivable
+    ) THEN
+        RAISE EXCEPTION 'replenishment plan pick face is stale'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF policy_source_count <> (
+        SELECT count(*)
+        FROM public.replenishment_policy_sources source
+        JOIN public.locations location
+          ON location.tenant_id = source.tenant_id
+         AND location.facility_id = source.facility_id
+         AND location.id = source.source_location_id
+        WHERE source.tenant_id = NEW.tenant_id
+          AND source.policy_id = NEW.policy_id
+          AND location.deleted IS NULL
+          AND location.active
+          AND NULLIF(btrim(location.barcode), '') IS NOT NULL
+          AND NOT location.pickable
+          AND NOT location.receivable
+    ) THEN
+        RAISE EXCEPTION 'replenishment plan reserve source set is stale'
+            USING ERRCODE = '55000';
+    END IF;
+
+    PERFORM task.task_id
+    FROM public.replenishment_tasks task
+    WHERE task.tenant_id = NEW.tenant_id
+      AND task.inventory_owner_id = NEW.inventory_owner_id
+      AND task.facility_id = NEW.facility_id
+      AND task.policy_id = NEW.policy_id
+      AND task.closed_at IS NULL
+    ORDER BY task.task_id
+    FOR SHARE;
+
+    PERFORM reservation.id
+    FROM public.inventory_reservations reservation
+    WHERE reservation.tenant_id = NEW.tenant_id
+      AND reservation.inventory_owner_id = NEW.inventory_owner_id
+      AND reservation.facility_id = NEW.facility_id
+      AND reservation.item_id = NEW.item_id
+      AND reservation.uom = NEW.uom
+      AND reservation.status = 'active'
+      AND reservation.deleted IS NULL
+    ORDER BY reservation.id
+    FOR SHARE;
+
+    PERFORM allocation.id
+    FROM public.inventory_allocations allocation
+    JOIN public.inventory_reservations reservation
+      ON reservation.tenant_id = allocation.tenant_id
+     AND reservation.inventory_owner_id = allocation.inventory_owner_id
+     AND reservation.id = allocation.reservation_id
+    WHERE reservation.tenant_id = NEW.tenant_id
+      AND reservation.inventory_owner_id = NEW.inventory_owner_id
+      AND reservation.facility_id = NEW.facility_id
+      AND reservation.item_id = NEW.item_id
+      AND reservation.uom = NEW.uom
+      AND reservation.status = 'active'
+      AND reservation.deleted IS NULL
+      AND allocation.status = 'allocated'
+      AND allocation.deleted IS NULL
+    ORDER BY allocation.id
+    FOR SHARE OF allocation;
+
+    PERFORM balance.id
+    FROM public.inventory_balances balance
+    WHERE balance.tenant_id = NEW.tenant_id
+      AND balance.inventory_owner_id = NEW.inventory_owner_id
+      AND balance.facility_id = NEW.facility_id
+      AND balance.item_id = NEW.item_id
+      AND balance.uom = NEW.uom
+      AND balance.license_plate_id IS NULL
+      AND balance.status = 'available'
+      AND balance.deleted IS NULL
+      AND (
+          balance.location_id = NEW.pick_face_location_id
+          OR EXISTS (
+              SELECT 1
+              FROM public.replenishment_policy_sources source
+              WHERE source.tenant_id = balance.tenant_id
+                AND source.inventory_owner_id = balance.inventory_owner_id
+                AND source.facility_id = balance.facility_id
+                AND source.policy_id = NEW.policy_id
+                AND source.source_location_id = balance.location_id
+          )
+      )
+    ORDER BY balance.id
+    FOR SHARE;
+
+    SELECT COALESCE(sum(
+        GREATEST(balance.qty_on_hand - balance.qty_reserved - balance.qty_held, 0)
+    ), 0)::bigint
+    INTO computed_pick_face_free_qty
+    FROM public.inventory_balances balance
+    WHERE balance.tenant_id = NEW.tenant_id
+      AND balance.inventory_owner_id = NEW.inventory_owner_id
+      AND balance.facility_id = NEW.facility_id
+      AND balance.location_id = NEW.pick_face_location_id
+      AND balance.item_id = NEW.item_id
+      AND balance.uom = NEW.uom
+      AND balance.license_plate_id IS NULL
+      AND balance.status = 'available'
+      AND balance.deleted IS NULL;
+
+    SELECT COALESCE(sum(task.planned_qty), 0)::bigint
+    INTO computed_active_inbound_qty
+    FROM public.replenishment_tasks task
+    WHERE task.tenant_id = NEW.tenant_id
+      AND task.inventory_owner_id = NEW.inventory_owner_id
+      AND task.facility_id = NEW.facility_id
+      AND task.policy_id = NEW.policy_id
+      AND task.destination_location_id = NEW.pick_face_location_id
+      AND task.item_id = NEW.item_id
+      AND task.uom = NEW.uom
+      AND task.closed_at IS NULL;
+
+    computed_projected_free_qty := computed_pick_face_free_qty
+        + computed_active_inbound_qty;
+
+    SELECT COALESCE(sum(
+        GREATEST(
+            reservation.qty
+            - COALESCE(disposition.accepted_short_qty, 0)
+            - COALESCE(allocation.allocated_qty, 0),
+            0
+        )
+    ), 0)::bigint
+    INTO computed_unallocated_demand_qty
+    FROM public.inventory_reservations reservation
+    LEFT JOIN LATERAL (
+        SELECT sum(accepted.accepted_short_qty)::bigint AS accepted_short_qty
+        FROM public.pick_short_ship_dispositions accepted
+        WHERE accepted.tenant_id = reservation.tenant_id
+          AND accepted.inventory_owner_id = reservation.inventory_owner_id
+          AND accepted.reservation_id = reservation.id
+    ) disposition ON true
+    LEFT JOIN LATERAL (
+        SELECT sum(current_allocation.qty)::bigint AS allocated_qty
+        FROM public.inventory_allocations current_allocation
+        WHERE current_allocation.tenant_id = reservation.tenant_id
+          AND current_allocation.inventory_owner_id = reservation.inventory_owner_id
+          AND current_allocation.reservation_id = reservation.id
+          AND current_allocation.status = 'allocated'
+          AND current_allocation.deleted IS NULL
+    ) allocation ON true
+    WHERE reservation.tenant_id = NEW.tenant_id
+      AND reservation.inventory_owner_id = NEW.inventory_owner_id
+      AND reservation.facility_id = NEW.facility_id
+      AND reservation.item_id = NEW.item_id
+      AND reservation.uom = NEW.uom
+      AND reservation.status = 'active'
+      AND reservation.deleted IS NULL;
+
+    SELECT COALESCE(sum(
+        GREATEST(balance.qty_on_hand - balance.qty_reserved - balance.qty_held, 0)
+    ), 0)::bigint
+    INTO computed_reserve_free_qty
+    FROM public.inventory_balances balance
+    JOIN public.replenishment_policy_sources source
+      ON source.tenant_id = balance.tenant_id
+     AND source.inventory_owner_id = balance.inventory_owner_id
+     AND source.facility_id = balance.facility_id
+     AND source.policy_id = NEW.policy_id
+     AND source.source_location_id = balance.location_id
+    WHERE balance.tenant_id = NEW.tenant_id
+      AND balance.inventory_owner_id = NEW.inventory_owner_id
+      AND balance.facility_id = NEW.facility_id
+      AND balance.item_id = NEW.item_id
+      AND balance.uom = NEW.uom
+      AND balance.license_plate_id IS NULL
+      AND balance.status = 'available'
+      AND balance.deleted IS NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM public.loose_inventory_movement_claims claim
+          WHERE claim.tenant_id = balance.tenant_id
+            AND claim.inventory_owner_id = balance.inventory_owner_id
+            AND claim.facility_id = balance.facility_id
+            AND claim.source_inventory_balance_id = balance.id
+            AND claim.released_at IS NULL
+      );
+
+    computed_required_level_qty := GREATEST(
+        policy_target_qty,
+        computed_unallocated_demand_qty
+    );
+    computed_target_gap_qty := GREATEST(
+        computed_required_level_qty - computed_projected_free_qty,
+        0
+    );
+
+    IF computed_projected_free_qty < policy_minimum_qty
+       OR computed_projected_free_qty < computed_unallocated_demand_qty
+    THEN
+        computed_planned_qty := LEAST(
+            computed_target_gap_qty,
+            computed_reserve_free_qty
+        );
+        IF computed_planned_qty = 0 THEN
+            computed_outcome := 'insufficient_reserve';
+        ELSIF computed_planned_qty < computed_target_gap_qty THEN
+            computed_outcome := 'partially_planned';
+        ELSE
+            computed_outcome := 'fully_planned';
+        END IF;
+    ELSE
+        computed_planned_qty := 0;
+        computed_outcome := 'not_needed';
+    END IF;
+
+    IF NEW.pick_face_free_qty <> computed_pick_face_free_qty
+       OR NEW.active_inbound_qty <> computed_active_inbound_qty
+       OR NEW.projected_free_qty <> computed_projected_free_qty
+       OR NEW.unallocated_demand_qty <> computed_unallocated_demand_qty
+       OR NEW.required_level_qty <> computed_required_level_qty
+       OR NEW.target_gap_qty <> computed_target_gap_qty
+       OR NEW.reserve_free_qty <> computed_reserve_free_qty
+       OR NEW.planned_qty <> computed_planned_qty
+       OR NEW.outcome <> computed_outcome
+       OR ((NEW.planned_qty = 0) <> (NEW.work_count = 0))
+    THEN
+        RAISE EXCEPTION 'replenishment plan snapshot is inconsistent'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: reject_replenishment_plan_run_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_replenishment_plan_run_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'replenishment plan runs are immutable'
+        USING ERRCODE = '23514';
+END;
+$$;
+
+
+--
+-- Name: validate_replenishment_task(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_replenishment_task() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    balance_free_qty bigint;
+    balance_lot text;
+    balance_serial text;
+    balance_expiration timestamp with time zone;
+    balance_received_at timestamp with time zone;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.work_tasks work
+        WHERE work.id = NEW.task_id
+          AND work.tenant_id = NEW.tenant_id
+          AND work.inventory_owner_id = NEW.inventory_owner_id
+          AND work.facility_id = NEW.facility_id
+          AND work.task_type = 'replenishment'
+          AND work.status IN ('open', 'assigned')
+          AND work.deleted IS NULL
+    ) THEN
+        RAISE EXCEPTION 'replenishment work task header is invalid'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.replenishment_plan_runs run
+        WHERE run.id = NEW.plan_run_id
+          AND run.tenant_id = NEW.tenant_id
+          AND run.inventory_owner_id = NEW.inventory_owner_id
+          AND run.facility_id = NEW.facility_id
+          AND run.policy_id = NEW.policy_id
+          AND run.policy_revision = NEW.policy_revision
+          AND run.pick_face_location_id = NEW.destination_location_id
+          AND run.item_id = NEW.item_id
+          AND run.uom = NEW.uom
+          AND run.outcome IN ('partially_planned', 'fully_planned')
+    ) THEN
+        RAISE EXCEPTION 'replenishment task plan snapshot is invalid'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.replenishment_policy_sources source
+        JOIN public.locations source_location
+          ON source_location.tenant_id = source.tenant_id
+         AND source_location.facility_id = source.facility_id
+         AND source_location.id = source.source_location_id
+        JOIN public.replenishment_policies policy
+          ON policy.tenant_id = source.tenant_id
+         AND policy.inventory_owner_id = source.inventory_owner_id
+         AND policy.facility_id = source.facility_id
+         AND policy.id = source.policy_id
+        JOIN public.locations destination
+          ON destination.tenant_id = policy.tenant_id
+         AND destination.facility_id = policy.facility_id
+         AND destination.id = policy.pick_face_location_id
+        WHERE source.tenant_id = NEW.tenant_id
+          AND source.inventory_owner_id = NEW.inventory_owner_id
+          AND source.facility_id = NEW.facility_id
+          AND source.policy_id = NEW.policy_id
+          AND source.source_location_id = NEW.source_location_id
+          AND policy.revision = NEW.policy_revision
+          AND policy.item_id = NEW.item_id
+          AND policy.uom = NEW.uom
+          AND policy.pick_face_location_id = NEW.destination_location_id
+          AND source_location.deleted IS NULL
+          AND source_location.active
+          AND NULLIF(btrim(source_location.barcode), '') IS NOT NULL
+          AND NOT source_location.pickable
+          AND NOT source_location.receivable
+          AND destination.deleted IS NULL
+          AND destination.active
+          AND NULLIF(btrim(destination.barcode), '') IS NOT NULL
+          AND destination.pickable
+          AND NOT destination.receivable
+    ) THEN
+        RAISE EXCEPTION 'replenishment task source or destination is ineligible'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT balance.qty_on_hand - balance.qty_reserved - balance.qty_held,
+           batch.lot,
+           batch.serial,
+           batch.expiration,
+           batch.created
+    INTO balance_free_qty,
+         balance_lot,
+         balance_serial,
+         balance_expiration,
+         balance_received_at
+    FROM public.inventory_balances balance
+    JOIN public.item_batches batch
+      ON batch.tenant_id = balance.tenant_id
+     AND batch.inventory_owner_id = balance.inventory_owner_id
+     AND batch.id = balance.item_batch_id
+    WHERE balance.id = NEW.source_inventory_balance_id
+      AND balance.tenant_id = NEW.tenant_id
+      AND balance.inventory_owner_id = NEW.inventory_owner_id
+      AND balance.facility_id = NEW.facility_id
+      AND balance.location_id = NEW.source_location_id
+      AND balance.item_batch_id = NEW.item_batch_id
+      AND balance.item_id = NEW.item_id
+      AND balance.uom = NEW.uom
+      AND balance.license_plate_id IS NULL
+      AND balance.status = 'available'
+      AND balance.deleted IS NULL
+    FOR SHARE OF balance, batch;
+
+    IF NOT FOUND
+       OR balance_free_qty <= 0
+       OR NEW.source_free_qty <> balance_free_qty
+       OR NEW.source_lot IS DISTINCT FROM balance_lot
+       OR NEW.source_serial IS DISTINCT FROM balance_serial
+       OR NEW.source_expiration IS DISTINCT FROM balance_expiration
+       OR NEW.source_received_at <> balance_received_at
+       OR NEW.planned_qty > balance_free_qty
+       OR EXISTS (
+           SELECT 1
+           FROM public.loose_inventory_movement_claims claim
+           WHERE claim.tenant_id = NEW.tenant_id
+             AND claim.inventory_owner_id = NEW.inventory_owner_id
+             AND claim.facility_id = NEW.facility_id
+             AND claim.source_inventory_balance_id = NEW.source_inventory_balance_id
+             AND claim.released_at IS NULL
+       )
+    THEN
+        RAISE EXCEPTION 'replenishment task source balance snapshot is stale or claimed'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_replenishment_task_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_replenishment_task_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'replenishment tasks are immutable'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.tenant_id <> OLD.tenant_id
+       OR NEW.task_id <> OLD.task_id
+       OR NEW.plan_run_id <> OLD.plan_run_id
+       OR NEW.policy_id <> OLD.policy_id
+       OR NEW.policy_revision <> OLD.policy_revision
+       OR NEW.inventory_owner_id <> OLD.inventory_owner_id
+       OR NEW.facility_id <> OLD.facility_id
+       OR NEW.source_inventory_balance_id <> OLD.source_inventory_balance_id
+       OR NEW.source_location_id <> OLD.source_location_id
+       OR NEW.destination_location_id <> OLD.destination_location_id
+       OR NEW.item_batch_id <> OLD.item_batch_id
+       OR NEW.item_id <> OLD.item_id
+       OR NEW.uom <> OLD.uom
+       OR NEW.inventory_status <> OLD.inventory_status
+       OR NEW.source_free_qty <> OLD.source_free_qty
+       OR NEW.planned_qty <> OLD.planned_qty
+       OR NEW.source_lot IS DISTINCT FROM OLD.source_lot
+       OR NEW.source_serial IS DISTINCT FROM OLD.source_serial
+       OR NEW.source_expiration IS DISTINCT FROM OLD.source_expiration
+       OR NEW.source_received_at <> OLD.source_received_at
+       OR NEW.travel_sequence <> OLD.travel_sequence
+       OR OLD.closed_at IS NOT NULL
+       OR NEW.closed_at IS NULL
+    THEN
+        RAISE EXCEPTION 'replenishment task facts are immutable'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_replenishment_plan_consistency(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_replenishment_plan_consistency() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    checked_tenant_id bigint;
+    checked_run_id bigint;
+    run_policy_id bigint;
+    run_owner_id bigint;
+    run_facility_id bigint;
+    run_item_id bigint;
+    run_uom text;
+    run_planned_qty bigint;
+    run_work_count bigint;
+BEGIN
+    IF TG_TABLE_NAME = 'replenishment_plan_runs' THEN
+        checked_tenant_id := NEW.tenant_id;
+        checked_run_id := NEW.id;
+    ELSE
+        checked_tenant_id := NEW.tenant_id;
+        checked_run_id := NEW.plan_run_id;
+    END IF;
+
+    SELECT run.policy_id,
+           run.inventory_owner_id,
+           run.facility_id,
+           run.item_id,
+           run.uom,
+           run.planned_qty,
+           run.work_count
+    INTO run_policy_id,
+         run_owner_id,
+         run_facility_id,
+         run_item_id,
+         run_uom,
+         run_planned_qty,
+         run_work_count
+    FROM public.replenishment_plan_runs run
+    WHERE run.tenant_id = checked_tenant_id
+      AND run.id = checked_run_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'replenishment plan run is missing'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF run_work_count <> (
+           SELECT count(*)
+           FROM public.replenishment_tasks task
+           WHERE task.tenant_id = checked_tenant_id
+             AND task.plan_run_id = checked_run_id
+       )
+       OR run_planned_qty <> COALESCE((
+           SELECT sum(task.planned_qty)
+           FROM public.replenishment_tasks task
+           WHERE task.tenant_id = checked_tenant_id
+             AND task.plan_run_id = checked_run_id
+       ), 0)
+    THEN
+        RAISE EXCEPTION 'replenishment plan work totals are inconsistent'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF EXISTS (
+        WITH eligible AS (
+            SELECT balance.id AS source_inventory_balance_id,
+                   balance.location_id AS source_location_id,
+                   balance.item_batch_id,
+                   batch.lot AS source_lot,
+                   batch.serial AS source_serial,
+                   batch.expiration AS source_expiration,
+                   batch.created AS source_received_at,
+                   (balance.qty_on_hand - balance.qty_reserved - balance.qty_held)::bigint AS source_free_qty,
+                   row_number() OVER (
+                       ORDER BY batch.expiration NULLS LAST, batch.created, balance.id
+                   )::bigint AS travel_sequence,
+                   COALESCE(sum(
+                       balance.qty_on_hand - balance.qty_reserved - balance.qty_held
+                   ) OVER (
+                       ORDER BY batch.expiration NULLS LAST, batch.created, balance.id
+                       ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                   ), 0)::bigint AS previous_free_qty
+            FROM public.inventory_balances balance
+            JOIN public.item_batches batch
+              ON batch.tenant_id = balance.tenant_id
+             AND batch.inventory_owner_id = balance.inventory_owner_id
+             AND batch.id = balance.item_batch_id
+            JOIN public.replenishment_policy_sources source
+              ON source.tenant_id = balance.tenant_id
+             AND source.inventory_owner_id = balance.inventory_owner_id
+             AND source.facility_id = balance.facility_id
+             AND source.policy_id = run_policy_id
+             AND source.source_location_id = balance.location_id
+            WHERE balance.tenant_id = checked_tenant_id
+              AND balance.inventory_owner_id = run_owner_id
+              AND balance.facility_id = run_facility_id
+              AND balance.item_id = run_item_id
+              AND balance.uom = run_uom
+              AND balance.license_plate_id IS NULL
+              AND balance.status = 'available'
+              AND balance.deleted IS NULL
+              AND (balance.qty_on_hand - balance.qty_reserved - balance.qty_held) > 0
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM public.loose_inventory_movement_claims claim
+                  WHERE claim.tenant_id = balance.tenant_id
+                    AND claim.inventory_owner_id = balance.inventory_owner_id
+                    AND claim.facility_id = balance.facility_id
+                    AND claim.source_inventory_balance_id = balance.id
+                    AND claim.released_at IS NULL
+                    AND NOT (
+                        claim.work_kind = 'replenishment'
+                        AND EXISTS (
+                            SELECT 1
+                            FROM public.replenishment_tasks claimed_task
+                            WHERE claimed_task.tenant_id = claim.tenant_id
+                              AND claimed_task.task_id = claim.work_task_id
+                              AND claimed_task.plan_run_id = checked_run_id
+                        )
+                    )
+              )
+        ), expected AS (
+            SELECT eligible.source_inventory_balance_id,
+                   eligible.source_location_id,
+                   eligible.item_batch_id,
+                   eligible.source_lot,
+                   eligible.source_serial,
+                   eligible.source_expiration,
+                   eligible.source_received_at,
+                   eligible.source_free_qty,
+                   LEAST(
+                       eligible.source_free_qty,
+                       run_planned_qty - eligible.previous_free_qty
+                   )::bigint AS planned_qty,
+                   eligible.travel_sequence
+            FROM eligible
+            WHERE eligible.previous_free_qty < run_planned_qty
+        ), actual AS (
+            SELECT task.*
+            FROM public.replenishment_tasks task
+            WHERE task.tenant_id = checked_tenant_id
+              AND task.plan_run_id = checked_run_id
+        )
+        SELECT 1
+        FROM expected
+        FULL OUTER JOIN actual task
+          ON task.travel_sequence = expected.travel_sequence
+        WHERE expected.source_inventory_balance_id IS DISTINCT FROM task.source_inventory_balance_id
+           OR expected.source_location_id IS DISTINCT FROM task.source_location_id
+           OR expected.item_batch_id IS DISTINCT FROM task.item_batch_id
+           OR expected.source_lot IS DISTINCT FROM task.source_lot
+           OR expected.source_serial IS DISTINCT FROM task.source_serial
+           OR expected.source_expiration IS DISTINCT FROM task.source_expiration
+           OR expected.source_received_at IS DISTINCT FROM task.source_received_at
+           OR expected.source_free_qty IS DISTINCT FROM task.source_free_qty
+           OR expected.planned_qty IS DISTINCT FROM task.planned_qty
+    ) THEN
+        RAISE EXCEPTION 'replenishment tasks do not match deterministic FEFO selection'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: reject_replenishment_confirmation_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_replenishment_confirmation_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'replenishment confirmations are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: validate_replenishment_confirmation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_replenishment_confirmation() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    source_row record;
+    destination_row record;
+    batch_row record;
+    transaction_matches boolean;
+    transaction_entry_count bigint;
+    source_entry_count bigint;
+    destination_entry_count bigint;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.work_tasks work
+        JOIN public.replenishment_tasks task
+          ON task.tenant_id = work.tenant_id
+         AND task.task_id = work.id
+        WHERE work.tenant_id = NEW.tenant_id
+          AND work.id = NEW.task_id
+          AND work.inventory_owner_id = NEW.inventory_owner_id
+          AND work.facility_id = NEW.facility_id
+          AND work.task_type = 'replenishment'
+          AND work.status = 'completed'
+          AND work.deleted IS NULL
+          AND work.assigned_user_id = NEW.confirmed_by_user_id
+          AND work.completed_by = NEW.confirmed_by_user_id
+          AND work.completed_at = NEW.confirmed_at
+          AND task.closed_at = NEW.confirmed_at
+          AND task.plan_run_id = NEW.plan_run_id
+          AND task.policy_id = NEW.policy_id
+          AND task.policy_revision = NEW.policy_revision
+          AND task.source_inventory_balance_id = NEW.source_inventory_balance_id
+          AND task.source_location_id = NEW.source_location_id
+          AND task.destination_location_id = NEW.destination_location_id
+          AND task.item_batch_id = NEW.item_batch_id
+          AND task.item_id = NEW.item_id
+          AND task.uom = NEW.uom
+          AND task.inventory_status = NEW.inventory_status
+          AND task.planned_qty = NEW.quantity
+          AND task.source_lot IS NOT DISTINCT FROM NEW.lot
+          AND task.source_serial IS NOT DISTINCT FROM NEW.serial
+          AND task.source_expiration IS NOT DISTINCT FROM NEW.expiration
+    ) THEN
+        RAISE EXCEPTION 'replenishment confirmation does not match its completed task'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT balance.location_id,
+           balance.license_plate_id,
+           balance.item_batch_id,
+           balance.item_id,
+           balance.uom,
+           balance.status,
+           balance.deleted
+    INTO source_row
+    FROM public.inventory_balances balance
+    WHERE balance.tenant_id = NEW.tenant_id
+      AND balance.inventory_owner_id = NEW.inventory_owner_id
+      AND balance.facility_id = NEW.facility_id
+      AND balance.id = NEW.source_inventory_balance_id;
+
+    SELECT balance.location_id,
+           balance.license_plate_id,
+           balance.item_batch_id,
+           balance.item_id,
+           balance.uom,
+           balance.status,
+           balance.qty_on_hand,
+           balance.deleted
+    INTO destination_row
+    FROM public.inventory_balances balance
+    WHERE balance.tenant_id = NEW.tenant_id
+      AND balance.inventory_owner_id = NEW.inventory_owner_id
+      AND balance.facility_id = NEW.facility_id
+      AND balance.id = NEW.destination_inventory_balance_id;
+
+    SELECT batch.lot, batch.expiration, batch.serial
+    INTO batch_row
+    FROM public.item_batches batch
+    WHERE batch.tenant_id = NEW.tenant_id
+      AND batch.inventory_owner_id = NEW.inventory_owner_id
+      AND batch.id = NEW.item_batch_id
+      AND batch.item_id = NEW.item_id
+      AND batch.uom = NEW.uom
+      AND batch.deleted IS NULL
+    FOR SHARE;
+
+    IF source_row.location_id IS DISTINCT FROM NEW.source_location_id
+       OR source_row.license_plate_id IS NOT NULL
+       OR source_row.item_batch_id IS DISTINCT FROM NEW.item_batch_id
+       OR source_row.item_id IS DISTINCT FROM NEW.item_id
+       OR source_row.uom IS DISTINCT FROM NEW.uom
+       OR source_row.status IS DISTINCT FROM NEW.inventory_status
+       OR source_row.deleted IS NOT NULL
+       OR destination_row.location_id IS DISTINCT FROM NEW.destination_location_id
+       OR destination_row.license_plate_id IS NOT NULL
+       OR destination_row.item_batch_id IS DISTINCT FROM NEW.item_batch_id
+       OR destination_row.item_id IS DISTINCT FROM NEW.item_id
+       OR destination_row.uom IS DISTINCT FROM NEW.uom
+       OR destination_row.status IS DISTINCT FROM NEW.inventory_status
+       OR destination_row.qty_on_hand < NEW.quantity
+       OR destination_row.deleted IS NOT NULL
+       OR batch_row.lot IS DISTINCT FROM NEW.lot
+       OR batch_row.expiration IS DISTINCT FROM NEW.expiration
+       OR batch_row.serial IS DISTINCT FROM NEW.serial
+    THEN
+        RAISE EXCEPTION 'replenishment confirmation inventory snapshot is inconsistent'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.inventory_transactions transaction
+        WHERE transaction.tenant_id = NEW.tenant_id
+          AND transaction.inventory_owner_id = NEW.inventory_owner_id
+          AND transaction.id = NEW.inventory_transaction_id
+          AND transaction.transaction_type = 'move'
+          AND transaction.actor_user_id = NEW.confirmed_by_user_id
+          AND transaction.reference_type = 'replenishment_task'
+          AND transaction.reference_id = NEW.task_id
+          AND transaction.operation = 'task.confirm_replenishment.v1'
+    )
+    INTO transaction_matches;
+
+    SELECT count(*),
+           count(*) FILTER (
+               WHERE entry.facility_id = NEW.facility_id
+                 AND entry.location_id = NEW.source_location_id
+                 AND entry.license_plate_id IS NULL
+                 AND entry.item_batch_id = NEW.item_batch_id
+                 AND entry.item_id = NEW.item_id
+                 AND entry.uom = NEW.uom
+                 AND entry.lot IS NOT DISTINCT FROM NEW.lot
+                 AND entry.expiration IS NOT DISTINCT FROM NEW.expiration
+                 AND entry.serial IS NOT DISTINCT FROM NEW.serial
+                 AND entry.status = NEW.inventory_status
+                 AND entry.quantity_delta = -NEW.quantity
+           ),
+           count(*) FILTER (
+               WHERE entry.facility_id = NEW.facility_id
+                 AND entry.location_id = NEW.destination_location_id
+                 AND entry.license_plate_id IS NULL
+                 AND entry.item_batch_id = NEW.item_batch_id
+                 AND entry.item_id = NEW.item_id
+                 AND entry.uom = NEW.uom
+                 AND entry.lot IS NOT DISTINCT FROM NEW.lot
+                 AND entry.expiration IS NOT DISTINCT FROM NEW.expiration
+                 AND entry.serial IS NOT DISTINCT FROM NEW.serial
+                 AND entry.status = NEW.inventory_status
+                 AND entry.quantity_delta = NEW.quantity
+           )
+    INTO transaction_entry_count, source_entry_count, destination_entry_count
+    FROM public.inventory_entries entry
+    WHERE entry.tenant_id = NEW.tenant_id
+      AND entry.inventory_owner_id = NEW.inventory_owner_id
+      AND entry.transaction_id = NEW.inventory_transaction_id;
+
+    IF NOT transaction_matches
+       OR transaction_entry_count <> 2
+       OR source_entry_count <> 1
+       OR destination_entry_count <> 1
+    THEN
+        RAISE EXCEPTION 'replenishment transaction is not an exact conserved move'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: reject_replenishment_cancellation_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_replenishment_cancellation_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'replenishment cancellations are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+CREATE FUNCTION public.validate_replenishment_cancellation_prestate() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    actual_status text;
+    actual_assigned_user_id bigint;
+    actual_started_at timestamp with time zone;
+    actual_lease_expires_at timestamp with time zone;
+    actual_completed_by bigint;
+    actual_completed_at timestamp with time zone;
+    actual_closed_at timestamp with time zone;
+BEGIN
+    SELECT work.status, work.assigned_user_id, work.started_at,
+           work.lease_expires_at, work.completed_by, work.completed_at,
+           detail.closed_at
+    INTO actual_status, actual_assigned_user_id, actual_started_at,
+         actual_lease_expires_at, actual_completed_by, actual_completed_at,
+         actual_closed_at
+    FROM public.work_tasks work
+    JOIN public.replenishment_tasks detail
+      ON detail.tenant_id = work.tenant_id
+     AND detail.task_id = work.id
+    WHERE work.tenant_id = NEW.tenant_id
+      AND work.id = NEW.task_id
+      AND work.task_type = 'replenishment'
+    FOR UPDATE OF work;
+
+    IF NOT FOUND
+       OR actual_status IS DISTINCT FROM NEW.previous_work_status
+       OR actual_assigned_user_id IS DISTINCT FROM NEW.previous_assigned_user_id
+       OR actual_status NOT IN ('open', 'assigned')
+       OR actual_started_at IS NOT NULL
+       OR actual_lease_expires_at IS NOT NULL
+       OR actual_completed_by IS NOT NULL
+       OR actual_completed_at IS NOT NULL
+       OR actual_closed_at IS NOT NULL
+       OR EXISTS (
+           SELECT 1
+           FROM public.replenishment_confirmations confirmation
+           WHERE confirmation.tenant_id = NEW.tenant_id
+             AND confirmation.task_id = NEW.task_id
+       )
+    THEN
+        RAISE EXCEPTION 'replenishment cancellation pre-state evidence is stale or forged'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+CREATE FUNCTION public.validate_replenishment_cancellation() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.work_tasks work
+        JOIN public.replenishment_tasks detail
+          ON detail.tenant_id = work.tenant_id
+         AND detail.task_id = work.id
+        JOIN public.loose_inventory_movement_claims claim
+          ON claim.tenant_id = work.tenant_id
+         AND claim.work_kind = 'replenishment'
+         AND claim.work_task_id = work.id
+        WHERE work.tenant_id = NEW.tenant_id
+          AND work.id = NEW.task_id
+          AND work.task_type = 'replenishment'
+          AND work.status = 'cancelled'
+          AND work.assigned_user_id IS NULL
+          AND work.started_at IS NULL
+          AND work.lease_expires_at IS NULL
+          AND work.completed_by = NEW.cancelled_by_user_id
+          AND work.completed_at = NEW.cancelled_at
+          AND detail.plan_run_id = NEW.plan_run_id
+          AND detail.policy_id = NEW.policy_id
+          AND detail.policy_revision = NEW.policy_revision
+          AND detail.inventory_owner_id = NEW.inventory_owner_id
+          AND detail.facility_id = NEW.facility_id
+          AND detail.source_inventory_balance_id = NEW.source_inventory_balance_id
+          AND detail.item_batch_id = NEW.item_batch_id
+          AND detail.item_id = NEW.item_id
+          AND detail.uom = NEW.uom
+          AND detail.planned_qty = NEW.planned_qty
+          AND detail.closed_at = NEW.cancelled_at
+          AND claim.inventory_owner_id = NEW.inventory_owner_id
+          AND claim.facility_id = NEW.facility_id
+          AND claim.source_inventory_balance_id = NEW.source_inventory_balance_id
+          AND claim.released_at = NEW.cancelled_at
+    ) OR EXISTS (
+        SELECT 1
+        FROM public.replenishment_confirmations confirmation
+        WHERE confirmation.tenant_id = NEW.tenant_id
+          AND confirmation.task_id = NEW.task_id
+    )
+    THEN
+        RAISE EXCEPTION 'replenishment cancellation does not match its terminal task facts'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_replenishment_confirmation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_replenishment_confirmation() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NEW.task_type = 'replenishment'
+       AND NEW.status = 'completed'
+       AND NOT EXISTS (
+           SELECT 1
+           FROM public.replenishment_confirmations confirmation
+           WHERE confirmation.tenant_id = NEW.tenant_id
+             AND confirmation.task_id = NEW.id
+             AND confirmation.confirmed_by_user_id = NEW.completed_by
+             AND confirmation.confirmed_at = NEW.completed_at
+       )
+    THEN
+        RAISE EXCEPTION 'replenishment completion requires its confirmation'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.task_type = 'replenishment'
+       AND NEW.status = 'cancelled'
+       AND NOT EXISTS (
+           SELECT 1
+           FROM public.replenishment_cancellations cancellation
+           WHERE cancellation.tenant_id = NEW.tenant_id
+             AND cancellation.task_id = NEW.id
+             AND cancellation.cancelled_by_user_id = NEW.completed_by
+             AND cancellation.cancelled_at = NEW.completed_at
+       )
+    THEN
+        RAISE EXCEPTION 'replenishment cancellation requires its evidence'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: create_session_record(text, bigint); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -10302,6 +11827,296 @@ ALTER TABLE ONLY public.putaway_tasks FORCE ROW LEVEL SECURITY;
 
 
 --
+-- Name: loose_inventory_movement_claims; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.loose_inventory_movement_claims (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    work_task_id bigint NOT NULL,
+    work_kind text NOT NULL,
+    claimed_at timestamp with time zone NOT NULL,
+    released_at timestamp with time zone,
+    CONSTRAINT loose_inventory_movement_claims_lifecycle_check CHECK (((released_at IS NULL) OR (released_at >= claimed_at))),
+    CONSTRAINT loose_inventory_movement_claims_work_kind_check CHECK ((work_kind = ANY (ARRAY['putaway'::text, 'inventory_relocation'::text, 'replenishment'::text])))
+);
+
+ALTER TABLE ONLY public.loose_inventory_movement_claims FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: loose_inventory_movement_claims_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.loose_inventory_movement_claims ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.loose_inventory_movement_claims_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: replenishment_policies; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.replenishment_policies (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    pick_face_location_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    minimum_qty bigint NOT NULL,
+    target_qty bigint NOT NULL,
+    revision bigint NOT NULL,
+    supersedes_policy_id bigint,
+    source_location_count bigint NOT NULL,
+    effective_from timestamp with time zone NOT NULL,
+    effective_to timestamp with time zone,
+    configured_by_user_id bigint NOT NULL,
+    configured_at timestamp with time zone NOT NULL,
+    retired_by_user_id bigint,
+    CONSTRAINT replenishment_policies_effective_check CHECK ((effective_from >= configured_at) AND (((effective_to IS NULL) AND (retired_by_user_id IS NULL)) OR ((effective_to > effective_from) AND (retired_by_user_id IS NOT NULL)))),
+    CONSTRAINT replenishment_policies_quantity_check CHECK ((minimum_qty >= 0) AND (target_qty > minimum_qty)),
+    CONSTRAINT replenishment_policies_revision_check CHECK ((revision > 0) AND (((revision = 1) AND (supersedes_policy_id IS NULL)) OR ((revision > 1) AND (supersedes_policy_id IS NOT NULL)))),
+    CONSTRAINT replenishment_policies_source_location_count_check CHECK ((source_location_count > 0)),
+    CONSTRAINT replenishment_policies_uom_check CHECK (((uom = btrim(uom)) AND (uom <> ''::text) AND (char_length(uom) <= 32)))
+);
+
+ALTER TABLE ONLY public.replenishment_policies FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: replenishment_policies_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.replenishment_policies ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.replenishment_policies_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: replenishment_policy_sources; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.replenishment_policy_sources (
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    policy_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    source_sequence bigint NOT NULL,
+    CONSTRAINT replenishment_policy_sources_sequence_check CHECK ((source_sequence > 0))
+);
+
+ALTER TABLE ONLY public.replenishment_policy_sources FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: replenishment_plan_runs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.replenishment_plan_runs (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    policy_id bigint NOT NULL,
+    policy_revision bigint NOT NULL,
+    pick_face_location_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    minimum_qty bigint NOT NULL,
+    target_qty bigint NOT NULL,
+    source_location_count bigint NOT NULL,
+    pick_face_free_qty bigint NOT NULL,
+    active_inbound_qty bigint NOT NULL,
+    projected_free_qty bigint NOT NULL,
+    unallocated_demand_qty bigint NOT NULL,
+    required_level_qty bigint NOT NULL,
+    target_gap_qty bigint NOT NULL,
+    reserve_free_qty bigint NOT NULL,
+    planned_qty bigint NOT NULL,
+    work_count bigint NOT NULL,
+    outcome text NOT NULL,
+    planned_by_user_id bigint NOT NULL,
+    planned_at timestamp with time zone NOT NULL,
+    CONSTRAINT replenishment_plan_runs_projection_check CHECK ((minimum_qty >= 0) AND (target_qty > minimum_qty) AND (source_location_count > 0) AND (pick_face_free_qty >= 0) AND (active_inbound_qty >= 0) AND (projected_free_qty = (pick_face_free_qty + active_inbound_qty)) AND (unallocated_demand_qty >= 0) AND (required_level_qty = GREATEST(target_qty, unallocated_demand_qty)) AND (target_gap_qty = GREATEST((required_level_qty - projected_free_qty), (0)::bigint)) AND (reserve_free_qty >= 0) AND (planned_qty >= 0) AND (work_count >= 0)),
+    CONSTRAINT replenishment_plan_runs_outcome_check CHECK ((((outcome = 'not_needed'::text) AND (projected_free_qty >= minimum_qty) AND (projected_free_qty >= unallocated_demand_qty) AND (planned_qty = 0) AND (work_count = 0)) OR ((outcome = 'insufficient_reserve'::text) AND ((projected_free_qty < minimum_qty) OR (projected_free_qty < unallocated_demand_qty)) AND (target_gap_qty > 0) AND (reserve_free_qty = 0) AND (planned_qty = 0) AND (work_count = 0)) OR ((outcome = 'partially_planned'::text) AND ((projected_free_qty < minimum_qty) OR (projected_free_qty < unallocated_demand_qty)) AND (planned_qty = LEAST(target_gap_qty, reserve_free_qty)) AND (planned_qty > 0) AND (planned_qty < target_gap_qty) AND (work_count > 0)) OR ((outcome = 'fully_planned'::text) AND ((projected_free_qty < minimum_qty) OR (projected_free_qty < unallocated_demand_qty)) AND (planned_qty = target_gap_qty) AND (planned_qty > 0) AND (planned_qty <= reserve_free_qty) AND (work_count > 0)))),
+    CONSTRAINT replenishment_plan_runs_policy_revision_check CHECK ((policy_revision > 0)),
+    CONSTRAINT replenishment_plan_runs_uom_check CHECK (((uom = btrim(uom)) AND (uom <> ''::text) AND (char_length(uom) <= 32)))
+);
+
+ALTER TABLE ONLY public.replenishment_plan_runs FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: replenishment_plan_runs_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.replenishment_plan_runs ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.replenishment_plan_runs_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: replenishment_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.replenishment_tasks (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    plan_run_id bigint NOT NULL,
+    policy_id bigint NOT NULL,
+    policy_revision bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    inventory_status text NOT NULL,
+    source_free_qty bigint NOT NULL,
+    planned_qty bigint NOT NULL,
+    source_lot text,
+    source_serial text,
+    source_expiration timestamp with time zone,
+    source_received_at timestamp with time zone NOT NULL,
+    travel_sequence bigint NOT NULL,
+    closed_at timestamp with time zone,
+    CONSTRAINT replenishment_tasks_inventory_status_check CHECK ((inventory_status = 'available'::text)),
+    CONSTRAINT replenishment_tasks_location_check CHECK ((source_location_id <> destination_location_id)),
+    CONSTRAINT replenishment_tasks_policy_revision_check CHECK ((policy_revision > 0)),
+    CONSTRAINT replenishment_tasks_quantity_check CHECK ((source_free_qty > 0) AND (planned_qty > 0) AND (planned_qty <= source_free_qty)),
+    CONSTRAINT replenishment_tasks_travel_sequence_check CHECK ((travel_sequence > 0)),
+    CONSTRAINT replenishment_tasks_uom_check CHECK (((uom = btrim(uom)) AND (uom <> ''::text) AND (char_length(uom) <= 32)))
+);
+
+ALTER TABLE ONLY public.replenishment_tasks FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: replenishment_cancellations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.replenishment_cancellations (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    plan_run_id bigint NOT NULL,
+    policy_id bigint NOT NULL,
+    policy_revision bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    planned_qty bigint NOT NULL,
+    previous_work_status text NOT NULL,
+    previous_assigned_user_id bigint,
+    reason_code text NOT NULL,
+    note text,
+    cancelled_by_user_id bigint NOT NULL,
+    cancelled_at timestamp with time zone NOT NULL,
+    CONSTRAINT replenishment_cancellations_assignment_check CHECK ((((previous_work_status = 'open'::text) AND (previous_assigned_user_id IS NULL)) OR ((previous_work_status = 'assigned'::text) AND (previous_assigned_user_id IS NOT NULL)))),
+    CONSTRAINT replenishment_cancellations_note_check CHECK (((note IS NULL) OR ((note = btrim(note)) AND (note <> ''::text) AND (char_length(note) <= 500) AND (note !~ '[[:cntrl:]]'::text))) AND ((reason_code <> 'other'::text) OR (note IS NOT NULL))),
+    CONSTRAINT replenishment_cancellations_policy_revision_check CHECK ((policy_revision > 0)),
+    CONSTRAINT replenishment_cancellations_quantity_check CHECK ((planned_qty > 0)),
+    CONSTRAINT replenishment_cancellations_reason_check CHECK ((reason_code = ANY (ARRAY['demand_removed'::text, 'policy_reconfigured'::text, 'source_unavailable'::text, 'destination_unavailable'::text, 'planning_error'::text, 'other'::text]))),
+    CONSTRAINT replenishment_cancellations_uom_check CHECK (((uom = btrim(uom)) AND (uom <> ''::text) AND (char_length(uom) <= 32)))
+);
+
+ALTER TABLE ONLY public.replenishment_cancellations FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: replenishment_cancellations_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.replenishment_cancellations ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.replenishment_cancellations_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: replenishment_confirmations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.replenishment_confirmations (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    plan_run_id bigint NOT NULL,
+    policy_id bigint NOT NULL,
+    policy_revision bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    inventory_transaction_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    destination_inventory_balance_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    lot text,
+    expiration timestamp with time zone,
+    serial text,
+    inventory_status text NOT NULL,
+    quantity bigint NOT NULL,
+    confirmed_by_user_id bigint NOT NULL,
+    confirmed_at timestamp with time zone NOT NULL,
+    CONSTRAINT replenishment_confirmations_balances_check CHECK ((source_inventory_balance_id <> destination_inventory_balance_id)),
+    CONSTRAINT replenishment_confirmations_inventory_status_check CHECK ((inventory_status = 'available'::text)),
+    CONSTRAINT replenishment_confirmations_locations_check CHECK ((source_location_id <> destination_location_id)),
+    CONSTRAINT replenishment_confirmations_policy_revision_check CHECK ((policy_revision > 0)),
+    CONSTRAINT replenishment_confirmations_quantity_check CHECK ((quantity > 0)),
+    CONSTRAINT replenishment_confirmations_uom_check CHECK (((uom = btrim(uom)) AND (uom <> ''::text) AND (char_length(uom) <= 32)))
+);
+
+ALTER TABLE ONLY public.replenishment_confirmations FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: replenishment_confirmations_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.replenishment_confirmations ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.replenishment_confirmations_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: role_permissions; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -10699,7 +12514,7 @@ CREATE TABLE public.work_task_progress (
     metadata_json text,
     facility_id bigint NOT NULL,
     inventory_owner_id bigint,
-    CONSTRAINT work_task_progress_action_check CHECK ((action = ANY (ARRAY['started'::text, 'aborted'::text, 'expired'::text, 'scope_revoked'::text, 'completed'::text, 'cancelled'::text, 'progress'::text, 'unpacked'::text, 'missing'::text, 'damaged'::text, 'moved'::text, 'cycle_count_confirmed'::text, 'putaway_confirmed'::text, 'license_plate_putaway_confirmed'::text, 'putaway_heartbeat'::text, 'putaway_released'::text, 'inventory_relocation_confirmed'::text, 'inventory_relocation_heartbeat'::text, 'inventory_relocation_released'::text, 'cycle_count_heartbeat'::text, 'cycle_count_released'::text]))),
+    CONSTRAINT work_task_progress_action_check CHECK ((action = ANY (ARRAY['started'::text, 'aborted'::text, 'expired'::text, 'scope_revoked'::text, 'completed'::text, 'cancelled'::text, 'progress'::text, 'unpacked'::text, 'missing'::text, 'damaged'::text, 'moved'::text, 'cycle_count_confirmed'::text, 'putaway_confirmed'::text, 'license_plate_putaway_confirmed'::text, 'putaway_heartbeat'::text, 'putaway_released'::text, 'inventory_relocation_confirmed'::text, 'inventory_relocation_heartbeat'::text, 'inventory_relocation_released'::text, 'replenishment_confirmed'::text, 'replenishment_heartbeat'::text, 'replenishment_released'::text, 'replenishment_cancelled'::text, 'cycle_count_heartbeat'::text, 'cycle_count_released'::text]))),
     CONSTRAINT work_task_progress_qty_delta_check CHECK (((qty_delta IS NULL) OR (qty_delta > 0))),
     CONSTRAINT work_task_progress_task_line_owner_check CHECK (((task_line_id IS NULL) OR (inventory_owner_id IS NOT NULL)))
 );
@@ -10756,10 +12571,10 @@ CREATE TABLE public.work_tasks (
     CONSTRAINT work_tasks_check2 CHECK (((started_at IS NULL) OR (status = ANY (ARRAY['in_progress'::text, 'completed'::text, 'cancelled'::text])))),
     CONSTRAINT work_tasks_priority_check CHECK ((priority >= 0)),
     CONSTRAINT work_tasks_release_count_check CHECK ((release_count >= 0)),
-    CONSTRAINT work_tasks_required_dimensions_check CHECK ((((task_type = ANY (ARRAY['cycle_count_item_location'::text, 'unpack_cancelled_order'::text, 'putaway'::text, 'license_plate_putaway'::text, 'inventory_relocation'::text])) AND (facility_id IS NOT NULL) AND (inventory_owner_id IS NOT NULL)) OR ((task_type = ANY (ARRAY['cycle_count_location'::text, 'break_master_pack'::text])) AND (facility_id IS NOT NULL)))),
+    CONSTRAINT work_tasks_required_dimensions_check CHECK ((((task_type = ANY (ARRAY['cycle_count_item_location'::text, 'unpack_cancelled_order'::text, 'putaway'::text, 'license_plate_putaway'::text, 'inventory_relocation'::text, 'replenishment'::text])) AND (facility_id IS NOT NULL) AND (inventory_owner_id IS NOT NULL)) OR ((task_type = ANY (ARRAY['cycle_count_location'::text, 'break_master_pack'::text])) AND (facility_id IS NOT NULL)))),
     CONSTRAINT work_tasks_status_check CHECK ((status = ANY (ARRAY['open'::text, 'assigned'::text, 'in_progress'::text, 'completed'::text, 'cancelled'::text]))),
     CONSTRAINT work_tasks_task_timeout_seconds_check CHECK ((task_timeout_seconds > 0)),
-    CONSTRAINT work_tasks_task_type_check CHECK ((task_type = ANY (ARRAY['cycle_count_item_location'::text, 'cycle_count_location'::text, 'break_master_pack'::text, 'unpack_cancelled_order'::text, 'putaway'::text, 'license_plate_putaway'::text, 'inventory_relocation'::text])))
+    CONSTRAINT work_tasks_task_type_check CHECK ((task_type = ANY (ARRAY['cycle_count_item_location'::text, 'cycle_count_location'::text, 'break_master_pack'::text, 'unpack_cancelled_order'::text, 'putaway'::text, 'license_plate_putaway'::text, 'inventory_relocation'::text, 'replenishment'::text])))
 );
 
 ALTER TABLE ONLY public.work_tasks FORCE ROW LEVEL SECURITY;
@@ -12378,6 +14193,98 @@ ALTER TABLE ONLY public.putaway_tasks
     ADD CONSTRAINT putaway_tasks_tenant_id_task_id_inventory_owner_id_facility_key UNIQUE (tenant_id, task_id, inventory_owner_id, facility_id, source_inventory_balance_id, source_location_id, destination_location_id, item_batch_id, item_id, inventory_status, planned_quantity);
 
 
+ALTER TABLE ONLY public.loose_inventory_movement_claims
+    ADD CONSTRAINT loose_inventory_movement_claims_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.loose_inventory_movement_claims
+    ADD CONSTRAINT loose_inventory_movement_claims_tenant_id_key UNIQUE (tenant_id, id);
+
+
+ALTER TABLE ONLY public.loose_inventory_movement_claims
+    ADD CONSTRAINT loose_inventory_movement_claims_work_key UNIQUE (tenant_id, work_kind, work_task_id);
+
+
+ALTER TABLE ONLY public.replenishment_policies
+    ADD CONSTRAINT replenishment_policies_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.replenishment_policies
+    ADD CONSTRAINT replenishment_policies_tenant_id_key UNIQUE (tenant_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_policies
+    ADD CONSTRAINT replenishment_policies_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_policies
+    ADD CONSTRAINT replenishment_policies_revision_key UNIQUE (tenant_id, inventory_owner_id, facility_id, pick_face_location_id, item_id, uom, revision);
+
+
+ALTER TABLE ONLY public.replenishment_policy_sources
+    ADD CONSTRAINT replenishment_policy_sources_pkey PRIMARY KEY (tenant_id, policy_id, source_location_id);
+
+
+ALTER TABLE ONLY public.replenishment_policy_sources
+    ADD CONSTRAINT replenishment_policy_sources_sequence_key UNIQUE (tenant_id, policy_id, source_sequence);
+
+
+ALTER TABLE ONLY public.replenishment_policy_sources
+    ADD CONSTRAINT replenishment_policy_sources_scope_key UNIQUE (tenant_id, inventory_owner_id, facility_id, policy_id, source_location_id);
+
+
+ALTER TABLE ONLY public.replenishment_plan_runs
+    ADD CONSTRAINT replenishment_plan_runs_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.replenishment_plan_runs
+    ADD CONSTRAINT replenishment_plan_runs_tenant_id_key UNIQUE (tenant_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_plan_runs
+    ADD CONSTRAINT replenishment_plan_runs_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, policy_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_tasks
+    ADD CONSTRAINT replenishment_tasks_pkey PRIMARY KEY (tenant_id, task_id);
+
+
+ALTER TABLE ONLY public.replenishment_tasks
+    ADD CONSTRAINT replenishment_tasks_run_sequence_key UNIQUE (tenant_id, plan_run_id, travel_sequence);
+
+
+ALTER TABLE ONLY public.replenishment_tasks
+    ADD CONSTRAINT replenishment_tasks_run_balance_key UNIQUE (tenant_id, plan_run_id, source_inventory_balance_id);
+
+
+ALTER TABLE ONLY public.replenishment_cancellations
+    ADD CONSTRAINT replenishment_cancellations_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.replenishment_cancellations
+    ADD CONSTRAINT replenishment_cancellations_tenant_id_key UNIQUE (tenant_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_cancellations
+    ADD CONSTRAINT replenishment_cancellations_task_key UNIQUE (tenant_id, task_id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_tenant_id_key UNIQUE (tenant_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_task_key UNIQUE (tenant_id, task_id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_transaction_key UNIQUE (tenant_id, inventory_owner_id, inventory_transaction_id);
+
+
 --
 -- Name: role_permissions role_permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
@@ -12664,6 +14571,10 @@ ALTER TABLE ONLY public.work_tasks
 
 ALTER TABLE ONLY public.work_tasks
     ADD CONSTRAINT work_tasks_tenant_owner_id_unique UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+ALTER TABLE ONLY public.work_tasks
+    ADD CONSTRAINT work_tasks_tenant_owner_facility_id_unique UNIQUE (tenant_id, inventory_owner_id, facility_id, id);
 
 
 --
@@ -13535,6 +15446,33 @@ CREATE INDEX putaway_tasks_destination_idx ON public.putaway_tasks USING btree (
 CREATE UNIQUE INDEX putaway_tasks_one_active_source_idx ON public.putaway_tasks USING btree (tenant_id, inventory_owner_id, source_inventory_balance_id) WHERE (closed_at IS NULL);
 
 
+CREATE UNIQUE INDEX loose_inventory_movement_claims_active_source_idx ON public.loose_inventory_movement_claims USING btree (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id) WHERE (released_at IS NULL);
+
+
+CREATE INDEX loose_inventory_movement_claims_work_idx ON public.loose_inventory_movement_claims USING btree (tenant_id, work_task_id, work_kind, released_at);
+
+
+CREATE UNIQUE INDEX replenishment_policies_one_active_natural_key_idx ON public.replenishment_policies USING btree (tenant_id, inventory_owner_id, facility_id, pick_face_location_id, item_id, uom) WHERE (effective_to IS NULL);
+
+
+CREATE INDEX replenishment_policies_history_idx ON public.replenishment_policies USING btree (tenant_id, inventory_owner_id, facility_id, pick_face_location_id, item_id, uom, revision DESC);
+
+
+CREATE INDEX replenishment_policy_sources_location_idx ON public.replenishment_policy_sources USING btree (tenant_id, inventory_owner_id, facility_id, source_location_id, policy_id);
+
+
+CREATE INDEX replenishment_plan_runs_policy_history_idx ON public.replenishment_plan_runs USING btree (tenant_id, inventory_owner_id, facility_id, policy_id, planned_at DESC, id DESC);
+
+
+CREATE INDEX replenishment_tasks_active_destination_idx ON public.replenishment_tasks USING btree (tenant_id, inventory_owner_id, facility_id, destination_location_id, item_id, uom, policy_id) WHERE (closed_at IS NULL);
+
+
+CREATE UNIQUE INDEX replenishment_tasks_one_active_source_idx ON public.replenishment_tasks USING btree (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id) WHERE (closed_at IS NULL);
+
+
+CREATE INDEX work_tasks_replenishment_queue_idx ON public.work_tasks USING btree (tenant_id, facility_id, inventory_owner_id, status, priority DESC, due_at, created, id) WHERE ((deleted IS NULL) AND (task_type = 'replenishment'::text));
+
+
 --
 -- Name: roles_parent_id_key; Type: INDEX; Schema: public; Owner: -
 --
@@ -13827,6 +15765,12 @@ CREATE TRIGGER inventory_projection_changes_are_immutable BEFORE DELETE OR UPDAT
 --
 
 CREATE TRIGGER inventory_relocation_results_are_immutable BEFORE DELETE OR UPDATE ON public.inventory_relocation_results FOR EACH ROW EXECUTE FUNCTION public.reject_inventory_relocation_result_mutation();
+
+
+CREATE TRIGGER inventory_relocation_tasks_claim_loose_source AFTER INSERT ON public.inventory_relocation_tasks FOR EACH ROW EXECUTE FUNCTION public.claim_loose_inventory_movement_source();
+
+
+CREATE TRIGGER inventory_relocation_tasks_release_loose_source AFTER UPDATE OF closed_at ON public.inventory_relocation_tasks FOR EACH ROW EXECUTE FUNCTION public.release_loose_inventory_movement_source();
 
 
 --
@@ -14274,6 +16218,72 @@ CREATE TRIGGER putaway_tasks_are_valid BEFORE INSERT ON public.putaway_tasks FOR
 CREATE TRIGGER putaway_tasks_guard_mutation BEFORE DELETE OR UPDATE ON public.putaway_tasks FOR EACH ROW EXECUTE FUNCTION public.guard_putaway_task_mutation();
 
 
+CREATE TRIGGER putaway_tasks_claim_loose_source AFTER INSERT ON public.putaway_tasks FOR EACH ROW EXECUTE FUNCTION public.claim_loose_inventory_movement_source();
+
+
+CREATE TRIGGER putaway_tasks_release_loose_source AFTER UPDATE OF closed_at ON public.putaway_tasks FOR EACH ROW EXECUTE FUNCTION public.release_loose_inventory_movement_source();
+
+
+CREATE TRIGGER loose_inventory_movement_claims_guard_mutation BEFORE DELETE OR UPDATE ON public.loose_inventory_movement_claims FOR EACH ROW EXECUTE FUNCTION public.guard_loose_inventory_movement_claim_mutation();
+
+
+CREATE TRIGGER replenishment_policies_validate BEFORE INSERT ON public.replenishment_policies FOR EACH ROW EXECUTE FUNCTION public.validate_replenishment_policy();
+
+
+CREATE TRIGGER replenishment_policies_guard_mutation BEFORE DELETE OR UPDATE ON public.replenishment_policies FOR EACH ROW EXECUTE FUNCTION public.guard_replenishment_policy_mutation();
+
+
+CREATE CONSTRAINT TRIGGER replenishment_policies_require_source_count AFTER INSERT OR UPDATE ON public.replenishment_policies DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_replenishment_policy_source_count();
+
+
+CREATE TRIGGER replenishment_policy_sources_validate BEFORE INSERT ON public.replenishment_policy_sources FOR EACH ROW EXECUTE FUNCTION public.validate_replenishment_policy_source();
+
+
+CREATE TRIGGER replenishment_policy_sources_are_immutable BEFORE DELETE OR UPDATE ON public.replenishment_policy_sources FOR EACH ROW EXECUTE FUNCTION public.reject_replenishment_policy_source_mutation();
+
+
+CREATE CONSTRAINT TRIGGER replenishment_policy_sources_require_source_count AFTER INSERT ON public.replenishment_policy_sources DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_replenishment_policy_source_count();
+
+
+CREATE TRIGGER replenishment_plan_runs_validate BEFORE INSERT ON public.replenishment_plan_runs FOR EACH ROW EXECUTE FUNCTION public.validate_replenishment_plan_run();
+
+
+CREATE TRIGGER replenishment_plan_runs_are_immutable BEFORE DELETE OR UPDATE ON public.replenishment_plan_runs FOR EACH ROW EXECUTE FUNCTION public.reject_replenishment_plan_run_mutation();
+
+
+CREATE CONSTRAINT TRIGGER replenishment_plan_runs_require_work AFTER INSERT ON public.replenishment_plan_runs DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_replenishment_plan_consistency();
+
+
+CREATE TRIGGER replenishment_tasks_validate BEFORE INSERT ON public.replenishment_tasks FOR EACH ROW EXECUTE FUNCTION public.validate_replenishment_task();
+
+
+CREATE TRIGGER replenishment_tasks_guard_mutation BEFORE DELETE OR UPDATE ON public.replenishment_tasks FOR EACH ROW EXECUTE FUNCTION public.guard_replenishment_task_mutation();
+
+
+CREATE TRIGGER replenishment_tasks_claim_loose_source AFTER INSERT ON public.replenishment_tasks FOR EACH ROW EXECUTE FUNCTION public.claim_loose_inventory_movement_source();
+
+
+CREATE TRIGGER replenishment_tasks_release_loose_source AFTER UPDATE OF closed_at ON public.replenishment_tasks FOR EACH ROW EXECUTE FUNCTION public.release_loose_inventory_movement_source();
+
+
+CREATE CONSTRAINT TRIGGER replenishment_tasks_require_plan_consistency AFTER INSERT ON public.replenishment_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_replenishment_plan_consistency();
+
+
+CREATE TRIGGER replenishment_cancellations_are_immutable BEFORE DELETE OR UPDATE ON public.replenishment_cancellations FOR EACH ROW EXECUTE FUNCTION public.reject_replenishment_cancellation_mutation();
+
+
+CREATE TRIGGER replenishment_cancellations_validate_prestate BEFORE INSERT ON public.replenishment_cancellations FOR EACH ROW EXECUTE FUNCTION public.validate_replenishment_cancellation_prestate();
+
+
+CREATE CONSTRAINT TRIGGER replenishment_cancellations_validate AFTER INSERT ON public.replenishment_cancellations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_replenishment_cancellation();
+
+
+CREATE TRIGGER replenishment_confirmations_are_immutable BEFORE DELETE OR UPDATE ON public.replenishment_confirmations FOR EACH ROW EXECUTE FUNCTION public.reject_replenishment_confirmation_mutation();
+
+
+CREATE CONSTRAINT TRIGGER replenishment_confirmations_validate AFTER INSERT ON public.replenishment_confirmations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_replenishment_confirmation();
+
+
 --
 -- Name: roles roles_hierarchy_guard; Type: TRIGGER; Schema: public; Owner: -
 --
@@ -14335,6 +16345,12 @@ CREATE TRIGGER work_tasks_close_license_plate_putaway_detail AFTER UPDATE OF sta
 --
 
 CREATE TRIGGER work_tasks_close_putaway_detail AFTER UPDATE OF status, deleted ON public.work_tasks FOR EACH ROW EXECUTE FUNCTION public.close_putaway_task_detail();
+
+
+CREATE TRIGGER work_tasks_close_replenishment_detail AFTER UPDATE OF status, deleted ON public.work_tasks FOR EACH ROW EXECUTE FUNCTION public.close_replenishment_task_detail();
+
+
+CREATE CONSTRAINT TRIGGER work_tasks_require_replenishment_confirmation AFTER INSERT OR UPDATE ON public.work_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_replenishment_confirmation();
 
 
 --
@@ -17330,6 +19346,178 @@ ALTER TABLE ONLY public.putaway_tasks
     ADD CONSTRAINT putaway_tasks_tenant_id_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
 
 
+ALTER TABLE ONLY public.loose_inventory_movement_claims
+    ADD CONSTRAINT loose_inventory_movement_claims_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.loose_inventory_movement_claims
+    ADD CONSTRAINT loose_inventory_movement_claims_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+ALTER TABLE ONLY public.loose_inventory_movement_claims
+    ADD CONSTRAINT loose_inventory_movement_claims_work_task_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, work_task_id) REFERENCES public.work_tasks(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_policies
+    ADD CONSTRAINT replenishment_policies_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+ALTER TABLE ONLY public.replenishment_policies
+    ADD CONSTRAINT replenishment_policies_owner_item_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_id) REFERENCES public.inventory_owner_items(tenant_id, inventory_owner_id, item_id);
+
+
+ALTER TABLE ONLY public.replenishment_policies
+    ADD CONSTRAINT replenishment_policies_pick_face_fkey FOREIGN KEY (tenant_id, facility_id, pick_face_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_policies
+    ADD CONSTRAINT replenishment_policies_configured_by_fkey FOREIGN KEY (tenant_id, configured_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+ALTER TABLE ONLY public.replenishment_policies
+    ADD CONSTRAINT replenishment_policies_retired_by_fkey FOREIGN KEY (tenant_id, retired_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+ALTER TABLE ONLY public.replenishment_policies
+    ADD CONSTRAINT replenishment_policies_supersedes_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, supersedes_policy_id) REFERENCES public.replenishment_policies(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_policy_sources
+    ADD CONSTRAINT replenishment_policy_sources_policy_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, policy_id) REFERENCES public.replenishment_policies(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_policy_sources
+    ADD CONSTRAINT replenishment_policy_sources_location_fkey FOREIGN KEY (tenant_id, facility_id, source_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_plan_runs
+    ADD CONSTRAINT replenishment_plan_runs_policy_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, policy_id) REFERENCES public.replenishment_policies(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_plan_runs
+    ADD CONSTRAINT replenishment_plan_runs_pick_face_fkey FOREIGN KEY (tenant_id, facility_id, pick_face_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_plan_runs
+    ADD CONSTRAINT replenishment_plan_runs_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+ALTER TABLE ONLY public.replenishment_plan_runs
+    ADD CONSTRAINT replenishment_plan_runs_owner_item_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_id) REFERENCES public.inventory_owner_items(tenant_id, inventory_owner_id, item_id);
+
+
+ALTER TABLE ONLY public.replenishment_plan_runs
+    ADD CONSTRAINT replenishment_plan_runs_planned_by_fkey FOREIGN KEY (tenant_id, planned_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+ALTER TABLE ONLY public.replenishment_tasks
+    ADD CONSTRAINT replenishment_tasks_work_task_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, task_id) REFERENCES public.work_tasks(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_tasks
+    ADD CONSTRAINT replenishment_tasks_plan_run_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, policy_id, plan_run_id) REFERENCES public.replenishment_plan_runs(tenant_id, inventory_owner_id, facility_id, policy_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_tasks
+    ADD CONSTRAINT replenishment_tasks_policy_source_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, policy_id, source_location_id) REFERENCES public.replenishment_policy_sources(tenant_id, inventory_owner_id, facility_id, policy_id, source_location_id);
+
+
+ALTER TABLE ONLY public.replenishment_tasks
+    ADD CONSTRAINT replenishment_tasks_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_tasks
+    ADD CONSTRAINT replenishment_tasks_batch_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_tasks
+    ADD CONSTRAINT replenishment_tasks_item_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_tasks
+    ADD CONSTRAINT replenishment_tasks_source_location_fkey FOREIGN KEY (tenant_id, facility_id, source_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_tasks
+    ADD CONSTRAINT replenishment_tasks_destination_location_fkey FOREIGN KEY (tenant_id, facility_id, destination_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_cancellations
+    ADD CONSTRAINT replenishment_cancellations_task_fkey FOREIGN KEY (tenant_id, task_id) REFERENCES public.replenishment_tasks(tenant_id, task_id);
+
+
+ALTER TABLE ONLY public.replenishment_cancellations
+    ADD CONSTRAINT replenishment_cancellations_plan_run_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, policy_id, plan_run_id) REFERENCES public.replenishment_plan_runs(tenant_id, inventory_owner_id, facility_id, policy_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_cancellations
+    ADD CONSTRAINT replenishment_cancellations_policy_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, policy_id) REFERENCES public.replenishment_policies(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_cancellations
+    ADD CONSTRAINT replenishment_cancellations_source_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_cancellations
+    ADD CONSTRAINT replenishment_cancellations_batch_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_cancellations
+    ADD CONSTRAINT replenishment_cancellations_item_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_cancellations
+    ADD CONSTRAINT replenishment_cancellations_actor_fkey FOREIGN KEY (tenant_id, cancelled_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+ALTER TABLE ONLY public.replenishment_cancellations
+    ADD CONSTRAINT replenishment_cancellations_previous_assignee_fkey FOREIGN KEY (tenant_id, previous_assigned_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_task_fkey FOREIGN KEY (tenant_id, task_id) REFERENCES public.replenishment_tasks(tenant_id, task_id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_plan_run_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, policy_id, plan_run_id) REFERENCES public.replenishment_plan_runs(tenant_id, inventory_owner_id, facility_id, policy_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_policy_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, policy_id) REFERENCES public.replenishment_policies(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_transaction_fkey FOREIGN KEY (tenant_id, inventory_owner_id, inventory_transaction_id) REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_source_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_destination_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, destination_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_source_location_fkey FOREIGN KEY (tenant_id, facility_id, source_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_destination_location_fkey FOREIGN KEY (tenant_id, facility_id, destination_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_batch_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_item_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+ALTER TABLE ONLY public.replenishment_confirmations
+    ADD CONSTRAINT replenishment_confirmations_actor_fkey FOREIGN KEY (tenant_id, confirmed_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
 --
 -- Name: role_permissions role_permissions_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
@@ -18826,6 +21014,34 @@ ALTER TABLE public.putaway_tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY putaway_tasks_tenant_isolation ON public.putaway_tasks USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
 
 
+ALTER TABLE public.loose_inventory_movement_claims ENABLE ROW LEVEL SECURITY;
+CREATE POLICY loose_inventory_movement_claims_tenant_isolation ON public.loose_inventory_movement_claims USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+ALTER TABLE public.replenishment_policies ENABLE ROW LEVEL SECURITY;
+CREATE POLICY replenishment_policies_tenant_isolation ON public.replenishment_policies USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+ALTER TABLE public.replenishment_policy_sources ENABLE ROW LEVEL SECURITY;
+CREATE POLICY replenishment_policy_sources_tenant_isolation ON public.replenishment_policy_sources USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+ALTER TABLE public.replenishment_plan_runs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY replenishment_plan_runs_tenant_isolation ON public.replenishment_plan_runs USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+ALTER TABLE public.replenishment_tasks ENABLE ROW LEVEL SECURITY;
+CREATE POLICY replenishment_tasks_tenant_isolation ON public.replenishment_tasks USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+ALTER TABLE public.replenishment_cancellations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY replenishment_cancellations_tenant_isolation ON public.replenishment_cancellations USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+ALTER TABLE public.replenishment_confirmations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY replenishment_confirmations_tenant_isolation ON public.replenishment_confirmations USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
 --
 -- Name: role_permissions; Type: ROW SECURITY; Schema: public; Owner: -
 --
@@ -19060,6 +21276,28 @@ REVOKE ALL ON FUNCTION public.close_license_plate_putaway_task_detail() FROM PUB
 --
 
 REVOKE ALL ON FUNCTION public.close_putaway_task_detail() FROM PUBLIC;
+
+
+REVOKE ALL ON FUNCTION public.close_replenishment_task_detail() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.claim_loose_inventory_movement_source() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.release_loose_inventory_movement_source() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_loose_inventory_movement_claim_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_replenishment_policy() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_replenishment_policy_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_replenishment_policy_source() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_replenishment_policy_source_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_replenishment_policy_source_count() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_replenishment_plan_run() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_replenishment_plan_run_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_replenishment_task() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_replenishment_task_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_replenishment_plan_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_replenishment_cancellation_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_replenishment_cancellation_prestate() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_replenishment_cancellation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_replenishment_confirmation_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_replenishment_confirmation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_replenishment_confirmation() FROM PUBLIC;
 
 
 --
@@ -20369,6 +22607,40 @@ GRANT SELECT,INSERT ON TABLE public.putaway_results TO wareboxes_app;
 --
 
 GRANT SELECT,INSERT ON TABLE public.putaway_tasks TO wareboxes_app;
+
+
+GRANT SELECT ON TABLE public.loose_inventory_movement_claims TO wareboxes_app;
+
+
+GRANT SELECT,INSERT ON TABLE public.replenishment_policies TO wareboxes_app;
+GRANT UPDATE (effective_to, retired_by_user_id) ON TABLE public.replenishment_policies TO wareboxes_app;
+
+
+GRANT USAGE ON SEQUENCE public.replenishment_policies_id_seq TO wareboxes_app;
+
+
+GRANT SELECT,INSERT ON TABLE public.replenishment_policy_sources TO wareboxes_app;
+
+
+GRANT SELECT,INSERT ON TABLE public.replenishment_plan_runs TO wareboxes_app;
+
+
+GRANT USAGE ON SEQUENCE public.replenishment_plan_runs_id_seq TO wareboxes_app;
+
+
+GRANT SELECT,INSERT ON TABLE public.replenishment_tasks TO wareboxes_app;
+
+
+GRANT SELECT,INSERT ON TABLE public.replenishment_cancellations TO wareboxes_app;
+
+
+GRANT USAGE ON SEQUENCE public.replenishment_cancellations_id_seq TO wareboxes_app;
+
+
+GRANT SELECT,INSERT ON TABLE public.replenishment_confirmations TO wareboxes_app;
+
+
+GRANT USAGE ON SEQUENCE public.replenishment_confirmations_id_seq TO wareboxes_app;
 
 
 --

@@ -45,11 +45,7 @@ impl V1Error {
 
 impl From<AppError> for V1Error {
     fn from(error: AppError) -> Self {
-        match error {
-            AppError::Application(error) => Self::from(error),
-            AppError::Db(error) => Self::internal(format!("database error: {error}")),
-            AppError::Other(error) => Self::internal(error.to_string()),
-        }
+        Self::from(error.public_application_error())
     }
 }
 

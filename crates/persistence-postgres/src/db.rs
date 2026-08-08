@@ -546,6 +546,34 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'putaway_results_tenant_isolation'
                 ),
                 (
+                    'loose_inventory_movement_claims',
+                    'loose_inventory_movement_claims_tenant_isolation'
+                ),
+                (
+                    'replenishment_policies',
+                    'replenishment_policies_tenant_isolation'
+                ),
+                (
+                    'replenishment_policy_sources',
+                    'replenishment_policy_sources_tenant_isolation'
+                ),
+                (
+                    'replenishment_plan_runs',
+                    'replenishment_plan_runs_tenant_isolation'
+                ),
+                (
+                    'replenishment_tasks',
+                    'replenishment_tasks_tenant_isolation'
+                ),
+                (
+                    'replenishment_cancellations',
+                    'replenishment_cancellations_tenant_isolation'
+                ),
+                (
+                    'replenishment_confirmations',
+                    'replenishment_confirmations_tenant_isolation'
+                ),
+                (
                     'license_plate_putaway_tasks',
                     'license_plate_putaway_tasks_tenant_isolation'
                 ),

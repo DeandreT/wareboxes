@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::expected_receiving::ConfirmationIntent;
 use crate::picking::{PickClaim, PickShortageReportResult, PickingCommand};
+use crate::replenishment::{
+    ReplenishmentClaim, ReplenishmentCommand, ReplenishmentConfirmationResult,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +25,7 @@ pub enum ClaimOperation {
     InventoryRelocation,
     CycleCount,
     Picking,
+    Replenishment,
 }
 
 impl From<MovementOperation> for ClaimOperation {
@@ -363,6 +367,7 @@ pub enum RfCommand {
     InventoryRelocation(InventoryRelocationCommand),
     CycleCount(CycleCountCommand),
     Picking(PickingCommand),
+    Replenishment(ReplenishmentCommand),
     ExpectedReceipt(Box<ConfirmationIntent>),
 }
 
@@ -373,6 +378,7 @@ impl RfCommand {
             Self::InventoryRelocation(_) => Some(MovementOperation::InventoryRelocation),
             Self::CycleCount(_) => None,
             Self::Picking(_) => None,
+            Self::Replenishment(_) => None,
             Self::ExpectedReceipt(_) => None,
         }
     }
@@ -472,6 +478,11 @@ pub enum CommandOutcome {
     PickShortageReported(Box<PickShortageReportResult>),
     PickReleased {
         task_id: i64,
+    },
+    ReplenishmentClaimed(Option<Box<ReplenishmentClaim>>),
+    ReplenishmentConfirmed(Box<ReplenishmentConfirmationResult>),
+    ReplenishmentReleased {
+        work_id: i64,
     },
     ExpectedReceipt(crate::expected_receiving::ConfirmationResult),
 }
@@ -880,7 +891,10 @@ impl MovementWorkflow {
             | CommandOutcome::PickClaimed(_)
             | CommandOutcome::PickConfirmed { .. }
             | CommandOutcome::PickShortageReported(_)
-            | CommandOutcome::PickReleased { .. } => {
+            | CommandOutcome::PickReleased { .. }
+            | CommandOutcome::ReplenishmentClaimed(_)
+            | CommandOutcome::ReplenishmentConfirmed(_)
+            | CommandOutcome::ReplenishmentReleased { .. } => {
                 self.require_reconciliation("Recorded result does not match the workflow".into());
                 return Transition::Applied;
             }
