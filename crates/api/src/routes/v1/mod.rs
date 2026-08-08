@@ -9,6 +9,7 @@ mod inventory_relocation;
 mod inventory_rollups;
 mod inventory_status_transitions;
 mod license_plate_putaway;
+mod order_allocations;
 mod order_holds;
 mod orders;
 mod putaway;
@@ -117,6 +118,14 @@ pub fn router() -> Router<AppState> {
             post(license_plate_putaway::confirm),
         )
         .route("/orders", post(orders::create))
+        .route(
+            "/orders/{order_id}/allocation-runs",
+            post(order_allocations::plan),
+        )
+        .route(
+            "/orders/{order_id}/allocation-readiness",
+            get(order_allocations::readiness),
+        )
         .route(
             "/inventory-owners/{inventory_owner_id}/order-entry-items",
             get(orders::entry_items),

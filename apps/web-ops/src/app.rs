@@ -208,6 +208,7 @@ pub fn App() -> impl IntoView {
         <Stylesheet id="wareboxes-inventory-integrity" href="/inventory-integrity.css"/>
         <Stylesheet id="wareboxes-inventory-rollups" href="/inventory-rollups.css"/>
         <Stylesheet id="wareboxes-fulfillment" href="/fulfillment.css"/>
+        <Stylesheet id="wareboxes-order-allocation" href="/order-allocation.css"/>
         <Stylesheet id="wareboxes-catalog" href="/catalog.css"/>
         <Stylesheet id="wareboxes-administration" href="/administration.css"/>
         <Title text="Wareboxes"/>

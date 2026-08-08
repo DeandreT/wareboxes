@@ -345,6 +345,14 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "inventory_allocations",
             "inventory_allocations_tenant_isolation",
         ),
+        (
+            "order_allocation_runs",
+            "order_allocation_runs_tenant_isolation",
+        ),
+        (
+            "order_allocation_run_lines",
+            "order_allocation_run_lines_tenant_isolation",
+        ),
         ("inventory_holds", "inventory_holds_tenant_isolation"),
         (
             "inventory_projection_changes",

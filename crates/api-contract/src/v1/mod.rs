@@ -12,6 +12,7 @@ mod inventory_rollup;
 mod inventory_status_transition;
 mod license_plate_putaway;
 mod order;
+mod order_allocation;
 mod order_hold;
 mod putaway;
 mod putaway_claim;
@@ -74,6 +75,13 @@ pub use order::{
     CreateFulfillmentOrderLineRequest, CreateFulfillmentOrderRequest,
     CreateFulfillmentOrderResponse, CreatedFulfillmentOrderLine, CreatedFulfillmentOrderStatus,
     FulfillmentOrderDestination, OrderEntryItemResponse,
+};
+pub use order_allocation::{
+    OrderAllocationDetailResponse, OrderAllocationFacilityResponse, OrderAllocationLineResponse,
+    OrderAllocationOutcome, OrderAllocationReadinessBlocker, OrderAllocationReadinessRequest,
+    OrderAllocationReadinessResponse, OrderAllocationReadinessStatus,
+    OrderAllocationShortageReason, OrderAllocationStrategy, PlanOrderAllocationRequest,
+    PlanOrderAllocationResponse,
 };
 pub use order_hold::{
     OrderHoldOrderStatus, OrderHoldReason, PlaceOrderHoldRequest, PlaceOrderHoldResponse,

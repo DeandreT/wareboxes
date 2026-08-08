@@ -275,6 +275,13 @@ struct LockedAllocation {
     qty: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CancelledOrderCommitments {
+    pub reservation_count: usize,
+    pub allocation_count: usize,
+    pub released_quantity: i64,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct InventoryEventContext<'a> {
     tenant_id: TenantId,
@@ -410,6 +417,233 @@ async fn enqueue_allocation_event(
     )
     .await?;
     Ok(())
+}
+
+pub(crate) async fn cancel_order_commitments_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    actor_user_id: i64,
+    order_id: i64,
+    scope: &ScopeBindings,
+) -> AppResult<CancelledOrderCommitments> {
+    let reservation_rows = sqlx::query(
+        r#"
+        SELECT inventory_owner_id, order_id, order_item_id, facility_id,
+               item_id, uom, qty, status, id
+        FROM inventory_reservations
+        WHERE tenant_id = $1
+          AND order_id = $2
+          AND deleted IS NULL
+          AND status = 'active'
+        ORDER BY id
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(order_id)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let mut reservations = Vec::with_capacity(reservation_rows.len());
+    for row in &reservation_rows {
+        let reservation_id: i64 = row.try_get("id")?;
+        let reservation = LockedReservation {
+            inventory_owner_id: row.try_get("inventory_owner_id")?,
+            order_id: row.try_get("order_id")?,
+            order_item_id: row.try_get("order_item_id")?,
+            facility_id: row.try_get("facility_id")?,
+            item_id: row.try_get("item_id")?,
+            uom: row.try_get("uom")?,
+            qty: row.try_get("qty")?,
+            status: row.try_get("status")?,
+        };
+        require_command_scope(
+            scope,
+            reservation.inventory_owner_id,
+            reservation.facility_id,
+        )?;
+        reservations.push((reservation_id, reservation));
+    }
+
+    let reservation_ids = reservations
+        .iter()
+        .map(|(reservation_id, _)| *reservation_id)
+        .collect::<Vec<_>>();
+    let reservation_indexes = reservations
+        .iter()
+        .enumerate()
+        .map(|(index, (reservation_id, _))| (*reservation_id, index))
+        .collect::<HashMap<_, _>>();
+    let allocation_rows = if reservation_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query(
+            r#"
+            SELECT allocation.id, allocation.reservation_id,
+                   allocation.inventory_balance_id, allocation.facility_id,
+                   allocation.qty
+            FROM inventory_allocations allocation
+            WHERE allocation.tenant_id = $1
+              AND allocation.reservation_id = ANY($2)
+              AND allocation.deleted IS NULL
+              AND allocation.status = 'allocated'
+            ORDER BY allocation.id
+            FOR UPDATE
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(&reservation_ids)
+        .fetch_all(&mut **tx)
+        .await?
+    };
+    let mut allocations = Vec::with_capacity(allocation_rows.len());
+    for row in &allocation_rows {
+        allocations.push((
+            row.try_get::<i64, _>("reservation_id")?,
+            LockedAllocation {
+                id: row.try_get("id")?,
+                inventory_balance_id: row.try_get("inventory_balance_id")?,
+                facility_id: row.try_get("facility_id")?,
+                qty: row.try_get("qty")?,
+            },
+        ));
+    }
+
+    let mut balance_ids = allocations
+        .iter()
+        .map(|(_, allocation)| allocation.inventory_balance_id)
+        .collect::<Vec<_>>();
+    balance_ids.sort_unstable();
+    balance_ids.dedup();
+    if !balance_ids.is_empty() {
+        sqlx::query(
+            r#"
+            SELECT id
+            FROM inventory_balances
+            WHERE tenant_id = $1 AND id = ANY($2)
+            ORDER BY id
+            FOR UPDATE
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(&balance_ids)
+        .fetch_all(&mut **tx)
+        .await?;
+    }
+
+    let now = now_iso();
+    let mut released_quantity = 0_i64;
+    let mut released_by_reservation = HashMap::<i64, i64>::new();
+    for (reservation_id, allocation) in &allocations {
+        let reservation = reservation_indexes
+            .get(reservation_id)
+            .and_then(|index| reservations.get(*index))
+            .map(|(_, reservation)| reservation)
+            .ok_or_else(|| AppError::internal("allocation reservation lock was not retained"))?;
+        let updated = sqlx::query(
+            r#"
+            UPDATE inventory_allocations
+            SET modified = $1, deleted = $1, status = 'released'
+            WHERE tenant_id = $2 AND id = $3 AND status = 'allocated'
+            "#,
+        )
+        .bind(now)
+        .bind(tenant_id.get())
+        .bind(allocation.id)
+        .execute(&mut **tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::conflict(
+                "order inventory allocations could not be released",
+            ));
+        }
+        released_quantity = released_quantity
+            .checked_add(allocation.qty)
+            .ok_or_else(|| AppError::internal("released allocation quantity overflow"))?;
+        let reservation_released = released_by_reservation.entry(*reservation_id).or_default();
+        *reservation_released = reservation_released
+            .checked_add(allocation.qty)
+            .ok_or_else(|| AppError::internal("reservation release quantity overflow"))?;
+        let payload = serde_json::json!({
+            "allocation_id": allocation.id,
+            "reservation_id": reservation_id,
+            "inventory_balance_id": allocation.inventory_balance_id,
+            "inventory_owner_id": reservation.inventory_owner_id,
+            "facility_id": allocation.facility_id,
+            "released_quantity": allocation.qty,
+            "reason": "order_cancelled",
+        });
+        enqueue_allocation_event(
+            tx,
+            reservation.inventory_owner_id,
+            allocation,
+            InventoryEventContext {
+                tenant_id,
+                actor_user_id,
+                transition: "released",
+                aggregate_sequence: 2,
+                occurred_at: now,
+            },
+            &payload,
+        )
+        .await?;
+    }
+
+    for (reservation_id, reservation) in &reservations {
+        let released_quantity = released_by_reservation
+            .get(reservation_id)
+            .copied()
+            .unwrap_or_default();
+        let updated = sqlx::query(
+            r#"
+            UPDATE inventory_reservations
+            SET modified = $1, deleted = $1, status = 'cancelled'
+            WHERE tenant_id = $2 AND id = $3 AND status = 'active'
+            "#,
+        )
+        .bind(now)
+        .bind(tenant_id.get())
+        .bind(reservation_id)
+        .execute(&mut **tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::conflict(
+                "order inventory reservations could not be cancelled",
+            ));
+        }
+        let payload = serde_json::json!({
+            "reservation_id": reservation_id,
+            "order_id": reservation.order_id,
+            "order_item_id": reservation.order_item_id,
+            "inventory_owner_id": reservation.inventory_owner_id,
+            "facility_id": reservation.facility_id,
+            "item_id": reservation.item_id,
+            "uom": reservation.uom,
+            "quantity": reservation.qty,
+            "released_quantity": released_quantity,
+            "reason": "order_cancelled",
+        });
+        enqueue_reservation_event(
+            tx,
+            *reservation_id,
+            reservation,
+            InventoryEventContext {
+                tenant_id,
+                actor_user_id,
+                transition: "cancelled",
+                aggregate_sequence: 2,
+                occurred_at: now,
+            },
+            &payload,
+        )
+        .await?;
+    }
+
+    Ok(CancelledOrderCommitments {
+        reservation_count: reservations.len(),
+        allocation_count: allocations.len(),
+        released_quantity,
+    })
 }
 
 pub async fn create_inventory_reservation(

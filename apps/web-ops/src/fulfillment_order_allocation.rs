@@ -1,0 +1,543 @@
+use leptos::prelude::*;
+use wareboxes_api_contract::v1::{
+    OrderAllocationDetailResponse, OrderAllocationLineResponse, OrderAllocationOutcome,
+    OrderAllocationReadinessBlocker, OrderAllocationReadinessResponse,
+    OrderAllocationReadinessStatus, OrderAllocationStrategy, PlanOrderAllocationRequest,
+};
+use wareboxes_api_contract::web::access::AccessScopeResource;
+
+use crate::api;
+use crate::components::{Icon, UiIcon};
+use crate::toast::use_toast_bus;
+use crate::view_model::format_quantity;
+
+type AllocationRetry = (PlanOrderAllocationRequest, String);
+
+#[derive(Clone, Copy)]
+struct ReadinessState {
+    facility_id: RwSignal<String>,
+    response: RwSignal<Option<OrderAllocationReadinessResponse>>,
+    loading: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    request_generation: RwSignal<u64>,
+    on_unauthorized: Callback<()>,
+}
+
+#[component]
+pub(super) fn OrderAllocationPanel(
+    order_id: i64,
+    facilities: Vec<AccessScopeResource>,
+    on_refreshed: Callback<i64>,
+    on_unauthorized: Callback<()>,
+) -> impl IntoView {
+    let facility_id = RwSignal::new(
+        facilities
+            .first()
+            .map_or_else(String::new, |facility| facility.id.to_string()),
+    );
+    let access_facilities = StoredValue::new(facilities);
+    let readiness = RwSignal::new(None::<OrderAllocationReadinessResponse>);
+    let loading = RwSignal::new(false);
+    let command_pending = RwSignal::new(false);
+    let readiness_error = RwSignal::new(None::<String>);
+    let command_error = RwSignal::new(None::<String>);
+    let request_generation = RwSignal::new(0_u64);
+    let retry_attempt = RwSignal::new(None::<AllocationRetry>);
+    let toasts = use_toast_bus();
+    let readiness_state = ReadinessState {
+        facility_id,
+        response: readiness,
+        loading,
+        error: readiness_error,
+        request_generation,
+        on_unauthorized,
+    };
+
+    Effect::new(move |_| {
+        let selected_facility = facility_id.get();
+        retry_attempt.set(None);
+        command_error.set(None);
+        let Ok(selected_facility) = selected_facility.parse::<i64>() else {
+            readiness.set(None);
+            loading.set(false);
+            return;
+        };
+        request_readiness(order_id, selected_facility, readiness_state);
+    });
+
+    let refresh = move |_| {
+        let Ok(selected_facility) = facility_id.get_untracked().parse::<i64>() else {
+            return;
+        };
+        command_error.set(None);
+        request_readiness(order_id, selected_facility, readiness_state);
+    };
+
+    let allocate = move |_| {
+        if command_pending.get_untracked() {
+            return;
+        }
+        let (request, idempotency_key) = if let Some(attempt) = retry_attempt.get_untracked() {
+            attempt
+        } else {
+            let Some(current) = readiness.get_untracked() else {
+                command_error.set(Some("Allocation readiness has not loaded yet.".to_owned()));
+                return;
+            };
+            if current.status != OrderAllocationReadinessStatus::Ready {
+                command_error.set(Some(readiness_action_message(&current)));
+                return;
+            }
+            (
+                PlanOrderAllocationRequest {
+                    facility_id: current.facility_id,
+                    expected_revision: current.revision,
+                    strategy: OrderAllocationStrategy::Fefo,
+                },
+                api::new_idempotency_key(),
+            )
+        };
+        retry_attempt.set(Some((request, idempotency_key.clone())));
+        command_pending.set(true);
+        command_error.set(None);
+
+        leptos::task::spawn_local(async move {
+            match api::plan_order_allocation(order_id, &request, &idempotency_key).await {
+                Ok(result) => {
+                    retry_attempt.set(None);
+                    command_pending.set(false);
+                    toasts.success(format!(
+                        "Allocation run #{} committed: {} allocated, {} short.",
+                        result.allocation_run_id,
+                        format_quantity(result.newly_allocated_quantity),
+                        format_quantity(result.shortage_quantity)
+                    ));
+                    on_refreshed.run(order_id);
+                    request_readiness(order_id, result.facility_id, readiness_state);
+                }
+                Err(api_error) if api_error.unauthorized => {
+                    retry_attempt.set(None);
+                    command_pending.set(false);
+                    on_unauthorized.run(());
+                }
+                Err(api_error) => {
+                    command_pending.set(false);
+                    let message = if api_error.ambiguous_outcome {
+                        format!(
+                            "{} The result is unknown; retry to recover the original result.",
+                            api_error.message
+                        )
+                    } else {
+                        retry_attempt.set(None);
+                        api_error.message.clone()
+                    };
+                    command_error.set(Some(message));
+                    toasts.error(api_error.message);
+                    request_readiness(order_id, request.facility_id, readiness_state);
+                }
+            }
+        });
+    };
+
+    view! {
+        <section class="detail-section allocation-section">
+            <div class="allocation-toolbar">
+                <div>
+                    <h3>"Stock allocation"</h3>
+                    <span title="Earliest expiration, then oldest receipt">"Strategy: FEFO"</span>
+                </div>
+                <label class="allocation-facility-selector">
+                    <span class="sr-only">"Allocation facility"</span>
+                    <select
+                        aria-label="Allocation facility"
+                        disabled=move || {
+                            loading.get()
+                                || command_pending.get()
+                                || readiness.get().is_some_and(|state| state.eligible_facilities.is_empty())
+                                || (readiness.get().is_none() && access_facilities.get_value().is_empty())
+                        }
+                        prop:value=move || facility_id.get()
+                        on:change=move |event| facility_id.set(event_target_value(&event))
+                    >
+                        {move || allocation_facilities(readiness.get(), access_facilities.get_value())
+                            .into_iter()
+                            .map(|facility| {
+                                view! {
+                                    <option value=facility.facility_id>{facility.facility_name}</option>
+                                }
+                            })
+                            .collect_view()}
+                    </select>
+                </label>
+                <button
+                    type="button"
+                    class="button icon-action allocation-refresh"
+                    title="Refresh allocation readiness"
+                    aria-label="Refresh allocation readiness"
+                    disabled=move || loading.get() || command_pending.get()
+                    on:click=refresh
+                >
+                    <Icon icon=UiIcon::Refresh/>
+                </button>
+                <button
+                    type="button"
+                    class="button primary-action allocation-run-action"
+                    title="Allocate eligible stock using FEFO"
+                    disabled=move || {
+                        command_pending.get()
+                            || (retry_attempt.get().is_none()
+                                && (loading.get()
+                                    || readiness.get().is_none_or(|state| {
+                                        state.status != OrderAllocationReadinessStatus::Ready
+                                    })))
+                    }
+                    on:click=allocate
+                >
+                    <Icon icon=UiIcon::Inventory/>
+                    {move || if command_pending.get() {
+                        "Allocating"
+                    } else if retry_attempt.get().is_some() {
+                        "Retry allocation"
+                    } else {
+                        "Allocate"
+                    }}
+                </button>
+            </div>
+
+            <Show when=move || loading.get()>
+                <div class="allocation-loading" role="status">
+                    <span class="loading-line" aria-hidden="true"></span>
+                    "Checking facility stock..."
+                </div>
+            </Show>
+            <Show when=move || readiness_error.get().is_some() || command_error.get().is_some()>
+                <p class="inline-command-error allocation-error" role="alert">
+                    {move || command_error.get().or_else(|| readiness_error.get()).unwrap_or_default()}
+                </p>
+            </Show>
+
+            {move || readiness.get().map(|state| view! { <AllocationReadiness state/> })}
+
+            <Show when=move || access_facilities.get_value().is_empty()>
+                <p class="empty-state compact">"No facility is available in your site scope."</p>
+            </Show>
+        </section>
+    }
+}
+
+#[component]
+fn AllocationReadiness(state: OrderAllocationReadinessResponse) -> impl IntoView {
+    let status = state.status;
+    let outcome = state.outcome;
+    let revision = state.revision.get();
+    let blocking_reasons = state.blocking_reasons.clone();
+    let lines = state.lines.clone();
+    let has_shortage = state.shortage_quantity > 0;
+    let blocker_view = if blocking_reasons.is_empty() {
+        ().into_any()
+    } else {
+        view! {
+            <div class="allocation-blockers" role="status">
+                <Icon icon=UiIcon::Alert/>
+                {blocking_reasons
+                    .into_iter()
+                    .map(|reason| view! { <span>{blocker_label(reason)}</span> })
+                    .collect_view()}
+            </div>
+        }
+        .into_any()
+    };
+
+    view! {
+        <div class="allocation-state-line">
+            <span class=allocation_status_class(status)>{readiness_status_label(status)}</span>
+            <span>{outcome_label(outcome)}</span>
+            <span class="allocation-revision">{format!("Order rev. {revision}")}</span>
+        </div>
+        {blocker_view}
+        <dl class="allocation-totals">
+            <div><dt>"Requested"</dt><dd>{format_quantity(state.demand_quantity)}</dd></div>
+            <div><dt>"Reserved"</dt><dd>{format_quantity(state.reserved_quantity)}</dd></div>
+            <div><dt>"Allocated"</dt><dd>{format_quantity(state.allocated_quantity)}</dd></div>
+            <div class:short=has_shortage>
+                <dt>"Short"</dt><dd>{format_quantity(state.shortage_quantity)}</dd>
+            </div>
+        </dl>
+        <div class="allocation-lines">
+            <table class="data-table allocation-lines-table">
+                <caption class="sr-only">"Facility allocation by order line"</caption>
+                <thead>
+                    <tr>
+                        <th>"Line"</th>
+                        <th>"Item / UOM"</th>
+                        <th class="numeric">"Req."</th>
+                        <th class="numeric">"Res."</th>
+                        <th class="numeric">"Alloc."</th>
+                        <th class="numeric">"Short"</th>
+                    </tr>
+                </thead>
+                {lines.into_iter().map(allocation_line_view).collect_view()}
+            </table>
+        </div>
+    }
+}
+
+fn allocation_line_view(line: OrderAllocationLineResponse) -> impl IntoView {
+    let has_shortage = line.shortage_quantity > 0;
+    let allocations = line.allocations.clone();
+    let source_count = allocations.len();
+    let item_label = line
+        .item_description
+        .clone()
+        .unwrap_or_else(|| format!("Item #{}", line.item_id));
+    let shortage_label = line.shortage_reason.map(shortage_reason_label);
+    let source_summary = shortage_label.map_or_else(
+        || format!("{source_count} stock assignment(s)"),
+        |reason| format!("{source_count} stock assignment(s) - {reason}"),
+    );
+    let no_source_label = shortage_label.map_or_else(
+        || "No concrete stock assigned".to_owned(),
+        |reason| format!("No concrete stock assigned - {reason}"),
+    );
+    let shortage_title = shortage_label.unwrap_or_default();
+
+    view! {
+        <tbody class:has-shortage=has_shortage>
+            <tr>
+                <td>
+                    <strong>{line.line_key}</strong>
+                    <small class="cell-detail">{format!("ID {}", line.order_line_id)}</small>
+                </td>
+                <td>
+                    <strong title=item_label.clone()>{item_label.clone()}</strong>
+                    <small class="cell-detail">{format!("Item #{} / {}", line.item_id, line.uom)}</small>
+                </td>
+                <td class="numeric">{format_quantity(line.demand_quantity)}</td>
+                <td class="numeric">{format_quantity(line.reserved_quantity)}</td>
+                <td class="numeric strong">{format_quantity(line.allocated_quantity)}</td>
+                <td class="numeric allocation-shortage" title=shortage_title>
+                    {format_quantity(line.shortage_quantity)}
+                </td>
+            </tr>
+            <tr class="allocation-source-row">
+                <td colspan="6">
+                    {if allocations.is_empty() {
+                        view! { <span class="allocation-no-source">{no_source_label}</span> }.into_any()
+                    } else {
+                        view! {
+                            <details class="allocation-source-details">
+                                <summary>{source_summary}</summary>
+                                <div class="allocation-source-grid">
+                                    {allocations.into_iter().map(allocation_source_view).collect_view()}
+                                </div>
+                            </details>
+                        }.into_any()
+                    }}
+                </td>
+            </tr>
+        </tbody>
+    }
+}
+
+fn allocation_source_view(source: OrderAllocationDetailResponse) -> impl IntoView {
+    let location = location_label(&source);
+    let license_plate = source
+        .license_plate_barcode
+        .clone()
+        .or_else(|| source.license_plate_id.map(|id| format!("LP #{id}")))
+        .unwrap_or_else(|| "Loose stock".to_owned());
+    let trace = trace_label(&source);
+    let expiration = source
+        .expiration
+        .as_deref()
+        .map(expiration_label)
+        .unwrap_or_else(|| "No expiry".to_owned());
+    let quantity = source.quantity;
+    let stock_reference = format!(
+        "Balance #{} / Batch #{} / Allocation #{}",
+        source.inventory_balance_id, source.item_batch_id, source.allocation_id
+    );
+
+    view! {
+        <div class="allocation-source" title=stock_reference>
+            <div><span>"Location"</span><strong>{location}</strong></div>
+            <div><span>"License plate"</span><strong>{license_plate}</strong></div>
+            <div><span>"Lot / serial"</span><strong>{trace}</strong></div>
+            <div><span>"Expiration"</span><strong>{expiration}</strong></div>
+            <div class="numeric"><span>"Qty"</span><strong>{format_quantity(quantity)}</strong></div>
+        </div>
+    }
+}
+
+fn request_readiness(order_id: i64, selected_facility: i64, state: ReadinessState) {
+    state
+        .request_generation
+        .update(|generation| *generation = generation.saturating_add(1));
+    let generation = state.request_generation.get_untracked();
+    state.loading.set(true);
+    state.error.set(None);
+
+    leptos::task::spawn_local(async move {
+        let response = api::order_allocation_readiness(order_id, selected_facility).await;
+        let is_current = state.request_generation.get_untracked() == generation
+            && state.facility_id.get_untracked() == selected_facility.to_string();
+        if !is_current {
+            return;
+        }
+        match response {
+            Ok(next) => {
+                let next_facility = next
+                    .eligible_facilities
+                    .first()
+                    .filter(|_| {
+                        !next
+                            .eligible_facilities
+                            .iter()
+                            .any(|facility| facility.facility_id == selected_facility)
+                    })
+                    .map(|facility| facility.facility_id);
+                if let Some(next_facility) = next_facility {
+                    state.facility_id.set(next_facility.to_string());
+                    return;
+                }
+                state.loading.set(false);
+                state.response.set(Some(next));
+            }
+            Err(api_error) if api_error.unauthorized => {
+                state.loading.set(false);
+                state.on_unauthorized.run(());
+            }
+            Err(api_error) => {
+                state.loading.set(false);
+                state.error.set(Some(api_error.message));
+            }
+        }
+    });
+}
+
+fn allocation_facilities(
+    readiness: Option<OrderAllocationReadinessResponse>,
+    fallback: Vec<AccessScopeResource>,
+) -> Vec<AllocationFacilityOption> {
+    readiness.map_or_else(
+        || {
+            fallback
+                .into_iter()
+                .map(|facility| AllocationFacilityOption {
+                    facility_id: facility.id,
+                    facility_name: facility.name,
+                })
+                .collect()
+        },
+        |state| {
+            state
+                .eligible_facilities
+                .into_iter()
+                .map(|facility| AllocationFacilityOption {
+                    facility_id: facility.facility_id,
+                    facility_name: facility.facility_name,
+                })
+                .collect()
+        },
+    )
+}
+
+struct AllocationFacilityOption {
+    facility_id: i64,
+    facility_name: String,
+}
+
+fn readiness_action_message(state: &OrderAllocationReadinessResponse) -> String {
+    match state.status {
+        OrderAllocationReadinessStatus::Ready => "Stock is ready to allocate.".to_owned(),
+        OrderAllocationReadinessStatus::AlreadyFullyAllocated => {
+            "Every demand line is already fully allocated at this facility.".to_owned()
+        }
+        OrderAllocationReadinessStatus::Blocked => state.blocking_reasons.first().map_or_else(
+            || "This order cannot be allocated in its current state.".to_owned(),
+            |reason| blocker_label(*reason).to_owned(),
+        ),
+    }
+}
+
+const fn allocation_status_class(status: OrderAllocationReadinessStatus) -> &'static str {
+    match status {
+        OrderAllocationReadinessStatus::Ready => "status allocation-ready",
+        OrderAllocationReadinessStatus::AlreadyFullyAllocated => "status allocation-complete",
+        OrderAllocationReadinessStatus::Blocked => "status held",
+    }
+}
+
+const fn readiness_status_label(status: OrderAllocationReadinessStatus) -> &'static str {
+    match status {
+        OrderAllocationReadinessStatus::Ready => "Ready",
+        OrderAllocationReadinessStatus::AlreadyFullyAllocated => "Fully allocated",
+        OrderAllocationReadinessStatus::Blocked => "Blocked",
+    }
+}
+
+const fn outcome_label(outcome: OrderAllocationOutcome) -> &'static str {
+    match outcome {
+        OrderAllocationOutcome::FullyAllocated => "All demand assigned",
+        OrderAllocationOutcome::PartiallyAllocated => "Partial assignment",
+        OrderAllocationOutcome::NotAllocated => "No demand assigned",
+    }
+}
+
+const fn blocker_label(reason: OrderAllocationReadinessBlocker) -> &'static str {
+    match reason {
+        OrderAllocationReadinessBlocker::ActiveHold => "Release active order holds first.",
+        OrderAllocationReadinessBlocker::OrderStatusNotAllocatable => {
+            "The order status does not allow allocation."
+        }
+        OrderAllocationReadinessBlocker::FacilityNotEligible => {
+            "The selected facility is not assigned to this client."
+        }
+    }
+}
+
+const fn shortage_reason_label(
+    reason: wareboxes_api_contract::v1::OrderAllocationShortageReason,
+) -> &'static str {
+    use wareboxes_api_contract::v1::OrderAllocationShortageReason;
+
+    match reason {
+        OrderAllocationShortageReason::NoEligibleInventory => "No eligible stock",
+        OrderAllocationShortageReason::InsufficientEligibleInventory => "Insufficient stock",
+    }
+}
+
+fn location_label(source: &OrderAllocationDetailResponse) -> String {
+    match (&source.location_name, &source.location_barcode) {
+        (Some(name), Some(barcode)) if name != barcode => format!("{name} ({barcode})"),
+        (Some(name), _) => name.clone(),
+        (None, Some(barcode)) => barcode.clone(),
+        (None, None) => format!("Location #{}", source.location_id),
+    }
+}
+
+fn trace_label(source: &OrderAllocationDetailResponse) -> String {
+    match (&source.lot, &source.serial) {
+        (Some(lot), Some(serial)) => format!("{lot} / {serial}"),
+        (Some(lot), None) => lot.clone(),
+        (None, Some(serial)) => serial.clone(),
+        (None, None) => "Untracked".to_owned(),
+    }
+}
+
+fn expiration_label(value: &str) -> String {
+    value
+        .split_once('T')
+        .map_or_else(|| value.to_owned(), |(date, _)| date.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expiration_uses_a_dense_date_label() {
+        assert_eq!(expiration_label("2027-08-10T00:00:00+00:00"), "2027-08-10");
+        assert_eq!(expiration_label("not-a-timestamp"), "not-a-timestamp");
+    }
+}

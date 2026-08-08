@@ -1855,6 +1855,20 @@ $$;
 
 
 --
+-- Name: reject_order_allocation_run_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_order_allocation_run_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'order allocation run records are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
 -- Name: reject_license_plate_putaway_content_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2228,6 +2242,8 @@ CREATE FUNCTION public.validate_inventory_allocation() RETURNS trigger
 DECLARE
     reservation_facility_id BIGINT;
     reservation_item_id BIGINT;
+    reservation_order_id BIGINT;
+    reservation_order_item_id BIGINT;
     reservation_uom TEXT;
     reservation_qty BIGINT;
     reservation_status TEXT;
@@ -2242,6 +2258,7 @@ DECLARE
     balance_reserved BIGINT;
     balance_held BIGINT;
     allocated_qty BIGINT;
+    allocation_run_matches BOOLEAN;
 BEGIN
     IF TG_OP = 'UPDATE' THEN
         IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
@@ -2258,6 +2275,7 @@ BEGIN
            OR NEW.item_id IS DISTINCT FROM OLD.item_id
            OR NEW.uom IS DISTINCT FROM OLD.uom
            OR NEW.inventory_status IS DISTINCT FROM OLD.inventory_status
+           OR NEW.allocation_run_id IS DISTINCT FROM OLD.allocation_run_id
            OR NEW.qty IS DISTINCT FROM OLD.qty
         THEN
             RAISE EXCEPTION 'inventory allocation dimensions are immutable'
@@ -2279,10 +2297,12 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    SELECT reservation.facility_id, reservation.item_id, reservation.uom,
-           reservation.qty, reservation.status
-    INTO reservation_facility_id, reservation_item_id, reservation_uom,
-         reservation_qty, reservation_status
+    SELECT reservation.facility_id, reservation.item_id, reservation.order_id,
+           reservation.order_item_id, reservation.uom, reservation.qty,
+           reservation.status
+    INTO reservation_facility_id, reservation_item_id, reservation_order_id,
+         reservation_order_item_id, reservation_uom, reservation_qty,
+         reservation_status
     FROM public.inventory_reservations reservation
     WHERE reservation.tenant_id = NEW.tenant_id
       AND reservation.inventory_owner_id = NEW.inventory_owner_id
@@ -2292,6 +2312,33 @@ BEGIN
     IF reservation_qty IS NULL THEN
         RAISE EXCEPTION 'inventory reservation does not exist'
             USING ERRCODE = '23503';
+    END IF;
+
+    IF NEW.allocation_run_id IS NOT NULL THEN
+        SELECT EXISTS (
+            SELECT 1
+            FROM public.order_allocation_run_lines run_line
+            INNER JOIN public.order_allocation_runs allocation_run
+                ON allocation_run.tenant_id = run_line.tenant_id
+               AND allocation_run.inventory_owner_id =
+                   run_line.inventory_owner_id
+               AND allocation_run.order_id = run_line.order_id
+               AND allocation_run.id = run_line.allocation_run_id
+            WHERE run_line.tenant_id = NEW.tenant_id
+              AND run_line.inventory_owner_id = NEW.inventory_owner_id
+              AND run_line.allocation_run_id = NEW.allocation_run_id
+              AND run_line.order_id = reservation_order_id
+              AND run_line.order_item_id = reservation_order_item_id
+              AND run_line.reservation_id = NEW.reservation_id
+              AND allocation_run.facility_id = NEW.facility_id
+        )
+        INTO allocation_run_matches;
+
+        IF NOT allocation_run_matches THEN
+            RAISE EXCEPTION
+                'allocation run must match the reservation demand line and facility'
+                USING ERRCODE = '23514';
+        END IF;
     END IF;
 
     SELECT balance.facility_id, balance.location_id,
@@ -4296,6 +4343,7 @@ CREATE TABLE public.inventory_allocations (
     item_id bigint NOT NULL,
     uom text NOT NULL,
     inventory_status text NOT NULL,
+    allocation_run_id bigint,
     qty bigint NOT NULL,
     status text DEFAULT 'allocated'::text NOT NULL,
     CONSTRAINT inventory_allocations_check CHECK ((((status = 'allocated'::text) AND (deleted IS NULL)) OR ((status = ANY (ARRAY['released'::text, 'fulfilled'::text])) AND (deleted IS NOT NULL)))),
@@ -5432,6 +5480,79 @@ ALTER TABLE public.order_activity ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTI
     NO MAXVALUE
     CACHE 1
 );
+
+
+--
+-- Name: order_allocation_runs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.order_allocation_runs (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    created timestamp with time zone NOT NULL,
+    created_by_user_id bigint NOT NULL,
+    strategy text NOT NULL,
+    outcome text NOT NULL,
+    requested_qty bigint NOT NULL,
+    allocated_qty bigint NOT NULL,
+    short_qty bigint NOT NULL,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    CONSTRAINT order_allocation_runs_allocated_qty_check CHECK ((allocated_qty >= 0) AND (allocated_qty <= requested_qty)),
+    CONSTRAINT order_allocation_runs_outcome_check CHECK ((outcome = ANY (ARRAY['fully_allocated'::text, 'partially_allocated'::text, 'not_allocated'::text]))),
+    CONSTRAINT order_allocation_runs_outcome_totals_check CHECK ((((outcome = 'fully_allocated'::text) AND (allocated_qty = requested_qty) AND (short_qty = 0)) OR ((outcome = 'partially_allocated'::text) AND (allocated_qty > 0) AND (short_qty > 0)) OR ((outcome = 'not_allocated'::text) AND (allocated_qty = 0) AND (short_qty = requested_qty)))),
+    CONSTRAINT order_allocation_runs_requested_qty_check CHECK (requested_qty > 0),
+    CONSTRAINT order_allocation_runs_revision_check CHECK ((expected_revision > 0) AND (resulting_revision = (expected_revision + 1))),
+    CONSTRAINT order_allocation_runs_short_qty_check CHECK ((short_qty >= 0) AND (short_qty = (requested_qty - allocated_qty))),
+    CONSTRAINT order_allocation_runs_strategy_check CHECK (strategy = 'fefo'::text)
+);
+
+ALTER TABLE ONLY public.order_allocation_runs FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: order_allocation_runs_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_allocation_runs ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.order_allocation_runs_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: order_allocation_run_lines; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.order_allocation_run_lines (
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    allocation_run_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    requested_qty bigint NOT NULL,
+    previously_allocated_qty bigint NOT NULL,
+    newly_allocated_qty bigint NOT NULL,
+    total_allocated_qty bigint NOT NULL,
+    short_qty bigint NOT NULL,
+    shortage_reason text,
+    CONSTRAINT order_allocation_run_lines_newly_allocated_qty_check CHECK (newly_allocated_qty >= 0),
+    CONSTRAINT order_allocation_run_lines_previous_qty_check CHECK (previously_allocated_qty >= 0),
+    CONSTRAINT order_allocation_run_lines_requested_qty_check CHECK (requested_qty > 0),
+    CONSTRAINT order_allocation_run_lines_short_qty_check CHECK ((short_qty >= 0) AND (short_qty = (requested_qty - total_allocated_qty))),
+    CONSTRAINT order_allocation_run_lines_shortage_reason_check CHECK (((short_qty = 0) AND (shortage_reason IS NULL)) OR ((short_qty > 0) AND (shortage_reason = ANY (ARRAY['no_eligible_inventory'::text, 'insufficient_eligible_inventory'::text])))),
+    CONSTRAINT order_allocation_run_lines_total_qty_check CHECK ((total_allocated_qty = (previously_allocated_qty + newly_allocated_qty)) AND (total_allocated_qty <= requested_qty))
+);
+
+ALTER TABLE ONLY public.order_allocation_run_lines FORCE ROW LEVEL SECURITY;
 
 
 --
@@ -7164,6 +7285,46 @@ ALTER TABLE ONLY public.order_activity
 
 
 --
+-- Name: order_allocation_runs order_allocation_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_allocation_runs
+    ADD CONSTRAINT order_allocation_runs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: order_allocation_runs order_allocation_runs_tenant_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_allocation_runs
+    ADD CONSTRAINT order_allocation_runs_tenant_id_id_key UNIQUE (tenant_id, id);
+
+
+--
+-- Name: order_allocation_runs order_allocation_runs_tenant_owner_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_allocation_runs
+    ADD CONSTRAINT order_allocation_runs_tenant_owner_id_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: order_allocation_runs order_allocation_runs_tenant_owner_order_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_allocation_runs
+    ADD CONSTRAINT order_allocation_runs_tenant_owner_order_id_key UNIQUE (tenant_id, inventory_owner_id, order_id, id);
+
+
+--
+-- Name: order_allocation_run_lines order_allocation_run_lines_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_allocation_run_lines
+    ADD CONSTRAINT order_allocation_run_lines_pkey PRIMARY KEY (tenant_id, allocation_run_id, order_item_id);
+
+
+--
 -- Name: order_holds order_holds_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -8003,6 +8164,13 @@ CREATE INDEX idx_locations_facility_id ON public.locations USING btree (tenant_i
 
 
 --
+-- Name: idx_locations_active_pickable; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_locations_active_pickable ON public.locations USING btree (tenant_id, facility_id, id) WHERE ((deleted IS NULL) AND active AND pickable);
+
+
+--
 -- Name: idx_locations_parent_location_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -8014,6 +8182,20 @@ CREATE INDEX idx_locations_parent_location_id ON public.locations USING btree (t
 --
 
 CREATE INDEX idx_order_activity_order_id ON public.order_activity USING btree (tenant_id, inventory_owner_id, order_id);
+
+
+--
+-- Name: idx_order_allocation_runs_order; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_order_allocation_runs_order ON public.order_allocation_runs USING btree (tenant_id, inventory_owner_id, order_id, created DESC, id DESC);
+
+
+--
+-- Name: idx_order_allocation_run_lines_order; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_order_allocation_run_lines_order ON public.order_allocation_run_lines USING btree (tenant_id, inventory_owner_id, order_id, order_item_id);
 
 
 --
@@ -8174,7 +8356,7 @@ CREATE INDEX integration_inbox_receipts_tenant_history_idx ON public.integration
 -- Name: inventory_allocations_active_balance_reservation_key; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX inventory_allocations_active_balance_reservation_key ON public.inventory_allocations USING btree (tenant_id, inventory_owner_id, reservation_id, inventory_balance_id) WHERE ((deleted IS NULL) AND (status = 'allocated'::text));
+CREATE INDEX inventory_allocations_active_balance_reservation_key ON public.inventory_allocations USING btree (tenant_id, inventory_owner_id, reservation_id, inventory_balance_id) WHERE ((deleted IS NULL) AND (status = 'allocated'::text));
 
 
 --
@@ -8189,6 +8371,27 @@ CREATE INDEX inventory_allocations_balance_idx ON public.inventory_allocations U
 --
 
 CREATE INDEX inventory_allocations_reservation_idx ON public.inventory_allocations USING btree (tenant_id, inventory_owner_id, reservation_id, status);
+
+
+--
+-- Name: inventory_allocations_run_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inventory_allocations_run_idx ON public.inventory_allocations USING btree (tenant_id, inventory_owner_id, allocation_run_id) WHERE (allocation_run_id IS NOT NULL);
+
+
+--
+-- Name: inventory_balances_allocation_candidates_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inventory_balances_allocation_candidates_idx ON public.inventory_balances USING btree (tenant_id, inventory_owner_id, facility_id, item_id, uom, id) WHERE ((deleted IS NULL) AND (status = 'available'::text));
+
+
+--
+-- Name: item_batches_fefo_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX item_batches_fefo_idx ON public.item_batches USING btree (tenant_id, inventory_owner_id, item_id, uom, expiration, created, id) WHERE (deleted IS NULL);
 
 
 --
@@ -8252,6 +8455,13 @@ CREATE INDEX inventory_reservations_active_demand_idx ON public.inventory_reserv
 --
 
 CREATE INDEX inventory_reservations_order_line_idx ON public.inventory_reservations USING btree (tenant_id, inventory_owner_id, order_id, order_item_id);
+
+
+--
+-- Name: inventory_reservations_active_order_line_facility_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX inventory_reservations_active_order_line_facility_key ON public.inventory_reservations USING btree (tenant_id, inventory_owner_id, order_id, order_item_id, facility_id) WHERE ((deleted IS NULL) AND (status = 'active'::text));
 
 
 --
@@ -8749,6 +8959,20 @@ CREATE CONSTRAINT TRIGGER license_plates_location_is_consistent AFTER INSERT OR 
 --
 
 CREATE TRIGGER license_plates_require_active_owner_facility BEFORE INSERT OR UPDATE OF tenant_id, inventory_owner_id, facility_id ON public.license_plates FOR EACH ROW EXECUTE FUNCTION public.require_active_inventory_owner_facility();
+
+
+--
+-- Name: order_allocation_runs order_allocation_runs_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER order_allocation_runs_are_immutable BEFORE DELETE OR UPDATE ON public.order_allocation_runs FOR EACH ROW EXECUTE FUNCTION public.reject_order_allocation_run_mutation();
+
+
+--
+-- Name: order_allocation_run_lines order_allocation_run_lines_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER order_allocation_run_lines_are_immutable BEFORE DELETE OR UPDATE ON public.order_allocation_run_lines FOR EACH ROW EXECUTE FUNCTION public.reject_order_allocation_run_mutation();
 
 
 --
@@ -9711,6 +9935,14 @@ ALTER TABLE ONLY public.inventory_allocations
 
 ALTER TABLE ONLY public.inventory_allocations
     ADD CONSTRAINT inventory_allocations_tenant_id_inventory_owner_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: inventory_allocations inventory_allocations_allocation_run_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_allocation_run_fkey FOREIGN KEY (tenant_id, inventory_owner_id, allocation_run_id) REFERENCES public.order_allocation_runs(tenant_id, inventory_owner_id, id);
 
 
 --
@@ -10799,6 +11031,78 @@ ALTER TABLE ONLY public.order_activity
 
 ALTER TABLE ONLY public.order_activity
     ADD CONSTRAINT order_activity_tenant_id_actor_user_id_fkey FOREIGN KEY (tenant_id, actor_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: order_allocation_runs order_allocation_runs_tenant_id_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_allocation_runs
+    ADD CONSTRAINT order_allocation_runs_tenant_id_created_by_user_id_fkey FOREIGN KEY (tenant_id, created_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: order_allocation_runs order_allocation_runs_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_allocation_runs
+    ADD CONSTRAINT order_allocation_runs_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: order_allocation_runs order_allocation_runs_tenant_id_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_allocation_runs
+    ADD CONSTRAINT order_allocation_runs_tenant_id_facility_id_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: order_allocation_runs order_allocation_runs_tenant_owner_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_allocation_runs
+    ADD CONSTRAINT order_allocation_runs_tenant_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: order_allocation_runs order_allocation_runs_tenant_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_allocation_runs
+    ADD CONSTRAINT order_allocation_runs_tenant_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: order_allocation_runs order_allocation_runs_tenant_owner_order_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_allocation_runs
+    ADD CONSTRAINT order_allocation_runs_tenant_owner_order_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES public.orders(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: order_allocation_run_lines order_allocation_run_lines_run_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_allocation_run_lines
+    ADD CONSTRAINT order_allocation_run_lines_run_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id, allocation_run_id) REFERENCES public.order_allocation_runs(tenant_id, inventory_owner_id, order_id, id);
+
+
+--
+-- Name: order_allocation_run_lines order_allocation_run_lines_order_item_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_allocation_run_lines
+    ADD CONSTRAINT order_allocation_run_lines_order_item_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id, order_item_id) REFERENCES public.order_items(tenant_id, inventory_owner_id, order_id, id);
+
+
+--
+-- Name: order_allocation_run_lines order_allocation_run_lines_reservation_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_allocation_run_lines
+    ADD CONSTRAINT order_allocation_run_lines_reservation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, reservation_id) REFERENCES public.inventory_reservations(tenant_id, inventory_owner_id, id);
 
 
 --
@@ -12258,6 +12562,32 @@ CREATE POLICY order_activity_tenant_isolation ON public.order_activity USING ((t
 
 
 --
+-- Name: order_allocation_runs; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_allocation_runs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: order_allocation_runs order_allocation_runs_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY order_allocation_runs_tenant_isolation ON public.order_allocation_runs USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: order_allocation_run_lines; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_allocation_run_lines ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: order_allocation_run_lines order_allocation_run_lines_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY order_allocation_run_lines_tenant_isolation ON public.order_allocation_run_lines USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
 -- Name: order_holds; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -12796,6 +13126,13 @@ REVOKE ALL ON FUNCTION public.reject_license_plate_putaway_content_mutation() FR
 --
 
 REVOKE ALL ON FUNCTION public.reject_license_plate_putaway_result_mutation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION reject_order_allocation_run_mutation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.reject_order_allocation_run_mutation() FROM PUBLIC;
 
 
 --
@@ -13471,6 +13808,27 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.order_activity TO wareboxes_ap
 --
 
 GRANT SELECT,USAGE ON SEQUENCE public.order_activity_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE order_allocation_runs; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.order_allocation_runs TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE order_allocation_runs_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.order_allocation_runs_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE order_allocation_run_lines; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.order_allocation_run_lines TO wareboxes_app;
 
 
 --

@@ -1,8 +1,15 @@
 //! Domain identifiers and invariants shared across application boundaries.
 
+mod allocation;
 mod order;
 mod tenant;
 
+pub use allocation::{
+    assess_order_allocation_readiness, plan_fefo_allocation, AllocationCandidate,
+    AllocationOutcome, AllocationPlan, AllocationPlanError, AllocationQuantity,
+    AllocationShortageReason, AllocationStrategy, OrderAllocationBlockReason,
+    OrderAllocationReadiness, OrderRevision, PlannedAllocation,
+};
 pub use order::{
     CatalogItemId, FulfillmentOrderDemandLine, NewFulfillmentOrder, OrderCreationError,
     OrderCreationField, OrderHoldReason, OrderHoldTransitionError, OrderKey, OrderLineKey,
@@ -76,6 +83,15 @@ positive_id!(TenantId, "tenant ID");
 positive_id!(InventoryOwnerId, "inventory owner ID");
 positive_id!(FacilityId, "facility ID");
 positive_id!(UserId, "user ID");
+positive_id!(OrderId, "order ID");
+positive_id!(OrderLineId, "order line ID");
+positive_id!(AllocationRunId, "allocation run ID");
+positive_id!(InventoryReservationId, "inventory reservation ID");
+positive_id!(InventoryAllocationId, "inventory allocation ID");
+positive_id!(InventoryBalanceId, "inventory balance ID");
+positive_id!(ItemBatchId, "item batch ID");
+positive_id!(LocationId, "location ID");
+positive_id!(LicensePlateId, "license plate ID");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SiteScope {

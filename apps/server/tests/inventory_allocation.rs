@@ -77,6 +77,12 @@ async fn soft_reservations_and_concrete_allocations_preserve_demand_and_stock() 
         .order_header(tenant_id, "ALLOCATION-ORDER", owner_id)
         .await;
     let order_item_id = fixture.order_item(tenant_id, order_id, item_id, 20).await;
+    let overstock_order = fixture
+        .order_header(tenant_id, "ALLOCATION-OVERSTOCK-ORDER", owner_id)
+        .await;
+    let overstock_order_item = fixture
+        .order_item(tenant_id, overstock_order, item_id, 3)
+        .await;
 
     let balance_a = fixture
         .received_balance(
@@ -286,8 +292,8 @@ async fn soft_reservations_and_concrete_allocations_preserve_demand_and_stock() 
         &fixture.db,
         &access,
         &repo::inventory::CreateInventoryReservationCommand {
-            order_id,
-            order_item_id,
+            order_id: overstock_order,
+            order_item_id: overstock_order_item,
             facility_id,
             qty: 3,
             idempotency_key: "allocation-overstock-reservation",
