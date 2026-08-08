@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use wareboxes_domain::{InventoryOwnerId, OwnerScope, SiteScope, TenantId, UserId};
+use wareboxes_domain::{InventoryOwnerId, OwnerScope, SiteScope, TenantId, TenantStatus, UserId};
 
 pub use wareboxes_domain::Timestamp;
 
@@ -15,33 +15,6 @@ macro_rules! impl_status_display {
         }
     };
 }
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TenantStatus {
-    #[default]
-    Active,
-    Suspended,
-}
-
-impl TenantStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Suspended => "suspended",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "active" => Some(Self::Active),
-            "suspended" => Some(Self::Suspended),
-            _ => None,
-        }
-    }
-}
-
-impl_status_display!(TenantStatus);
 
 /// A tenant available to the authenticated user. This is an access projection,
 /// not the persistence model for either a tenant or membership.
