@@ -1,14 +1,15 @@
 #[cfg(target_arch = "wasm32")]
 use wareboxes_api_contract::v1::ReleaseInventoryHoldRequest;
 use wareboxes_api_contract::v1::{
-    CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
-    CreateInventoryStatusTransitionRequest,
+    CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse, InventoryBalancePage,
+    InventoryHoldPage, InventoryHoldStatus, InventoryStatusTransitionResponse, OpaqueCursor,
+    OrderEntryItemResponse, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
+    PlaceOrderHoldRequest, PlaceOrderHoldResponse, ReleaseInventoryHoldResponse,
+    ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
 };
 use wareboxes_api_contract::v1::{
-    InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
-    InventoryStatusTransitionResponse, OpaqueCursor, PlaceInventoryHoldRequest,
-    PlaceInventoryHoldResponse, PlaceOrderHoldRequest, PlaceOrderHoldResponse,
-    ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
+    CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
+    CreateInventoryStatusTransitionRequest,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 use wareboxes_core::dto::{OrderPage, WebSessionContext};
@@ -37,13 +38,14 @@ mod browser {
     use wareboxes_core::dto::{LoginRequest, SelectTenantRequest};
 
     use super::{
-        AccessScopeWorkspace, ApiError, CreateInventoryRelocationTaskRequest,
+        AccessScopeWorkspace, ApiError, CreateFulfillmentOrderRequest,
+        CreateFulfillmentOrderResponse, CreateInventoryRelocationTaskRequest,
         CreateInventoryRelocationTaskResponse, CreateInventoryStatusTransitionRequest,
         InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
-        InventoryStatusTransitionResponse, OpaqueCursor, OrderPage, PlaceInventoryHoldRequest,
-        PlaceInventoryHoldResponse, PlaceOrderHoldRequest, PlaceOrderHoldResponse,
-        ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
-        ReleaseOrderHoldResponse, WebSessionContext,
+        InventoryStatusTransitionResponse, OpaqueCursor, OrderEntryItemResponse, OrderPage,
+        PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
+        PlaceOrderHoldResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
+        ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -96,6 +98,26 @@ mod browser {
 
     pub async fn access() -> Result<AccessScopeWorkspace, ApiError> {
         get("/api/web/access").await
+    }
+
+    pub async fn order_entry_items(
+        inventory_owner_id: i64,
+        search: &str,
+    ) -> Result<Vec<OrderEntryItemResponse>, ApiError> {
+        let mut path =
+            format!("/api/v1/inventory-owners/{inventory_owner_id}/order-entry-items?limit=50");
+        if !search.trim().is_empty() {
+            path.push_str("&search=");
+            path.push_str(&urlencoding::encode(search.trim()));
+        }
+        get(&path).await
+    }
+
+    pub async fn create_fulfillment_order(
+        request: &CreateFulfillmentOrderRequest,
+        idempotency_key: &str,
+    ) -> Result<CreateFulfillmentOrderResponse, ApiError> {
+        post("/api/v1/orders", request, idempotency_key).await
     }
 
     pub async fn internal_get<T: DeserializeOwned>(path: &str) -> Result<T, ApiError> {
@@ -332,6 +354,22 @@ pub async fn search_balances(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn access() -> Result<AccessScopeWorkspace, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn order_entry_items(
+    _inventory_owner_id: i64,
+    _search: &str,
+) -> Result<Vec<OrderEntryItemResponse>, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn create_fulfillment_order(
+    _request: &CreateFulfillmentOrderRequest,
+    _idempotency_key: &str,
+) -> Result<CreateFulfillmentOrderResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

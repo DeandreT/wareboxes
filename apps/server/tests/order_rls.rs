@@ -205,7 +205,9 @@ async fn address_count(db: &db::Db, tenant_id: TenantId) -> i64 {
 async fn order_refs(fixture: &Fixture, tenant_id: TenantId, name: &str) -> OrderRefs {
     let inventory_owner_id = fixture.inventory_owner(tenant_id, name).await;
     let item_id = fixture.item(tenant_id, name, "each").await;
-    let order_id = fixture.order(tenant_id, name, inventory_owner_id).await;
+    let order_id = fixture
+        .order_header(tenant_id, name, inventory_owner_id)
+        .await;
     let order_item_id = fixture.order_item(tenant_id, order_id, item_id, 2).await;
     let address_id = repo::orders::get_order(&fixture.db, tenant_id, order_id)
         .await
@@ -320,8 +322,9 @@ async fn insert_order_item(
     sqlx::query_scalar(
         r#"
         INSERT INTO order_items
-            (tenant_id, inventory_owner_id, created, qty, item_id, order_id)
-        VALUES ($1, $2, $3, 1, $4, $5)
+            (tenant_id, inventory_owner_id, created, line_key, line_number,
+             qty, item_id, order_id, uom)
+        VALUES ($1, $2, $3, 'RLS-LINE', 1, 1, $4, $5, 'each')
         RETURNING id
         "#,
     )

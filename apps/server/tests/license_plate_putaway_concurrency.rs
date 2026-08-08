@@ -709,7 +709,7 @@ async fn license_plate_putaway_races_serialize_without_duplicate_inventory_effec
     )
     .await;
     let order_id = fixture
-        .order(
+        .order_header(
             tenant_id,
             "LP-PUTAWAY-ALLOCATION-RACE-ORDER",
             inventory_owner_id,

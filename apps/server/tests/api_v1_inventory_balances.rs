@@ -332,7 +332,7 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
         .find(|balance| balance.item_id == second_item)
         .unwrap();
     let order_id = fixture
-        .order(tenant_id, "V1-BALANCE-COMMITMENTS", allowed_owner)
+        .order_header(tenant_id, "V1-BALANCE-COMMITMENTS", allowed_owner)
         .await;
     fixture
         .allocated_reservation(

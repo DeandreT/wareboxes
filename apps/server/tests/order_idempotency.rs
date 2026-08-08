@@ -136,7 +136,9 @@ async fn order_metadata_updates_are_replay_safe_and_scope_checked() {
     let owner = fixture
         .inventory_owner(tenant_id, "Order Metadata Owner")
         .await;
-    let order = fixture.order(tenant_id, "ORDER-METADATA-1", owner).await;
+    let order = fixture
+        .order_header(tenant_id, "ORDER-METADATA-1", owner)
+        .await;
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let address_count_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM addresses")
         .fetch_one(&mut *tx)
@@ -307,7 +309,9 @@ async fn order_cancellation_commands_are_replay_safe() {
         .assign_owner_to_facility(tenant_id, owner, facility)
         .await;
     let item = fixture.item(tenant_id, "Cancel Replay Item", "each").await;
-    let order = fixture.order(tenant_id, "CANCEL-REPLAY-1", owner).await;
+    let order = fixture
+        .order_header(tenant_id, "CANCEL-REPLAY-1", owner)
+        .await;
     fixture.order_item(tenant_id, order, item, 4).await;
     let body = json!({"order_id": order, "facility_id": facility});
 
@@ -577,7 +581,9 @@ async fn failed_unpack_work_rolls_back_order_cancellation_command() {
     let item = fixture
         .item(tenant_id, "Cancel Rollback Item", "each")
         .await;
-    let order = fixture.order(tenant_id, "CANCEL-ROLLBACK-1", owner).await;
+    let order = fixture
+        .order_header(tenant_id, "CANCEL-ROLLBACK-1", owner)
+        .await;
     fixture.order_item(tenant_id, order, item, 2).await;
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("UPDATE items SET deleted = $1 WHERE tenant_id = $2 AND id = $3")

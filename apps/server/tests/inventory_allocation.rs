@@ -73,7 +73,9 @@ async fn soft_reservations_and_concrete_allocations_preserve_demand_and_stock() 
         .assign_owner_to_facility(tenant_id, owner_id, other_facility_id)
         .await;
     let item_id = fixture.item(tenant_id, "Allocation Item", "each").await;
-    let order_id = fixture.order(tenant_id, "ALLOCATION-ORDER", owner_id).await;
+    let order_id = fixture
+        .order_header(tenant_id, "ALLOCATION-ORDER", owner_id)
+        .await;
     let order_item_id = fixture.order_item(tenant_id, order_id, item_id, 20).await;
 
     let balance_a = fixture
@@ -176,6 +178,15 @@ async fn soft_reservations_and_concrete_allocations_preserve_demand_and_stock() 
         .await
         .balance_id;
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    sqlx::query("UPDATE items SET packaging_unit = 'case' WHERE tenant_id = $1 AND id = $2")
+        .bind(tenant_id.get())
+        .bind(item_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
     let reservation_command = repo::inventory::CreateInventoryReservationCommand {
         order_id,
         order_item_id,
@@ -219,6 +230,7 @@ async fn soft_reservations_and_concrete_allocations_preserve_demand_and_stock() 
         .find(|row| row.id == reservation.reservation_id)
         .unwrap();
     assert_eq!(soft_reservation.status, ReservationStatus::Active);
+    assert_eq!(soft_reservation.uom, "each");
     assert_eq!(soft_reservation.allocated_qty, 0);
     assert!(soft_reservation.allocations.is_empty());
 
@@ -348,8 +360,17 @@ async fn soft_reservations_and_concrete_allocations_preserve_demand_and_stock() 
         .unwrap_err(),
     );
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    sqlx::query("UPDATE items SET packaging_unit = 'each' WHERE tenant_id = $1 AND id = $2")
+        .bind(tenant_id.get())
+        .bind(item_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
     let concurrent_order = fixture
-        .order(tenant_id, "ALLOCATION-CONCURRENT-ORDER", owner_id)
+        .order_header(tenant_id, "ALLOCATION-CONCURRENT-ORDER", owner_id)
         .await;
     let concurrent_order_item = fixture
         .order_item(tenant_id, concurrent_order, item_id, 5)

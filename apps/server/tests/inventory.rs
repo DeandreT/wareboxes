@@ -236,10 +236,7 @@ async fn inventory_commands_write_replay_safe_journal_and_balance_projection() {
         AppError::Application(ApplicationError::Conflict(_))
     ));
 
-    repo::orders::add_order(&db, tenant_id, &new_order("INV-1", inventory_owner))
-        .await
-        .unwrap();
-    let order_id = repo::orders::get_orders(&db, tenant_id).await.unwrap()[0].id;
+    let order_id = insert_test_order_header(&db, tenant_id, "INV-1", inventory_owner).await;
     let order_item_id = fixture.order_item(tenant_id, order_id, item, 20).await;
     let access = default_tenant_for_user(&db, user.id).await.unwrap();
     let reservation_command = repo::inventory::CreateInventoryReservationCommand {
@@ -739,7 +736,9 @@ async fn inventory_repositories_reject_cross_tenant_and_cross_owner_access() {
     .unwrap();
     admin_db.close().await;
 
-    let other_owner_order = fixture.order(tenant_a, "OTHER-OWNER-ORDER", owner_b).await;
+    let other_owner_order = fixture
+        .order_header(tenant_a, "OTHER-OWNER-ORDER", owner_b)
+        .await;
     let balance = repo::inventory::get_balances(&fixture.db, tenant_a, false)
         .await
         .unwrap()
@@ -926,7 +925,7 @@ async fn concurrent_inventory_retries_apply_effects_once() {
         .unwrap();
     let destination_balance_id = destination_balance.id;
     let order_id = fixture
-        .order(tenant_id, "CONCURRENT-ORDER", inventory_owner)
+        .order_header(tenant_id, "CONCURRENT-ORDER", inventory_owner)
         .await;
     let order_item_id = fixture
         .order_item(tenant_id, order_id, destination_balance.item_id, 10)

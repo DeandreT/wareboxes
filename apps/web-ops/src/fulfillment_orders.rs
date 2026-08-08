@@ -1,9 +1,13 @@
 use leptos::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use std::time::Duration;
 use wareboxes_api_contract::v1::{
-    OrderHoldReason as OrderHoldRequestReason, PlaceOrderHoldRequest, ReleaseOrderHoldRequest,
+    CreateFulfillmentOrderLineRequest, CreateFulfillmentOrderRequest, FulfillmentOrderDestination,
+    OrderEntryItemResponse, OrderHoldReason as OrderHoldRequestReason, PlaceOrderHoldRequest,
+    ReleaseOrderHoldRequest,
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
-use wareboxes_core::dto::{CancelOrder, NewOrder, OrderPage, OrderUpdate};
+use wareboxes_core::dto::{CancelOrder, OrderPage, OrderUpdate};
 use wareboxes_core::models::{Order, OrderStatus};
 
 use crate::api;
@@ -35,6 +39,15 @@ enum OrderDetailTab {
     Fulfillment,
     Holds,
     Activity,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct DraftOrderLine {
+    line_key: String,
+    item_id: i64,
+    description: String,
+    requested_uom: String,
+    quantity: i64,
 }
 
 #[component]
@@ -119,14 +132,20 @@ pub fn OrdersWorkbench(
         });
     });
 
-    let created = Callback::new(move |_| {
+    let created = Callback::new(move |order_id: i64| {
         create_open.set(false);
-        selected.set(None);
+        request_order_detail(
+            order_id,
+            selected,
+            selected_pending,
+            selected_error,
+            on_unauthorized,
+        );
         run_search(0);
     });
 
     view! {
-        <div class="fulfillment-workbench">
+        <div class="fulfillment-workbench" class:create-mode=move || create_open.get()>
             <section class="data-section fulfillment-list">
                 <form class="table-toolbar fulfillment-toolbar" on:submit=submit_search>
                     <div class="toolbar-summary">
@@ -387,7 +406,7 @@ pub fn OrdersWorkbench(
 #[component]
 fn CreateOrderPanel(
     clients: Vec<AccessScopeResource>,
-    on_created: Callback<()>,
+    on_created: Callback<i64>,
     on_close: Callback<()>,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
@@ -405,9 +424,120 @@ fn CreateOrderPanel(
     let state = RwSignal::new(String::new());
     let postal_code = RwSignal::new(String::new());
     let country = RwSignal::new("US".to_owned());
+    let item_search = RwSignal::new(String::new());
+    let catalog_query = RwSignal::new(String::new());
+    let entry_items = RwSignal::new(Vec::<OrderEntryItemResponse>::new());
+    let items_pending = RwSignal::new(false);
+    let selected_item_id = RwSignal::new(String::new());
+    let line_quantity = RwSignal::new("1".to_owned());
+    let lines = RwSignal::new(Vec::<DraftOrderLine>::new());
+    let next_line_number = RwSignal::new(1_i64);
     let pending = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
+    let retry_attempt = RwSignal::new(None::<(CreateFulfillmentOrderRequest, String)>);
     let toasts = use_toast_bus();
+
+    Effect::new(move |_| {
+        let search = item_search.get();
+        #[cfg(target_arch = "wasm32")]
+        set_timeout(
+            move || {
+                if item_search.get_untracked() == search && catalog_query.get_untracked() != search
+                {
+                    catalog_query.set(search);
+                }
+            },
+            Duration::from_millis(250),
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        catalog_query.set(search);
+    });
+
+    Effect::new(move |_| {
+        let selected_client = client_id.get();
+        let selected_search = catalog_query.get();
+        entry_items.set(Vec::new());
+        selected_item_id.set(String::new());
+        let Ok(inventory_owner_id) = selected_client.parse::<i64>() else {
+            return;
+        };
+        items_pending.set(true);
+        leptos::task::spawn_local(async move {
+            match api::order_entry_items(inventory_owner_id, &selected_search).await {
+                Ok(items) => {
+                    if client_id.get_untracked() == selected_client
+                        && catalog_query.get_untracked() == selected_search
+                    {
+                        entry_items.set(items);
+                        items_pending.set(false);
+                    }
+                }
+                Err(api_error) if api_error.unauthorized => on_unauthorized.run(()),
+                Err(api_error) => {
+                    if client_id.get_untracked() == selected_client
+                        && catalog_query.get_untracked() == selected_search
+                    {
+                        error.set(Some(api_error.message));
+                        items_pending.set(false);
+                    }
+                }
+            }
+        });
+    });
+
+    let add_line = move |_| {
+        let Ok(item_id) = selected_item_id.get_untracked().parse::<i64>() else {
+            error.set(Some("Choose an item for the demand line.".to_owned()));
+            return;
+        };
+        let Ok(quantity) = line_quantity.get_untracked().parse::<i64>() else {
+            error.set(Some(
+                "Line quantity must be a positive whole number.".to_owned(),
+            ));
+            return;
+        };
+        if quantity <= 0 {
+            error.set(Some(
+                "Line quantity must be a positive whole number.".to_owned(),
+            ));
+            return;
+        }
+        let Some(item) = entry_items
+            .get_untracked()
+            .into_iter()
+            .find(|item| item.item_id == item_id)
+        else {
+            error.set(Some("The selected item is no longer available.".to_owned()));
+            return;
+        };
+        let mut current_lines = lines.get_untracked();
+        if let Some(existing) = current_lines
+            .iter_mut()
+            .find(|line| line.item_id == item.item_id && line.requested_uom == item.requested_uom)
+        {
+            let Some(merged) = existing.quantity.checked_add(quantity) else {
+                error.set(Some("Line quantity is too large.".to_owned()));
+                return;
+            };
+            existing.quantity = merged;
+        } else {
+            let line_number = next_line_number.get_untracked();
+            current_lines.push(DraftOrderLine {
+                line_key: line_number.to_string(),
+                item_id: item.item_id,
+                description: item
+                    .description
+                    .unwrap_or_else(|| format!("Item #{}", item.item_id)),
+                requested_uom: item.requested_uom,
+                quantity,
+            });
+            next_line_number.set(line_number.saturating_add(1));
+        }
+        lines.set(current_lines);
+        selected_item_id.set(String::new());
+        line_quantity.set("1".to_owned());
+        error.set(None);
+    };
 
     let submit = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
@@ -423,11 +553,13 @@ fn CreateOrderPanel(
             error.set(Some("Choose a client.".to_owned()));
             return;
         };
+        let line1_value = line1.get_untracked().trim().to_owned();
         let city_value = city.get_untracked().trim().to_owned();
         let state_value = state.get_untracked().trim().to_owned();
         let postal_value = postal_code.get_untracked().trim().to_owned();
         let country_value = country.get_untracked().trim().to_owned();
         if [
+            line1_value.as_str(),
             city_value.as_str(),
             state_value.as_str(),
             postal_value.as_str(),
@@ -437,7 +569,7 @@ fn CreateOrderPanel(
         .any(|value| value.is_empty())
         {
             error.set(Some(
-                "City, state, postal code, and country are required.".to_owned(),
+                "Address, city, state, postal code, and country are required.".to_owned(),
             ));
             return;
         }
@@ -448,30 +580,57 @@ fn CreateOrderPanel(
                 return;
             }
         };
-        let request = NewOrder {
-            order_key: order_key.clone(),
-            rush: Some(rush.get_untracked()),
-            ship_by: ship_by_value,
-            line1: optional_text(&line1.get_untracked()),
-            line2: optional_text(&line2.get_untracked()),
-            city: city_value,
-            state: state_value,
-            postal_code: postal_value,
-            country: country_value,
+        let draft_lines = lines.get_untracked();
+        if draft_lines.is_empty() {
+            error.set(Some("Add at least one demand line.".to_owned()));
+            return;
+        }
+        if draft_lines.iter().any(|line| line.quantity <= 0) {
+            error.set(Some(
+                "Every demand line must have a positive whole-number quantity.".to_owned(),
+            ));
+            return;
+        }
+        let request = CreateFulfillmentOrderRequest {
             inventory_owner_id,
+            order_key: order_key.clone(),
+            rush: rush.get_untracked(),
+            ship_by: ship_by_value.map(|value| value.to_rfc3339()),
+            destination: FulfillmentOrderDestination {
+                line1: line1_value,
+                line2: optional_text(&line2.get_untracked()),
+                city: city_value,
+                region: state_value,
+                postal_code: postal_value,
+                country: country_value,
+            },
+            lines: draft_lines
+                .iter()
+                .map(|line| CreateFulfillmentOrderLineRequest {
+                    line_key: line.line_key.clone(),
+                    item_id: line.item_id,
+                    quantity: line.quantity,
+                    requested_uom: line.requested_uom.clone(),
+                })
+                .collect(),
         };
         pending.set(true);
         error.set(None);
+        let idempotency_key = retry_attempt
+            .get_untracked()
+            .filter(|(prior_request, _)| prior_request == &request)
+            .map_or_else(api::new_idempotency_key, |(_, key)| key);
+        retry_attempt.set(Some((request.clone(), idempotency_key.clone())));
         leptos::task::spawn_local(async move {
-            match api::internal_post::<_, bool>("/api/orders/add", &request).await {
-                Ok(true) => {
+            match api::create_fulfillment_order(&request, &idempotency_key).await {
+                Ok(result) => {
                     pending.set(false);
-                    toasts.success(format!("Order {order_key} created."));
-                    on_created.run(());
-                }
-                Ok(false) => {
-                    error.set(Some("The order was not created.".to_owned()));
-                    pending.set(false);
+                    retry_attempt.set(None);
+                    toasts.success(format!(
+                        "Order {order_key} created with {} line(s).",
+                        result.lines.len()
+                    ));
+                    on_created.run(result.order_id);
                 }
                 Err(api_error) if api_error.unauthorized => on_unauthorized.run(()),
                 Err(api_error) => {
@@ -508,6 +667,7 @@ fn CreateOrderPanel(
                     <span>"Client"</span>
                     <select
                         required
+                        disabled=move || pending.get() || !lines.get().is_empty()
                         prop:value=move || client_id.get()
                         on:change=move |event| client_id.set(event_target_value(&event))
                     >
@@ -535,11 +695,188 @@ fn CreateOrderPanel(
                 </label>
             </div>
             <fieldset>
+                <legend>"Demand lines"</legend>
+                <div class="order-line-entry">
+                    <label>
+                        <span>"Find item"</span>
+                        <input
+                            type="search"
+                            autocomplete="off"
+                            placeholder="SKU, barcode, or description"
+                            disabled=move || pending.get()
+                            prop:value=move || item_search.get()
+                            on:input=move |event| {
+                                item_search.set(event_target_value(&event));
+                                selected_item_id.set(String::new());
+                            }
+                        />
+                    </label>
+                    <label>
+                        <span>"Item"</span>
+                        <select
+                            disabled=move || {
+                                pending.get()
+                                    || items_pending.get()
+                                    || item_search.get() != catalog_query.get()
+                            }
+                            prop:value=move || selected_item_id.get()
+                            on:change=move |event| selected_item_id.set(event_target_value(&event))
+                        >
+                            <option value="">{move || {
+                                if item_search.get() != catalog_query.get() {
+                                    "Searching items"
+                                } else if items_pending.get() {
+                                    "Loading items"
+                                } else {
+                                    "Select item"
+                                }
+                            }}</option>
+                            {move || entry_items
+                                .get()
+                                .into_iter()
+                                .map(|item| {
+                                    let label = item
+                                        .description
+                                        .unwrap_or_else(|| format!("Item #{}", item.item_id));
+                                    view! {
+                                        <option value=item.item_id>{format!("{label} - {}", item.requested_uom)}</option>
+                                    }
+                                })
+                                .collect_view()}
+                        </select>
+                        <Show when=move || {
+                            item_search.get() == catalog_query.get()
+                                && !items_pending.get()
+                                && entry_items.get().len() == 50
+                        }>
+                            <small class="cell-detail">"50 matches shown"</small>
+                        </Show>
+                    </label>
+                    <label>
+                        <span>"Quantity"</span>
+                        <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            disabled=move || pending.get()
+                            prop:value=move || line_quantity.get()
+                            on:input=move |event| line_quantity.set(event_target_value(&event))
+                        />
+                    </label>
+                    <button
+                        type="button"
+                        class="button secondary-action order-line-add"
+                        disabled=move || {
+                            pending.get()
+                                || items_pending.get()
+                                || item_search.get() != catalog_query.get()
+                        }
+                        on:click=add_line
+                    >
+                        <Icon icon=UiIcon::Add/>
+                        "Add line"
+                    </button>
+                </div>
+                <div class="table-scroll order-lines-draft-scroll">
+                    <table class="data-table order-lines-draft-table">
+                        <thead>
+                            <tr><th>"Line"</th><th>"Item"</th><th>"UOM"</th><th>"Qty"</th><th></th></tr>
+                        </thead>
+                        <tbody>
+                            {move || lines
+                                .get()
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, line)| {
+                                    let item_id = line.item_id;
+                                    view! {
+                                        <tr>
+                                            <td><strong>{line.line_key}</strong></td>
+                                            <td>
+                                                <strong>{line.description}</strong>
+                                                <small class="cell-detail">{format!("Item #{item_id}")}</small>
+                                            </td>
+                                            <td>{line.requested_uom}</td>
+                                            <td>
+                                                <input
+                                                    class="line-quantity-input"
+                                                    type="number"
+                                                    min="1"
+                                                    step="1"
+                                                    required
+                                                    disabled=move || pending.get()
+                                                    prop:value=line.quantity
+                                                    on:input=move |event| {
+                                                        let quantity = event_target_value(&event)
+                                                            .parse::<i64>()
+                                                            .unwrap_or(0);
+                                                        lines.update(|values| {
+                                                            if let Some(value) = values.get_mut(index) {
+                                                                value.quantity = quantity;
+                                                            }
+                                                        });
+                                                    }
+                                                />
+                                            </td>
+                                            <td>
+                                                <button
+                                                    type="button"
+                                                    class="button order-line-remove"
+                                                    title="Remove demand line"
+                                                    aria-label="Remove demand line"
+                                                    disabled=move || pending.get()
+                                                    on:click=move |_| {
+                                                        lines.update(|values| {
+                                                            if index < values.len() {
+                                                                values.remove(index);
+                                                            }
+                                                        });
+                                                    }
+                                                >
+                                                    <Icon icon=UiIcon::Remove/>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    }
+                                })
+                                .collect_view()}
+                        </tbody>
+                    </table>
+                    {move || lines.get().is_empty().then(|| {
+                        view! { <p class="empty-state compact">"No demand lines added."</p> }
+                    })}
+                </div>
+                <div class="order-lines-draft-summary">
+                    <span>{move || format!("{} lines", lines.get().len())}</span>
+                    <strong>{move || format!(
+                        "{} units",
+                        lines
+                            .get()
+                            .iter()
+                            .fold(0_i64, |total, line| {
+                                total.saturating_add(line.quantity.max(0))
+                            })
+                    )}</strong>
+                    <button
+                        type="button"
+                        class="text-button"
+                        disabled=move || pending.get() || lines.get().is_empty()
+                        on:click=move |_| {
+                            lines.set(Vec::new());
+                            next_line_number.set(1);
+                        }
+                    >
+                        "Clear lines"
+                    </button>
+                </div>
+            </fieldset>
+            <fieldset>
                 <legend>"Ship to"</legend>
                 <div class="form-grid two-column">
                     <label class="wide">
                         <span>"Address line 1"</span>
                         <input
+                            required
                             autocomplete="street-address"
                             prop:value=move || line1.get()
                             on:input=move |event| line1.set(event_target_value(&event))
@@ -1105,11 +1442,11 @@ fn OrderDetailPanel(
                         <span>{format!("{} lines", order.order_items.len())}</span>
                     </div>
                     <div class="table-scroll">
-                        <table class="data-table detail-table">
+                        <table class="data-table detail-table order-demand-lines-table">
                             <thead>
                                 <tr>
                                     <th>"Line"</th><th>"Item"</th><th>"Description"</th>
-                                    <th>"Batch"</th><th class="numeric">"Quantity"</th>
+                                    <th>"UOM"</th><th class="numeric">"Quantity"</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -1120,14 +1457,15 @@ fn OrderDetailPanel(
                                     .map(|line| {
                                         view! {
                                             <tr>
-                                                <td>{format!("#{}", line.id)}</td>
+                                                <td>
+                                                    <strong>{line.line_key}</strong>
+                                                    <small class="cell-detail">
+                                                        {format!("Line {}", line.line_number)}
+                                                    </small>
+                                                </td>
                                                 <td>{format!("#{}", line.item_id)}</td>
                                                 <td>{line.item_description.unwrap_or_else(|| "-".to_owned())}</td>
-                                                <td>
-                                                    {line
-                                                        .item_batch_id
-                                                        .map_or_else(|| "-".to_owned(), |id| format!("#{id}"))}
-                                                </td>
+                                                <td>{line.uom}</td>
                                                 <td class="numeric strong">{format_quantity(line.qty)}</td>
                                             </tr>
                                         }

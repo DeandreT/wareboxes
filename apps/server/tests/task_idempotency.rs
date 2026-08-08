@@ -69,8 +69,22 @@ async fn create_twice(
         ),
         send(app, token, tenant_id, uri, Some(idempotency_key), body,),
     );
-    assert_eq!(first.status(), StatusCode::OK, "{uri}");
-    assert_eq!(second.status(), StatusCode::OK, "{uri}");
+    if first.status() != StatusCode::OK {
+        let status = first.status();
+        let body = to_bytes(first.into_body(), 256 * 1024).await.unwrap();
+        panic!(
+            "{uri}: first response was {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    if second.status() != StatusCode::OK {
+        let status = second.status();
+        let body = to_bytes(second.into_body(), 256 * 1024).await.unwrap();
+        panic!(
+            "{uri}: second response was {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
     let first_id = response_json::<i64>(first).await;
     let second_id = response_json::<i64>(second).await;
     assert_eq!(first_id, second_id, "{uri}");
@@ -770,7 +784,9 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
         .find(|balance| balance.item_batch_id == batch)
         .unwrap()
         .id;
-    let order = fixture.order(tenant_id, "CREATE-REPLAY-ORDER", owner).await;
+    let order = fixture
+        .order_header(tenant_id, "CREATE-REPLAY-ORDER", owner)
+        .await;
     fixture.order_item(tenant_id, order, single, 3).await;
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query("UPDATE orders SET status = 'cancelled' WHERE tenant_id = $1 AND id = $2")

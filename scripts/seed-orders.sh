@@ -48,6 +48,7 @@ DECLARE
   owner bigint;
   address bigint;
   item bigint;
+  item_uom text;
   order_id bigint;
   item_ids bigint[] := ARRAY[]::bigint[];
   statuses text[] := ARRAY['open', 'open', 'held', 'open', 'shipped', 'cancelled'];
@@ -74,9 +75,15 @@ BEGIN
     RAISE EXCEPTION 'seed-orders requires scripts/seed-inventory.sh to run first';
   END IF;
 
-  SELECT array_agg(item_id ORDER BY item_id) INTO item_ids
-  FROM inventory_owner_items
-  WHERE tenant_id = tenant AND inventory_owner_id = owner AND deleted IS NULL;
+  SELECT array_agg(owner_item.item_id ORDER BY owner_item.item_id) INTO item_ids
+  FROM inventory_owner_items owner_item
+  JOIN items item
+    ON item.tenant_id = owner_item.tenant_id
+   AND item.id = owner_item.item_id
+   AND item.deleted IS NULL
+  WHERE owner_item.tenant_id = tenant
+    AND owner_item.inventory_owner_id = owner
+    AND owner_item.deleted IS NULL;
   IF coalesce(array_length(item_ids, 1), 0) = 0 THEN
     RAISE EXCEPTION 'seed-orders requires inventory-owner items';
   END IF;
@@ -127,9 +134,16 @@ BEGIN
 
     FOR j IN 1..(2 + i % 2) LOOP
       item := item_ids[((i + j - 2) % array_length(item_ids, 1)) + 1];
+      SELECT packaging_unit INTO item_uom
+      FROM items
+      WHERE tenant_id = tenant AND id = item AND deleted IS NULL;
       INSERT INTO order_items
-          (tenant_id, inventory_owner_id, created, qty, item_id, order_id)
-      VALUES (tenant, owner, now(), 2 + ((i * j) % 9), item, order_id);
+          (tenant_id, inventory_owner_id, created, line_key, line_number,
+           qty, item_id, order_id, uom)
+      VALUES (
+        tenant, owner, now(), j::text, j,
+        2 + ((i * j) % 9), item, order_id, item_uom
+      );
     END LOOP;
 
     INSERT INTO order_activity

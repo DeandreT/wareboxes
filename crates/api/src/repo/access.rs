@@ -127,6 +127,89 @@ pub(crate) async fn lock_current_scope_tx(
     current_scope_tx(tx, tenant_id, user_id).await
 }
 
+/// Revalidates a permission inside a command transaction and locks the rows
+/// that currently grant it. Concurrent revocation therefore orders either
+/// before the command (which is denied) or after it commits.
+pub(crate) async fn require_permission_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    user_id: i64,
+    permission: &str,
+) -> AppResult<()> {
+    let direct_role_ids = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT role_id
+        FROM user_roles
+        WHERE tenant_id = $1 AND user_id = $2 AND deleted IS NULL
+        ORDER BY role_id
+        FOR SHARE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    if direct_role_ids.is_empty() {
+        return Err(AppError::forbidden());
+    }
+
+    let role_ids = sqlx::query_scalar::<_, i64>(
+        r#"
+        WITH RECURSIVE role_hierarchy AS (
+            SELECT role.id, role.parent_id
+            FROM roles role
+            WHERE role.tenant_id = $1
+              AND role.id = ANY($2)
+              AND role.deleted IS NULL
+            UNION
+            SELECT parent.id, parent.parent_id
+            FROM role_hierarchy child
+            INNER JOIN roles parent
+                ON parent.tenant_id = $1 AND parent.id = child.parent_id
+            WHERE parent.deleted IS NULL
+        )
+        SELECT role.id
+        FROM roles role
+        INNER JOIN (SELECT DISTINCT id FROM role_hierarchy) granted
+            ON granted.id = role.id
+        WHERE role.tenant_id = $1 AND role.deleted IS NULL
+        ORDER BY role.id
+        FOR SHARE OF role
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(&direct_role_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    if role_ids.is_empty() {
+        return Err(AppError::forbidden());
+    }
+
+    let grant = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT role_permission.id
+        FROM role_permissions role_permission
+        INNER JOIN permissions permission
+            ON permission.tenant_id = role_permission.tenant_id
+           AND permission.id = role_permission.permission_id
+        WHERE role_permission.tenant_id = $1
+          AND role_permission.role_id = ANY($2)
+          AND role_permission.deleted IS NULL
+          AND permission.deleted IS NULL
+          AND UPPER(permission.name) IN (UPPER($3), 'ADMIN')
+        ORDER BY role_permission.id
+        LIMIT 1
+        FOR SHARE OF role_permission, permission
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(&role_ids)
+    .bind(permission)
+    .fetch_optional(&mut **tx)
+    .await?;
+    grant.map(|_| ()).ok_or_else(AppError::forbidden)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OperationalDimensions {
     pub facility_id: FacilityId,

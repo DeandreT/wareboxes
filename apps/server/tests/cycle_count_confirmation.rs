@@ -117,7 +117,7 @@ impl CycleCountFixture {
 
         if reserved > 0 {
             let order_id = fixture
-                .order(tenant_id, &format!("COUNT-{suffix}-ORDER"), owner_id)
+                .order_header(tenant_id, &format!("COUNT-{suffix}-ORDER"), owner_id)
                 .await;
             fixture
                 .allocated_reservation(

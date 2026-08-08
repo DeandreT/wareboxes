@@ -19,10 +19,7 @@ async fn order_and_load_mutations_write_activity_history() {
     .await
     .unwrap();
 
-    repo::orders::add_order(&db, tenant_id, &new_order("ACT-ORDER", inventory_owner))
-        .await
-        .unwrap();
-    let order_id = repo::orders::get_orders(&db, tenant_id).await.unwrap()[0].id;
+    let order_id = insert_test_order_header(&db, tenant_id, "ACT-ORDER", inventory_owner).await;
     let update = OrderUpdate {
         order_id,
         order_key: None,

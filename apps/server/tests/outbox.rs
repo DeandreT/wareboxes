@@ -108,7 +108,9 @@ async fn domain_events_are_atomic_immutable_and_replay_safe() {
         .await
         .unwrap()[0]
         .id;
-    let order_id = fixture.order(tenant_id, "OUTBOX-ORDER", owner_id).await;
+    let order_id = fixture
+        .order_header(tenant_id, "OUTBOX-ORDER", owner_id)
+        .await;
     let item_id = repo::inventory::get_balances(&fixture.db, tenant_id, false)
         .await
         .unwrap()[0]

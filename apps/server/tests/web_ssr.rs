@@ -111,7 +111,7 @@ async fn authenticated_overview_and_orders_are_rendered_with_scoped_data() {
         )
         .await;
     fixture
-        .order(access.tenant_id, "SSR-ORDER-1001", inventory_owner_id)
+        .order_header(access.tenant_id, "SSR-ORDER-1001", inventory_owner_id)
         .await;
 
     let state = AppState::new(fixture.db.clone());

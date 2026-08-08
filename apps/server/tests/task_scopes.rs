@@ -210,7 +210,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         .inventory_owner(foreign_tenant_id, "Foreign Task Owner")
         .await;
     let foreign_order = fixture
-        .order(foreign_tenant_id, "TASK-SCOPE-FOREIGN-ORDER", foreign_owner)
+        .order_header(foreign_tenant_id, "TASK-SCOPE-FOREIGN-ORDER", foreign_owner)
         .await;
 
     let allowed_batch = repo::inventory::add_item_batch(
@@ -268,7 +268,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         .unwrap();
 
     let allowed_order = fixture
-        .order(tenant_id, "TASK-SCOPE-ALLOWED-ORDER", allowed_owner)
+        .order_header(tenant_id, "TASK-SCOPE-ALLOWED-ORDER", allowed_owner)
         .await;
     fixture.order_item(tenant_id, allowed_order, item, 2).await;
     cancel_order(
@@ -280,7 +280,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
     )
     .await;
     let denied_order = fixture
-        .order(tenant_id, "TASK-SCOPE-DENIED-ORDER", denied_owner)
+        .order_header(tenant_id, "TASK-SCOPE-DENIED-ORDER", denied_owner)
         .await;
     fixture.order_item(tenant_id, denied_order, item, 2).await;
     cancel_order(

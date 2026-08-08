@@ -89,7 +89,7 @@ pub(super) async fn lock_unpack_order_lines_tx(
 ) -> AppResult<()> {
     let rows = sqlx::query(
         r#"
-        SELECT item_id, item_batch_id
+        SELECT item_id
         FROM order_items
         WHERE tenant_id = $1
           AND inventory_owner_id = $2
@@ -104,17 +104,11 @@ pub(super) async fn lock_unpack_order_lines_tx(
     .fetch_all(&mut **tx)
     .await?;
     let mut item_ids = Vec::with_capacity(rows.len());
-    let mut batch_ids = Vec::new();
     for row in &rows {
         item_ids.push(row.try_get::<i64, _>("item_id")?);
-        if let Some(item_batch_id) = row.try_get::<Option<i64>, _>("item_batch_id")? {
-            batch_ids.push(item_batch_id);
-        }
     }
     item_ids.sort_unstable();
     item_ids.dedup();
-    batch_ids.sort_unstable();
-    batch_ids.dedup();
     let locked_items = sqlx::query(
         "SELECT id FROM items WHERE tenant_id = $1 AND id = ANY($2) AND deleted IS NULL FOR SHARE",
     )
@@ -122,23 +116,7 @@ pub(super) async fn lock_unpack_order_lines_tx(
     .bind(&item_ids)
     .fetch_all(&mut **tx)
     .await?;
-    let locked_batches = sqlx::query(
-        r#"
-        SELECT id
-        FROM item_batches
-        WHERE tenant_id = $1
-          AND inventory_owner_id = $2
-          AND id = ANY($3)
-          AND deleted IS NULL
-        FOR SHARE
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(inventory_owner_id)
-    .bind(&batch_ids)
-    .fetch_all(&mut **tx)
-    .await?;
-    if locked_items.len() != item_ids.len() || locked_batches.len() != batch_ids.len() {
+    if locked_items.len() != item_ids.len() {
         return Err(AppError::conflict(
             "cancelled order has inactive item references",
         ));

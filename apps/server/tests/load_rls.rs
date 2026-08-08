@@ -126,7 +126,7 @@ async fn load_refs(fixture: &Fixture, email: &str, key: &str) -> LoadRefs {
         .item(tenant_id, &format!("{key} item"), "each")
         .await;
     let order_id = fixture
-        .order(tenant_id, &format!("{key}-ORDER"), inventory_owner_id)
+        .order_header(tenant_id, &format!("{key}-ORDER"), inventory_owner_id)
         .await;
 
     let load_id = repo::loads::add_load(

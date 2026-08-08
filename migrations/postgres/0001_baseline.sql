@@ -2575,7 +2575,7 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    SELECT order_line.qty, order_line.item_id, item.packaging_unit
+    SELECT order_line.qty, order_line.item_id, order_line.uom
     INTO line_qty, line_item_id, line_uom
     FROM public.order_items order_line
     INNER JOIN public.orders customer_order
@@ -2585,10 +2585,6 @@ BEGIN
        AND customer_order.id = order_line.order_id
        AND customer_order.deleted IS NULL
        AND customer_order.status NOT IN ('shipped', 'cancelled', 'void')
-    INNER JOIN public.items item
-        ON item.tenant_id = order_line.tenant_id
-       AND item.id = order_line.item_id
-       AND item.deleted IS NULL
     INNER JOIN public.inventory_owner_facilities assignment
         ON assignment.tenant_id = order_line.tenant_id
        AND assignment.inventory_owner_id =
@@ -5417,6 +5413,7 @@ CREATE TABLE public.order_activity (
     created timestamp with time zone NOT NULL,
     deleted timestamp with time zone,
     order_id bigint NOT NULL,
+    actor_user_id bigint,
     action text NOT NULL
 );
 
@@ -5487,11 +5484,16 @@ CREATE TABLE public.order_items (
     inventory_owner_id bigint NOT NULL,
     created timestamp with time zone NOT NULL,
     deleted timestamp with time zone,
+    line_key text NOT NULL,
+    line_number bigint NOT NULL,
     qty bigint NOT NULL,
     item_id bigint NOT NULL,
     order_id bigint NOT NULL,
-    item_batch_id bigint,
-    CONSTRAINT order_items_qty_check CHECK ((qty > 0))
+    uom text NOT NULL,
+    CONSTRAINT order_items_line_key_check CHECK (((line_key = btrim(line_key)) AND (line_key <> ''::text) AND (char_length(line_key) <= 200))),
+    CONSTRAINT order_items_line_number_check CHECK ((line_number > 0)),
+    CONSTRAINT order_items_qty_check CHECK ((qty > 0)),
+    CONSTRAINT order_items_uom_check CHECK (((uom = btrim(uom)) AND (uom <> ''::text) AND (char_length(uom) <= 32)))
 );
 
 ALTER TABLE ONLY public.order_items FORCE ROW LEVEL SECURITY;
@@ -5558,10 +5560,13 @@ CREATE TABLE public.orders (
     rush boolean DEFAULT false NOT NULL,
     status text DEFAULT 'open'::text NOT NULL,
     address_id bigint NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
     confirmed timestamp with time zone,
     closed timestamp with time zone,
     ship_by timestamp with time zone,
     wave_id bigint,
+    CONSTRAINT orders_order_key_check CHECK (((order_key = btrim(order_key)) AND (order_key <> ''::text) AND (char_length(order_key) <= 200))),
+    CONSTRAINT orders_revision_check CHECK ((revision > 0)),
     CONSTRAINT orders_status_check CHECK ((status = ANY (ARRAY['awaiting shipment'::text, 'shipped'::text, 'cancelled'::text, 'held'::text, 'processing'::text, 'open'::text, 'void'::text])))
 );
 
@@ -7199,6 +7204,22 @@ ALTER TABLE ONLY public.order_items
 
 
 --
+-- Name: order_items order_items_tenant_owner_order_line_key_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_items
+    ADD CONSTRAINT order_items_tenant_owner_order_line_key_key UNIQUE (tenant_id, inventory_owner_id, order_id, line_key);
+
+
+--
+-- Name: order_items order_items_tenant_owner_order_line_number_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_items
+    ADD CONSTRAINT order_items_tenant_owner_order_line_number_key UNIQUE (tenant_id, inventory_owner_id, order_id, line_number);
+
+
+--
 -- Name: order_items order_items_tenant_owner_order_id_unique; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -7709,6 +7730,20 @@ CREATE UNIQUE INDEX barcodes_active_scanner_identity_unique_idx ON public.barcod
 
 
 --
+-- Name: idx_items_active_order_entry_description; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_items_active_order_entry_description ON public.items USING btree (tenant_id, lower(description) text_pattern_ops) WHERE (deleted IS NULL);
+
+
+--
+-- Name: idx_skus_active_order_entry_name; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_skus_active_order_entry_name ON public.skus USING btree (tenant_id, lower(name) text_pattern_ops, item_id) WHERE (deleted IS NULL);
+
+
+--
 -- Name: idx_audit_location_counts_scope; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -7999,7 +8034,7 @@ CREATE UNIQUE INDEX order_holds_active_reason_key ON public.order_holds USING bt
 -- Name: idx_order_items_item_id; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_order_items_item_id ON public.order_items USING btree (tenant_id, item_id);
+CREATE INDEX idx_order_items_item_id ON public.order_items USING btree (tenant_id, inventory_owner_id, item_id);
 
 
 --
@@ -10759,6 +10794,14 @@ ALTER TABLE ONLY public.order_activity
 
 
 --
+-- Name: order_activity order_activity_tenant_id_actor_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_activity
+    ADD CONSTRAINT order_activity_tenant_id_actor_user_id_fkey FOREIGN KEY (tenant_id, actor_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
 -- Name: order_holds order_holds_tenant_id_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -10791,19 +10834,11 @@ ALTER TABLE ONLY public.order_holds
 
 
 --
--- Name: order_items order_items_item_batch_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: order_items order_items_owner_item_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.order_items
-    ADD CONSTRAINT order_items_item_batch_id_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
-
-
---
--- Name: order_items order_items_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.order_items
-    ADD CONSTRAINT order_items_item_id_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+    ADD CONSTRAINT order_items_owner_item_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_id) REFERENCES public.inventory_owner_items(tenant_id, inventory_owner_id, item_id);
 
 
 --

@@ -372,6 +372,21 @@ pub async fn update_inventory_owner_in_scope(
 /// shipped or cancelled.
 pub async fn delete_inventory_owner(db: &Db, tenant_id: TenantId, id: i64) -> AppResult<bool> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    let owner_exists: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT id FROM inventory_owners
+        WHERE tenant_id = $1 AND id = $2 AND deleted IS NULL
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if owner_exists.is_none() {
+        tx.commit().await?;
+        return Ok(false);
+    }
     let open: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM orders
