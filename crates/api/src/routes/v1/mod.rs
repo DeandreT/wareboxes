@@ -9,6 +9,7 @@ mod inventory_relocation;
 mod inventory_rollups;
 mod inventory_status_transitions;
 mod license_plate_putaway;
+mod order_holds;
 mod putaway;
 mod putaway_claim_lifecycle;
 mod putaway_claims;
@@ -113,6 +114,11 @@ pub fn router() -> Router<AppState> {
         .route(
             "/license-plate-putaway-tasks/{task_id}/confirmations",
             post(license_plate_putaway::confirm),
+        )
+        .route("/orders/{order_id}/holds", post(order_holds::place))
+        .route(
+            "/orders/{order_id}/holds/{hold_id}/releases",
+            post(order_holds::release),
         )
         .route("/putaway-tasks", post(putaway::create))
         .route(

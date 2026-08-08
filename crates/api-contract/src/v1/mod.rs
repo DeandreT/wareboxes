@@ -11,6 +11,7 @@ mod inventory_relocation;
 mod inventory_rollup;
 mod inventory_status_transition;
 mod license_plate_putaway;
+mod order_hold;
 mod putaway;
 mod putaway_claim;
 mod revision;
@@ -67,6 +68,10 @@ pub use inventory_status_transition::{
 pub use license_plate_putaway::{
     ConfirmLicensePlatePutawayRequest, CreateLicensePlatePutawayTaskRequest,
     CreateLicensePlatePutawayTaskResponse, LicensePlatePutawayConfirmationResponse,
+};
+pub use order_hold::{
+    OrderHoldOrderStatus, OrderHoldReason, PlaceOrderHoldRequest, PlaceOrderHoldResponse,
+    ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
 };
 pub use putaway::{
     ConfirmPutawayRequest, CreatePutawayTaskRequest, CreatePutawayTaskResponse,

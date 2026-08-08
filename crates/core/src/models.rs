@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use wareboxes_domain::{InventoryOwnerId, OwnerScope, SiteScope, TenantId, TenantStatus, UserId};
 
-pub use wareboxes_domain::Timestamp;
+pub use wareboxes_domain::{OrderHoldReason, OrderStatus, Timestamp};
 
 macro_rules! impl_status_display {
     ($ty:ty) => {
@@ -135,68 +135,6 @@ pub struct InventoryOwner {
     pub inventory_owner_facilities: Vec<Facility>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum OrderStatus {
-    #[serde(rename = "awaiting shipment")]
-    AwaitingShipment,
-    Shipped,
-    Cancelled,
-    Held,
-    Processing,
-    #[default]
-    Open,
-    Void,
-}
-
-impl OrderStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            OrderStatus::AwaitingShipment => "awaiting shipment",
-            OrderStatus::Shipped => "shipped",
-            OrderStatus::Cancelled => "cancelled",
-            OrderStatus::Held => "held",
-            OrderStatus::Processing => "processing",
-            OrderStatus::Open => "open",
-            OrderStatus::Void => "void",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "awaiting shipment" => OrderStatus::AwaitingShipment,
-            "shipped" => OrderStatus::Shipped,
-            "cancelled" => OrderStatus::Cancelled,
-            "held" => OrderStatus::Held,
-            "processing" => OrderStatus::Processing,
-            "open" => OrderStatus::Open,
-            "void" => OrderStatus::Void,
-            _ => return None,
-        })
-    }
-
-    pub const ALL: [OrderStatus; 7] = [
-        OrderStatus::AwaitingShipment,
-        OrderStatus::Shipped,
-        OrderStatus::Cancelled,
-        OrderStatus::Held,
-        OrderStatus::Processing,
-        OrderStatus::Open,
-        OrderStatus::Void,
-    ];
-
-    /// Statuses an order may be in to allow update or soft-delete
-    /// (mirrors the `inArray` guard in `app/utils/orders.ts`).
-    pub fn is_mutable(&self) -> bool {
-        matches!(
-            self,
-            OrderStatus::Cancelled | OrderStatus::Held | OrderStatus::Open | OrderStatus::Void
-        )
-    }
-}
-
-impl_status_display!(OrderStatus);
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OrderItem {
     pub id: i64,
@@ -235,6 +173,27 @@ pub struct OrderActivity {
     pub action: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrderHold {
+    pub id: i64,
+    pub tenant_id: TenantId,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub order_id: i64,
+    pub created: Timestamp,
+    pub created_by_user_id: i64,
+    pub reason: OrderHoldReason,
+    pub note: Option<String>,
+    pub released_at: Option<Timestamp>,
+    pub released_by_user_id: Option<i64>,
+    pub release_note: Option<String>,
+}
+
+impl OrderHold {
+    pub const fn is_active(&self) -> bool {
+        self.released_at.is_none()
+    }
+}
+
 /// Orders join their shipping address, so the address columns are flattened
 /// onto the order (matching `SelectOrder` in `app/utils/types/db/orders.ts`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -267,6 +226,8 @@ pub struct Order {
     pub reservations: Vec<InventoryReservation>,
     #[serde(default)]
     pub activity: Vec<OrderActivity>,
+    #[serde(default)]
+    pub holds: Vec<OrderHold>,
     #[serde(default)]
     pub ordered_qty: i64,
     #[serde(default)]
