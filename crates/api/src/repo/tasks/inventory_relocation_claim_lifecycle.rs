@@ -9,7 +9,8 @@ use wareboxes_domain::InventoryOwnerId;
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
-use crate::repo::idempotency::{require_command_context, PreparedCommand};
+use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
 use super::{insert_progress_tx, TaskDimensions};
 
@@ -153,13 +154,13 @@ pub async fn heartbeat_inventory_relocation_claim_in_scope(
     command: &CommandContext,
     task_id: i64,
 ) -> AppResult<InventoryRelocationClaimHeartbeat> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     if task_id <= 0 {
         return Err(AppError::bad_request(
             "inventory relocation task ID must be positive",
         ));
     }
-    let prepared = PreparedCommand::new(command, HEARTBEAT_OPERATION, &task_id)?;
+    let prepared = PreparedCommand::new_v1(command, HEARTBEAT_OPERATION, &task_id)?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, command.actor_id.get()).await?;
@@ -226,7 +227,7 @@ pub async fn heartbeat_inventory_relocation_claim_in_scope(
         previous_lease_expires_at: claim.lease_expires_at,
         lease_expires_at,
     };
-    prepared.commit(tx, heartbeat).await
+    Ok(prepared.commit(tx, heartbeat).await?)
 }
 
 pub async fn release_inventory_relocation_claim_in_scope(
@@ -237,14 +238,14 @@ pub async fn release_inventory_relocation_claim_in_scope(
     reason: InventoryRelocationClaimReleaseReason,
     note: Option<&str>,
 ) -> AppResult<InventoryRelocationClaimRelease> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     if task_id <= 0 {
         return Err(AppError::bad_request(
             "inventory relocation task ID must be positive",
         ));
     }
     validate_release_input(reason, note)?;
-    let prepared = PreparedCommand::new(command, RELEASE_OPERATION, &(task_id, reason, note))?;
+    let prepared = PreparedCommand::new_v1(command, RELEASE_OPERATION, &(task_id, reason, note))?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, command.actor_id.get()).await?;
@@ -318,5 +319,5 @@ pub async fn release_inventory_relocation_claim_in_scope(
         reason,
         note: note.map(str::to_owned),
     };
-    prepared.commit(tx, release).await
+    Ok(prepared.commit(tx, release).await?)
 }

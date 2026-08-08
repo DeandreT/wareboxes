@@ -3,6 +3,7 @@
 pub mod authorization;
 mod context;
 mod error;
+pub mod idempotency;
 pub mod identity;
 pub mod integration;
 pub mod inventory;

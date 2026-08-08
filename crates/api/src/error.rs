@@ -37,6 +37,19 @@ impl From<wareboxes_persistence_postgres::PersistenceError> for AppError {
     }
 }
 
+impl From<wareboxes_persistence_postgres::idempotency::CommandIdempotencyError> for AppError {
+    fn from(error: wareboxes_persistence_postgres::idempotency::CommandIdempotencyError) -> Self {
+        match error {
+            wareboxes_persistence_postgres::idempotency::CommandIdempotencyError::Application(
+                error,
+            ) => Self::Application(error),
+            wareboxes_persistence_postgres::idempotency::CommandIdempotencyError::Persistence(
+                error,
+            ) => error.into(),
+        }
+    }
+}
+
 impl AppError {
     pub fn unauthorized() -> Self {
         Self::Application(ApplicationError::Unauthorized)

@@ -12,9 +12,10 @@ use wareboxes_domain::{OwnerFacilityScope, TenantId};
 use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
-use crate::repo::idempotency::{request_hash, require_command_context, PreparedCommand};
-use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry, JournalStart};
+use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
 use crate::repo::{inventory, license_plates};
+use wareboxes_application::idempotency::{command_request_hash, PreparedCommand};
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 const INTERNAL_OPERATION: &str = "inbound.receive_expected_inventory.v1";
@@ -444,12 +445,17 @@ async fn enqueue_receipt_event(
     tenant_id: TenantId,
     actor_user_id: i64,
     owner_facility: OwnerFacilityScope,
-    prepared: &PreparedCommand<'_>,
+    prepared: &PreparedCommand,
     result: &ReceiveExpectedInventoryResult,
     receipt: &ValidatedReceipt<'_>,
 ) -> AppResult<()> {
-    let event_identity = request_hash(&(prepared.idempotency_key(), prepared.request_hash()))?;
-    let event_key = format!("inbound-expected-receipt:{event_identity}");
+    let event_identity = command_request_hash(
+        prepared.actor_id(),
+        prepared.operation(),
+        prepared.schema(),
+        &(prepared.idempotency_key(), prepared.request_hash()),
+    )?;
+    let event_key = format!("inbound-expected-receipt:{}", event_identity.as_str());
     let disposition = receipt_disposition(receipt);
     let payload = serde_json::json!({
         "load_id": result.load_id,
@@ -481,7 +487,7 @@ async fn enqueue_receipt_event(
             actor_user_id: Some(actor_user_id),
             event_key: &event_key,
             aggregate_type: "inbound_receipt",
-            aggregate_id: &event_identity,
+            aggregate_id: event_identity.as_str(),
             ordering_key: &event_key,
             aggregate_sequence: 1,
             event_type: "inbound.expected_receipt.confirmed",
@@ -511,12 +517,12 @@ pub async fn receive_expected_inventory(
     load_line_id: i64,
     command: &ReceiveExpectedInventoryCommand<'_>,
 ) -> AppResult<ReceiveExpectedInventoryResult> {
-    require_command_context(access, context)?;
+    context.require_actor(access.tenant_id, access.user_id)?;
     if load_line_id <= 0 {
         return Err(AppError::bad_request("load line ID must be positive"));
     }
     let receipt = validate_command(command)?;
-    let prepared = PreparedCommand::new(context, INTERNAL_OPERATION, &(load_line_id, receipt))?;
+    let prepared = PreparedCommand::new_v1(context, INTERNAL_OPERATION, &(load_line_id, receipt))?;
     execute_expected_receipt(
         db,
         access,
@@ -537,13 +543,13 @@ pub async fn confirm_expected_receipt(
     load_line_id: i64,
     command: &ConfirmExpectedReceiptCommand<'_>,
 ) -> AppResult<ReceiveExpectedInventoryResult> {
-    require_command_context(access, context)?;
+    context.require_actor(access.tenant_id, access.user_id)?;
     if load_line_id <= 0 {
         return Err(AppError::bad_request("load line ID must be positive"));
     }
     let scanner_receipt = validate_scanner_command(command)?;
     let prepared =
-        PreparedCommand::new(context, SCANNER_OPERATION, &(load_line_id, scanner_receipt))?;
+        PreparedCommand::new_v1(context, SCANNER_OPERATION, &(load_line_id, scanner_receipt))?;
     execute_expected_receipt(
         db,
         access,
@@ -565,7 +571,7 @@ async fn execute_expected_receipt(
     load_line_id: i64,
     mut receipt: ValidatedReceipt<'_>,
     scanner_receipt: Option<ValidatedScannerReceipt<'_>>,
-    prepared: PreparedCommand<'_>,
+    prepared: PreparedCommand,
     operation: &'static str,
 ) -> AppResult<ReceiveExpectedInventoryResult> {
     let now = now_iso();
@@ -820,7 +826,7 @@ async fn execute_expected_receipt(
         let transaction_reason = receipt
             .exception_reason
             .map_or("expected_receipt", InboundReceiptExceptionReason::as_str);
-        let transaction_id = match inventory_journal::begin_transaction(
+        let transaction_id = inventory_journal::begin_transaction(
             &mut tx,
             &JournalCommand {
                 tenant_id: access.tenant_id,
@@ -834,18 +840,9 @@ async fn execute_expected_receipt(
                 operation,
                 idempotency_key: Some(prepared.idempotency_key()),
                 request_hash: prepared.request_hash(),
-                record_idempotency: false,
             },
         )
-        .await?
-        {
-            JournalStart::New(transaction_id) => transaction_id,
-            JournalStart::Replay(_) => {
-                return Err(AppError::internal(
-                    "expected receipt journal replay bypassed command replay",
-                ));
-            }
-        };
+        .await?;
         inventory_transaction_id = Some(transaction_id);
 
         if let Some(license_plate_id) = resolved_license_plate_id {
@@ -1054,7 +1051,7 @@ async fn execute_expected_receipt(
         &receipt,
     )
     .await?;
-    prepared
+    Ok(prepared
         .commit_with_inventory_transaction(tx, result, inventory_transaction_id)
-        .await
+        .await?)
 }

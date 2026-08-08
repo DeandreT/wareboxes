@@ -5551,7 +5551,10 @@ dependencies = [
 name = "wareboxes-application"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "serde",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
  "wareboxes-domain",
 ]
@@ -5586,6 +5589,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "serde",
  "serde_json",
  "sha2",
  "sqlx",

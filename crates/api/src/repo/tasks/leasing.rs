@@ -5,12 +5,13 @@ use wareboxes_domain::TenantId;
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::AppResult;
 use crate::repo::access::{current_scope_tx, lock_current_scope_tx, lock_user_tx};
-use crate::repo::idempotency::PreparedCommand;
+use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
 use super::execution::{
     insert_progress_tx, task_assignment_requirements_tx, user_can_execute_task_tx,
 };
-use super::{require_command_context, ScopeBindings};
+use super::ScopeBindings;
 
 pub async fn assign_task(
     db: &Db,
@@ -31,7 +32,7 @@ async fn assign_task_with_scope(
 ) -> AppResult<bool> {
     let prepared = command
         .map(|command| {
-            PreparedCommand::new(command, "task.assign.v1", &(task_id, assigned_user_id))
+            PreparedCommand::new_v1(command, "task.assign.v1", &(task_id, assigned_user_id))
         })
         .transpose()?;
     let mut tx = db.begin().await?;
@@ -60,12 +61,6 @@ async fn assign_task_with_scope(
     {
         return Ok(false);
     }
-    if let Some(prepared) = prepared.as_ref() {
-        if let Some(assigned) = prepared.replayed::<bool>(&mut tx).await? {
-            tx.commit().await?;
-            return Ok(assigned);
-        }
-    }
     if !user_can_execute_task_tx(
         &mut tx,
         tenant_id,
@@ -76,6 +71,12 @@ async fn assign_task_with_scope(
     .await?
     {
         return Ok(false);
+    }
+    if let Some(prepared) = prepared.as_ref() {
+        if let Some(assigned) = prepared.replayed::<bool>(&mut tx).await? {
+            tx.commit().await?;
+            return Ok(assigned);
+        }
     }
     let active: Option<i64> = sqlx::query_scalar(
         r#"
@@ -118,7 +119,7 @@ async fn assign_task_with_scope(
         return Ok(false);
     }
     match prepared {
-        Some(prepared) => prepared.commit(tx, assigned).await,
+        Some(prepared) => Ok(prepared.commit(tx, assigned).await?),
         None => {
             tx.commit().await?;
             Ok(assigned)
@@ -133,7 +134,7 @@ pub async fn assign_task_in_scope(
     task_id: i64,
     assigned_user_id: i64,
 ) -> AppResult<bool> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     assign_task_with_scope(
         db,
         access.tenant_id,
@@ -155,7 +156,7 @@ pub async fn release_expired_tasks_in_scope(
     access: &TenantAccess,
     command: &CommandContext,
 ) -> AppResult<u64> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     release_expired_tasks_with_scope(
         db,
         access.tenant_id,
@@ -173,9 +174,6 @@ pub(super) async fn release_expired_tasks_with_scope(
     scope: &ScopeBindings,
     command: Option<&CommandContext>,
 ) -> AppResult<u64> {
-    let prepared = command
-        .map(|command| PreparedCommand::new(command, "task.release_expired.v1", &()))
-        .transpose()?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
     let current_scope = match scope_user_id {
@@ -185,6 +183,20 @@ pub(super) async fn release_expired_tasks_with_scope(
         None => None,
     };
     let scope = current_scope.as_ref().unwrap_or(scope);
+    let prepared = command
+        .map(|command| {
+            PreparedCommand::new_v1(
+                command,
+                "task.release_expired.v1",
+                &(
+                    scope.all_facilities,
+                    &scope.facility_ids,
+                    scope.all_inventory_owners,
+                    &scope.inventory_owner_ids,
+                ),
+            )
+        })
+        .transpose()?;
     if let Some(prepared) = prepared.as_ref() {
         if let Some(released) = prepared.replayed::<u64>(&mut tx).await? {
             tx.commit().await?;

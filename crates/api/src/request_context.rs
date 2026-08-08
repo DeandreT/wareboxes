@@ -8,6 +8,7 @@ use axum::response::Response;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use wareboxes_api_contract::web::{ErrorCode, ErrorResponse};
+use wareboxes_application::idempotency::IdempotencyKey as ApplicationIdempotencyKey;
 
 use crate::error::AppError;
 
@@ -15,11 +16,11 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 
 #[derive(Debug, Clone)]
-pub struct IdempotencyKey(String);
+pub struct IdempotencyKey(ApplicationIdempotencyKey);
 
 impl IdempotencyKey {
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -36,14 +37,7 @@ where
             .and_then(|value| value.to_str().ok())
             .map(str::trim)
             .ok_or_else(AppError::idempotency_key_required)?;
-        if value.is_empty() || value.len() > 200 {
-            return Err(if value.is_empty() {
-                AppError::idempotency_key_required()
-            } else {
-                AppError::bad_request("idempotency key cannot exceed 200 characters")
-            });
-        }
-        Ok(Self(value.to_owned()))
+        Ok(Self(ApplicationIdempotencyKey::new(value)?))
     }
 }
 

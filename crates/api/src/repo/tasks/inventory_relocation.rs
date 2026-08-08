@@ -8,9 +8,10 @@ use wareboxes_domain::TenantId;
 use crate::db::{bind_tenant_context, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::ScopeBindings;
-use crate::repo::idempotency::{require_command_context, PreparedCommand};
 use crate::repo::inventory;
 use crate::repo::inventory_journal;
+use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
 use super::{
     insert_task_tx, lock_current_task_scope_tx, require_replayed_task_visible_tx, task_permission,
@@ -87,7 +88,7 @@ pub async fn create_loose_inventory_relocation_task_in_scope(
     due_at: Option<Timestamp>,
     instructions: Option<&str>,
 ) -> AppResult<i64> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     validate_creation(
         source_inventory_balance_id,
         destination_location_id,
@@ -95,7 +96,7 @@ pub async fn create_loose_inventory_relocation_task_in_scope(
         priority,
         instructions,
     )?;
-    let prepared = PreparedCommand::new(
+    let prepared = PreparedCommand::new_v1(
         command,
         CREATE_LOOSE_OPERATION,
         &(
@@ -212,7 +213,7 @@ pub async fn create_loose_inventory_relocation_task_in_scope(
     .bind(quantity)
     .execute(&mut *tx)
     .await?;
-    prepared.commit(tx, task_id).await
+    Ok(prepared.commit(tx, task_id).await?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -228,7 +229,7 @@ pub async fn create_license_plate_inventory_relocation_task_in_scope(
     due_at: Option<Timestamp>,
     instructions: Option<&str>,
 ) -> AppResult<i64> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     validate_creation(
         license_plate_id,
         destination_location_id,
@@ -236,7 +237,7 @@ pub async fn create_license_plate_inventory_relocation_task_in_scope(
         priority,
         instructions,
     )?;
-    let prepared = PreparedCommand::new(
+    let prepared = PreparedCommand::new_v1(
         command,
         CREATE_PLATE_OPERATION,
         &(
@@ -373,7 +374,7 @@ pub async fn create_license_plate_inventory_relocation_task_in_scope(
         .execute(&mut *tx)
         .await?;
     }
-    prepared.commit(tx, task_id).await
+    Ok(prepared.commit(tx, task_id).await?)
 }
 
 fn validate_creation(

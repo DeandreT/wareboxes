@@ -7,6 +7,7 @@ use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_application::CommandContext;
+use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::{
     InboundReceiptExceptionReason, ReceiveExpectedInventoryResult, Timestamp,
 };
@@ -1038,7 +1039,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     assert_eq!(balances[0].license_plate_id, Some(plate.id));
     assert_eq!(balances[0].qty_on_hand, 5);
 
-    let plate_move_transaction = repo::license_plates::move_license_plate(
+    let first_plate_move = repo::license_plates::move_license_plate(
         &db,
         tenant_id,
         user.id,
@@ -1046,23 +1047,43 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
         reserve,
         Some("putaway"),
         "lp-move-1",
-    )
-    .await
-    .unwrap();
+    );
+    let concurrent_plate_replay = repo::license_plates::move_license_plate(
+        &db,
+        tenant_id,
+        user.id,
+        plate.id,
+        reserve,
+        Some("putaway"),
+        "lp-move-1",
+    );
+    let (first_plate_move, concurrent_plate_replay) =
+        tokio::join!(first_plate_move, concurrent_plate_replay);
+    let plate_move_transaction = first_plate_move.unwrap();
     assert!(plate_move_transaction > 0);
-
-    let replayed_plate_move = repo::license_plates::move_license_plate(
-        &db,
-        tenant_id,
-        user.id,
-        plate.id,
-        reserve,
-        Some("putaway"),
-        "lp-move-1",
+    let replayed_plate_move = concurrent_plate_replay.unwrap();
+    assert_eq!(replayed_plate_move, plate_move_transaction);
+    let mut tx = tenant_tx(&db, tenant_id).await;
+    let durable_move_effects: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT (SELECT COUNT(*) FROM inventory_transactions
+                WHERE tenant_id = $1 AND operation = 'move_license_plate'
+                  AND idempotency_key = 'lp-move-1'),
+               (SELECT COUNT(*) FROM command_idempotency_records
+                WHERE tenant_id = $1 AND operation = 'move_license_plate'
+                  AND idempotency_key = 'lp-move-1'),
+               (SELECT COUNT(*) FROM outbox_events
+                WHERE tenant_id = $1 AND aggregate_type = 'inventory_transaction'
+                  AND aggregate_id = $2)
+        "#,
     )
+    .bind(tenant_id.get())
+    .bind(plate_move_transaction.to_string())
+    .fetch_one(&mut *tx)
     .await
     .unwrap();
-    assert_eq!(replayed_plate_move, plate_move_transaction);
+    tx.rollback().await.unwrap();
+    assert_eq!(durable_move_effects, (1, 1, 1));
 
     let moved = repo::license_plates::get_license_plate_by_barcode(&db, tenant_id, "LP-0001")
         .await
@@ -1114,5 +1135,34 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     assert!(matches!(
         err,
         AppError::Application(ApplicationError::Conflict(_))
+    ));
+
+    repo::tenants::update_user_access_scope(
+        &db,
+        tenant_id,
+        &UpdateUserAccessScope {
+            user_id: user.id,
+            all_facilities: false,
+            facility_ids: Vec::new(),
+            all_inventory_owners: false,
+            inventory_owner_ids: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let revoked_move_replay = repo::license_plates::move_license_plate(
+        &db,
+        tenant_id,
+        user.id,
+        plate.id,
+        reserve,
+        Some("putaway"),
+        "lp-move-1",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        revoked_move_replay,
+        AppError::Application(ApplicationError::Forbidden)
     ));
 }

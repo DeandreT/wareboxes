@@ -9,7 +9,8 @@ use wareboxes_domain::InventoryOwnerId;
 use crate::db::{bind_tenant_context, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
-use crate::repo::idempotency::{require_command_context, PreparedCommand};
+use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
 use super::leasing::{release_expired_tasks_tx, release_inaccessible_active_tasks_tx};
 use super::{insert_progress_tx, require_replayed_task_visible_tx, TaskDimensions};
@@ -204,8 +205,8 @@ pub async fn claim_next_cycle_count_in_scope(
     access: &TenantAccess,
     command: &CommandContext,
 ) -> AppResult<Option<CycleCountClaim>> {
-    require_command_context(access, command)?;
-    let prepared = PreparedCommand::new(command, CLAIM_NEXT_OPERATION, &())?;
+    command.require_actor(access.tenant_id, access.user_id)?;
+    let prepared = PreparedCommand::new_v1(command, CLAIM_NEXT_OPERATION, &())?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, command.actor_id.get()).await?;
@@ -349,7 +350,7 @@ pub async fn claim_next_cycle_count_in_scope(
         }
         None => None,
     };
-    prepared.commit(tx, claim).await
+    Ok(prepared.commit(tx, claim).await?)
 }
 
 async fn operator_has_active_task_tx(
@@ -501,13 +502,13 @@ pub async fn claim_cycle_count_by_id_in_scope(
     command: &CommandContext,
     task_id: i64,
 ) -> AppResult<CycleCountClaim> {
-    require_command_context(access, command)?;
+    command.require_actor(access.tenant_id, access.user_id)?;
     if task_id <= 0 {
         return Err(AppError::bad_request(
             "cycle count task ID must be positive",
         ));
     }
-    let prepared = PreparedCommand::new(command, CLAIM_BY_ID_OPERATION, &task_id)?;
+    let prepared = PreparedCommand::new_v1(command, CLAIM_BY_ID_OPERATION, &task_id)?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, command.actor_id.get()).await?;
@@ -556,7 +557,7 @@ pub async fn claim_cycle_count_by_id_in_scope(
     )
     .await?;
     let claim = load_claim_tx(&mut tx, access, task_id, command.actor_id.get()).await?;
-    prepared.commit(tx, claim).await
+    Ok(prepared.commit(tx, claim).await?)
 }
 
 pub async fn get_current_cycle_count_claim_in_scope(

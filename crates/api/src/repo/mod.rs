@@ -7,7 +7,6 @@ pub mod address;
 pub mod audits;
 pub mod employees;
 pub mod expected_receiving;
-pub mod idempotency;
 pub mod inbound_receipt;
 pub mod inventory;
 mod inventory_allocation;

@@ -3,6 +3,7 @@
 pub mod authorization;
 pub mod db;
 pub mod facilities;
+pub mod idempotency;
 pub mod integration_inbox;
 pub mod inventory_balances;
 pub mod inventory_holds;
