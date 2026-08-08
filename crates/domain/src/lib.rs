@@ -1,5 +1,9 @@
 //! Domain identifiers and invariants shared across application boundaries.
 
+mod tenant;
+
+pub use tenant::TenantStatus;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
