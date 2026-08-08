@@ -2,6 +2,7 @@
 
 mod allocation;
 mod order;
+mod order_cancellation;
 mod tenant;
 
 pub use allocation::{
@@ -18,6 +19,10 @@ pub use order::{
     MAX_DESTINATION_COUNTRY_LENGTH, MAX_DESTINATION_POSTAL_CODE_LENGTH,
     MAX_DESTINATION_REGION_LENGTH, MAX_ORDER_KEY_LENGTH, MAX_ORDER_LINE_KEY_LENGTH,
     MAX_REQUESTED_UOM_LENGTH,
+};
+pub use order_cancellation::{
+    CancellationNote, OrderCancellationDetails, OrderCancellationError, OrderCancellationReason,
+    MAX_CANCELLATION_NOTE_LENGTH,
 };
 pub use tenant::TenantStatus;
 
@@ -85,6 +90,7 @@ positive_id!(FacilityId, "facility ID");
 positive_id!(UserId, "user ID");
 positive_id!(OrderId, "order ID");
 positive_id!(OrderLineId, "order line ID");
+positive_id!(OrderCancellationId, "order cancellation ID");
 positive_id!(AllocationRunId, "allocation run ID");
 positive_id!(InventoryReservationId, "inventory reservation ID");
 positive_id!(InventoryAllocationId, "inventory allocation ID");

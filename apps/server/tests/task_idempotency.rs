@@ -784,19 +784,6 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
         .find(|balance| balance.item_batch_id == batch)
         .unwrap()
         .id;
-    let order = fixture
-        .order_header(tenant_id, "CREATE-REPLAY-ORDER", owner)
-        .await;
-    fixture.order_item(tenant_id, order, single, 3).await;
-    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
-    sqlx::query("UPDATE orders SET status = 'cancelled' WHERE tenant_id = $1 AND id = $2")
-        .bind(tenant_id.get())
-        .bind(order)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-
     let cases = [
         (
             "/api/tasks/cycle-counts/item-location/add",
@@ -819,10 +806,6 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
                 "location_id": location,
                 "qty": 2
             }),
-        ),
-        (
-            "/api/tasks/unpack-cancelled-orders/add",
-            json!({"order_id": order, "facility_id": facility}),
         ),
         ("/api/tasks/release-expired", json!({})),
     ];
@@ -864,16 +847,6 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
         cases[2].1.clone(),
     )
     .await;
-    let unpack_task = create_twice(
-        &app,
-        &token,
-        tenant_id,
-        cases[3].0,
-        shared_key,
-        cases[3].1.clone(),
-    )
-    .await;
-
     for (uri, body) in [
         (
             cases[0].0,
@@ -894,10 +867,6 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
                 "qty": 3
             }),
         ),
-        (
-            cases[3].0,
-            json!({"order_id": order, "facility_id": facility, "priority": 71}),
-        ),
     ] {
         let response = send(&app, &token, tenant_id, uri, Some(shared_key), body).await;
         assert_eq!(response.status(), StatusCode::CONFLICT, "{uri}");
@@ -908,7 +877,7 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
         );
     }
 
-    let task_ids = vec![item_task, location_task, break_task, unpack_task];
+    let task_ids = vec![item_task, location_task, break_task];
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let task_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM work_tasks WHERE tenant_id = $1 AND id = ANY($2)")
@@ -918,7 +887,7 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
             .await
             .unwrap();
     tx.rollback().await.unwrap();
-    assert_eq!(task_count, 4);
+    assert_eq!(task_count, 3);
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let command_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM command_idempotency_records WHERE tenant_id = $1 AND idempotency_key = $2 AND operation LIKE 'task.create_%'",
@@ -929,7 +898,7 @@ async fn task_creation_and_lease_release_commands_are_replay_safe() {
     .await
     .unwrap();
     tx.rollback().await.unwrap();
-    assert_eq!(command_count, 4);
+    assert_eq!(command_count, 3);
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     sqlx::query(

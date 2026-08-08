@@ -10,6 +10,7 @@ mod inventory_rollups;
 mod inventory_status_transitions;
 mod license_plate_putaway;
 mod order_allocations;
+mod order_cancellations;
 mod order_holds;
 mod orders;
 mod putaway;
@@ -125,6 +126,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/orders/{order_id}/allocation-readiness",
             get(order_allocations::readiness),
+        )
+        .route(
+            "/orders/{order_id}/cancellations",
+            post(order_cancellations::create),
         )
         .route(
             "/inventory-owners/{inventory_owner_id}/order-entry-items",

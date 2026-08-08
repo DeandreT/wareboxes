@@ -1,12 +1,13 @@
 #[cfg(target_arch = "wasm32")]
 use wareboxes_api_contract::v1::ReleaseInventoryHoldRequest;
 use wareboxes_api_contract::v1::{
-    CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse, InventoryBalancePage,
-    InventoryHoldPage, InventoryHoldStatus, InventoryStatusTransitionResponse, OpaqueCursor,
-    OrderAllocationReadinessResponse, OrderEntryItemResponse, PlaceInventoryHoldRequest,
-    PlaceInventoryHoldResponse, PlaceOrderHoldRequest, PlaceOrderHoldResponse,
-    PlanOrderAllocationRequest, PlanOrderAllocationResponse, ReleaseInventoryHoldResponse,
-    ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
+    CancelOrderRequest, CancelOrderResponse, CreateFulfillmentOrderRequest,
+    CreateFulfillmentOrderResponse, InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
+    InventoryStatusTransitionResponse, OpaqueCursor, OrderAllocationReadinessResponse,
+    OrderEntryItemResponse, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
+    PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
+    PlanOrderAllocationResponse, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
+    ReleaseOrderHoldResponse,
 };
 use wareboxes_api_contract::v1::{
     CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
@@ -42,15 +43,16 @@ mod browser {
     use wareboxes_core::dto::{LoginRequest, SelectTenantRequest};
 
     use super::{
-        AccessScopeWorkspace, ApiError, CreateFulfillmentOrderRequest,
-        CreateFulfillmentOrderResponse, CreateInventoryRelocationTaskRequest,
-        CreateInventoryRelocationTaskResponse, CreateInventoryStatusTransitionRequest,
-        InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
-        InventoryStatusTransitionResponse, OpaqueCursor, OrderAllocationReadinessResponse,
-        OrderEntryItemResponse, OrderPage, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
-        PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
-        PlanOrderAllocationResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
-        ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, WebSessionContext,
+        AccessScopeWorkspace, ApiError, CancelOrderRequest, CancelOrderResponse,
+        CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse,
+        CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
+        CreateInventoryStatusTransitionRequest, InventoryBalancePage, InventoryHoldPage,
+        InventoryHoldStatus, InventoryStatusTransitionResponse, OpaqueCursor,
+        OrderAllocationReadinessResponse, OrderEntryItemResponse, OrderPage,
+        PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
+        PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
+        ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
+        ReleaseOrderHoldResponse, WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -144,6 +146,19 @@ mod browser {
     ) -> Result<PlanOrderAllocationResponse, ApiError> {
         post(
             &format!("/api/v1/orders/{order_id}/allocation-runs"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn cancel_order(
+        order_id: i64,
+        request: &CancelOrderRequest,
+        idempotency_key: &str,
+    ) -> Result<CancelOrderResponse, ApiError> {
+        post(
+            &format!("/api/v1/orders/{order_id}/cancellations"),
             request,
             idempotency_key,
         )
@@ -422,6 +437,15 @@ pub async fn plan_order_allocation(
     _request: &PlanOrderAllocationRequest,
     _idempotency_key: &str,
 ) -> Result<PlanOrderAllocationResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn cancel_order(
+    _order_id: i64,
+    _request: &CancelOrderRequest,
+    _idempotency_key: &str,
+) -> Result<CancelOrderResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

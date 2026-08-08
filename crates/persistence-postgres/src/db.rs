@@ -442,6 +442,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'order_allocation_run_lines_tenant_isolation'
                 ),
                 (
+                    'order_cancellations',
+                    'order_cancellations_tenant_isolation'
+                ),
+                (
                     'load_activity',
                     'load_activity_tenant_isolation'
                 ),
