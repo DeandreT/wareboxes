@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::expected_receiving::ConfirmationIntent;
-use crate::picking::{PickClaim, PickingCommand};
+use crate::picking::{PickClaim, PickShortageReportResult, PickingCommand};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -469,6 +469,7 @@ pub enum CommandOutcome {
         task_completed: bool,
         order_ready_to_pack: bool,
     },
+    PickShortageReported(Box<PickShortageReportResult>),
     PickReleased {
         task_id: i64,
     },
@@ -878,6 +879,7 @@ impl MovementWorkflow {
             | CommandOutcome::CycleCountReleased { .. }
             | CommandOutcome::PickClaimed(_)
             | CommandOutcome::PickConfirmed { .. }
+            | CommandOutcome::PickShortageReported(_)
             | CommandOutcome::PickReleased { .. } => {
                 self.require_reconciliation("Recorded result does not match the workflow".into());
                 return Transition::Applied;

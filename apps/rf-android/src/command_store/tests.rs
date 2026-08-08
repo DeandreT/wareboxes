@@ -6,7 +6,9 @@ use crate::expected_receiving::{
     NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason, ReceivingDock,
     ReceivingLoadStatus, StockDimension,
 };
-use crate::picking::PickingCommand;
+use crate::picking::{
+    PickShortageCommand, PickShortageOutcome, PickShortageReason, PickingCommand,
+};
 use crate::workflow::{CycleCountCommand, InventoryRelocationCommand, MovementKind, ReleaseReason};
 
 fn scope() -> ExecutionScope {
@@ -76,6 +78,31 @@ fn pick_confirmation_draft(command_id: &str, key: &str) -> DurableCommandDraft {
             source_license_plate_barcode: Some("LP-91".into()),
             destination_license_plate_barcode: "TOTE-91".into(),
         }),
+    }
+}
+
+fn pick_shortage_draft(command_id: &str, key: &str) -> DurableCommandDraft {
+    DurableCommandDraft {
+        schema_version: 1,
+        command_id: command_id.into(),
+        idempotency_key: key.into(),
+        command: RfCommand::Picking(PickingCommand::ReportShortage(Box::new(
+            PickShortageCommand {
+                task_id: 91,
+                content_id: 92,
+                source_location_barcode: "A-09-01".into(),
+                source_license_plate_barcode: Some("LP-91".into()),
+                observed_item_barcode: Some("ITEM-91".into()),
+                observed_lot: Some("LOT-91".into()),
+                observed_serial: None,
+                reason: PickShortageReason::InsufficientQuantity,
+                note: Some("Two cases found".into()),
+                outcome: PickShortageOutcome::Partial {
+                    picked_quantity: 2,
+                    destination_license_plate_barcode: "TOTE-91".into(),
+                },
+            },
+        ))),
     }
 }
 
@@ -405,6 +432,42 @@ fn pick_confirmation_survives_the_durable_store_boundary() {
     assert_eq!(record.request.response_kind, ResponseKind::PickConfirmation);
     assert_eq!(record.draft, draft);
     assert!(record.request.verify_body());
+}
+
+#[test]
+fn pick_shortage_retry_keeps_exact_request_and_idempotency_identity() {
+    let mut store = CommandStore::open_in_memory().unwrap();
+    let draft = pick_shortage_draft("pick-short-1", "pick:short:91:92:1");
+    let record = store.persist(&scope(), draft.clone()).unwrap();
+
+    assert_eq!(record.operation, CommandOperation::PickShortageReport);
+    assert_eq!(
+        record.request.path,
+        "/api/v1/picking-tasks/91/contents/92/short-picks"
+    );
+    assert_eq!(
+        record.request.response_kind,
+        ResponseKind::PickShortageReport
+    );
+    let first = store.begin_attempt(&scope(), record.record_id).unwrap();
+    store
+        .mark_ambiguous(
+            &scope(),
+            record.record_id,
+            &first.attempt_id,
+            "connection ended after send",
+        )
+        .unwrap();
+    let retry = store.begin_attempt(&scope(), record.record_id).unwrap();
+
+    assert_eq!(retry.command.request, first.command.request);
+    assert_eq!(retry.command.draft, draft);
+    assert_eq!(
+        retry.command.draft.idempotency_key,
+        first.command.draft.idempotency_key
+    );
+    assert_ne!(retry.attempt_id, first.attempt_id);
+    assert_ne!(retry.request_id, first.request_id);
 }
 
 #[test]

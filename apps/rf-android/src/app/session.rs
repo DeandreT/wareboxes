@@ -1256,6 +1256,7 @@ impl RfApp {
                         &outcome,
                         crate::workflow::CommandOutcome::PickClaimed(_)
                             | crate::workflow::CommandOutcome::PickConfirmed { .. }
+                            | crate::workflow::CommandOutcome::PickShortageReported(_)
                             | crate::workflow::CommandOutcome::PickReleased { .. }
                     );
                     if self

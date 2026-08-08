@@ -134,6 +134,8 @@ fn map_claim(claim: PickClaim) -> V1Result<PickClaimResponse> {
         inventory_owner_id: claim.inventory_owner_id.get(),
         facility_id: claim.facility_id.get(),
         order_key: claim.order_key,
+        order_revision: Revision::new(claim.order_revision.get())
+            .map_err(|error| V1Error::internal(error.to_string()))?,
         priority: claim.priority,
         ship_by: claim.ship_by.map(|value| value.to_rfc3339()),
         lease_expires_at: claim.lease_expires_at.to_rfc3339(),
@@ -261,6 +263,7 @@ fn map_content_state(state: PickContentState) -> ApiContentState {
     match state {
         PickContentState::Pending => ApiContentState::Pending,
         PickContentState::Completed => ApiContentState::Completed,
+        PickContentState::Shorted => ApiContentState::Shorted,
     }
 }
 

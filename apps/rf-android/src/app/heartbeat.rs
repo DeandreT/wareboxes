@@ -56,6 +56,39 @@ impl HeartbeatRuntime {
 }
 
 impl RfApp {
+    #[cfg(all(debug_assertions, not(target_os = "android")))]
+    pub(super) fn load_verified_debug_heartbeat(&mut self, task_id: i64) {
+        let monotonic_now = self.heartbeat.now();
+        let wall_now = Utc::now();
+        let lease_expires_at = wall_now + chrono::Duration::minutes(5);
+        let Ok(mut monitor) = MovementLeaseMonitor::new(
+            task_id,
+            &lease_expires_at.to_rfc3339(),
+            ClockSample::new(wall_now, monotonic_now),
+            LeasePolicy::default(),
+        ) else {
+            return;
+        };
+        let Some(attempt) = monitor.begin_heartbeat(monotonic_now) else {
+            return;
+        };
+        if monitor
+            .heartbeat_succeeded(
+                attempt.id,
+                HeartbeatLease {
+                    task_id,
+                    heartbeat_at: &wall_now.to_rfc3339(),
+                    lease_expires_at: &lease_expires_at.to_rfc3339(),
+                },
+                monotonic_now,
+            )
+            .is_ok()
+        {
+            self.heartbeat.reset();
+            self.heartbeat.monitor = Some(monitor);
+        }
+    }
+
     pub(super) fn maintain_claim_heartbeat(&mut self, context: &egui::Context) {
         if self.lease_check_task_id.is_some() {
             self.heartbeat.reset();

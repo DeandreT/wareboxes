@@ -384,6 +384,7 @@ async fn lock_target_tx(
                allocation.inventory_status AS allocation_status,
                allocation.qty AS allocation_qty,
                allocation.status AS allocation_lifecycle,
+               allocation.execution_stage AS allocation_execution_stage,
                allocation.deleted AS allocation_deleted,
                balance.location_id AS balance_location_id,
                balance.license_plate_id AS balance_plate_id,
@@ -475,6 +476,7 @@ async fn lock_target_tx(
         && row.try_get::<String, _>("allocation_status")? == target.inventory_status.as_str()
         && row.try_get::<i64, _>("allocation_qty")? == target.quantity.get()
         && row.try_get::<String, _>("allocation_lifecycle")? == "allocated"
+        && row.try_get::<String, _>("allocation_execution_stage")? == "staged"
         && row
             .try_get::<Option<Timestamp>, _>("allocation_deleted")?
             .is_none()
@@ -699,11 +701,11 @@ async fn create_carton_allocation_tx(
             tenant_id, inventory_owner_id, created, created_by,
             reservation_id, inventory_balance_id, facility_id, location_id,
             license_plate_id, item_batch_id, item_id, uom, inventory_status,
-            allocation_run_id, qty, status
+            allocation_run_id, qty, status, execution_stage
         )
         SELECT tenant_id, inventory_owner_id, $1, $2, reservation_id, $3,
                facility_id, $4, $5, item_batch_id, item_id, uom,
-               inventory_status, allocation_run_id, qty, 'allocated'
+               inventory_status, allocation_run_id, qty, 'allocated', 'packed'
         FROM inventory_allocations
         WHERE tenant_id = $6 AND inventory_owner_id = $7 AND id = $8
           AND status = 'fulfilled' AND deleted = $1

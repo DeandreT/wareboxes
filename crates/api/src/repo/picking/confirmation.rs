@@ -19,6 +19,9 @@ use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
 use crate::repo::inventory_locking;
 use crate::repo::orders::insert_order_activity_tx;
 
+use super::shortage::{
+    advance_parent_shortage_for_terminal_work_tx, enqueue_parent_shortage_transition_event_tx,
+};
 use super::CONFIRM_OPERATION;
 
 #[derive(Debug)]
@@ -90,11 +93,20 @@ pub async fn confirm_content(
         return Ok(result);
     }
 
-    let order_id = task_order_hint_tx(&mut tx, access.tenant_id, command.task_id).await?;
+    let order_id = task_order_hint_tx(&mut tx, access.tenant_id, command.task_id, &scope).await?;
     let order = lock_order_tx(&mut tx, access.tenant_id, order_id, &scope).await?;
     if order.status != OrderStatus::Processing {
         return Err(AppError::conflict("order is not in picking execution"));
     }
+    lock_pick_reservation_tx(
+        &mut tx,
+        access.tenant_id,
+        order.inventory_owner_id,
+        order_id,
+        command.task_id,
+        command.content_id,
+    )
+    .await?;
     lock_pick_license_plates_tx(
         &mut tx,
         access.tenant_id,
@@ -226,14 +238,23 @@ pub async fn confirm_content(
         confirmed_at,
     )
     .await?;
-    let remaining_pick_count = remaining_pick_count_tx(
+    let parent_shortage_transition = advance_parent_shortage_for_terminal_work_tx(
+        &mut tx,
+        access.tenant_id,
+        context.actor_id.get(),
+        command.task_id,
+        target.source_allocation_id,
+        target.quantity,
+        confirmed_at,
+    )
+    .await?;
+    let order_ready_to_pack = order_ready_to_pack_tx(
         &mut tx,
         access.tenant_id,
         target.inventory_owner_id,
         target.order_id,
     )
     .await?;
-    let order_ready_to_pack = remaining_pick_count == 0;
     let (order_status, order_revision) = if order_ready_to_pack {
         advance_order_to_awaiting_packing_tx(&mut tx, access.tenant_id, &order, target.order_id)
             .await?
@@ -287,6 +308,16 @@ pub async fn confirm_content(
         &result,
     )
     .await?;
+    if let Some(transition) = parent_shortage_transition.as_ref() {
+        enqueue_parent_shortage_transition_event_tx(
+            &mut tx,
+            access.tenant_id,
+            context.actor_id.get(),
+            order_revision,
+            transition,
+        )
+        .await?;
+    }
     Ok(prepared
         .commit_with_inventory_transaction(tx, result, Some(transaction_id))
         .await?)
@@ -296,15 +327,72 @@ async fn task_order_hint_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     task_id: PickTaskId,
+    scope: &ScopeBindings,
 ) -> AppResult<OrderId> {
-    let id: i64 =
-        sqlx::query_scalar("SELECT order_id FROM pick_tasks WHERE tenant_id = $1 AND id = $2")
-            .bind(tenant_id.get())
-            .bind(task_id.get())
-            .fetch_optional(&mut **tx)
-            .await?
-            .ok_or_else(|| AppError::not_found("pick task"))?;
+    let id: i64 = sqlx::query_scalar(
+        r#"
+        SELECT order_id
+        FROM pick_tasks
+        WHERE tenant_id = $1 AND id = $2
+          AND ($3 OR inventory_owner_id = ANY($4))
+          AND ($5 OR facility_id = ANY($6))
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(task_id.get())
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::not_found("pick task"))?;
     OrderId::new(id).map_err(|error| AppError::internal(error.to_string()))
+}
+
+async fn lock_pick_reservation_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    inventory_owner_id: InventoryOwnerId,
+    order_id: OrderId,
+    task_id: PickTaskId,
+    content_id: PickContentId,
+) -> AppResult<()> {
+    let reservation_id: i64 = sqlx::query_scalar(
+        r#"
+        SELECT content.reservation_id
+        FROM pick_tasks task
+        INNER JOIN pick_task_contents content
+          ON content.tenant_id = task.tenant_id AND content.task_id = task.id
+        WHERE task.tenant_id = $1 AND task.inventory_owner_id = $2
+          AND task.order_id = $3 AND task.id = $4 AND content.id = $5
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id.get())
+    .bind(order_id.get())
+    .bind(task_id.get())
+    .bind(content_id.get())
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::not_found("pick task"))?;
+    let locked: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT id FROM inventory_reservations
+        WHERE tenant_id = $1 AND inventory_owner_id = $2
+          AND order_id = $3 AND id = $4 AND deleted IS NULL AND status = 'active'
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id.get())
+    .bind(order_id.get())
+    .bind(reservation_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    locked
+        .map(|_| ())
+        .ok_or_else(|| AppError::conflict("pick reservation is no longer active"))
 }
 
 async fn lock_order_tx(
@@ -413,6 +501,7 @@ async fn lock_pick_target_tx(
                allocation.inventory_status AS allocation_status,
                allocation.qty AS allocation_qty,
                allocation.status AS allocation_lifecycle,
+               allocation.execution_stage AS allocation_execution_stage,
                allocation.deleted AS allocation_deleted,
                balance.location_id AS balance_location_id,
                balance.license_plate_id AS balance_license_plate_id,
@@ -501,6 +590,7 @@ fn validate_target_row(row: &sqlx::postgres::PgRow, target: &PickTarget) -> AppR
         && row.try_get::<String, _>("allocation_status")? == target.inventory_status.as_str()
         && row.try_get::<i64, _>("allocation_qty")? == quantity
         && row.try_get::<String, _>("allocation_lifecycle")? == "allocated"
+        && row.try_get::<String, _>("allocation_execution_stage")? == "pick_source"
         && row
             .try_get::<Option<Timestamp>, _>("allocation_deleted")?
             .is_none()
@@ -858,11 +948,11 @@ async fn create_destination_allocation_tx(
             tenant_id, inventory_owner_id, created, created_by,
             reservation_id, inventory_balance_id, facility_id, location_id,
             license_plate_id, item_batch_id, item_id, uom, inventory_status,
-            allocation_run_id, qty, status
+            allocation_run_id, qty, status, execution_stage
         )
         SELECT tenant_id, inventory_owner_id, $1, $2, reservation_id, $3,
                facility_id, $4, $5, item_batch_id, item_id, uom,
-               inventory_status, allocation_run_id, qty, 'allocated'
+               inventory_status, allocation_run_id, qty, 'allocated', 'staged'
         FROM inventory_allocations
         WHERE tenant_id = $6 AND inventory_owner_id = $7 AND id = $8
           AND status = 'fulfilled' AND deleted = $1
@@ -927,17 +1017,49 @@ async fn complete_pick_rows_tx(
     Ok(())
 }
 
-async fn remaining_pick_count_tx(
+async fn order_ready_to_pack_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     inventory_owner_id: InventoryOwnerId,
     order_id: OrderId,
-) -> AppResult<i64> {
+) -> AppResult<bool> {
     Ok(sqlx::query_scalar(
         r#"
-        SELECT COUNT(*) FROM pick_tasks
-        WHERE tenant_id = $1 AND inventory_owner_id = $2
-          AND order_id = $3 AND status <> 'completed'
+        SELECT
+            NOT EXISTS (
+                SELECT 1 FROM pick_tasks task
+                WHERE task.tenant_id = $1 AND task.inventory_owner_id = $2
+                  AND task.order_id = $3 AND task.status IN ('open', 'in_progress')
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM pick_shortages shortage
+                WHERE shortage.tenant_id = $1 AND shortage.inventory_owner_id = $2
+                  AND shortage.order_id = $3 AND shortage.status <> 'resolved'
+            )
+            AND COALESCE((
+                SELECT SUM(allocation.qty)
+                FROM inventory_allocations allocation
+                INNER JOIN inventory_reservations reservation
+                  ON reservation.tenant_id = allocation.tenant_id
+                 AND reservation.inventory_owner_id = allocation.inventory_owner_id
+                 AND reservation.id = allocation.reservation_id
+                 AND reservation.status = 'active' AND reservation.deleted IS NULL
+                WHERE allocation.tenant_id = $1
+                  AND allocation.inventory_owner_id = $2
+                  AND reservation.order_id = $3
+                  AND allocation.status = 'allocated'
+                  AND allocation.execution_stage = 'staged'
+                  AND allocation.deleted IS NULL
+            ), 0) = COALESCE((
+                SELECT SUM(item.qty) FROM order_items item
+                WHERE item.tenant_id = $1 AND item.inventory_owner_id = $2
+                  AND item.order_id = $3 AND item.deleted IS NULL
+            ), 0)
+            AND EXISTS (
+                SELECT 1 FROM order_items item
+                WHERE item.tenant_id = $1 AND item.inventory_owner_id = $2
+                  AND item.order_id = $3 AND item.deleted IS NULL
+            )
         "#,
     )
     .bind(tenant_id.get())

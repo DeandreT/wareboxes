@@ -13,6 +13,7 @@ mod fulfillment_loads;
 mod fulfillment_order_allocation;
 mod fulfillment_order_cancellation;
 mod fulfillment_orders;
+mod fulfillment_pick_shortages;
 mod fulfillment_shared;
 mod inventory;
 mod inventory_disposition;

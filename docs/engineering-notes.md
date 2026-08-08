@@ -8,3 +8,6 @@
   cancellation recovery must be derived from immutable pick, stage, carton, and
   manifest records with exact stock provenance.
 - Master packs and singles are separate items linked through explicit pack relationships; do not infer this from `packaging_unit`.
+- A short pick terminalizes the directed source allocation and records immutable
+  physical evidence. Replacement inventory is selected through the typed shortage
+  recovery workflow; generic order allocation cannot bypass active execution.

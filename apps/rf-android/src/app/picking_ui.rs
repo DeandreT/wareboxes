@@ -1,7 +1,10 @@
 use eframe::egui;
 use lucide_icons::Icon;
 
-use crate::picking::{PickClaim, PickReleaseReason, PickScanStage};
+use crate::picking::{
+    PickClaim, PickControlledEvidence, PickReleaseReason, PickScanStage, PickShortageDisposition,
+    PickShortageReason,
+};
 use crate::workflow::{Activity, Transition, WorkflowEffect};
 
 use super::RfApp;
@@ -100,25 +103,223 @@ impl RfApp {
         } else {
             false
         };
-        if let Some(stage) = self.picking.expected_scan() {
-            self.pick_scan_control(ui, claim.task_id, stage, lease_actions_allowed);
-        }
-
-        ui.add_space(8.0);
-        if self.release_confirmation {
-            self.pick_release_confirmation(ui, lease_actions_allowed);
+        if self.picking.shortage().is_some() {
+            self.pick_shortage_panel(ui, &claim, lease_actions_allowed);
         } else {
-            let clicked = ui
-                .add_enabled(
-                    lease_actions_allowed,
-                    Self::secondary_button("Release pick", ui.available_width(), 48.0),
-                )
-                .on_disabled_hover_text("Check pick connection first")
-                .clicked();
-            if clicked && lease_actions_allowed {
-                self.release_confirmation = true;
+            if let Some(stage) = self.picking.expected_scan() {
+                self.pick_scan_control(ui, claim.task_id, stage, lease_actions_allowed);
+            }
+
+            ui.add_space(8.0);
+            if self.release_confirmation {
+                self.pick_release_confirmation(ui, lease_actions_allowed);
+            } else {
+                let width = (ui.available_width() - 8.0) / 2.0;
+                ui.horizontal(|ui| {
+                    let short_clicked = ui
+                        .add_enabled(
+                            lease_actions_allowed,
+                            egui::Button::new(egui::RichText::new("Short pick").strong())
+                                .fill(if lease_actions_allowed {
+                                    egui::Color32::from_rgb(112, 72, 18)
+                                } else {
+                                    egui::Color32::from_rgb(28, 34, 32)
+                                })
+                                .min_size(egui::vec2(width, 48.0)),
+                        )
+                        .on_disabled_hover_text("Check pick connection first")
+                        .clicked();
+                    if short_clicked {
+                        self.picking.begin_shortage();
+                        self.pick_scan_focus = None;
+                    }
+
+                    let release_clicked = ui
+                        .add_enabled(
+                            lease_actions_allowed,
+                            Self::secondary_button("Release", width, 48.0),
+                        )
+                        .on_disabled_hover_text("Check pick connection first")
+                        .clicked();
+                    if release_clicked {
+                        self.release_confirmation = true;
+                    }
+                });
             }
         }
+    }
+
+    fn pick_shortage_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        claim: &PickClaim,
+        lease_actions_allowed: bool,
+    ) {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("SHORT PICK")
+                    .small()
+                    .strong()
+                    .color(Self::warning()),
+            );
+            ui.weak(format!(
+                "Planned {} {}",
+                claim.content.planned_quantity, claim.content.uom
+            ));
+        });
+
+        let Some(snapshot) = self.picking.shortage().cloned() else {
+            return;
+        };
+        let mut reason = snapshot.reason();
+        ui.add_enabled_ui(lease_actions_allowed, |ui| {
+            egui::ComboBox::from_id_salt(("pick_shortage_reason", claim.task_id))
+                .width(ui.available_width())
+                .selected_text(reason.label())
+                .show_ui(ui, |ui| {
+                    for candidate in PickShortageReason::ALL {
+                        ui.selectable_value(&mut reason, candidate, candidate.label());
+                    }
+                });
+        });
+        if reason != snapshot.reason() {
+            self.picking.set_shortage_reason(reason);
+            self.pick_scan_focus = None;
+        }
+
+        let disposition = self
+            .picking
+            .shortage()
+            .map(|draft| draft.disposition())
+            .unwrap_or(PickShortageDisposition::NoPick);
+        ui.add_enabled_ui(lease_actions_allowed, |ui| {
+            ui.horizontal(|ui| {
+                for candidate in [
+                    PickShortageDisposition::NoPick,
+                    PickShortageDisposition::Partial,
+                ] {
+                    let enabled =
+                        candidate == PickShortageDisposition::NoPick || reason.supports_partial();
+                    if ui
+                        .add_enabled(
+                            enabled,
+                            egui::Button::selectable(disposition == candidate, candidate.label()),
+                        )
+                        .clicked()
+                    {
+                        self.picking.set_shortage_disposition(candidate);
+                        self.pick_scan_focus = None;
+                    }
+                }
+            });
+        });
+
+        if reason == PickShortageReason::LotOrSerialMismatch
+            && claim.content.lot.is_some()
+            && claim.content.serial.is_some()
+        {
+            let evidence = self
+                .picking
+                .shortage()
+                .and_then(|draft| draft.controlled_evidence());
+            ui.add_enabled_ui(lease_actions_allowed, |ui| {
+                ui.horizontal(|ui| {
+                    ui.weak("Evidence");
+                    for candidate in [PickControlledEvidence::Lot, PickControlledEvidence::Serial] {
+                        if ui
+                            .add(egui::Button::selectable(
+                                evidence == Some(candidate),
+                                candidate.label(),
+                            ))
+                            .clicked()
+                        {
+                            self.picking.set_controlled_evidence(candidate);
+                            self.pick_scan_focus = None;
+                        }
+                    }
+                });
+            });
+        }
+
+        if disposition == PickShortageDisposition::Partial {
+            ui.horizontal(|ui| {
+                ui.label("Picked qty");
+                let available = ui.available_width();
+                let draft = self.picking.shortage_mut();
+                if let Some(draft) = draft {
+                    ui.add_enabled(
+                        lease_actions_allowed,
+                        egui::TextEdit::singleline(draft.picked_quantity_mut())
+                            .desired_width(available)
+                            .font(egui::TextStyle::Monospace)
+                            .hint_text("0"),
+                    );
+                }
+            });
+        }
+
+        if let Some(stage) = self.picking.expected_scan() {
+            self.pick_scan_control(ui, claim.task_id, stage, lease_actions_allowed);
+        } else if let Some(draft) = self.picking.shortage() {
+            ui.horizontal_wrapped(|ui| {
+                if let Some(item) = draft.observed_item_barcode() {
+                    ui.monospace(format!("Item {item}"));
+                }
+                if let Some(lot) = draft.observed_lot() {
+                    ui.monospace(format!("Lot {lot}"));
+                }
+                if let Some(serial) = draft.observed_serial() {
+                    ui.monospace(format!("Serial {serial}"));
+                }
+            });
+        }
+
+        ui.label(if reason == PickShortageReason::Other {
+            "Note (required)"
+        } else {
+            "Note (optional)"
+        });
+        if let Some(draft) = self.picking.shortage_mut() {
+            ui.add_enabled(
+                lease_actions_allowed,
+                egui::TextEdit::multiline(draft.note_mut())
+                    .desired_width(ui.available_width())
+                    .desired_rows(2)
+                    .char_limit(500),
+            );
+        }
+
+        let validation = self.picking.shortage_validation_message();
+        if let Some(message) = validation {
+            ui.weak(message);
+        }
+        ui.horizontal(|ui| {
+            let width = (ui.available_width() - 8.0) / 2.0;
+            if ui
+                .add(Self::secondary_button("Cancel", width, 48.0))
+                .clicked()
+            {
+                self.picking.cancel_shortage();
+                self.pick_scan_focus = None;
+            }
+            let can_report = lease_actions_allowed && validation.is_none();
+            if ui
+                .add_enabled(
+                    can_report,
+                    egui::Button::new(egui::RichText::new("Report short").strong())
+                        .fill(Self::primary_fill(can_report))
+                        .min_size(egui::vec2(width, 48.0)),
+                )
+                .on_disabled_hover_text(validation.unwrap_or("Check pick connection first"))
+                .clicked()
+            {
+                let (command_id, key) = Self::command_identity("pick-shortage");
+                let effect = self.picking.begin_shortage_report(command_id, key);
+                self.emit_pick(effect);
+                self.pick_scan_focus = None;
+            }
+        });
     }
 
     fn pick_scan_control(
@@ -300,7 +501,15 @@ impl RfApp {
         self.work_mode = super::WorkMode::Pick;
         self.workflow = crate::workflow::MovementWorkflow::default();
         self.cycle_count = crate::cycle_count::CycleCountWorkflow::default();
-        self.picking.load_debug_claim(debug_pick_claim());
+        let claim = debug_pick_claim();
+        self.load_verified_debug_heartbeat(claim.task_id);
+        self.picking.load_debug_claim(claim);
+    }
+
+    #[cfg(all(debug_assertions, not(target_os = "android")))]
+    pub(super) fn load_pick_shortage_preview(&mut self) {
+        self.load_pick_preview();
+        self.picking.begin_shortage();
     }
 }
 
@@ -367,6 +576,7 @@ fn debug_pick_claim() -> PickClaim {
         inventory_owner_id: 2,
         facility_id: 3,
         order_key: "SO-10510".into(),
+        order_revision: 4,
         priority: 90,
         ship_by: Some("2026-08-09T20:00:00Z".into()),
         lease_expires_at: "2099-08-08T20:00:00Z".into(),

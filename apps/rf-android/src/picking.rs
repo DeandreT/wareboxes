@@ -5,10 +5,19 @@ use crate::workflow::{
     WorkflowEffect,
 };
 
+mod shortage;
+
+pub use shortage::{
+    PickControlledEvidence, PickShortageCommand, PickShortageDisposition, PickShortageDraft,
+    PickShortageOutcome, PickShortageReason, PickShortageReportResult, PickShortageStatus,
+};
+use shortage::{expected_shortage_scan, validate_shortage};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickContentState {
     Pending,
     Completed,
+    Shorted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +50,7 @@ pub struct PickClaim {
     pub inventory_owner_id: i64,
     pub facility_id: i64,
     pub order_key: String,
+    pub order_revision: i64,
     pub priority: i64,
     pub ship_by: Option<String>,
     pub lease_expires_at: String,
@@ -56,6 +66,10 @@ pub enum PickScanStage {
     Item,
     SourceLicensePlate,
     DestinationLicensePlate,
+    ObservedItem,
+    ObservedLot,
+    ObservedSerial,
+    ShortageDestinationLicensePlate,
 }
 
 impl PickScanStage {
@@ -65,6 +79,10 @@ impl PickScanStage {
             Self::Item => "Scan item",
             Self::SourceLicensePlate => "Scan source license plate",
             Self::DestinationLicensePlate => "Scan destination license plate",
+            Self::ObservedItem => "Scan observed item",
+            Self::ObservedLot => "Scan observed lot",
+            Self::ObservedSerial => "Scan observed serial",
+            Self::ShortageDestinationLicensePlate => "Scan destination license plate",
         }
     }
 }
@@ -95,6 +113,7 @@ pub enum PickingCommand {
         source_license_plate_barcode: Option<String>,
         destination_license_plate_barcode: String,
     },
+    ReportShortage(Box<PickShortageCommand>),
     Release {
         task_id: i64,
         reason: PickReleaseReason,
@@ -122,6 +141,7 @@ pub struct PickingWorkflow {
     item_scan: Option<String>,
     source_license_plate_scan: Option<String>,
     destination_license_plate_scan: Option<String>,
+    shortage: Option<PickShortageDraft>,
     scan_draft: String,
     error: Option<String>,
     notice: Option<String>,
@@ -137,6 +157,7 @@ impl Default for PickingWorkflow {
             item_scan: None,
             source_license_plate_scan: None,
             destination_license_plate_scan: None,
+            shortage: None,
             scan_draft: String::new(),
             error: None,
             notice: None,
@@ -164,6 +185,128 @@ impl PickingWorkflow {
         self.claim.as_ref()
     }
 
+    pub const fn shortage(&self) -> Option<&PickShortageDraft> {
+        self.shortage.as_ref()
+    }
+
+    pub fn shortage_mut(&mut self) -> Option<&mut PickShortageDraft> {
+        self.shortage.as_mut()
+    }
+
+    pub fn begin_shortage(&mut self) {
+        if self.activity() != Activity::Active || self.shortage.is_some() {
+            return;
+        }
+        let controlled_evidence = self.claim.as_ref().and_then(|claim| {
+            if claim.content.lot.is_some() {
+                Some(PickControlledEvidence::Lot)
+            } else if claim.content.serial.is_some() {
+                Some(PickControlledEvidence::Serial)
+            } else {
+                None
+            }
+        });
+        self.shortage = Some(PickShortageDraft {
+            reason: PickShortageReason::InventoryMissing,
+            disposition: PickShortageDisposition::NoPick,
+            controlled_evidence,
+            picked_quantity: String::new(),
+            note: String::new(),
+            observed_item_barcode: None,
+            observed_lot: None,
+            observed_serial: None,
+            destination_license_plate_barcode: None,
+        });
+        self.item_scan = None;
+        self.destination_license_plate_scan = None;
+        self.scan_draft.clear();
+        self.error = None;
+    }
+
+    pub fn cancel_shortage(&mut self) {
+        if self.activity() == Activity::Active {
+            self.shortage = None;
+            self.item_scan = None;
+            self.destination_license_plate_scan = None;
+            self.scan_draft.clear();
+            self.error = None;
+        }
+    }
+
+    pub fn set_shortage_reason(&mut self, reason: PickShortageReason) {
+        let controlled_evidence = self.claim.as_ref().and_then(|claim| {
+            if claim.content.lot.is_some() {
+                Some(PickControlledEvidence::Lot)
+            } else if claim.content.serial.is_some() {
+                Some(PickControlledEvidence::Serial)
+            } else {
+                None
+            }
+        });
+        let Some(shortage) = self.shortage.as_mut() else {
+            return;
+        };
+        if shortage.reason == reason {
+            return;
+        }
+        shortage.reason = reason;
+        if !reason.supports_partial() {
+            shortage.disposition = PickShortageDisposition::NoPick;
+            shortage.picked_quantity.clear();
+            shortage.destination_license_plate_barcode = None;
+        }
+        shortage.controlled_evidence = controlled_evidence;
+        shortage.observed_item_barcode = None;
+        shortage.observed_lot = None;
+        shortage.observed_serial = None;
+        self.scan_draft.clear();
+        self.error = None;
+    }
+
+    pub fn set_shortage_disposition(&mut self, disposition: PickShortageDisposition) {
+        let Some(shortage) = self.shortage.as_mut() else {
+            return;
+        };
+        if disposition == PickShortageDisposition::Partial && !shortage.reason.supports_partial() {
+            self.error = Some("This reason cannot record a partial pick".into());
+            return;
+        }
+        shortage.disposition = disposition;
+        if disposition == PickShortageDisposition::NoPick {
+            shortage.picked_quantity.clear();
+            shortage.destination_license_plate_barcode = None;
+            if shortage.reason != PickShortageReason::LotOrSerialMismatch {
+                shortage.observed_lot = None;
+                shortage.observed_serial = None;
+            }
+        }
+        self.scan_draft.clear();
+        self.error = None;
+    }
+
+    pub fn set_controlled_evidence(&mut self, evidence: PickControlledEvidence) {
+        let Some(shortage) = self.shortage.as_mut() else {
+            return;
+        };
+        shortage.controlled_evidence = Some(evidence);
+        shortage.observed_lot = None;
+        shortage.observed_serial = None;
+        self.scan_draft.clear();
+        self.error = None;
+    }
+
+    pub fn shortage_validation_message(&self) -> Option<&'static str> {
+        let claim = self.claim.as_ref()?;
+        let shortage = self.shortage.as_ref()?;
+        validate_shortage(
+            claim,
+            shortage,
+            self.source_location_scan.as_deref(),
+            self.source_license_plate_scan.as_deref(),
+        )
+        .err()
+    }
+
     pub fn scan_draft_mut(&mut self) -> &mut String {
         &mut self.scan_draft
     }
@@ -173,6 +316,14 @@ impl PickingWorkflow {
             return None;
         }
         let content = &self.claim.as_ref()?.content;
+        if let Some(shortage) = self.shortage.as_ref() {
+            return expected_shortage_scan(
+                content,
+                shortage,
+                self.source_location_scan.is_some(),
+                self.source_license_plate_scan.is_some(),
+            );
+        }
         if self.source_location_scan.is_none() {
             return Some(PickScanStage::SourceLocation);
         }
@@ -226,7 +377,7 @@ impl PickingWorkflow {
             self.error = Some("A scan is required".into());
             return None;
         }
-        let content = &self.claim.as_ref()?.content;
+        let content = self.claim.as_ref()?.content.clone();
         let accepted = match stage {
             PickScanStage::SourceLocation => scanned == content.source_location_barcode,
             PickScanStage::Item => content
@@ -237,6 +388,40 @@ impl PickingWorkflow {
                 content.source_license_plate_barcode.as_deref() == Some(scanned.as_str())
             }
             PickScanStage::DestinationLicensePlate => content
+                .source_license_plate_barcode
+                .as_deref()
+                .is_none_or(|source| source != scanned),
+            PickScanStage::ObservedItem => {
+                let matches_item = content
+                    .item_barcodes
+                    .iter()
+                    .any(|barcode| barcode == &scanned);
+                self.shortage
+                    .as_ref()
+                    .is_some_and(|shortage| match shortage.reason {
+                        PickShortageReason::WrongInventory => !matches_item,
+                        _ => matches_item,
+                    })
+            }
+            PickScanStage::ObservedLot => self.shortage.as_ref().is_some_and(|shortage| {
+                content.lot.as_deref().is_some_and(|directed| {
+                    if shortage.disposition == PickShortageDisposition::Partial {
+                        scanned == directed
+                    } else {
+                        scanned != directed
+                    }
+                })
+            }),
+            PickScanStage::ObservedSerial => self.shortage.as_ref().is_some_and(|shortage| {
+                content.serial.as_deref().is_some_and(|directed| {
+                    if shortage.disposition == PickShortageDisposition::Partial {
+                        scanned == directed
+                    } else {
+                        scanned != directed
+                    }
+                })
+            }),
+            PickScanStage::ShortageDestinationLicensePlate => content
                 .source_license_plate_barcode
                 .as_deref()
                 .is_none_or(|source| source != scanned),
@@ -251,6 +436,19 @@ impl PickingWorkflow {
                 PickScanStage::DestinationLicensePlate => {
                     "Destination license plate must differ from the source"
                 }
+                PickScanStage::ObservedItem => {
+                    match self.shortage.as_ref().map(|draft| draft.reason) {
+                        Some(PickShortageReason::WrongInventory) => {
+                            "Observed item matches the directed item"
+                        }
+                        _ => "Observed item does not match the directed item",
+                    }
+                }
+                PickScanStage::ObservedLot => "Observed lot matches the directed lot",
+                PickScanStage::ObservedSerial => "Observed serial matches the directed serial",
+                PickScanStage::ShortageDestinationLicensePlate => {
+                    "Destination license plate must differ from the source"
+                }
             });
             return None;
         }
@@ -261,6 +459,16 @@ impl PickingWorkflow {
             PickScanStage::SourceLicensePlate => self.source_license_plate_scan = Some(scanned),
             PickScanStage::DestinationLicensePlate => {
                 self.destination_license_plate_scan = Some(scanned)
+            }
+            PickScanStage::ObservedItem => {
+                self.shortage.as_mut()?.observed_item_barcode = Some(scanned)
+            }
+            PickScanStage::ObservedLot => self.shortage.as_mut()?.observed_lot = Some(scanned),
+            PickScanStage::ObservedSerial => {
+                self.shortage.as_mut()?.observed_serial = Some(scanned)
+            }
+            PickScanStage::ShortageDestinationLicensePlate => {
+                self.shortage.as_mut()?.destination_license_plate_barcode = Some(scanned)
             }
         }
         self.scan_draft.clear();
@@ -315,6 +523,48 @@ impl PickingWorkflow {
             command_id,
             idempotency_key,
         )
+    }
+
+    pub fn begin_shortage_report(
+        &mut self,
+        command_id: String,
+        idempotency_key: String,
+    ) -> Option<WorkflowEffect> {
+        let claim = self.claim.as_ref()?;
+        let shortage = self.shortage.as_ref()?;
+        if let Err(message) = validate_shortage(
+            claim,
+            shortage,
+            self.source_location_scan.as_deref(),
+            self.source_license_plate_scan.as_deref(),
+        ) {
+            self.error = Some(message.into());
+            return None;
+        }
+
+        let note = (!shortage.note.trim().is_empty()).then(|| shortage.note.trim().to_owned());
+        let outcome = match shortage.disposition {
+            PickShortageDisposition::NoPick => PickShortageOutcome::NoPick,
+            PickShortageDisposition::Partial => PickShortageOutcome::Partial {
+                picked_quantity: shortage.picked_quantity.trim().parse().ok()?,
+                destination_license_plate_barcode: shortage
+                    .destination_license_plate_barcode
+                    .clone()?,
+            },
+        };
+        let command = PickingCommand::ReportShortage(Box::new(PickShortageCommand {
+            task_id: claim.task_id,
+            content_id: claim.content.content_id,
+            source_location_barcode: self.source_location_scan.clone()?,
+            source_license_plate_barcode: self.source_license_plate_scan.clone(),
+            observed_item_barcode: shortage.observed_item_barcode.clone(),
+            observed_lot: shortage.observed_lot.clone(),
+            observed_serial: shortage.observed_serial.clone(),
+            reason: shortage.reason,
+            note,
+            outcome,
+        }));
+        self.begin_active(command, command_id, idempotency_key)
     }
 
     fn begin_idle(
@@ -426,6 +676,19 @@ impl PickingWorkflow {
             self.require_reconciliation("Pick result did not match the saved command".into());
             return;
         }
+        if let CommandOutcome::PickShortageReported(result) = &outcome
+            && !self.claim.as_ref().is_some_and(|claim| {
+                result.order_id == claim.order_id
+                    && result.order_revision > claim.order_revision
+                    && result.planned_quantity == claim.content.planned_quantity
+                    && result.short_quantity == result.planned_quantity - result.picked_quantity
+            })
+        {
+            self.require_reconciliation(
+                "Short-pick result did not match the active order revision".into(),
+            );
+            return;
+        }
 
         self.lane = Lane::Empty;
         match outcome {
@@ -448,6 +711,14 @@ impl PickingWorkflow {
                 } else {
                     "Pick confirmed".into()
                 });
+            }
+            CommandOutcome::PickShortageReported(result) => {
+                self.claim = None;
+                self.reset_scans();
+                self.notice = Some(format!(
+                    "Short pick {} reported for supervisor recovery",
+                    result.shortage_id
+                ));
             }
             CommandOutcome::PickReleased { .. } => {
                 self.claim = None;
@@ -562,6 +833,7 @@ impl PickingWorkflow {
         self.item_scan = None;
         self.source_license_plate_scan = None;
         self.destination_license_plate_scan = None;
+        self.shortage = None;
         self.scan_draft.clear();
     }
 }
@@ -586,6 +858,25 @@ fn outcome_matches(command: &RfCommand, outcome: &CommandOutcome) -> bool {
             },
         ) => task_id == outcome_task_id && content_id == outcome_content_id,
         (
+            RfCommand::Picking(PickingCommand::ReportShortage(command)),
+            CommandOutcome::PickShortageReported(result),
+        ) => {
+            let picked_quantity = match &command.outcome {
+                PickShortageOutcome::NoPick => 0,
+                PickShortageOutcome::Partial {
+                    picked_quantity, ..
+                } => *picked_quantity,
+            };
+            command.task_id == result.task_id
+                && command.content_id == result.content_id
+                && command.reason == result.reason
+                && command.note == result.note
+                && command.observed_item_barcode == result.observed_item_barcode
+                && command.observed_lot == result.observed_lot
+                && command.observed_serial == result.observed_serial
+                && picked_quantity == result.picked_quantity
+        }
+        (
             RfCommand::Picking(PickingCommand::Release { task_id, .. }),
             CommandOutcome::PickReleased {
                 task_id: outcome_task_id,
@@ -606,6 +897,7 @@ mod tests {
             inventory_owner_id: 2,
             facility_id: 3,
             order_key: "SO-1051".into(),
+            order_revision: 4,
             priority: 90,
             ship_by: Some("2026-08-09T20:00:00Z".into()),
             lease_expires_at: "2026-08-08T20:00:00Z".into(),
@@ -750,6 +1042,193 @@ mod tests {
                 task_completed: true,
                 order_ready_to_pack: false,
             },
+        );
+
+        assert_eq!(workflow.activity(), Activity::ReconcileRequired);
+        assert!(workflow.claim().is_some());
+    }
+
+    #[test]
+    fn missing_inventory_reports_no_pick_after_exact_source_scans() {
+        let mut workflow = PickingWorkflow::default();
+        activate(&mut workflow, claim(true));
+        workflow.begin_shortage();
+
+        assert_eq!(
+            workflow.expected_scan(),
+            Some(PickScanStage::SourceLocation)
+        );
+        assert_eq!(scan(&mut workflow, "A-01-02"), None);
+        assert_eq!(
+            workflow.expected_scan(),
+            Some(PickScanStage::SourceLicensePlate)
+        );
+        assert_eq!(scan(&mut workflow, "LP-SOURCE"), None);
+        assert_eq!(workflow.expected_scan(), None);
+        assert_eq!(workflow.shortage_validation_message(), None);
+
+        let WorkflowEffect::PersistCommand(draft) = workflow
+            .begin_shortage_report("short-command".into(), "short-key".into())
+            .unwrap()
+        else {
+            panic!("valid shortage must enter durable persistence");
+        };
+        let RfCommand::Picking(PickingCommand::ReportShortage(command)) = draft.command else {
+            panic!("expected a shortage command");
+        };
+        assert_eq!(command.task_id, 41);
+        assert_eq!(command.content_id, 61);
+        assert_eq!(command.source_location_barcode, "A-01-02");
+        assert_eq!(
+            command.source_license_plate_barcode.as_deref(),
+            Some("LP-SOURCE")
+        );
+        assert_eq!(command.observed_item_barcode, None);
+        assert_eq!(command.reason, PickShortageReason::InventoryMissing);
+        assert_eq!(command.outcome, PickShortageOutcome::NoPick);
+    }
+
+    #[test]
+    fn wrong_inventory_requires_a_nonmatching_observed_item() {
+        let mut workflow = PickingWorkflow::default();
+        activate(&mut workflow, claim(false));
+        workflow.begin_shortage();
+        workflow.set_shortage_reason(PickShortageReason::WrongInventory);
+        scan(&mut workflow, "A-01-02");
+
+        assert_eq!(workflow.expected_scan(), Some(PickScanStage::ObservedItem));
+        assert_eq!(scan(&mut workflow, "CASE-111"), None);
+        assert_eq!(
+            workflow.error(),
+            Some("Observed item matches the directed item")
+        );
+        assert_eq!(scan(&mut workflow, "CASE-999"), None);
+        assert_eq!(workflow.shortage_validation_message(), None);
+    }
+
+    #[test]
+    fn changing_controlled_evidence_discards_prior_lot_and_serial_scans() {
+        let mut controlled_claim = claim(false);
+        controlled_claim.content.serial = Some("SERIAL-8".into());
+        let mut workflow = PickingWorkflow::default();
+        activate(&mut workflow, controlled_claim);
+        workflow.begin_shortage();
+        workflow.set_shortage_reason(PickShortageReason::LotOrSerialMismatch);
+        scan(&mut workflow, "A-01-02");
+        scan(&mut workflow, "CASE-111");
+        scan(&mut workflow, "WRONG-LOT");
+
+        assert_eq!(
+            workflow
+                .shortage()
+                .and_then(PickShortageDraft::observed_lot),
+            Some("WRONG-LOT")
+        );
+        workflow.set_controlled_evidence(PickControlledEvidence::Serial);
+
+        let shortage = workflow.shortage().unwrap();
+        assert_eq!(shortage.observed_lot(), None);
+        assert_eq!(shortage.observed_serial(), None);
+        assert_eq!(
+            workflow.expected_scan(),
+            Some(PickScanStage::ObservedSerial)
+        );
+    }
+
+    #[test]
+    fn partial_shortage_scans_matching_controlled_stock_and_destination() {
+        let mut workflow = PickingWorkflow::default();
+        activate(&mut workflow, claim(false));
+        workflow.begin_shortage();
+        workflow.set_shortage_reason(PickShortageReason::InsufficientQuantity);
+        workflow.set_shortage_disposition(PickShortageDisposition::Partial);
+        scan(&mut workflow, "A-01-02");
+        scan(&mut workflow, "CASE-111");
+        assert_eq!(workflow.expected_scan(), Some(PickScanStage::ObservedLot));
+        scan(&mut workflow, "LOT-8");
+        assert_eq!(
+            workflow.expected_scan(),
+            Some(PickScanStage::ShortageDestinationLicensePlate)
+        );
+        scan(&mut workflow, "TOTE-2");
+        workflow
+            .shortage_mut()
+            .unwrap()
+            .picked_quantity_mut()
+            .push('2');
+
+        assert_eq!(workflow.shortage_validation_message(), None);
+        let WorkflowEffect::PersistCommand(draft) = workflow
+            .begin_shortage_report("short-command".into(), "short-key".into())
+            .unwrap()
+        else {
+            panic!("partial shortage must persist");
+        };
+        let RfCommand::Picking(PickingCommand::ReportShortage(command)) = draft.command else {
+            panic!("expected a shortage command");
+        };
+        assert_eq!(command.observed_item_barcode.as_deref(), Some("CASE-111"));
+        assert_eq!(command.observed_lot.as_deref(), Some("LOT-8"));
+        assert_eq!(
+            command.outcome,
+            PickShortageOutcome::Partial {
+                picked_quantity: 2,
+                destination_license_plate_barcode: "TOTE-2".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn other_shortage_requires_a_bounded_note() {
+        let mut workflow = PickingWorkflow::default();
+        activate(&mut workflow, claim(false));
+        workflow.begin_shortage();
+        workflow.set_shortage_reason(PickShortageReason::Other);
+        scan(&mut workflow, "A-01-02");
+
+        assert_eq!(
+            workflow.shortage_validation_message(),
+            Some("Add a note for Other")
+        );
+        workflow
+            .shortage_mut()
+            .unwrap()
+            .note_mut()
+            .push_str("Picker found mixed stock");
+        assert_eq!(workflow.shortage_validation_message(), None);
+    }
+
+    #[test]
+    fn shortage_result_must_match_saved_evidence_before_claim_clears() {
+        let mut workflow = PickingWorkflow::default();
+        activate(&mut workflow, claim(false));
+        workflow.begin_shortage();
+        workflow.set_shortage_reason(PickShortageReason::WrongInventory);
+        scan(&mut workflow, "A-01-02");
+        scan(&mut workflow, "CASE-999");
+        workflow.begin_shortage_report("short-command".into(), "short-key".into());
+        workflow.command_persisted("short-command", 19);
+        workflow.dispatch_started(19);
+
+        workflow.durable_outcome_recorded(
+            19,
+            CommandOutcome::PickShortageReported(Box::new(PickShortageReportResult {
+                shortage_id: 29,
+                shortage_revision: 1,
+                task_id: 41,
+                content_id: 61,
+                order_id: 51,
+                order_revision: 5,
+                planned_quantity: 4,
+                picked_quantity: 0,
+                short_quantity: 4,
+                reason: PickShortageReason::WrongInventory,
+                note: None,
+                observed_item_barcode: Some("DIFFERENT-RESULT".into()),
+                observed_lot: None,
+                observed_serial: None,
+                status: PickShortageStatus::AwaitingInventory,
+            })),
         );
 
         assert_eq!(workflow.activity(), Activity::ReconcileRequired);

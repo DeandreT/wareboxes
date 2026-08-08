@@ -961,6 +961,7 @@ impl RfApp {
             "receiving-reconcile" => self.load_receiving_preview(ReceivingPreview::Reconcile),
             "count-active" => self.load_count_preview(),
             "pick-active" => self.load_pick_preview(),
+            "pick-shortage" => self.load_pick_shortage_preview(),
             _ => {}
         }
     }

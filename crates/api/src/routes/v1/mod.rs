@@ -16,6 +16,7 @@ mod order_holds;
 mod order_releases;
 mod orders;
 pub(crate) mod packing;
+mod pick_shortages;
 mod picking;
 mod putaway;
 mod putaway_claim_lifecycle;
@@ -187,6 +188,16 @@ pub fn router() -> Router<AppState> {
         .route(
             "/picking-tasks/{task_id}/contents/{content_id}/confirmations",
             post(picking::confirm),
+        )
+        .route(
+            "/picking-tasks/{task_id}/contents/{content_id}/short-picks",
+            post(pick_shortages::report),
+        )
+        .route("/pick-shortages", get(pick_shortages::list))
+        .route("/pick-shortages/{shortage_id}", get(pick_shortages::get))
+        .route(
+            "/pick-shortages/{shortage_id}/reallocations",
+            post(pick_shortages::reallocate),
         )
         .route(
             "/inventory-owners/{inventory_owner_id}/order-entry-items",

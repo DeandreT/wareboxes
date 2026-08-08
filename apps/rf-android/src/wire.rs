@@ -17,11 +17,14 @@ use wareboxes_api_contract::v1::{
     InventoryRelocationClaimWork, InventoryRelocationConfirmationResponse,
     InventoryRelocationWorkflow, LicensePlatePutawayConfirmationResponse,
     PickClaimHeartbeatResponse, PickClaimReleaseReason, PickClaimResponse,
-    PickContentConfirmationResponse, PutawayClaimHeartbeatResponse, PutawayClaimReleaseReason,
-    PutawayClaimResponse, PutawayClaimSourceLocation, PutawayClaimWork,
-    PutawayConfirmationResponse, PutawayWorkflow as ApiPutawayWorkflow,
-    ReleaseCycleCountClaimRequest, ReleaseInventoryRelocationClaimRequest, ReleasePickClaimRequest,
-    ReleasePutawayClaimRequest,
+    PickContentConfirmationResponse, PickShortageDetails as ApiPickShortageDetails,
+    PickShortageReason as ApiPickShortageReason, PickShortageStatus as ApiPickShortageStatus,
+    PutawayClaimHeartbeatResponse, PutawayClaimReleaseReason, PutawayClaimResponse,
+    PutawayClaimSourceLocation, PutawayClaimWork, PutawayConfirmationResponse,
+    PutawayWorkflow as ApiPutawayWorkflow, ReleaseCycleCountClaimRequest,
+    ReleaseInventoryRelocationClaimRequest, ReleasePickClaimRequest, ReleasePutawayClaimRequest,
+    ReportPickShortageOutcome as ApiReportPickShortageOutcome, ReportPickShortageRequest,
+    ReportPickShortageResponse,
 };
 
 use crate::cycle_count::CycleCountClaim;
@@ -33,7 +36,8 @@ use crate::expected_receiving::{
     ReceivingLoadStatus, ReceivingSession, ReceivingSessionInput, StockDimension,
 };
 use crate::picking::{
-    PickClaim, PickClaimContent, PickContentState, PickReleaseReason, PickingCommand,
+    PickClaim, PickClaimContent, PickContentState, PickReleaseReason, PickShortageOutcome,
+    PickShortageReason, PickShortageReportResult, PickShortageStatus, PickingCommand,
 };
 use crate::workflow::{
     CommandOutcome, CycleCountCommand, DurableCommandDraft, InventoryRelocationClaim,
@@ -74,6 +78,7 @@ pub enum ResponseKind {
     PickOptionalClaim,
     PickClaim,
     PickConfirmation,
+    PickShortageReport,
     PickRelease,
     ExpectedReceiptConfirmation,
 }
@@ -104,6 +109,8 @@ pub enum WireRequestError {
     InvalidTaskId,
     #[error("pick content ID must be positive")]
     InvalidPickContentId,
+    #[error("pick shortage contains invalid {field}")]
+    InvalidPickShortageField { field: &'static str },
     #[error("load ID must be positive")]
     InvalidLoadId,
     #[error("load line ID must be positive")]
@@ -145,6 +152,8 @@ pub enum WireResponseError {
     ExpectedReceivingLoadMismatch { expected: i64, actual: i64 },
     #[error("the warehouse service returned an invalid expected receipt confirmation")]
     InvalidExpectedReceiptConfirmation,
+    #[error("the warehouse service returned an invalid pick-shortage result")]
+    InvalidPickShortageResponse,
     #[error(
         "the expected receipt response line ID {actual} does not match requested line {expected}"
     )]
@@ -434,6 +443,51 @@ pub fn build_durable_request(
                 ResponseKind::PickConfirmation,
             )
         }
+        RfCommand::Picking(PickingCommand::ReportShortage(command)) => {
+            validate_task_id(command.task_id)?;
+            if command.content_id <= 0 {
+                return Err(WireRequestError::InvalidPickContentId);
+            }
+            validate_pick_shortage_command(
+                &command.source_location_barcode,
+                command.source_license_plate_barcode.as_deref(),
+                command.observed_item_barcode.as_deref(),
+                command.observed_lot.as_deref(),
+                command.observed_serial.as_deref(),
+                command.reason,
+                command.note.as_deref(),
+                &command.outcome,
+            )?;
+            let outcome = match &command.outcome {
+                PickShortageOutcome::NoPick => ApiReportPickShortageOutcome::NoPick {},
+                PickShortageOutcome::Partial {
+                    picked_quantity,
+                    destination_license_plate_barcode,
+                } => ApiReportPickShortageOutcome::Partial {
+                    picked_quantity: *picked_quantity,
+                    destination_license_plate_barcode: destination_license_plate_barcode.clone(),
+                },
+            };
+            (
+                format!(
+                    "{API_PREFIX}/picking-tasks/{}/contents/{}/short-picks",
+                    command.task_id, command.content_id
+                ),
+                serde_json::to_vec(&ReportPickShortageRequest {
+                    source_location_barcode: command.source_location_barcode.clone(),
+                    source_license_plate_barcode: command.source_license_plate_barcode.clone(),
+                    observed_item_barcode: command.observed_item_barcode.clone(),
+                    observed_lot: command.observed_lot.clone(),
+                    observed_serial: command.observed_serial.clone(),
+                    details: ApiPickShortageDetails {
+                        reason: map_pick_shortage_reason(command.reason),
+                        note: command.note.clone(),
+                    },
+                    outcome,
+                })?,
+                ResponseKind::PickShortageReport,
+            )
+        }
         RfCommand::Picking(PickingCommand::Release {
             task_id,
             reason,
@@ -578,6 +632,12 @@ pub fn decode_command_response(
                 task_completed: response.task_completed,
                 order_ready_to_pack: response.order_ready_to_pack,
             })
+        }
+        ResponseKind::PickShortageReport => {
+            let response = serde_json::from_slice::<ReportPickShortageResponse>(body)?;
+            Ok(CommandOutcome::PickShortageReported(Box::new(
+                map_pick_shortage_response(response)?,
+            )))
         }
         ResponseKind::PickRelease => {
             let response = serde_json::from_slice::<
@@ -1086,6 +1146,7 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
         inventory_owner_id: response.inventory_owner_id,
         facility_id: response.facility_id,
         order_key: response.order_key,
+        order_revision: response.order_revision.get(),
         priority: response.priority,
         ship_by: response.ship_by,
         lease_expires_at: response.lease_expires_at,
@@ -1113,6 +1174,87 @@ fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponse
             planned_quantity: content.planned_quantity,
             state: PickContentState::Pending,
         },
+    })
+}
+
+fn map_pick_shortage_response(
+    response: ReportPickShortageResponse,
+) -> Result<PickShortageReportResult, WireResponseError> {
+    let quantities = response.quantities;
+    let details = response.details;
+    let scans_are_valid = [
+        response.observed_item_barcode.as_deref(),
+        response.observed_lot.as_deref(),
+        response.observed_serial.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .all(valid_pick_scan);
+    let note_is_valid = details.note.as_deref().is_none_or(|note| {
+        !note.is_empty()
+            && note.trim() == note
+            && note.chars().count() <= 500
+            && !note.chars().any(char::is_control)
+    });
+    let movement_is_valid = match (quantities.picked, response.movement.as_ref()) {
+        (0, None) => true,
+        (picked, Some(movement)) if picked > 0 => {
+            movement.inventory_transaction_id > 0
+                && movement.source_inventory_allocation_id > 0
+                && movement.destination_inventory_allocation_id > 0
+                && movement.source_inventory_balance_id > 0
+                && movement.destination_inventory_balance_id > 0
+                && movement.source_location_id > 0
+                && movement.destination_location_id > 0
+                && movement
+                    .source_license_plate_id
+                    .is_none_or(|license_plate_id| license_plate_id > 0)
+                && movement.destination_license_plate_id > 0
+                && movement.picked_quantity == picked
+        }
+        _ => false,
+    };
+    if response.shortage_id <= 0
+        || response.task_id <= 0
+        || response.content_id <= 0
+        || response.order_id <= 0
+        || quantities.planned <= 0
+        || quantities.picked < 0
+        || quantities.picked >= quantities.planned
+        || quantities.short != quantities.planned - quantities.picked
+        || response.shortage_status != ApiPickShortageStatus::AwaitingInventory
+        || response.reallocated_quantity != 0
+        || response.recovery_terminal_quantity != 0
+        || response.remaining_to_allocate_quantity != quantities.short
+        || response.hold.hold_id <= 0
+        || response.hold.inventory_balance_id <= 0
+        || response.hold.held_quantity <= 0
+        || response.reported_by <= 0
+        || DateTime::parse_from_rfc3339(&response.reported_at).is_err()
+        || !scans_are_valid
+        || !note_is_valid
+        || (details.reason == ApiPickShortageReason::Other && details.note.is_none())
+        || !movement_is_valid
+    {
+        return Err(WireResponseError::InvalidPickShortageResponse);
+    }
+
+    Ok(PickShortageReportResult {
+        shortage_id: response.shortage_id,
+        shortage_revision: response.shortage_revision.get(),
+        task_id: response.task_id,
+        content_id: response.content_id,
+        order_id: response.order_id,
+        order_revision: response.order_revision.get(),
+        planned_quantity: quantities.planned,
+        picked_quantity: quantities.picked,
+        short_quantity: quantities.short,
+        reason: map_api_pick_shortage_reason(details.reason),
+        note: details.note,
+        observed_item_barcode: response.observed_item_barcode,
+        observed_lot: response.observed_lot,
+        observed_serial: response.observed_serial,
+        status: PickShortageStatus::AwaitingInventory,
     })
 }
 
@@ -1515,6 +1657,92 @@ fn validate_task_id(task_id: i64) -> Result<(), WireRequestError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validate_pick_shortage_command(
+    source_location_barcode: &str,
+    source_license_plate_barcode: Option<&str>,
+    observed_item_barcode: Option<&str>,
+    observed_lot: Option<&str>,
+    observed_serial: Option<&str>,
+    reason: PickShortageReason,
+    note: Option<&str>,
+    outcome: &PickShortageOutcome,
+) -> Result<(), WireRequestError> {
+    if !valid_pick_scan(source_location_barcode) {
+        return Err(WireRequestError::InvalidPickShortageField {
+            field: "source location barcode",
+        });
+    }
+    for (field, value) in [
+        ("source license plate barcode", source_license_plate_barcode),
+        ("observed item barcode", observed_item_barcode),
+        ("observed lot", observed_lot),
+        ("observed serial", observed_serial),
+    ] {
+        if value.is_some_and(|value| !valid_pick_scan(value)) {
+            return Err(WireRequestError::InvalidPickShortageField { field });
+        }
+    }
+    if note.is_some_and(|note| {
+        note.is_empty()
+            || note.trim() != note
+            || note.chars().count() > 500
+            || note.chars().any(char::is_control)
+    }) {
+        return Err(WireRequestError::InvalidPickShortageField { field: "note" });
+    }
+    if reason == PickShortageReason::Other && note.is_none() {
+        return Err(WireRequestError::InvalidPickShortageField { field: "note" });
+    }
+
+    let item_required = matches!(
+        reason,
+        PickShortageReason::InsufficientQuantity
+            | PickShortageReason::DamagedInventory
+            | PickShortageReason::WrongInventory
+            | PickShortageReason::LotOrSerialMismatch
+    ) || matches!(outcome, PickShortageOutcome::Partial { .. });
+    if item_required && observed_item_barcode.is_none() {
+        return Err(WireRequestError::InvalidPickShortageField {
+            field: "observed item barcode",
+        });
+    }
+    if reason == PickShortageReason::LotOrSerialMismatch
+        && observed_lot.is_none()
+        && observed_serial.is_none()
+    {
+        return Err(WireRequestError::InvalidPickShortageField {
+            field: "observed lot or serial",
+        });
+    }
+    if let PickShortageOutcome::Partial {
+        picked_quantity,
+        destination_license_plate_barcode,
+    } = outcome
+    {
+        if !reason.supports_partial() || *picked_quantity <= 0 {
+            return Err(WireRequestError::InvalidPickShortageField {
+                field: "picked quantity",
+            });
+        }
+        if !valid_pick_scan(destination_license_plate_barcode)
+            || source_license_plate_barcode == Some(destination_license_plate_barcode.as_str())
+        {
+            return Err(WireRequestError::InvalidPickShortageField {
+                field: "destination license plate barcode",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn valid_pick_scan(value: &str) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.chars().count() <= 200
+        && !value.chars().any(char::is_control)
+}
+
 const fn map_workflow(workflow: MovementKind) -> ApiPutawayWorkflow {
     match workflow {
         MovementKind::Loose => ApiPutawayWorkflow::Loose,
@@ -1577,11 +1805,34 @@ const fn map_pick_release_reason(reason: PickReleaseReason) -> PickClaimReleaseR
     }
 }
 
+const fn map_pick_shortage_reason(reason: PickShortageReason) -> ApiPickShortageReason {
+    match reason {
+        PickShortageReason::InventoryMissing => ApiPickShortageReason::InventoryMissing,
+        PickShortageReason::InsufficientQuantity => ApiPickShortageReason::InsufficientQuantity,
+        PickShortageReason::DamagedInventory => ApiPickShortageReason::DamagedInventory,
+        PickShortageReason::WrongInventory => ApiPickShortageReason::WrongInventory,
+        PickShortageReason::LotOrSerialMismatch => ApiPickShortageReason::LotOrSerialMismatch,
+        PickShortageReason::Other => ApiPickShortageReason::Other,
+    }
+}
+
+const fn map_api_pick_shortage_reason(reason: ApiPickShortageReason) -> PickShortageReason {
+    match reason {
+        ApiPickShortageReason::InventoryMissing => PickShortageReason::InventoryMissing,
+        ApiPickShortageReason::InsufficientQuantity => PickShortageReason::InsufficientQuantity,
+        ApiPickShortageReason::DamagedInventory => PickShortageReason::DamagedInventory,
+        ApiPickShortageReason::WrongInventory => PickShortageReason::WrongInventory,
+        ApiPickShortageReason::LotOrSerialMismatch => PickShortageReason::LotOrSerialMismatch,
+        ApiPickShortageReason::Other => PickShortageReason::Other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::picking::PickShortageCommand;
 
     fn draft(command: PutawayCommand) -> DurableCommandDraft {
         DurableCommandDraft {
@@ -1972,6 +2223,48 @@ mod tests {
         );
         assert_eq!(confirmation.response_kind, ResponseKind::PickConfirmation);
 
+        let shortage = build_durable_request(&pick_draft(PickingCommand::ReportShortage(
+            Box::new(PickShortageCommand {
+                task_id: 71,
+                content_id: 81,
+                source_location_barcode: "A-01-02".into(),
+                source_license_plate_barcode: Some("LP-71".into()),
+                observed_item_barcode: Some("ITEM-71".into()),
+                observed_lot: Some("LOT-1".into()),
+                observed_serial: None,
+                reason: PickShortageReason::InsufficientQuantity,
+                note: Some("Two cases found".into()),
+                outcome: PickShortageOutcome::Partial {
+                    picked_quantity: 2,
+                    destination_license_plate_barcode: "TOTE-9".into(),
+                },
+            }),
+        )))
+        .unwrap();
+        assert_eq!(
+            shortage.path,
+            "/api/v1/picking-tasks/71/contents/81/short-picks"
+        );
+        assert_eq!(
+            body(&shortage),
+            json!({
+                "source_location_barcode": "A-01-02",
+                "source_license_plate_barcode": "LP-71",
+                "observed_item_barcode": "ITEM-71",
+                "observed_lot": "LOT-1",
+                "details": {
+                    "reason": "insufficient_quantity",
+                    "note": "Two cases found"
+                },
+                "outcome": {
+                    "kind": "partial",
+                    "picked_quantity": 2,
+                    "destination_license_plate_barcode": "TOTE-9"
+                }
+            })
+        );
+        assert_eq!(shortage.response_kind, ResponseKind::PickShortageReport);
+
         let release = build_durable_request(&pick_draft(PickingCommand::Release {
             task_id: 71,
             reason: PickReleaseReason::InventoryDiscrepancy,
@@ -1994,6 +2287,7 @@ mod tests {
             "inventory_owner_id": 7,
             "facility_id": 9,
             "order_key": "SO-72",
+            "order_revision": 3,
             "priority": 80,
             "ship_by": "2026-08-09T20:00:00Z",
             "lease_expires_at": "2026-08-08T20:30:00Z",
@@ -2030,6 +2324,7 @@ mod tests {
             panic!("expected pick claim");
         };
         assert_eq!(claim.task_id, 71);
+        assert_eq!(claim.order_revision, 3);
         assert_eq!(claim.content.content_id, 81);
         assert_eq!(claim.content.inventory_allocation_id, 83);
         assert_eq!(claim.content.item_barcodes, vec!["ITEM-71", "000071"]);
@@ -2037,6 +2332,57 @@ mod tests {
             claim.content.source_license_plate_barcode.as_deref(),
             Some("LP-71")
         );
+    }
+
+    #[test]
+    fn pick_shortage_decoder_validates_initial_recovery_counters() {
+        let response = json!({
+            "shortage_id": 91,
+            "shortage_revision": 1,
+            "shortage_status": "awaiting_inventory",
+            "task_id": 71,
+            "content_id": 81,
+            "order_id": 72,
+            "order_revision": 4,
+            "quantities": {"planned": 4, "picked": 0, "short": 4},
+            "details": {"reason": "inventory_missing"},
+            "reallocated_quantity": 0,
+            "recovery_terminal_quantity": 0,
+            "remaining_to_allocate_quantity": 4,
+            "observed_item_barcode": null,
+            "observed_lot": null,
+            "observed_serial": null,
+            "hold": {
+                "hold_id": 101,
+                "inventory_balance_id": 84,
+                "held_quantity": 4
+            },
+            "movement": null,
+            "reported_by": 9,
+            "reported_at": "2026-08-08T20:00:00Z"
+        });
+        let CommandOutcome::PickShortageReported(result) = decode_command_response(
+            ResponseKind::PickShortageReport,
+            201,
+            &serde_json::to_vec(&response).unwrap(),
+        )
+        .unwrap() else {
+            panic!("expected a shortage result");
+        };
+        assert_eq!(result.shortage_id, 91);
+        assert_eq!(result.short_quantity, 4);
+        assert_eq!(result.reason, PickShortageReason::InventoryMissing);
+
+        let mut invalid = response;
+        invalid["remaining_to_allocate_quantity"] = json!(3);
+        assert!(matches!(
+            decode_command_response(
+                ResponseKind::PickShortageReport,
+                201,
+                &serde_json::to_vec(&invalid).unwrap(),
+            ),
+            Err(WireResponseError::InvalidPickShortageResponse)
+        ));
     }
 
     #[test]
