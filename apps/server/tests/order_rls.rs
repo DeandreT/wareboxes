@@ -1,7 +1,6 @@
 mod common;
 
 use common::*;
-use wareboxes_application::CommandContext;
 
 #[derive(Clone, Copy)]
 struct OrderRefs {
@@ -138,42 +137,6 @@ async fn order_aggregate_requires_a_transaction_local_tenant_context() {
     );
     tenant_b_tx.rollback().await.unwrap();
 
-    let tenant_b_address_count = address_count(&fixture.db, tenant_b).await;
-    let guessed_update = OrderUpdate {
-        order_id: refs_a.order_id,
-        order_key: None,
-        rush: None,
-        ship_by: None,
-        line1: Some("Must not be inserted".to_owned()),
-        line2: None,
-        city: None,
-        state: None,
-        postal_code: None,
-        country: None,
-    };
-    let tenant_b_access = repo::tenants::access_for_user(&fixture.db, user_b.id, tenant_b)
-        .await
-        .unwrap()
-        .unwrap();
-    let command = CommandContext {
-        tenant_id: tenant_b,
-        actor_id: tenant_b_access.user_id,
-        request_id: "order-rls-guessed-update".to_owned(),
-        idempotency_key: Some("order-rls-guessed-update".to_owned()),
-    };
-    assert!(!repo::orders::update_order_metadata(
-        &fixture.db,
-        &tenant_b_access,
-        &command,
-        &guessed_update
-    )
-    .await
-    .unwrap());
-    assert_eq!(
-        address_count(&fixture.db, tenant_b).await,
-        tenant_b_address_count
-    );
-
     assert_eq!(snapshot(&fixture.db, refs_a).await, source_a);
     assert_eq!(snapshot(&fixture.db, refs_b).await, source_b);
 
@@ -190,16 +153,6 @@ async fn order_aggregate_requires_a_transaction_local_tenant_context() {
             .collect::<Vec<_>>(),
         vec![refs_a.order_item_id]
     );
-}
-
-async fn address_count(db: &db::Db, tenant_id: TenantId) -> i64 {
-    let mut tx = tenant_tx(db, tenant_id).await;
-    let count = sqlx::query_scalar("SELECT COUNT(*) FROM addresses")
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap();
-    tx.rollback().await.unwrap();
-    count
 }
 
 async fn order_refs(fixture: &Fixture, tenant_id: TenantId, name: &str) -> OrderRefs {

@@ -10,7 +10,6 @@ use url::Url;
 pub use wareboxes_api::error::AppError;
 pub use wareboxes_api::{auth, db, permissions, repo};
 pub use wareboxes_application::ApplicationError;
-pub use wareboxes_core::dto::OrderUpdate;
 pub use wareboxes_core::models::{
     InventoryTransactionType, LoadLineStatus, LoadStatus, LoadType, OrderStatus,
     WorkTaskProgressAction, WorkTaskStatus, WorkTaskType,

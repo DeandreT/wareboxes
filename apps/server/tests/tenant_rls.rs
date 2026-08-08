@@ -443,6 +443,7 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "order_cancellations",
             "order_cancellations_tenant_isolation",
         ),
+        ("order_amendments", "order_amendments_tenant_isolation"),
         ("order_releases", "order_releases_tenant_isolation"),
         (
             "order_release_allocations",

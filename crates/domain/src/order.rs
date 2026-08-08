@@ -214,7 +214,7 @@ impl<'de> Deserialize<'de> for CatalogItemId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShippingRecipient {
     name: String,
     company: Option<String>,
@@ -275,7 +275,7 @@ impl ShippingRecipient {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShippingDestination {
     recipient: ShippingRecipient,
     line1: String,

@@ -2,23 +2,24 @@
 use wareboxes_api_contract::v1::ReleaseInventoryHoldRequest;
 use wareboxes_api_contract::v1::{
     AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
-    CancelOrderRequest, CancelOrderResponse, CancelReplenishmentWorkRequest, CloseCartonRequest,
-    CloseCartonResponse, ConfigureFacilityShippingOriginRequest,
-    ConfigureFacilityShippingOriginResponse, ConfigureReplenishmentPolicyRequest,
-    ConfigureReplenishmentPolicyResponse, CreateCartonRequest, CreateCartonResponse,
-    CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse, InventoryBalancePage,
-    InventoryHoldPage, InventoryHoldStatus, InventoryStatusTransitionResponse, OpaqueCursor,
-    OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
-    OrderEntryItemResponse, PackPickedAllocationRequest, PackPickedAllocationResponse,
-    PackSessionResponse, PackingQueuePage, PickShortagePage, PickShortageResponse,
-    PickShortageStatus, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
-    PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
-    PlanOrderAllocationResponse, PlanReplenishmentRequest, PlanReplenishmentResponse,
-    ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleaseInventoryHoldResponse,
-    ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
-    ReplenishmentPolicyPage, ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse,
-    ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
-    VoidCartonRequest, VoidCartonResponse,
+    AmendFulfillmentOrderRequest, AmendFulfillmentOrderResponse, CancelOrderRequest,
+    CancelOrderResponse, CancelReplenishmentWorkRequest, CloseCartonRequest, CloseCartonResponse,
+    ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,
+    ConfigureReplenishmentPolicyRequest, ConfigureReplenishmentPolicyResponse, CreateCartonRequest,
+    CreateCartonResponse, CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse,
+    InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
+    InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
+    OpenPackSessionResponse, OrderAllocationReadinessResponse, OrderEntryItemResponse,
+    PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
+    PackingQueuePage, PickShortagePage, PickShortageResponse, PickShortageStatus,
+    PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
+    PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
+    PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
+    ReallocatePickShortageResponse, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
+    ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse, ReplenishmentPolicyPage,
+    ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
+    RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse, VoidCartonRequest,
+    VoidCartonResponse,
 };
 use wareboxes_api_contract::v1::{
     CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
@@ -55,27 +56,28 @@ mod browser {
 
     use super::{
         AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
-        AccessScopeWorkspace, ApiError, CancelOrderRequest, CancelOrderResponse,
-        CancelReplenishmentWorkRequest, CloseCartonRequest, CloseCartonResponse,
-        ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,
-        ConfigureReplenishmentPolicyRequest, ConfigureReplenishmentPolicyResponse,
-        CreateCartonRequest, CreateCartonResponse, CreateFulfillmentOrderRequest,
-        CreateFulfillmentOrderResponse, CreateInventoryRelocationTaskRequest,
-        CreateInventoryRelocationTaskResponse, CreateInventoryStatusTransitionRequest,
-        InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
-        InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
-        OpenPackSessionResponse, OrderAllocationReadinessResponse, OrderEntryItemResponse,
-        OrderPage, PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
-        PackingQueuePage, PickShortagePage, PickShortageResponse, PickShortageStatus,
-        PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
-        PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
-        PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
-        ReallocatePickShortageResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
-        ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest,
-        ReleaseOrderResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
-        ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
-        RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse, VoidCartonRequest,
-        VoidCartonResponse, WebSessionContext,
+        AccessScopeWorkspace, AmendFulfillmentOrderRequest, AmendFulfillmentOrderResponse,
+        ApiError, CancelOrderRequest, CancelOrderResponse, CancelReplenishmentWorkRequest,
+        CloseCartonRequest, CloseCartonResponse, ConfigureFacilityShippingOriginRequest,
+        ConfigureFacilityShippingOriginResponse, ConfigureReplenishmentPolicyRequest,
+        ConfigureReplenishmentPolicyResponse, CreateCartonRequest, CreateCartonResponse,
+        CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse,
+        CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
+        CreateInventoryStatusTransitionRequest, InventoryBalancePage, InventoryHoldPage,
+        InventoryHoldStatus, InventoryStatusTransitionResponse, OpaqueCursor,
+        OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
+        OrderEntryItemResponse, OrderPage, PackPickedAllocationRequest,
+        PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage, PickShortagePage,
+        PickShortageResponse, PickShortageStatus, PlaceInventoryHoldRequest,
+        PlaceInventoryHoldResponse, PlaceOrderHoldRequest, PlaceOrderHoldResponse,
+        PlanOrderAllocationRequest, PlanOrderAllocationResponse, PlanReplenishmentRequest,
+        PlanReplenishmentResponse, ReallocatePickShortageRequest, ReallocatePickShortageResponse,
+        ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
+        ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
+        ReplenishmentPolicyPage, ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse,
+        ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest,
+        RetireReplenishmentPolicyResponse, VoidCartonRequest, VoidCartonResponse,
+        WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -150,6 +152,19 @@ mod browser {
         idempotency_key: &str,
     ) -> Result<CreateFulfillmentOrderResponse, ApiError> {
         post("/api/v1/orders", request, idempotency_key).await
+    }
+
+    pub async fn amend_fulfillment_order(
+        order_id: i64,
+        request: &AmendFulfillmentOrderRequest,
+        idempotency_key: &str,
+    ) -> Result<AmendFulfillmentOrderResponse, ApiError> {
+        post(
+            &format!("/api/v1/orders/{order_id}/amendments"),
+            request,
+            idempotency_key,
+        )
+        .await
     }
 
     pub async fn order_allocation_readiness(
@@ -710,6 +725,15 @@ pub async fn create_fulfillment_order(
     _request: &CreateFulfillmentOrderRequest,
     _idempotency_key: &str,
 ) -> Result<CreateFulfillmentOrderResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn amend_fulfillment_order(
+    _order_id: i64,
+    _request: &AmendFulfillmentOrderRequest,
+    _idempotency_key: &str,
+) -> Result<AmendFulfillmentOrderResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

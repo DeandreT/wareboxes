@@ -132,6 +132,7 @@ pub fn router() -> Router<AppState> {
             post(license_plate_putaway::confirm),
         )
         .route("/orders", post(orders::create))
+        .route("/orders/{order_id}/amendments", post(orders::amend))
         .route("/orders/{order_id}/shipments", post(shipping::create))
         .route("/shipments/{shipment_id}", get(shipping::get))
         .route(

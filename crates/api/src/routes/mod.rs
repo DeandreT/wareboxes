@@ -106,7 +106,6 @@ pub fn app(state: AppState) -> Router {
         // orders
         .route("/orders", get(orders::list))
         .route("/orders/{order_id}", get(orders::get))
-        .route("/orders/update", post(orders::update))
         .route("/orders/delete", post(orders::delete))
         .route("/orders/restore", post(orders::restore))
         // WMS catalog / locations

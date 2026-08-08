@@ -3,6 +3,7 @@
 mod allocation;
 mod facility;
 mod order;
+mod order_amendment;
 mod order_cancellation;
 mod order_release;
 mod outbound_load;
@@ -35,6 +36,9 @@ pub use order::{
     MAX_DESTINATION_PHONE_LENGTH, MAX_DESTINATION_POSTAL_CODE_LENGTH,
     MAX_DESTINATION_RECIPIENT_NAME_LENGTH, MAX_DESTINATION_REGION_LENGTH, MAX_ORDER_KEY_LENGTH,
     MAX_ORDER_LINE_KEY_LENGTH, MAX_REQUESTED_UOM_LENGTH,
+};
+pub use order_amendment::{
+    amend_fulfillment_order, FulfillmentOrderHeader, OrderAmendmentError, OrderAmendmentTransition,
 };
 pub use order_cancellation::{
     CancellationNote, OrderCancellationDetails, OrderCancellationError, OrderCancellationReason,
@@ -161,6 +165,7 @@ positive_id!(
 positive_id!(UserId, "user ID");
 positive_id!(OrderId, "order ID");
 positive_id!(OrderLineId, "order line ID");
+positive_id!(OrderAmendmentId, "order amendment ID");
 positive_id!(OrderCancellationId, "order cancellation ID");
 positive_id!(OrderReleaseId, "order release ID");
 positive_id!(PickTaskId, "pick task ID");

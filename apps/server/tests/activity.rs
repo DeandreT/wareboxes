@@ -1,7 +1,9 @@
 mod common;
 
 use common::*;
+use wareboxes_application::order_amendment::AmendFulfillmentOrderCommand;
 use wareboxes_application::CommandContext;
+use wareboxes_domain::{OrderId, OrderRevision, ShippingDestination, ShippingRecipient};
 
 #[tokio::test]
 async fn order_and_load_mutations_write_activity_history() {
@@ -10,6 +12,31 @@ async fn order_and_load_mutations_write_activity_history() {
         .await
         .unwrap();
     let tenant_id = tenant_for_user(&db, user.id).await;
+    let permission =
+        match wareboxes_persistence_postgres::permissions::find_by_name(&db, tenant_id, "orders")
+            .await
+            .unwrap()
+        {
+            Some(permission) => permission.id,
+            None => wareboxes_persistence_postgres::permissions::add_permission(
+                &db,
+                tenant_id,
+                "orders",
+                Some("Orders"),
+            )
+            .await
+            .unwrap(),
+        };
+    let role =
+        wareboxes_persistence_postgres::roles::add_role(&db, tenant_id, "activity-orders", None)
+            .await
+            .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(&db, tenant_id, role, permission)
+        .await
+        .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(&db, tenant_id, user.id, role)
+        .await
+        .unwrap();
     let inventory_owner = repo::inventory_owners::add_inventory_owner(
         &db,
         tenant_id,
@@ -20,18 +47,22 @@ async fn order_and_load_mutations_write_activity_history() {
     .unwrap();
 
     let order_id = insert_test_order_header(&db, tenant_id, "ACT-ORDER", inventory_owner).await;
-    let update = OrderUpdate {
-        order_id,
-        order_key: None,
-        rush: Some(true),
-        ship_by: None,
-        line1: None,
-        line2: None,
-        city: None,
-        state: None,
-        postal_code: None,
-        country: None,
-    };
+    let update = AmendFulfillmentOrderCommand::new(
+        OrderId::new(order_id).unwrap(),
+        OrderRevision::new(1).unwrap(),
+        true,
+        None,
+        ShippingDestination::new(
+            ShippingRecipient::new("Test Recipient", None, None, None).unwrap(),
+            "1 Main St",
+            None,
+            "Reno",
+            "NV",
+            "89501",
+            "US",
+        )
+        .unwrap(),
+    );
     let access = repo::tenants::access_for_user(&db, user.id, tenant_id)
         .await
         .unwrap()
@@ -42,11 +73,9 @@ async fn order_and_load_mutations_write_activity_history() {
         request_id: "activity-order-update".to_owned(),
         idempotency_key: Some("activity-order-update".to_owned()),
     };
-    assert!(
-        repo::orders::update_order_metadata(&db, &access, &command, &update)
-            .await
-            .unwrap()
-    );
+    repo::order_amendment::amend_fulfillment_order_header(&db, &access, &command, &update)
+        .await
+        .unwrap();
     assert!(repo::orders::delete_order(&db, tenant_id, order_id)
         .await
         .unwrap());
@@ -67,7 +96,7 @@ async fn order_and_load_mutations_write_activity_history() {
         order_actions,
         vec![
             "created order",
-            "updated order metadata",
+            "amended fulfillment order header",
             "deleted order",
             "restored order",
         ]

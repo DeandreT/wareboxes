@@ -14,6 +14,7 @@ mod inventory_status_transition;
 mod license_plate_putaway;
 mod order;
 mod order_allocation;
+mod order_amendment;
 mod order_cancellation;
 mod order_hold;
 mod order_release;
@@ -95,6 +96,9 @@ pub use order_allocation::{
     OrderAllocationReadinessResponse, OrderAllocationReadinessStatus,
     OrderAllocationShortageReason, OrderAllocationStrategy, PlanOrderAllocationRequest,
     PlanOrderAllocationResponse,
+};
+pub use order_amendment::{
+    AmendFulfillmentOrderRequest, AmendFulfillmentOrderResponse, AmendedFulfillmentOrderStatus,
 };
 pub use order_cancellation::{
     CancelOrderRequest, CancelOrderResponse, OrderCancellationReason, OrderCancellationStatus,

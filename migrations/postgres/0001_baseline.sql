@@ -23168,6 +23168,235 @@ GRANT USAGE ON SEQUENCE public.facility_shipping_origin_configurations_id_seq TO
 
 
 --
+-- Optimistic pre-execution fulfillment-order amendments.
+--
+
+CREATE TABLE public.order_amendments (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    previous_address_id bigint NOT NULL,
+    resulting_address_id bigint NOT NULL,
+    previous_rush boolean NOT NULL,
+    resulting_rush boolean NOT NULL,
+    previous_ship_by timestamp with time zone,
+    resulting_ship_by timestamp with time zone,
+    order_status text NOT NULL,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    amended_by_user_id bigint NOT NULL,
+    amended_at timestamp with time zone NOT NULL,
+    CONSTRAINT order_amendments_status_check CHECK (
+        order_status IN ('open', 'held')
+    ),
+    CONSTRAINT order_amendments_revision_check CHECK (
+        expected_revision > 0
+        AND resulting_revision = expected_revision + 1
+        AND resulting_revision > expected_revision
+    ),
+    CONSTRAINT order_amendments_change_check CHECK (
+        previous_address_id <> resulting_address_id
+        OR previous_rush IS DISTINCT FROM resulting_rush
+        OR previous_ship_by IS DISTINCT FROM resulting_ship_by
+    ),
+    CONSTRAINT order_amendments_tenant_id_id_key UNIQUE (tenant_id, id),
+    CONSTRAINT order_amendments_scope_id_key
+        UNIQUE (tenant_id, inventory_owner_id, order_id, id),
+    CONSTRAINT order_amendments_order_revision_key
+        UNIQUE (tenant_id, inventory_owner_id, order_id, resulting_revision),
+    CONSTRAINT order_amendments_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id),
+    CONSTRAINT order_amendments_order_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, order_id)
+        REFERENCES public.orders(tenant_id, inventory_owner_id, id),
+    CONSTRAINT order_amendments_previous_address_fkey
+        FOREIGN KEY (tenant_id, previous_address_id)
+        REFERENCES public.addresses(tenant_id, id),
+    CONSTRAINT order_amendments_resulting_address_fkey
+        FOREIGN KEY (tenant_id, resulting_address_id)
+        REFERENCES public.addresses(tenant_id, id),
+    CONSTRAINT order_amendments_actor_fkey
+        FOREIGN KEY (tenant_id, amended_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id)
+);
+
+ALTER TABLE public.order_amendments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.order_amendments FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY order_amendments_tenant_isolation
+ON public.order_amendments
+USING (
+    tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint
+)
+WITH CHECK (
+    tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint
+);
+
+CREATE INDEX order_amendments_order_history_idx
+ON public.order_amendments
+    (tenant_id, inventory_owner_id, order_id, resulting_revision DESC);
+
+CREATE FUNCTION public.guard_fulfillment_order_header_amendment() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NEW.order_key IS NOT DISTINCT FROM OLD.order_key
+       AND NEW.rush IS NOT DISTINCT FROM OLD.rush
+       AND NEW.ship_by IS NOT DISTINCT FROM OLD.ship_by
+       AND NEW.address_id IS NOT DISTINCT FROM OLD.address_id
+    THEN
+        RETURN NEW;
+    END IF;
+
+    IF OLD.deleted IS NOT NULL
+       OR OLD.status NOT IN ('open', 'held')
+       OR NEW.status IS DISTINCT FROM OLD.status
+       OR NEW.order_key IS DISTINCT FROM OLD.order_key
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR OLD.revision = 9223372036854775807
+       OR NEW.revision <> OLD.revision + 1
+    THEN
+        RAISE EXCEPTION
+            'fulfillment order header amendments require an open or held order and one revision step'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.require_fulfillment_order_header_amendment() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NEW.rush IS NOT DISTINCT FROM OLD.rush
+       AND NEW.ship_by IS NOT DISTINCT FROM OLD.ship_by
+       AND NEW.address_id IS NOT DISTINCT FROM OLD.address_id
+    THEN
+        RETURN NULL;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.order_amendments amendment
+        WHERE amendment.tenant_id = NEW.tenant_id
+          AND amendment.inventory_owner_id = NEW.inventory_owner_id
+          AND amendment.order_id = NEW.id
+          AND amendment.previous_address_id = OLD.address_id
+          AND amendment.resulting_address_id = NEW.address_id
+          AND amendment.previous_rush = OLD.rush
+          AND amendment.resulting_rush = NEW.rush
+          AND amendment.previous_ship_by IS NOT DISTINCT FROM OLD.ship_by
+          AND amendment.resulting_ship_by IS NOT DISTINCT FROM NEW.ship_by
+          AND amendment.order_status = NEW.status
+          AND amendment.expected_revision = OLD.revision
+          AND amendment.resulting_revision = NEW.revision
+    ) THEN
+        RAISE EXCEPTION 'fulfillment order header update requires exact amendment evidence'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.require_fulfillment_order_amendment_state() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.orders order_header
+        WHERE order_header.tenant_id = NEW.tenant_id
+          AND order_header.inventory_owner_id = NEW.inventory_owner_id
+          AND order_header.id = NEW.order_id
+          AND order_header.deleted IS NULL
+          AND order_header.status = NEW.order_status
+          AND order_header.address_id = NEW.resulting_address_id
+          AND order_header.rush = NEW.resulting_rush
+          AND order_header.ship_by IS NOT DISTINCT FROM NEW.resulting_ship_by
+          AND order_header.revision = NEW.resulting_revision
+    ) THEN
+        RAISE EXCEPTION 'fulfillment order amendment does not match resulting order state'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.reject_fulfillment_order_amendment_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'fulfillment order amendment evidence is immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE FUNCTION public.protect_fulfillment_order_amendment_address() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM public.order_amendments amendment
+        WHERE amendment.tenant_id = OLD.tenant_id
+          AND (
+              amendment.previous_address_id = OLD.id
+              OR amendment.resulting_address_id = OLD.id
+          )
+    ) THEN
+        RAISE EXCEPTION 'fulfillment order amendment addresses are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+        RETURN NEW;
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
+CREATE TRIGGER orders_guard_header_amendments
+BEFORE UPDATE OF order_key, rush, ship_by, address_id, status, revision ON public.orders
+FOR EACH ROW EXECUTE FUNCTION public.guard_fulfillment_order_header_amendment();
+
+CREATE CONSTRAINT TRIGGER orders_require_header_amendments
+AFTER UPDATE OF rush, ship_by, address_id, status, revision ON public.orders
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_fulfillment_order_header_amendment();
+
+CREATE CONSTRAINT TRIGGER order_amendments_require_resulting_state
+AFTER INSERT ON public.order_amendments
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_fulfillment_order_amendment_state();
+
+CREATE TRIGGER order_amendments_are_immutable
+BEFORE DELETE OR UPDATE ON public.order_amendments
+FOR EACH ROW EXECUTE FUNCTION public.reject_fulfillment_order_amendment_mutation();
+
+CREATE TRIGGER order_amendment_addresses_are_immutable
+BEFORE DELETE OR UPDATE ON public.addresses
+FOR EACH ROW EXECUTE FUNCTION public.protect_fulfillment_order_amendment_address();
+
+REVOKE ALL ON FUNCTION public.guard_fulfillment_order_header_amendment() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_fulfillment_order_header_amendment() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_fulfillment_order_amendment_state() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_fulfillment_order_amendment_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.protect_fulfillment_order_amendment_address() FROM PUBLIC;
+
+REVOKE UPDATE ON TABLE public.orders FROM wareboxes_app;
+GRANT UPDATE (
+    deleted, rush, status, address_id, revision, confirmed, closed, ship_by, wave_id
+) ON TABLE public.orders TO wareboxes_app;
+GRANT SELECT,INSERT ON TABLE public.order_amendments TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.order_amendments_id_seq TO wareboxes_app;
+
+
+--
 -- Typed outbound-load execution and movable packed-carton projection.
 
 ALTER TABLE ONLY public.carton_contents

@@ -9,6 +9,7 @@ pub mod identity;
 pub mod integration;
 pub mod inventory;
 pub mod order_allocation;
+pub mod order_amendment;
 pub mod order_cancellation;
 pub mod order_release;
 pub mod outbound_load;

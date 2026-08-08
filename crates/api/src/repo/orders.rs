@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use wareboxes_application::CommandContext;
-use wareboxes_core::dto::{OrderPage, OrderUpdate, Paged, SummaryCount};
+use wareboxes_core::dto::{OrderPage, Paged, SummaryCount};
 use wareboxes_core::models::{
     AllocationStatus, InventoryAllocation, InventoryReservation, InventoryStatus, Order,
     OrderActivity, OrderHold, OrderHoldReason, OrderItem, OrderStatus, OrderTrackingNumber,
@@ -17,7 +17,6 @@ use wareboxes_domain::{InventoryOwnerId, TenantId};
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
-use crate::repo::address;
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
@@ -53,6 +52,10 @@ fn map_order(row: &sqlx::postgres::PgRow) -> AppResult<Order> {
         wave_id: row.try_get("wave_id")?,
         inventory_owner_id: row.try_get("inventory_owner_id")?,
         inventory_owner_name: row.try_get("inventory_owner_name")?,
+        recipient_name: row.try_get("recipient_name")?,
+        destination_company: row.try_get("destination_company")?,
+        destination_phone: row.try_get("destination_phone")?,
+        destination_email: row.try_get("destination_email")?,
         line1: row.try_get("line1")?,
         line2: row.try_get("line2")?,
         city: row.try_get("city")?,
@@ -624,6 +627,8 @@ pub async fn get_orders(db: &Db, tenant_id: TenantId) -> AppResult<Vec<Order>> {
                o.address_id AS address_id, o.revision AS revision, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
                o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
+               a.name AS recipient_name, a.company AS destination_company,
+               a.phone AS destination_phone, a.email AS destination_email,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM orders o
@@ -759,6 +764,8 @@ async fn get_orders_page_with_scope(
                o.address_id AS address_id, o.revision AS revision, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
                o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
+               a.name AS recipient_name, a.company AS destination_company,
+               a.phone AS destination_phone, a.email AS destination_email,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM orders o
@@ -839,6 +846,8 @@ async fn get_order_with_scope(
                o.address_id AS address_id, o.revision AS revision, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
                o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
+               a.name AS recipient_name, a.company AS destination_company,
+               a.phone AS destination_phone, a.email AS destination_email,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM orders o
@@ -1050,6 +1059,8 @@ pub async fn orders_by_load(db: &Db, tenant_id: TenantId) -> AppResult<HashMap<i
                o.address_id AS address_id, o.revision AS revision, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
                o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
+               a.name AS recipient_name, a.company AS destination_company,
+               a.phone AS destination_phone, a.email AS destination_email,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM load_orders lo
@@ -1096,6 +1107,8 @@ pub async fn orders_for_load(db: &Db, tenant_id: TenantId, load_id: i64) -> AppR
                o.address_id AS address_id, o.revision AS revision, o.confirmed AS confirmed,
                o.closed AS closed, o.ship_by AS ship_by, o.wave_id AS wave_id,
                o.inventory_owner_id AS inventory_owner_id, acct.name AS inventory_owner_name,
+               a.name AS recipient_name, a.company AS destination_company,
+               a.phone AS destination_phone, a.email AS destination_email,
                a.line1 AS line1, a.line2 AS line2, a.city AS city,
                a.state AS state, a.postal_code AS postal_code, a.country AS country
         FROM load_orders lo
@@ -1170,166 +1183,6 @@ pub(crate) async fn insert_order_activity_tx(
     .fetch_one(&mut **tx)
     .await?;
     Ok(id)
-}
-
-pub async fn update_order_metadata(
-    db: &Db,
-    access: &TenantAccess,
-    command: &CommandContext,
-    update: &OrderUpdate,
-) -> AppResult<bool> {
-    command.require_actor(access.tenant_id, access.user_id)?;
-    let has_address = update.line1.is_some()
-        || update.line2.is_some()
-        || update.city.is_some()
-        || update.state.is_some()
-        || update.postal_code.is_some()
-        || update.country.is_some();
-    if update.order_key.is_none()
-        && update.rush.is_none()
-        && update.ship_by.is_none()
-        && !has_address
-    {
-        return Err(AppError::bad_request(
-            "at least one order metadata field is required",
-        ));
-    }
-    if update
-        .order_key
-        .as_ref()
-        .is_some_and(|order_key| order_key.trim().is_empty() || order_key.chars().count() > 200)
-    {
-        return Err(AppError::bad_request(
-            "order key must be nonblank and cannot exceed 200 characters",
-        ));
-    }
-
-    let prepared = PreparedCommand::new_v1(command, "order.update_metadata.v1", update)?;
-    let tenant_id = access.tenant_id;
-    let mut tx = db.begin().await?;
-    bind_tenant_context(&mut tx, tenant_id).await?;
-    let scope = lock_current_scope_tx(&mut tx, tenant_id, command.actor_id.get()).await?;
-    if let Some(updated) = prepared.replayed::<bool>(&mut tx).await? {
-        if updated {
-            require_replayed_order_visible_tx(&mut tx, tenant_id, update.order_id, &scope).await?;
-        }
-        tx.commit().await?;
-        return Ok(updated);
-    }
-    let lock_sql = format!(
-        r#"
-        SELECT orders.inventory_owner_id,
-               address.name AS current_name,
-               address.company AS current_company,
-               address.phone AS current_phone,
-               address.email AS current_email,
-               address.line1 AS current_line1,
-               address.line2 AS current_line2,
-               address.city AS current_city,
-               address.state AS current_state,
-               address.postal_code AS current_postal_code,
-               address.country AS current_country
-        FROM orders
-        INNER JOIN addresses address
-            ON address.tenant_id = orders.tenant_id
-           AND address.id = orders.address_id
-        WHERE orders.tenant_id = $1
-          AND orders.id = $2
-          AND orders.deleted IS NULL
-          AND orders.status IN {MUTABLE}
-          AND orders.status <> 'cancelled'
-          AND ($3 OR orders.inventory_owner_id = ANY($4))
-        FOR UPDATE OF orders
-        "#
-    );
-    let order = sqlx::query(&lock_sql)
-        .bind(tenant_id.get())
-        .bind(update.order_id)
-        .bind(scope.all_inventory_owners)
-        .bind(&scope.inventory_owner_ids)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let Some(order) = order else {
-        tx.rollback().await?;
-        return Ok(false);
-    };
-    let inventory_owner_id: i64 = order.try_get("inventory_owner_id")?;
-
-    let new_address_id = if has_address {
-        let current_name: Option<String> = order.try_get("current_name")?;
-        let current_company: Option<String> = order.try_get("current_company")?;
-        let current_phone: Option<String> = order.try_get("current_phone")?;
-        let current_email: Option<String> = order.try_get("current_email")?;
-        let current_line1: String = order.try_get("current_line1")?;
-        let current_line2: Option<String> = order.try_get("current_line2")?;
-        let current_city: Option<String> = order.try_get("current_city")?;
-        let current_state: Option<String> = order.try_get("current_state")?;
-        let current_postal_code: Option<String> = order.try_get("current_postal_code")?;
-        let current_country: String = order.try_get("current_country")?;
-        Some(
-            address::insert_address_tx(
-                &mut tx,
-                tenant_id,
-                address::NewAddress {
-                    name: current_name.as_deref(),
-                    company: current_company.as_deref(),
-                    line1: update.line1.as_deref().unwrap_or(&current_line1),
-                    line2: update.line2.as_deref().or(current_line2.as_deref()),
-                    city: update.city.as_deref().or(current_city.as_deref()),
-                    state: update.state.as_deref().or(current_state.as_deref()),
-                    postal_code: update
-                        .postal_code
-                        .as_deref()
-                        .or(current_postal_code.as_deref()),
-                    country: update.country.as_deref().unwrap_or(&current_country),
-                    phone: current_phone.as_deref(),
-                    email: current_email.as_deref(),
-                },
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
-
-    let updated_inventory_owner_id: Option<i64> = sqlx::query_scalar(
-        r#"
-        UPDATE orders SET
-            order_key = COALESCE($1, order_key),
-            rush = COALESCE($2, rush),
-            ship_by = COALESCE($3, ship_by),
-            address_id = COALESCE($4, address_id),
-            revision = revision + 1
-        WHERE tenant_id = $5
-          AND id = $6
-        RETURNING inventory_owner_id
-        "#,
-    )
-    .bind(update.order_key.as_deref())
-    .bind(update.rush)
-    .bind(update.ship_by)
-    .bind(new_address_id)
-    .bind(tenant_id.get())
-    .bind(update.order_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if updated_inventory_owner_id != Some(inventory_owner_id) {
-        return Err(AppError::internal(
-            "locked order was not updated inside the same transaction",
-        ));
-    }
-    let inventory_owner_id = InventoryOwnerId::new(inventory_owner_id)
-        .map_err(|error| AppError::internal(error.to_string()))?;
-    insert_order_activity_tx(
-        &mut tx,
-        tenant_id,
-        inventory_owner_id,
-        update.order_id,
-        Some(command.actor_id.get()),
-        "updated order metadata",
-    )
-    .await?;
-    Ok(prepared.commit(tx, true).await?)
 }
 
 pub(crate) async fn require_replayed_order_visible_tx(

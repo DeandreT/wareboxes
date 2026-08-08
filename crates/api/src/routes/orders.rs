@@ -1,13 +1,12 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
-use wareboxes_core::dto::{OrderIdRequest, OrderPage, OrderUpdate};
+use wareboxes_core::dto::{OrderIdRequest, OrderPage};
 use wareboxes_core::models::{Order, OrderStatus};
 
 use crate::auth::CurrentTenant;
 use crate::error::{AppError, AppResult};
 use crate::repo;
-use crate::request_context::IdempotencyKey;
 use crate::routes::validate;
 use crate::state::AppState;
 
@@ -54,19 +53,6 @@ pub async fn get(
     user.require_permission(&state.db, PERM).await?;
     let order = repo::orders::get_order_in_scope(&state.db, &user.tenant, order_id).await?;
     Ok(Json(order))
-}
-
-pub async fn update(
-    State(state): State<AppState>,
-    user: CurrentTenant,
-    idempotency_key: IdempotencyKey,
-    Json(body): Json<OrderUpdate>,
-) -> AppResult<Json<bool>> {
-    user.require_permission(&state.db, PERM).await?;
-    validate(&body)?;
-    let command = user.command_context(&idempotency_key);
-    let ok = repo::orders::update_order_metadata(&state.db, &user.tenant, &command, &body).await?;
-    Ok(Json(ok))
 }
 
 pub async fn delete(

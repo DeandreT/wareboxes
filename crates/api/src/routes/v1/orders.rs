@@ -3,8 +3,12 @@ use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use wareboxes_api_contract::v1::{
+    AmendFulfillmentOrderRequest, AmendFulfillmentOrderResponse, AmendedFulfillmentOrderStatus,
     CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse, CreatedFulfillmentOrderLine,
-    CreatedFulfillmentOrderStatus, OrderEntryItemResponse, Revision,
+    CreatedFulfillmentOrderStatus, FulfillmentOrderDestination, OrderEntryItemResponse, Revision,
+};
+use wareboxes_application::order_amendment::{
+    AmendFulfillmentOrderCommand, AmendFulfillmentOrderResult,
 };
 use wareboxes_domain::{
     CatalogItemId, FulfillmentOrderDemandLine, InventoryOwnerId, NewFulfillmentOrder, OrderKey,
@@ -70,6 +74,26 @@ pub async fn create(
     }))
 }
 
+pub async fn amend(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(order_id): Path<i64>,
+    Json(body): Json<AmendFulfillmentOrderRequest>,
+) -> V1Result<Json<AmendFulfillmentOrderResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let command = amendment_command(order_id, body)?;
+    let context = user.command_context(&idempotency_key);
+    let result = repo::order_amendment::amend_fulfillment_order_header(
+        &state.db,
+        &user.tenant,
+        &context,
+        &command,
+    )
+    .await?;
+    Ok(Json(amendment_response(result)?))
+}
+
 pub async fn entry_items(
     State(state): State<AppState>,
     user: CurrentTenant,
@@ -118,23 +142,7 @@ fn new_fulfillment_order(request: CreateFulfillmentOrderRequest) -> V1Result<New
         .map_err(|error| invalid(error.to_string()))?;
     let order_key = OrderKey::new(request.order_key).map_err(domain_validation)?;
     let ship_by = parse_timestamp(request.ship_by.as_deref(), "ship_by")?;
-    let recipient = ShippingRecipient::new(
-        request.destination.recipient_name,
-        request.destination.company,
-        request.destination.phone,
-        request.destination.email,
-    )
-    .map_err(domain_validation)?;
-    let destination = ShippingDestination::new(
-        recipient,
-        request.destination.line1,
-        request.destination.line2,
-        request.destination.city,
-        request.destination.region,
-        request.destination.postal_code,
-        request.destination.country,
-    )
-    .map_err(domain_validation)?;
+    let destination = shipping_destination(request.destination)?;
     let lines = request
         .lines
         .into_iter()
@@ -157,6 +165,82 @@ fn new_fulfillment_order(request: CreateFulfillmentOrderRequest) -> V1Result<New
         lines,
     )
     .map_err(domain_validation)
+}
+
+fn amendment_command(
+    order_id: i64,
+    request: AmendFulfillmentOrderRequest,
+) -> V1Result<AmendFulfillmentOrderCommand> {
+    Ok(AmendFulfillmentOrderCommand::new(
+        wareboxes_domain::OrderId::new(order_id).map_err(domain_validation)?,
+        wareboxes_domain::OrderRevision::new(request.expected_revision.get())
+            .map_err(domain_validation)?,
+        request.rush,
+        parse_timestamp(request.ship_by.as_deref(), "ship_by")?,
+        shipping_destination(request.destination)?,
+    ))
+}
+
+fn amendment_response(
+    result: AmendFulfillmentOrderResult,
+) -> V1Result<AmendFulfillmentOrderResponse> {
+    let status = match result.order_status {
+        OrderStatus::Open => AmendedFulfillmentOrderStatus::Open,
+        OrderStatus::Held => AmendedFulfillmentOrderStatus::Held,
+        _ => {
+            return Err(V1Error::internal(
+                "order amendment produced an invalid order status",
+            ));
+        }
+    };
+    Ok(AmendFulfillmentOrderResponse {
+        amendment_id: result.amendment_id.get(),
+        order_id: result.order_id.get(),
+        inventory_owner_id: result.inventory_owner_id.get(),
+        status,
+        revision: Revision::new(result.revision.get())
+            .map_err(|_| V1Error::internal("order amendment produced an invalid revision"))?,
+        rush: result.rush,
+        ship_by: result.ship_by.map(|value| value.to_rfc3339()),
+        destination: destination_response(&result.destination),
+        amended_by: result.amended_by.get(),
+        amended_at: result.amended_at.to_rfc3339(),
+    })
+}
+
+fn shipping_destination(destination: FulfillmentOrderDestination) -> V1Result<ShippingDestination> {
+    let recipient = ShippingRecipient::new(
+        destination.recipient_name,
+        destination.company,
+        destination.phone,
+        destination.email,
+    )
+    .map_err(domain_validation)?;
+    ShippingDestination::new(
+        recipient,
+        destination.line1,
+        destination.line2,
+        destination.city,
+        destination.region,
+        destination.postal_code,
+        destination.country,
+    )
+    .map_err(domain_validation)
+}
+
+fn destination_response(destination: &ShippingDestination) -> FulfillmentOrderDestination {
+    FulfillmentOrderDestination {
+        recipient_name: destination.recipient().name().to_owned(),
+        company: destination.recipient().company().map(str::to_owned),
+        phone: destination.recipient().phone().map(str::to_owned),
+        email: destination.recipient().email().map(str::to_owned),
+        line1: destination.line1().to_owned(),
+        line2: destination.line2().map(str::to_owned),
+        city: destination.city().to_owned(),
+        region: destination.region().to_owned(),
+        postal_code: destination.postal_code().to_owned(),
+        country: destination.country().to_owned(),
+    }
 }
 
 fn parse_timestamp(value: Option<&str>, field: &str) -> V1Result<Option<Timestamp>> {
@@ -183,9 +267,7 @@ fn invalid(message: impl Into<String>) -> V1Error {
 
 #[cfg(test)]
 mod tests {
-    use wareboxes_api_contract::v1::{
-        CreateFulfillmentOrderLineRequest, FulfillmentOrderDestination,
-    };
+    use wareboxes_api_contract::v1::CreateFulfillmentOrderLineRequest;
 
     use super::*;
 
@@ -250,5 +332,23 @@ mod tests {
         });
 
         assert!(new_fulfillment_order(request).is_err());
+    }
+
+    #[test]
+    fn constructs_a_path_bound_amendment_that_can_clear_ship_by() {
+        let command = amendment_command(
+            17,
+            AmendFulfillmentOrderRequest {
+                expected_revision: Revision::new(3).unwrap(),
+                rush: false,
+                ship_by: None,
+                destination: request().destination,
+            },
+        )
+        .unwrap();
+        assert_eq!(command.order_id().get(), 17);
+        assert_eq!(command.expected_revision().get(), 3);
+        assert_eq!(command.ship_by(), None);
+        assert_eq!(command.destination().recipient().name(), "Receiving Team");
     }
 }
