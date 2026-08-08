@@ -25,17 +25,20 @@ fn work_mode_changes_only_without_owned_work() {
         Activity::Idle,
         ReceivingActivity::AwaitingLoad,
         Activity::Idle,
+        Activity::Idle,
         Activity::Idle
     ));
     assert!(work_mode_switch_allowed(
         Activity::Idle,
         ReceivingActivity::LoadComplete,
         Activity::Idle,
+        Activity::Idle,
         Activity::Idle
     ));
     assert!(!work_mode_switch_allowed(
         Activity::Active,
         ReceivingActivity::AwaitingLoad,
+        Activity::Idle,
         Activity::Idle,
         Activity::Idle
     ));
@@ -43,11 +46,13 @@ fn work_mode_changes_only_without_owned_work() {
         Activity::Idle,
         ReceivingActivity::Active,
         Activity::Idle,
+        Activity::Idle,
         Activity::Idle
     ));
     assert!(!work_mode_switch_allowed(
         Activity::Idle,
         ReceivingActivity::ConfirmationPending,
+        Activity::Idle,
         Activity::Idle,
         Activity::Idle
     ));
@@ -55,11 +60,20 @@ fn work_mode_changes_only_without_owned_work() {
         Activity::Idle,
         ReceivingActivity::AwaitingLoad,
         Activity::Active,
+        Activity::Idle,
         Activity::Idle
     ));
     assert!(!work_mode_switch_allowed(
         Activity::Idle,
         ReceivingActivity::AwaitingLoad,
+        Activity::Idle,
+        Activity::Active,
+        Activity::Idle
+    ));
+    assert!(!work_mode_switch_allowed(
+        Activity::Idle,
+        ReceivingActivity::AwaitingLoad,
+        Activity::Idle,
         Activity::Idle,
         Activity::Active
     ));

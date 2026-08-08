@@ -1356,6 +1356,7 @@ pub enum WorkTaskType {
     Putaway,
     LicensePlatePutaway,
     InventoryRelocation,
+    Replenishment,
 }
 
 impl WorkTaskType {
@@ -1368,6 +1369,7 @@ impl WorkTaskType {
             WorkTaskType::Putaway => "putaway",
             WorkTaskType::LicensePlatePutaway => "license_plate_putaway",
             WorkTaskType::InventoryRelocation => "inventory_relocation",
+            WorkTaskType::Replenishment => "replenishment",
         }
     }
 
@@ -1380,6 +1382,7 @@ impl WorkTaskType {
             "putaway" => WorkTaskType::Putaway,
             "license_plate_putaway" => WorkTaskType::LicensePlatePutaway,
             "inventory_relocation" => WorkTaskType::InventoryRelocation,
+            "replenishment" => WorkTaskType::Replenishment,
             _ => return None,
         })
     }
@@ -1430,6 +1433,10 @@ pub enum WorkTaskProgressAction {
     Unpacked,
     Missing,
     Damaged,
+    ReplenishmentConfirmed,
+    ReplenishmentHeartbeat,
+    ReplenishmentReleased,
+    ReplenishmentCancelled,
 }
 
 impl WorkTaskProgressAction {
@@ -1439,6 +1446,10 @@ impl WorkTaskProgressAction {
             WorkTaskProgressAction::Unpacked => "unpacked",
             WorkTaskProgressAction::Missing => "missing",
             WorkTaskProgressAction::Damaged => "damaged",
+            WorkTaskProgressAction::ReplenishmentConfirmed => "replenishment_confirmed",
+            WorkTaskProgressAction::ReplenishmentHeartbeat => "replenishment_heartbeat",
+            WorkTaskProgressAction::ReplenishmentReleased => "replenishment_released",
+            WorkTaskProgressAction::ReplenishmentCancelled => "replenishment_cancelled",
         }
     }
 
@@ -1448,6 +1459,10 @@ impl WorkTaskProgressAction {
             "unpacked" => WorkTaskProgressAction::Unpacked,
             "missing" => WorkTaskProgressAction::Missing,
             "damaged" => WorkTaskProgressAction::Damaged,
+            "replenishment_confirmed" => WorkTaskProgressAction::ReplenishmentConfirmed,
+            "replenishment_heartbeat" => WorkTaskProgressAction::ReplenishmentHeartbeat,
+            "replenishment_released" => WorkTaskProgressAction::ReplenishmentReleased,
+            "replenishment_cancelled" => WorkTaskProgressAction::ReplenishmentCancelled,
             _ => return None,
         })
     }

@@ -38,6 +38,7 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
     let email = session.user.email.clone();
     let can_view_orders = has_permission(&session, "orders");
     let can_view_inventory = has_permission(&session, "wms");
+    let can_supervise_wms = has_permission(&session, "wms_supervisor");
     let can_administer = has_permission(&session, "admin");
     let available_tenants = session.available_tenants.clone();
     let tenant_count = available_tenants.len();
@@ -171,6 +172,16 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                 label="Master data"
                                 icon=UiIcon::Catalog
                                 active=section == Section::Catalog
+                            />
+                        }
+                    })}
+                    {can_supervise_wms.then(|| {
+                        view! {
+                            <NavItem
+                                href="/replenishment"
+                                label="Replenishment"
+                                icon=UiIcon::Replenishment
+                                active=section == Section::Replenishment
                             />
                         }
                     })}

@@ -9,13 +9,15 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::picking::PickingCommand;
-use crate::wire::{
-    DurableHttpRequest, HttpMethod, ResponseKind, WireRequestError, build_durable_request,
-};
+#[cfg(test)]
+use crate::wire::ResponseKind;
+use crate::wire::{DurableHttpRequest, HttpMethod, WireRequestError, build_durable_request};
 use crate::workflow::{
     CycleCountCommand, DurableCommandDraft, InventoryRelocationCommand, PutawayCommand, RfCommand,
 };
 
+mod replenishment;
+mod response_kind;
 mod schema;
 
 const STORE_SCHEMA_VERSION: i64 = 3;
@@ -59,6 +61,7 @@ pub enum CommandOperation {
     CycleCountConfirmation,
     PickConfirmation,
     PickShortageReport,
+    ReplenishmentConfirmation,
 }
 
 impl CommandOperation {
@@ -73,6 +76,7 @@ impl CommandOperation {
             Self::CycleCountConfirmation => "cycle_count_confirmation",
             Self::PickConfirmation => "pick_confirmation",
             Self::PickShortageReport => "pick_shortage_report",
+            Self::ReplenishmentConfirmation => "replenishment_confirmation",
         }
     }
 
@@ -87,6 +91,7 @@ impl CommandOperation {
             "cycle_count_confirmation" => Ok(Self::CycleCountConfirmation),
             "pick_confirmation" => Ok(Self::PickConfirmation),
             "pick_shortage_report" => Ok(Self::PickShortageReport),
+            "replenishment_confirmation" => Ok(Self::ReplenishmentConfirmation),
             _ => Err(CommandStoreError::CorruptRecord(
                 "unknown command operation".into(),
             )),
@@ -129,6 +134,7 @@ impl From<&RfCommand> for CommandOperation {
             RfCommand::Picking(PickingCommand::Confirm { .. }) => Self::PickConfirmation,
             RfCommand::Picking(PickingCommand::ReportShortage(_)) => Self::PickShortageReport,
             RfCommand::Picking(PickingCommand::Release { .. }) => Self::Release,
+            RfCommand::Replenishment(command) => replenishment::command_operation(command),
         }
     }
 }
@@ -446,7 +452,7 @@ impl CommandStore {
                 request.content_type,
                 request.body,
                 request.body_sha256.as_slice(),
-                response_kind_name(request.response_kind),
+                response_kind::name(request.response_kind),
                 now,
             ],
         )
@@ -966,7 +972,7 @@ fn decode_record(raw: RawRecord) -> Result<DurableCommandRecord, CommandStoreErr
         .try_into()
         .map_err(|_| CommandStoreError::CorruptRecord("invalid request body hash".into()))?;
     let method = parse_method(&raw.http_method)?;
-    let response_kind = parse_response_kind(&raw.response_kind)?;
+    let response_kind = response_kind::parse(&raw.response_kind)?;
     let request = DurableHttpRequest {
         method,
         path: raw.path,
@@ -1180,57 +1186,6 @@ fn parse_method(value: &str) -> Result<HttpMethod, CommandStoreError> {
         "POST" => Ok(HttpMethod::Post),
         _ => Err(CommandStoreError::CorruptRecord(
             "unknown HTTP method".into(),
-        )),
-    }
-}
-
-const fn response_kind_name(kind: ResponseKind) -> &'static str {
-    match kind {
-        ResponseKind::OptionalClaim => "optional_claim",
-        ResponseKind::Claim => "claim",
-        ResponseKind::LooseConfirmation => "loose_confirmation",
-        ResponseKind::LicensePlateConfirmation => "license_plate_confirmation",
-        ResponseKind::Release => "release",
-        ResponseKind::RelocationOptionalClaim => "relocation_optional_claim",
-        ResponseKind::RelocationClaim => "relocation_claim",
-        ResponseKind::RelocationConfirmation => "relocation_confirmation",
-        ResponseKind::RelocationRelease => "relocation_release",
-        ResponseKind::CycleCountOptionalClaim => "cycle_count_optional_claim",
-        ResponseKind::CycleCountClaim => "cycle_count_claim",
-        ResponseKind::CycleCountConfirmation => "cycle_count_confirmation",
-        ResponseKind::CycleCountRelease => "cycle_count_release",
-        ResponseKind::PickOptionalClaim => "pick_optional_claim",
-        ResponseKind::PickClaim => "pick_claim",
-        ResponseKind::PickConfirmation => "pick_confirmation",
-        ResponseKind::PickShortageReport => "pick_shortage_report",
-        ResponseKind::PickRelease => "pick_release",
-        ResponseKind::ExpectedReceiptConfirmation => "expected_receipt_confirmation",
-    }
-}
-
-fn parse_response_kind(value: &str) -> Result<ResponseKind, CommandStoreError> {
-    match value {
-        "optional_claim" => Ok(ResponseKind::OptionalClaim),
-        "claim" => Ok(ResponseKind::Claim),
-        "loose_confirmation" => Ok(ResponseKind::LooseConfirmation),
-        "license_plate_confirmation" => Ok(ResponseKind::LicensePlateConfirmation),
-        "release" => Ok(ResponseKind::Release),
-        "relocation_optional_claim" => Ok(ResponseKind::RelocationOptionalClaim),
-        "relocation_claim" => Ok(ResponseKind::RelocationClaim),
-        "relocation_confirmation" => Ok(ResponseKind::RelocationConfirmation),
-        "relocation_release" => Ok(ResponseKind::RelocationRelease),
-        "cycle_count_optional_claim" => Ok(ResponseKind::CycleCountOptionalClaim),
-        "cycle_count_claim" => Ok(ResponseKind::CycleCountClaim),
-        "cycle_count_confirmation" => Ok(ResponseKind::CycleCountConfirmation),
-        "cycle_count_release" => Ok(ResponseKind::CycleCountRelease),
-        "pick_optional_claim" => Ok(ResponseKind::PickOptionalClaim),
-        "pick_claim" => Ok(ResponseKind::PickClaim),
-        "pick_confirmation" => Ok(ResponseKind::PickConfirmation),
-        "pick_shortage_report" => Ok(ResponseKind::PickShortageReport),
-        "pick_release" => Ok(ResponseKind::PickRelease),
-        "expected_receipt_confirmation" => Ok(ResponseKind::ExpectedReceiptConfirmation),
-        _ => Err(CommandStoreError::CorruptRecord(
-            "unknown response kind".into(),
         )),
     }
 }

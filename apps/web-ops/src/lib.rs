@@ -23,6 +23,7 @@ mod inventory_rollups;
 mod orders;
 mod packing;
 mod preferences;
+mod replenishment;
 mod shipping;
 mod sorting;
 mod toast;

@@ -21,6 +21,7 @@ mod picking;
 mod putaway;
 mod putaway_claim_lifecycle;
 mod putaway_claims;
+pub(crate) mod replenishment;
 mod rf_sessions;
 mod shipping;
 pub(crate) mod shipping_queue;
@@ -230,6 +231,47 @@ pub fn router() -> Router<AppState> {
         .route(
             "/putaway-claims/{task_id}/releases",
             post(putaway_claim_lifecycle::release),
+        )
+        .route(
+            "/replenishment-policies",
+            get(replenishment::policy_page).post(replenishment::configure_policy),
+        )
+        .route(
+            "/replenishment-policies/{policy_id}/retirements",
+            post(replenishment::retire_policy),
+        )
+        .route(
+            "/replenishment-policies/{policy_id}/plan-runs",
+            post(replenishment::plan_policy),
+        )
+        .route("/replenishment-queue", get(replenishment::work_page))
+        .route(
+            "/replenishment-claims/next",
+            post(replenishment::claim_next),
+        )
+        .route(
+            "/replenishment-claims/current",
+            get(replenishment::current_claim),
+        )
+        .route(
+            "/replenishment-claims/{work_id}",
+            post(replenishment::claim_by_id),
+        )
+        .route(
+            "/replenishment-claims/{work_id}/heartbeats",
+            post(replenishment::heartbeat_claim),
+        )
+        .route(
+            "/replenishment-claims/{work_id}/releases",
+            post(replenishment::release_claim),
+        )
+        .route(
+            "/replenishment-tasks/{work_id}/confirmations",
+            post(replenishment::confirm_work),
+        )
+        .route(
+            "/replenishment-tasks/{work_id}/cancellations",
+            post(replenishment::cancel_work),
         )
         .layer(middleware::map_response(error::normalize_error_response))
 }

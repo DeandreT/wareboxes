@@ -7,6 +7,7 @@ mod order_cancellation;
 mod order_release;
 mod packing;
 mod picking;
+mod replenishment;
 mod shipping;
 mod tenant;
 
@@ -51,6 +52,20 @@ pub use picking::{
     PickShortageQuantities, PickShortageReason, PickShortageResolution, PickShortageRevision,
     PickShortageStatus, PickingError, ShortShipDemandQuantities, MAX_PICK_SCAN_VALUE_LENGTH,
     MAX_PICK_SHORTAGE_NOTE_LENGTH, MAX_PICK_SHORT_SHIP_NOTE_LENGTH,
+};
+pub use replenishment::{
+    assess_replenishment_source, plan_replenishment, select_replenishment_sources,
+    validate_unique_active_replenishment_policy_scopes, EligibleReplenishmentSource,
+    PlannedReplenishmentSource, ReplenishmentClaimReleaseReason, ReplenishmentError,
+    ReplenishmentInventoryStatus, ReplenishmentLevel, ReplenishmentMoveQuantity,
+    ReplenishmentPlanDecision, ReplenishmentPlanningOutcome, ReplenishmentPlanningSnapshot,
+    ReplenishmentPolicyDefinition, ReplenishmentPolicyRevision, ReplenishmentPolicyScope,
+    ReplenishmentPolicyStatus, ReplenishmentPolicyThresholds,
+    ReplenishmentReserveSourceLocationIds, ReplenishmentScanValue, ReplenishmentSourceCandidate,
+    ReplenishmentSourceEligibility, ReplenishmentSourceIneligibility, ReplenishmentUom,
+    ReplenishmentWorkCancellationNote, ReplenishmentWorkCancellationReason,
+    ReplenishmentWorkStatus, MAX_REPLENISHMENT_CANCELLATION_NOTE_LENGTH,
+    MAX_REPLENISHMENT_SCAN_VALUE_LENGTH, MAX_REPLENISHMENT_UOM_LENGTH,
 };
 pub use shipping::{
     confirm_shipment_departure, create_shipment, record_manual_manifest, CarrierCode,
@@ -142,6 +157,11 @@ positive_id!(
     "pick shortage reallocation run ID"
 );
 positive_id!(InventoryHoldId, "inventory hold ID");
+positive_id!(ReplenishmentPolicyId, "replenishment policy ID");
+positive_id!(ReplenishmentPlanId, "replenishment plan ID");
+positive_id!(ReplenishmentWorkId, "replenishment work ID");
+positive_id!(ReplenishmentCancellationId, "replenishment cancellation ID");
+positive_id!(ReplenishmentConfirmationId, "replenishment confirmation ID");
 positive_id!(PackSessionId, "pack session ID");
 positive_id!(CartonId, "carton ID");
 positive_id!(CartonContentId, "carton content ID");

@@ -21,6 +21,7 @@ mod packing;
 mod picking;
 mod putaway;
 mod putaway_claim;
+mod replenishment;
 mod revision;
 mod rf_session;
 mod shipping;
@@ -136,6 +137,23 @@ pub use putaway_claim::{
     PutawayClaimDestinationLocation, PutawayClaimHeartbeatResponse, PutawayClaimReleaseReason,
     PutawayClaimReleaseResponse, PutawayClaimResponse, PutawayClaimSourceLocation,
     PutawayClaimWork, PutawayWorkflow, ReleasePutawayClaimRequest,
+};
+pub use replenishment::{
+    CancelReplenishmentWorkRequest, ClaimNextReplenishmentWorkRequest,
+    ClaimReplenishmentWorkByIdRequest, ConfigureReplenishmentPolicyRequest,
+    ConfigureReplenishmentPolicyResponse, ConfirmReplenishmentWorkRequest,
+    HeartbeatReplenishmentClaimRequest, PlanReplenishmentRequest, PlanReplenishmentResponse,
+    ReleaseReplenishmentClaimRequest, ReplenishmentClaimHeartbeatResponse,
+    ReplenishmentClaimReleaseReason, ReplenishmentClaimReleaseResponse, ReplenishmentClaimResponse,
+    ReplenishmentConfirmationResponse, ReplenishmentLocationResponse,
+    ReplenishmentPlannedWorkResponse, ReplenishmentPlanningOutcome,
+    ReplenishmentPlanningSnapshotResponse, ReplenishmentPolicyLatestPlanResponse,
+    ReplenishmentPolicyPage, ReplenishmentPolicyPageRequest,
+    ReplenishmentPolicyReadinessEntryResponse, ReplenishmentPolicyStatus,
+    ReplenishmentQueueEntryResponse, ReplenishmentQueuePage, ReplenishmentQueuePageRequest,
+    ReplenishmentReserveSourceLocationIds, ReplenishmentWorkCancellationReason,
+    ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
+    RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
 };
 pub use revision::{Revision, RevisionError, RevisionPrecondition};
 pub use rf_session::{

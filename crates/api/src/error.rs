@@ -83,7 +83,7 @@ impl AppError {
         Self::Application(ApplicationError::Internal(message.into()))
     }
 
-    fn public_application_error(&self) -> ApplicationError {
+    pub(crate) fn public_application_error(&self) -> ApplicationError {
         match self {
             AppError::Application(ApplicationError::Internal(_)) => {
                 ApplicationError::Internal("internal error".into())

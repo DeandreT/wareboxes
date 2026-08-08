@@ -186,7 +186,8 @@ impl OrderQuantity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
 pub struct CatalogItemId(i64);
 
 impl CatalogItemId {
@@ -200,6 +201,16 @@ impl CatalogItemId {
 
     pub const fn get(self) -> i64 {
         self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for CatalogItemId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = i64::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 

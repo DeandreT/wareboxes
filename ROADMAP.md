@@ -117,7 +117,8 @@ record. Wareboxes owns facility execution and its auditable inventory consequenc
   priority, routing, and backorder policy.
 - Soft reservation and concrete allocation with FIFO/FEFO, lot, serial, status,
   owner, facility, and location policy.
-- Wave and waveless release, workload planning, pick work, and replenishment.
+- Wave and waveless release, workload planning, pick work, and versioned min/target
+  loose-stock demand replenishment with supervisor planning and scanner execution.
 - Discrete, batch, cluster, case, pallet, zone, and cart workflows as required by
   supported profiles.
 - Pick confirmation, typed short-pick evidence, discrepancy holds, explicit

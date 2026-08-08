@@ -21,6 +21,7 @@ use crate::transport::{
 use crate::wire::{
     decode_claim_response, decode_command_response, decode_cycle_count_claim_response,
     decode_pick_claim_response, decode_receiving_session, decode_relocation_claim_response,
+    decode_replenishment_claim_response,
 };
 use crate::workflow::{
     ClaimOperation, DurableCommandDraft, InventoryRelocationClaim, MovementWorkflow, PutawayClaim,
@@ -73,6 +74,7 @@ enum CurrentMovementClaim {
     InventoryRelocation(Option<InventoryRelocationClaim>),
     CycleCount(Option<crate::cycle_count::CycleCountClaim>),
     Picking(Option<crate::picking::PickClaim>),
+    Replenishment(Option<crate::replenishment::ReplenishmentClaim>),
 }
 
 impl CurrentMovementClaim {
@@ -82,6 +84,7 @@ impl CurrentMovementClaim {
             Self::InventoryRelocation(claim) => claim.is_none(),
             Self::CycleCount(claim) => claim.is_none(),
             Self::Picking(claim) => claim.is_none(),
+            Self::Replenishment(claim) => claim.is_none(),
         }
     }
 
@@ -91,6 +94,7 @@ impl CurrentMovementClaim {
             Self::InventoryRelocation(claim) => claim.as_ref().map(|claim| claim.details().task_id),
             Self::CycleCount(claim) => claim.as_ref().map(|claim| claim.task_id),
             Self::Picking(claim) => claim.as_ref().map(|claim| claim.task_id),
+            Self::Replenishment(claim) => claim.as_ref().map(|claim| claim.work_id),
         }
     }
 
@@ -99,6 +103,7 @@ impl CurrentMovementClaim {
         workflow: &mut MovementWorkflow,
         cycle_count: &mut crate::cycle_count::CycleCountWorkflow,
         picking: &mut crate::picking::PickingWorkflow,
+        replenishment: &mut crate::replenishment::ReplenishmentWorkflow,
     ) {
         match self {
             Self::Putaway(claim) => workflow.restore_current_putaway_claim(claim),
@@ -107,6 +112,7 @@ impl CurrentMovementClaim {
             }
             Self::CycleCount(claim) => cycle_count.restore_current_claim(claim),
             Self::Picking(claim) => picking.restore_current_claim(claim),
+            Self::Replenishment(claim) => replenishment.restore_current_claim(claim),
         }
     }
 }
@@ -375,6 +381,10 @@ impl RfApp {
             self.restore_picking_command(context, record);
             return;
         }
+        if matches!(record.draft.command, RfCommand::Replenishment(_)) {
+            self.restore_replenishment_command(context, record);
+            return;
+        }
         if let Some(operation) = record.draft.command.movement_operation() {
             self.work_mode = super::WorkMode::from(operation);
         }
@@ -604,7 +614,7 @@ impl RfApp {
         self.request_current_claim_for_operation(context, ClaimOperation::Putaway);
     }
 
-    fn request_current_claim_for_operation(
+    pub(super) fn request_current_claim_for_operation(
         &mut self,
         context: &egui::Context,
         operation: ClaimOperation,
@@ -678,13 +688,10 @@ impl RfApp {
         }
         if !(200..300).contains(&response.status) {
             if lease_check_task_id.is_none()
-                && operation == ClaimOperation::Putaway
                 && response.status == 409
+                && let Some(next_operation) = next_claim_operation_after_conflict(operation)
             {
-                self.request_current_claim_for_operation(
-                    context,
-                    ClaimOperation::InventoryRelocation,
-                );
+                self.request_current_claim_for_operation(context, next_operation);
                 return;
             }
             self.session_gate = SessionGate::Ready;
@@ -709,6 +716,8 @@ impl RfApp {
             ClaimOperation::Picking => {
                 decode_pick_claim_response(&response.body).map(CurrentMovementClaim::Picking)
             }
+            ClaimOperation::Replenishment => decode_replenishment_claim_response(&response.body)
+                .map(CurrentMovementClaim::Replenishment),
         };
         match claim {
             Ok(claim) => {
@@ -736,16 +745,32 @@ impl RfApp {
                     self.request_current_claim_for_operation(context, ClaimOperation::Picking);
                     return;
                 }
+                if lease_check_task_id.is_none()
+                    && operation == ClaimOperation::Picking
+                    && claim.is_none()
+                {
+                    self.request_current_claim_for_operation(
+                        context,
+                        ClaimOperation::Replenishment,
+                    );
+                    return;
+                }
                 self.session_gate = SessionGate::Ready;
                 self.clear_claim_heartbeat();
                 if let Some(expected_task_id) = lease_check_task_id {
                     if claim.task_id() == Some(expected_task_id) && !lease_rejection_check {
-                        claim.restore(&mut self.workflow, &mut self.cycle_count, &mut self.picking);
+                        claim.restore(
+                            &mut self.workflow,
+                            &mut self.cycle_count,
+                            &mut self.picking,
+                            &mut self.replenishment,
+                        );
                         self.work_mode = match operation {
                             ClaimOperation::Putaway => super::WorkMode::Putaway,
                             ClaimOperation::InventoryRelocation => super::WorkMode::Relocate,
                             ClaimOperation::CycleCount => super::WorkMode::Count,
                             ClaimOperation::Picking => super::WorkMode::Pick,
+                            ClaimOperation::Replenishment => super::WorkMode::Replenish,
                         };
                     } else {
                         match operation {
@@ -759,12 +784,16 @@ impl RfApp {
                                 self.cycle_count.restore_current_claim(None)
                             }
                             ClaimOperation::Picking => self.picking.restore_current_claim(None),
+                            ClaimOperation::Replenishment => {
+                                self.replenishment.restore_current_claim(None)
+                            }
                         }
                         self.work_mode = match operation {
                             ClaimOperation::Putaway => super::WorkMode::Putaway,
                             ClaimOperation::InventoryRelocation => super::WorkMode::Relocate,
                             ClaimOperation::CycleCount => super::WorkMode::Count,
                             ClaimOperation::Picking => super::WorkMode::Pick,
+                            ClaimOperation::Replenishment => super::WorkMode::Replenish,
                         };
                         match operation {
                             ClaimOperation::CycleCount => self.cycle_count.require_reconciliation(
@@ -774,6 +803,12 @@ impl RfApp {
                                 "This pick is no longer assigned. Do not move its inventory. Contact a supervisor."
                                     .into(),
                             ),
+                            ClaimOperation::Replenishment => self
+                                .replenishment
+                                .require_reconciliation(
+                                    "This replenishment is no longer assigned. Do not move its inventory. Contact a supervisor."
+                                        .into(),
+                                ),
                             ClaimOperation::Putaway | ClaimOperation::InventoryRelocation => {
                                 self.workflow.require_reconciliation(
                                     "This task is no longer assigned. Do not move its inventory. Contact a supervisor."
@@ -783,17 +818,24 @@ impl RfApp {
                         }
                     }
                 } else if !claim.is_none() {
-                    claim.restore(&mut self.workflow, &mut self.cycle_count, &mut self.picking);
+                    claim.restore(
+                        &mut self.workflow,
+                        &mut self.cycle_count,
+                        &mut self.picking,
+                        &mut self.replenishment,
+                    );
                     self.work_mode = match operation {
                         ClaimOperation::Putaway => super::WorkMode::Putaway,
                         ClaimOperation::InventoryRelocation => super::WorkMode::Relocate,
                         ClaimOperation::CycleCount => super::WorkMode::Count,
                         ClaimOperation::Picking => super::WorkMode::Pick,
+                        ClaimOperation::Replenishment => super::WorkMode::Replenish,
                     };
                 } else {
                     self.workflow.restore_current_putaway_claim(None);
                     self.cycle_count.restore_current_claim(None);
                     self.picking.restore_current_claim(None);
+                    self.replenishment.restore_current_claim(None);
                     self.work_mode = super::WorkMode::Putaway;
                 }
                 self.connectivity_notice = None;
@@ -809,6 +851,9 @@ impl RfApp {
                     ),
                     ClaimOperation::Picking => self.picking.require_reconciliation(
                         "The server returned invalid current-pick data.".into(),
+                    ),
+                    ClaimOperation::Replenishment => self.replenishment.require_reconciliation(
+                        "The server returned invalid current-replenishment data.".into(),
                     ),
                     ClaimOperation::Putaway | ClaimOperation::InventoryRelocation => {
                         self.workflow.require_reconciliation(
@@ -834,6 +879,10 @@ impl RfApp {
         let operation = if self.work_mode == super::WorkMode::Pick || self.picking.claim().is_some()
         {
             ClaimOperation::Picking
+        } else if self.work_mode == super::WorkMode::Replenish
+            || self.replenishment.claim().is_some()
+        {
+            ClaimOperation::Replenishment
         } else if self.work_mode == super::WorkMode::Count || self.cycle_count.claim().is_some() {
             ClaimOperation::CycleCount
         } else {
@@ -863,20 +912,33 @@ impl RfApp {
                 self.effects.push_back(effect);
                 continue;
             };
+            let is_cycle_count = matches!(draft.command, RfCommand::CycleCount(_));
+            let is_picking = matches!(draft.command, RfCommand::Picking(_));
+            let is_replenishment = matches!(draft.command, RfCommand::Replenishment(_));
             let Some(store) = self.command_store.as_mut() else {
-                self.workflow
-                    .require_reconciliation("Durable device storage is unavailable".into());
+                if is_replenishment {
+                    self.replenishment
+                        .require_reconciliation("Durable device storage is unavailable".into());
+                } else {
+                    self.workflow
+                        .require_reconciliation("Durable device storage is unavailable".into());
+                }
                 continue;
             };
             let Some(scope) = self.execution_scope.as_ref() else {
-                self.workflow.require_reconciliation(
-                    "The command cannot be stored without an authenticated device scope".into(),
-                );
+                if is_replenishment {
+                    self.replenishment.require_reconciliation(
+                        "The replenishment cannot be stored without an authenticated device scope"
+                            .into(),
+                    );
+                } else {
+                    self.workflow.require_reconciliation(
+                        "The command cannot be stored without an authenticated device scope".into(),
+                    );
+                }
                 continue;
             };
             let command_id = draft.command_id.clone();
-            let is_cycle_count = matches!(draft.command, RfCommand::CycleCount(_));
-            let is_picking = matches!(draft.command, RfCommand::Picking(_));
             match store.persist(scope, draft) {
                 Ok(record) => {
                     if is_cycle_count {
@@ -889,6 +951,11 @@ impl RfApp {
                             .picking
                             .command_persisted(&command_id, record.record_id);
                         self.emit_pick_transition(transition);
+                    } else if is_replenishment {
+                        let transition = self
+                            .replenishment
+                            .command_persisted(&command_id, record.record_id);
+                        self.emit_replenishment_transition(transition);
                     } else {
                         let transition = self
                             .workflow
@@ -904,6 +971,10 @@ impl RfApp {
                     } else if is_picking {
                         self.picking.require_reconciliation(format!(
                             "The pick could not be stored durably: {error}"
+                        ));
+                    } else if is_replenishment {
+                        self.replenishment.require_reconciliation(format!(
+                            "The replenishment could not be stored durably: {error}"
                         ));
                     } else {
                         self.workflow.require_reconciliation(format!(
@@ -945,6 +1016,10 @@ impl RfApp {
                         self.cycle_count.require_reconciliation(
                             "The saved count could not enter network dispatch.".into(),
                         );
+                    } else if self.replenishment.owns_record(record_id) {
+                        self.replenishment.require_reconciliation(
+                            "The saved replenishment could not enter network dispatch.".into(),
+                        );
                     } else {
                         self.workflow.require_reconciliation(
                             "The saved command could not enter network dispatch.".into(),
@@ -975,6 +1050,10 @@ impl RfApp {
                         self.cycle_count.require_reconciliation(
                             "The saved count failed its integrity check.".into(),
                         );
+                    } else if self.replenishment.owns_record(record_id) {
+                        self.replenishment.require_reconciliation(
+                            "The saved replenishment failed its integrity check.".into(),
+                        );
                     } else {
                         self.workflow.require_reconciliation(
                             "The saved command failed its integrity check.".into(),
@@ -987,6 +1066,8 @@ impl RfApp {
                 self.cycle_count.dispatch_started(record_id);
             } else if matches!(attempt.command.draft.command, RfCommand::Picking(_)) {
                 self.picking.dispatch_started(record_id);
+            } else if matches!(attempt.command.draft.command, RfCommand::Replenishment(_)) {
+                self.replenishment.dispatch_started(record_id);
             } else {
                 self.workflow.dispatch_started(record_id);
             }
@@ -1022,6 +1103,10 @@ impl RfApp {
             } else if self.cycle_count.owns_record(record_id) {
                 self.cycle_count.require_reconciliation(
                     "The authenticated device scope was lost during count dispatch.".into(),
+                );
+            } else if self.replenishment.owns_record(record_id) {
+                self.replenishment.require_reconciliation(
+                    "The authenticated device scope was lost during replenishment dispatch.".into(),
                 );
             } else {
                 self.workflow.require_reconciliation(
@@ -1062,6 +1147,11 @@ impl RfApp {
                             record_id,
                             "The server may have received the pick. Check it before continuing.",
                         );
+                    } else if matches!(stored.draft.command, RfCommand::Replenishment(_)) {
+                        self.replenishment.dispatch_ambiguous(
+                            record_id,
+                            "The server may have received the replenishment. Check it before continuing.",
+                        );
                     } else {
                         self.workflow.dispatch_ambiguous(
                             record_id,
@@ -1085,6 +1175,10 @@ impl RfApp {
                     } else if self.cycle_count.owns_record(record_id) {
                         self.cycle_count.require_reconciliation(
                             "The interrupted count could not be saved for recovery.".into(),
+                        );
+                    } else if self.replenishment.owns_record(record_id) {
+                        self.replenishment.require_reconciliation(
+                            "The interrupted replenishment could not be saved for recovery.".into(),
                         );
                     } else {
                         self.workflow.require_reconciliation(
@@ -1119,6 +1213,10 @@ impl RfApp {
                     self.picking.require_reconciliation(
                         "The retryable pick result could not be saved.".into(),
                     );
+                } else if self.replenishment.owns_record(record_id) {
+                    self.replenishment.require_reconciliation(
+                        "The retryable replenishment result could not be saved.".into(),
+                    );
                 } else {
                     self.workflow.require_reconciliation(
                         "The retryable server result could not be saved.".into(),
@@ -1129,6 +1227,7 @@ impl RfApp {
             let is_receiving = stored.operation == CommandOperation::ExpectedReceiptConfirmation;
             let is_cycle_count = matches!(stored.draft.command, RfCommand::CycleCount(_));
             let is_picking = matches!(stored.draft.command, RfCommand::Picking(_));
+            let is_replenishment = matches!(stored.draft.command, RfCommand::Replenishment(_));
             if response.status == 401 {
                 if is_receiving {
                     if let Some(runtime) = self.receiving_command.as_mut() {
@@ -1149,6 +1248,12 @@ impl RfApp {
                         record_id,
                         stored.draft,
                         "Sign in with the same operator account to recover this saved pick.",
+                    );
+                } else if is_replenishment {
+                    self.replenishment.restore_ambiguous_command(
+                        record_id,
+                        stored.draft,
+                        "Sign in with the same operator account to recover this saved replenishment.",
                     );
                 } else {
                     self.workflow.restore_ambiguous_command(
@@ -1184,6 +1289,11 @@ impl RfApp {
                         record_id,
                         "The service is temporarily unavailable. Check the saved pick again.",
                     );
+                } else if is_replenishment {
+                    self.replenishment.dispatch_ambiguous(
+                        record_id,
+                        "The service is temporarily unavailable. Check the saved replenishment again.",
+                    );
                 } else {
                     self.workflow.dispatch_ambiguous(
                         record_id,
@@ -1218,6 +1328,10 @@ impl RfApp {
                     self.cycle_count.require_reconciliation(
                         "The count result could not be stored durably.".into(),
                     );
+                } else if self.replenishment.owns_record(record_id) {
+                    self.replenishment.require_reconciliation(
+                        "The replenishment result could not be stored durably.".into(),
+                    );
                 } else {
                     self.workflow.require_reconciliation(
                         "The server result could not be stored durably.".into(),
@@ -1229,7 +1343,7 @@ impl RfApp {
         self.apply_recorded_response(&scope, recorded, response);
     }
 
-    fn apply_recorded_response(
+    pub(super) fn apply_recorded_response(
         &mut self,
         scope: &ExecutionScope,
         recorded: DurableCommandRecord,
@@ -1259,6 +1373,27 @@ impl RfApp {
                             | crate::workflow::CommandOutcome::PickShortageReported(_)
                             | crate::workflow::CommandOutcome::PickReleased { .. }
                     );
+                    let is_replenishment = matches!(
+                        &outcome,
+                        crate::workflow::CommandOutcome::ReplenishmentClaimed(_)
+                            | crate::workflow::CommandOutcome::ReplenishmentConfirmed(_)
+                            | crate::workflow::CommandOutcome::ReplenishmentReleased { .. }
+                    );
+                    if is_replenishment
+                        && (!self.replenishment.accepts_outcome(record_id, &outcome)
+                            || matches!(
+                                &outcome,
+                                crate::workflow::CommandOutcome::ReplenishmentConfirmed(result)
+                                    if result.confirmed_by != scope.operator_id
+                            ))
+                    {
+                        self.require_replenishment_record_reconciliation(
+                            scope,
+                            record_id,
+                            "The replenishment result conflicts with the saved command or task.",
+                        );
+                        return;
+                    }
                     if self
                         .finalize_record(scope, record_id, CommandStatus::Completed, None)
                         .is_some()
@@ -1268,6 +1403,9 @@ impl RfApp {
                                 .durable_outcome_recorded(record_id, outcome);
                         } else if is_picking {
                             self.picking.durable_outcome_recorded(record_id, outcome);
+                        } else if is_replenishment {
+                            self.replenishment
+                                .durable_outcome_recorded(record_id, outcome);
                         } else {
                             self.workflow.durable_outcome_recorded(record_id, outcome);
                         }
@@ -1292,6 +1430,12 @@ impl RfApp {
                             scope,
                             record_id,
                             "The server returned an invalid count result.",
+                        );
+                    } else if matches!(recorded.draft.command, RfCommand::Replenishment(_)) {
+                        self.require_replenishment_record_reconciliation(
+                            scope,
+                            record_id,
+                            "The server returned an invalid replenishment result.",
                         );
                     } else {
                         self.require_record_reconciliation(
@@ -1328,6 +1472,9 @@ impl RfApp {
                         .durable_rejection_recorded(record_id, message);
                 } else if matches!(recorded.draft.command, RfCommand::Picking(_)) {
                     self.picking.durable_rejection_recorded(record_id, message);
+                } else if matches!(recorded.draft.command, RfCommand::Replenishment(_)) {
+                    self.replenishment
+                        .durable_rejection_recorded(record_id, message);
                 } else {
                     self.workflow.durable_rejection_recorded(record_id, message);
                 }
@@ -1343,6 +1490,8 @@ impl RfApp {
                 self.require_count_record_reconciliation(scope, record_id, &message);
             } else if matches!(recorded.draft.command, RfCommand::Picking(_)) {
                 self.require_pick_record_reconciliation(scope, record_id, &message);
+            } else if matches!(recorded.draft.command, RfCommand::Replenishment(_)) {
+                self.require_replenishment_record_reconciliation(scope, record_id, &message);
             } else {
                 self.require_record_reconciliation(scope, record_id, &message);
             }
@@ -1491,6 +1640,10 @@ impl RfApp {
                     self.picking.require_reconciliation(
                         "The durable pick command could not be finalized.".into(),
                     );
+                } else if self.replenishment.owns_record(record_id) {
+                    self.replenishment.require_reconciliation(
+                        "The durable replenishment command could not be finalized.".into(),
+                    );
                 } else {
                     self.workflow.require_reconciliation(
                         "The durable command could not be finalized.".into(),
@@ -1526,6 +1679,8 @@ impl RfApp {
                 self.picking.require_reconciliation(message.into());
             } else if self.cycle_count.owns_record(record_id) {
                 self.cycle_count.require_reconciliation(message.into());
+            } else if self.replenishment.owns_record(record_id) {
+                self.replenishment.require_reconciliation(message.into());
             } else {
                 self.workflow.require_reconciliation(message.into());
             }
@@ -1567,6 +1722,25 @@ impl RfApp {
             .is_some()
         {
             self.picking.require_reconciliation(message.into());
+        }
+    }
+
+    fn require_replenishment_record_reconciliation(
+        &mut self,
+        scope: &ExecutionScope,
+        record_id: i64,
+        message: &str,
+    ) {
+        if self
+            .finalize_record(
+                scope,
+                record_id,
+                CommandStatus::ReconcileRequired,
+                Some(message),
+            )
+            .is_some()
+        {
+            self.replenishment.require_reconciliation(message.into());
         }
     }
 
@@ -1627,5 +1801,17 @@ impl RfApp {
             && self.session.is_some()
             && self.session_gate == SessionGate::Ready
             && self.connectivity_notice.is_none()
+    }
+}
+
+pub(super) const fn next_claim_operation_after_conflict(
+    operation: ClaimOperation,
+) -> Option<ClaimOperation> {
+    match operation {
+        ClaimOperation::Putaway => Some(ClaimOperation::InventoryRelocation),
+        ClaimOperation::InventoryRelocation => Some(ClaimOperation::CycleCount),
+        ClaimOperation::CycleCount | ClaimOperation::Picking | ClaimOperation::Replenishment => {
+            None
+        }
     }
 }

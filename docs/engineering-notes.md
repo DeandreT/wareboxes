@@ -11,3 +11,7 @@
 - A short pick terminalizes the directed source allocation and records immutable
   physical evidence. Replacement inventory is selected through the typed shortage
   recovery workflow; generic order allocation cannot bypass active execution.
+- Demand replenishment plans only loose, available stock from an explicit versioned
+  reserve-source set. Scanner confirmation posts a conserved move into the pick face;
+  it does not implicitly allocate that stock, so allocation remains an explicit,
+  independently replay-safe decision.

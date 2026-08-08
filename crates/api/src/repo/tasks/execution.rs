@@ -810,7 +810,7 @@ fn typed_inventory_execution_required(task_type: WorkTaskType) -> AppError {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn insert_progress_tx(
+pub(in crate::repo) async fn insert_progress_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     task_id: i64,

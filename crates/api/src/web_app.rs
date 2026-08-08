@@ -91,6 +91,7 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
         "/orders" | "/orders/" => Some(WorkspaceBootstrapSection::Orders),
         "/packing" | "/packing/" => Some(WorkspaceBootstrapSection::Packing),
         "/shipping" | "/shipping/" => Some(WorkspaceBootstrapSection::Shipping),
+        "/replenishment" | "/replenishment/" => Some(WorkspaceBootstrapSection::Replenishment),
         "/inventory" | "/inventory/" => Some(WorkspaceBootstrapSection::Inventory),
         "/access" | "/access/" => Some(WorkspaceBootstrapSection::Access),
         _ => None,
@@ -132,6 +133,8 @@ async fn workspace_bootstrap(
                 orders,
                 packing_queue: None,
                 shipping_queue: None,
+                replenishment_policies: None,
+                replenishment_queue: None,
                 balances,
                 balance_next_cursor,
                 access: access_workspace,
@@ -198,6 +201,21 @@ async fn workspace_bootstrap(
                 ..WorkspaceBootstrapData::default()
             })
         }
+        WorkspaceBootstrapSection::Replenishment => {
+            if !has_permission(session, "wms_supervisor") {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            let ((replenishment_policies, replenishment_queue), access_workspace) = tokio::try_join!(
+                routes::v1::replenishment::pages_for_access(state, access, 100),
+                routes::access::workspace_for_access(state, access),
+            )?;
+            Ok(WorkspaceBootstrapData {
+                replenishment_policies: Some(replenishment_policies),
+                replenishment_queue: Some(replenishment_queue),
+                access: access_workspace,
+                ..WorkspaceBootstrapData::default()
+            })
+        }
         WorkspaceBootstrapSection::Access => Ok(WorkspaceBootstrapData {
             access: routes::access::workspace_for_access(state, access).await?,
             ..WorkspaceBootstrapData::default()
@@ -233,6 +251,10 @@ mod tests {
         assert_eq!(
             section_for_path("/shipping"),
             Some(WorkspaceBootstrapSection::Shipping)
+        );
+        assert_eq!(
+            section_for_path("/replenishment"),
+            Some(WorkspaceBootstrapSection::Replenishment)
         );
         assert_eq!(
             section_for_path("/inventory/holds"),

@@ -6,7 +6,7 @@ use leptos_router::{
 };
 use wareboxes_api_contract::v1::{
     InventoryBalanceResponse, InventoryHoldResponse, InventoryHoldStatus, OpaqueCursor,
-    PackingQueuePage, ShippingQueuePage,
+    PackingQueuePage, ReplenishmentPolicyPage, ReplenishmentQueuePage, ShippingQueuePage,
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 use wareboxes_core::dto::{OrderPage, WebSessionContext};
@@ -25,6 +25,7 @@ use crate::inventory_integrity::InventoryIntegrityWorkbench;
 use crate::orders::OrderTable;
 use crate::packing::PackingWorkspace;
 use crate::preferences::provide_display_preferences;
+use crate::replenishment::ReplenishmentWorkspace;
 use crate::shipping::ShippingWorkspace;
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::toast::ToastProvider;
@@ -47,6 +48,7 @@ pub enum WorkspaceBootstrapSection {
     Packing,
     Shipping,
     Inventory,
+    Replenishment,
     Access,
 }
 
@@ -55,6 +57,8 @@ pub struct WorkspaceBootstrapData {
     pub orders: Option<OrderPage>,
     pub packing_queue: Option<PackingQueuePage>,
     pub shipping_queue: Option<ShippingQueuePage>,
+    pub replenishment_policies: Option<ReplenishmentPolicyPage>,
+    pub replenishment_queue: Option<ReplenishmentQueuePage>,
     pub balances: Vec<InventoryBalanceResponse>,
     pub balance_next_cursor: Option<OpaqueCursor>,
     pub access: AccessScopeWorkspace,
@@ -85,6 +89,8 @@ struct WorkspaceData {
     orders: Option<OrderPage>,
     packing_queue: Option<PackingQueuePage>,
     shipping_queue: Option<ShippingQueuePage>,
+    replenishment_policies: Option<ReplenishmentPolicyPage>,
+    replenishment_queue: Option<ReplenishmentQueuePage>,
     balances: Vec<InventoryBalanceResponse>,
     balance_next_cursor: Option<OpaqueCursor>,
     holds: Vec<InventoryHoldResponse>,
@@ -101,6 +107,8 @@ impl From<WorkspaceBootstrapData> for WorkspaceData {
             orders: bootstrap.orders,
             packing_queue: bootstrap.packing_queue,
             shipping_queue: bootstrap.shipping_queue,
+            replenishment_policies: bootstrap.replenishment_policies,
+            replenishment_queue: bootstrap.replenishment_queue,
             balances: bootstrap.balances,
             balance_next_cursor: bootstrap.balance_next_cursor,
             access: bootstrap.access,
@@ -130,6 +138,7 @@ pub(crate) enum Section {
     InventoryHolds,
     InventoryDisposition,
     InventoryIntegrity,
+    Replenishment,
     Access,
     Administration(AdministrationArea),
 }
@@ -142,6 +151,7 @@ impl Section {
             Self::Packing => Some(WorkspaceBootstrapSection::Packing),
             Self::Shipping => Some(WorkspaceBootstrapSection::Shipping),
             Self::Inventory => Some(WorkspaceBootstrapSection::Inventory),
+            Self::Replenishment => Some(WorkspaceBootstrapSection::Replenishment),
             Self::Access => Some(WorkspaceBootstrapSection::Access),
             _ => None,
         }
@@ -229,6 +239,7 @@ pub fn App() -> impl IntoView {
         <Stylesheet id="wareboxes-order-allocation" href="/order-allocation.css"/>
         <Stylesheet id="wareboxes-packing" href="/packing.css"/>
         <Stylesheet id="wareboxes-shipping" href="/shipping.css"/>
+        <Stylesheet id="wareboxes-replenishment" href="/replenishment.css"/>
         <Stylesheet id="wareboxes-catalog" href="/catalog.css"/>
         <Stylesheet id="wareboxes-administration" href="/administration.css"/>
         <Title text="Wareboxes"/>
@@ -242,6 +253,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("loads") view=LoadsPage/>
                     <Route path=StaticSegment("catalog") view=CatalogPage/>
                     <Route path=StaticSegment("inventory") view=InventoryPage/>
+                    <Route path=StaticSegment("replenishment") view=ReplenishmentPage/>
                     <Route path=(StaticSegment("inventory"), StaticSegment("holds")) view=InventoryHoldsPage/>
                     <Route
                         path=(StaticSegment("inventory"), StaticSegment("disposition"))
@@ -561,6 +573,13 @@ async fn load_workspace(
             data.balance_next_cursor = page.next_cursor;
         }
         Section::InventoryIntegrity if has_permission(session, "wms") => {}
+        Section::Replenishment if has_permission(session, "wms_supervisor") => {
+            data.replenishment_policies =
+                Some(api::replenishment_policies(None, None, None, None, None).await?);
+            data.replenishment_queue =
+                Some(api::replenishment_queue(None, None, None, None, None, None).await?);
+            data.access = api::access().await?;
+        }
         Section::Access => {
             data.access = api::access().await?;
         }
@@ -574,6 +593,7 @@ async fn load_workspace(
         | Section::InventoryHolds
         | Section::InventoryDisposition
         | Section::InventoryIntegrity
+        | Section::Replenishment
         | Section::Administration(_) => {}
     }
     Ok(data)
@@ -627,6 +647,11 @@ fn InventoryDispositionPage() -> impl IntoView {
 #[component]
 fn InventoryIntegrityPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::InventoryIntegrity/> }
+}
+
+#[component]
+fn ReplenishmentPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::Replenishment/> }
 }
 
 #[component]
@@ -752,6 +777,15 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                 });
                 view! { <InventoryIntegrity on_unauthorized/> }.into_any()
             }
+            Section::Replenishment if has_permission(&session, "wms_supervisor") => view! {
+                <ReplenishmentWorkspace
+                    initial_policies=data.replenishment_policies
+                    initial_work=data.replenishment_queue
+                    access=data.access
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
             Section::Access => view! { <Access data/> }.into_any(),
             Section::Administration(area) if has_permission(&session, "admin") => view! {
                 <AdministrationWorkspace
