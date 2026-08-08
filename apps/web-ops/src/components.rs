@@ -2,7 +2,8 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 use lucide_leptos::{
     ArrowRightLeft, Boxes, Building2, ClipboardList, LayoutDashboard, LockKeyhole, LockKeyholeOpen,
-    LogOut, PackageOpen, Plus, Printer, RefreshCw, Search, ShieldCheck, Trash2, TriangleAlert,
+    LogOut, PackageOpen, Plus, Printer, RefreshCw, ScanBarcode, Search, ShieldCheck, Trash2,
+    TriangleAlert,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -20,6 +21,7 @@ pub enum UiIcon {
     Inventory,
     Loads,
     Orders,
+    Packing,
     Overview,
     Permissions,
     Print,
@@ -27,6 +29,7 @@ pub enum UiIcon {
     Release,
     Remove,
     Roles,
+    Scan,
     Search,
     SignOut,
     Unlock,
@@ -51,6 +54,7 @@ pub fn Icon(icon: UiIcon) -> impl IntoView {
                 UiIcon::Inventory => view! { <Boxes size=16/> }.into_any(),
                 UiIcon::Loads => view! { <ClipboardList size=16/> }.into_any(),
                 UiIcon::Orders => view! { <ClipboardList size=16/> }.into_any(),
+                UiIcon::Packing => view! { <PackageOpen size=16/> }.into_any(),
                 UiIcon::Overview => view! { <LayoutDashboard size=16/> }.into_any(),
                 UiIcon::Permissions => view! { <LockKeyhole size=16/> }.into_any(),
                 UiIcon::Print => view! { <Printer size=16/> }.into_any(),
@@ -58,6 +62,7 @@ pub fn Icon(icon: UiIcon) -> impl IntoView {
                 UiIcon::Release => view! { <PackageOpen size=16/> }.into_any(),
                 UiIcon::Remove => view! { <Trash2 size=16/> }.into_any(),
                 UiIcon::Roles => view! { <ShieldCheck size=16/> }.into_any(),
+                UiIcon::Scan => view! { <ScanBarcode size=16/> }.into_any(),
                 UiIcon::Search => view! { <Search size=16/> }.into_any(),
                 UiIcon::SignOut => view! { <LogOut size=16/> }.into_any(),
                 UiIcon::Unlock => view! { <LockKeyholeOpen size=16/> }.into_any(),

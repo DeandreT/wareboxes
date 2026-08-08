@@ -721,9 +721,16 @@ async fn terminal_states_and_concurrent_revisions_fail_closed() {
         .await;
     let mut terminal_order_ids = Vec::new();
 
-    for (index, status) in ["processing", "awaiting shipment", "shipped", "void"]
-        .into_iter()
-        .enumerate()
+    for (index, status) in [
+        "processing",
+        "awaiting packing",
+        "packing",
+        "awaiting shipment",
+        "shipped",
+        "void",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let order_id = order_with_line(
             &fixture,
@@ -763,7 +770,14 @@ async fn terminal_states_and_concurrent_revisions_fail_closed() {
     tx.rollback().await.unwrap();
     assert_eq!(
         retained_states,
-        vec!["processing", "awaiting shipment", "shipped", "void"]
+        vec![
+            "processing",
+            "awaiting packing",
+            "packing",
+            "awaiting shipment",
+            "shipped",
+            "void",
+        ]
     );
 
     let concurrent_order_id =

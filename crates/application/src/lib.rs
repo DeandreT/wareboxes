@@ -11,6 +11,7 @@ pub mod order_allocation;
 pub mod order_cancellation;
 pub mod order_release;
 pub mod outbox;
+pub mod packing;
 pub mod picking;
 pub mod topology;
 

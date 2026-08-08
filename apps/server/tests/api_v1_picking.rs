@@ -1196,7 +1196,7 @@ async fn confirmation_requires_exact_scans_and_atomically_transfers_reserved_inv
     assert_eq!(confirmed.content_state, PickContentState::Completed);
     assert!(confirmed.task_completed);
     assert!(confirmed.order_ready_to_pack);
-    assert_eq!(confirmed.order_status, PickOrderStatus::AwaitingShipment);
+    assert_eq!(confirmed.order_status, PickOrderStatus::AwaitingPacking);
     assert_eq!(confirmed.order_revision.get(), 4);
 
     let replay = send(
@@ -1340,7 +1340,7 @@ async fn confirmation_requires_exact_scans_and_atomically_transfers_reserved_inv
             .await
             .unwrap();
     tx.rollback().await.unwrap();
-    assert_eq!(order_state, ("awaiting shipment".into(), 4));
+    assert_eq!(order_state, ("awaiting packing".into(), 4));
 
     let admin = admin_db_for(&fixture.db).await;
     for (operation, statement) in [

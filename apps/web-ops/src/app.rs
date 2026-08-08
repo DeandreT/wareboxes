@@ -6,6 +6,7 @@ use leptos_router::{
 };
 use wareboxes_api_contract::v1::{
     InventoryBalanceResponse, InventoryHoldResponse, InventoryHoldStatus, OpaqueCursor,
+    PackingQueuePage,
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 use wareboxes_core::dto::{OrderPage, WebSessionContext};
@@ -22,6 +23,7 @@ use crate::inventory_disposition::InventoryDispositionWorkbench;
 use crate::inventory_holds::QuantityHoldsWorkbench;
 use crate::inventory_integrity::InventoryIntegrityWorkbench;
 use crate::orders::OrderTable;
+use crate::packing::PackingWorkspace;
 use crate::preferences::provide_display_preferences;
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::toast::ToastProvider;
@@ -41,6 +43,7 @@ pub struct InitialWebWorkspace(pub Option<WorkspaceBootstrap>);
 pub enum WorkspaceBootstrapSection {
     Overview,
     Orders,
+    Packing,
     Inventory,
     Access,
 }
@@ -48,6 +51,7 @@ pub enum WorkspaceBootstrapSection {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceBootstrapData {
     pub orders: Option<OrderPage>,
+    pub packing_queue: Option<PackingQueuePage>,
     pub balances: Vec<InventoryBalanceResponse>,
     pub balance_next_cursor: Option<OpaqueCursor>,
     pub access: AccessScopeWorkspace,
@@ -57,7 +61,7 @@ pub struct WorkspaceBootstrapData {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status", content = "payload")]
 pub enum WorkspaceBootstrapContent {
-    Ready(WorkspaceBootstrapData),
+    Ready(Box<WorkspaceBootstrapData>),
     Failed(String),
 }
 
@@ -76,6 +80,7 @@ pub(crate) enum SessionState {
 #[derive(Clone, Default)]
 struct WorkspaceData {
     orders: Option<OrderPage>,
+    packing_queue: Option<PackingQueuePage>,
     balances: Vec<InventoryBalanceResponse>,
     balance_next_cursor: Option<OpaqueCursor>,
     holds: Vec<InventoryHoldResponse>,
@@ -90,6 +95,7 @@ impl From<WorkspaceBootstrapData> for WorkspaceData {
     fn from(bootstrap: WorkspaceBootstrapData) -> Self {
         Self {
             orders: bootstrap.orders,
+            packing_queue: bootstrap.packing_queue,
             balances: bootstrap.balances,
             balance_next_cursor: bootstrap.balance_next_cursor,
             access: bootstrap.access,
@@ -111,6 +117,7 @@ enum WorkspaceState {
 pub(crate) enum Section {
     Overview,
     Orders,
+    Packing,
     Loads,
     Catalog,
     Inventory,
@@ -126,6 +133,7 @@ impl Section {
         match self {
             Self::Overview => Some(WorkspaceBootstrapSection::Overview),
             Self::Orders => Some(WorkspaceBootstrapSection::Orders),
+            Self::Packing => Some(WorkspaceBootstrapSection::Packing),
             Self::Inventory => Some(WorkspaceBootstrapSection::Inventory),
             Self::Access => Some(WorkspaceBootstrapSection::Access),
             _ => None,
@@ -211,6 +219,7 @@ pub fn App() -> impl IntoView {
         <Stylesheet id="wareboxes-inventory-rollups" href="/inventory-rollups.css"/>
         <Stylesheet id="wareboxes-fulfillment" href="/fulfillment.css"/>
         <Stylesheet id="wareboxes-order-allocation" href="/order-allocation.css"/>
+        <Stylesheet id="wareboxes-packing" href="/packing.css"/>
         <Stylesheet id="wareboxes-catalog" href="/catalog.css"/>
         <Stylesheet id="wareboxes-administration" href="/administration.css"/>
         <Title text="Wareboxes"/>
@@ -219,6 +228,7 @@ pub fn App() -> impl IntoView {
                 <Routes fallback=|| view! { <NotFoundPage/> }.into_any()>
                     <Route path=StaticSegment("") view=OverviewPage/>
                     <Route path=StaticSegment("orders") view=OrdersPage/>
+                    <Route path=StaticSegment("packing") view=PackingPage/>
                     <Route path=StaticSegment("loads") view=LoadsPage/>
                     <Route path=StaticSegment("catalog") view=CatalogPage/>
                     <Route path=StaticSegment("inventory") view=InventoryPage/>
@@ -422,7 +432,7 @@ fn initial_workspace_state(section: Section) -> Option<WorkspaceState> {
         return None;
     }
     Some(match bootstrap.content {
-        WorkspaceBootstrapContent::Ready(data) => WorkspaceState::Ready(data.into()),
+        WorkspaceBootstrapContent::Ready(data) => WorkspaceState::Ready((*data).into()),
         WorkspaceBootstrapContent::Failed(message) => WorkspaceState::Failed(message),
     })
 }
@@ -505,6 +515,11 @@ async fn load_workspace(
             data.access = api::access().await?;
             data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
         }
+        Section::Packing if has_permission(session, "wms") => {
+            data.packing_queue = Some(api::packing_queue(None, None).await?);
+            data.access = api::access().await?;
+            data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
+        }
         Section::Loads if has_permission(session, "wms") => {
             data.loads = api::internal_get("/api/loads?offset=0&limit=500").await?;
             data.access = api::access().await?;
@@ -536,6 +551,7 @@ async fn load_workspace(
         }
         Section::Administration(_) if has_permission(session, "admin") => {}
         Section::Orders
+        | Section::Packing
         | Section::Loads
         | Section::Catalog
         | Section::Inventory
@@ -555,6 +571,11 @@ fn OverviewPage() -> impl IntoView {
 #[component]
 fn OrdersPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::Orders/> }
+}
+
+#[component]
+fn PackingPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::Packing/> }
 }
 
 #[component]
@@ -639,7 +660,8 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
     let state = expect_context::<RwSignal<WorkspaceState>>();
     let session = expect_context::<WebSessionContext>();
 
-    move || match state.get() {
+    move || {
+        match state.get() {
         WorkspaceState::Loading => view! { <WorkspaceLoading/> }.into_any(),
         WorkspaceState::Failed(message) => {
             view! { <WorkspaceError message session=session.clone() section state/> }.into_any()
@@ -649,6 +671,15 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
             Section::Orders if has_permission(&session, "orders") => {
                 view! { <Orders data on_unauthorized=session_expired_callback()/> }.into_any()
             }
+            Section::Packing if has_permission(&session, "wms") => view! {
+                <PackingWorkspace
+                    initial_queue=data.packing_queue.unwrap_or_else(|| PackingQueuePage::new(Vec::new(), None))
+                    access=data.access
+                    locations=data.locations
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
             Section::Loads if has_permission(&session, "wms") => {
                 view! { <Loads data on_unauthorized=session_expired_callback()/> }.into_any()
             }
@@ -701,6 +732,7 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
             .into_any(),
             _ => view! { <AccessDenied/> }.into_any(),
         },
+    }
     }
 }
 
@@ -1296,6 +1328,7 @@ mod tests {
 
         assert!(Section::Overview.supports_workspace_refresh());
         assert!(Section::Orders.supports_workspace_refresh());
+        assert!(!Section::Packing.supports_workspace_refresh());
         assert!(!Section::Catalog.supports_workspace_refresh());
         assert!(
             !Section::Administration(crate::administration::AdministrationArea::Users)

@@ -30,19 +30,33 @@ pub(crate) async fn lock_license_plate(
     tenant_id: TenantId,
     license_plate_id: Option<i64>,
 ) -> AppResult<()> {
-    let Some(license_plate_id) = license_plate_id else {
+    lock_license_plates(tx, tenant_id, license_plate_id.into_iter().collect()).await
+}
+
+pub(crate) async fn lock_license_plates(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    mut license_plate_ids: Vec<i64>,
+) -> AppResult<()> {
+    license_plate_ids.sort_unstable();
+    license_plate_ids.dedup();
+    if license_plate_ids.is_empty() {
         return Ok(());
-    };
-    let locked: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM license_plates WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
+    }
+    let locked: Vec<i64> = sqlx::query_scalar(
+        r#"
+        SELECT id FROM license_plates
+        WHERE tenant_id = $1 AND id = ANY($2)
+        ORDER BY id FOR UPDATE
+        "#,
     )
     .bind(tenant_id.get())
-    .bind(license_plate_id)
-    .fetch_optional(&mut **tx)
+    .bind(&license_plate_ids)
+    .fetch_all(&mut **tx)
     .await?;
-    if locked.is_none() {
+    if locked != license_plate_ids {
         return Err(AppError::internal(
-            "inventory balance references a missing license plate",
+            "inventory operation references a missing license plate",
         ));
     }
     Ok(())

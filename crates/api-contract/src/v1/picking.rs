@@ -66,7 +66,7 @@ pub enum PickContentState {
 #[serde(rename_all = "snake_case")]
 pub enum PickOrderStatus {
     Processing,
-    AwaitingShipment,
+    AwaitingPacking,
 }
 
 /// One scanner-ready allocation in a claimed pick task.

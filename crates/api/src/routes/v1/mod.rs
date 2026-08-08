@@ -14,6 +14,7 @@ mod order_cancellations;
 mod order_holds;
 mod order_releases;
 mod orders;
+pub(crate) mod packing;
 mod picking;
 mod putaway;
 mod putaway_claim_lifecycle;
@@ -121,6 +122,7 @@ pub fn router() -> Router<AppState> {
             post(license_plate_putaway::confirm),
         )
         .route("/orders", post(orders::create))
+        .route("/packing-queue", get(packing::queue))
         .route(
             "/orders/{order_id}/allocation-runs",
             post(order_allocations::plan),
@@ -134,6 +136,28 @@ pub fn router() -> Router<AppState> {
             post(order_cancellations::create),
         )
         .route("/orders/{order_id}/releases", post(order_releases::create))
+        .route(
+            "/orders/{order_id}/packing-session",
+            get(packing::for_order),
+        )
+        .route("/orders/{order_id}/packing-sessions", post(packing::open))
+        .route("/packing-sessions/{session_id}", get(packing::get))
+        .route(
+            "/packing-sessions/{session_id}/cartons",
+            post(packing::create_carton),
+        )
+        .route(
+            "/packing-sessions/{session_id}/cartons/{carton_id}/contents",
+            post(packing::pack_content),
+        )
+        .route(
+            "/packing-sessions/{session_id}/cartons/{carton_id}/closures",
+            post(packing::close_carton),
+        )
+        .route(
+            "/packing-sessions/{session_id}/cartons/{carton_id}/voids",
+            post(packing::void_carton),
+        )
         .route("/picking-claims/next", post(picking::claim_next))
         .route("/picking-claims/current", get(picking::current))
         .route("/picking-claims/{task_id}", post(picking::claim_by_id))

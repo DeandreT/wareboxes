@@ -127,7 +127,7 @@ async fn pick_waves_remain_inaccessible_until_a_typed_workflow_exists() {
 }
 
 #[tokio::test]
-async fn typed_picking_tables_expose_only_required_runtime_privileges() {
+async fn typed_outbound_tables_expose_only_required_runtime_privileges() {
     let fixture = Fixture::new().await;
     for (table_name, can_update) in [
         ("order_releases", false),
@@ -135,6 +135,11 @@ async fn typed_picking_tables_expose_only_required_runtime_privileges() {
         ("pick_tasks", true),
         ("pick_task_contents", true),
         ("pick_confirmations", false),
+        ("outbound_order_containers", false),
+        ("packing_sessions", true),
+        ("packing_session_allocations", false),
+        ("cartons", true),
+        ("carton_contents", false),
     ] {
         let privileges: TablePrivileges = sqlx::query_as(
             r#"
@@ -171,6 +176,11 @@ async fn typed_picking_tables_expose_only_required_runtime_privileges() {
         "pick_tasks_id_seq",
         "pick_task_contents_id_seq",
         "pick_confirmations_id_seq",
+        "outbound_order_containers_id_seq",
+        "packing_sessions_id_seq",
+        "packing_session_allocations_id_seq",
+        "cartons_id_seq",
+        "carton_contents_id_seq",
     ] {
         let privileges: SequencePrivileges = sqlx::query_as(
             r#"

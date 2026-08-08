@@ -37,6 +37,8 @@ pub fn open_order_count(summaries: &[wareboxes_core::dto::SummaryCount]) -> i64 
                     OrderStatus::Open
                         | OrderStatus::Processing
                         | OrderStatus::Held
+                        | OrderStatus::AwaitingPacking
+                        | OrderStatus::Packing
                         | OrderStatus::AwaitingShipment
                 )
             )

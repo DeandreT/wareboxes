@@ -16,6 +16,7 @@ mod order_allocation;
 mod order_cancellation;
 mod order_hold;
 mod order_release;
+mod packing;
 mod picking;
 mod putaway;
 mod putaway_claim;
@@ -94,6 +95,17 @@ pub use order_hold::{
     ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
 };
 pub use order_release::{OrderReleaseStatus, ReleaseOrderRequest, ReleaseOrderResponse};
+pub use packing::{
+    CartonDimensions, CartonMeasurements, CloseCartonRequest, CloseCartonResponse,
+    CreateCartonRequest, CreateCartonResponse, DimensionMillimeters, OpenPackSessionRequest,
+    OpenPackSessionResponse, PackAllocationDispositionResponse, PackCartonLifecycleResponse,
+    PackCartonResponse, PackPickedAllocationRequest, PackPickedAllocationResponse,
+    PackSessionResponse, PackSessionStatus, PackableAllocationResponse, PackingMeasurementError,
+    PackingOrderStatus, PackingProgressResponse, PackingQueueEntryResponse, PackingQueueFacilityId,
+    PackingQueueFacilityIdError, PackingQueueOrderStatus, PackingQueuePage,
+    PackingQueuePageRequest, PackingQueueSessionResponse, VoidCartonRequest, VoidCartonResponse,
+    WeightGrams,
+};
 pub use picking::{
     ClaimNextPickRequest, ClaimPickByIdRequest, ConfirmPickContentRequest, CurrentPickResponse,
     HeartbeatPickClaimRequest, PickClaimContent, PickClaimHeartbeatResponse,

@@ -146,7 +146,7 @@ fn status_class(status: &str) -> &'static str {
         "shipped" => "status shipped",
         "cancelled" | "void" => "status muted",
         "held" => "status held",
-        "processing" | "awaiting shipment" => "status processing",
+        "processing" | "awaiting packing" | "packing" | "awaiting shipment" => "status processing",
         _ => "status open",
     }
 }

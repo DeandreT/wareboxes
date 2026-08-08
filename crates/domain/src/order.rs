@@ -390,11 +390,13 @@ impl NewFulfillmentOrder {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderStatus {
+    AwaitingPacking,
     #[serde(rename = "awaiting shipment")]
     AwaitingShipment,
     Shipped,
     Cancelled,
     Held,
+    Packing,
     Processing,
     #[default]
     Open,
@@ -402,11 +404,13 @@ pub enum OrderStatus {
 }
 
 impl OrderStatus {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
+        Self::AwaitingPacking,
         Self::AwaitingShipment,
         Self::Shipped,
         Self::Cancelled,
         Self::Held,
+        Self::Packing,
         Self::Processing,
         Self::Open,
         Self::Void,
@@ -414,10 +418,12 @@ impl OrderStatus {
 
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::AwaitingPacking => "awaiting packing",
             Self::AwaitingShipment => "awaiting shipment",
             Self::Shipped => "shipped",
             Self::Cancelled => "cancelled",
             Self::Held => "held",
+            Self::Packing => "packing",
             Self::Processing => "processing",
             Self::Open => "open",
             Self::Void => "void",
@@ -426,10 +432,12 @@ impl OrderStatus {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
+            "awaiting packing" => Some(Self::AwaitingPacking),
             "awaiting shipment" => Some(Self::AwaitingShipment),
             "shipped" => Some(Self::Shipped),
             "cancelled" => Some(Self::Cancelled),
             "held" => Some(Self::Held),
+            "packing" => Some(Self::Packing),
             "processing" => Some(Self::Processing),
             "open" => Some(Self::Open),
             "void" => Some(Self::Void),

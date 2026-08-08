@@ -195,7 +195,7 @@ fn map_release(result: PickClaimReleaseResult) -> PickClaimReleaseResponse {
 fn map_confirmation(result: ConfirmPickContentResult) -> V1Result<PickContentConfirmationResponse> {
     let order_status = match result.order_status {
         OrderStatus::Processing => PickOrderStatus::Processing,
-        OrderStatus::AwaitingShipment => PickOrderStatus::AwaitingShipment,
+        OrderStatus::AwaitingPacking => PickOrderStatus::AwaitingPacking,
         _ => {
             return Err(V1Error::internal(
                 "pick confirmation produced an invalid order status",

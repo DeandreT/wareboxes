@@ -264,6 +264,17 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         ("pick_tasks", "pick_tasks_tenant_isolation"),
         ("pick_task_contents", "pick_task_contents_tenant_isolation"),
         ("pick_confirmations", "pick_confirmations_tenant_isolation"),
+        (
+            "outbound_order_containers",
+            "outbound_order_containers_tenant_isolation",
+        ),
+        ("packing_sessions", "packing_sessions_tenant_isolation"),
+        (
+            "packing_session_allocations",
+            "packing_session_allocations_tenant_isolation",
+        ),
+        ("cartons", "cartons_tenant_isolation"),
+        ("carton_contents", "carton_contents_tenant_isolation"),
         ("facilities", "facilities_tenant_isolation"),
         ("locations", "locations_tenant_isolation"),
         ("inventory_owners", "inventory_owners_tenant_isolation"),
