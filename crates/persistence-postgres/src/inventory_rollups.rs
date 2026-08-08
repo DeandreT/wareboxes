@@ -1,112 +1,49 @@
-//! Scope-safe aggregate inventory reads for the version 1 API.
+//! Scope-safe aggregate inventory reads.
 
 use sqlx::postgres::PgRow;
 use sqlx::Row;
-use wareboxes_core::models::TenantAccess;
+use wareboxes_application::inventory::{
+    FacilityRollupCursor, InventoryFacilityRollupPage, InventoryFacilityRollupReadModel,
+    InventoryItemRollupPage, InventoryItemRollupReadModel, InventoryLocationRollupPage,
+    InventoryLocationRollupReadModel, InventoryRollupCount, InventoryRollupQuantity,
+    ItemRollupCursor, LocationRollupCursor, MAX_INVENTORY_ROLLUP_PAGE_SIZE,
+};
+use wareboxes_domain::{FacilityId, InventoryOwnerId, OwnerScope, SiteScope, TenantId};
 
 use crate::db::{begin_tenant_transaction, Db};
-use crate::error::AppResult;
-use crate::repo::access::ScopeBindings;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LocationRollupCursor {
-    pub inventory_owner_id: i64,
-    pub item_id: i64,
-    pub location_id: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FacilityRollupCursor {
-    pub inventory_owner_id: i64,
-    pub item_id: i64,
-    pub facility_id: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ItemRollupCursor {
-    pub inventory_owner_id: i64,
-    pub item_id: i64,
-}
-
-#[derive(Debug)]
-pub struct InventoryRollupQuantityColumns {
-    pub uoms: Vec<String>,
-    pub on_hand: Vec<i64>,
-    pub reserved: Vec<i64>,
-    pub held: Vec<i64>,
-    pub available: Vec<i64>,
-}
-
-#[derive(Debug)]
-pub struct InventoryLocationRollupRow {
-    pub inventory_owner_id: i64,
-    pub inventory_owner_name: String,
-    pub item_id: i64,
-    pub item_description: Option<String>,
-    pub primary_sku: Option<String>,
-    pub facility_id: i64,
-    pub facility_name: Option<String>,
-    pub location_id: i64,
-    pub location_name: Option<String>,
-    pub location_barcode: Option<String>,
-    pub quantities: InventoryRollupQuantityColumns,
-    pub balance_count: i64,
-    pub batch_count: i64,
-}
-
-pub struct InventoryLocationRollupKeysetPage {
-    pub rows: Vec<InventoryLocationRollupRow>,
-    pub next_cursor: Option<LocationRollupCursor>,
-}
-
-#[derive(Debug)]
-pub struct InventoryFacilityRollupRow {
-    pub inventory_owner_id: i64,
-    pub inventory_owner_name: String,
-    pub item_id: i64,
-    pub item_description: Option<String>,
-    pub primary_sku: Option<String>,
-    pub facility_id: i64,
-    pub facility_name: Option<String>,
-    pub quantities: InventoryRollupQuantityColumns,
-    pub balance_count: i64,
-    pub batch_count: i64,
-    pub location_count: i64,
-}
-
-pub struct InventoryFacilityRollupKeysetPage {
-    pub rows: Vec<InventoryFacilityRollupRow>,
-    pub next_cursor: Option<FacilityRollupCursor>,
-}
-
-#[derive(Debug)]
-pub struct InventoryItemRollupRow {
-    pub inventory_owner_id: i64,
-    pub inventory_owner_name: String,
-    pub item_id: i64,
-    pub item_description: Option<String>,
-    pub primary_sku: Option<String>,
-    pub quantities: InventoryRollupQuantityColumns,
-    pub balance_count: i64,
-    pub batch_count: i64,
-    pub location_count: i64,
-    pub facility_count: i64,
-}
-
-pub struct InventoryItemRollupKeysetPage {
-    pub rows: Vec<InventoryItemRollupRow>,
-    pub next_cursor: Option<ItemRollupCursor>,
-}
+use crate::{PersistenceError, PersistenceResult};
 
 pub async fn get_inventory_location_rollup_page(
     db: &Db,
-    access: &TenantAccess,
+    tenant_id: TenantId,
+    site_scope: &SiteScope,
+    owner_scope: &OwnerScope,
     after: Option<LocationRollupCursor>,
     limit: u16,
-) -> AppResult<InventoryLocationRollupKeysetPage> {
-    let scope = ScopeBindings::for_access(access);
+) -> PersistenceResult<InventoryLocationRollupPage> {
+    let cursor_values = after.map(|cursor| {
+        [
+            cursor.inventory_owner_id.get(),
+            cursor.item_id,
+            cursor.location_id,
+        ]
+    });
+    validate_page_request(
+        limit,
+        cursor_values.as_ref().map(|values| values.as_slice()),
+    )?;
+    let facility_ids = site_scope
+        .facility_ids
+        .iter()
+        .map(|id| id.get())
+        .collect::<Vec<_>>();
+    let inventory_owner_ids = owner_scope
+        .inventory_owner_ids
+        .iter()
+        .map(|id| id.get())
+        .collect::<Vec<_>>();
     let fetch_limit = i64::from(limit) + 1;
-    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         WITH base AS (
@@ -199,12 +136,12 @@ pub async fn get_inventory_location_rollup_page(
         LIMIT $9
         "#,
     )
-    .bind(access.tenant_id.get())
-    .bind(scope.all_facilities)
-    .bind(&scope.facility_ids)
-    .bind(scope.all_inventory_owners)
-    .bind(&scope.inventory_owner_ids)
-    .bind(after.map(|cursor| cursor.inventory_owner_id))
+    .bind(tenant_id.get())
+    .bind(site_scope.all_facilities)
+    .bind(&facility_ids)
+    .bind(owner_scope.all_inventory_owners)
+    .bind(&inventory_owner_ids)
+    .bind(after.map(|cursor| cursor.inventory_owner_id.get()))
     .bind(after.map(|cursor| cursor.item_id))
     .bind(after.map(|cursor| cursor.location_id))
     .bind(fetch_limit)
@@ -216,7 +153,7 @@ pub async fn get_inventory_location_rollup_page(
         .iter()
         .take(usize::from(limit))
         .map(map_location_row)
-        .collect::<AppResult<Vec<_>>>()?;
+        .collect::<PersistenceResult<Vec<_>>>()?;
     let next_cursor = if has_more {
         rows.last().map(|row| LocationRollupCursor {
             inventory_owner_id: row.inventory_owner_id,
@@ -228,18 +165,43 @@ pub async fn get_inventory_location_rollup_page(
     };
     tx.commit().await?;
 
-    Ok(InventoryLocationRollupKeysetPage { rows, next_cursor })
+    Ok(InventoryLocationRollupPage {
+        items: rows,
+        next_cursor,
+    })
 }
 
 pub async fn get_inventory_facility_rollup_page(
     db: &Db,
-    access: &TenantAccess,
+    tenant_id: TenantId,
+    site_scope: &SiteScope,
+    owner_scope: &OwnerScope,
     after: Option<FacilityRollupCursor>,
     limit: u16,
-) -> AppResult<InventoryFacilityRollupKeysetPage> {
-    let scope = ScopeBindings::for_access(access);
+) -> PersistenceResult<InventoryFacilityRollupPage> {
+    let cursor_values = after.map(|cursor| {
+        [
+            cursor.inventory_owner_id.get(),
+            cursor.item_id,
+            cursor.facility_id.get(),
+        ]
+    });
+    validate_page_request(
+        limit,
+        cursor_values.as_ref().map(|values| values.as_slice()),
+    )?;
+    let facility_ids = site_scope
+        .facility_ids
+        .iter()
+        .map(|id| id.get())
+        .collect::<Vec<_>>();
+    let inventory_owner_ids = owner_scope
+        .inventory_owner_ids
+        .iter()
+        .map(|id| id.get())
+        .collect::<Vec<_>>();
     let fetch_limit = i64::from(limit) + 1;
-    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         WITH base AS (
@@ -324,14 +286,14 @@ pub async fn get_inventory_facility_rollup_page(
         LIMIT $9
         "#,
     )
-    .bind(access.tenant_id.get())
-    .bind(scope.all_facilities)
-    .bind(&scope.facility_ids)
-    .bind(scope.all_inventory_owners)
-    .bind(&scope.inventory_owner_ids)
-    .bind(after.map(|cursor| cursor.inventory_owner_id))
+    .bind(tenant_id.get())
+    .bind(site_scope.all_facilities)
+    .bind(&facility_ids)
+    .bind(owner_scope.all_inventory_owners)
+    .bind(&inventory_owner_ids)
+    .bind(after.map(|cursor| cursor.inventory_owner_id.get()))
     .bind(after.map(|cursor| cursor.item_id))
-    .bind(after.map(|cursor| cursor.facility_id))
+    .bind(after.map(|cursor| cursor.facility_id.get()))
     .bind(fetch_limit)
     .fetch_all(&mut *tx)
     .await?;
@@ -341,7 +303,7 @@ pub async fn get_inventory_facility_rollup_page(
         .iter()
         .take(usize::from(limit))
         .map(map_facility_row)
-        .collect::<AppResult<Vec<_>>>()?;
+        .collect::<PersistenceResult<Vec<_>>>()?;
     let next_cursor = if has_more {
         rows.last().map(|row| FacilityRollupCursor {
             inventory_owner_id: row.inventory_owner_id,
@@ -353,18 +315,37 @@ pub async fn get_inventory_facility_rollup_page(
     };
     tx.commit().await?;
 
-    Ok(InventoryFacilityRollupKeysetPage { rows, next_cursor })
+    Ok(InventoryFacilityRollupPage {
+        items: rows,
+        next_cursor,
+    })
 }
 
 pub async fn get_inventory_item_rollup_page(
     db: &Db,
-    access: &TenantAccess,
+    tenant_id: TenantId,
+    site_scope: &SiteScope,
+    owner_scope: &OwnerScope,
     after: Option<ItemRollupCursor>,
     limit: u16,
-) -> AppResult<InventoryItemRollupKeysetPage> {
-    let scope = ScopeBindings::for_access(access);
+) -> PersistenceResult<InventoryItemRollupPage> {
+    let cursor_values = after.map(|cursor| [cursor.inventory_owner_id.get(), cursor.item_id]);
+    validate_page_request(
+        limit,
+        cursor_values.as_ref().map(|values| values.as_slice()),
+    )?;
+    let facility_ids = site_scope
+        .facility_ids
+        .iter()
+        .map(|id| id.get())
+        .collect::<Vec<_>>();
+    let inventory_owner_ids = owner_scope
+        .inventory_owner_ids
+        .iter()
+        .map(|id| id.get())
+        .collect::<Vec<_>>();
     let fetch_limit = i64::from(limit) + 1;
-    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
         WITH base AS (
@@ -443,12 +424,12 @@ pub async fn get_inventory_item_rollup_page(
         LIMIT $8
         "#,
     )
-    .bind(access.tenant_id.get())
-    .bind(scope.all_facilities)
-    .bind(&scope.facility_ids)
-    .bind(scope.all_inventory_owners)
-    .bind(&scope.inventory_owner_ids)
-    .bind(after.map(|cursor| cursor.inventory_owner_id))
+    .bind(tenant_id.get())
+    .bind(site_scope.all_facilities)
+    .bind(&facility_ids)
+    .bind(owner_scope.all_inventory_owners)
+    .bind(&inventory_owner_ids)
+    .bind(after.map(|cursor| cursor.inventory_owner_id.get()))
     .bind(after.map(|cursor| cursor.item_id))
     .bind(fetch_limit)
     .fetch_all(&mut *tx)
@@ -459,7 +440,7 @@ pub async fn get_inventory_item_rollup_page(
         .iter()
         .take(usize::from(limit))
         .map(map_item_row)
-        .collect::<AppResult<Vec<_>>>()?;
+        .collect::<PersistenceResult<Vec<_>>>()?;
     let next_cursor = if has_more {
         rows.last().map(|row| ItemRollupCursor {
             inventory_owner_id: row.inventory_owner_id,
@@ -470,64 +451,169 @@ pub async fn get_inventory_item_rollup_page(
     };
     tx.commit().await?;
 
-    Ok(InventoryItemRollupKeysetPage { rows, next_cursor })
-}
-
-fn map_quantity_columns(row: &PgRow) -> AppResult<InventoryRollupQuantityColumns> {
-    Ok(InventoryRollupQuantityColumns {
-        uoms: row.try_get("uoms")?,
-        on_hand: row.try_get("on_hand")?,
-        reserved: row.try_get("reserved")?,
-        held: row.try_get("held")?,
-        available: row.try_get("available")?,
+    Ok(InventoryItemRollupPage {
+        items: rows,
+        next_cursor,
     })
 }
 
-fn map_location_row(row: &PgRow) -> AppResult<InventoryLocationRollupRow> {
-    Ok(InventoryLocationRollupRow {
-        inventory_owner_id: row.try_get("inventory_owner_id")?,
+fn map_quantities(row: &PgRow) -> PersistenceResult<Vec<InventoryRollupQuantity>> {
+    map_quantity_columns(
+        row.try_get("uoms")?,
+        row.try_get("on_hand")?,
+        row.try_get("reserved")?,
+        row.try_get("held")?,
+        row.try_get("available")?,
+    )
+}
+
+fn map_quantity_columns(
+    uoms: Vec<String>,
+    on_hand: Vec<i64>,
+    reserved: Vec<i64>,
+    held: Vec<i64>,
+    available: Vec<i64>,
+) -> PersistenceResult<Vec<InventoryRollupQuantity>> {
+    let count = uoms.len();
+    if count == 0
+        || on_hand.len() != count
+        || reserved.len() != count
+        || held.len() != count
+        || available.len() != count
+    {
+        return Err(PersistenceError::invalid_data(
+            "inventory rollup quantity columns are inconsistent",
+        ));
+    }
+
+    uoms.into_iter()
+        .zip(on_hand)
+        .zip(reserved)
+        .zip(held)
+        .zip(available)
+        .map(|((((uom, on_hand), reserved), held), available)| {
+            InventoryRollupQuantity::new(uom, on_hand, reserved, held, available).map_err(|error| {
+                PersistenceError::invalid_data(format!(
+                    "inventory rollup quantities are inconsistent: {error:?}"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn map_location_row(row: &PgRow) -> PersistenceResult<InventoryLocationRollupReadModel> {
+    Ok(InventoryLocationRollupReadModel {
+        inventory_owner_id: map_inventory_owner_id(row)?,
         inventory_owner_name: row.try_get("inventory_owner_name")?,
         item_id: row.try_get("item_id")?,
         item_description: row.try_get("item_description")?,
         primary_sku: row.try_get("primary_sku")?,
-        facility_id: row.try_get("facility_id")?,
+        facility_id: map_facility_id(row)?,
         facility_name: row.try_get("facility_name")?,
         location_id: row.try_get("location_id")?,
         location_name: row.try_get("location_name")?,
         location_barcode: row.try_get("location_barcode")?,
-        quantities: map_quantity_columns(row)?,
-        balance_count: row.try_get("balance_count")?,
-        batch_count: row.try_get("batch_count")?,
+        quantities: map_quantities(row)?,
+        balance_count: map_count(row, "balance_count")?,
+        batch_count: map_count(row, "batch_count")?,
     })
 }
 
-fn map_facility_row(row: &PgRow) -> AppResult<InventoryFacilityRollupRow> {
-    Ok(InventoryFacilityRollupRow {
-        inventory_owner_id: row.try_get("inventory_owner_id")?,
+fn map_facility_row(row: &PgRow) -> PersistenceResult<InventoryFacilityRollupReadModel> {
+    Ok(InventoryFacilityRollupReadModel {
+        inventory_owner_id: map_inventory_owner_id(row)?,
         inventory_owner_name: row.try_get("inventory_owner_name")?,
         item_id: row.try_get("item_id")?,
         item_description: row.try_get("item_description")?,
         primary_sku: row.try_get("primary_sku")?,
-        facility_id: row.try_get("facility_id")?,
+        facility_id: map_facility_id(row)?,
         facility_name: row.try_get("facility_name")?,
-        quantities: map_quantity_columns(row)?,
-        balance_count: row.try_get("balance_count")?,
-        batch_count: row.try_get("batch_count")?,
-        location_count: row.try_get("location_count")?,
+        quantities: map_quantities(row)?,
+        balance_count: map_count(row, "balance_count")?,
+        batch_count: map_count(row, "batch_count")?,
+        location_count: map_count(row, "location_count")?,
     })
 }
 
-fn map_item_row(row: &PgRow) -> AppResult<InventoryItemRollupRow> {
-    Ok(InventoryItemRollupRow {
-        inventory_owner_id: row.try_get("inventory_owner_id")?,
+fn map_item_row(row: &PgRow) -> PersistenceResult<InventoryItemRollupReadModel> {
+    Ok(InventoryItemRollupReadModel {
+        inventory_owner_id: map_inventory_owner_id(row)?,
         inventory_owner_name: row.try_get("inventory_owner_name")?,
         item_id: row.try_get("item_id")?,
         item_description: row.try_get("item_description")?,
         primary_sku: row.try_get("primary_sku")?,
-        quantities: map_quantity_columns(row)?,
-        balance_count: row.try_get("balance_count")?,
-        batch_count: row.try_get("batch_count")?,
-        location_count: row.try_get("location_count")?,
-        facility_count: row.try_get("facility_count")?,
+        quantities: map_quantities(row)?,
+        balance_count: map_count(row, "balance_count")?,
+        batch_count: map_count(row, "batch_count")?,
+        location_count: map_count(row, "location_count")?,
+        facility_count: map_count(row, "facility_count")?,
     })
+}
+
+fn map_inventory_owner_id(row: &PgRow) -> PersistenceResult<InventoryOwnerId> {
+    InventoryOwnerId::new(row.try_get("inventory_owner_id")?)
+        .map_err(|error| PersistenceError::invalid_data(error.to_string()))
+}
+
+fn map_facility_id(row: &PgRow) -> PersistenceResult<FacilityId> {
+    FacilityId::new(row.try_get("facility_id")?)
+        .map_err(|error| PersistenceError::invalid_data(error.to_string()))
+}
+
+fn map_count(row: &PgRow, column: &str) -> PersistenceResult<InventoryRollupCount> {
+    let count = row.try_get(column)?;
+    InventoryRollupCount::new(count).ok_or_else(|| {
+        PersistenceError::invalid_data(format!("inventory rollup {column} is invalid"))
+    })
+}
+
+fn validate_page_request(limit: u16, cursor_values: Option<&[i64]>) -> PersistenceResult<()> {
+    if !(1..=MAX_INVENTORY_ROLLUP_PAGE_SIZE).contains(&limit) {
+        return Err(PersistenceError::invalid_input(format!(
+            "inventory rollup page size must be between 1 and {MAX_INVENTORY_ROLLUP_PAGE_SIZE}"
+        )));
+    }
+    if cursor_values.is_some_and(|values| values.iter().any(|value| *value <= 0)) {
+        return Err(PersistenceError::invalid_input(
+            "inventory rollup cursor values must be positive",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_request_validation_rejects_untrusted_direct_inputs() {
+        assert!(validate_page_request(1, None).is_ok());
+        assert!(validate_page_request(1, Some(&[1, 2, 3])).is_ok());
+        assert!(matches!(
+            validate_page_request(0, None),
+            Err(PersistenceError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            validate_page_request(MAX_INVENTORY_ROLLUP_PAGE_SIZE + 1, None),
+            Err(PersistenceError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            validate_page_request(1, Some(&[1, 0, 3])),
+            Err(PersistenceError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn quantity_mapping_rejects_misaligned_database_columns() {
+        assert!(matches!(
+            map_quantity_columns(
+                vec!["each".to_owned()],
+                vec![5],
+                Vec::new(),
+                vec![0],
+                vec![5],
+            ),
+            Err(PersistenceError::InvalidData(_))
+        ));
+    }
 }
