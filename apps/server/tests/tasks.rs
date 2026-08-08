@@ -6,7 +6,6 @@ use common::*;
 use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::{routes, state::AppState};
-use wareboxes_application::CommandContext;
 use wareboxes_core::models::WorkTask;
 
 #[tokio::test]
@@ -477,25 +476,27 @@ async fn cancelled_order_unpack_task_is_facility_scoped_and_deduplicated() {
         .order_header(tenant_id, "CANCEL-TASK-1", inventory_owner)
         .await;
     let order_item_id = fixture.order_item(tenant_id, order_id, item, 3).await;
-    let access = repo::tenants::access_for_user(db, user.id, tenant_id)
+    let mut cancellation_tx = tenant_tx(db, tenant_id).await;
+    sqlx::query("UPDATE orders SET status = 'cancelled' WHERE tenant_id = $1 AND id = $2")
+        .bind(tenant_id.get())
+        .bind(order_id)
+        .execute(&mut *cancellation_tx)
         .await
-        .unwrap()
         .unwrap();
-    let cancel_command = CommandContext {
-        tenant_id,
-        actor_id: access.user_id,
-        request_id: "cancel-task-1".into(),
-        idempotency_key: Some("cancel-task-1".into()),
-    };
-    let unpack_task = repo::orders::cancel_order_with_unpack_task(
+    cancellation_tx.commit().await.unwrap();
+    let unpack_task = repo::tasks::create_unpack_cancelled_order_task(
         db,
-        &access,
-        &cancel_command,
+        tenant_id,
+        Some(user.id),
         order_id,
         facility,
+        None,
+        None,
+        None,
+        None,
+        Some("Legacy unpack task test fixture".to_owned()),
     )
     .await
-    .unwrap()
     .unwrap();
     let duplicate = repo::tasks::create_unpack_cancelled_order_task(
         db,
@@ -512,22 +513,22 @@ async fn cancelled_order_unpack_task_is_facility_scoped_and_deduplicated() {
     .await
     .unwrap();
     assert_eq!(duplicate, unpack_task);
-    let retry_command = CommandContext {
-        request_id: "cancel-task-2".into(),
-        idempotency_key: Some("cancel-task-2".into()),
-        ..cancel_command
-    };
     assert_eq!(
-        repo::orders::cancel_order_with_unpack_task(
+        repo::tasks::create_unpack_cancelled_order_task(
             db,
-            &access,
-            &retry_command,
+            tenant_id,
+            Some(user.id),
             order_id,
             facility,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap(),
-        Some(unpack_task)
+        unpack_task
     );
 
     let tasks = repo::tasks::get_tasks(

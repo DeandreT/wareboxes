@@ -266,14 +266,6 @@ pub struct OrderIdRequest {
     pub order_id: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct CancelOrder {
-    #[validate(range(min = 1, message = "Invalid order ID"))]
-    pub order_id: i64,
-    #[validate(range(min = 1, message = "Invalid facility ID"))]
-    pub facility_id: i64,
-}
-
 // ---------------------------------------------------------------------------
 // Items
 // ---------------------------------------------------------------------------
@@ -787,20 +779,6 @@ pub struct CreateBreakMasterPackTask {
     pub location_id: i64,
     #[validate(range(min = 1, message = "Quantity must be positive"))]
     pub qty: i64,
-    #[validate(range(min = 0, message = "Priority must be zero or greater"))]
-    pub priority: Option<i64>,
-    pub assigned_user_id: Option<i64>,
-    pub scheduled_for: Option<Timestamp>,
-    pub due_at: Option<Timestamp>,
-    pub instructions: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
-pub struct CreateUnpackCancelledOrderTask {
-    #[validate(range(min = 1, message = "Invalid order ID"))]
-    pub order_id: i64,
-    #[validate(range(min = 1, message = "Invalid facility ID"))]
-    pub facility_id: i64,
     #[validate(range(min = 0, message = "Priority must be zero or greater"))]
     pub priority: Option<i64>,
     pub assigned_user_id: Option<i64>,

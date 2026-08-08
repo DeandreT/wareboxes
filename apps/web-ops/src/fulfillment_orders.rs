@@ -7,12 +7,13 @@ use wareboxes_api_contract::v1::{
     ReleaseOrderHoldRequest,
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
-use wareboxes_core::dto::{CancelOrder, OrderPage, OrderUpdate};
+use wareboxes_core::dto::{OrderPage, OrderUpdate};
 use wareboxes_core::models::{Order, OrderStatus};
 
 use crate::api;
 use crate::components::{Icon, SearchField, UiIcon};
 use crate::fulfillment_order_allocation::OrderAllocationPanel;
+use crate::fulfillment_order_cancellation::OrderCancellationPanel;
 use crate::fulfillment_shared::{
     cmp_option_str, optional_text, order_destination, order_status_class, parse_optional_timestamp,
     query_encode, short_timestamp, timestamp_input,
@@ -954,6 +955,7 @@ fn OrderDetailPanel(
 ) -> impl IntoView {
     let tab = RwSignal::new(OrderDetailTab::Header);
     let order_id = order.id;
+    let cancellation_order_key = StoredValue::new(order.order_key.clone());
     let order_key = RwSignal::new(order.order_key.clone());
     let rush = RwSignal::new(order.rush);
     let ship_by = RwSignal::new(timestamp_input(order.ship_by));
@@ -971,11 +973,6 @@ fn OrderDetailPanel(
     let hold_note = RwSignal::new(String::new());
     let release_candidate = RwSignal::new(None::<i64>);
     let release_note = RwSignal::new(String::new());
-    let facility_id = RwSignal::new(
-        facilities
-            .first()
-            .map_or_else(String::new, |facility| facility.id.to_string()),
-    );
     let reservation_item_names = StoredValue::new(
         order
             .order_items
@@ -1046,49 +1043,6 @@ fn OrderDetailPanel(
                         "The order could not be updated in its current state.".to_owned(),
                     ));
                     command_pending.set(false);
-                }
-                Err(api_error) if api_error.unauthorized => on_unauthorized.run(()),
-                Err(api_error) => {
-                    toasts.error(api_error.message.clone());
-                    command_error.set(Some(api_error.message));
-                    command_pending.set(false);
-                }
-            }
-        });
-    };
-
-    let cancel = move |_| {
-        if command_pending.get_untracked() {
-            return;
-        }
-        let Ok(selected_facility) = facility_id.get_untracked().parse::<i64>() else {
-            command_error.set(Some(
-                "Choose the facility that will handle returned stock.".to_owned(),
-            ));
-            return;
-        };
-        command_pending.set(true);
-        command_error.set(None);
-        let request = CancelOrder {
-            order_id,
-            facility_id: selected_facility,
-        };
-        let idempotency_key = api::new_idempotency_key();
-        leptos::task::spawn_local(async move {
-            match api::internal_post_idempotent::<_, i64>(
-                "/api/orders/cancel",
-                &request,
-                &idempotency_key,
-            )
-            .await
-            {
-                Ok(task_id) => {
-                    cancel_open.set(false);
-                    command_pending.set(false);
-                    toasts.success(format!(
-                        "Order cancellation accepted. Recovery task #{task_id} created."
-                    ));
-                    on_refreshed.run(order_id);
                 }
                 Err(api_error) if api_error.unauthorized => on_unauthorized.run(()),
                 Err(api_error) => {
@@ -1341,8 +1295,12 @@ fn OrderDetailPanel(
                                 <button
                                     class="button danger-action"
                                     type="button"
-                                    on:click=move |_| cancel_open.set(true)
+                                    on:click=move |_| {
+                                        hold_open.set(false);
+                                        cancel_open.set(true);
+                                    }
                                 >
+                                    <Icon icon=UiIcon::Alert/>
                                     "Cancel order"
                                 </button>
                             }
@@ -1396,42 +1354,14 @@ fn OrderDetailPanel(
                         </section>
                     </Show>
                     <Show when=move || cancel_open.get()>
-                        <section class="confirmation-panel" role="alertdialog" aria-labelledby="cancel-order-title">
-                            <h3 id="cancel-order-title">"Cancel this order?"</h3>
-                            <p>"Reserved or staged stock will be assigned to a recovery task. This action cannot be undone here."</p>
-                            <label>
-                                <span>"Recovery facility"</span>
-                                <select
-                                    prop:value=move || facility_id.get()
-                                    on:change=move |event| facility_id.set(event_target_value(&event))
-                                >
-                                    {facilities
-                                        .get_value()
-                                        .into_iter()
-                                        .map(|facility| {
-                                            view! { <option value=facility.id>{facility.name}</option> }
-                                        })
-                                        .collect_view()}
-                                </select>
-                            </label>
-                            <div class="form-actions">
-                                <button
-                                    type="button"
-                                    class="button danger-action"
-                                    disabled=move || command_pending.get()
-                                    on:click=cancel
-                                >
-                                    "Confirm cancellation"
-                                </button>
-                                <button
-                                    type="button"
-                                    class="button secondary-action"
-                                    on:click=move |_| cancel_open.set(false)
-                                >
-                                    "Keep order"
-                                </button>
-                            </div>
-                        </section>
+                        <OrderCancellationPanel
+                            order_id
+                            order_key=cancellation_order_key.get_value()
+                            revision=order.revision
+                            on_close=Callback::new(move |_| cancel_open.set(false))
+                            on_refreshed
+                            on_unauthorized
+                        />
                     </Show>
                 </form>
             </Show>
@@ -1786,13 +1716,7 @@ fn request_order_detail(
 }
 
 fn can_cancel_order(status: OrderStatus) -> bool {
-    matches!(
-        status,
-        OrderStatus::Open
-            | OrderStatus::Held
-            | OrderStatus::Processing
-            | OrderStatus::AwaitingShipment
-    )
+    matches!(status, OrderStatus::Open | OrderStatus::Held)
 }
 
 fn can_place_order_hold(status: OrderStatus) -> bool {
@@ -1844,7 +1768,9 @@ mod tests {
     #[test]
     fn cancellation_is_not_offered_for_terminal_orders() {
         assert!(can_cancel_order(OrderStatus::Open));
-        assert!(can_cancel_order(OrderStatus::Processing));
+        assert!(can_cancel_order(OrderStatus::Held));
+        assert!(!can_cancel_order(OrderStatus::Processing));
+        assert!(!can_cancel_order(OrderStatus::AwaitingShipment));
         assert!(!can_cancel_order(OrderStatus::Shipped));
         assert!(!can_cancel_order(OrderStatus::Cancelled));
         assert!(!can_cancel_order(OrderStatus::Void));

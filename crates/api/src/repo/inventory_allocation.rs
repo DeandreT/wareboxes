@@ -275,11 +275,12 @@ struct LockedAllocation {
     qty: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CancelledOrderCommitments {
     pub reservation_count: usize,
     pub allocation_count: usize,
     pub released_quantity: i64,
+    pub affected_facility_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -643,6 +644,15 @@ pub(crate) async fn cancel_order_commitments_tx(
         reservation_count: reservations.len(),
         allocation_count: allocations.len(),
         released_quantity,
+        affected_facility_ids: {
+            let mut facility_ids = reservations
+                .iter()
+                .map(|(_, reservation)| reservation.facility_id)
+                .collect::<Vec<_>>();
+            facility_ids.sort_unstable();
+            facility_ids.dedup();
+            facility_ids
+        },
     })
 }
 

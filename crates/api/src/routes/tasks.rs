@@ -3,12 +3,11 @@ use axum::Json;
 use serde::Deserialize;
 use wareboxes_core::dto::{
     AssignWorkTask, CompleteWorkTask, ConfirmItemLocationCycleCount, CreateBreakMasterPackTask,
-    CreateItemLocationCycleCountTask, CreateLocationCycleCountTask, CreateUnpackCancelledOrderTask,
-    RecordWorkTaskProgress, StartNextWorkTask, WorkTaskIdRequest,
+    CreateItemLocationCycleCountTask, CreateLocationCycleCountTask, RecordWorkTaskProgress,
+    StartNextWorkTask, WorkTaskIdRequest,
 };
 use wareboxes_core::models::{
-    ItemLocationCycleCountConfirmation, UnpackCancelledOrderTaskLine, WorkTask, WorkTaskStatus,
-    WorkTaskType,
+    ItemLocationCycleCountConfirmation, WorkTask, WorkTaskStatus, WorkTaskType,
 };
 
 use crate::auth::CurrentTenant;
@@ -30,11 +29,6 @@ pub struct WorkTaskListQuery {
     pub order_id: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct WorkTaskLinesQuery {
-    pub task_id: i64,
-}
-
 pub async fn list(
     State(state): State<AppState>,
     user: CurrentTenant,
@@ -53,25 +47,6 @@ pub async fn list(
                 location_id: q.location_id,
                 order_id: q.order_id,
             },
-        )
-        .await?,
-    ))
-}
-
-pub async fn list_unpack_cancelled_order_lines(
-    State(state): State<AppState>,
-    user: CurrentTenant,
-    Query(q): Query<WorkTaskLinesQuery>,
-) -> AppResult<Json<Vec<UnpackCancelledOrderTaskLine>>> {
-    user.require_permission(&state.db, PERM).await?;
-    if q.task_id <= 0 {
-        return Err(AppError::bad_request("invalid task ID"));
-    }
-    Ok(Json(
-        repo::tasks::get_unpack_cancelled_order_task_lines_in_scope(
-            &state.db,
-            &user.tenant,
-            q.task_id,
         )
         .await?,
     ))
@@ -168,32 +143,6 @@ pub async fn create_break_master_pack(
             body.single_item_id,
             body.location_id,
             body.qty,
-            body.priority,
-            body.assigned_user_id,
-            body.scheduled_for,
-            body.due_at,
-            body.instructions,
-        )
-        .await?,
-    ))
-}
-
-pub async fn create_unpack_cancelled_order(
-    State(state): State<AppState>,
-    user: CurrentTenant,
-    idempotency_key: IdempotencyKey,
-    Json(body): Json<CreateUnpackCancelledOrderTask>,
-) -> AppResult<Json<i64>> {
-    user.require_permission(&state.db, PERM).await?;
-    validate(&body)?;
-    let command = user.command_context(&idempotency_key);
-    Ok(Json(
-        repo::tasks::create_unpack_cancelled_order_task_in_scope(
-            &state.db,
-            &user.tenant,
-            &command,
-            body.order_id,
-            body.facility_id,
             body.priority,
             body.assigned_user_id,
             body.scheduled_for,

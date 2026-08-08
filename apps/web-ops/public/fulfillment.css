@@ -532,6 +532,83 @@
   font-weight: 500;
 }
 
+.order-cancellation-panel {
+  gap: 7px;
+  padding: 9px;
+}
+
+.order-cancellation-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.order-cancellation-heading > .ui-icon {
+  flex: 0 0 auto;
+  color: var(--red);
+}
+
+.order-cancellation-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.order-cancellation-heading span {
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 9px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.order-cancellation-panel .order-cancellation-warning {
+  padding: 5px 7px;
+  border: 1px solid #d7a9ac;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 620;
+}
+
+.order-cancellation-fields {
+  display: grid;
+  grid-template-columns: minmax(142px, 0.42fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+}
+
+.order-cancellation-fields textarea {
+  min-height: 54px;
+}
+
+.order-cancellation-error {
+  margin: 0;
+}
+
+.order-cancellation-retry-note {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.order-cancellation-panel .form-actions {
+  padding-top: 6px;
+}
+
+.order-cancellation-panel .danger-action {
+  border-color: #a9363b;
+  background: var(--red);
+  color: #fff;
+}
+
+.order-cancellation-panel .danger-action:hover:not(:disabled) {
+  background: #9e3338;
+  color: #fff;
+}
+
 .order-hold-panel {
   border-color: #d6b66c;
   border-left-color: #a66b00;

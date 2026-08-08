@@ -65,31 +65,20 @@ async fn response_json<T: serde::de::DeserializeOwned>(response: axum::response:
 async fn cancel_order(
     db: &db::Db,
     tenant_id: TenantId,
-    user_id: i64,
+    _user_id: i64,
     order_id: i64,
-    facility_id: i64,
+    _facility_id: i64,
 ) {
-    let access = repo::tenants::access_for_user(db, user_id, tenant_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let operation_id = NEXT_IDEMPOTENCY_KEY.fetch_add(1, Ordering::Relaxed);
-    let command = CommandContext {
-        tenant_id,
-        actor_id: access.user_id,
-        request_id: format!("task-scope-cancel-{operation_id}"),
-        idempotency_key: Some(format!("task-scope-cancel-{operation_id}")),
-    };
-    assert!(repo::orders::cancel_order_with_unpack_task(
-        db,
-        &access,
-        &command,
-        order_id,
-        facility_id,
-    )
-    .await
-    .unwrap()
-    .is_some());
+    let mut tx = tenant_tx(db, tenant_id).await;
+    let updated =
+        sqlx::query("UPDATE orders SET status = 'cancelled' WHERE tenant_id = $1 AND id = $2")
+            .bind(tenant_id.get())
+            .bind(order_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(updated.rows_affected(), 1);
 }
 
 #[tokio::test]
@@ -577,8 +566,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         Some(json!({"order_id": allowed_order, "facility_id": allowed_facility})),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response_json::<i64>(response).await, allowed_owner_task);
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     let response = send_api(
         &app,
         &token,
@@ -588,7 +576,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         Some(json!({"order_id": denied_order, "facility_id": denied_facility})),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
 
     let response = send_api(
         &app,
@@ -599,8 +587,7 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         None,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(response_json::<Vec<Value>>(response).await.is_empty());
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     let response = send_api(
         &app,

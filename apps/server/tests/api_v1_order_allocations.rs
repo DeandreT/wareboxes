@@ -14,9 +14,10 @@ use wareboxes_api_contract::v1::{
     OrderAllocationReadinessStatus, OrderAllocationStrategy, PlanOrderAllocationRequest,
     PlanOrderAllocationResponse, Revision,
 };
+use wareboxes_application::order_cancellation::CancelOrderCommand;
 use wareboxes_application::CommandContext;
 use wareboxes_core::dto::UpdateUserAccessScope;
-use wareboxes_domain::OrderHoldReason;
+use wareboxes_domain::{OrderCancellationReason, OrderHoldReason, OrderId, OrderRevision};
 
 fn api_request<T: Serialize>(
     token: &str,
@@ -638,16 +639,22 @@ async fn order_allocation_is_fefo_replay_safe_replenishable_and_cancel_safe() {
         OrderAllocationReadinessStatus::AlreadyFullyAllocated
     );
 
-    let task_id = repo::orders::cancel_order_with_unpack_task(
+    let cancellation_command = CancelOrderCommand::new(
+        OrderId::new(shortage_order_id).unwrap(),
+        OrderRevision::new(shortage_second.revision.get()).unwrap(),
+        OrderCancellationReason::ClientRequest,
+        None,
+    )
+    .unwrap();
+    let cancellation = repo::order_cancellation::cancel_order(
         &fixture.db,
         &access,
         &command_context(&access, "cancel-allocated-order"),
-        shortage_order_id,
-        facility_id,
+        &cancellation_command,
     )
     .await
     .unwrap();
-    assert!(task_id.is_some());
+    assert_eq!(cancellation.released_allocation_count, 2);
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let cancellation_state: (String, i64, i64, i64, i64, i64) = sqlx::query_as(
         r#"

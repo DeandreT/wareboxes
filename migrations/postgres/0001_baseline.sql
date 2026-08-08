@@ -1869,6 +1869,20 @@ $$;
 
 
 --
+-- Name: reject_order_cancellation_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_order_cancellation_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'order cancellation records are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
 -- Name: reject_license_plate_putaway_content_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5556,6 +5570,56 @@ ALTER TABLE ONLY public.order_allocation_run_lines FORCE ROW LEVEL SECURITY;
 
 
 --
+-- Name: order_cancellations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.order_cancellations (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    actor_user_id bigint NOT NULL,
+    occurred_at timestamp with time zone NOT NULL,
+    reason text NOT NULL,
+    note text,
+    previous_status text NOT NULL,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    affected_facility_ids bigint[] DEFAULT '{}'::bigint[] NOT NULL,
+    released_hold_count bigint NOT NULL,
+    released_reservation_count bigint NOT NULL,
+    released_allocation_count bigint NOT NULL,
+    released_quantity bigint NOT NULL,
+    CONSTRAINT order_cancellations_affected_facilities_check CHECK ((array_position(affected_facility_ids, NULL::bigint) IS NULL) AND (0 < ALL (affected_facility_ids))),
+    CONSTRAINT order_cancellations_note_check CHECK (((note IS NULL) OR ((note = btrim(note)) AND (note <> ''::text) AND (char_length(note) <= 1000)))),
+    CONSTRAINT order_cancellations_other_note_check CHECK (((reason <> 'other'::text) OR (note IS NOT NULL))),
+    CONSTRAINT order_cancellations_previous_status_check CHECK ((previous_status = ANY (ARRAY['open'::text, 'held'::text]))),
+    CONSTRAINT order_cancellations_reason_check CHECK ((reason = ANY (ARRAY['client_request'::text, 'duplicate_order'::text, 'data_correction'::text, 'inventory_unavailable'::text, 'fulfillment_exception'::text, 'other'::text]))),
+    CONSTRAINT order_cancellations_released_allocation_count_check CHECK (released_allocation_count >= 0),
+    CONSTRAINT order_cancellations_released_hold_count_check CHECK (released_hold_count >= 0),
+    CONSTRAINT order_cancellations_released_quantity_check CHECK (released_quantity >= 0),
+    CONSTRAINT order_cancellations_released_reservation_count_check CHECK (released_reservation_count >= 0),
+    CONSTRAINT order_cancellations_revision_check CHECK ((expected_revision > 0) AND (resulting_revision = (expected_revision + 1)))
+);
+
+ALTER TABLE ONLY public.order_cancellations FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: order_cancellations_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_cancellations ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.order_cancellations_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: order_holds; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7325,6 +7389,30 @@ ALTER TABLE ONLY public.order_allocation_run_lines
 
 
 --
+-- Name: order_cancellations order_cancellations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_cancellations
+    ADD CONSTRAINT order_cancellations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: order_cancellations order_cancellations_tenant_owner_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_cancellations
+    ADD CONSTRAINT order_cancellations_tenant_owner_id_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: order_cancellations order_cancellations_tenant_owner_order_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_cancellations
+    ADD CONSTRAINT order_cancellations_tenant_owner_order_key UNIQUE (tenant_id, inventory_owner_id, order_id);
+
+
+--
 -- Name: order_holds order_holds_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -8199,6 +8287,20 @@ CREATE INDEX idx_order_allocation_run_lines_order ON public.order_allocation_run
 
 
 --
+-- Name: idx_order_cancellations_actor; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_order_cancellations_actor ON public.order_cancellations USING btree (tenant_id, actor_user_id, occurred_at DESC, id DESC);
+
+
+--
+-- Name: idx_order_cancellations_tenant_history; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_order_cancellations_tenant_history ON public.order_cancellations USING btree (tenant_id, occurred_at DESC, id DESC);
+
+
+--
 -- Name: idx_order_holds_order_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -8973,6 +9075,13 @@ CREATE TRIGGER order_allocation_runs_are_immutable BEFORE DELETE OR UPDATE ON pu
 --
 
 CREATE TRIGGER order_allocation_run_lines_are_immutable BEFORE DELETE OR UPDATE ON public.order_allocation_run_lines FOR EACH ROW EXECUTE FUNCTION public.reject_order_allocation_run_mutation();
+
+
+--
+-- Name: order_cancellations order_cancellations_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER order_cancellations_are_immutable BEFORE DELETE OR UPDATE ON public.order_cancellations FOR EACH ROW EXECUTE FUNCTION public.reject_order_cancellation_mutation();
 
 
 --
@@ -11106,6 +11215,38 @@ ALTER TABLE ONLY public.order_allocation_run_lines
 
 
 --
+-- Name: order_cancellations order_cancellations_tenant_id_actor_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_cancellations
+    ADD CONSTRAINT order_cancellations_tenant_id_actor_user_id_fkey FOREIGN KEY (tenant_id, actor_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: order_cancellations order_cancellations_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_cancellations
+    ADD CONSTRAINT order_cancellations_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: order_cancellations order_cancellations_tenant_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_cancellations
+    ADD CONSTRAINT order_cancellations_tenant_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: order_cancellations order_cancellations_tenant_owner_order_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_cancellations
+    ADD CONSTRAINT order_cancellations_tenant_owner_order_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES public.orders(tenant_id, inventory_owner_id, id);
+
+
+--
 -- Name: order_holds order_holds_tenant_id_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -12588,6 +12729,19 @@ CREATE POLICY order_allocation_run_lines_tenant_isolation ON public.order_alloca
 
 
 --
+-- Name: order_cancellations; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_cancellations ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: order_cancellations order_cancellations_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY order_cancellations_tenant_isolation ON public.order_cancellations USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
 -- Name: order_holds; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -13133,6 +13287,13 @@ REVOKE ALL ON FUNCTION public.reject_license_plate_putaway_result_mutation() FRO
 --
 
 REVOKE ALL ON FUNCTION public.reject_order_allocation_run_mutation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION reject_order_cancellation_mutation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.reject_order_cancellation_mutation() FROM PUBLIC;
 
 
 --
@@ -13829,6 +13990,20 @@ GRANT USAGE ON SEQUENCE public.order_allocation_runs_id_seq TO wareboxes_app;
 --
 
 GRANT SELECT,INSERT ON TABLE public.order_allocation_run_lines TO wareboxes_app;
+
+
+--
+-- Name: TABLE order_cancellations; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.order_cancellations TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE order_cancellations_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.order_cancellations_id_seq TO wareboxes_app;
 
 
 --

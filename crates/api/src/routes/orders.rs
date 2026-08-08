@@ -1,7 +1,7 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
-use wareboxes_core::dto::{CancelOrder, OrderIdRequest, OrderPage, OrderUpdate};
+use wareboxes_core::dto::{OrderIdRequest, OrderPage, OrderUpdate};
 use wareboxes_core::models::{Order, OrderStatus};
 
 use crate::auth::CurrentTenant;
@@ -67,28 +67,6 @@ pub async fn update(
     let command = user.command_context(&idempotency_key);
     let ok = repo::orders::update_order_metadata(&state.db, &user.tenant, &command, &body).await?;
     Ok(Json(ok))
-}
-
-pub async fn cancel(
-    State(state): State<AppState>,
-    user: CurrentTenant,
-    idempotency_key: IdempotencyKey,
-    Json(body): Json<CancelOrder>,
-) -> AppResult<Json<i64>> {
-    user.require_permission(&state.db, PERM).await?;
-    validate(&body)?;
-    user.require_facility(body.facility_id)?;
-    let command = user.command_context(&idempotency_key);
-    let task_id = repo::orders::cancel_order_with_unpack_task(
-        &state.db,
-        &user.tenant,
-        &command,
-        body.order_id,
-        body.facility_id,
-    )
-    .await?
-    .ok_or_else(|| AppError::conflict("order cannot be cancelled"))?;
-    Ok(Json(task_id))
 }
 
 pub async fn delete(

@@ -107,7 +107,6 @@ pub fn app(state: AppState) -> Router {
         .route("/orders", get(orders::list))
         .route("/orders/{order_id}", get(orders::get))
         .route("/orders/update", post(orders::update))
-        .route("/orders/cancel", post(orders::cancel))
         .route("/orders/delete", post(orders::delete))
         .route("/orders/restore", post(orders::restore))
         // WMS catalog / locations
@@ -212,14 +211,6 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/tasks/break-master-packs/add",
             post(tasks::create_break_master_pack),
-        )
-        .route(
-            "/tasks/unpack-cancelled-orders/add",
-            post(tasks::create_unpack_cancelled_order),
-        )
-        .route(
-            "/tasks/unpack-cancelled-orders/lines",
-            get(tasks::list_unpack_cancelled_order_lines),
         )
         .route("/tasks/assign", post(tasks::assign))
         .route("/tasks/start-next", post(tasks::start_next))
