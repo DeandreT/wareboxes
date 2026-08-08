@@ -1,6 +1,7 @@
 #[cfg(target_arch = "wasm32")]
 use wareboxes_api_contract::v1::ReleaseInventoryHoldRequest;
 use wareboxes_api_contract::v1::{
+    AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
     CancelOrderRequest, CancelOrderResponse, CloseCartonRequest, CloseCartonResponse,
     ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,
     CreateCartonRequest, CreateCartonResponse, CreateFulfillmentOrderRequest,
@@ -49,6 +50,7 @@ mod browser {
     use wareboxes_core::dto::{LoginRequest, SelectTenantRequest};
 
     use super::{
+        AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
         AccessScopeWorkspace, ApiError, CancelOrderRequest, CancelOrderResponse,
         CloseCartonRequest, CloseCartonResponse, ConfigureFacilityShippingOriginRequest,
         ConfigureFacilityShippingOriginResponse, CreateCartonRequest, CreateCartonResponse,
@@ -453,6 +455,19 @@ mod browser {
         .await
     }
 
+    pub async fn accept_pick_shortage_as_short_ship(
+        shortage_id: i64,
+        request: &AcceptPickShortageAsShortShipRequest,
+        idempotency_key: &str,
+    ) -> Result<AcceptPickShortageAsShortShipResponse, ApiError> {
+        post(
+            &format!("/api/v1/pick-shortages/{shortage_id}/short-ship-dispositions"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
     pub fn new_idempotency_key() -> String {
         uuid::Uuid::new_v4().to_string()
     }
@@ -829,6 +844,15 @@ pub async fn reallocate_pick_shortage(
     _request: &ReallocatePickShortageRequest,
     _idempotency_key: &str,
 ) -> Result<ReallocatePickShortageResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn accept_pick_shortage_as_short_ship(
+    _shortage_id: i64,
+    _request: &AcceptPickShortageAsShortShipRequest,
+    _idempotency_key: &str,
+) -> Result<AcceptPickShortageAsShortShipResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

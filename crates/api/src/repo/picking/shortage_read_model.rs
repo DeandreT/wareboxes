@@ -8,7 +8,8 @@ use wareboxes_domain::{
     ActualPickQuantity, FacilityId, InventoryBalanceId, InventoryHoldId, InventoryOwnerId,
     LicensePlateId, LocationId, OrderId, OrderLineId, OrderRevision, PickContentId, PickQuantity,
     PickScanValue, PickShortageDetails, PickShortageId, PickShortageNote, PickShortageQuantities,
-    PickShortageReason, PickShortageRevision, PickShortageStatus, PickTaskId, UserId,
+    PickShortageReason, PickShortageResolution, PickShortageRevision, PickShortageStatus,
+    PickTaskId, UserId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, Db};
 
@@ -16,7 +17,7 @@ use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, require_permission_tx, ScopeBindings};
 
 const SHORTAGE_SELECT: &str = r#"
-    SELECT shortage.id, shortage.revision, shortage.status,
+    SELECT shortage.id, shortage.revision, shortage.status, shortage.resolution,
            shortage.inventory_owner_id, inventory_owner.name AS inventory_owner_name,
            shortage.facility_id, facility.name AS facility_name,
            shortage.order_id, order_header.order_key, order_header.revision AS order_revision,
@@ -30,7 +31,8 @@ const SHORTAGE_SELECT: &str = r#"
            shortage.uom, batch.lot, batch.serial, batch.expiration,
            shortage.planned_qty, shortage.picked_qty, shortage.short_qty,
            shortage.reallocated_qty, shortage.recovery_terminal_qty,
-           shortage.remaining_to_allocate_qty, shortage.observed_item_barcode,
+           shortage.remaining_to_allocate_qty, shortage.accepted_short_qty,
+           shortage.observed_item_barcode,
            shortage.observed_lot, shortage.observed_serial,
            shortage.reason_code, shortage.note, shortage.inventory_hold_id,
            shortage.source_inventory_balance_id AS hold_balance_id,
@@ -185,6 +187,13 @@ fn map_shortage(
     }
     let status = PickShortageStatus::parse(&row.try_get::<String, _>("status")?)
         .ok_or_else(|| AppError::internal("pick shortage has invalid status"))?;
+    let resolution = row
+        .try_get::<Option<String>, _>("resolution")?
+        .map(|value| {
+            PickShortageResolution::parse(&value)
+                .ok_or_else(|| AppError::internal("pick shortage has invalid resolution"))
+        })
+        .transpose()?;
     let reason = PickShortageReason::parse(&row.try_get::<String, _>("reason_code")?)
         .ok_or_else(|| AppError::internal("pick shortage has invalid reason"))?;
     let note = row
@@ -211,6 +220,7 @@ fn map_shortage(
         shortage_revision: PickShortageRevision::new(row.try_get("revision")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
         status,
+        resolution,
         inventory_owner_id: InventoryOwnerId::new(owner_id)
             .map_err(|error| AppError::internal(error.to_string()))?,
         inventory_owner_name: row.try_get("inventory_owner_name")?,
@@ -265,6 +275,8 @@ fn map_shortage(
             row.try_get("remaining_to_allocate_qty")?,
         )
         .map_err(|error| AppError::internal(error.to_string()))?,
+        accepted_short_quantity: ActualPickQuantity::new(row.try_get("accepted_short_qty")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
         observed_item_barcode: optional_scan(&row, "observed_item_barcode")?,
         observed_lot: optional_scan(&row, "observed_lot")?,
         observed_serial: optional_scan(&row, "observed_serial")?,

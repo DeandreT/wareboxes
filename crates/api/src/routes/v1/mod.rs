@@ -200,6 +200,10 @@ pub fn router() -> Router<AppState> {
             post(pick_shortages::reallocate),
         )
         .route(
+            "/pick-shortages/{shortage_id}/short-ship-dispositions",
+            post(pick_shortages::accept_short_shipment),
+        )
+        .route(
             "/inventory-owners/{inventory_owner_id}/order-entry-items",
             get(orders::entry_items),
         )

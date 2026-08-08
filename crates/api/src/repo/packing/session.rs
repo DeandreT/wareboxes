@@ -15,6 +15,7 @@ use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, require_permission_tx};
 use crate::repo::inventory_locking;
 use crate::repo::orders::insert_order_activity_tx;
+use crate::repo::picking::order_pick_readiness_tx;
 
 use super::read_model::load_session_tx;
 use super::{enqueue_order_event_tx, lock_order_tx, require_replayed_session_visible_tx};
@@ -417,46 +418,12 @@ async fn require_all_picks_complete_tx(
     staged_allocation_count: i64,
     staged_quantity: i64,
 ) -> AppResult<()> {
-    let row = sqlx::query(
-        r#"
-        SELECT
-            EXISTS (
-                SELECT 1 FROM pick_tasks task
-                WHERE task.tenant_id = $1 AND task.inventory_owner_id = $2
-                  AND task.order_id = $3 AND task.status IN ('open', 'in_progress')
-            ) AS has_executable_work,
-            EXISTS (
-                SELECT 1 FROM pick_shortages shortage
-                WHERE shortage.tenant_id = $1 AND shortage.inventory_owner_id = $2
-                  AND shortage.order_id = $3 AND shortage.status <> 'resolved'
-            ) AS has_unresolved_shortage,
-            COALESCE((
-                SELECT SUM(item.qty)::BIGINT FROM order_items item
-                WHERE item.tenant_id = $1 AND item.inventory_owner_id = $2
-                  AND item.order_id = $3 AND item.deleted IS NULL
-            ), 0) AS demand_quantity,
-            (SELECT COUNT(*) FROM pick_confirmations confirmation
-             INNER JOIN inventory_allocations allocation
-               ON allocation.tenant_id = confirmation.tenant_id
-              AND allocation.inventory_owner_id = confirmation.inventory_owner_id
-              AND allocation.id = confirmation.destination_inventory_allocation_id
-              AND allocation.status = 'allocated'
-              AND allocation.execution_stage = 'staged'
-              AND allocation.deleted IS NULL
-             WHERE confirmation.tenant_id = $1
-               AND confirmation.inventory_owner_id = $2
-               AND confirmation.order_id = $3) AS staged_count
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(owner_id.get())
-    .bind(order_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    if row.try_get::<bool, _>("has_executable_work")?
-        || row.try_get::<bool, _>("has_unresolved_shortage")?
-        || row.try_get::<i64, _>("demand_quantity")? != staged_quantity
-        || row.try_get::<i64, _>("staged_count")? != staged_allocation_count
+    let order_id = wareboxes_domain::OrderId::new(order_id)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let readiness = order_pick_readiness_tx(tx, tenant_id, owner_id, order_id).await?;
+    if !readiness.is_ready_to_pack()
+        || readiness.staged_quantity != staged_quantity
+        || readiness.staged_allocation_count != staged_allocation_count
     {
         return Err(AppError::conflict("all picks must complete before packing"));
     }

@@ -45,10 +45,12 @@ pub use packing::{
     PackSessionStatus, PackingError, PackingProgress, WeightGrams, MAX_PACK_SCAN_VALUE_LENGTH,
 };
 pub use picking::{
-    ActualPickQuantity, PickClaimReleaseReason, PickContentState, PickQuantity, PickScanValue,
-    PickShortageDetails, PickShortageNote, PickShortageQuantities, PickShortageReason,
-    PickShortageRevision, PickShortageStatus, PickingError, MAX_PICK_SCAN_VALUE_LENGTH,
-    MAX_PICK_SHORTAGE_NOTE_LENGTH,
+    resolve_pick_shortage_as_short_ship, ActualPickQuantity, PickClaimReleaseReason,
+    PickContentState, PickQuantity, PickScanValue, PickShortShipDetails, PickShortShipNote,
+    PickShortShipReason, PickShortShipTransition, PickShortageDetails, PickShortageNote,
+    PickShortageQuantities, PickShortageReason, PickShortageResolution, PickShortageRevision,
+    PickShortageStatus, PickingError, ShortShipDemandQuantities, MAX_PICK_SCAN_VALUE_LENGTH,
+    MAX_PICK_SHORTAGE_NOTE_LENGTH, MAX_PICK_SHORT_SHIP_NOTE_LENGTH,
 };
 pub use shipping::{
     confirm_shipment_departure, create_shipment, record_manual_manifest, CarrierCode,
@@ -134,6 +136,7 @@ positive_id!(OrderReleaseId, "order release ID");
 positive_id!(PickTaskId, "pick task ID");
 positive_id!(PickContentId, "pick content ID");
 positive_id!(PickShortageId, "pick shortage ID");
+positive_id!(PickShortageDispositionId, "pick shortage disposition ID");
 positive_id!(
     PickShortageReallocationRunId,
     "pick shortage reallocation run ID"

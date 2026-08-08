@@ -178,6 +178,24 @@ pub enum PickShortageStatus {
     Resolved,
 }
 
+/// Durable terminal outcome of a resolved pick-shortage exception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickShortageResolution {
+    Recovered,
+    ShortShip,
+}
+
+/// Business reason for accepting unmet demand as a short shipment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickShortShipReason {
+    ClientAuthorized,
+    InventoryUnavailable,
+    ShipByCommitment,
+    Other,
+}
+
 /// Physical execution stage of a replacement allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -349,6 +367,55 @@ pub struct ReallocatePickShortageResponse {
     pub executed_at: String,
 }
 
+/// Optimistic request to accept the server-derived unmet quantity for shipment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptPickShortageAsShortShipRequest {
+    pub expected_shortage_revision: Revision,
+    pub expected_order_revision: Revision,
+    pub reason: PickShortShipReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Conserved original, accepted-short, and effective executable demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShortShipDemandResponse {
+    pub ordered: i64,
+    pub accepted_short: i64,
+    pub effective: i64,
+}
+
+/// Replay-stable result of accepting one shortage as a short shipment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptPickShortageAsShortShipResponse {
+    pub disposition_id: i64,
+    pub shortage_id: i64,
+    pub previous_shortage_status: PickShortageStatus,
+    pub shortage_status: PickShortageStatus,
+    pub shortage_resolution: PickShortageResolution,
+    pub shortage_revision: Revision,
+    pub order_id: i64,
+    pub order_line_id: i64,
+    pub previous_order_status: PickOrderStatus,
+    pub order_status: PickOrderStatus,
+    pub order_revision: Revision,
+    pub order_ready_to_pack: bool,
+    pub shortage_quantities: PickShortageQuantitiesResponse,
+    pub reallocated_quantity: i64,
+    pub recovery_terminal_quantity: i64,
+    pub accepted_short_quantity: i64,
+    pub line_demand: ShortShipDemandResponse,
+    pub order_demand: ShortShipDemandResponse,
+    pub inventory_hold_id: i64,
+    pub reason: PickShortShipReason,
+    pub note: Option<String>,
+    pub resolved_by: i64,
+    pub resolved_at: String,
+}
+
 /// Scoped filters for the supervisor shortage work queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -375,6 +442,7 @@ pub struct PickShortageResponse {
     pub shortage_id: i64,
     pub shortage_revision: Revision,
     pub status: PickShortageStatus,
+    pub resolution: Option<PickShortageResolution>,
     pub inventory_owner_id: i64,
     pub inventory_owner_name: String,
     pub facility_id: i64,
@@ -401,6 +469,7 @@ pub struct PickShortageResponse {
     pub reallocated_quantity: i64,
     pub recovery_terminal_quantity: i64,
     pub remaining_to_allocate_quantity: i64,
+    pub accepted_short_quantity: i64,
     pub observed_item_barcode: Option<String>,
     pub observed_lot: Option<String>,
     pub observed_serial: Option<String>,
@@ -671,5 +740,98 @@ mod tests {
             "offset": 10
         }))
         .is_err());
+    }
+
+    #[test]
+    fn short_ship_request_is_strict_revisioned_and_has_no_client_quantity() {
+        let request = serde_json::from_value::<AcceptPickShortageAsShortShipRequest>(json!({
+            "expected_shortage_revision": 3,
+            "expected_order_revision": 8,
+            "reason": "client_authorized",
+            "note": "Client approved reduced fulfillment"
+        }))
+        .unwrap();
+        assert_eq!(request.expected_shortage_revision.get(), 3);
+        assert_eq!(request.expected_order_revision.get(), 8);
+        assert_eq!(request.reason, PickShortShipReason::ClientAuthorized);
+
+        assert!(
+            serde_json::from_value::<AcceptPickShortageAsShortShipRequest>(json!({
+                "expected_shortage_revision": 3,
+                "expected_order_revision": 8,
+                "reason": "inventory_unavailable",
+                "note": null,
+                "accepted_short_quantity": 4
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<AcceptPickShortageAsShortShipRequest>(json!({
+                "expected_shortage_revision": 0,
+                "expected_order_revision": 8,
+                "reason": "inventory_unavailable",
+                "note": null
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<AcceptPickShortageAsShortShipRequest>(json!({
+                "expected_shortage_revision": 3,
+                "expected_order_revision": 8,
+                "reason": "supervisor_override",
+                "note": null
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn short_ship_response_exposes_conserved_effective_demand() {
+        let response = AcceptPickShortageAsShortShipResponse {
+            disposition_id: 31,
+            shortage_id: 21,
+            previous_shortage_status: PickShortageStatus::AwaitingInventory,
+            shortage_status: PickShortageStatus::Resolved,
+            shortage_resolution: PickShortageResolution::ShortShip,
+            shortage_revision: Revision::new(4).unwrap(),
+            order_id: 11,
+            order_line_id: 12,
+            previous_order_status: PickOrderStatus::Processing,
+            order_status: PickOrderStatus::AwaitingPacking,
+            order_revision: Revision::new(9).unwrap(),
+            order_ready_to_pack: true,
+            shortage_quantities: PickShortageQuantitiesResponse {
+                planned: 5,
+                picked: 2,
+                short: 3,
+            },
+            reallocated_quantity: 0,
+            recovery_terminal_quantity: 0,
+            accepted_short_quantity: 3,
+            line_demand: ShortShipDemandResponse {
+                ordered: 5,
+                accepted_short: 3,
+                effective: 2,
+            },
+            order_demand: ShortShipDemandResponse {
+                ordered: 12,
+                accepted_short: 3,
+                effective: 9,
+            },
+            inventory_hold_id: 41,
+            reason: PickShortShipReason::InventoryUnavailable,
+            note: None,
+            resolved_by: 51,
+            resolved_at: "2026-08-08T20:00:00Z".into(),
+        };
+
+        let encoded = serde_json::to_value(&response).unwrap();
+        assert_eq!(encoded["shortage_resolution"], "short_ship");
+        assert_eq!(encoded["line_demand"]["effective"], 2);
+        assert_eq!(encoded["order_demand"]["accepted_short"], 3);
+        assert_eq!(
+            serde_json::from_value::<AcceptPickShortageAsShortShipResponse>(encoded).unwrap(),
+            response
+        );
     }
 }

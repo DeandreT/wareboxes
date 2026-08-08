@@ -1,9 +1,14 @@
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
     OpaqueCursor, OrderAllocationStrategy, PickShortagePage, PickShortageReason,
-    PickShortageResponse, PickShortageStatus, ReallocatePickShortageRequest,
+    PickShortageResolution, PickShortageResponse, PickShortageStatus,
+    ReallocatePickShortageRequest,
 };
 use wareboxes_api_contract::web::access::AccessScopeResource;
+
+mod short_ship;
+
+use self::short_ship::{ShortShipConfirmation, ShortShipRetry};
 
 use crate::api;
 use crate::components::{Icon, UiIcon};
@@ -12,6 +17,12 @@ use crate::toast::{use_toast_bus, ToastBus};
 use crate::view_model::format_quantity;
 
 type ReallocationRetry = (i64, ReallocatePickShortageRequest, String);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingShortageCommand {
+    Reallocation(i64),
+    ShortShip(i64),
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ShortageSort {
@@ -47,9 +58,14 @@ struct DetailSignals {
     loading: RwSignal<bool>,
     error: RwSignal<Option<String>>,
     generation: RwSignal<u64>,
-    command_pending: RwSignal<Option<i64>>,
+    command_pending: RwSignal<Option<PendingShortageCommand>>,
     command_error: RwSignal<Option<String>>,
-    retry: RwSignal<Option<ReallocationRetry>>,
+    reallocation_retry: RwSignal<Option<ReallocationRetry>>,
+    short_ship_retry: RwSignal<Option<ShortShipRetry>>,
+    short_ship_open: RwSignal<Option<i64>>,
+    short_ship_reason: RwSignal<String>,
+    short_ship_note: RwSignal<String>,
+    short_ship_error: RwSignal<Option<String>>,
     queue: QueueSignals,
     toasts: ToastBus,
     on_unauthorized: Callback<()>,
@@ -76,9 +92,14 @@ pub(super) fn PickShortageWorkbench(
     let detail_loading = RwSignal::new(false);
     let detail_error = RwSignal::new(None::<String>);
     let detail_generation = RwSignal::new(0_u64);
-    let command_pending = RwSignal::new(None::<i64>);
+    let command_pending = RwSignal::new(None::<PendingShortageCommand>);
     let command_error = RwSignal::new(None::<String>);
-    let retry = RwSignal::new(None::<ReallocationRetry>);
+    let reallocation_retry = RwSignal::new(None::<ReallocationRetry>);
+    let short_ship_retry = RwSignal::new(None::<ShortShipRetry>);
+    let short_ship_open = RwSignal::new(None::<i64>);
+    let short_ship_reason = RwSignal::new("client_authorized".to_owned());
+    let short_ship_note = RwSignal::new(String::new());
+    let short_ship_error = RwSignal::new(None::<String>);
     let sort = RwSignal::new(SortSpec {
         key: ShortageSort::Reported,
         direction: SortDirection::Descending,
@@ -107,7 +128,12 @@ pub(super) fn PickShortageWorkbench(
         generation: detail_generation,
         command_pending,
         command_error,
-        retry,
+        reallocation_retry,
+        short_ship_retry,
+        short_ship_open,
+        short_ship_reason,
+        short_ship_note,
+        short_ship_error,
         queue,
         toasts,
         on_unauthorized,
@@ -126,6 +152,8 @@ pub(super) fn PickShortageWorkbench(
         selected.set(None);
         detail_error.set(None);
         command_error.set(None);
+        short_ship_open.set(None);
+        short_ship_error.set(None);
         request_queue(queue, None, Vec::new());
     };
 
@@ -148,6 +176,8 @@ pub(super) fn PickShortageWorkbench(
         selected.set(Some(shortage));
         detail_error.set(None);
         command_error.set(None);
+        short_ship_open.set(None);
+        short_ship_error.set(None);
         request_detail(shortage_id, detail);
     };
 
@@ -299,7 +329,7 @@ pub(super) fn PickShortageWorkbench(
                                             >
                                                 <td>{compact_timestamp(&shortage.reported_at)}</td>
                                                 <td><strong>{shortage.order_key}</strong><small class="cell-detail">{format!("#{} / Line {}", shortage.order_id, shortage.order_line_id)}</small></td>
-                                                <td><span class=shortage_status_class(shortage.status)>{shortage_status_label(shortage.status)}</span></td>
+                                                <td><span class=shortage_status_class(shortage.status)>{shortage_status_label(shortage.status, shortage.resolution)}</span></td>
                                                 <td class="numeric strong">{format_quantity(shortage.quantities.short)}</td>
                                                 <td class="numeric">{format_quantity(shortage.remaining_to_allocate_quantity)}</td>
                                                 <td>{shortage.inventory_owner_name}</td>
@@ -349,22 +379,66 @@ pub(super) fn PickShortageWorkbench(
 #[component]
 fn PickShortageDetail(shortage: PickShortageResponse, signals: DetailSignals) -> impl IntoView {
     let shortage_id = shortage.shortage_id;
-    let pending = move || signals.command_pending.get() == Some(shortage_id);
-    let retry_for_shortage = move || {
+    let any_pending = move || signals.command_pending.get().is_some();
+    let reallocation_pending = move || {
+        signals.command_pending.get() == Some(PendingShortageCommand::Reallocation(shortage_id))
+    };
+    let reallocation_retry_for_shortage = move || {
         signals
-            .retry
+            .reallocation_retry
             .get()
             .is_some_and(|(retry_id, _, _)| retry_id == shortage_id)
     };
-    let unresolved_retry_elsewhere = move || {
+    let reallocation_retry_elsewhere = move || {
         signals
-            .retry
+            .reallocation_retry
+            .get()
+            .is_some_and(|(retry_id, _, _)| retry_id != shortage_id)
+    };
+    let short_ship_retry_for_shortage = move || {
+        signals
+            .short_ship_retry
+            .get()
+            .is_some_and(|(retry_id, _, _)| retry_id == shortage_id)
+    };
+    let short_ship_retry_elsewhere = move || {
+        signals
+            .short_ship_retry
             .get()
             .is_some_and(|(retry_id, _, _)| retry_id != shortage_id)
     };
     let can_reallocate = shortage.status != PickShortageStatus::Resolved
         && shortage.remaining_to_allocate_quantity > 0;
+    let can_short_ship = shortage.status == PickShortageStatus::AwaitingInventory
+        && shortage.remaining_to_allocate_quantity > 0
+        && shortage.reallocated_quantity == shortage.recovery_terminal_quantity;
     let recover = move |_| dispatch_reallocation(shortage_id, signals);
+    let open_short_ship = move |_| {
+        if signals.reallocation_retry.get_untracked().is_some()
+            || signals
+                .short_ship_retry
+                .get_untracked()
+                .is_some_and(|(retry_id, _, _)| retry_id != shortage_id)
+        {
+            signals.short_ship_error.set(Some(
+                "Resolve the retained unknown command result before starting another disposition."
+                    .to_owned(),
+            ));
+            return;
+        }
+        if !signals
+            .short_ship_retry
+            .get_untracked()
+            .is_some_and(|(retry_id, _, _)| retry_id == shortage_id)
+        {
+            signals
+                .short_ship_reason
+                .set("client_authorized".to_owned());
+            signals.short_ship_note.set(String::new());
+        }
+        signals.short_ship_error.set(None);
+        signals.short_ship_open.set(Some(shortage_id));
+    };
     let item_label = shortage
         .item_description
         .clone()
@@ -380,6 +454,21 @@ fn PickShortageDetail(shortage: PickShortageResponse, signals: DetailSignals) ->
     let trace = trace_label(&shortage);
     let evidence = evidence_label(&shortage);
     let progress = recovery_percent(&shortage);
+    let terminal_state = match shortage.resolution {
+        Some(PickShortageResolution::ShortShip) => Some(format!(
+            "Short shipment accepted: {} {}. Discrepancy hold #{} remains active.",
+            format_quantity(shortage.accepted_short_quantity),
+            shortage.uom,
+            shortage.hold.hold_id
+        )),
+        Some(PickShortageResolution::Recovered) => {
+            Some("Recovery completed with replacement inventory.".to_owned())
+        }
+        None if shortage.status == PickShortageStatus::Resolved => {
+            Some("Recovery is complete.".to_owned())
+        }
+        None => None,
+    };
 
     view! {
         <div class="fulfillment-detail-content shortage-detail-content">
@@ -388,7 +477,7 @@ fn PickShortageDetail(shortage: PickShortageResponse, signals: DetailSignals) ->
                     <span class="eyebrow">{format!("Pick exception #{}", shortage.shortage_id)}</span>
                     <h2>{shortage.order_key.clone()}</h2>
                 </div>
-                <span class=shortage_status_class(shortage.status)>{shortage_status_label(shortage.status)}</span>
+                <span class=shortage_status_class(shortage.status)>{shortage_status_label(shortage.status, shortage.resolution)}</span>
             </div>
             <dl class="detail-facts four-column">
                 <div><dt>"Client"</dt><dd>{shortage.inventory_owner_name.clone()}</dd></div>
@@ -438,11 +527,17 @@ fn PickShortageDetail(shortage: PickShortageResponse, signals: DetailSignals) ->
                 <div class="detail-section-title">
                     <div><h3>"FEFO recovery"</h3><span>{format!("Order revision {}", shortage.order_revision.get())}</span></div>
                 </div>
-                <Show when=retry_for_shortage>
+                <Show when=reallocation_retry_for_shortage>
                     <p class="shortage-retry-note" role="status">"The previous result is unknown. Retry sends the exact saved command and idempotency key."</p>
                 </Show>
-                <Show when=unresolved_retry_elsewhere>
+                <Show when=reallocation_retry_elsewhere>
                     <p class="shortage-retry-note" role="alert">"Resolve the unknown recovery result on the previously selected exception before starting another recovery."</p>
+                </Show>
+                <Show when=short_ship_retry_for_shortage>
+                    <p class="shortage-retry-note" role="status">"A short-shipment result is unknown. Open the confirmation to retry its exact saved request and idempotency key."</p>
+                </Show>
+                <Show when=short_ship_retry_elsewhere>
+                    <p class="shortage-retry-note" role="alert">"Resolve the unknown short-shipment result on the previously selected exception before starting another command."</p>
                 </Show>
                 <Show when=move || signals.command_error.get().is_some()>
                     <p class="inline-command-error" role="alert">{move || signals.command_error.get().unwrap_or_default()}</p>
@@ -451,16 +546,25 @@ fn PickShortageDetail(shortage: PickShortageResponse, signals: DetailSignals) ->
                     <button
                         type="button"
                         class="button primary-action"
-                        disabled=move || pending() || !can_reallocate || unresolved_retry_elsewhere()
+                        disabled=move || any_pending() || !can_reallocate || reallocation_retry_elsewhere() || short_ship_retry_for_shortage() || short_ship_retry_elsewhere()
                         on:click=recover
                     >
                         <Icon icon=UiIcon::Release/>
-                        {move || if pending() { "Recovering" } else if retry_for_shortage() { "Retry recovery" } else { "Allocate replacement" }}
+                        {move || if reallocation_pending() { "Recovering" } else if reallocation_retry_for_shortage() { "Retry recovery" } else { "Allocate replacement" }}
+                    </button>
+                    <button
+                        type="button"
+                        class="button danger-action"
+                        disabled=move || any_pending() || !can_short_ship || reallocation_retry_for_shortage() || reallocation_retry_elsewhere() || short_ship_retry_elsewhere()
+                        on:click=open_short_ship
+                    >
+                        <Icon icon=UiIcon::Shipping/>
+                        {move || if short_ship_retry_for_shortage() { "Resume short shipment" } else { "Accept short shipment" }}
                     </button>
                     <button
                         type="button"
                         class="button secondary-action"
-                        disabled=move || signals.loading.get() || pending()
+                        disabled=move || signals.loading.get() || any_pending()
                         on:click=move |_| request_detail(shortage_id, signals)
                     >
                         <Icon icon=UiIcon::Refresh/>
@@ -468,8 +572,11 @@ fn PickShortageDetail(shortage: PickShortageResponse, signals: DetailSignals) ->
                     </button>
                 </div>
                 {(!can_reallocate).then(|| view! {
-                    <p class="shortage-action-state">{if shortage.status == PickShortageStatus::Resolved { "Recovery is complete." } else { "Replacement work is already allocated and awaiting RF execution." }}</p>
+                    <p class="shortage-action-state">{terminal_state.unwrap_or_else(|| "Replacement work is already allocated and awaiting RF execution.".to_owned())}</p>
                 })}
+                <Show when=move || signals.short_ship_open.get() == Some(shortage_id)>
+                    <ShortShipConfirmation shortage=shortage.clone() signals/>
+                </Show>
             </section>
         </div>
     }
@@ -574,7 +681,13 @@ fn dispatch_reallocation(shortage_id: i64, signals: DetailSignals) {
     if signals.command_pending.get_untracked().is_some() {
         return;
     }
-    let (request, idempotency_key) = match signals.retry.get_untracked() {
+    if let Some((retry_id, _, _)) = signals.short_ship_retry.get_untracked() {
+        signals.command_error.set(Some(format!(
+            "Resolve the unknown short-shipment result for pick exception #{retry_id} first."
+        )));
+        return;
+    }
+    let (request, idempotency_key) = match signals.reallocation_retry.get_untracked() {
         Some((retry_id, request, key)) if retry_id == shortage_id => (request, key),
         Some((retry_id, _, _)) => {
             signals.command_error.set(Some(format!(
@@ -597,24 +710,28 @@ fn dispatch_reallocation(shortage_id: i64, signals: DetailSignals) {
         }
     };
     signals
-        .retry
+        .reallocation_retry
         .set(Some((shortage_id, request, idempotency_key.clone())));
-    signals.command_pending.set(Some(shortage_id));
+    signals
+        .command_pending
+        .set(Some(PendingShortageCommand::Reallocation(shortage_id)));
     signals.command_error.set(None);
 
     leptos::task::spawn_local(async move {
         let response = api::reallocate_pick_shortage(shortage_id, &request, &idempotency_key).await;
-        if signals.command_pending.get_untracked() == Some(shortage_id) {
+        if signals.command_pending.get_untracked()
+            == Some(PendingShortageCommand::Reallocation(shortage_id))
+        {
             signals.command_pending.set(None);
         }
         match response {
             Ok(result) => {
                 if signals
-                    .retry
+                    .reallocation_retry
                     .get_untracked()
                     .is_some_and(|(retry_id, _, _)| retry_id == shortage_id)
                 {
-                    signals.retry.set(None);
+                    signals.reallocation_retry.set(None);
                 }
                 signals.command_error.set(None);
                 signals.toasts.success(format!(
@@ -626,10 +743,10 @@ fn dispatch_reallocation(shortage_id: i64, signals: DetailSignals) {
                         .map_or("units", |allocation| allocation.execution_stage_label()),
                     format_quantity(result.remaining_to_allocate_quantity)
                 ));
-                refresh_after_reallocation(shortage_id, signals);
+                refresh_after_command(shortage_id, signals);
             }
             Err(api_error) if api_error.unauthorized => {
-                signals.retry.set(None);
+                signals.reallocation_retry.set(None);
                 signals.on_unauthorized.run(());
             }
             Err(api_error) if api_error.ambiguous_outcome => {
@@ -641,19 +758,19 @@ fn dispatch_reallocation(shortage_id: i64, signals: DetailSignals) {
                 signals.toasts.error(api_error.message);
             }
             Err(api_error) => {
-                signals.retry.set(None);
+                signals.reallocation_retry.set(None);
                 signals.command_error.set(Some(format!(
                     "{} Authoritative shortage revisions were refreshed.",
                     api_error.message
                 )));
                 signals.toasts.error(api_error.message);
-                refresh_after_reallocation(shortage_id, signals);
+                refresh_after_command(shortage_id, signals);
             }
         }
     });
 }
 
-fn refresh_after_reallocation(shortage_id: i64, signals: DetailSignals) {
+fn refresh_after_command(shortage_id: i64, signals: DetailSignals) {
     request_queue(
         signals.queue,
         signals.queue.current_cursor.get_untracked(),
@@ -734,11 +851,16 @@ const fn shortage_status_wire(status: PickShortageStatus) -> &'static str {
     }
 }
 
-const fn shortage_status_label(status: PickShortageStatus) -> &'static str {
-    match status {
-        PickShortageStatus::AwaitingInventory => "Awaiting inventory",
-        PickShortageStatus::RecoveryInProgress => "Recovery in progress",
-        PickShortageStatus::Resolved => "Resolved",
+const fn shortage_status_label(
+    status: PickShortageStatus,
+    resolution: Option<PickShortageResolution>,
+) -> &'static str {
+    match (status, resolution) {
+        (PickShortageStatus::Resolved, Some(PickShortageResolution::Recovered)) => "Recovered",
+        (PickShortageStatus::Resolved, Some(PickShortageResolution::ShortShip)) => "Short shipped",
+        (PickShortageStatus::AwaitingInventory, _) => "Awaiting inventory",
+        (PickShortageStatus::RecoveryInProgress, _) => "Recovery in progress",
+        (PickShortageStatus::Resolved, None) => "Resolved",
     }
 }
 
@@ -852,6 +974,13 @@ mod tests {
         assert_eq!(
             shortage_status_wire(PickShortageStatus::AwaitingInventory),
             "awaiting_inventory"
+        );
+        assert_eq!(
+            shortage_status_label(
+                PickShortageStatus::Resolved,
+                Some(PickShortageResolution::ShortShip),
+            ),
+            "Short shipped"
         );
     }
 

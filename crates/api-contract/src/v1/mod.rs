@@ -114,16 +114,18 @@ pub use packing::{
     WeightGrams,
 };
 pub use picking::{
+    AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
     AllocationExecutionStage, ClaimNextPickRequest, ClaimPickByIdRequest,
     ConfirmPickContentRequest, CurrentPickResponse, HeartbeatPickClaimRequest, PickClaimContent,
     PickClaimHeartbeatResponse, PickClaimReleaseReason, PickClaimReleaseResponse,
     PickClaimResponse, PickContentConfirmationResponse, PickContentState, PickOrderStatus,
-    PickShortageAllocationResponse, PickShortageDetails, PickShortageHoldResponse,
-    PickShortageMovementResponse, PickShortagePage, PickShortagePageRequest,
-    PickShortageQuantitiesResponse, PickShortageReason, PickShortageResponse, PickShortageStatus,
-    PickShortageTaskResponse, ReallocatePickShortageRequest, ReallocatePickShortageResponse,
-    ReleasePickClaimRequest, ReportPickShortageOutcome, ReportPickShortageRequest,
-    ReportPickShortageResponse,
+    PickShortShipReason, PickShortageAllocationResponse, PickShortageDetails,
+    PickShortageHoldResponse, PickShortageMovementResponse, PickShortagePage,
+    PickShortagePageRequest, PickShortageQuantitiesResponse, PickShortageReason,
+    PickShortageResolution, PickShortageResponse, PickShortageStatus, PickShortageTaskResponse,
+    ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleasePickClaimRequest,
+    ReportPickShortageOutcome, ReportPickShortageRequest, ReportPickShortageResponse,
+    ShortShipDemandResponse,
 };
 pub use putaway::{
     ConfirmPutawayRequest, CreatePutawayTaskRequest, CreatePutawayTaskResponse,
@@ -144,7 +146,8 @@ pub use shipping::{
     ConfirmShipmentDepartureRequest, ConfirmShipmentDepartureResponse, CreateShipmentRequest,
     CreateShipmentResponse, ManualCarrierManifestResponse, ManualCartonTrackingRequest,
     RecordManualManifestRequest, RecordManualManifestResponse, ShipmentCartonResponse,
-    ShipmentCartonTrackingResponse, ShipmentOrderStatus, ShipmentResponse, ShipmentStatus,
+    ShipmentCartonTrackingResponse, ShipmentDemandResponse, ShipmentOrderStatus, ShipmentResponse,
+    ShipmentStatus,
 };
 pub use shipping_queue::{
     ShippingQueueEntryResponse, ShippingQueueFacilityId, ShippingQueueFacilityIdError,

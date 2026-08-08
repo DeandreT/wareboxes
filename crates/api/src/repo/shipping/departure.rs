@@ -265,7 +265,9 @@ pub async fn confirm_departure(
             "order_id": shipment.order_id,
             "inventory_transaction_id": transaction_id,
             "carton_count": shipment.carton_count,
+            "ordered_quantity": shipment.demand.ordered(),
             "shipped_quantity": shipment.shipped_qty,
+            "accepted_short_quantity": shipment.demand.accepted_short(),
             "shipment_revision": next_shipment_revision,
             "order_revision": next_order_revision,
             "departed_at": departed_at,
@@ -283,6 +285,7 @@ pub async fn confirm_departure(
         order_status: transition.order_status,
         order_revision: next_order_revision,
         scanned_carton_count,
+        demand: shipment.demand,
         departed_by: positive(context.actor_id.get(), UserId::new)?,
         departed_at,
     };

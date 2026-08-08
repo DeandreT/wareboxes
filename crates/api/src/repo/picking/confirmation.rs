@@ -19,6 +19,7 @@ use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
 use crate::repo::inventory_locking;
 use crate::repo::orders::insert_order_activity_tx;
 
+use super::readiness::order_pick_readiness_tx;
 use super::shortage::{
     advance_parent_shortage_for_terminal_work_tx, enqueue_parent_shortage_transition_event_tx,
 };
@@ -1023,50 +1024,11 @@ async fn order_ready_to_pack_tx(
     inventory_owner_id: InventoryOwnerId,
     order_id: OrderId,
 ) -> AppResult<bool> {
-    Ok(sqlx::query_scalar(
-        r#"
-        SELECT
-            NOT EXISTS (
-                SELECT 1 FROM pick_tasks task
-                WHERE task.tenant_id = $1 AND task.inventory_owner_id = $2
-                  AND task.order_id = $3 AND task.status IN ('open', 'in_progress')
-            )
-            AND NOT EXISTS (
-                SELECT 1 FROM pick_shortages shortage
-                WHERE shortage.tenant_id = $1 AND shortage.inventory_owner_id = $2
-                  AND shortage.order_id = $3 AND shortage.status <> 'resolved'
-            )
-            AND COALESCE((
-                SELECT SUM(allocation.qty)
-                FROM inventory_allocations allocation
-                INNER JOIN inventory_reservations reservation
-                  ON reservation.tenant_id = allocation.tenant_id
-                 AND reservation.inventory_owner_id = allocation.inventory_owner_id
-                 AND reservation.id = allocation.reservation_id
-                 AND reservation.status = 'active' AND reservation.deleted IS NULL
-                WHERE allocation.tenant_id = $1
-                  AND allocation.inventory_owner_id = $2
-                  AND reservation.order_id = $3
-                  AND allocation.status = 'allocated'
-                  AND allocation.execution_stage = 'staged'
-                  AND allocation.deleted IS NULL
-            ), 0) = COALESCE((
-                SELECT SUM(item.qty) FROM order_items item
-                WHERE item.tenant_id = $1 AND item.inventory_owner_id = $2
-                  AND item.order_id = $3 AND item.deleted IS NULL
-            ), 0)
-            AND EXISTS (
-                SELECT 1 FROM order_items item
-                WHERE item.tenant_id = $1 AND item.inventory_owner_id = $2
-                  AND item.order_id = $3 AND item.deleted IS NULL
-            )
-        "#,
+    Ok(
+        order_pick_readiness_tx(tx, tenant_id, inventory_owner_id, order_id)
+            .await?
+            .is_ready_to_pack(),
     )
-    .bind(tenant_id.get())
-    .bind(inventory_owner_id.get())
-    .bind(order_id.get())
-    .fetch_one(&mut **tx)
-    .await?)
 }
 
 async fn advance_order_to_awaiting_packing_tx(
