@@ -90,6 +90,7 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
         "/" => Some(WorkspaceBootstrapSection::Overview),
         "/orders" | "/orders/" => Some(WorkspaceBootstrapSection::Orders),
         "/packing" | "/packing/" => Some(WorkspaceBootstrapSection::Packing),
+        "/shipping" | "/shipping/" => Some(WorkspaceBootstrapSection::Shipping),
         "/inventory" | "/inventory/" => Some(WorkspaceBootstrapSection::Inventory),
         "/access" | "/access/" => Some(WorkspaceBootstrapSection::Access),
         _ => None,
@@ -130,6 +131,7 @@ async fn workspace_bootstrap(
             Ok(WorkspaceBootstrapData {
                 orders,
                 packing_queue: None,
+                shipping_queue: None,
                 balances,
                 balance_next_cursor,
                 access: access_workspace,
@@ -166,6 +168,20 @@ async fn workspace_bootstrap(
                 packing_queue: Some(packing_queue),
                 access: access_workspace,
                 locations,
+                ..WorkspaceBootstrapData::default()
+            })
+        }
+        WorkspaceBootstrapSection::Shipping => {
+            if !has_permission(session, "wms") {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            let (shipping_queue, access_workspace) = tokio::try_join!(
+                routes::v1::shipping_queue::page_for_access(state, access, None, None, 100),
+                routes::access::workspace_for_access(state, access),
+            )?;
+            Ok(WorkspaceBootstrapData {
+                shipping_queue: Some(shipping_queue),
+                access: access_workspace,
                 ..WorkspaceBootstrapData::default()
             })
         }
@@ -213,6 +229,10 @@ mod tests {
         assert_eq!(
             section_for_path("/packing"),
             Some(WorkspaceBootstrapSection::Packing)
+        );
+        assert_eq!(
+            section_for_path("/shipping"),
+            Some(WorkspaceBootstrapSection::Shipping)
         );
         assert_eq!(
             section_for_path("/inventory/holds"),

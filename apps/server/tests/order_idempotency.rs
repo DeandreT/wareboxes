@@ -18,6 +18,7 @@ struct OrderMetadataState {
     address_count: i64,
     activity_count: i64,
     command_count: i64,
+    recipient_name: Option<String>,
     line1: String,
     city: Option<String>,
     state: Option<String>,
@@ -210,6 +211,7 @@ async fn order_metadata_updates_are_replay_safe_and_scope_checked() {
                (SELECT COUNT(*) FROM command_idempotency_records
                 WHERE tenant_id = orders.tenant_id
                   AND operation = 'order.update_metadata.v1') AS command_count,
+               address.name AS recipient_name,
                address.line1,
                address.city,
                address.state,
@@ -236,6 +238,7 @@ async fn order_metadata_updates_are_replay_safe_and_scope_checked() {
             address_count: address_count_before + 1,
             activity_count: 1,
             command_count: 1,
+            recipient_name: Some("Test Recipient".to_owned()),
             line1: "200 Replay Street".to_owned(),
             city: Some("Reno".to_owned()),
             state: Some("NV".to_owned()),

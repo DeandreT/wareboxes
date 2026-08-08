@@ -2568,11 +2568,726 @@ BEGIN
        OR packed_qty <> session_row.packed_qty
        OR open_count <> session_row.open_carton_count
        OR closed_count <> session_row.closed_carton_count
-       OR order_revision IS DISTINCT FROM session_row.revision
-       OR (session_row.state = 'open' AND order_status IS DISTINCT FROM 'packing')
-       OR (session_row.state = 'ready_to_manifest' AND order_status IS DISTINCT FROM 'awaiting shipment')
+       OR (session_row.state = 'open' AND (
+            order_status IS DISTINCT FROM 'packing'
+            OR order_revision IS DISTINCT FROM session_row.revision
+       ))
+       OR (session_row.state = 'ready_to_manifest' AND NOT (
+            (order_status = 'awaiting shipment'
+             AND order_revision = session_row.revision
+             AND NOT EXISTS (
+                 SELECT 1 FROM public.shipments shipment
+                 WHERE shipment.tenant_id = session_row.tenant_id
+                   AND shipment.inventory_owner_id = session_row.inventory_owner_id
+                   AND shipment.facility_id = session_row.facility_id
+                   AND shipment.packing_session_id = session_row.id
+             ))
+            OR EXISTS (
+                SELECT 1 FROM public.shipments shipment
+                WHERE shipment.tenant_id = session_row.tenant_id
+                  AND shipment.inventory_owner_id = session_row.inventory_owner_id
+                  AND shipment.facility_id = session_row.facility_id
+                  AND shipment.packing_session_id = session_row.id
+                  AND shipment.order_release_id = session_row.order_release_id
+                  AND shipment.order_id = session_row.order_id
+                  AND shipment.creation_expected_order_revision = session_row.revision
+                  AND shipment.creation_resulting_order_revision = session_row.revision + 1
+                  AND ((shipment.state IN ('awaiting manifest', 'manifested')
+                        AND order_status = 'awaiting shipment'
+                        AND order_revision = shipment.creation_resulting_order_revision)
+                       OR (shipment.state = 'departed'
+                           AND order_status = 'shipped'
+                           AND order_revision = shipment.creation_resulting_order_revision + 1))
+            )
+       ))
     THEN
         RAISE EXCEPTION 'packing session header, contents, cartons, and order state do not reconcile'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+
+--
+-- Name: reject_shipping_ledger_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_shipping_ledger_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION '% is immutable', TG_TABLE_NAME
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: guard_shipment_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_shipment_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.packing_session_id IS DISTINCT FROM OLD.packing_session_id
+       OR NEW.order_release_id IS DISTINCT FROM OLD.order_release_id
+       OR NEW.order_id IS DISTINCT FROM OLD.order_id
+       OR NEW.creation_expected_order_revision IS DISTINCT FROM OLD.creation_expected_order_revision
+       OR NEW.creation_resulting_order_revision IS DISTINCT FROM OLD.creation_resulting_order_revision
+       OR NEW.carton_count IS DISTINCT FROM OLD.carton_count
+       OR NEW.content_count IS DISTINCT FROM OLD.content_count
+       OR NEW.shipped_qty IS DISTINCT FROM OLD.shipped_qty
+       OR NEW.created_by_user_id IS DISTINCT FROM OLD.created_by_user_id
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+    THEN
+        RAISE EXCEPTION 'shipment identity and plan are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF OLD.state = 'awaiting manifest'
+       AND NEW.state = 'manifested'
+       AND NEW.revision = OLD.revision + 1
+       AND OLD.manifested_at IS NULL
+       AND NEW.manifested_at IS NOT NULL
+       AND NEW.manifested_at >= NEW.created_at
+       AND NEW.departed_at IS NULL
+       AND OLD.carrier IS NULL
+       AND OLD.service IS NULL
+       AND NEW.carrier IS NOT NULL
+    THEN
+        RETURN NEW;
+    END IF;
+
+    IF OLD.state = 'manifested'
+       AND NEW.state = 'departed'
+       AND NEW.revision = OLD.revision + 1
+       AND NEW.carrier IS NOT DISTINCT FROM OLD.carrier
+       AND NEW.service IS NOT DISTINCT FROM OLD.service
+       AND NEW.manifested_at IS NOT DISTINCT FROM OLD.manifested_at
+       AND NEW.departed_at IS NOT NULL
+       AND NEW.departed_at >= NEW.manifested_at
+    THEN
+        RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION 'invalid shipment state or revision transition'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: validate_shipment(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_shipment() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.state <> 'awaiting manifest'
+       OR NEW.revision <> 1
+       OR NEW.carrier IS NOT NULL
+       OR NEW.service IS NOT NULL
+       OR NEW.manifested_at IS NOT NULL
+       OR NEW.departed_at IS NOT NULL
+       OR NOT EXISTS (
+            SELECT 1
+            FROM public.packing_sessions session
+            INNER JOIN public.orders order_header
+              ON order_header.tenant_id = session.tenant_id
+             AND order_header.inventory_owner_id = session.inventory_owner_id
+             AND order_header.id = session.order_id
+             AND order_header.deleted IS NULL
+            WHERE session.tenant_id = NEW.tenant_id
+              AND session.inventory_owner_id = NEW.inventory_owner_id
+              AND session.facility_id = NEW.facility_id
+              AND session.id = NEW.packing_session_id
+              AND session.order_release_id = NEW.order_release_id
+              AND session.order_id = NEW.order_id
+              AND session.state = 'ready_to_manifest'
+              AND session.closed_carton_count = NEW.carton_count
+              AND session.packed_allocation_count = NEW.content_count
+              AND session.packed_qty = NEW.shipped_qty
+              AND NEW.creation_expected_order_revision = session.revision
+              AND NEW.creation_resulting_order_revision = NEW.creation_expected_order_revision + 1
+       )
+    THEN
+        RAISE EXCEPTION 'shipment must snapshot one ready full-order packing session'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_shipment_address_snapshot(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_shipment_address_snapshot() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF (NEW.name IS NULL OR btrim(NEW.name) = '')
+       AND (NEW.company IS NULL OR btrim(NEW.company) = '')
+    THEN
+        RAISE EXCEPTION 'shipping address requires a recipient or company name'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.shipments shipment
+        INNER JOIN public.addresses address
+          ON address.tenant_id = shipment.tenant_id
+         AND address.id = NEW.source_address_id
+         AND address.deleted IS NULL
+        LEFT JOIN public.facilities facility
+          ON NEW.address_role = 'origin'
+         AND facility.tenant_id = shipment.tenant_id
+         AND facility.id = shipment.facility_id
+         AND facility.deleted IS NULL
+         AND facility.address_id = address.id
+        LEFT JOIN public.orders order_header
+          ON NEW.address_role = 'destination'
+         AND order_header.tenant_id = shipment.tenant_id
+         AND order_header.inventory_owner_id = shipment.inventory_owner_id
+         AND order_header.id = shipment.order_id
+         AND order_header.deleted IS NULL
+         AND order_header.address_id = address.id
+        WHERE shipment.tenant_id = NEW.tenant_id
+          AND shipment.inventory_owner_id = NEW.inventory_owner_id
+          AND shipment.facility_id = NEW.facility_id
+          AND shipment.id = NEW.shipment_id
+          AND ((NEW.address_role = 'origin' AND facility.id IS NOT NULL)
+               OR (NEW.address_role = 'destination' AND order_header.id IS NOT NULL))
+          AND NEW.name IS NOT DISTINCT FROM address.name
+          AND NEW.company IS NOT DISTINCT FROM address.company
+          AND NEW.line1 = address.line1
+          AND NEW.line2 IS NOT DISTINCT FROM address.line2
+          AND NEW.postal_code = address.postal_code
+          AND NEW.country = address.country
+          AND NEW.phone IS NOT DISTINCT FROM address.phone
+          AND NEW.email IS NOT DISTINCT FROM address.email
+          AND NEW.state IS NOT DISTINCT FROM address.state
+          AND NEW.county IS NOT DISTINCT FROM address.county
+          AND NEW.city = address.city
+          AND NEW.territory IS NOT DISTINCT FROM address.territory
+          AND NEW.district IS NOT DISTINCT FROM address.district
+    ) THEN
+        RAISE EXCEPTION 'shipment address snapshot must exactly copy its complete scoped source'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_shipment_carton(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_shipment_carton() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.shipments shipment
+        INNER JOIN public.cartons carton
+          ON carton.tenant_id = shipment.tenant_id
+         AND carton.inventory_owner_id = shipment.inventory_owner_id
+         AND carton.facility_id = shipment.facility_id
+         AND carton.packing_session_id = shipment.packing_session_id
+         AND carton.order_release_id = shipment.order_release_id
+         AND carton.order_id = shipment.order_id
+         AND carton.id = NEW.carton_id
+        INNER JOIN public.license_plates plate
+          ON plate.tenant_id = carton.tenant_id
+         AND plate.inventory_owner_id = carton.inventory_owner_id
+         AND plate.facility_id = carton.facility_id
+         AND plate.id = carton.license_plate_id
+         AND plate.deleted IS NULL
+        WHERE shipment.tenant_id = NEW.tenant_id
+          AND shipment.inventory_owner_id = NEW.inventory_owner_id
+          AND shipment.facility_id = NEW.facility_id
+          AND shipment.id = NEW.shipment_id
+          AND shipment.packing_session_id = NEW.packing_session_id
+          AND carton.state = 'closed'
+          AND carton.license_plate_id = NEW.license_plate_id
+          AND plate.location_id = carton.packing_location_id
+          AND plate.barcode = NEW.carton_barcode
+          AND carton.weight_g IS NOT DISTINCT FROM NEW.weight_g
+          AND carton.length_mm IS NOT DISTINCT FROM NEW.length_mm
+          AND carton.width_mm IS NOT DISTINCT FROM NEW.width_mm
+          AND carton.height_mm IS NOT DISTINCT FROM NEW.height_mm
+          AND NEW.content_count = (
+              SELECT COUNT(*)
+              FROM public.carton_contents content
+              WHERE content.tenant_id = carton.tenant_id
+                AND content.inventory_owner_id = carton.inventory_owner_id
+                AND content.packing_session_id = carton.packing_session_id
+                AND content.carton_id = carton.id
+          )
+          AND NEW.packed_qty = (
+              SELECT COALESCE(SUM(content.packed_qty), 0)::bigint
+              FROM public.carton_contents content
+              WHERE content.tenant_id = carton.tenant_id
+                AND content.inventory_owner_id = carton.inventory_owner_id
+                AND content.packing_session_id = carton.packing_session_id
+                AND content.carton_id = carton.id
+          )
+    ) THEN
+        RAISE EXCEPTION 'shipment carton must exactly snapshot a closed carton'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_shipment_manifest(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_shipment_manifest() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.shipments shipment
+        WHERE shipment.tenant_id = NEW.tenant_id
+          AND shipment.inventory_owner_id = NEW.inventory_owner_id
+          AND shipment.facility_id = NEW.facility_id
+          AND shipment.id = NEW.shipment_id
+          AND shipment.packing_session_id = NEW.packing_session_id
+          AND shipment.order_release_id = NEW.order_release_id
+          AND shipment.order_id = NEW.order_id
+          AND shipment.state = 'manifested'
+          AND shipment.revision = NEW.resulting_revision
+          AND shipment.carrier = NEW.carrier
+          AND shipment.service IS NOT DISTINCT FROM NEW.service
+          AND shipment.carton_count = NEW.package_count
+          AND shipment.manifested_at = NEW.manifested_at
+          AND NEW.resulting_revision = NEW.expected_revision + 1
+          AND NEW.manifested_at >= shipment.created_at
+    ) THEN
+        RAISE EXCEPTION 'manifest must match the shipment transition'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_shipment_manifest_package(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_shipment_manifest_package() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.shipment_manifests manifest
+        INNER JOIN public.shipment_cartons shipment_carton
+          ON shipment_carton.tenant_id = manifest.tenant_id
+         AND shipment_carton.inventory_owner_id = manifest.inventory_owner_id
+         AND shipment_carton.facility_id = manifest.facility_id
+         AND shipment_carton.shipment_id = manifest.shipment_id
+         AND shipment_carton.id = NEW.shipment_carton_id
+        WHERE manifest.tenant_id = NEW.tenant_id
+          AND manifest.inventory_owner_id = NEW.inventory_owner_id
+          AND manifest.facility_id = NEW.facility_id
+          AND manifest.id = NEW.manifest_id
+          AND manifest.shipment_id = NEW.shipment_id
+          AND manifest.carrier = NEW.carrier
+          AND manifest.service IS NOT DISTINCT FROM NEW.service
+          AND shipment_carton.carton_id = NEW.carton_id
+          AND shipment_carton.license_plate_id = NEW.license_plate_id
+          AND shipment_carton.weight_g IS NOT DISTINCT FROM NEW.weight_g
+          AND shipment_carton.length_mm IS NOT DISTINCT FROM NEW.length_mm
+          AND shipment_carton.width_mm IS NOT DISTINCT FROM NEW.width_mm
+          AND shipment_carton.height_mm IS NOT DISTINCT FROM NEW.height_mm
+          AND NEW.created_at = manifest.manifested_at
+    ) THEN
+        RAISE EXCEPTION 'manifest package must exactly snapshot a shipment carton'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_shipment_confirmation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_shipment_confirmation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.shipments shipment
+        INNER JOIN public.shipment_manifests manifest
+          ON manifest.tenant_id = shipment.tenant_id
+         AND manifest.inventory_owner_id = shipment.inventory_owner_id
+         AND manifest.facility_id = shipment.facility_id
+         AND manifest.shipment_id = shipment.id
+         AND manifest.id = NEW.manifest_id
+        INNER JOIN public.orders order_header
+          ON order_header.tenant_id = shipment.tenant_id
+         AND order_header.inventory_owner_id = shipment.inventory_owner_id
+         AND order_header.id = shipment.order_id
+        INNER JOIN public.inventory_transactions transaction
+          ON transaction.tenant_id = shipment.tenant_id
+         AND transaction.inventory_owner_id = shipment.inventory_owner_id
+         AND transaction.id = NEW.inventory_transaction_id
+        WHERE shipment.tenant_id = NEW.tenant_id
+          AND shipment.inventory_owner_id = NEW.inventory_owner_id
+          AND shipment.facility_id = NEW.facility_id
+          AND shipment.id = NEW.shipment_id
+          AND shipment.packing_session_id = NEW.packing_session_id
+          AND shipment.order_release_id = NEW.order_release_id
+          AND shipment.order_id = NEW.order_id
+          AND shipment.state = 'departed'
+          AND shipment.revision = NEW.resulting_shipment_revision
+          AND shipment.departed_at = NEW.confirmed_at
+          AND NEW.resulting_shipment_revision = NEW.expected_shipment_revision + 1
+          AND order_header.status = 'shipped'
+          AND order_header.revision = NEW.resulting_order_revision
+          AND NEW.resulting_order_revision = NEW.expected_order_revision + 1
+          AND NEW.expected_order_revision = shipment.creation_resulting_order_revision
+          AND shipment.carton_count = NEW.carton_count
+          AND shipment.shipped_qty = NEW.shipped_qty
+          AND transaction.actor_user_id = NEW.confirmed_by_user_id
+          AND transaction.created <= NEW.confirmed_at
+          AND transaction.transaction_type = 'ship'
+          AND transaction.operation = 'shipping.shipment.departure.confirm.v1'
+          AND transaction.reference_type = 'shipment'
+          AND transaction.reference_id = shipment.id
+    ) THEN
+        RAISE EXCEPTION 'shipment confirmation must match shipment, order, and journal transitions'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_shipment_consistency(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_shipment_consistency() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    target_shipment_id bigint;
+    shipment_row public.shipments%ROWTYPE;
+    address_count bigint;
+    carton_count bigint;
+    content_count bigint;
+    packed_qty bigint;
+    closed_carton_count bigint;
+    manifest_count bigint;
+    package_count bigint;
+    confirmation_count bigint;
+    order_status text;
+    order_revision bigint;
+BEGIN
+    IF TG_TABLE_NAME = 'shipments' THEN
+        target_shipment_id := NEW.id;
+    ELSIF TG_TABLE_NAME = 'orders' THEN
+        SELECT shipment.id INTO target_shipment_id
+        FROM public.shipments shipment
+        WHERE shipment.tenant_id = NEW.tenant_id
+          AND shipment.inventory_owner_id = NEW.inventory_owner_id
+          AND shipment.order_id = NEW.id;
+        IF NOT FOUND THEN
+            RETURN NULL;
+        END IF;
+    ELSE
+        target_shipment_id := NEW.shipment_id;
+    END IF;
+
+    SELECT * INTO shipment_row
+    FROM public.shipments shipment
+    WHERE shipment.tenant_id = NEW.tenant_id
+      AND shipment.id = target_shipment_id;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT COUNT(*) INTO address_count
+    FROM public.shipment_address_snapshots snapshot
+    WHERE snapshot.tenant_id = shipment_row.tenant_id
+      AND snapshot.inventory_owner_id = shipment_row.inventory_owner_id
+      AND snapshot.facility_id = shipment_row.facility_id
+      AND snapshot.shipment_id = shipment_row.id;
+
+    SELECT COUNT(*), COALESCE(SUM(carton.content_count), 0)::bigint,
+           COALESCE(SUM(carton.packed_qty), 0)::bigint
+    INTO carton_count, content_count, packed_qty
+    FROM public.shipment_cartons carton
+    WHERE carton.tenant_id = shipment_row.tenant_id
+      AND carton.inventory_owner_id = shipment_row.inventory_owner_id
+      AND carton.facility_id = shipment_row.facility_id
+      AND carton.shipment_id = shipment_row.id;
+
+    SELECT COUNT(*) INTO closed_carton_count
+    FROM public.cartons carton
+    WHERE carton.tenant_id = shipment_row.tenant_id
+      AND carton.inventory_owner_id = shipment_row.inventory_owner_id
+      AND carton.facility_id = shipment_row.facility_id
+      AND carton.packing_session_id = shipment_row.packing_session_id
+      AND carton.state = 'closed';
+
+    SELECT COUNT(*) INTO manifest_count
+    FROM public.shipment_manifests manifest
+    WHERE manifest.tenant_id = shipment_row.tenant_id
+      AND manifest.inventory_owner_id = shipment_row.inventory_owner_id
+      AND manifest.facility_id = shipment_row.facility_id
+      AND manifest.shipment_id = shipment_row.id;
+
+    SELECT COUNT(*) INTO package_count
+    FROM public.shipment_manifest_packages package
+    WHERE package.tenant_id = shipment_row.tenant_id
+      AND package.inventory_owner_id = shipment_row.inventory_owner_id
+      AND package.facility_id = shipment_row.facility_id
+      AND package.shipment_id = shipment_row.id;
+
+    SELECT COUNT(*) INTO confirmation_count
+    FROM public.shipment_confirmations confirmation
+    WHERE confirmation.tenant_id = shipment_row.tenant_id
+      AND confirmation.inventory_owner_id = shipment_row.inventory_owner_id
+      AND confirmation.facility_id = shipment_row.facility_id
+      AND confirmation.shipment_id = shipment_row.id;
+
+    SELECT status, revision INTO order_status, order_revision
+    FROM public.orders order_header
+    WHERE order_header.tenant_id = shipment_row.tenant_id
+      AND order_header.inventory_owner_id = shipment_row.inventory_owner_id
+      AND order_header.id = shipment_row.order_id;
+
+    IF address_count <> 2
+       OR NOT EXISTS (
+           SELECT 1 FROM public.packing_sessions session
+           WHERE session.tenant_id = shipment_row.tenant_id
+             AND session.inventory_owner_id = shipment_row.inventory_owner_id
+             AND session.facility_id = shipment_row.facility_id
+             AND session.id = shipment_row.packing_session_id
+             AND session.order_release_id = shipment_row.order_release_id
+             AND session.order_id = shipment_row.order_id
+             AND session.state = 'ready_to_manifest'
+             AND session.revision = shipment_row.creation_expected_order_revision
+             AND session.closed_carton_count = shipment_row.carton_count
+             AND session.packed_allocation_count = shipment_row.content_count
+             AND session.packed_qty = shipment_row.shipped_qty
+       )
+       OR NOT EXISTS (
+           SELECT 1 FROM public.shipment_address_snapshots snapshot
+           WHERE snapshot.tenant_id = shipment_row.tenant_id
+             AND snapshot.shipment_id = shipment_row.id
+             AND snapshot.address_role = 'origin'
+       )
+       OR NOT EXISTS (
+           SELECT 1 FROM public.shipment_address_snapshots snapshot
+           WHERE snapshot.tenant_id = shipment_row.tenant_id
+             AND snapshot.shipment_id = shipment_row.id
+             AND snapshot.address_role = 'destination'
+       )
+       OR carton_count <> shipment_row.carton_count
+       OR content_count <> shipment_row.content_count
+       OR packed_qty <> shipment_row.shipped_qty
+       OR closed_carton_count <> shipment_row.carton_count
+       OR EXISTS (
+           SELECT 1 FROM public.cartons carton
+           WHERE carton.tenant_id = shipment_row.tenant_id
+             AND carton.inventory_owner_id = shipment_row.inventory_owner_id
+             AND carton.facility_id = shipment_row.facility_id
+             AND carton.packing_session_id = shipment_row.packing_session_id
+             AND carton.state = 'closed'
+             AND NOT EXISTS (
+                 SELECT 1 FROM public.shipment_cartons shipment_carton
+                 WHERE shipment_carton.tenant_id = carton.tenant_id
+                   AND shipment_carton.inventory_owner_id = carton.inventory_owner_id
+                   AND shipment_carton.facility_id = carton.facility_id
+                   AND shipment_carton.shipment_id = shipment_row.id
+                   AND shipment_carton.carton_id = carton.id
+             )
+       )
+    THEN
+        RAISE EXCEPTION 'shipment does not exactly snapshot its addresses and closed cartons'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF shipment_row.state = 'awaiting manifest' THEN
+        IF shipment_row.revision <> 1
+           OR manifest_count <> 0 OR package_count <> 0 OR confirmation_count <> 0
+           OR order_status IS DISTINCT FROM 'awaiting shipment'
+           OR order_revision IS DISTINCT FROM shipment_row.creation_resulting_order_revision
+        THEN
+            RAISE EXCEPTION 'awaiting-manifest shipment state does not reconcile'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NULL;
+    END IF;
+
+    IF manifest_count <> 1
+       OR package_count <> shipment_row.carton_count
+       OR EXISTS (
+           SELECT 1 FROM public.shipment_cartons shipment_carton
+           WHERE shipment_carton.tenant_id = shipment_row.tenant_id
+             AND shipment_carton.inventory_owner_id = shipment_row.inventory_owner_id
+             AND shipment_carton.facility_id = shipment_row.facility_id
+             AND shipment_carton.shipment_id = shipment_row.id
+             AND NOT EXISTS (
+                 SELECT 1 FROM public.shipment_manifest_packages package
+                 WHERE package.tenant_id = shipment_carton.tenant_id
+                   AND package.inventory_owner_id = shipment_carton.inventory_owner_id
+                   AND package.facility_id = shipment_carton.facility_id
+                   AND package.shipment_id = shipment_carton.shipment_id
+                   AND package.shipment_carton_id = shipment_carton.id
+             )
+       )
+    THEN
+        RAISE EXCEPTION 'shipment manifest does not contain the exact carton set'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF shipment_row.state = 'manifested' THEN
+        IF shipment_row.revision <> 2
+           OR confirmation_count <> 0
+           OR order_status IS DISTINCT FROM 'awaiting shipment'
+           OR order_revision IS DISTINCT FROM shipment_row.creation_resulting_order_revision
+        THEN
+            RAISE EXCEPTION 'manifested shipment state does not reconcile'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NULL;
+    END IF;
+
+    IF shipment_row.state <> 'departed'
+       OR shipment_row.revision <> 3
+       OR confirmation_count <> 1
+       OR order_status IS DISTINCT FROM 'shipped'
+       OR order_revision IS DISTINCT FROM shipment_row.creation_resulting_order_revision + 1
+       OR EXISTS (
+           SELECT 1
+           FROM public.shipment_cartons shipment_carton
+           INNER JOIN public.license_plates plate
+             ON plate.tenant_id = shipment_carton.tenant_id
+            AND plate.inventory_owner_id = shipment_carton.inventory_owner_id
+            AND plate.facility_id = shipment_carton.facility_id
+            AND plate.id = shipment_carton.license_plate_id
+           WHERE shipment_carton.tenant_id = shipment_row.tenant_id
+             AND shipment_carton.inventory_owner_id = shipment_row.inventory_owner_id
+             AND shipment_carton.facility_id = shipment_row.facility_id
+             AND shipment_carton.shipment_id = shipment_row.id
+             AND (plate.location_id IS NOT NULL
+                  OR plate.deleted IS DISTINCT FROM shipment_row.departed_at)
+       )
+       OR EXISTS (
+           SELECT 1
+           FROM public.carton_contents content
+           INNER JOIN public.inventory_allocations allocation
+             ON allocation.tenant_id = content.tenant_id
+            AND allocation.inventory_owner_id = content.inventory_owner_id
+            AND allocation.facility_id = content.facility_id
+            AND allocation.id = content.destination_inventory_allocation_id
+           INNER JOIN public.inventory_balances balance
+             ON balance.tenant_id = content.tenant_id
+            AND balance.inventory_owner_id = content.inventory_owner_id
+            AND balance.facility_id = content.facility_id
+            AND balance.id = content.destination_inventory_balance_id
+           WHERE content.tenant_id = shipment_row.tenant_id
+             AND content.inventory_owner_id = shipment_row.inventory_owner_id
+             AND content.facility_id = shipment_row.facility_id
+             AND content.packing_session_id = shipment_row.packing_session_id
+             AND (allocation.status <> 'fulfilled'
+                  OR allocation.modified IS DISTINCT FROM shipment_row.departed_at
+                  OR allocation.deleted IS DISTINCT FROM shipment_row.departed_at
+                  OR balance.qty_on_hand <> 0
+                  OR balance.qty_reserved <> 0
+                  OR balance.deleted IS DISTINCT FROM shipment_row.departed_at)
+       )
+       OR EXISTS (
+           SELECT 1
+           FROM public.inventory_reservations reservation
+           WHERE reservation.tenant_id = shipment_row.tenant_id
+             AND reservation.inventory_owner_id = shipment_row.inventory_owner_id
+             AND reservation.order_id = shipment_row.order_id
+             AND (reservation.status <> 'fulfilled'
+                  OR reservation.modified IS DISTINCT FROM shipment_row.departed_at
+                  OR reservation.deleted IS DISTINCT FROM shipment_row.departed_at)
+       )
+       OR EXISTS (
+           WITH expected AS (
+               SELECT content.facility_id,
+                      content.destination_location_id AS location_id,
+                      content.destination_license_plate_id AS license_plate_id,
+                      content.item_batch_id, content.item_id, content.uom,
+                      batch.lot, batch.expiration, batch.serial,
+                      content.inventory_status AS status,
+                      -SUM(content.packed_qty)::bigint AS quantity_delta
+               FROM public.carton_contents content
+               INNER JOIN public.item_batches batch
+                 ON batch.tenant_id = content.tenant_id
+                AND batch.inventory_owner_id = content.inventory_owner_id
+                AND batch.id = content.item_batch_id
+               WHERE content.tenant_id = shipment_row.tenant_id
+                 AND content.inventory_owner_id = shipment_row.inventory_owner_id
+                 AND content.facility_id = shipment_row.facility_id
+                 AND content.packing_session_id = shipment_row.packing_session_id
+               GROUP BY content.facility_id, content.destination_location_id,
+                        content.destination_license_plate_id,
+                        content.item_batch_id, content.item_id, content.uom,
+                        batch.lot, batch.expiration, batch.serial,
+                        content.inventory_status
+           ), actual AS (
+               SELECT entry.facility_id, entry.location_id, entry.license_plate_id,
+                      entry.item_batch_id, entry.item_id, entry.uom,
+                      entry.lot, entry.expiration, entry.serial, entry.status,
+                      SUM(entry.quantity_delta)::bigint AS quantity_delta
+               FROM public.inventory_entries entry
+               INNER JOIN public.shipment_confirmations confirmation
+                 ON confirmation.tenant_id = entry.tenant_id
+                AND confirmation.inventory_owner_id = entry.inventory_owner_id
+                AND confirmation.inventory_transaction_id = entry.transaction_id
+               WHERE confirmation.tenant_id = shipment_row.tenant_id
+                 AND confirmation.inventory_owner_id = shipment_row.inventory_owner_id
+                 AND confirmation.facility_id = shipment_row.facility_id
+                 AND confirmation.shipment_id = shipment_row.id
+               GROUP BY entry.facility_id, entry.location_id, entry.license_plate_id,
+                        entry.item_batch_id, entry.item_id, entry.uom,
+                        entry.lot, entry.expiration, entry.serial, entry.status
+           )
+           SELECT 1
+           FROM expected
+           FULL OUTER JOIN actual
+             ON actual.facility_id = expected.facility_id
+            AND actual.location_id = expected.location_id
+            AND actual.license_plate_id = expected.license_plate_id
+            AND actual.item_batch_id = expected.item_batch_id
+            AND actual.item_id = expected.item_id
+            AND actual.uom = expected.uom
+            AND actual.lot IS NOT DISTINCT FROM expected.lot
+            AND actual.expiration IS NOT DISTINCT FROM expected.expiration
+            AND actual.serial IS NOT DISTINCT FROM expected.serial
+            AND actual.status = expected.status
+           WHERE actual.quantity_delta IS DISTINCT FROM expected.quantity_delta
+       )
+    THEN
+        RAISE EXCEPTION 'departed shipment does not reconcile with order, inventory, or carton departures'
             USING ERRCODE = '23514';
     END IF;
     RETURN NULL;
@@ -5652,7 +6367,9 @@ CREATE TABLE public.facilities (
     created timestamp with time zone NOT NULL,
     deleted timestamp with time zone,
     name text,
-    address_id bigint
+    address_id bigint,
+    revision bigint DEFAULT 1 NOT NULL,
+    CONSTRAINT facilities_revision_check CHECK (revision > 0)
 );
 
 ALTER TABLE ONLY public.facilities FORCE ROW LEVEL SECURITY;
@@ -7683,6 +8400,281 @@ ALTER TABLE public.carton_contents ALTER COLUMN id ADD GENERATED ALWAYS AS IDENT
 
 
 --
+-- Name: shipments; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.shipments (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    packing_session_id bigint NOT NULL,
+    order_release_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    state text DEFAULT 'awaiting manifest'::text NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
+    creation_expected_order_revision bigint NOT NULL,
+    creation_resulting_order_revision bigint NOT NULL,
+    carton_count bigint NOT NULL,
+    content_count bigint NOT NULL,
+    shipped_qty bigint NOT NULL,
+    carrier text,
+    service text,
+    created_by_user_id bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    manifested_at timestamp with time zone,
+    departed_at timestamp with time zone,
+    CONSTRAINT shipments_carrier_check CHECK ((carrier IS NULL) OR ((carrier = btrim(carrier)) AND (carrier <> ''::text) AND (char_length(carrier) <= 100))),
+    CONSTRAINT shipments_counts_check CHECK ((carton_count > 0) AND (content_count > 0) AND (shipped_qty > 0)),
+    CONSTRAINT shipments_creation_revision_check CHECK ((creation_expected_order_revision > 0) AND (creation_resulting_order_revision = creation_expected_order_revision + 1)),
+    CONSTRAINT shipments_revision_check CHECK (revision > 0),
+    CONSTRAINT shipments_service_check CHECK ((service IS NULL) OR ((service = btrim(service)) AND (service <> ''::text) AND (char_length(service) <= 100))),
+    CONSTRAINT shipments_state_check CHECK ((state = ANY (ARRAY['awaiting manifest'::text, 'manifested'::text, 'departed'::text]))),
+    CONSTRAINT shipments_state_fields_check CHECK (
+        ((state = 'awaiting manifest'::text) AND (revision = 1)
+            AND (carrier IS NULL) AND (service IS NULL)
+            AND (manifested_at IS NULL) AND (departed_at IS NULL))
+        OR ((state = 'manifested'::text) AND (revision = 2)
+            AND (carrier IS NOT NULL)
+            AND (manifested_at IS NOT NULL) AND (manifested_at >= created_at)
+            AND (departed_at IS NULL))
+        OR ((state = 'departed'::text) AND (revision = 3)
+            AND (carrier IS NOT NULL)
+            AND (manifested_at IS NOT NULL) AND (manifested_at >= created_at)
+            AND (departed_at IS NOT NULL) AND (departed_at >= manifested_at))
+    )
+);
+
+ALTER TABLE ONLY public.shipments FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE public.shipments ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.shipments_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: shipment_address_snapshots; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.shipment_address_snapshots (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    shipment_id bigint NOT NULL,
+    address_role text NOT NULL,
+    source_address_id bigint NOT NULL,
+    name text,
+    company text,
+    line1 text NOT NULL,
+    line2 text,
+    postal_code text NOT NULL,
+    country text NOT NULL,
+    phone text,
+    email text,
+    state text,
+    county text,
+    city text NOT NULL,
+    territory text,
+    district text,
+    CONSTRAINT shipment_address_snapshots_complete_check CHECK (
+        (((name IS NOT NULL) AND (name = btrim(name)) AND (name <> ''::text))
+            OR ((company IS NOT NULL) AND (company = btrim(company)) AND (company <> ''::text)))
+        AND (line1 = btrim(line1)) AND (line1 <> ''::text)
+        AND (postal_code = btrim(postal_code)) AND (postal_code <> ''::text)
+        AND (country = btrim(country)) AND (country <> ''::text)
+        AND (city = btrim(city)) AND (city <> ''::text)
+    ),
+    CONSTRAINT shipment_address_snapshots_role_check CHECK ((address_role = ANY (ARRAY['origin'::text, 'destination'::text])))
+);
+
+ALTER TABLE ONLY public.shipment_address_snapshots FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE public.shipment_address_snapshots ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.shipment_address_snapshots_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: shipment_cartons; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.shipment_cartons (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    shipment_id bigint NOT NULL,
+    packing_session_id bigint NOT NULL,
+    carton_id bigint NOT NULL,
+    license_plate_id bigint NOT NULL,
+    carton_barcode text NOT NULL,
+    sequence bigint NOT NULL,
+    content_count bigint NOT NULL,
+    packed_qty bigint NOT NULL,
+    weight_g bigint,
+    length_mm bigint,
+    width_mm bigint,
+    height_mm bigint,
+    CONSTRAINT shipment_cartons_counts_check CHECK ((content_count > 0) AND (packed_qty > 0)),
+    CONSTRAINT shipment_cartons_barcode_check CHECK ((carton_barcode = btrim(carton_barcode)) AND (carton_barcode <> ''::text) AND (char_length(carton_barcode) <= 200)),
+    CONSTRAINT shipment_cartons_dimensions_check CHECK (((length_mm IS NULL) AND (width_mm IS NULL) AND (height_mm IS NULL)) OR ((length_mm > 0) AND (width_mm > 0) AND (height_mm > 0))),
+    CONSTRAINT shipment_cartons_sequence_check CHECK (sequence > 0),
+    CONSTRAINT shipment_cartons_weight_check CHECK ((weight_g IS NULL) OR (weight_g > 0))
+);
+
+ALTER TABLE ONLY public.shipment_cartons FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE public.shipment_cartons ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.shipment_cartons_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: shipment_manifests; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.shipment_manifests (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    shipment_id bigint NOT NULL,
+    packing_session_id bigint NOT NULL,
+    order_release_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    manifest_number text NOT NULL,
+    carrier text NOT NULL,
+    service text,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    package_count bigint NOT NULL,
+    manifested_by_user_id bigint NOT NULL,
+    manifested_at timestamp with time zone NOT NULL,
+    CONSTRAINT shipment_manifests_carrier_check CHECK ((carrier = btrim(carrier)) AND (carrier <> ''::text) AND (char_length(carrier) <= 100)),
+    CONSTRAINT shipment_manifests_manifest_number_check CHECK ((manifest_number = btrim(manifest_number)) AND (manifest_number <> ''::text) AND (char_length(manifest_number) <= 200)),
+    CONSTRAINT shipment_manifests_package_count_check CHECK (package_count > 0),
+    CONSTRAINT shipment_manifests_revision_check CHECK ((expected_revision > 0) AND (resulting_revision = expected_revision + 1)),
+    CONSTRAINT shipment_manifests_service_check CHECK ((service IS NULL) OR ((service = btrim(service)) AND (service <> ''::text) AND (char_length(service) <= 100)))
+);
+
+ALTER TABLE ONLY public.shipment_manifests FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE public.shipment_manifests ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.shipment_manifests_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: shipment_manifest_packages; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.shipment_manifest_packages (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    shipment_id bigint NOT NULL,
+    manifest_id bigint NOT NULL,
+    shipment_carton_id bigint NOT NULL,
+    carton_id bigint NOT NULL,
+    license_plate_id bigint NOT NULL,
+    sequence bigint NOT NULL,
+    carrier text NOT NULL,
+    service text,
+    tracking_number text NOT NULL,
+    weight_g bigint,
+    length_mm bigint,
+    width_mm bigint,
+    height_mm bigint,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT shipment_manifest_packages_carrier_check CHECK ((carrier = btrim(carrier)) AND (carrier <> ''::text) AND (char_length(carrier) <= 100)),
+    CONSTRAINT shipment_manifest_packages_dimensions_check CHECK (((length_mm IS NULL) AND (width_mm IS NULL) AND (height_mm IS NULL)) OR ((length_mm > 0) AND (width_mm > 0) AND (height_mm > 0))),
+    CONSTRAINT shipment_manifest_packages_sequence_check CHECK (sequence > 0),
+    CONSTRAINT shipment_manifest_packages_service_check CHECK ((service IS NULL) OR ((service = btrim(service)) AND (service <> ''::text) AND (char_length(service) <= 100))),
+    CONSTRAINT shipment_manifest_packages_tracking_check CHECK ((tracking_number = btrim(tracking_number)) AND (tracking_number <> ''::text) AND (char_length(tracking_number) <= 200)),
+    CONSTRAINT shipment_manifest_packages_weight_check CHECK ((weight_g IS NULL) OR (weight_g > 0))
+);
+
+ALTER TABLE ONLY public.shipment_manifest_packages FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE public.shipment_manifest_packages ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.shipment_manifest_packages_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: shipment_confirmations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.shipment_confirmations (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    shipment_id bigint NOT NULL,
+    manifest_id bigint NOT NULL,
+    packing_session_id bigint NOT NULL,
+    order_release_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    inventory_transaction_id bigint NOT NULL,
+    expected_shipment_revision bigint NOT NULL,
+    resulting_shipment_revision bigint NOT NULL,
+    expected_order_revision bigint NOT NULL,
+    resulting_order_revision bigint NOT NULL,
+    carton_count bigint NOT NULL,
+    shipped_qty bigint NOT NULL,
+    confirmed_by_user_id bigint NOT NULL,
+    confirmed_at timestamp with time zone NOT NULL,
+    CONSTRAINT shipment_confirmations_counts_check CHECK ((carton_count > 0) AND (shipped_qty > 0)),
+    CONSTRAINT shipment_confirmations_order_revision_check CHECK ((expected_order_revision > 0) AND (resulting_order_revision = expected_order_revision + 1)),
+    CONSTRAINT shipment_confirmations_shipment_revision_check CHECK ((expected_shipment_revision > 0) AND (resulting_shipment_revision = expected_shipment_revision + 1))
+);
+
+ALTER TABLE ONLY public.shipment_confirmations FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE public.shipment_confirmations ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.shipment_confirmations_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: pick_tasks; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -9687,6 +10679,110 @@ ALTER TABLE ONLY public.carton_contents
     ADD CONSTRAINT carton_contents_transaction_key UNIQUE (tenant_id, inventory_owner_id, inventory_transaction_id);
 
 
+ALTER TABLE ONLY public.shipments
+    ADD CONSTRAINT shipments_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.shipments
+    ADD CONSTRAINT shipments_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, packing_session_id, order_release_id, order_id, id);
+
+
+ALTER TABLE ONLY public.shipments
+    ADD CONSTRAINT shipments_basic_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.shipments
+    ADD CONSTRAINT shipments_session_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, packing_session_id, id);
+
+
+ALTER TABLE ONLY public.shipments
+    ADD CONSTRAINT shipments_order_key UNIQUE (tenant_id, inventory_owner_id, order_id);
+
+
+ALTER TABLE ONLY public.shipment_address_snapshots
+    ADD CONSTRAINT shipment_address_snapshots_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.shipment_address_snapshots
+    ADD CONSTRAINT shipment_address_snapshots_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_id, id);
+
+
+ALTER TABLE ONLY public.shipment_address_snapshots
+    ADD CONSTRAINT shipment_address_snapshots_role_key UNIQUE (tenant_id, inventory_owner_id, shipment_id, address_role);
+
+
+ALTER TABLE ONLY public.shipment_cartons
+    ADD CONSTRAINT shipment_cartons_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.shipment_cartons
+    ADD CONSTRAINT shipment_cartons_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_id, id);
+
+
+ALTER TABLE ONLY public.shipment_cartons
+    ADD CONSTRAINT shipment_cartons_carton_key UNIQUE (tenant_id, inventory_owner_id, facility_id, carton_id);
+
+
+ALTER TABLE ONLY public.shipment_cartons
+    ADD CONSTRAINT shipment_cartons_license_plate_key UNIQUE (tenant_id, inventory_owner_id, facility_id, license_plate_id);
+
+
+ALTER TABLE ONLY public.shipment_cartons
+    ADD CONSTRAINT shipment_cartons_sequence_key UNIQUE (tenant_id, inventory_owner_id, shipment_id, sequence);
+
+
+ALTER TABLE ONLY public.shipment_cartons
+    ADD CONSTRAINT shipment_cartons_barcode_key UNIQUE (tenant_id, inventory_owner_id, shipment_id, carton_barcode);
+
+
+ALTER TABLE ONLY public.shipment_manifests
+    ADD CONSTRAINT shipment_manifests_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.shipment_manifests
+    ADD CONSTRAINT shipment_manifests_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_id, id);
+
+
+ALTER TABLE ONLY public.shipment_manifests
+    ADD CONSTRAINT shipment_manifests_shipment_key UNIQUE (tenant_id, inventory_owner_id, shipment_id);
+
+
+ALTER TABLE ONLY public.shipment_manifests
+    ADD CONSTRAINT shipment_manifests_number_key UNIQUE (tenant_id, carrier, manifest_number);
+
+
+ALTER TABLE ONLY public.shipment_manifest_packages
+    ADD CONSTRAINT shipment_manifest_packages_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.shipment_manifest_packages
+    ADD CONSTRAINT shipment_manifest_packages_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_id, manifest_id, id);
+
+
+ALTER TABLE ONLY public.shipment_manifest_packages
+    ADD CONSTRAINT shipment_manifest_packages_carton_key UNIQUE (tenant_id, inventory_owner_id, shipment_carton_id);
+
+
+ALTER TABLE ONLY public.shipment_manifest_packages
+    ADD CONSTRAINT shipment_manifest_packages_sequence_key UNIQUE (tenant_id, inventory_owner_id, manifest_id, sequence);
+
+
+ALTER TABLE ONLY public.shipment_manifest_packages
+    ADD CONSTRAINT shipment_manifest_packages_tracking_key UNIQUE (tenant_id, carrier, tracking_number);
+
+
+ALTER TABLE ONLY public.shipment_confirmations
+    ADD CONSTRAINT shipment_confirmations_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.shipment_confirmations
+    ADD CONSTRAINT shipment_confirmations_shipment_key UNIQUE (tenant_id, inventory_owner_id, shipment_id);
+
+
+ALTER TABLE ONLY public.shipment_confirmations
+    ADD CONSTRAINT shipment_confirmations_transaction_key UNIQUE (tenant_id, inventory_owner_id, inventory_transaction_id);
+
+
 --
 -- Name: pick_tasks pick_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
@@ -10524,6 +11620,9 @@ CREATE INDEX idx_orders_status_created ON public.orders USING btree (tenant_id, 
 CREATE INDEX orders_packing_queue_idx ON public.orders USING btree (tenant_id, rush DESC, ship_by ASC NULLS LAST, id) WHERE ((deleted IS NULL) AND (status = ANY (ARRAY['awaiting packing'::text, 'packing'::text])));
 
 
+CREATE INDEX orders_shipping_queue_idx ON public.orders USING btree (tenant_id, rush DESC, ship_by ASC NULLS LAST, id) WHERE ((deleted IS NULL) AND (status = 'awaiting shipment'::text));
+
+
 --
 -- Name: idx_role_permissions_permission_id; Type: INDEX; Schema: public; Owner: -
 --
@@ -10865,6 +11964,15 @@ CREATE UNIQUE INDEX cartons_one_open_session_idx ON public.cartons USING btree (
 --
 
 CREATE INDEX carton_contents_session_idx ON public.carton_contents USING btree (tenant_id, packing_session_id, carton_id, packed_at, id);
+
+
+CREATE INDEX shipments_state_idx ON public.shipments USING btree (tenant_id, facility_id, inventory_owner_id, state, created_at, id);
+
+
+CREATE INDEX shipment_cartons_shipment_idx ON public.shipment_cartons USING btree (tenant_id, shipment_id, sequence, id);
+
+
+CREATE INDEX shipment_manifest_packages_manifest_idx ON public.shipment_manifest_packages USING btree (tenant_id, manifest_id, sequence, id);
 
 
 --
@@ -11401,6 +12509,66 @@ CREATE TRIGGER carton_contents_validate BEFORE INSERT ON public.carton_contents 
 
 
 CREATE CONSTRAINT TRIGGER carton_contents_validate_session AFTER INSERT ON public.carton_contents DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_packing_session_consistency();
+
+
+CREATE TRIGGER shipments_reject_delete BEFORE DELETE ON public.shipments FOR EACH ROW EXECUTE FUNCTION public.reject_shipping_ledger_mutation();
+
+
+CREATE TRIGGER shipments_guard_mutation BEFORE UPDATE ON public.shipments FOR EACH ROW EXECUTE FUNCTION public.guard_shipment_mutation();
+
+
+CREATE TRIGGER shipments_validate BEFORE INSERT ON public.shipments FOR EACH ROW EXECUTE FUNCTION public.validate_shipment();
+
+
+CREATE CONSTRAINT TRIGGER shipments_validate_consistency AFTER INSERT OR UPDATE ON public.shipments DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_consistency();
+
+
+CREATE TRIGGER shipment_address_snapshots_are_immutable BEFORE DELETE OR UPDATE ON public.shipment_address_snapshots FOR EACH ROW EXECUTE FUNCTION public.reject_shipping_ledger_mutation();
+
+
+CREATE TRIGGER shipment_address_snapshots_validate BEFORE INSERT ON public.shipment_address_snapshots FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_address_snapshot();
+
+
+CREATE CONSTRAINT TRIGGER shipment_address_snapshots_validate_consistency AFTER INSERT ON public.shipment_address_snapshots DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_consistency();
+
+
+CREATE TRIGGER shipment_cartons_are_immutable BEFORE DELETE OR UPDATE ON public.shipment_cartons FOR EACH ROW EXECUTE FUNCTION public.reject_shipping_ledger_mutation();
+
+
+CREATE TRIGGER shipment_cartons_validate BEFORE INSERT ON public.shipment_cartons FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_carton();
+
+
+CREATE CONSTRAINT TRIGGER shipment_cartons_validate_consistency AFTER INSERT ON public.shipment_cartons DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_consistency();
+
+
+CREATE TRIGGER shipment_manifests_are_immutable BEFORE DELETE OR UPDATE ON public.shipment_manifests FOR EACH ROW EXECUTE FUNCTION public.reject_shipping_ledger_mutation();
+
+
+CREATE TRIGGER shipment_manifests_validate BEFORE INSERT ON public.shipment_manifests FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_manifest();
+
+
+CREATE CONSTRAINT TRIGGER shipment_manifests_validate_consistency AFTER INSERT ON public.shipment_manifests DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_consistency();
+
+
+CREATE TRIGGER shipment_manifest_packages_are_immutable BEFORE DELETE OR UPDATE ON public.shipment_manifest_packages FOR EACH ROW EXECUTE FUNCTION public.reject_shipping_ledger_mutation();
+
+
+CREATE TRIGGER shipment_manifest_packages_validate BEFORE INSERT ON public.shipment_manifest_packages FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_manifest_package();
+
+
+CREATE CONSTRAINT TRIGGER shipment_manifest_packages_validate_consistency AFTER INSERT ON public.shipment_manifest_packages DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_consistency();
+
+
+CREATE TRIGGER shipment_confirmations_are_immutable BEFORE DELETE OR UPDATE ON public.shipment_confirmations FOR EACH ROW EXECUTE FUNCTION public.reject_shipping_ledger_mutation();
+
+
+CREATE TRIGGER shipment_confirmations_validate BEFORE INSERT ON public.shipment_confirmations FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_confirmation();
+
+
+CREATE CONSTRAINT TRIGGER shipment_confirmations_validate_consistency AFTER INSERT ON public.shipment_confirmations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_consistency();
+
+
+CREATE CONSTRAINT TRIGGER orders_validate_shipment_consistency AFTER UPDATE OF status, revision ON public.orders DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_consistency();
 
 
 --
@@ -14061,6 +15229,50 @@ ALTER TABLE ONLY public.carton_contents
     ADD CONSTRAINT carton_contents_packed_by_fkey FOREIGN KEY (tenant_id, packed_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
 
 
+ALTER TABLE ONLY public.shipments
+    ADD CONSTRAINT shipments_session_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, packing_session_id) REFERENCES public.packing_sessions(tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, id);
+ALTER TABLE ONLY public.shipments
+    ADD CONSTRAINT shipments_created_by_fkey FOREIGN KEY (tenant_id, created_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+ALTER TABLE ONLY public.shipment_address_snapshots
+    ADD CONSTRAINT shipment_address_snapshots_shipment_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, shipment_id) REFERENCES public.shipments(tenant_id, inventory_owner_id, facility_id, id);
+ALTER TABLE ONLY public.shipment_address_snapshots
+    ADD CONSTRAINT shipment_address_snapshots_source_fkey FOREIGN KEY (tenant_id, source_address_id) REFERENCES public.addresses(tenant_id, id);
+
+
+ALTER TABLE ONLY public.shipment_cartons
+    ADD CONSTRAINT shipment_cartons_shipment_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, packing_session_id, shipment_id) REFERENCES public.shipments(tenant_id, inventory_owner_id, facility_id, packing_session_id, id);
+ALTER TABLE ONLY public.shipment_cartons
+    ADD CONSTRAINT shipment_cartons_carton_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, packing_session_id, carton_id) REFERENCES public.cartons(tenant_id, inventory_owner_id, facility_id, packing_session_id, id);
+ALTER TABLE ONLY public.shipment_cartons
+    ADD CONSTRAINT shipment_cartons_license_plate_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.shipment_manifests
+    ADD CONSTRAINT shipment_manifests_shipment_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, packing_session_id, order_release_id, order_id, shipment_id) REFERENCES public.shipments(tenant_id, inventory_owner_id, facility_id, packing_session_id, order_release_id, order_id, id);
+ALTER TABLE ONLY public.shipment_manifests
+    ADD CONSTRAINT shipment_manifests_manifested_by_fkey FOREIGN KEY (tenant_id, manifested_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+ALTER TABLE ONLY public.shipment_manifest_packages
+    ADD CONSTRAINT shipment_manifest_packages_manifest_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, shipment_id, manifest_id) REFERENCES public.shipment_manifests(tenant_id, inventory_owner_id, facility_id, shipment_id, id);
+ALTER TABLE ONLY public.shipment_manifest_packages
+    ADD CONSTRAINT shipment_manifest_packages_carton_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, shipment_id, shipment_carton_id) REFERENCES public.shipment_cartons(tenant_id, inventory_owner_id, facility_id, shipment_id, id);
+ALTER TABLE ONLY public.shipment_manifest_packages
+    ADD CONSTRAINT shipment_manifest_packages_license_plate_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.shipment_confirmations
+    ADD CONSTRAINT shipment_confirmations_shipment_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, packing_session_id, order_release_id, order_id, shipment_id) REFERENCES public.shipments(tenant_id, inventory_owner_id, facility_id, packing_session_id, order_release_id, order_id, id);
+ALTER TABLE ONLY public.shipment_confirmations
+    ADD CONSTRAINT shipment_confirmations_manifest_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, shipment_id, manifest_id) REFERENCES public.shipment_manifests(tenant_id, inventory_owner_id, facility_id, shipment_id, id);
+ALTER TABLE ONLY public.shipment_confirmations
+    ADD CONSTRAINT shipment_confirmations_transaction_fkey FOREIGN KEY (tenant_id, inventory_owner_id, inventory_transaction_id) REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id);
+ALTER TABLE ONLY public.shipment_confirmations
+    ADD CONSTRAINT shipment_confirmations_confirmed_by_fkey FOREIGN KEY (tenant_id, confirmed_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
 --
 -- Name: permissions permissions_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
@@ -15739,6 +16951,30 @@ ALTER TABLE public.carton_contents ENABLE ROW LEVEL SECURITY;
 CREATE POLICY carton_contents_tenant_isolation ON public.carton_contents USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
 
 
+ALTER TABLE public.shipments ENABLE ROW LEVEL SECURITY;
+CREATE POLICY shipments_tenant_isolation ON public.shipments USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+ALTER TABLE public.shipment_address_snapshots ENABLE ROW LEVEL SECURITY;
+CREATE POLICY shipment_address_snapshots_tenant_isolation ON public.shipment_address_snapshots USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+ALTER TABLE public.shipment_cartons ENABLE ROW LEVEL SECURITY;
+CREATE POLICY shipment_cartons_tenant_isolation ON public.shipment_cartons USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+ALTER TABLE public.shipment_manifests ENABLE ROW LEVEL SECURITY;
+CREATE POLICY shipment_manifests_tenant_isolation ON public.shipment_manifests USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+ALTER TABLE public.shipment_manifest_packages ENABLE ROW LEVEL SECURITY;
+CREATE POLICY shipment_manifest_packages_tenant_isolation ON public.shipment_manifest_packages USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+ALTER TABLE public.shipment_confirmations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY shipment_confirmations_tenant_isolation ON public.shipment_confirmations USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
 --
 -- Name: permissions; Type: ROW SECURITY; Schema: public; Owner: -
 --
@@ -16233,6 +17469,15 @@ REVOKE ALL ON FUNCTION public.validate_packing_session_allocation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_carton() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_carton_content() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_packing_session_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_shipping_ledger_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_shipment_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_shipment() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_shipment_address_snapshot() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_shipment_carton() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_shipment_manifest() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_shipment_manifest_package() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_shipment_confirmation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_shipment_consistency() FROM PUBLIC;
 
 
 --
@@ -17165,6 +18410,30 @@ GRANT SELECT,INSERT ON TABLE public.carton_contents TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.carton_contents_id_seq TO wareboxes_app;
 
 
+GRANT SELECT,INSERT,UPDATE ON TABLE public.shipments TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.shipments_id_seq TO wareboxes_app;
+
+
+GRANT SELECT,INSERT ON TABLE public.shipment_address_snapshots TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.shipment_address_snapshots_id_seq TO wareboxes_app;
+
+
+GRANT SELECT,INSERT ON TABLE public.shipment_cartons TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.shipment_cartons_id_seq TO wareboxes_app;
+
+
+GRANT SELECT,INSERT ON TABLE public.shipment_manifests TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.shipment_manifests_id_seq TO wareboxes_app;
+
+
+GRANT SELECT,INSERT ON TABLE public.shipment_manifest_packages TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.shipment_manifest_packages_id_seq TO wareboxes_app;
+
+
+GRANT SELECT,INSERT ON TABLE public.shipment_confirmations TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.shipment_confirmations_id_seq TO wareboxes_app;
+
+
 --
 -- Name: TABLE pick_tasks; Type: ACL; Schema: public; Owner: -
 --
@@ -17422,6 +18691,283 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.work_tasks TO wareboxes_app;
 --
 
 GRANT SELECT,USAGE ON SEQUENCE public.work_tasks_id_seq TO wareboxes_app;
+
+
+--
+-- Facility shipping-origin configuration lifecycle
+--
+
+CREATE TABLE public.facility_shipping_origin_configurations (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    previous_address_id bigint,
+    address_id bigint NOT NULL,
+    configured_by_user_id bigint NOT NULL,
+    configured_at timestamp with time zone NOT NULL,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    CONSTRAINT facility_shipping_origin_configurations_revision_check CHECK (
+        expected_revision > 0
+        AND resulting_revision = expected_revision + 1
+        AND resulting_revision > expected_revision
+    ),
+    CONSTRAINT facility_shipping_origin_configurations_address_change_check CHECK (
+        previous_address_id IS NULL OR previous_address_id <> address_id
+    ),
+    CONSTRAINT facility_shipping_origin_configurations_tenant_id_id_key
+        UNIQUE (tenant_id, id),
+    CONSTRAINT facility_shipping_origin_configurations_facility_revision_key
+        UNIQUE (tenant_id, facility_id, resulting_revision),
+    CONSTRAINT facility_shipping_origin_configurations_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id),
+    CONSTRAINT facility_shipping_origin_configurations_facility_id_fkey
+        FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id),
+    CONSTRAINT facility_shipping_origin_configurations_previous_address_id_fkey
+        FOREIGN KEY (tenant_id, previous_address_id) REFERENCES public.addresses(tenant_id, id),
+    CONSTRAINT facility_shipping_origin_configurations_address_id_fkey
+        FOREIGN KEY (tenant_id, address_id) REFERENCES public.addresses(tenant_id, id),
+    CONSTRAINT facility_shipping_origin_configurations_actor_id_fkey
+        FOREIGN KEY (tenant_id, configured_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id)
+);
+
+ALTER TABLE public.facility_shipping_origin_configurations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.facility_shipping_origin_configurations FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY facility_shipping_origin_configurations_tenant_isolation
+ON public.facility_shipping_origin_configurations
+USING (
+    tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint
+)
+WITH CHECK (
+    tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint
+);
+
+CREATE FUNCTION public.guard_facility_shipping_origin_update() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    origin_is_complete boolean;
+BEGIN
+    IF OLD.deleted IS NOT NULL
+       OR NEW.address_id IS NULL
+       OR NEW.address_id IS NOT DISTINCT FROM OLD.address_id
+       OR OLD.revision = 9223372036854775807
+       OR NEW.revision <> OLD.revision + 1 THEN
+        RAISE EXCEPTION
+            'facility shipping origin replacement requires a new address and one revision step'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT (
+        address.deleted IS NULL
+        AND (
+            (
+                address.name IS NOT NULL
+                AND btrim(address.name) <> ''
+                AND address.name = btrim(address.name)
+                AND char_length(address.name) <= 200
+                AND address.name !~ '[[:cntrl:]]'
+            )
+            OR (
+                address.company IS NOT NULL
+                AND btrim(address.company) <> ''
+                AND address.company = btrim(address.company)
+                AND char_length(address.company) <= 200
+                AND address.company !~ '[[:cntrl:]]'
+            )
+        )
+        AND (
+            address.name IS NULL
+            OR (
+                address.name = btrim(address.name)
+                AND char_length(address.name) BETWEEN 1 AND 200
+                AND address.name !~ '[[:cntrl:]]'
+            )
+        )
+        AND (
+            address.company IS NULL
+            OR (
+                address.company = btrim(address.company)
+                AND char_length(address.company) BETWEEN 1 AND 200
+                AND address.company !~ '[[:cntrl:]]'
+            )
+        )
+        AND address.line1 = btrim(address.line1)
+        AND char_length(address.line1) BETWEEN 1 AND 200
+        AND address.line1 !~ '[[:cntrl:]]'
+        AND (
+            address.line2 IS NULL
+            OR (
+                address.line2 = btrim(address.line2)
+                AND char_length(address.line2) BETWEEN 1 AND 200
+                AND address.line2 !~ '[[:cntrl:]]'
+            )
+        )
+        AND address.city IS NOT NULL
+        AND address.city = btrim(address.city)
+        AND char_length(address.city) BETWEEN 1 AND 100
+        AND address.city !~ '[[:cntrl:]]'
+        AND (
+            address.state IS NULL
+            OR (
+                address.state = btrim(address.state)
+                AND char_length(address.state) BETWEEN 1 AND 100
+                AND address.state !~ '[[:cntrl:]]'
+            )
+        )
+        AND address.postal_code IS NOT NULL
+        AND address.postal_code = btrim(address.postal_code)
+        AND char_length(address.postal_code) BETWEEN 1 AND 32
+        AND address.postal_code !~ '[[:cntrl:]]'
+        AND address.country = btrim(address.country)
+        AND char_length(address.country) BETWEEN 1 AND 100
+        AND address.country !~ '[[:cntrl:]]'
+        AND (
+            address.phone IS NULL
+            OR (
+                address.phone = btrim(address.phone)
+                AND char_length(address.phone) BETWEEN 1 AND 64
+                AND address.phone !~ '[[:cntrl:]]'
+            )
+        )
+        AND (
+            address.email IS NULL
+            OR (
+                address.email = btrim(address.email)
+                AND char_length(address.email) BETWEEN 1 AND 254
+                AND address.email !~ '[[:cntrl:]]'
+            )
+        )
+    )
+    INTO origin_is_complete
+    FROM public.addresses address
+    WHERE address.tenant_id = NEW.tenant_id
+      AND address.id = NEW.address_id;
+
+    IF NOT COALESCE(origin_is_complete, false) THEN
+        RAISE EXCEPTION 'facility shipping origin address must be complete and valid'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.enforce_facility_shipping_origin_audit() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.facility_shipping_origin_configurations configuration
+        WHERE configuration.tenant_id = NEW.tenant_id
+          AND configuration.facility_id = NEW.id
+          AND configuration.previous_address_id IS NOT DISTINCT FROM OLD.address_id
+          AND configuration.address_id = NEW.address_id
+          AND configuration.expected_revision = OLD.revision
+          AND configuration.resulting_revision = NEW.revision
+    ) THEN
+        RAISE EXCEPTION 'facility shipping origin update requires an audit record'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.enforce_facility_shipping_origin_configuration() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.facilities facility
+        WHERE facility.tenant_id = NEW.tenant_id
+          AND facility.id = NEW.facility_id
+          AND facility.deleted IS NULL
+          AND facility.address_id = NEW.address_id
+          AND facility.revision = NEW.resulting_revision
+    ) THEN
+        RAISE EXCEPTION 'facility shipping origin audit does not match facility state'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.protect_facility_shipping_origin_address() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM public.facilities facility
+        WHERE facility.tenant_id = OLD.tenant_id
+          AND facility.address_id = OLD.id
+    ) OR EXISTS (
+        SELECT 1
+        FROM public.facility_shipping_origin_configurations configuration
+        WHERE configuration.tenant_id = OLD.tenant_id
+          AND (
+              configuration.previous_address_id = OLD.id
+              OR configuration.address_id = OLD.id
+          )
+    ) THEN
+        RAISE EXCEPTION 'facility shipping origin addresses are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+        RETURN NEW;
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
+CREATE FUNCTION public.reject_facility_shipping_origin_audit_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'facility shipping origin configuration records are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER facility_shipping_origin_updates_are_guarded
+BEFORE UPDATE OF address_id, revision ON public.facilities
+FOR EACH ROW EXECUTE FUNCTION public.guard_facility_shipping_origin_update();
+
+CREATE CONSTRAINT TRIGGER facility_shipping_origin_updates_are_audited
+AFTER UPDATE OF address_id, revision ON public.facilities
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.enforce_facility_shipping_origin_audit();
+
+CREATE CONSTRAINT TRIGGER facility_shipping_origin_configurations_are_applied
+AFTER INSERT ON public.facility_shipping_origin_configurations
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.enforce_facility_shipping_origin_configuration();
+
+CREATE TRIGGER facility_shipping_origin_configurations_are_immutable
+BEFORE DELETE OR UPDATE ON public.facility_shipping_origin_configurations
+FOR EACH ROW EXECUTE FUNCTION public.reject_facility_shipping_origin_audit_mutation();
+
+CREATE TRIGGER facility_shipping_origin_addresses_are_immutable
+BEFORE DELETE OR UPDATE ON public.addresses
+FOR EACH ROW EXECUTE FUNCTION public.protect_facility_shipping_origin_address();
+
+REVOKE ALL ON FUNCTION public.guard_facility_shipping_origin_update() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.enforce_facility_shipping_origin_audit() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.enforce_facility_shipping_origin_configuration() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.protect_facility_shipping_origin_address() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_facility_shipping_origin_audit_mutation() FROM PUBLIC;
+
+GRANT UPDATE (address_id, revision) ON TABLE public.facilities TO wareboxes_app;
+GRANT SELECT,INSERT ON TABLE public.facility_shipping_origin_configurations TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.facility_shipping_origin_configurations_id_seq TO wareboxes_app;
 
 
 --

@@ -8,6 +8,10 @@ pub const MAX_ORDER_KEY_LENGTH: usize = 200;
 pub const MAX_ORDER_LINE_KEY_LENGTH: usize = 200;
 pub const MAX_REQUESTED_UOM_LENGTH: usize = 32;
 pub const MAX_DESTINATION_ADDRESS_LINE_LENGTH: usize = 200;
+pub const MAX_DESTINATION_RECIPIENT_NAME_LENGTH: usize = 200;
+pub const MAX_DESTINATION_COMPANY_LENGTH: usize = 200;
+pub const MAX_DESTINATION_PHONE_LENGTH: usize = 64;
+pub const MAX_DESTINATION_EMAIL_LENGTH: usize = 254;
 pub const MAX_DESTINATION_CITY_LENGTH: usize = 100;
 pub const MAX_DESTINATION_REGION_LENGTH: usize = 100;
 pub const MAX_DESTINATION_POSTAL_CODE_LENGTH: usize = 32;
@@ -18,6 +22,10 @@ pub enum OrderCreationField {
     OrderKey,
     LineKey,
     RequestedUom,
+    DestinationRecipientName,
+    DestinationCompany,
+    DestinationPhone,
+    DestinationEmail,
     DestinationLine1,
     DestinationLine2,
     DestinationCity,
@@ -32,6 +40,10 @@ impl fmt::Display for OrderCreationField {
             Self::OrderKey => "order key",
             Self::LineKey => "order line key",
             Self::RequestedUom => "requested UOM",
+            Self::DestinationRecipientName => "destination recipient name",
+            Self::DestinationCompany => "destination company",
+            Self::DestinationPhone => "destination phone",
+            Self::DestinationEmail => "destination email",
             Self::DestinationLine1 => "destination address line 1",
             Self::DestinationLine2 => "destination address line 2",
             Self::DestinationCity => "destination city",
@@ -192,7 +204,69 @@ impl CatalogItemId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShippingRecipient {
+    name: String,
+    company: Option<String>,
+    phone: Option<String>,
+    email: Option<String>,
+}
+
+impl ShippingRecipient {
+    pub fn new(
+        name: impl Into<String>,
+        company: Option<String>,
+        phone: Option<String>,
+        email: Option<String>,
+    ) -> Result<Self, OrderCreationError> {
+        let recipient = Self {
+            name: name.into(),
+            company,
+            phone,
+            email,
+        };
+        validate_required_text(
+            &recipient.name,
+            OrderCreationField::DestinationRecipientName,
+            MAX_DESTINATION_RECIPIENT_NAME_LENGTH,
+        )?;
+        validate_optional_text(
+            recipient.company.as_deref(),
+            OrderCreationField::DestinationCompany,
+            MAX_DESTINATION_COMPANY_LENGTH,
+        )?;
+        validate_optional_text(
+            recipient.phone.as_deref(),
+            OrderCreationField::DestinationPhone,
+            MAX_DESTINATION_PHONE_LENGTH,
+        )?;
+        validate_optional_text(
+            recipient.email.as_deref(),
+            OrderCreationField::DestinationEmail,
+            MAX_DESTINATION_EMAIL_LENGTH,
+        )?;
+        Ok(recipient)
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn company(&self) -> Option<&str> {
+        self.company.as_deref()
+    }
+
+    pub fn phone(&self) -> Option<&str> {
+        self.phone.as_deref()
+    }
+
+    pub fn email(&self) -> Option<&str> {
+        self.email.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShippingDestination {
+    recipient: ShippingRecipient,
     line1: String,
     line2: Option<String>,
     city: String,
@@ -203,6 +277,7 @@ pub struct ShippingDestination {
 
 impl ShippingDestination {
     pub fn new(
+        recipient: ShippingRecipient,
         line1: impl Into<String>,
         line2: Option<String>,
         city: impl Into<String>,
@@ -211,6 +286,7 @@ impl ShippingDestination {
         country: impl Into<String>,
     ) -> Result<Self, OrderCreationError> {
         let destination = Self {
+            recipient,
             line1: line1.into(),
             line2,
             city: city.into(),
@@ -249,6 +325,10 @@ impl ShippingDestination {
             MAX_DESTINATION_COUNTRY_LENGTH,
         )?;
         Ok(destination)
+    }
+
+    pub const fn recipient(&self) -> &ShippingRecipient {
+        &self.recipient
     }
 
     pub fn line1(&self) -> &str {
@@ -542,6 +622,13 @@ mod tests {
 
     fn destination() -> ShippingDestination {
         ShippingDestination::new(
+            ShippingRecipient::new(
+                "Receiving Team",
+                Some("Northstar Retail".into()),
+                Some("+1 775 555 0100".into()),
+                Some("receiving@example.com".into()),
+            )
+            .unwrap(),
             "125 Shipping Lane",
             Some("Dock 4".into()),
             "Reno",
@@ -578,6 +665,7 @@ mod tests {
         assert!(order.rush());
         assert_eq!(order.ship_by(), None);
         assert_eq!(order.initial_status(), OrderStatus::Open);
+        assert_eq!(order.destination().recipient().name(), "Receiving Team");
         assert_eq!(order.destination().city(), "Reno");
         assert_eq!(order.demand_lines().len(), 2);
         assert_eq!(order.demand_lines()[0].quantity().get(), 12);
@@ -641,13 +729,22 @@ mod tests {
             Err(OrderCreationError::InvalidQuantity { value: -1 })
         );
         assert!(matches!(
-            ShippingDestination::new("", None, "Reno", "NV", "89502", "US"),
+            ShippingDestination::new(
+                ShippingRecipient::new("Receiving Team", None, None, None).unwrap(),
+                "",
+                None,
+                "Reno",
+                "NV",
+                "89502",
+                "US"
+            ),
             Err(OrderCreationError::InvalidText {
                 field: OrderCreationField::DestinationLine1
             })
         ));
         assert!(matches!(
             ShippingDestination::new(
+                ShippingRecipient::new("Receiving Team", None, None, None).unwrap(),
                 "125 Shipping Lane",
                 None,
                 "Reno",
@@ -658,6 +755,12 @@ mod tests {
             Err(OrderCreationError::TextTooLong {
                 field: OrderCreationField::DestinationPostalCode,
                 maximum: MAX_DESTINATION_POSTAL_CODE_LENGTH
+            })
+        ));
+        assert!(matches!(
+            ShippingRecipient::new("", None, None, None),
+            Err(OrderCreationError::InvalidText {
+                field: OrderCreationField::DestinationRecipientName
             })
         ));
     }

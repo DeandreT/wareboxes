@@ -6,7 +6,7 @@ use leptos_router::{
 };
 use wareboxes_api_contract::v1::{
     InventoryBalanceResponse, InventoryHoldResponse, InventoryHoldStatus, OpaqueCursor,
-    PackingQueuePage,
+    PackingQueuePage, ShippingQueuePage,
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 use wareboxes_core::dto::{OrderPage, WebSessionContext};
@@ -25,6 +25,7 @@ use crate::inventory_integrity::InventoryIntegrityWorkbench;
 use crate::orders::OrderTable;
 use crate::packing::PackingWorkspace;
 use crate::preferences::provide_display_preferences;
+use crate::shipping::ShippingWorkspace;
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::toast::ToastProvider;
 use crate::view_model::{facility_inventory, format_quantity, has_permission, open_order_count};
@@ -44,6 +45,7 @@ pub enum WorkspaceBootstrapSection {
     Overview,
     Orders,
     Packing,
+    Shipping,
     Inventory,
     Access,
 }
@@ -52,6 +54,7 @@ pub enum WorkspaceBootstrapSection {
 pub struct WorkspaceBootstrapData {
     pub orders: Option<OrderPage>,
     pub packing_queue: Option<PackingQueuePage>,
+    pub shipping_queue: Option<ShippingQueuePage>,
     pub balances: Vec<InventoryBalanceResponse>,
     pub balance_next_cursor: Option<OpaqueCursor>,
     pub access: AccessScopeWorkspace,
@@ -81,6 +84,7 @@ pub(crate) enum SessionState {
 struct WorkspaceData {
     orders: Option<OrderPage>,
     packing_queue: Option<PackingQueuePage>,
+    shipping_queue: Option<ShippingQueuePage>,
     balances: Vec<InventoryBalanceResponse>,
     balance_next_cursor: Option<OpaqueCursor>,
     holds: Vec<InventoryHoldResponse>,
@@ -96,6 +100,7 @@ impl From<WorkspaceBootstrapData> for WorkspaceData {
         Self {
             orders: bootstrap.orders,
             packing_queue: bootstrap.packing_queue,
+            shipping_queue: bootstrap.shipping_queue,
             balances: bootstrap.balances,
             balance_next_cursor: bootstrap.balance_next_cursor,
             access: bootstrap.access,
@@ -118,6 +123,7 @@ pub(crate) enum Section {
     Overview,
     Orders,
     Packing,
+    Shipping,
     Loads,
     Catalog,
     Inventory,
@@ -134,6 +140,7 @@ impl Section {
             Self::Overview => Some(WorkspaceBootstrapSection::Overview),
             Self::Orders => Some(WorkspaceBootstrapSection::Orders),
             Self::Packing => Some(WorkspaceBootstrapSection::Packing),
+            Self::Shipping => Some(WorkspaceBootstrapSection::Shipping),
             Self::Inventory => Some(WorkspaceBootstrapSection::Inventory),
             Self::Access => Some(WorkspaceBootstrapSection::Access),
             _ => None,
@@ -220,6 +227,7 @@ pub fn App() -> impl IntoView {
         <Stylesheet id="wareboxes-fulfillment" href="/fulfillment.css"/>
         <Stylesheet id="wareboxes-order-allocation" href="/order-allocation.css"/>
         <Stylesheet id="wareboxes-packing" href="/packing.css"/>
+        <Stylesheet id="wareboxes-shipping" href="/shipping.css"/>
         <Stylesheet id="wareboxes-catalog" href="/catalog.css"/>
         <Stylesheet id="wareboxes-administration" href="/administration.css"/>
         <Title text="Wareboxes"/>
@@ -229,6 +237,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("") view=OverviewPage/>
                     <Route path=StaticSegment("orders") view=OrdersPage/>
                     <Route path=StaticSegment("packing") view=PackingPage/>
+                    <Route path=StaticSegment("shipping") view=ShippingPage/>
                     <Route path=StaticSegment("loads") view=LoadsPage/>
                     <Route path=StaticSegment("catalog") view=CatalogPage/>
                     <Route path=StaticSegment("inventory") view=InventoryPage/>
@@ -520,6 +529,11 @@ async fn load_workspace(
             data.access = api::access().await?;
             data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
         }
+        Section::Shipping if has_permission(session, "wms") => {
+            data.shipping_queue =
+                Some(api::internal_get("/api/v1/shipping-queue?limit=100").await?);
+            data.access = api::access().await?;
+        }
         Section::Loads if has_permission(session, "wms") => {
             data.loads = api::internal_get("/api/loads?offset=0&limit=500").await?;
             data.access = api::access().await?;
@@ -552,6 +566,7 @@ async fn load_workspace(
         Section::Administration(_) if has_permission(session, "admin") => {}
         Section::Orders
         | Section::Packing
+        | Section::Shipping
         | Section::Loads
         | Section::Catalog
         | Section::Inventory
@@ -576,6 +591,11 @@ fn OrdersPage() -> impl IntoView {
 #[component]
 fn PackingPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::Packing/> }
+}
+
+#[component]
+fn ShippingPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::Shipping/> }
 }
 
 #[component]
@@ -676,6 +696,15 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                     initial_queue=data.packing_queue.unwrap_or_else(|| PackingQueuePage::new(Vec::new(), None))
                     access=data.access
                     locations=data.locations
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::Shipping if has_permission(&session, "wms") => view! {
+                <ShippingWorkspace
+                    initial_queue=data.shipping_queue.unwrap_or_else(|| ShippingQueuePage::new(Vec::new(), None))
+                    access=data.access
+                    can_configure_origins=has_permission(&session, "admin")
                     on_unauthorized=session_expired_callback()
                 />
             }
@@ -1329,6 +1358,7 @@ mod tests {
         assert!(Section::Overview.supports_workspace_refresh());
         assert!(Section::Orders.supports_workspace_refresh());
         assert!(!Section::Packing.supports_workspace_refresh());
+        assert!(!Section::Shipping.supports_workspace_refresh());
         assert!(!Section::Catalog.supports_workspace_refresh());
         assert!(
             !Section::Administration(crate::administration::AdministrationArea::Users)

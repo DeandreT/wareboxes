@@ -1219,6 +1219,10 @@ pub async fn update_order_metadata(
     let lock_sql = format!(
         r#"
         SELECT orders.inventory_owner_id,
+               address.name AS current_name,
+               address.company AS current_company,
+               address.phone AS current_phone,
+               address.email AS current_email,
                address.line1 AS current_line1,
                address.line2 AS current_line2,
                address.city AS current_city,
@@ -1252,6 +1256,10 @@ pub async fn update_order_metadata(
     let inventory_owner_id: i64 = order.try_get("inventory_owner_id")?;
 
     let new_address_id = if has_address {
+        let current_name: Option<String> = order.try_get("current_name")?;
+        let current_company: Option<String> = order.try_get("current_company")?;
+        let current_phone: Option<String> = order.try_get("current_phone")?;
+        let current_email: Option<String> = order.try_get("current_email")?;
         let current_line1: String = order.try_get("current_line1")?;
         let current_line2: Option<String> = order.try_get("current_line2")?;
         let current_city: Option<String> = order.try_get("current_city")?;
@@ -1262,15 +1270,21 @@ pub async fn update_order_metadata(
             address::insert_address_tx(
                 &mut tx,
                 tenant_id,
-                Some(update.line1.as_deref().unwrap_or(&current_line1)),
-                update.line2.as_deref().or(current_line2.as_deref()),
-                update.city.as_deref().or(current_city.as_deref()),
-                update.state.as_deref().or(current_state.as_deref()),
-                update
-                    .postal_code
-                    .as_deref()
-                    .or(current_postal_code.as_deref()),
-                Some(update.country.as_deref().unwrap_or(&current_country)),
+                address::NewAddress {
+                    name: current_name.as_deref(),
+                    company: current_company.as_deref(),
+                    line1: update.line1.as_deref().unwrap_or(&current_line1),
+                    line2: update.line2.as_deref().or(current_line2.as_deref()),
+                    city: update.city.as_deref().or(current_city.as_deref()),
+                    state: update.state.as_deref().or(current_state.as_deref()),
+                    postal_code: update
+                        .postal_code
+                        .as_deref()
+                        .or(current_postal_code.as_deref()),
+                    country: update.country.as_deref().unwrap_or(&current_country),
+                    phone: current_phone.as_deref(),
+                    email: current_email.as_deref(),
+                },
             )
             .await?,
         )

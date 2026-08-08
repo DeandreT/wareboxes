@@ -3,6 +3,7 @@
 mod cycle_count;
 mod error;
 mod expected_receiving;
+mod facility_shipping_origins;
 pub(crate) mod inventory_balances;
 mod inventory_holds;
 mod inventory_relocation;
@@ -20,6 +21,8 @@ mod putaway;
 mod putaway_claim_lifecycle;
 mod putaway_claims;
 mod rf_sessions;
+mod shipping;
+pub(crate) mod shipping_queue;
 
 use axum::middleware;
 use axum::routing::{get, post};
@@ -42,6 +45,10 @@ pub fn router() -> Router<AppState> {
             post(expected_receiving::confirm),
         )
         .route("/rf/sessions", post(rf_sessions::create))
+        .route(
+            "/facilities/{facility_id}/shipping-origin-configurations",
+            post(facility_shipping_origins::configure),
+        )
         .route("/cycle-count-claims/next", post(cycle_count::claim_next))
         .route("/cycle-count-claims/current", get(cycle_count::current))
         .route(
@@ -122,6 +129,17 @@ pub fn router() -> Router<AppState> {
             post(license_plate_putaway::confirm),
         )
         .route("/orders", post(orders::create))
+        .route("/orders/{order_id}/shipments", post(shipping::create))
+        .route("/shipments/{shipment_id}", get(shipping::get))
+        .route(
+            "/shipments/{shipment_id}/manifests",
+            post(shipping::record_manifest),
+        )
+        .route(
+            "/shipments/{shipment_id}/departures",
+            post(shipping::confirm_departure),
+        )
+        .route("/shipping-queue", get(shipping_queue::queue))
         .route("/packing-queue", get(packing::queue))
         .route(
             "/orders/{order_id}/allocation-runs",

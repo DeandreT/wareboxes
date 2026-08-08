@@ -124,6 +124,14 @@ record. Wareboxes owns facility execution and its auditable inventory consequenc
   consolidation, and supervisor exceptions.
 - Cartonization, packing, scale and printer support, outbound QA, documents, labels,
   carrier adapters, manifesting, tracking, and shipment confirmation.
+- Facility shipping-origin configuration with immutable address history, optimistic
+  revisions, scope enforcement, and audit evidence.
+- Full-order parcel shipment creation from closed cartons with immutable origin,
+  destination, and carton snapshots; exact carton-to-tracking assignment; and
+  scan-confirmed departure that posts the inventory journal and order transition
+  atomically.
+- A cursor-paginated desktop shipping queue for readiness resolution, manifesting,
+  tracking entry, exact retry recovery, and physical departure verification.
 - Outbound load planning, staging-lane selection, trailer loading sequence, and
   departure confirmation.
 

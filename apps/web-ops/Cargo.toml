@@ -26,6 +26,7 @@ lucide-leptos = { version = "3.26.0", default-features = false, features = [
     "security",
     "shapes",
     "text",
+    "transportation",
 ] }
 serde = { workspace = true }
 serde_json = { workspace = true }

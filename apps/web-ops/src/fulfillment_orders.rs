@@ -423,6 +423,10 @@ fn CreateOrderPanel(
     );
     let rush = RwSignal::new(false);
     let ship_by = RwSignal::new(String::new());
+    let recipient_name = RwSignal::new(String::new());
+    let company = RwSignal::new(String::new());
+    let phone = RwSignal::new(String::new());
+    let email = RwSignal::new(String::new());
     let line1 = RwSignal::new(String::new());
     let line2 = RwSignal::new(String::new());
     let city = RwSignal::new(String::new());
@@ -558,12 +562,14 @@ fn CreateOrderPanel(
             error.set(Some("Choose a client.".to_owned()));
             return;
         };
+        let recipient_name_value = recipient_name.get_untracked().trim().to_owned();
         let line1_value = line1.get_untracked().trim().to_owned();
         let city_value = city.get_untracked().trim().to_owned();
         let state_value = state.get_untracked().trim().to_owned();
         let postal_value = postal_code.get_untracked().trim().to_owned();
         let country_value = country.get_untracked().trim().to_owned();
         if [
+            recipient_name_value.as_str(),
             line1_value.as_str(),
             city_value.as_str(),
             state_value.as_str(),
@@ -574,7 +580,8 @@ fn CreateOrderPanel(
         .any(|value| value.is_empty())
         {
             error.set(Some(
-                "Address, city, state, postal code, and country are required.".to_owned(),
+                "Recipient, address, city, state, postal code, and country are required."
+                    .to_owned(),
             ));
             return;
         }
@@ -602,6 +609,10 @@ fn CreateOrderPanel(
             rush: rush.get_untracked(),
             ship_by: ship_by_value.map(|value| value.to_rfc3339()),
             destination: FulfillmentOrderDestination {
+                recipient_name: recipient_name_value,
+                company: optional_text(&company.get_untracked()),
+                phone: optional_text(&phone.get_untracked()),
+                email: optional_text(&email.get_untracked()),
                 line1: line1_value,
                 line2: optional_text(&line2.get_untracked()),
                 city: city_value,
@@ -878,6 +889,41 @@ fn CreateOrderPanel(
             <fieldset>
                 <legend>"Ship to"</legend>
                 <div class="form-grid two-column">
+                    <label>
+                        <span>"Recipient name"</span>
+                        <input
+                            required
+                            autocomplete="name"
+                            prop:value=move || recipient_name.get()
+                            on:input=move |event| recipient_name.set(event_target_value(&event))
+                        />
+                    </label>
+                    <label>
+                        <span>"Company"</span>
+                        <input
+                            autocomplete="organization"
+                            prop:value=move || company.get()
+                            on:input=move |event| company.set(event_target_value(&event))
+                        />
+                    </label>
+                    <label>
+                        <span>"Phone"</span>
+                        <input
+                            type="tel"
+                            autocomplete="tel"
+                            prop:value=move || phone.get()
+                            on:input=move |event| phone.set(event_target_value(&event))
+                        />
+                    </label>
+                    <label>
+                        <span>"Email"</span>
+                        <input
+                            type="email"
+                            autocomplete="email"
+                            prop:value=move || email.get()
+                            on:input=move |event| email.set(event_target_value(&event))
+                        />
+                    </label>
                     <label class="wide">
                         <span>"Address line 1"</span>
                         <input

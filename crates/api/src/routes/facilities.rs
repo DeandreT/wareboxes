@@ -30,6 +30,7 @@ pub async fn list(
         deleted: facility.deleted,
         name: facility.name,
         address_id: facility.address_id,
+        revision: facility.revision,
     })
     .collect();
     Ok(Json(facilities))
