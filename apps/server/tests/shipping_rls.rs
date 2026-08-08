@@ -53,6 +53,11 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
             false,
         ),
         (
+            "shipment_confirmation_cartons",
+            "shipment_confirmation_cartons_tenant_isolation",
+            false,
+        ),
+        (
             "pick_short_ship_dispositions",
             "pick_short_ship_dispositions_tenant_isolation",
             false,
@@ -114,6 +119,7 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
         "shipment_manifests_id_seq",
         "shipment_manifest_packages_id_seq",
         "shipment_confirmations_id_seq",
+        "shipment_confirmation_cartons_id_seq",
         "pick_short_ship_dispositions_id_seq",
     ] {
         let privileges: SequencePrivileges = sqlx::query_as(

@@ -1,4 +1,6 @@
 mod common;
+#[path = "api_v1_shipping/partial_departure.rs"]
+mod partial_departure;
 #[path = "api_v1_shipping/queue.rs"]
 mod queue;
 #[path = "api_v1_shipping/support.rs"]
@@ -601,7 +603,7 @@ async fn full_order_shipping_is_exact_replay_safe_and_reconciles_inventory() {
 
     let departure_path = format!("{shipment_path}/departures");
     for (key, scans) in [
-        ("missing", vec![ready.carton_barcodes[0].clone()]),
+        ("empty", vec![]),
         (
             "duplicate",
             vec![
@@ -814,6 +816,10 @@ async fn full_order_shipping_is_exact_replay_safe_and_reconciles_inventory() {
         (
             "confirmation update",
             "UPDATE shipment_confirmations SET shipped_qty = shipped_qty WHERE tenant_id = $1 AND shipment_id = $2",
+        ),
+        (
+            "confirmation carton delete",
+            "DELETE FROM shipment_confirmation_cartons WHERE tenant_id = $1 AND shipment_id = $2",
         ),
     ] {
         let result = sqlx::query(statement)
@@ -1074,6 +1080,7 @@ async fn shipping_reads_and_replays_fail_closed_across_scopes_and_tenants() {
         "shipment_manifests",
         "shipment_manifest_packages",
         "shipment_confirmations",
+        "shipment_confirmation_cartons",
     ] {
         let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
             .fetch_one(&mut *foreign_tx)
@@ -1095,6 +1102,7 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
         ("shipment_manifests", false),
         ("shipment_manifest_packages", false),
         ("shipment_confirmations", false),
+        ("shipment_confirmation_cartons", false),
     ] {
         let privileges: (bool, bool, bool, bool) = sqlx::query_as(
             r#"
@@ -1125,6 +1133,7 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
         "shipment_manifests_id_seq",
         "shipment_manifest_packages_id_seq",
         "shipment_confirmations_id_seq",
+        "shipment_confirmation_cartons_id_seq",
     ] {
         let privileges: (bool, bool, bool) = sqlx::query_as(
             r#"

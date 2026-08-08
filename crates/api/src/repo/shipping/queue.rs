@@ -26,6 +26,8 @@ pub struct ShippingQueueShipment {
     pub revision: ShipmentRevision,
     pub carton_count: i64,
     pub shipped_quantity: i64,
+    pub departed_carton_count: i64,
+    pub departed_quantity: i64,
     pub carrier_code: Option<String>,
     pub service_code: Option<String>,
     pub created_at: Timestamp,
@@ -122,6 +124,8 @@ pub async fn shipping_queue(
                shipment.revision AS shipment_revision,
                shipment.carton_count,
                shipment.shipped_qty,
+               shipment.departed_carton_count,
+               shipment.departed_qty,
                shipment.carrier,
                shipment.service,
                shipment.created_at,
@@ -227,6 +231,8 @@ fn entry_from_row(row: sqlx::postgres::PgRow) -> AppResult<ShippingQueueEntry> {
                     .map_err(|error| AppError::internal(error.to_string()))?,
                 carton_count: required(&row, "carton_count")?,
                 shipped_quantity: required(&row, "shipped_qty")?,
+                departed_carton_count: required(&row, "departed_carton_count")?,
+                departed_quantity: required(&row, "departed_qty")?,
                 carrier_code: row.try_get("carrier")?,
                 service_code: row.try_get("service")?,
                 created_at: required(&row, "created_at")?,
@@ -244,15 +250,36 @@ fn entry_from_row(row: sqlx::postgres::PgRow) -> AppResult<ShippingQueueEntry> {
                         && shipment.carrier_code.is_some()
                         && shipment.manifested_at.is_some()
                 }
+                ShipmentStatus::PartiallyDeparted => {
+                    shipment.revision.get() >= 3
+                        && shipment.carrier_code.is_some()
+                        && shipment.manifested_at.is_some()
+                        && shipment.departed_carton_count > 0
+                        && shipment.departed_carton_count < shipment.carton_count
+                        && shipment.departed_quantity > 0
+                        && shipment.departed_quantity < shipment.shipped_quantity
+                }
                 ShipmentStatus::Departed => false,
             };
+            let expected_order_revision =
+                packing_revision.get().checked_add(1).and_then(|revision| {
+                    revision.checked_add(shipment.revision.get().saturating_sub(2).max(0))
+                });
             if !lifecycle_consistent
                 || shipment.carton_count <= 0
                 || shipment.shipped_quantity <= 0
-                || packing_revision.checked_next() != Some(order_revision)
+                || expected_order_revision != Some(order_revision.get())
             {
                 return Err(AppError::internal(
-                    "shipping queue order and shipment state are inconsistent",
+                    format!(
+                        "shipping queue order and shipment state are inconsistent: status={:?} shipment_revision={} packing_revision={} order_revision={} expected={expected_order_revision:?} departed_cartons={} departed_qty={}",
+                        shipment.status,
+                        shipment.revision.get(),
+                        packing_revision.get(),
+                        order_revision.get(),
+                        shipment.departed_carton_count,
+                        shipment.departed_quantity,
+                    ),
                 ));
             }
             Ok(shipment)

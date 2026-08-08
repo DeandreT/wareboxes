@@ -4137,9 +4137,14 @@ BEGIN
                   AND ((shipment.state IN ('awaiting manifest', 'manifested')
                         AND order_status = 'awaiting shipment'
                         AND order_revision = shipment.creation_resulting_order_revision)
+                       OR (shipment.state = 'partially departed'
+                           AND order_status = 'awaiting shipment'
+                           AND order_revision = shipment.creation_resulting_order_revision
+                               + (shipment.revision - 2))
                        OR (shipment.state = 'departed'
                            AND order_status = 'shipped'
-                           AND order_revision = shipment.creation_resulting_order_revision + 1))
+                           AND order_revision = shipment.creation_resulting_order_revision
+                               + (shipment.revision - 2)))
             )
        ))
     THEN
@@ -4198,6 +4203,8 @@ BEGIN
        AND NEW.manifested_at IS NOT NULL
        AND NEW.manifested_at >= NEW.created_at
        AND NEW.departed_at IS NULL
+       AND NEW.departed_carton_count = 0
+       AND NEW.departed_qty = 0
        AND OLD.carrier IS NULL
        AND OLD.service IS NULL
        AND NEW.carrier IS NOT NULL
@@ -4205,14 +4212,23 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    IF OLD.state = 'manifested'
-       AND NEW.state = 'departed'
+    IF OLD.state IN ('manifested', 'partially departed')
+       AND NEW.state IN ('partially departed', 'departed')
        AND NEW.revision = OLD.revision + 1
        AND NEW.carrier IS NOT DISTINCT FROM OLD.carrier
        AND NEW.service IS NOT DISTINCT FROM OLD.service
        AND NEW.manifested_at IS NOT DISTINCT FROM OLD.manifested_at
-       AND NEW.departed_at IS NOT NULL
-       AND NEW.departed_at >= NEW.manifested_at
+       AND NEW.departed_carton_count > OLD.departed_carton_count
+       AND NEW.departed_qty > OLD.departed_qty
+       AND ((NEW.state = 'partially departed'
+             AND NEW.departed_at IS NULL
+             AND NEW.departed_carton_count < NEW.carton_count
+             AND NEW.departed_qty < NEW.shipped_qty)
+            OR (NEW.state = 'departed'
+                AND NEW.departed_at IS NOT NULL
+                AND NEW.departed_at >= NEW.manifested_at
+                AND NEW.departed_carton_count = NEW.carton_count
+                AND NEW.departed_qty = NEW.shipped_qty))
     THEN
         RETURN NEW;
     END IF;
@@ -4237,6 +4253,8 @@ BEGIN
        OR NEW.service IS NOT NULL
        OR NEW.manifested_at IS NOT NULL
        OR NEW.departed_at IS NOT NULL
+       OR NEW.departed_carton_count <> 0
+       OR NEW.departed_qty <> 0
        OR NOT EXISTS (
             SELECT 1
             FROM public.packing_sessions session
@@ -4500,16 +4518,21 @@ BEGIN
           AND shipment.packing_session_id = NEW.packing_session_id
           AND shipment.order_release_id = NEW.order_release_id
           AND shipment.order_id = NEW.order_id
-          AND shipment.state = 'departed'
+          AND shipment.state = NEW.resulting_shipment_state
           AND shipment.revision = NEW.resulting_shipment_revision
-          AND shipment.departed_at = NEW.confirmed_at
+          AND ((NEW.resulting_shipment_state = 'partially departed'
+                AND shipment.departed_at IS NULL)
+               OR (NEW.resulting_shipment_state = 'departed'
+                   AND shipment.departed_at = NEW.confirmed_at))
           AND NEW.resulting_shipment_revision = NEW.expected_shipment_revision + 1
-          AND order_header.status = 'shipped'
+          AND order_header.status = CASE NEW.resulting_shipment_state
+              WHEN 'departed' THEN 'shipped' ELSE 'awaiting shipment' END
           AND order_header.revision = NEW.resulting_order_revision
           AND NEW.resulting_order_revision = NEW.expected_order_revision + 1
           AND NEW.expected_order_revision = shipment.creation_resulting_order_revision
-          AND shipment.carton_count = NEW.carton_count
-          AND shipment.shipped_qty = NEW.shipped_qty
+              + (NEW.expected_shipment_revision - 2)
+          AND shipment.departed_carton_count >= NEW.carton_count
+          AND shipment.departed_qty >= NEW.shipped_qty
           AND transaction.actor_user_id = NEW.confirmed_by_user_id
           AND transaction.created <= NEW.confirmed_at
           AND transaction.transaction_type = 'ship'
@@ -4521,6 +4544,236 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_shipment_confirmation_carton(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_shipment_confirmation_carton() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.shipment_confirmations confirmation
+        INNER JOIN public.shipment_cartons shipment_carton
+          ON shipment_carton.tenant_id = confirmation.tenant_id
+         AND shipment_carton.inventory_owner_id = confirmation.inventory_owner_id
+         AND shipment_carton.facility_id = confirmation.facility_id
+         AND shipment_carton.shipment_id = confirmation.shipment_id
+         AND shipment_carton.id = NEW.shipment_carton_id
+        WHERE confirmation.tenant_id = NEW.tenant_id
+          AND confirmation.inventory_owner_id = NEW.inventory_owner_id
+          AND confirmation.facility_id = NEW.facility_id
+          AND confirmation.shipment_id = NEW.shipment_id
+          AND confirmation.id = NEW.confirmation_id
+          AND confirmation.confirmed_at = NEW.departed_at
+          AND shipment_carton.carton_id = NEW.carton_id
+          AND shipment_carton.license_plate_id = NEW.license_plate_id
+          AND shipment_carton.packed_qty = NEW.packed_qty
+          AND EXISTS (
+              SELECT 1
+              FROM public.packed_inventory_positions position
+              WHERE position.tenant_id = shipment_carton.tenant_id
+                AND position.inventory_owner_id = shipment_carton.inventory_owner_id
+                AND position.facility_id = shipment_carton.facility_id
+                AND position.carton_id = shipment_carton.carton_id
+                AND position.state = 'departed'
+                AND position.departure_inventory_transaction_id = confirmation.inventory_transaction_id
+                AND position.departed_at = confirmation.confirmed_at
+          )
+    ) THEN
+        RAISE EXCEPTION 'shipment confirmation carton must exactly identify departed carton evidence'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_shipment_confirmation_consistency(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_shipment_confirmation_consistency() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    target_confirmation_id bigint;
+    confirmation_row public.shipment_confirmations%ROWTYPE;
+    carton_count bigint;
+    shipped_qty bigint;
+BEGIN
+    IF TG_TABLE_NAME = 'shipment_confirmations' THEN
+        target_confirmation_id := NEW.id;
+    ELSE
+        target_confirmation_id := NEW.confirmation_id;
+    END IF;
+
+    SELECT * INTO confirmation_row
+    FROM public.shipment_confirmations confirmation
+    WHERE confirmation.tenant_id = NEW.tenant_id
+      AND confirmation.id = target_confirmation_id;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT COUNT(*), COALESCE(SUM(carton.packed_qty), 0)::bigint
+    INTO carton_count, shipped_qty
+    FROM public.shipment_confirmation_cartons carton
+    WHERE carton.tenant_id = confirmation_row.tenant_id
+      AND carton.inventory_owner_id = confirmation_row.inventory_owner_id
+      AND carton.facility_id = confirmation_row.facility_id
+      AND carton.shipment_id = confirmation_row.shipment_id
+      AND carton.confirmation_id = confirmation_row.id;
+
+    IF carton_count <> confirmation_row.carton_count
+       OR shipped_qty <> confirmation_row.shipped_qty
+       OR EXISTS (
+           SELECT 1
+           FROM public.packed_inventory_positions position
+           INNER JOIN public.shipment_confirmation_cartons carton
+             ON carton.tenant_id = position.tenant_id
+            AND carton.inventory_owner_id = position.inventory_owner_id
+            AND carton.facility_id = position.facility_id
+            AND carton.shipment_id = confirmation_row.shipment_id
+            AND carton.confirmation_id = confirmation_row.id
+            AND carton.carton_id = position.carton_id
+           INNER JOIN public.carton_contents content
+             ON content.tenant_id = position.tenant_id
+            AND content.inventory_owner_id = position.inventory_owner_id
+            AND content.id = position.carton_content_id
+           LEFT JOIN LATERAL (
+               SELECT detail.destination_inventory_allocation_id,
+                      detail.destination_inventory_balance_id
+               FROM public.packed_carton_move_details detail
+               JOIN public.packed_carton_move_confirmations movement
+                 ON movement.tenant_id = detail.tenant_id
+                AND movement.inventory_owner_id = detail.inventory_owner_id
+                AND movement.id = detail.move_confirmation_id
+               WHERE detail.tenant_id = position.tenant_id
+                 AND detail.inventory_owner_id = position.inventory_owner_id
+                 AND detail.packed_position_id = position.id
+               ORDER BY movement.moved_at DESC, movement.id DESC
+               LIMIT 1
+           ) move_detail ON TRUE
+           INNER JOIN public.inventory_allocations allocation
+             ON allocation.tenant_id = position.tenant_id
+            AND allocation.inventory_owner_id = position.inventory_owner_id
+            AND allocation.facility_id = position.facility_id
+            AND allocation.id = COALESCE(
+                move_detail.destination_inventory_allocation_id,
+                content.destination_inventory_allocation_id)
+           INNER JOIN public.inventory_balances balance
+             ON balance.tenant_id = position.tenant_id
+            AND balance.inventory_owner_id = position.inventory_owner_id
+            AND balance.facility_id = position.facility_id
+            AND balance.id = COALESCE(
+                move_detail.destination_inventory_balance_id,
+                content.destination_inventory_balance_id)
+           INNER JOIN public.license_plates plate
+             ON plate.tenant_id = carton.tenant_id
+            AND plate.inventory_owner_id = carton.inventory_owner_id
+            AND plate.facility_id = carton.facility_id
+            AND plate.id = carton.license_plate_id
+           WHERE position.state <> 'departed'
+              OR position.departure_inventory_transaction_id IS DISTINCT FROM confirmation_row.inventory_transaction_id
+              OR position.departed_at IS DISTINCT FROM confirmation_row.confirmed_at
+              OR allocation.status <> 'fulfilled'
+              OR allocation.modified IS DISTINCT FROM confirmation_row.confirmed_at
+              OR allocation.deleted IS DISTINCT FROM confirmation_row.confirmed_at
+              OR balance.qty_on_hand <> 0
+              OR balance.qty_reserved <> 0
+              OR balance.deleted IS DISTINCT FROM confirmation_row.confirmed_at
+              OR plate.location_id IS NOT NULL
+              OR plate.deleted IS DISTINCT FROM confirmation_row.confirmed_at
+       )
+       OR EXISTS (
+           WITH expected AS (
+               SELECT position.facility_id,
+                      source_balance.location_id,
+                      source_balance.license_plate_id,
+                      position.item_batch_id, position.item_id, position.uom,
+                      batch.lot, batch.expiration, batch.serial,
+                      position.inventory_status AS status,
+                      -SUM(position.packed_qty)::bigint AS quantity_delta
+               FROM public.packed_inventory_positions position
+               INNER JOIN public.shipment_confirmation_cartons carton
+                 ON carton.tenant_id = position.tenant_id
+                AND carton.inventory_owner_id = position.inventory_owner_id
+                AND carton.facility_id = position.facility_id
+                AND carton.shipment_id = confirmation_row.shipment_id
+                AND carton.confirmation_id = confirmation_row.id
+                AND carton.carton_id = position.carton_id
+               INNER JOIN public.carton_contents content
+                 ON content.tenant_id = position.tenant_id
+                AND content.inventory_owner_id = position.inventory_owner_id
+                AND content.id = position.carton_content_id
+               LEFT JOIN LATERAL (
+                   SELECT detail.destination_inventory_balance_id
+                   FROM public.packed_carton_move_details detail
+                   JOIN public.packed_carton_move_confirmations movement
+                     ON movement.tenant_id = detail.tenant_id
+                    AND movement.inventory_owner_id = detail.inventory_owner_id
+                    AND movement.id = detail.move_confirmation_id
+                   WHERE detail.tenant_id = position.tenant_id
+                     AND detail.inventory_owner_id = position.inventory_owner_id
+                     AND detail.packed_position_id = position.id
+                   ORDER BY movement.moved_at DESC, movement.id DESC
+                   LIMIT 1
+               ) move_detail ON TRUE
+               INNER JOIN public.inventory_balances source_balance
+                 ON source_balance.tenant_id = position.tenant_id
+                AND source_balance.inventory_owner_id = position.inventory_owner_id
+                AND source_balance.facility_id = position.facility_id
+                AND source_balance.id = COALESCE(
+                    move_detail.destination_inventory_balance_id,
+                    content.destination_inventory_balance_id)
+               INNER JOIN public.item_batches batch
+                 ON batch.tenant_id = position.tenant_id
+                AND batch.inventory_owner_id = position.inventory_owner_id
+                AND batch.id = position.item_batch_id
+               GROUP BY position.facility_id, source_balance.location_id,
+                        source_balance.license_plate_id,
+                        position.item_batch_id, position.item_id, position.uom,
+                        batch.lot, batch.expiration, batch.serial,
+                        position.inventory_status
+           ), actual AS (
+               SELECT entry.facility_id, entry.location_id, entry.license_plate_id,
+                      entry.item_batch_id, entry.item_id, entry.uom,
+                      entry.lot, entry.expiration, entry.serial, entry.status,
+                      SUM(entry.quantity_delta)::bigint AS quantity_delta
+               FROM public.inventory_entries entry
+               WHERE entry.tenant_id = confirmation_row.tenant_id
+                 AND entry.inventory_owner_id = confirmation_row.inventory_owner_id
+                 AND entry.transaction_id = confirmation_row.inventory_transaction_id
+               GROUP BY entry.facility_id, entry.location_id, entry.license_plate_id,
+                        entry.item_batch_id, entry.item_id, entry.uom,
+                        entry.lot, entry.expiration, entry.serial, entry.status
+           )
+           SELECT 1
+           FROM expected
+           FULL OUTER JOIN actual
+             ON actual.facility_id = expected.facility_id
+            AND actual.location_id = expected.location_id
+            AND actual.license_plate_id = expected.license_plate_id
+            AND actual.item_batch_id = expected.item_batch_id
+            AND actual.item_id = expected.item_id
+            AND actual.uom = expected.uom
+            AND actual.lot IS NOT DISTINCT FROM expected.lot
+            AND actual.expiration IS NOT DISTINCT FROM expected.expiration
+            AND actual.serial IS NOT DISTINCT FROM expected.serial
+            AND actual.status = expected.status
+           WHERE actual.quantity_delta IS DISTINCT FROM expected.quantity_delta
+       )
+    THEN
+        RAISE EXCEPTION 'shipment confirmation does not reconcile with its carton set and journal'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
 END;
 $$;
 
@@ -4543,6 +4796,8 @@ DECLARE
     manifest_count bigint;
     package_count bigint;
     confirmation_count bigint;
+    confirmation_carton_count bigint;
+    confirmation_shipped_qty bigint;
     order_status text;
     order_revision bigint;
 BEGIN
@@ -4613,6 +4868,14 @@ BEGIN
       AND confirmation.inventory_owner_id = shipment_row.inventory_owner_id
       AND confirmation.facility_id = shipment_row.facility_id
       AND confirmation.shipment_id = shipment_row.id;
+
+    SELECT COUNT(*), COALESCE(SUM(carton.packed_qty), 0)::bigint
+    INTO confirmation_carton_count, confirmation_shipped_qty
+    FROM public.shipment_confirmation_cartons carton
+    WHERE carton.tenant_id = shipment_row.tenant_id
+      AND carton.inventory_owner_id = shipment_row.inventory_owner_id
+      AND carton.facility_id = shipment_row.facility_id
+      AND carton.shipment_id = shipment_row.id;
 
     SELECT status, revision INTO order_status, order_revision
     FROM public.orders order_header
@@ -4718,6 +4981,7 @@ BEGIN
     IF shipment_row.state = 'awaiting manifest' THEN
         IF shipment_row.revision <> 1
            OR manifest_count <> 0 OR package_count <> 0 OR confirmation_count <> 0
+           OR shipment_row.departed_carton_count <> 0 OR shipment_row.departed_qty <> 0
            OR order_status IS DISTINCT FROM 'awaiting shipment'
            OR order_revision IS DISTINCT FROM shipment_row.creation_resulting_order_revision
         THEN
@@ -4752,6 +5016,7 @@ BEGIN
     IF shipment_row.state = 'manifested' THEN
         IF shipment_row.revision <> 2
            OR confirmation_count <> 0
+           OR shipment_row.departed_carton_count <> 0 OR shipment_row.departed_qty <> 0
            OR order_status IS DISTINCT FROM 'awaiting shipment'
            OR order_revision IS DISTINCT FROM shipment_row.creation_resulting_order_revision
         THEN
@@ -4761,11 +5026,60 @@ BEGIN
         RETURN NULL;
     END IF;
 
+    IF confirmation_count <> shipment_row.revision - 2
+       OR confirmation_carton_count <> shipment_row.departed_carton_count
+       OR confirmation_shipped_qty <> shipment_row.departed_qty
+       OR EXISTS (
+           SELECT 1
+           FROM public.shipment_confirmations confirmation
+           WHERE confirmation.tenant_id = shipment_row.tenant_id
+             AND confirmation.inventory_owner_id = shipment_row.inventory_owner_id
+             AND confirmation.facility_id = shipment_row.facility_id
+             AND confirmation.shipment_id = shipment_row.id
+             AND (confirmation.carton_count <> (
+                     SELECT COUNT(*)
+                     FROM public.shipment_confirmation_cartons carton
+                     WHERE carton.tenant_id = confirmation.tenant_id
+                       AND carton.inventory_owner_id = confirmation.inventory_owner_id
+                       AND carton.facility_id = confirmation.facility_id
+                       AND carton.shipment_id = confirmation.shipment_id
+                       AND carton.confirmation_id = confirmation.id)
+                  OR confirmation.shipped_qty <> (
+                     SELECT COALESCE(SUM(carton.packed_qty), 0)::bigint
+                     FROM public.shipment_confirmation_cartons carton
+                     WHERE carton.tenant_id = confirmation.tenant_id
+                       AND carton.inventory_owner_id = confirmation.inventory_owner_id
+                       AND carton.facility_id = confirmation.facility_id
+                       AND carton.shipment_id = confirmation.shipment_id
+                       AND carton.confirmation_id = confirmation.id))
+       )
+    THEN
+        RAISE EXCEPTION 'shipment departure confirmations do not reconcile with cumulative progress'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF shipment_row.state = 'partially departed' THEN
+        IF shipment_row.departed_carton_count <= 0
+           OR shipment_row.departed_carton_count >= shipment_row.carton_count
+           OR shipment_row.departed_qty <= 0
+           OR shipment_row.departed_qty >= shipment_row.shipped_qty
+           OR shipment_row.departed_at IS NOT NULL
+           OR order_status IS DISTINCT FROM 'awaiting shipment'
+           OR order_revision IS DISTINCT FROM shipment_row.creation_resulting_order_revision
+                + confirmation_count
+        THEN
+            RAISE EXCEPTION 'partially-departed shipment state does not reconcile'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NULL;
+    END IF;
+
     IF shipment_row.state <> 'departed'
-       OR shipment_row.revision <> 3
-       OR confirmation_count <> 1
+       OR shipment_row.departed_carton_count <> shipment_row.carton_count
+       OR shipment_row.departed_qty <> shipment_row.shipped_qty
        OR order_status IS DISTINCT FROM 'shipped'
-       OR order_revision IS DISTINCT FROM shipment_row.creation_resulting_order_revision + 1
+       OR order_revision IS DISTINCT FROM shipment_row.creation_resulting_order_revision
+            + confirmation_count
        OR EXISTS (
            SELECT 1
            FROM public.shipment_cartons shipment_carton
@@ -4774,12 +5088,18 @@ BEGIN
             AND plate.inventory_owner_id = shipment_carton.inventory_owner_id
             AND plate.facility_id = shipment_carton.facility_id
             AND plate.id = shipment_carton.license_plate_id
+           INNER JOIN public.shipment_confirmation_cartons departed_carton
+             ON departed_carton.tenant_id = shipment_carton.tenant_id
+            AND departed_carton.inventory_owner_id = shipment_carton.inventory_owner_id
+            AND departed_carton.facility_id = shipment_carton.facility_id
+            AND departed_carton.shipment_id = shipment_carton.shipment_id
+            AND departed_carton.shipment_carton_id = shipment_carton.id
            WHERE shipment_carton.tenant_id = shipment_row.tenant_id
              AND shipment_carton.inventory_owner_id = shipment_row.inventory_owner_id
              AND shipment_carton.facility_id = shipment_row.facility_id
              AND shipment_carton.shipment_id = shipment_row.id
              AND (plate.location_id IS NOT NULL
-                  OR plate.deleted IS DISTINCT FROM shipment_row.departed_at)
+                  OR plate.deleted IS DISTINCT FROM departed_carton.departed_at)
        )
        OR EXISTS (
            SELECT 1
@@ -4788,6 +5108,12 @@ BEGIN
              ON content.tenant_id = position.tenant_id
             AND content.inventory_owner_id = position.inventory_owner_id
             AND content.id = position.carton_content_id
+           INNER JOIN public.shipment_confirmation_cartons departed_carton
+             ON departed_carton.tenant_id = position.tenant_id
+            AND departed_carton.inventory_owner_id = position.inventory_owner_id
+            AND departed_carton.facility_id = position.facility_id
+            AND departed_carton.shipment_id = shipment_row.id
+            AND departed_carton.carton_id = position.carton_id
            LEFT JOIN LATERAL (
                SELECT detail.destination_inventory_allocation_id,
                       detail.destination_inventory_balance_id
@@ -4827,11 +5153,11 @@ BEGIN
                    AND shipment_carton.shipment_id = shipment_row.id)
              AND content.packing_session_id = shipment_row.packing_session_id
              AND (allocation.status <> 'fulfilled'
-                  OR allocation.modified IS DISTINCT FROM shipment_row.departed_at
-                  OR allocation.deleted IS DISTINCT FROM shipment_row.departed_at
+                  OR allocation.modified IS DISTINCT FROM departed_carton.departed_at
+                  OR allocation.deleted IS DISTINCT FROM departed_carton.departed_at
                   OR balance.qty_on_hand <> 0
                   OR balance.qty_reserved <> 0
-                  OR balance.deleted IS DISTINCT FROM shipment_row.departed_at)
+                  OR balance.deleted IS DISTINCT FROM departed_carton.departed_at)
        )
        OR EXISTS (
            SELECT 1
@@ -11176,6 +11502,8 @@ CREATE TABLE public.shipments (
     carton_count bigint NOT NULL,
     content_count bigint NOT NULL,
     shipped_qty bigint NOT NULL,
+    departed_carton_count bigint DEFAULT 0 NOT NULL,
+    departed_qty bigint DEFAULT 0 NOT NULL,
     carrier text,
     service text,
     created_by_user_id bigint NOT NULL,
@@ -11183,23 +11511,34 @@ CREATE TABLE public.shipments (
     manifested_at timestamp with time zone,
     departed_at timestamp with time zone,
     CONSTRAINT shipments_carrier_check CHECK ((carrier IS NULL) OR ((carrier = btrim(carrier)) AND (carrier <> ''::text) AND (char_length(carrier) <= 100))),
-    CONSTRAINT shipments_counts_check CHECK ((carton_count > 0) AND (content_count > 0) AND (shipped_qty > 0)),
+    CONSTRAINT shipments_counts_check CHECK ((carton_count > 0) AND (content_count > 0) AND (shipped_qty > 0)
+        AND (departed_carton_count >= 0) AND (departed_carton_count <= carton_count)
+        AND (departed_qty >= 0) AND (departed_qty <= shipped_qty)),
     CONSTRAINT shipments_creation_revision_check CHECK ((creation_expected_order_revision > 0) AND (creation_resulting_order_revision = creation_expected_order_revision + 1)),
     CONSTRAINT shipments_revision_check CHECK (revision > 0),
     CONSTRAINT shipments_service_check CHECK ((service IS NULL) OR ((service = btrim(service)) AND (service <> ''::text) AND (char_length(service) <= 100))),
-    CONSTRAINT shipments_state_check CHECK ((state = ANY (ARRAY['awaiting manifest'::text, 'manifested'::text, 'departed'::text]))),
+    CONSTRAINT shipments_state_check CHECK ((state = ANY (ARRAY['awaiting manifest'::text, 'manifested'::text, 'partially departed'::text, 'departed'::text]))),
     CONSTRAINT shipments_state_fields_check CHECK (
         ((state = 'awaiting manifest'::text) AND (revision = 1)
             AND (carrier IS NULL) AND (service IS NULL)
-            AND (manifested_at IS NULL) AND (departed_at IS NULL))
+            AND (manifested_at IS NULL) AND (departed_at IS NULL)
+            AND (departed_carton_count = 0) AND (departed_qty = 0))
         OR ((state = 'manifested'::text) AND (revision = 2)
             AND (carrier IS NOT NULL)
             AND (manifested_at IS NOT NULL) AND (manifested_at >= created_at)
-            AND (departed_at IS NULL))
-        OR ((state = 'departed'::text) AND (revision = 3)
+            AND (departed_at IS NULL)
+            AND (departed_carton_count = 0) AND (departed_qty = 0))
+        OR ((state = 'partially departed'::text) AND (revision >= 3)
             AND (carrier IS NOT NULL)
             AND (manifested_at IS NOT NULL) AND (manifested_at >= created_at)
-            AND (departed_at IS NOT NULL) AND (departed_at >= manifested_at))
+            AND (departed_at IS NULL)
+            AND (departed_carton_count > 0) AND (departed_carton_count < carton_count)
+            AND (departed_qty > 0) AND (departed_qty < shipped_qty))
+        OR ((state = 'departed'::text) AND (revision >= 3)
+            AND (carrier IS NOT NULL)
+            AND (manifested_at IS NOT NULL) AND (manifested_at >= created_at)
+            AND (departed_at IS NOT NULL) AND (departed_at >= manifested_at)
+            AND (departed_carton_count = carton_count) AND (departed_qty = shipped_qty))
     )
 );
 
@@ -11410,11 +11749,13 @@ CREATE TABLE public.shipment_confirmations (
     resulting_shipment_revision bigint NOT NULL,
     expected_order_revision bigint NOT NULL,
     resulting_order_revision bigint NOT NULL,
+    resulting_shipment_state text NOT NULL,
     carton_count bigint NOT NULL,
     shipped_qty bigint NOT NULL,
     confirmed_by_user_id bigint NOT NULL,
     confirmed_at timestamp with time zone NOT NULL,
     CONSTRAINT shipment_confirmations_counts_check CHECK ((carton_count > 0) AND (shipped_qty > 0)),
+    CONSTRAINT shipment_confirmations_state_check CHECK ((resulting_shipment_state = ANY (ARRAY['partially departed'::text, 'departed'::text]))),
     CONSTRAINT shipment_confirmations_order_revision_check CHECK ((expected_order_revision > 0) AND (resulting_order_revision = expected_order_revision + 1)),
     CONSTRAINT shipment_confirmations_shipment_revision_check CHECK ((expected_shipment_revision > 0) AND (resulting_shipment_revision = expected_shipment_revision + 1))
 );
@@ -11424,6 +11765,39 @@ ALTER TABLE ONLY public.shipment_confirmations FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE public.shipment_confirmations ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
     SEQUENCE NAME public.shipment_confirmations_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: shipment_confirmation_cartons; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.shipment_confirmation_cartons (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    shipment_id bigint NOT NULL,
+    confirmation_id bigint NOT NULL,
+    shipment_carton_id bigint NOT NULL,
+    carton_id bigint NOT NULL,
+    license_plate_id bigint NOT NULL,
+    sequence bigint NOT NULL,
+    packed_qty bigint NOT NULL,
+    departed_at timestamp with time zone NOT NULL,
+    CONSTRAINT shipment_confirmation_cartons_counts_check CHECK ((sequence > 0) AND (packed_qty > 0))
+);
+
+ALTER TABLE ONLY public.shipment_confirmation_cartons FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE public.shipment_confirmation_cartons ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.shipment_confirmation_cartons_id_seq
     START WITH 1
     INCREMENT BY 1
     NO MINVALUE
@@ -14032,11 +14406,31 @@ ALTER TABLE ONLY public.shipment_confirmations
 
 
 ALTER TABLE ONLY public.shipment_confirmations
-    ADD CONSTRAINT shipment_confirmations_shipment_key UNIQUE (tenant_id, inventory_owner_id, shipment_id);
+    ADD CONSTRAINT shipment_confirmations_revision_key UNIQUE (tenant_id, inventory_owner_id, shipment_id, expected_shipment_revision);
+
+
+ALTER TABLE ONLY public.shipment_confirmations
+    ADD CONSTRAINT shipment_confirmations_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_id, id);
 
 
 ALTER TABLE ONLY public.shipment_confirmations
     ADD CONSTRAINT shipment_confirmations_transaction_key UNIQUE (tenant_id, inventory_owner_id, inventory_transaction_id);
+
+
+ALTER TABLE ONLY public.shipment_confirmation_cartons
+    ADD CONSTRAINT shipment_confirmation_cartons_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.shipment_confirmation_cartons
+    ADD CONSTRAINT shipment_confirmation_cartons_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_id, confirmation_id, id);
+
+
+ALTER TABLE ONLY public.shipment_confirmation_cartons
+    ADD CONSTRAINT shipment_confirmation_cartons_carton_key UNIQUE (tenant_id, inventory_owner_id, shipment_id, shipment_carton_id);
+
+
+ALTER TABLE ONLY public.shipment_confirmation_cartons
+    ADD CONSTRAINT shipment_confirmation_cartons_sequence_key UNIQUE (tenant_id, inventory_owner_id, shipment_id, confirmation_id, sequence);
 
 
 --
@@ -16075,6 +16469,21 @@ CREATE TRIGGER shipment_confirmations_validate BEFORE INSERT ON public.shipment_
 
 
 CREATE CONSTRAINT TRIGGER shipment_confirmations_validate_consistency AFTER INSERT ON public.shipment_confirmations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_consistency();
+
+
+CREATE CONSTRAINT TRIGGER shipment_confirmations_require_cartons AFTER INSERT ON public.shipment_confirmations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_shipment_confirmation_consistency();
+
+
+CREATE TRIGGER shipment_confirmation_cartons_are_immutable BEFORE DELETE OR UPDATE ON public.shipment_confirmation_cartons FOR EACH ROW EXECUTE FUNCTION public.reject_shipping_ledger_mutation();
+
+
+CREATE TRIGGER shipment_confirmation_cartons_validate BEFORE INSERT ON public.shipment_confirmation_cartons FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_confirmation_carton();
+
+
+CREATE CONSTRAINT TRIGGER shipment_confirmation_cartons_require_confirmation AFTER INSERT ON public.shipment_confirmation_cartons DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_shipment_confirmation_consistency();
+
+
+CREATE CONSTRAINT TRIGGER shipment_confirmation_cartons_validate_shipment AFTER INSERT ON public.shipment_confirmation_cartons DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_consistency();
 
 
 CREATE CONSTRAINT TRIGGER orders_validate_shipment_consistency AFTER UPDATE OF status, revision ON public.orders DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_consistency();
@@ -18912,6 +19321,14 @@ ALTER TABLE ONLY public.shipment_confirmations
     ADD CONSTRAINT shipment_confirmations_confirmed_by_fkey FOREIGN KEY (tenant_id, confirmed_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
 
 
+ALTER TABLE ONLY public.shipment_confirmation_cartons
+    ADD CONSTRAINT shipment_confirmation_cartons_confirmation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, shipment_id, confirmation_id) REFERENCES public.shipment_confirmations(tenant_id, inventory_owner_id, facility_id, shipment_id, id);
+ALTER TABLE ONLY public.shipment_confirmation_cartons
+    ADD CONSTRAINT shipment_confirmation_cartons_carton_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, shipment_id, shipment_carton_id) REFERENCES public.shipment_cartons(tenant_id, inventory_owner_id, facility_id, shipment_id, id);
+ALTER TABLE ONLY public.shipment_confirmation_cartons
+    ADD CONSTRAINT shipment_confirmation_cartons_license_plate_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
 --
 -- Name: permissions permissions_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
@@ -20942,6 +21359,10 @@ ALTER TABLE public.shipment_confirmations ENABLE ROW LEVEL SECURITY;
 CREATE POLICY shipment_confirmations_tenant_isolation ON public.shipment_confirmations USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
 
 
+ALTER TABLE public.shipment_confirmation_cartons ENABLE ROW LEVEL SECURITY;
+CREATE POLICY shipment_confirmation_cartons_tenant_isolation ON public.shipment_confirmation_cartons USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
 --
 -- Name: permissions; Type: ROW SECURITY; Schema: public; Owner: -
 --
@@ -21533,6 +21954,8 @@ REVOKE ALL ON FUNCTION public.validate_shipment_carton() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_shipment_manifest() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_shipment_manifest_package() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_shipment_confirmation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_shipment_confirmation_carton() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_shipment_confirmation_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_shipment_consistency() FROM PUBLIC;
 
 
@@ -22546,6 +22969,10 @@ GRANT USAGE ON SEQUENCE public.shipment_manifest_packages_id_seq TO wareboxes_ap
 
 GRANT SELECT,INSERT ON TABLE public.shipment_confirmations TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.shipment_confirmations_id_seq TO wareboxes_app;
+
+
+GRANT SELECT,INSERT ON TABLE public.shipment_confirmation_cartons TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.shipment_confirmation_cartons_id_seq TO wareboxes_app;
 
 
 --
@@ -24122,12 +24549,13 @@ BEGIN
         IF NOT EXISTS (
             SELECT 1
             FROM public.shipment_confirmations confirmation
-            JOIN public.shipment_cartons shipment_carton
-              ON shipment_carton.tenant_id = confirmation.tenant_id
-             AND shipment_carton.inventory_owner_id = confirmation.inventory_owner_id
-             AND shipment_carton.facility_id = confirmation.facility_id
-             AND shipment_carton.shipment_id = confirmation.shipment_id
-             AND shipment_carton.carton_id = NEW.carton_id
+            JOIN public.shipment_confirmation_cartons confirmation_carton
+              ON confirmation_carton.tenant_id = confirmation.tenant_id
+             AND confirmation_carton.inventory_owner_id = confirmation.inventory_owner_id
+             AND confirmation_carton.facility_id = confirmation.facility_id
+             AND confirmation_carton.shipment_id = confirmation.shipment_id
+             AND confirmation_carton.confirmation_id = confirmation.id
+             AND confirmation_carton.carton_id = NEW.carton_id
             WHERE confirmation.tenant_id = NEW.tenant_id
               AND confirmation.inventory_owner_id = NEW.inventory_owner_id
               AND confirmation.inventory_transaction_id = NEW.departure_inventory_transaction_id
@@ -24796,7 +25224,8 @@ CREATE FUNCTION public.reject_assigned_shipment_direct_departure() RETURNS trigg
     SET search_path TO 'pg_catalog', 'public'
     AS $$
 BEGIN
-    IF OLD.state <> 'departed' AND NEW.state = 'departed'
+    IF OLD.state IN ('manifested', 'partially departed')
+       AND NEW.state IN ('partially departed', 'departed')
        AND EXISTS (
            SELECT 1
            FROM public.outbound_load_shipments link

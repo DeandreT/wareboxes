@@ -51,6 +51,8 @@ struct LockedShipment {
     revision: ShipmentRevision,
     carton_count: i64,
     shipped_qty: i64,
+    departed_carton_count: i64,
+    departed_qty: i64,
     demand: ShortShipDemandQuantities,
 }
 
@@ -127,7 +129,7 @@ async fn lock_shipment_tx(
         r#"
         SELECT id, packing_session_id, order_release_id, order_id,
                inventory_owner_id, facility_id, state, revision,
-               carton_count, shipped_qty
+               carton_count, shipped_qty, departed_carton_count, departed_qty
         FROM shipments
         WHERE tenant_id = $1 AND id = $2
           AND ($3 OR facility_id = ANY($4))
@@ -166,6 +168,8 @@ async fn lock_shipment_tx(
         revision: positive(row.try_get("revision")?, ShipmentRevision::new)?,
         carton_count: row.try_get("carton_count")?,
         shipped_qty,
+        departed_carton_count: row.try_get("departed_carton_count")?,
+        departed_qty: row.try_get("departed_qty")?,
         demand,
     })
 }

@@ -183,8 +183,8 @@ pub use shipping::{
     ConfirmShipmentDepartureRequest, ConfirmShipmentDepartureResponse, CreateShipmentRequest,
     CreateShipmentResponse, ManualCarrierManifestResponse, ManualCartonTrackingRequest,
     RecordManualManifestRequest, RecordManualManifestResponse, ShipmentCartonResponse,
-    ShipmentCartonTrackingResponse, ShipmentDemandResponse, ShipmentOrderStatus, ShipmentResponse,
-    ShipmentStatus,
+    ShipmentCartonTrackingResponse, ShipmentDemandResponse, ShipmentDepartureProgressResponse,
+    ShipmentOrderStatus, ShipmentResponse, ShipmentStatus,
 };
 pub use shipping_queue::{
     ShippingQueueEntryResponse, ShippingQueueFacilityId, ShippingQueueFacilityIdError,

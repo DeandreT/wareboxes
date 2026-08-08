@@ -4,8 +4,8 @@ use wareboxes_api_contract::v1::{
     ConfirmShipmentDepartureRequest, ConfirmShipmentDepartureResponse, CreateShipmentRequest,
     CreateShipmentResponse, ManualCarrierManifestResponse, RecordManualManifestRequest,
     RecordManualManifestResponse, Revision, ShipmentCartonResponse, ShipmentCartonTrackingResponse,
-    ShipmentDemandResponse, ShipmentOrderStatus, ShipmentResponse,
-    ShipmentStatus as ApiShipmentStatus,
+    ShipmentDemandResponse, ShipmentDepartureProgressResponse, ShipmentOrderStatus,
+    ShipmentResponse, ShipmentStatus as ApiShipmentStatus,
 };
 use wareboxes_application::shipping::{
     ConfirmShipmentDepartureCommand, ConfirmShipmentDepartureResult, CreateShipmentCommand,
@@ -149,6 +149,14 @@ fn map_shipment(shipment: ShipmentReadModel) -> V1Result<ShipmentResponse> {
         order_status: map_order_status(shipment.order_status)?,
         order_revision: revision(shipment.order_revision.get())?,
         demand: map_demand(shipment.demand),
+        departure_progress: ShipmentDepartureProgressResponse {
+            total_carton_count: shipment.departure_progress.total_carton_count,
+            departed_carton_count: shipment.departure_progress.departed_carton_count,
+            remaining_carton_count: shipment.departure_progress.remaining_carton_count,
+            total_quantity: shipment.departure_progress.total_quantity,
+            departed_quantity: shipment.departure_progress.departed_quantity,
+            remaining_quantity: shipment.departure_progress.remaining_quantity,
+        },
         cartons: shipment
             .cartons
             .into_iter()
@@ -168,6 +176,7 @@ fn map_shipment(shipment: ShipmentReadModel) -> V1Result<ShipmentResponse> {
                 tracking_number: carton
                     .tracking_number
                     .map(wareboxes_domain::TrackingNumber::into_inner),
+                departed_at: carton.departed_at.map(|timestamp| timestamp.to_rfc3339()),
             })
             .collect(),
         manifest: shipment.manifest.map(map_manifest),
@@ -221,6 +230,10 @@ fn map_departure(
         order_status: map_order_status(result.order_status)?,
         order_revision: revision(result.order_revision.get())?,
         scanned_carton_count: result.scanned_carton_count,
+        departure_quantity: result.departure_quantity,
+        cumulative_departed_quantity: result.cumulative_departed_quantity,
+        remaining_quantity: result.remaining_quantity,
+        remaining_carton_count: result.remaining_carton_count,
         demand: map_demand(result.demand),
         departed_by: result.departed_by.get(),
         departed_at: result.departed_at.to_rfc3339(),
@@ -239,6 +252,7 @@ const fn map_shipment_status(status: ShipmentStatus) -> ApiShipmentStatus {
     match status {
         ShipmentStatus::AwaitingManifest => ApiShipmentStatus::AwaitingManifest,
         ShipmentStatus::Manifested => ApiShipmentStatus::Manifested,
+        ShipmentStatus::PartiallyDeparted => ApiShipmentStatus::PartiallyDeparted,
         ShipmentStatus::Departed => ApiShipmentStatus::Departed,
     }
 }

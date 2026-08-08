@@ -13,12 +13,13 @@ pub const MAX_MANIFEST_REFERENCE_LENGTH: usize = 200;
 pub const MAX_TRACKING_NUMBER_LENGTH: usize = 200;
 pub const MAX_SHIPMENT_SCAN_VALUE_LENGTH: usize = 200;
 
-/// Lifecycle of one full-order parcel shipment.
+/// Lifecycle of one parcel shipment, including incremental carton departure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShipmentStatus {
     AwaitingManifest,
     Manifested,
+    PartiallyDeparted,
     Departed,
 }
 
@@ -27,6 +28,7 @@ impl ShipmentStatus {
         match self {
             Self::AwaitingManifest => "awaiting manifest",
             Self::Manifested => "manifested",
+            Self::PartiallyDeparted => "partially departed",
             Self::Departed => "departed",
         }
     }
@@ -35,6 +37,7 @@ impl ShipmentStatus {
         match value {
             "awaiting manifest" => Some(Self::AwaitingManifest),
             "manifested" => Some(Self::Manifested),
+            "partially departed" => Some(Self::PartiallyDeparted),
             "departed" => Some(Self::Departed),
             _ => None,
         }
@@ -246,7 +249,7 @@ impl CartonTrackingAssignment {
     }
 }
 
-/// Final aggregate transitions applied atomically when a shipment departs.
+/// Aggregate transitions applied atomically for one carton-departure increment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShipmentDepartureTransition {
     pub shipment_status: ShipmentStatus,
@@ -308,14 +311,17 @@ pub fn record_manual_manifest(
     Ok(ShipmentStatus::Manifested)
 }
 
-/// Confirms physical departure using a duplicate-free exact scan of the carton set.
+/// Confirms physical departure using a nonempty, duplicate-free subset of remaining cartons.
 pub fn confirm_shipment_departure(
     shipment_status: ShipmentStatus,
     order_status: OrderStatus,
-    cartons: &[ShipmentCartonIdentity],
+    remaining_cartons: &[ShipmentCartonIdentity],
     scanned_carton_barcodes: &[ShipmentScanValue],
 ) -> Result<ShipmentDepartureTransition, ShippingError> {
-    if !matches!(shipment_status, ShipmentStatus::Manifested) {
+    if !matches!(
+        shipment_status,
+        ShipmentStatus::Manifested | ShipmentStatus::PartiallyDeparted
+    ) {
         return Err(ShippingError::ShipmentNotManifested {
             status: shipment_status,
         });
@@ -325,12 +331,13 @@ pub fn confirm_shipment_departure(
             status: order_status,
         });
     }
-    validate_carton_set(cartons)?;
-    if scanned_carton_barcodes.len() != cartons.len() {
+    validate_carton_set(remaining_cartons)?;
+    if scanned_carton_barcodes.is_empty() || scanned_carton_barcodes.len() > remaining_cartons.len()
+    {
         return Err(ShippingError::DepartureCartonSetMismatch);
     }
 
-    let expected = cartons
+    let remaining = remaining_cartons
         .iter()
         .map(|carton| carton.carton_barcode().as_str())
         .collect::<HashSet<_>>();
@@ -338,13 +345,24 @@ pub fn confirm_shipment_departure(
         .iter()
         .map(ShipmentScanValue::as_str)
         .collect::<HashSet<_>>();
-    if scanned.len() != scanned_carton_barcodes.len() || scanned != expected {
+    if scanned.len() != scanned_carton_barcodes.len()
+        || !scanned.iter().all(|barcode| remaining.contains(barcode))
+    {
         return Err(ShippingError::DepartureCartonSetMismatch);
     }
 
+    let is_final = scanned.len() == remaining.len();
     Ok(ShipmentDepartureTransition {
-        shipment_status: ShipmentStatus::Departed,
-        order_status: OrderStatus::Shipped,
+        shipment_status: if is_final {
+            ShipmentStatus::Departed
+        } else {
+            ShipmentStatus::PartiallyDeparted
+        },
+        order_status: if is_final {
+            OrderStatus::Shipped
+        } else {
+            OrderStatus::AwaitingShipment
+        },
     })
 }
 
@@ -391,9 +409,9 @@ pub enum ShippingError {
     TrackingAssignmentSetMismatch,
     #[error("tracking numbers must be unique within a shipment")]
     DuplicateTrackingNumber,
-    #[error("only a manifested shipment can depart, got {status}")]
+    #[error("only a manifested or partially departed shipment can depart, got {status}")]
     ShipmentNotManifested { status: ShipmentStatus },
-    #[error("departure scans must identify every shipment carton exactly once")]
+    #[error("departure scans must identify a nonempty subset of remaining shipment cartons exactly once")]
     DepartureCartonSetMismatch,
 }
 
@@ -495,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn departure_requires_a_duplicate_free_exact_carton_scan_set() {
+    fn departure_accepts_duplicate_free_remaining_carton_subsets() {
         let cartons = [carton(1, "CARTON-1"), carton(2, "CARTON-2")];
         let exact = [
             ShipmentScanValue::new("CARTON-2").unwrap(),
@@ -507,6 +525,31 @@ mod tests {
                 OrderStatus::AwaitingShipment,
                 &cartons,
                 &exact
+            ),
+            Ok(ShipmentDepartureTransition {
+                shipment_status: ShipmentStatus::Departed,
+                order_status: OrderStatus::Shipped,
+            })
+        );
+
+        assert_eq!(
+            confirm_shipment_departure(
+                ShipmentStatus::Manifested,
+                OrderStatus::AwaitingShipment,
+                &cartons,
+                &[ShipmentScanValue::new("CARTON-1").unwrap()]
+            ),
+            Ok(ShipmentDepartureTransition {
+                shipment_status: ShipmentStatus::PartiallyDeparted,
+                order_status: OrderStatus::AwaitingShipment,
+            })
+        );
+        assert_eq!(
+            confirm_shipment_departure(
+                ShipmentStatus::PartiallyDeparted,
+                OrderStatus::AwaitingShipment,
+                &[carton(2, "CARTON-2")],
+                &[ShipmentScanValue::new("CARTON-2").unwrap()]
             ),
             Ok(ShipmentDepartureTransition {
                 shipment_status: ShipmentStatus::Departed,

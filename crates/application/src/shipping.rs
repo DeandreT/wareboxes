@@ -60,6 +60,31 @@ pub struct ShipmentCartonReadModel {
     pub height_mm: Option<i64>,
     pub tracking_assignment_id: Option<ShipmentTrackingAssignmentId>,
     pub tracking_number: Option<TrackingNumber>,
+    pub departed_at: Option<Timestamp>,
+}
+
+/// Cumulative physical departure progress for one shipment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShipmentDepartureProgress {
+    pub total_carton_count: i64,
+    pub departed_carton_count: i64,
+    pub remaining_carton_count: i64,
+    pub total_quantity: i64,
+    pub departed_quantity: i64,
+    pub remaining_quantity: i64,
+}
+
+impl ShipmentDepartureProgress {
+    pub const fn is_consistent(self) -> bool {
+        self.total_carton_count > 0
+            && self.departed_carton_count >= 0
+            && self.remaining_carton_count >= 0
+            && self.departed_carton_count + self.remaining_carton_count == self.total_carton_count
+            && self.total_quantity > 0
+            && self.departed_quantity >= 0
+            && self.remaining_quantity >= 0
+            && self.departed_quantity + self.remaining_quantity == self.total_quantity
+    }
 }
 
 /// Resumable shipment state returned after create and read operations.
@@ -76,6 +101,7 @@ pub struct ShipmentReadModel {
     pub order_status: OrderStatus,
     pub order_revision: OrderRevision,
     pub demand: ShortShipDemandQuantities,
+    pub departure_progress: ShipmentDepartureProgress,
     pub cartons: Vec<ShipmentCartonReadModel>,
     pub manifest: Option<ManualCarrierManifestReadModel>,
     pub created_by: UserId,
@@ -95,6 +121,26 @@ impl ShipmentReadModel {
         });
         if carton_quantity != Some(self.demand.effective().get())
             || self.demand.effective().is_zero()
+            || !self.departure_progress.is_consistent()
+            || self.departure_progress.total_carton_count
+                != i64::try_from(self.cartons.len()).unwrap_or(i64::MAX)
+            || self.departure_progress.total_quantity != self.demand.effective().get()
+            || self.departure_progress.departed_carton_count
+                != i64::try_from(
+                    self.cartons
+                        .iter()
+                        .filter(|carton| carton.departed_at.is_some())
+                        .count(),
+                )
+                .unwrap_or(i64::MAX)
+            || Some(self.departure_progress.departed_quantity)
+                != self
+                    .cartons
+                    .iter()
+                    .filter(|carton| carton.departed_at.is_some())
+                    .try_fold(0_i64, |total, carton| {
+                        total.checked_add(carton.packed_quantity)
+                    })
         {
             return false;
         }
@@ -104,6 +150,7 @@ impl ShipmentReadModel {
                     && self.manifest.is_none()
                     && self.departed_by.is_none()
                     && self.departed_at.is_none()
+                    && self.departure_progress.departed_carton_count == 0
                     && self.cartons.iter().all(|carton| {
                         carton.tracking_assignment_id.is_none() && carton.tracking_number.is_none()
                     })
@@ -113,12 +160,22 @@ impl ShipmentReadModel {
                     && self.manifest_covers_cartons()
                     && self.departed_by.is_none()
                     && self.departed_at.is_none()
+                    && self.departure_progress.departed_carton_count == 0
+            }
+            ShipmentStatus::PartiallyDeparted => {
+                matches!(self.order_status, OrderStatus::AwaitingShipment)
+                    && self.manifest_covers_cartons()
+                    && self.departed_by.is_none()
+                    && self.departed_at.is_none()
+                    && self.departure_progress.departed_carton_count > 0
+                    && self.departure_progress.remaining_carton_count > 0
             }
             ShipmentStatus::Departed => {
                 matches!(self.order_status, OrderStatus::Shipped)
                     && self.manifest_covers_cartons()
                     && self.departed_by.is_some()
                     && self.departed_at.is_some()
+                    && self.departure_progress.remaining_carton_count == 0
             }
         }
     }
@@ -176,7 +233,7 @@ pub struct RecordManualManifestResult {
     pub manifest: ManualCarrierManifestReadModel,
 }
 
-/// Confirms physical departure by scanning the exact shipment carton set.
+/// Confirms physical departure for a nonempty subset of remaining shipment cartons.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfirmShipmentDepartureCommand {
     pub shipment_id: ShipmentId,
@@ -195,6 +252,10 @@ pub struct ConfirmShipmentDepartureResult {
     pub order_status: OrderStatus,
     pub order_revision: OrderRevision,
     pub scanned_carton_count: i64,
+    pub departure_quantity: i64,
+    pub cumulative_departed_quantity: i64,
+    pub remaining_quantity: i64,
+    pub remaining_carton_count: i64,
     pub demand: ShortShipDemandQuantities,
     pub departed_by: UserId,
     pub departed_at: Timestamp,
@@ -224,6 +285,14 @@ mod tests {
                 wareboxes_domain::ActualPickQuantity::ZERO,
             )
             .unwrap(),
+            departure_progress: ShipmentDepartureProgress {
+                total_carton_count: 1,
+                departed_carton_count: 0,
+                remaining_carton_count: 1,
+                total_quantity: 2,
+                departed_quantity: 0,
+                remaining_quantity: 2,
+            },
             cartons: vec![ShipmentCartonReadModel {
                 carton_id,
                 carton_barcode: ShipmentScanValue::new("CARTON-8").unwrap(),
@@ -236,6 +305,7 @@ mod tests {
                 height_mm: Some(150),
                 tracking_assignment_id: Some(tracking_assignment_id),
                 tracking_number: Some(tracking_number.clone()),
+                departed_at: None,
             }],
             manifest: Some(ManualCarrierManifestReadModel {
                 manifest_id: CarrierManifestId::new(6).unwrap(),
@@ -309,14 +379,56 @@ mod tests {
 
     #[test]
     fn shipment_read_model_requires_manifest_and_departure_facts_by_state() {
-        let manifested = manifested_shipment(ShipmentStatus::Manifested);
+        let mut manifested = manifested_shipment(ShipmentStatus::Manifested);
+        let mut second_carton = manifested.cartons[0].clone();
+        second_carton.carton_id = CartonId::new(18).unwrap();
+        second_carton.carton_barcode = ShipmentScanValue::new("CARTON-18").unwrap();
+        second_carton.sequence = 2;
+        second_carton.tracking_assignment_id = Some(ShipmentTrackingAssignmentId::new(17).unwrap());
+        second_carton.tracking_number = Some(TrackingNumber::new("TRACK-18").unwrap());
+        manifested.cartons.push(second_carton);
+        manifested
+            .manifest
+            .as_mut()
+            .unwrap()
+            .carton_tracking_assignments
+            .push(ShipmentCartonTrackingReadModel {
+                tracking_assignment_id: ShipmentTrackingAssignmentId::new(17).unwrap(),
+                carton_id: CartonId::new(18).unwrap(),
+                tracking_number: TrackingNumber::new("TRACK-18").unwrap(),
+            });
+        manifested.demand = ShortShipDemandQuantities::new(
+            wareboxes_domain::PickQuantity::new(4).unwrap(),
+            wareboxes_domain::ActualPickQuantity::ZERO,
+        )
+        .unwrap();
+        manifested.departure_progress.total_carton_count = 2;
+        manifested.departure_progress.remaining_carton_count = 2;
+        manifested.departure_progress.total_quantity = 4;
+        manifested.departure_progress.remaining_quantity = 4;
         assert!(manifested.is_consistent());
 
-        let mut departed = manifested;
+        let mut partial = manifested;
+        partial.status = ShipmentStatus::PartiallyDeparted;
+        partial.revision = ShipmentRevision::new(3).unwrap();
+        partial.order_revision = OrderRevision::new(9).unwrap();
+        partial.departure_progress.departed_carton_count = 1;
+        partial.departure_progress.remaining_carton_count = 1;
+        partial.departure_progress.departed_quantity = 2;
+        partial.departure_progress.remaining_quantity = 2;
+        partial.cartons[0].departed_at = Some("2026-08-08T20:30:00Z".parse().unwrap());
+        assert!(partial.is_consistent());
+
+        let mut departed = partial;
         departed.status = ShipmentStatus::Departed;
         departed.order_status = OrderStatus::Shipped;
         departed.departed_by = Some(UserId::new(10).unwrap());
         departed.departed_at = Some("2026-08-08T21:00:00Z".parse().unwrap());
+        departed.departure_progress.departed_carton_count = 2;
+        departed.departure_progress.remaining_carton_count = 0;
+        departed.departure_progress.departed_quantity = 4;
+        departed.departure_progress.remaining_quantity = 0;
+        departed.cartons[1].departed_at = departed.departed_at;
         assert!(departed.is_consistent());
 
         departed.cartons[0].tracking_number = None;

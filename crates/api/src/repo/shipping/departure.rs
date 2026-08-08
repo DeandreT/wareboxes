@@ -38,6 +38,15 @@ struct DepartureHint {
 }
 
 #[derive(Debug, Clone)]
+struct DepartureCarton {
+    shipment_carton_id: i64,
+    carton_id: CartonId,
+    carton_barcode: ShipmentScanValue,
+    license_plate_id: i64,
+    packed_qty: i64,
+}
+
+#[derive(Debug, Clone)]
 struct BalanceDeparture {
     balance_id: i64,
     location_id: i64,
@@ -95,8 +104,12 @@ pub async fn confirm_departure(
     {
         return Err(AppError::conflict("shipment departure revision is stale"));
     }
-    let carton_identities =
-        shipment_carton_identities_tx(&mut tx, access.tenant_id, shipment.id).await?;
+    let remaining_cartons =
+        remaining_departure_cartons_tx(&mut tx, access.tenant_id, shipment.id).await?;
+    let carton_identities = remaining_cartons
+        .iter()
+        .map(|carton| ShipmentCartonIdentity::new(carton.carton_id, carton.carton_barcode.clone()))
+        .collect::<Vec<_>>();
     let transition = validate_departure(
         shipment.status,
         order.status,
@@ -105,17 +118,54 @@ pub async fn confirm_departure(
     )
     .map_err(departure_validation_error)?;
 
-    let hints = departure_hints_tx(&mut tx, access.tenant_id, shipment.id, "packed").await?;
+    let selected_by_barcode = remaining_cartons
+        .iter()
+        .map(|carton| (carton.carton_barcode.as_str(), carton))
+        .collect::<BTreeMap<_, _>>();
+    let selected_cartons = command
+        .scanned_carton_barcodes
+        .iter()
+        .map(|barcode| {
+            selected_by_barcode
+                .get(barcode.as_str())
+                .copied()
+                .ok_or_else(|| AppError::bad_request("departure carton scan is not remaining"))
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    let selected_carton_ids = selected_cartons
+        .iter()
+        .map(|carton| carton.carton_id)
+        .collect::<Vec<_>>();
+
+    let hints = departure_hints_tx(
+        &mut tx,
+        access.tenant_id,
+        shipment.id,
+        "packed",
+        &selected_carton_ids,
+    )
+    .await?;
     lock_departure_inventory_tx(&mut tx, access.tenant_id, shipment.order_id.get(), &hints).await?;
-    let balances =
-        validate_departure_inventory_tx(&mut tx, access.tenant_id, shipment.id, "packed", &hints)
-            .await?;
+    let balances = validate_departure_inventory_tx(
+        &mut tx,
+        access.tenant_id,
+        shipment.id,
+        "packed",
+        &selected_carton_ids,
+        &hints,
+    )
+    .await?;
     let shipped_qty = balances.values().try_fold(0_i64, |total, balance| {
         total
             .checked_add(balance.quantity)
             .ok_or_else(|| AppError::internal("departure quantity exceeds i64"))
     })?;
-    if shipped_qty != shipment.shipped_qty {
+    let selected_snapshot_qty = selected_cartons.iter().try_fold(0_i64, |total, carton| {
+        total
+            .checked_add(carton.packed_qty)
+            .ok_or_else(|| AppError::internal("departure quantity exceeds i64"))
+    })?;
+    if shipped_qty != selected_snapshot_qty {
         return Err(AppError::conflict(
             "packed inventory changed before shipment departure",
         ));
@@ -161,12 +211,15 @@ pub async fn confirm_departure(
         departed_at,
     )
     .await?;
-    fulfill_reservations_tx(&mut tx, access.tenant_id, &hints, departed_at).await?;
+    if matches!(transition.shipment_status, ShipmentStatus::Departed) {
+        fulfill_reservations_tx(&mut tx, access.tenant_id, shipment.order_id, departed_at).await?;
+    }
     depart_license_plates_tx(&mut tx, access.tenant_id, &hints, departed_at).await?;
     depart_packed_positions_tx(
         &mut tx,
         access.tenant_id,
         shipment.id,
+        &selected_carton_ids,
         transaction_id,
         departed_at,
     )
@@ -180,15 +233,31 @@ pub async fn confirm_departure(
         .revision
         .checked_next()
         .ok_or_else(|| AppError::internal("order revision overflow"))?;
+    let scanned_carton_count = i64::try_from(selected_cartons.len())
+        .map_err(|_| AppError::internal("departure carton count exceeds i64"))?;
+    let cumulative_departed_carton_count = shipment
+        .departed_carton_count
+        .checked_add(scanned_carton_count)
+        .ok_or_else(|| AppError::internal("departed carton count exceeds i64"))?;
+    let cumulative_departed_quantity = shipment
+        .departed_qty
+        .checked_add(shipped_qty)
+        .ok_or_else(|| AppError::internal("departed quantity exceeds i64"))?;
+    let terminal_departed_at =
+        matches!(transition.shipment_status, ShipmentStatus::Departed).then_some(departed_at);
     let shipment_updated = sqlx::query(
         r#"
-        UPDATE shipments SET state = $1, revision = $2, departed_at = $3
-        WHERE tenant_id = $4 AND id = $5 AND state = $6 AND revision = $7
+        UPDATE shipments
+        SET state = $1, revision = $2, departed_at = $3,
+            departed_carton_count = $4, departed_qty = $5
+        WHERE tenant_id = $6 AND id = $7 AND state = $8 AND revision = $9
         "#,
     )
     .bind(transition.shipment_status.as_str())
     .bind(next_shipment_revision.get())
-    .bind(departed_at)
+    .bind(terminal_departed_at)
+    .bind(cumulative_departed_carton_count)
+    .bind(cumulative_departed_quantity)
     .bind(access.tenant_id.get())
     .bind(shipment.id.get())
     .bind(shipment.status.as_str())
@@ -219,19 +288,21 @@ pub async fn confirm_departure(
             "order changed during departure confirmation",
         ));
     }
-    sqlx::query(
+    let confirmation_id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO shipment_confirmations (
             tenant_id, inventory_owner_id, facility_id, shipment_id,
             manifest_id, packing_session_id, order_release_id, order_id,
             inventory_transaction_id, expected_shipment_revision,
             resulting_shipment_revision, expected_order_revision,
-            resulting_order_revision, carton_count, shipped_qty,
+            resulting_order_revision, resulting_shipment_state,
+            carton_count, shipped_qty,
             confirmed_by_user_id, confirmed_at
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-            $13, $14, $15, $16, $17
+            $13, $14, $15, $16, $17, $18
         )
+        RETURNING id
         "#,
     )
     .bind(access.tenant_id.get())
@@ -247,11 +318,21 @@ pub async fn confirm_departure(
     .bind(next_shipment_revision.get())
     .bind(order.revision.get())
     .bind(next_order_revision.get())
-    .bind(shipment.carton_count)
-    .bind(shipment.shipped_qty)
+    .bind(transition.shipment_status.as_str())
+    .bind(scanned_carton_count)
+    .bind(shipped_qty)
     .bind(context.actor_id.get())
     .bind(departed_at)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
+    .await?;
+    insert_confirmation_cartons_tx(
+        &mut tx,
+        access.tenant_id,
+        &shipment,
+        confirmation_id,
+        &selected_cartons,
+        departed_at,
+    )
     .await?;
     insert_order_activity_tx(
         &mut tx,
@@ -260,11 +341,22 @@ pub async fn confirm_departure(
         shipment.order_id.get(),
         Some(context.actor_id.get()),
         &format!(
-            "departed shipment {} with {} carton(s)",
-            shipment.id, shipment.carton_count
+            "departed {} carton(s) from shipment {} ({} remaining)",
+            scanned_carton_count,
+            shipment.id,
+            shipment.carton_count - cumulative_departed_carton_count
         ),
     )
     .await?;
+    let departure_event_key = if matches!(transition.shipment_status, ShipmentStatus::Departed) {
+        format!("shipment:{}:departed", shipment.id.get())
+    } else {
+        format!(
+            "shipment:{}:departure:{}",
+            shipment.id.get(),
+            next_shipment_revision.get()
+        )
+    };
     enqueue_order_event_tx(
         &mut tx,
         access.tenant_id,
@@ -272,13 +364,23 @@ pub async fn confirm_departure(
         shipment.facility_id,
         context.actor_id.get(),
         shipment.order_id,
-        "shipping.shipment_departed",
-        &format!("shipment:{}:departed", shipment.id.get()),
+        if matches!(transition.shipment_status, ShipmentStatus::Departed) {
+            "shipping.shipment_departed"
+        } else {
+            "shipping.shipment_partially_departed"
+        },
+        &departure_event_key,
         serde_json::json!({
             "shipment_id": shipment.id,
             "order_id": shipment.order_id,
             "inventory_transaction_id": transaction_id,
-            "carton_count": shipment.carton_count,
+            "confirmation_id": confirmation_id,
+            "carton_count": scanned_carton_count,
+            "departure_quantity": shipped_qty,
+            "cumulative_departed_carton_count": cumulative_departed_carton_count,
+            "cumulative_departed_quantity": cumulative_departed_quantity,
+            "remaining_carton_count": shipment.carton_count - cumulative_departed_carton_count,
+            "remaining_quantity": shipment.shipped_qty - cumulative_departed_quantity,
             "ordered_quantity": shipment.demand.ordered(),
             "shipped_quantity": shipment.shipped_qty,
             "accepted_short_quantity": shipment.demand.accepted_short(),
@@ -289,8 +391,6 @@ pub async fn confirm_departure(
         departed_at,
     )
     .await?;
-    let scanned_carton_count = i64::try_from(command.scanned_carton_barcodes.len())
-        .map_err(|_| AppError::internal("departure carton count exceeds i64"))?;
     let result = ConfirmShipmentDepartureResult {
         shipment_id: shipment.id,
         order_id: shipment.order_id,
@@ -299,6 +399,10 @@ pub async fn confirm_departure(
         order_status: transition.order_status,
         order_revision: next_order_revision,
         scanned_carton_count,
+        departure_quantity: shipped_qty,
+        cumulative_departed_quantity,
+        remaining_quantity: shipment.shipped_qty - cumulative_departed_quantity,
+        remaining_carton_count: shipment.carton_count - cumulative_departed_carton_count,
         demand: shipment.demand,
         departed_by: positive(context.actor_id.get(), UserId::new)?,
         departed_at,
@@ -336,11 +440,24 @@ pub(crate) async fn depart_for_outbound_load_tx(
             "outbound load shipment departure revision is stale",
         ));
     }
-    let hints = departure_hints_tx(tx, access.tenant_id, shipment.id, "loaded").await?;
+    let remaining_cartons =
+        remaining_departure_cartons_tx(tx, access.tenant_id, shipment.id).await?;
+    let carton_ids = remaining_cartons
+        .iter()
+        .map(|carton| carton.carton_id)
+        .collect::<Vec<_>>();
+    let hints =
+        departure_hints_tx(tx, access.tenant_id, shipment.id, "loaded", &carton_ids).await?;
     lock_departure_inventory_tx(tx, access.tenant_id, shipment.order_id.get(), &hints).await?;
-    let balances =
-        validate_departure_inventory_tx(tx, access.tenant_id, shipment.id, "loaded", &hints)
-            .await?;
+    let balances = validate_departure_inventory_tx(
+        tx,
+        access.tenant_id,
+        shipment.id,
+        "loaded",
+        &carton_ids,
+        &hints,
+    )
+    .await?;
     let shipped_qty = balances.values().try_fold(0_i64, |total, balance| {
         total
             .checked_add(balance.quantity)
@@ -391,12 +508,13 @@ pub(crate) async fn depart_for_outbound_load_tx(
         departed_at,
     )
     .await?;
-    fulfill_reservations_tx(tx, access.tenant_id, &hints, departed_at).await?;
+    fulfill_reservations_tx(tx, access.tenant_id, shipment.order_id, departed_at).await?;
     depart_license_plates_tx(tx, access.tenant_id, &hints, departed_at).await?;
     depart_packed_positions_tx(
         tx,
         access.tenant_id,
         shipment.id,
+        &carton_ids,
         transaction_id,
         departed_at,
     )
@@ -411,7 +529,7 @@ pub(crate) async fn depart_for_outbound_load_tx(
         .ok_or_else(|| AppError::internal("order revision overflow"))?;
     require_updated(
         sqlx::query(
-            "UPDATE shipments SET state='departed',revision=$3,departed_at=$4 WHERE tenant_id=$1 AND id=$2 AND state='manifested' AND revision=$5",
+            "UPDATE shipments SET state='departed',revision=$3,departed_at=$4,departed_carton_count=carton_count,departed_qty=shipped_qty WHERE tenant_id=$1 AND id=$2 AND state='manifested' AND revision=$5",
         )
         .bind(access.tenant_id.get())
         .bind(shipment.id.get())
@@ -436,15 +554,17 @@ pub(crate) async fn depart_for_outbound_load_tx(
         .rows_affected(),
         "order changed during outbound load departure",
     )?;
-    sqlx::query(
+    let confirmation_id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO shipment_confirmations (
             tenant_id,inventory_owner_id,facility_id,shipment_id,manifest_id,
             packing_session_id,order_release_id,order_id,inventory_transaction_id,
             expected_shipment_revision,resulting_shipment_revision,
-            expected_order_revision,resulting_order_revision,carton_count,shipped_qty,
+            expected_order_revision,resulting_order_revision,resulting_shipment_state,
+            carton_count,shipped_qty,
             confirmed_by_user_id,confirmed_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+        RETURNING id
         "#,
     )
     .bind(access.tenant_id.get())
@@ -460,11 +580,22 @@ pub(crate) async fn depart_for_outbound_load_tx(
     .bind(next_shipment_revision.get())
     .bind(order.revision.get())
     .bind(next_order_revision.get())
+    .bind(ShipmentStatus::Departed.as_str())
     .bind(shipment.carton_count)
     .bind(shipment.shipped_qty)
     .bind(context.actor_id.get())
     .bind(departed_at)
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
+    .await?;
+    let confirmation_cartons = remaining_cartons.iter().collect::<Vec<_>>();
+    insert_confirmation_cartons_tx(
+        tx,
+        access.tenant_id,
+        &shipment,
+        confirmation_id,
+        &confirmation_cartons,
+        departed_at,
+    )
     .await?;
     insert_order_activity_tx(
         tx,
@@ -530,17 +661,28 @@ fn departure_validation_error(error: ShippingError) -> AppError {
     }
 }
 
-async fn shipment_carton_identities_tx(
+async fn remaining_departure_cartons_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     shipment_id: wareboxes_domain::ShipmentId,
-) -> AppResult<Vec<ShipmentCartonIdentity>> {
+) -> AppResult<Vec<DepartureCarton>> {
     let rows = sqlx::query(
         r#"
-        SELECT carton_id, carton_barcode
-        FROM shipment_cartons
-        WHERE tenant_id = $1 AND shipment_id = $2
-        ORDER BY sequence, id
+        SELECT shipment_carton.id AS shipment_carton_id,
+               shipment_carton.carton_id, shipment_carton.carton_barcode,
+               shipment_carton.license_plate_id, shipment_carton.packed_qty
+        FROM shipment_cartons shipment_carton
+        WHERE shipment_carton.tenant_id = $1
+          AND shipment_carton.shipment_id = $2
+          AND NOT EXISTS (
+              SELECT 1
+              FROM shipment_confirmation_cartons departed
+              WHERE departed.tenant_id = shipment_carton.tenant_id
+                AND departed.inventory_owner_id = shipment_carton.inventory_owner_id
+                AND departed.shipment_id = shipment_carton.shipment_id
+                AND departed.shipment_carton_id = shipment_carton.id
+          )
+        ORDER BY shipment_carton.sequence, shipment_carton.id
         "#,
     )
     .bind(tenant_id.get())
@@ -549,13 +691,53 @@ async fn shipment_carton_identities_tx(
     .await?;
     rows.into_iter()
         .map(|row| {
-            Ok(ShipmentCartonIdentity::new(
-                positive(row.try_get("carton_id")?, CartonId::new)?,
-                ShipmentScanValue::new(row.try_get::<String, _>("carton_barcode")?)
+            Ok(DepartureCarton {
+                shipment_carton_id: row.try_get("shipment_carton_id")?,
+                carton_id: positive(row.try_get("carton_id")?, CartonId::new)?,
+                carton_barcode: ShipmentScanValue::new(row.try_get::<String, _>("carton_barcode")?)
                     .map_err(|error| AppError::internal(error.to_string()))?,
-            ))
+                license_plate_id: row.try_get("license_plate_id")?,
+                packed_qty: row.try_get("packed_qty")?,
+            })
         })
         .collect()
+}
+
+async fn insert_confirmation_cartons_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    shipment: &super::LockedShipment,
+    confirmation_id: i64,
+    cartons: &[&DepartureCarton],
+    departed_at: wareboxes_domain::Timestamp,
+) -> AppResult<()> {
+    for (index, carton) in cartons.iter().enumerate() {
+        let sequence = i64::try_from(index + 1)
+            .map_err(|_| AppError::internal("departure carton sequence exceeds i64"))?;
+        sqlx::query(
+            r#"
+            INSERT INTO shipment_confirmation_cartons (
+                tenant_id, inventory_owner_id, facility_id, shipment_id,
+                confirmation_id, shipment_carton_id, carton_id,
+                license_plate_id, sequence, packed_qty, departed_at
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(shipment.inventory_owner_id.get())
+        .bind(shipment.facility_id.get())
+        .bind(shipment.id.get())
+        .bind(confirmation_id)
+        .bind(carton.shipment_carton_id)
+        .bind(carton.carton_id.get())
+        .bind(carton.license_plate_id)
+        .bind(sequence)
+        .bind(carton.packed_qty)
+        .bind(departed_at)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
 }
 
 async fn departure_hints_tx(
@@ -563,6 +745,7 @@ async fn departure_hints_tx(
     tenant_id: TenantId,
     shipment_id: wareboxes_domain::ShipmentId,
     required_state: &str,
+    carton_ids: &[CartonId],
 ) -> AppResult<Vec<DepartureHint>> {
     let rows = sqlx::query(
         r#"
@@ -578,12 +761,14 @@ async fn departure_hints_tx(
          AND position.carton_id=shipment_carton.carton_id
         WHERE shipment_carton.tenant_id=$1 AND shipment_carton.shipment_id=$2
           AND position.state=$3
+          AND shipment_carton.carton_id = ANY($4)
         ORDER BY position.current_inventory_allocation_id
         "#,
     )
     .bind(tenant_id.get())
     .bind(shipment_id.get())
     .bind(required_state)
+    .bind(carton_ids.iter().map(|id| id.get()).collect::<Vec<_>>())
     .fetch_all(&mut **tx)
     .await?;
     if rows.is_empty() {
@@ -627,12 +812,6 @@ async fn lock_departure_inventory_tx(
         hints.iter().map(|hint| hint.balance_id).collect(),
     )
     .await?;
-    let mut expected_reservations = hints
-        .iter()
-        .map(|hint| hint.reservation_id)
-        .collect::<Vec<_>>();
-    expected_reservations.sort_unstable();
-    expected_reservations.dedup();
     let reservations: Vec<i64> = sqlx::query_scalar(
         r#"
         SELECT id FROM inventory_reservations
@@ -644,9 +823,13 @@ async fn lock_departure_inventory_tx(
     .bind(order_id)
     .fetch_all(&mut **tx)
     .await?;
-    if reservations != expected_reservations {
+    if reservations.is_empty()
+        || hints
+            .iter()
+            .any(|hint| !reservations.contains(&hint.reservation_id))
+    {
         return Err(AppError::conflict(
-            "shipment does not cover the order reservation set",
+            "shipment departure inventory does not match the order reservations",
         ));
     }
     Ok(())
@@ -687,6 +870,7 @@ async fn validate_departure_inventory_tx(
     tenant_id: TenantId,
     shipment_id: wareboxes_domain::ShipmentId,
     required_state: &str,
+    carton_ids: &[CartonId],
     hints: &[DepartureHint],
 ) -> AppResult<BTreeMap<i64, BalanceDeparture>> {
     let rows = sqlx::query(
@@ -733,12 +917,14 @@ async fn validate_departure_inventory_tx(
          AND reservation.id = position.reservation_id
         WHERE shipment_carton.tenant_id=$1 AND shipment_carton.shipment_id=$2
           AND position.state=$3
+          AND shipment_carton.carton_id = ANY($4)
         ORDER BY position.current_inventory_allocation_id
         "#,
     )
     .bind(tenant_id.get())
     .bind(shipment_id.get())
     .bind(required_state)
+    .bind(carton_ids.iter().map(|id| id.get()).collect::<Vec<_>>())
     .fetch_all(&mut **tx)
     .await?;
     if rows.len() != hints.len() {
@@ -914,31 +1100,33 @@ async fn consume_balances_tx(
 async fn fulfill_reservations_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
-    hints: &[DepartureHint],
+    order_id: OrderId,
     departed_at: wareboxes_domain::Timestamp,
 ) -> AppResult<()> {
-    for reservation_id in hints
-        .iter()
-        .map(|hint| hint.reservation_id)
-        .collect::<BTreeSet<_>>()
-    {
-        let updated = sqlx::query(
-            r#"
-            UPDATE inventory_reservations
-            SET status = 'fulfilled', modified = $1, deleted = $1
-            WHERE tenant_id = $2 AND id = $3 AND status = 'active' AND deleted IS NULL
-            "#,
-        )
-        .bind(departed_at)
-        .bind(tenant_id.get())
-        .bind(reservation_id)
-        .execute(&mut **tx)
-        .await?;
-        if updated.rows_affected() != 1 {
-            return Err(AppError::conflict(
-                "inventory reservation changed during shipment departure",
-            ));
-        }
+    let active_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM inventory_reservations WHERE tenant_id=$1 AND order_id=$2 AND status='active' AND deleted IS NULL",
+    )
+    .bind(tenant_id.get())
+    .bind(order_id.get())
+    .fetch_one(&mut **tx)
+    .await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE inventory_reservations
+        SET status = 'fulfilled', modified = $1, deleted = $1
+        WHERE tenant_id = $2 AND order_id = $3
+          AND status = 'active' AND deleted IS NULL
+        "#,
+    )
+    .bind(departed_at)
+    .bind(tenant_id.get())
+    .bind(order_id.get())
+    .execute(&mut **tx)
+    .await?;
+    if active_count <= 0 || updated.rows_affected() != active_count as u64 {
+        return Err(AppError::conflict(
+            "inventory reservation changed during shipment departure",
+        ));
     }
     Ok(())
 }
@@ -978,6 +1166,7 @@ async fn depart_packed_positions_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     shipment_id: wareboxes_domain::ShipmentId,
+    carton_ids: &[CartonId],
     inventory_transaction_id: i64,
     departed_at: wareboxes_domain::Timestamp,
 ) -> AppResult<()> {
@@ -995,12 +1184,14 @@ async fn depart_packed_positions_tx(
           AND shipment_carton.carton_id=position.carton_id
           AND position.tenant_id=shipment_carton.tenant_id
           AND position.state IN ('packed','loaded')
+          AND shipment_carton.carton_id = ANY($5)
         "#,
     )
     .bind(tenant_id.get())
     .bind(shipment_id.get())
     .bind(departed_at)
     .bind(inventory_transaction_id)
+    .bind(carton_ids.iter().map(|id| id.get()).collect::<Vec<_>>())
     .execute(&mut **tx)
     .await?;
     if updated.rows_affected() == 0 {

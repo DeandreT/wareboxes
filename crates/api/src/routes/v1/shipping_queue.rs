@@ -71,6 +71,8 @@ fn map_entry(entry: repo::shipping::ShippingQueueEntry) -> AppResult<ShippingQue
                     .map_err(|error| AppError::internal(error.to_string()))?,
                 carton_count: shipment.carton_count,
                 shipped_quantity: shipment.shipped_quantity,
+                departed_carton_count: shipment.departed_carton_count,
+                departed_quantity: shipment.departed_quantity,
                 carrier_code: shipment.carrier_code,
                 service_code: shipment.service_code,
                 created_at: shipment.created_at.to_rfc3339(),
@@ -102,6 +104,7 @@ fn map_status(status: ShipmentStatus) -> ApiShipmentStatus {
     match status {
         ShipmentStatus::AwaitingManifest => ApiShipmentStatus::AwaitingManifest,
         ShipmentStatus::Manifested => ApiShipmentStatus::Manifested,
+        ShipmentStatus::PartiallyDeparted => ApiShipmentStatus::PartiallyDeparted,
         ShipmentStatus::Departed => ApiShipmentStatus::Departed,
     }
 }

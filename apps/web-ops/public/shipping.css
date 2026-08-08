@@ -76,7 +76,7 @@
 .shipping-body {
   display: grid;
   min-height: 0;
-  grid-template-columns: 315px minmax(0, 1fr);
+  grid-template-columns: 280px minmax(0, 1fr);
 }
 
 .shipping-queue {
@@ -379,7 +379,7 @@
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-columns: minmax(0, 1fr) 330px;
+  grid-template-columns: minmax(0, 1fr) 284px;
 }
 
 .shipping-cartons {
@@ -412,27 +412,31 @@
 }
 
 .shipping-carton-table th:nth-child(1) {
-  width: 6%;
+  width: 4%;
 }
 
 .shipping-carton-table th:nth-child(2) {
-  width: 20%;
+  width: 25%;
 }
 
 .shipping-carton-table th:nth-child(3) {
-  width: 15%;
+  width: 12%;
 }
 
 .shipping-carton-table th:nth-child(4) {
-  width: 13%;
+  width: 10%;
 }
 
 .shipping-carton-table th:nth-child(5) {
-  width: 23%;
+  width: 17%;
 }
 
 .shipping-carton-table th:nth-child(6) {
-  width: 23%;
+  width: 17%;
+}
+
+.shipping-carton-table th:nth-child(7) {
+  width: 15%;
 }
 
 .shipping-command-panel {

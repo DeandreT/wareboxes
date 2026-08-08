@@ -1,3 +1,4 @@
+mod display;
 mod request_state;
 
 use leptos::{html, prelude::*};
@@ -14,6 +15,10 @@ use crate::components::{Icon, UiIcon};
 use crate::facility_shipping_origin::FacilityShippingOriginDialog;
 use crate::toast::{use_toast_bus, ToastBus};
 
+use display::{
+    compact_timestamp, departure_action_label, dimensions_label, optional_text,
+    shipment_status_label,
+};
 use request_state::{
     queue_refresh_action, queue_response_is_current, shipment_request_is_current,
     QueueRefreshAction, ShipmentRequestToken, ShipmentVersion,
@@ -330,11 +335,19 @@ fn ShippingQueue(
                     )
                     children=move |entry| {
                         let order_id = entry.order_id;
-                        let state = entry.shipment.as_ref().map_or("Ready", |shipment| match shipment.status {
-                            ShipmentStatus::AwaitingManifest => "Needs manifest",
-                            ShipmentStatus::Manifested => "Ready to depart",
-                            ShipmentStatus::Departed => "Departed",
-                        });
+                        let state = entry.shipment.as_ref().map_or_else(
+                            || "Ready".to_owned(),
+                            |shipment| match shipment.status {
+                                ShipmentStatus::AwaitingManifest => "Needs manifest".to_owned(),
+                                ShipmentStatus::Manifested => "Ready to depart".to_owned(),
+                                ShipmentStatus::PartiallyDeparted => format!(
+                                    "{} / {} departed",
+                                    shipment.departed_carton_count,
+                                    shipment.carton_count,
+                                ),
+                                ShipmentStatus::Departed => "Departed".to_owned(),
+                            },
+                        );
                         let blocker = if !entry.origin_ready {
                             Some("Origin missing")
                         } else if !entry.destination_ready {
@@ -533,7 +546,7 @@ fn ShipmentExecution(
                 </header>
                 <div class="table-scroll shipping-carton-scroll">
                     <table class="data-table shipping-carton-table">
-                        <thead><tr><th>"#"</th><th>"Carton"</th><th>"Lines / qty"</th><th>"Weight"</th><th>"Dimensions"</th><th>"Tracking"</th></tr></thead>
+                        <thead><tr><th>"#"</th><th>"Carton"</th><th>"Lines/qty"</th><th>"Weight"</th><th>"Dimensions"</th><th>"Tracking"</th><th>"Departure"</th></tr></thead>
                         <tbody>
                             {shipment.cartons.clone().into_iter().map(|carton| {
                                 let carton_barcode = carton.carton_barcode;
@@ -543,6 +556,7 @@ fn ShipmentExecution(
                                 let dimensions_title = dimensions.clone();
                                 let tracking = carton.tracking_number.unwrap_or_else(|| "Unassigned".into());
                                 let tracking_title = tracking.clone();
+                                let departure = carton.departed_at.as_ref().map_or("Remaining", |_| "Departed");
                                 view! {
                                 <tr>
                                     <td>{carton.sequence}</td>
@@ -551,6 +565,7 @@ fn ShipmentExecution(
                                     <td>{carton.weight_grams.map_or_else(|| "—".into(), |value| format!("{value} g"))}</td>
                                     <td title=dimensions_title>{dimensions}</td>
                                     <td class="mono" title=tracking_title>{tracking}</td>
+                                    <td><span class=if carton.departed_at.is_some() { "status success" } else { "status" }>{departure}</span></td>
                                 </tr>
                             }}).collect_view()}
                         </tbody>
@@ -563,6 +578,9 @@ fn ShipmentExecution(
                         <ManifestPanel signals on_manifest/>
                     }.into_any(),
                     ShipmentStatus::Manifested => view! {
+                        <DeparturePanel shipment signals scan_input on_scan on_depart/>
+                    }.into_any(),
+                    ShipmentStatus::PartiallyDeparted => view! {
                         <DeparturePanel shipment signals scan_input on_scan on_depart/>
                     }.into_any(),
                     ShipmentStatus::Departed => view! {
@@ -608,20 +626,27 @@ fn DeparturePanel(
     on_scan: Callback<()>,
     on_depart: Callback<()>,
 ) -> impl IntoView {
-    let expected = shipment.cartons.len();
+    let expected = shipment
+        .cartons
+        .iter()
+        .filter(|carton| carton.departed_at.is_none())
+        .count();
     view! {
         <form class="shipping-departure" on:submit=move |event| { event.prevent_default(); on_scan.run(()); }>
             <header><h3>"Departure scan"</h3><span>{move || format!("{} of {expected}", signals.scanned_cartons.get().len())}</span></header>
             <label class="shipping-scan-input"><Icon icon=UiIcon::Scan/><input node_ref=scan_input autocomplete="off" placeholder="Scan carton barcode" prop:value=move || signals.departure_scan.get() on:input=move |event| signals.departure_scan.set(event_target_value(&event)) disabled=move || signals.blocked() /></label>
             <div class="shipping-scan-list">
-                {shipment.cartons.into_iter().map(|carton| {
+                {shipment.cartons.into_iter().filter(|carton| carton.departed_at.is_none()).map(|carton| {
                     let barcode = carton.carton_barcode;
                     let barcode_for_class = barcode.clone();
                     let barcode_for_label = barcode.clone();
                     view! { <div class:verified=move || signals.scanned_cartons.get().iter().any(|scan| scan == &barcode_for_class)><span class="mono">{barcode}</span><strong>{move || if signals.scanned_cartons.get().iter().any(|scan| scan == &barcode_for_label) { "Verified" } else { "Pending" }}</strong></div> }
                 }).collect_view()}
             </div>
-            <button type="button" class="button primary-action" disabled=move || signals.blocked() || signals.scanned_cartons.get().len() != expected on:click=move |_| on_depart.run(())>"Confirm departure"</button>
+            <button type="button" class="button primary-action" disabled=move || signals.blocked() || signals.scanned_cartons.get().is_empty() on:click=move |_| on_depart.run(())>{move || {
+                let count = signals.scanned_cartons.get().len();
+                departure_action_label(count)
+            }}</button>
         </form>
     }
 }
@@ -683,10 +708,12 @@ fn submit_departure_scan(signals: ShippingSignals) {
     let Some(expected) = shipment
         .cartons
         .iter()
-        .find(|carton| carton.carton_barcode.eq_ignore_ascii_case(&scan))
+        .find(|carton| {
+            carton.departed_at.is_none() && carton.carton_barcode.eq_ignore_ascii_case(&scan)
+        })
         .map(|carton| carton.carton_barcode.clone())
     else {
-        set_error(signals, "That carton does not belong to this shipment.");
+        set_error(signals, "That carton is not remaining on this shipment.");
         signals.departure_scan.set(String::new());
         signals.refocus();
         return;
@@ -712,8 +739,11 @@ fn submit_departure(queue: QueueSignals, signals: ShippingSignals) {
         return;
     };
     let scanned = signals.scanned_cartons.get_untracked();
-    if scanned.len() != shipment.cartons.len() {
-        set_error(signals, "Verify every shipment carton before departure.");
+    if scanned.is_empty() {
+        set_error(
+            signals,
+            "Verify at least one remaining carton before departure.",
+        );
         return;
     }
     dispatch_command(
@@ -805,10 +835,18 @@ fn dispatch_command(
                 refresh_shipping_queue(queue, signals);
             }
             Ok(CommandResult::Departed(result)) => {
-                signals
-                    .toasts
-                    .success(format!("Shipment {} departed.", result.shipment_id));
-                clear_shipping_selection(signals, "Select an order ready to ship.");
+                if matches!(result.shipment_status, ShipmentStatus::Departed) {
+                    signals
+                        .toasts
+                        .success(format!("Shipment {} departed.", result.shipment_id));
+                    clear_shipping_selection(signals, "Select an order ready to ship.");
+                } else {
+                    signals.toasts.success(format!(
+                        "{} carton(s) departed; {} remain.",
+                        result.scanned_carton_count, result.remaining_carton_count
+                    ));
+                    load_shipment(result.order_id, result.shipment_id, signals);
+                }
                 refresh_shipping_queue(queue, signals);
             }
             Err(error) if error.unauthorized => signals.on_unauthorized.run(()),
@@ -913,7 +951,10 @@ fn initialize_shipment(shipment: ShipmentResponse, signals: ShippingSignals) {
     signals.message.set(
         match status {
             ShipmentStatus::AwaitingManifest => "Assign tracking and record the carrier manifest.",
-            ShipmentStatus::Manifested => "Scan every carton to confirm physical departure.",
+            ShipmentStatus::Manifested => "Scan one or more cartons for physical departure.",
+            ShipmentStatus::PartiallyDeparted => {
+                "Scan one or more remaining cartons for the next departure."
+            }
             ShipmentStatus::Departed => "Shipment departure is complete.",
         }
         .to_owned(),
@@ -1119,63 +1160,10 @@ fn set_error(signals: ShippingSignals, message: impl Into<String>) {
     signals.message.set(message.into());
 }
 
-fn optional_text(value: &str) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty()).then(|| value.to_owned())
-}
-
 fn command_pending_label(command: &PendingShippingCommand) -> &'static str {
     match command {
         PendingShippingCommand::Create { .. } => "Creating shipment...",
         PendingShippingCommand::Manifest { .. } => "Recording carrier manifest...",
         PendingShippingCommand::Depart { .. } => "Confirming shipment departure...",
-    }
-}
-
-fn shipment_status_label(status: ShipmentStatus) -> &'static str {
-    match status {
-        ShipmentStatus::AwaitingManifest => "Awaiting manifest",
-        ShipmentStatus::Manifested => "Manifested",
-        ShipmentStatus::Departed => "Departed",
-    }
-}
-
-fn dimensions_label(length: Option<i64>, width: Option<i64>, height: Option<i64>) -> String {
-    match (length, width, height) {
-        (Some(length), Some(width), Some(height)) => format!("{length}×{width}×{height} mm"),
-        _ => "—".to_owned(),
-    }
-}
-
-fn compact_timestamp(value: &str) -> String {
-    value.get(..16).unwrap_or(value).replace('T', " ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn optional_manifest_service_is_trimmed() {
-        assert_eq!(optional_text("  GROUND  ").as_deref(), Some("GROUND"));
-        assert_eq!(optional_text("  "), None);
-    }
-
-    #[test]
-    fn dimensions_require_a_complete_triplet_for_display() {
-        assert_eq!(
-            dimensions_label(Some(10), Some(20), Some(30)),
-            "10×20×30 mm"
-        );
-        assert_eq!(dimensions_label(Some(10), None, Some(30)), "—");
-    }
-
-    #[test]
-    fn timestamp_uses_a_dense_minute_label() {
-        assert_eq!(
-            compact_timestamp("2026-08-08T16:06:59.386043+00:00"),
-            "2026-08-08 16:06"
-        );
-        assert_eq!(compact_timestamp("not-a-timestamp"), "not-a-timestamp");
     }
 }

@@ -350,6 +350,7 @@ const fn shipment_status(value: ShipmentStatus) -> ApiShipmentStatus {
     match value {
         ShipmentStatus::AwaitingManifest => ApiShipmentStatus::AwaitingManifest,
         ShipmentStatus::Manifested => ApiShipmentStatus::Manifested,
+        ShipmentStatus::PartiallyDeparted => ApiShipmentStatus::PartiallyDeparted,
         ShipmentStatus::Departed => ApiShipmentStatus::Departed,
     }
 }

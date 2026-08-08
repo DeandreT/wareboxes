@@ -8,6 +8,7 @@ use super::Revision;
 pub enum ShipmentStatus {
     AwaitingManifest,
     Manifested,
+    PartiallyDeparted,
     Departed,
 }
 
@@ -47,7 +48,7 @@ pub struct RecordManualManifestRequest {
     pub expected_revision: Revision,
 }
 
-/// Confirms departure using an exact scan of every shipment carton barcode.
+/// Confirms departure using a nonempty subset of remaining shipment carton barcodes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfirmShipmentDepartureRequest {
@@ -93,6 +94,19 @@ pub struct ShipmentCartonResponse {
     pub height_mm: Option<i64>,
     pub tracking_assignment_id: Option<i64>,
     pub tracking_number: Option<String>,
+    pub departed_at: Option<String>,
+}
+
+/// Cumulative carton and quantity progress for physical departure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShipmentDepartureProgressResponse {
+    pub total_carton_count: i64,
+    pub departed_carton_count: i64,
+    pub remaining_carton_count: i64,
+    pub total_quantity: i64,
+    pub departed_quantity: i64,
+    pub remaining_quantity: i64,
 }
 
 /// Ordered, physically shipped, and accepted-short quantities for one shipment.
@@ -119,6 +133,7 @@ pub struct ShipmentResponse {
     pub order_status: ShipmentOrderStatus,
     pub order_revision: Revision,
     pub demand: ShipmentDemandResponse,
+    pub departure_progress: ShipmentDepartureProgressResponse,
     pub cartons: Vec<ShipmentCartonResponse>,
     pub manifest: Option<ManualCarrierManifestResponse>,
     pub created_by: i64,
@@ -158,6 +173,10 @@ pub struct ConfirmShipmentDepartureResponse {
     pub order_status: ShipmentOrderStatus,
     pub order_revision: Revision,
     pub scanned_carton_count: i64,
+    pub departure_quantity: i64,
+    pub cumulative_departed_quantity: i64,
+    pub remaining_quantity: i64,
+    pub remaining_carton_count: i64,
     pub demand: ShipmentDemandResponse,
     pub departed_by: i64,
     pub departed_at: String,
@@ -234,6 +253,10 @@ mod tests {
             order_status: ShipmentOrderStatus::Shipped,
             order_revision: Revision::new(10).unwrap(),
             scanned_carton_count: 2,
+            departure_quantity: 5,
+            cumulative_departed_quantity: 5,
+            remaining_quantity: 0,
+            remaining_carton_count: 0,
             demand: ShipmentDemandResponse {
                 ordered_quantity: 7,
                 shipped_quantity: 5,
@@ -253,6 +276,10 @@ mod tests {
                 "order_status": "shipped",
                 "order_revision": 10,
                 "scanned_carton_count": 2,
+                "departure_quantity": 5,
+                "cumulative_departed_quantity": 5,
+                "remaining_quantity": 0,
+                "remaining_carton_count": 0,
                 "demand": {
                     "ordered_quantity": 7,
                     "shipped_quantity": 5,

@@ -1,7 +1,7 @@
 use sqlx::Row;
 use wareboxes_application::shipping::{
     ManualCarrierManifestReadModel, ShipmentCartonReadModel, ShipmentCartonTrackingReadModel,
-    ShipmentQuery, ShipmentReadModel,
+    ShipmentDepartureProgress, ShipmentQuery, ShipmentReadModel,
 };
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
@@ -43,7 +43,8 @@ pub(super) async fn load_shipment_tx(
                order_header.order_key, order_header.status AS order_status,
                order_header.revision AS order_revision, shipment.inventory_owner_id,
                shipment.facility_id, shipment.state, shipment.revision,
-               shipment.shipped_qty,
+               shipment.carton_count, shipment.shipped_qty,
+               shipment.departed_carton_count, shipment.departed_qty,
                shipment.created_by_user_id, shipment.created_at,
                confirmation.confirmed_by_user_id AS departed_by_user_id,
                shipment.departed_at
@@ -57,6 +58,8 @@ pub(super) async fn load_shipment_tx(
          AND confirmation.inventory_owner_id = shipment.inventory_owner_id
          AND confirmation.facility_id = shipment.facility_id
          AND confirmation.shipment_id = shipment.id
+         AND confirmation.resulting_shipment_state = 'departed'
+         AND confirmation.confirmed_at = shipment.departed_at
         WHERE shipment.tenant_id = $1 AND shipment.id = $2
           AND ($3 OR shipment.facility_id = ANY($4))
           AND ($5 OR shipment.inventory_owner_id = ANY($6))
@@ -97,6 +100,16 @@ pub(super) async fn load_shipment_tx(
             .ok_or_else(|| AppError::internal("shipment order has an invalid status"))?,
         order_revision: positive(row.try_get("order_revision")?, OrderRevision::new)?,
         demand,
+        departure_progress: ShipmentDepartureProgress {
+            total_carton_count: row.try_get("carton_count")?,
+            departed_carton_count: row.try_get("departed_carton_count")?,
+            remaining_carton_count: row.try_get::<i64, _>("carton_count")?
+                - row.try_get::<i64, _>("departed_carton_count")?,
+            total_quantity: row.try_get("shipped_qty")?,
+            departed_quantity: row.try_get("departed_qty")?,
+            remaining_quantity: row.try_get::<i64, _>("shipped_qty")?
+                - row.try_get::<i64, _>("departed_qty")?,
+        },
         cartons,
         manifest,
         created_by: positive(row.try_get("created_by_user_id")?, UserId::new)?,
@@ -125,7 +138,8 @@ async fn load_cartons_tx(
                shipment_carton.packed_qty, shipment_carton.weight_g,
                shipment_carton.length_mm, shipment_carton.width_mm,
                shipment_carton.height_mm,
-               package.id AS tracking_assignment_id, package.tracking_number
+               package.id AS tracking_assignment_id, package.tracking_number,
+               departed.departed_at
         FROM shipment_cartons shipment_carton
         LEFT JOIN shipment_manifest_packages package
           ON package.tenant_id = shipment_carton.tenant_id
@@ -133,6 +147,12 @@ async fn load_cartons_tx(
          AND package.facility_id = shipment_carton.facility_id
          AND package.shipment_id = shipment_carton.shipment_id
          AND package.shipment_carton_id = shipment_carton.id
+        LEFT JOIN shipment_confirmation_cartons departed
+          ON departed.tenant_id = shipment_carton.tenant_id
+         AND departed.inventory_owner_id = shipment_carton.inventory_owner_id
+         AND departed.facility_id = shipment_carton.facility_id
+         AND departed.shipment_id = shipment_carton.shipment_id
+         AND departed.shipment_carton_id = shipment_carton.id
         WHERE shipment_carton.tenant_id = $1
           AND shipment_carton.shipment_id = $2
         ORDER BY shipment_carton.sequence, shipment_carton.id
@@ -164,6 +184,7 @@ async fn load_cartons_tx(
                     .map(TrackingNumber::new)
                     .transpose()
                     .map_err(|error| AppError::internal(error.to_string()))?,
+                departed_at: row.try_get("departed_at")?,
             })
         })
         .collect()
