@@ -58,6 +58,7 @@ pub enum CommandOperation {
     ExpectedReceiptConfirmation,
     CycleCountConfirmation,
     PickConfirmation,
+    PickShortageReport,
 }
 
 impl CommandOperation {
@@ -71,6 +72,7 @@ impl CommandOperation {
             Self::ExpectedReceiptConfirmation => "expected_receipt_confirmation",
             Self::CycleCountConfirmation => "cycle_count_confirmation",
             Self::PickConfirmation => "pick_confirmation",
+            Self::PickShortageReport => "pick_shortage_report",
         }
     }
 
@@ -84,6 +86,7 @@ impl CommandOperation {
             "expected_receipt_confirmation" => Ok(Self::ExpectedReceiptConfirmation),
             "cycle_count_confirmation" => Ok(Self::CycleCountConfirmation),
             "pick_confirmation" => Ok(Self::PickConfirmation),
+            "pick_shortage_report" => Ok(Self::PickShortageReport),
             _ => Err(CommandStoreError::CorruptRecord(
                 "unknown command operation".into(),
             )),
@@ -124,6 +127,7 @@ impl From<&RfCommand> for CommandOperation {
             RfCommand::Picking(PickingCommand::ClaimNext) => Self::ClaimNext,
             RfCommand::Picking(PickingCommand::ClaimById { .. }) => Self::ClaimById,
             RfCommand::Picking(PickingCommand::Confirm { .. }) => Self::PickConfirmation,
+            RfCommand::Picking(PickingCommand::ReportShortage(_)) => Self::PickShortageReport,
             RfCommand::Picking(PickingCommand::Release { .. }) => Self::Release,
         }
     }
@@ -1198,6 +1202,7 @@ const fn response_kind_name(kind: ResponseKind) -> &'static str {
         ResponseKind::PickOptionalClaim => "pick_optional_claim",
         ResponseKind::PickClaim => "pick_claim",
         ResponseKind::PickConfirmation => "pick_confirmation",
+        ResponseKind::PickShortageReport => "pick_shortage_report",
         ResponseKind::PickRelease => "pick_release",
         ResponseKind::ExpectedReceiptConfirmation => "expected_receipt_confirmation",
     }
@@ -1221,6 +1226,7 @@ fn parse_response_kind(value: &str) -> Result<ResponseKind, CommandStoreError> {
         "pick_optional_claim" => Ok(ResponseKind::PickOptionalClaim),
         "pick_claim" => Ok(ResponseKind::PickClaim),
         "pick_confirmation" => Ok(ResponseKind::PickConfirmation),
+        "pick_shortage_report" => Ok(ResponseKind::PickShortageReport),
         "pick_release" => Ok(ResponseKind::PickRelease),
         "expected_receipt_confirmation" => Ok(ResponseKind::ExpectedReceiptConfirmation),
         _ => Err(CommandStoreError::CorruptRecord(

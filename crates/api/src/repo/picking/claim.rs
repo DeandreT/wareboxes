@@ -7,8 +7,8 @@ use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     FacilityId, InventoryAllocationId, InventoryBalanceId, InventoryOwnerId, ItemBatchId,
-    LicensePlateId, LocationId, OrderId, OrderLineId, PickContentId, PickContentState,
-    PickQuantity, PickScanValue, PickTaskId, TenantId, Timestamp,
+    LicensePlateId, LocationId, OrderId, OrderLineId, OrderRevision, PickContentId,
+    PickContentState, PickQuantity, PickScanValue, PickTaskId, TenantId, Timestamp,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
@@ -240,6 +240,7 @@ pub(super) async fn load_claim_tx(
         SELECT task.inventory_owner_id, task.facility_id, task.order_id,
                task.priority, task.ship_by, task.lease_expires_at,
                task.destination_location_id, orders.order_key,
+               orders.revision AS order_revision,
                destination.barcode AS destination_barcode,
                destination.name AS destination_name,
                destination.active AS destination_active,
@@ -262,6 +263,7 @@ pub(super) async fn load_claim_tx(
                allocation.inventory_status AS allocation_status,
                allocation.qty AS allocation_qty,
                allocation.status AS allocation_lifecycle,
+               allocation.execution_stage AS allocation_execution_stage,
                allocation.deleted AS allocation_deleted,
                balance.location_id AS balance_location_id,
                balance.license_plate_id AS balance_license_plate_id,
@@ -341,6 +343,8 @@ pub(super) async fn load_claim_tx(
         facility_id: FacilityId::new(row.try_get("facility_id")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
         order_key: row.try_get("order_key")?,
+        order_revision: OrderRevision::new(row.try_get("order_revision")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
         priority: row.try_get("priority")?,
         ship_by: row.try_get("ship_by")?,
         lease_expires_at: row.try_get("lease_expires_at")?,
@@ -423,6 +427,7 @@ fn validate_claim_row(row: &sqlx::postgres::PgRow) -> AppResult<()> {
         && row.try_get::<String, _>("allocation_status")? == "available"
         && row.try_get::<i64, _>("allocation_qty")? == planned_qty
         && row.try_get::<String, _>("allocation_lifecycle")? == "allocated"
+        && row.try_get::<String, _>("allocation_execution_stage")? == "pick_source"
         && row
             .try_get::<Option<Timestamp>, _>("allocation_deleted")?
             .is_none()

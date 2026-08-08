@@ -114,10 +114,16 @@ pub use packing::{
     WeightGrams,
 };
 pub use picking::{
-    ClaimNextPickRequest, ClaimPickByIdRequest, ConfirmPickContentRequest, CurrentPickResponse,
-    HeartbeatPickClaimRequest, PickClaimContent, PickClaimHeartbeatResponse,
-    PickClaimReleaseReason, PickClaimReleaseResponse, PickClaimResponse,
-    PickContentConfirmationResponse, PickContentState, PickOrderStatus, ReleasePickClaimRequest,
+    AllocationExecutionStage, ClaimNextPickRequest, ClaimPickByIdRequest,
+    ConfirmPickContentRequest, CurrentPickResponse, HeartbeatPickClaimRequest, PickClaimContent,
+    PickClaimHeartbeatResponse, PickClaimReleaseReason, PickClaimReleaseResponse,
+    PickClaimResponse, PickContentConfirmationResponse, PickContentState, PickOrderStatus,
+    PickShortageAllocationResponse, PickShortageDetails, PickShortageHoldResponse,
+    PickShortageMovementResponse, PickShortagePage, PickShortagePageRequest,
+    PickShortageQuantitiesResponse, PickShortageReason, PickShortageResponse, PickShortageStatus,
+    PickShortageTaskResponse, ReallocatePickShortageRequest, ReallocatePickShortageResponse,
+    ReleasePickClaimRequest, ReportPickShortageOutcome, ReportPickShortageRequest,
+    ReportPickShortageResponse,
 };
 pub use putaway::{
     ConfirmPutawayRequest, CreatePutawayTaskRequest, CreatePutawayTaskResponse,

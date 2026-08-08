@@ -110,19 +110,13 @@ pub async fn open_session(
         .first()
         .map(|allocation| allocation.order_release_id)
         .ok_or_else(|| AppError::conflict("order has no completed picks to pack"))?;
-    if allocations
-        .iter()
-        .any(|allocation| allocation.order_release_id != release_id)
-    {
-        return Err(AppError::internal(
-            "picked order spans multiple waveless releases",
-        ));
-    }
     require_all_picks_complete_tx(
         &mut tx,
         access.tenant_id,
+        order.inventory_owner_id,
         command.order_id.get(),
         expected_count,
+        expected_qty,
     )
     .await?;
 
@@ -418,22 +412,51 @@ async fn lock_picked_allocations_tx(
 async fn require_all_picks_complete_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
+    owner_id: InventoryOwnerId,
     order_id: i64,
-    confirmation_count: i64,
+    staged_allocation_count: i64,
+    staged_quantity: i64,
 ) -> AppResult<()> {
     let row = sqlx::query(
         r#"
-        SELECT COUNT(*) AS task_count,
-               COUNT(*) FILTER (WHERE status = 'completed') AS completed_count
-        FROM pick_tasks WHERE tenant_id = $1 AND order_id = $2
+        SELECT
+            EXISTS (
+                SELECT 1 FROM pick_tasks task
+                WHERE task.tenant_id = $1 AND task.inventory_owner_id = $2
+                  AND task.order_id = $3 AND task.status IN ('open', 'in_progress')
+            ) AS has_executable_work,
+            EXISTS (
+                SELECT 1 FROM pick_shortages shortage
+                WHERE shortage.tenant_id = $1 AND shortage.inventory_owner_id = $2
+                  AND shortage.order_id = $3 AND shortage.status <> 'resolved'
+            ) AS has_unresolved_shortage,
+            COALESCE((
+                SELECT SUM(item.qty)::BIGINT FROM order_items item
+                WHERE item.tenant_id = $1 AND item.inventory_owner_id = $2
+                  AND item.order_id = $3 AND item.deleted IS NULL
+            ), 0) AS demand_quantity,
+            (SELECT COUNT(*) FROM pick_confirmations confirmation
+             INNER JOIN inventory_allocations allocation
+               ON allocation.tenant_id = confirmation.tenant_id
+              AND allocation.inventory_owner_id = confirmation.inventory_owner_id
+              AND allocation.id = confirmation.destination_inventory_allocation_id
+              AND allocation.status = 'allocated'
+              AND allocation.execution_stage = 'staged'
+              AND allocation.deleted IS NULL
+             WHERE confirmation.tenant_id = $1
+               AND confirmation.inventory_owner_id = $2
+               AND confirmation.order_id = $3) AS staged_count
         "#,
     )
     .bind(tenant_id.get())
+    .bind(owner_id.get())
     .bind(order_id)
     .fetch_one(&mut **tx)
     .await?;
-    if row.try_get::<i64, _>("task_count")? != confirmation_count
-        || row.try_get::<i64, _>("completed_count")? != confirmation_count
+    if row.try_get::<bool, _>("has_executable_work")?
+        || row.try_get::<bool, _>("has_unresolved_shortage")?
+        || row.try_get::<i64, _>("demand_quantity")? != staged_quantity
+        || row.try_get::<i64, _>("staged_count")? != staged_allocation_count
     {
         return Err(AppError::conflict("all picks must complete before packing"));
     }

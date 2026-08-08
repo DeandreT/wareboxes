@@ -12,8 +12,8 @@ mod tenant;
 
 pub use allocation::{
     assess_order_allocation_readiness, plan_fefo_allocation, AllocationCandidate,
-    AllocationOutcome, AllocationPlan, AllocationPlanError, AllocationQuantity,
-    AllocationShortageReason, AllocationStrategy, OrderAllocationBlockReason,
+    AllocationExecutionStage, AllocationOutcome, AllocationPlan, AllocationPlanError,
+    AllocationQuantity, AllocationShortageReason, AllocationStrategy, OrderAllocationBlockReason,
     OrderAllocationReadiness, OrderRevision, PlannedAllocation,
 };
 pub use facility::{
@@ -45,8 +45,10 @@ pub use packing::{
     PackSessionStatus, PackingError, PackingProgress, WeightGrams, MAX_PACK_SCAN_VALUE_LENGTH,
 };
 pub use picking::{
-    PickClaimReleaseReason, PickContentState, PickQuantity, PickScanValue, PickingError,
-    MAX_PICK_SCAN_VALUE_LENGTH,
+    ActualPickQuantity, PickClaimReleaseReason, PickContentState, PickQuantity, PickScanValue,
+    PickShortageDetails, PickShortageNote, PickShortageQuantities, PickShortageReason,
+    PickShortageRevision, PickShortageStatus, PickingError, MAX_PICK_SCAN_VALUE_LENGTH,
+    MAX_PICK_SHORTAGE_NOTE_LENGTH,
 };
 pub use shipping::{
     confirm_shipment_departure, create_shipment, record_manual_manifest, CarrierCode,
@@ -131,6 +133,12 @@ positive_id!(OrderCancellationId, "order cancellation ID");
 positive_id!(OrderReleaseId, "order release ID");
 positive_id!(PickTaskId, "pick task ID");
 positive_id!(PickContentId, "pick content ID");
+positive_id!(PickShortageId, "pick shortage ID");
+positive_id!(
+    PickShortageReallocationRunId,
+    "pick shortage reallocation run ID"
+);
+positive_id!(InventoryHoldId, "inventory hold ID");
 positive_id!(PackSessionId, "pack session ID");
 positive_id!(CartonId, "carton ID");
 positive_id!(CartonContentId, "carton content ID");

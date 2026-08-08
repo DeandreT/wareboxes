@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use super::Revision;
+use super::{
+    CursorPage, OpaqueCursor, OrderAllocationOutcome, OrderAllocationStrategy, PageLimit, Revision,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +61,7 @@ pub struct PickClaimReleaseResponse {
 pub enum PickContentState {
     Pending,
     Completed,
+    Shorted,
 }
 
 /// Order states observable after an individual pick confirmation.
@@ -103,6 +106,7 @@ pub struct PickClaimResponse {
     pub inventory_owner_id: i64,
     pub facility_id: i64,
     pub order_key: String,
+    pub order_revision: Revision,
     pub priority: i64,
     pub ship_by: Option<String>,
     pub lease_expires_at: String,
@@ -152,6 +156,262 @@ pub struct PickContentConfirmationResponse {
     pub order_status: PickOrderStatus,
     pub order_revision: Revision,
 }
+
+/// Physical reason an operator could not complete the directed quantity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickShortageReason {
+    InventoryMissing,
+    InsufficientQuantity,
+    DamagedInventory,
+    WrongInventory,
+    LotOrSerialMismatch,
+    Other,
+}
+
+/// Lifecycle state of a pick-shortage exception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickShortageStatus {
+    AwaitingInventory,
+    RecoveryInProgress,
+    Resolved,
+}
+
+/// Physical execution stage of a replacement allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllocationExecutionStage {
+    PickSource,
+    Staged,
+    Packed,
+}
+
+/// Operator-supplied shortage reason and bounded context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickShortageDetails {
+    pub reason: PickShortageReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Physical outcome reported by the operator for a short pick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReportPickShortageOutcome {
+    NoPick {},
+    Partial {
+        picked_quantity: i64,
+        destination_license_plate_barcode: String,
+    },
+}
+
+/// Scanner evidence and physical outcome for one active claimed pick line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportPickShortageRequest {
+    pub source_location_barcode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_license_plate_barcode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_item_barcode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_lot: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_serial: Option<String>,
+    pub details: PickShortageDetails,
+    pub outcome: ReportPickShortageOutcome,
+}
+
+/// Conserved quantities recorded for one shortage exception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickShortageQuantitiesResponse {
+    pub planned: i64,
+    pub picked: i64,
+    pub short: i64,
+}
+
+/// Quantity hold created for the physically short source stock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickShortageHoldResponse {
+    pub hold_id: i64,
+    pub inventory_balance_id: i64,
+    pub held_quantity: i64,
+}
+
+/// Inventory movement committed for a nonzero partial pick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickShortageMovementResponse {
+    pub inventory_transaction_id: i64,
+    pub source_inventory_allocation_id: i64,
+    pub destination_inventory_allocation_id: i64,
+    pub source_inventory_balance_id: i64,
+    pub destination_inventory_balance_id: i64,
+    pub source_location_id: i64,
+    pub destination_location_id: i64,
+    pub source_license_plate_id: Option<i64>,
+    pub destination_license_plate_id: i64,
+    pub picked_quantity: i64,
+    pub destination_stage: AllocationExecutionStage,
+}
+
+/// Replay-stable result of reporting one pick shortage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportPickShortageResponse {
+    pub shortage_id: i64,
+    pub shortage_revision: Revision,
+    pub shortage_status: PickShortageStatus,
+    pub task_id: i64,
+    pub content_id: i64,
+    pub order_id: i64,
+    pub order_revision: Revision,
+    pub quantities: PickShortageQuantitiesResponse,
+    pub details: PickShortageDetails,
+    pub reallocated_quantity: i64,
+    pub recovery_terminal_quantity: i64,
+    pub remaining_to_allocate_quantity: i64,
+    pub observed_item_barcode: Option<String>,
+    pub observed_lot: Option<String>,
+    pub observed_serial: Option<String>,
+    pub hold: PickShortageHoldResponse,
+    pub movement: Option<PickShortageMovementResponse>,
+    pub reported_by: i64,
+    pub reported_at: String,
+}
+
+/// Optimistic FEFO recovery command for one unresolved shortage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReallocatePickShortageRequest {
+    pub expected_shortage_revision: Revision,
+    pub expected_order_revision: Revision,
+    pub strategy: OrderAllocationStrategy,
+}
+
+/// One replacement allocation created under the existing order release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickShortageAllocationResponse {
+    pub allocation_id: i64,
+    pub inventory_balance_id: i64,
+    pub item_batch_id: i64,
+    pub location_id: i64,
+    pub location_name: Option<String>,
+    pub location_barcode: String,
+    pub license_plate_id: Option<i64>,
+    pub license_plate_barcode: Option<String>,
+    pub lot: Option<String>,
+    pub serial: Option<String>,
+    pub expiration: Option<String>,
+    pub quantity: i64,
+    pub execution_stage: AllocationExecutionStage,
+}
+
+/// Replacement RF task created for one recovery allocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickShortageTaskResponse {
+    pub task_id: i64,
+    pub content_id: i64,
+    pub source_allocation_id: i64,
+    pub source_inventory_balance_id: i64,
+    pub source_location_id: i64,
+    pub source_location_barcode: String,
+    pub source_license_plate_id: Option<i64>,
+    pub source_license_plate_barcode: Option<String>,
+    pub planned_quantity: i64,
+}
+
+/// Replay-stable result of one FEFO shortage-recovery attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReallocatePickShortageResponse {
+    pub reallocation_run_id: i64,
+    pub shortage_id: i64,
+    pub shortage_revision: Revision,
+    pub shortage_status: PickShortageStatus,
+    pub order_id: i64,
+    pub order_revision: Revision,
+    pub strategy: OrderAllocationStrategy,
+    pub outcome: OrderAllocationOutcome,
+    pub newly_allocated_quantity: i64,
+    pub reallocated_quantity: i64,
+    pub recovery_terminal_quantity: i64,
+    pub remaining_to_allocate_quantity: i64,
+    pub new_allocations: Vec<PickShortageAllocationResponse>,
+    pub new_tasks: Vec<PickShortageTaskResponse>,
+    pub executed_by: i64,
+    pub executed_at: String,
+}
+
+/// Scoped filters for the supervisor shortage work queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PickShortagePageRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facility_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_owner_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_id: Option<i64>,
+    /// When omitted, the queue returns unresolved shortage work only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<PickShortageStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<OpaqueCursor>,
+    #[serde(default)]
+    pub limit: PageLimit,
+}
+
+/// Supervisor-facing shortage state and recovery progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickShortageResponse {
+    pub shortage_id: i64,
+    pub shortage_revision: Revision,
+    pub status: PickShortageStatus,
+    pub inventory_owner_id: i64,
+    pub inventory_owner_name: String,
+    pub facility_id: i64,
+    pub facility_name: String,
+    pub order_id: i64,
+    pub order_key: String,
+    pub order_revision: Revision,
+    pub order_line_id: i64,
+    pub task_id: i64,
+    pub content_id: i64,
+    pub source_inventory_balance_id: i64,
+    pub source_location_id: i64,
+    pub source_location_barcode: String,
+    pub source_location_name: Option<String>,
+    pub source_license_plate_id: Option<i64>,
+    pub source_license_plate_barcode: Option<String>,
+    pub item_id: i64,
+    pub item_description: Option<String>,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub serial: Option<String>,
+    pub expiration: Option<String>,
+    pub quantities: PickShortageQuantitiesResponse,
+    pub reallocated_quantity: i64,
+    pub recovery_terminal_quantity: i64,
+    pub remaining_to_allocate_quantity: i64,
+    pub observed_item_barcode: Option<String>,
+    pub observed_lot: Option<String>,
+    pub observed_serial: Option<String>,
+    pub details: PickShortageDetails,
+    pub hold: PickShortageHoldResponse,
+    pub reported_by: i64,
+    pub reported_at: String,
+    pub resolved_at: Option<String>,
+}
+
+pub type PickShortagePage = CursorPage<PickShortageResponse>;
 
 #[cfg(test)]
 mod tests {
@@ -219,6 +479,7 @@ mod tests {
             inventory_owner_id: 3,
             facility_id: 4,
             order_key: "ORDER-2".into(),
+            order_revision: Revision::new(3).unwrap(),
             priority: 80,
             ship_by: Some("2026-08-09T20:00:00Z".into()),
             lease_expires_at: "2026-08-08T20:30:00Z".into(),
@@ -254,5 +515,161 @@ mod tests {
         assert!(value.get("tenant_id").is_none());
         assert!(value.get("metadata_json").is_none());
         assert!(value.get("contents").is_none());
+    }
+
+    #[test]
+    fn short_pick_report_is_strict_and_preserves_observed_evidence() {
+        let request = serde_json::from_value::<ReportPickShortageRequest>(json!({
+            "source_location_barcode": "A-01",
+            "source_license_plate_barcode": "LP-12",
+            "observed_item_barcode": "SKU-OBSERVED",
+            "observed_lot": "LOT-OBSERVED",
+            "observed_serial": null,
+            "details": {
+                "reason": "lot_or_serial_mismatch",
+                "note": "Directed lot was not present"
+            },
+            "outcome": {
+                "kind": "partial",
+                "picked_quantity": 2,
+                "destination_license_plate_barcode": "TOTE-1"
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            request.observed_item_barcode.as_deref(),
+            Some("SKU-OBSERVED")
+        );
+        assert_eq!(request.observed_lot.as_deref(), Some("LOT-OBSERVED"));
+
+        let value = serde_json::to_value(request).unwrap();
+        assert!(value.get("expected_order_revision").is_none());
+        assert!(value.get("idempotency_key").is_none());
+        assert!(serde_json::from_value::<ReportPickShortageRequest>(json!({
+            "source_location_barcode": "A-01",
+            "details": {"reason": "inventory_missing"},
+            "outcome": {"kind": "no_pick", "picked_quantity": 0}
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<ReportPickShortageRequest>(json!({
+            "source_location_barcode": "A-01",
+            "details": {"reason": "inventory_missing"},
+            "outcome": {"kind": "no_pick"},
+            "expected_order_revision": 3
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn report_response_is_replay_complete() {
+        let response = ReportPickShortageResponse {
+            shortage_id: 21,
+            shortage_revision: Revision::new(1).unwrap(),
+            shortage_status: PickShortageStatus::AwaitingInventory,
+            task_id: 7,
+            content_id: 8,
+            order_id: 9,
+            order_revision: Revision::new(4).unwrap(),
+            quantities: PickShortageQuantitiesResponse {
+                planned: 4,
+                picked: 0,
+                short: 4,
+            },
+            details: PickShortageDetails {
+                reason: PickShortageReason::InventoryMissing,
+                note: None,
+            },
+            reallocated_quantity: 0,
+            recovery_terminal_quantity: 0,
+            remaining_to_allocate_quantity: 4,
+            observed_item_barcode: None,
+            observed_lot: None,
+            observed_serial: None,
+            hold: PickShortageHoldResponse {
+                hold_id: 31,
+                inventory_balance_id: 41,
+                held_quantity: 4,
+            },
+            movement: None,
+            reported_by: 51,
+            reported_at: "2026-08-08T20:00:00Z".into(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            json!({
+                "shortage_id": 21,
+                "shortage_revision": 1,
+                "shortage_status": "awaiting_inventory",
+                "task_id": 7,
+                "content_id": 8,
+                "order_id": 9,
+                "order_revision": 4,
+                "quantities": {"planned": 4, "picked": 0, "short": 4},
+                "details": {"reason": "inventory_missing"},
+                "reallocated_quantity": 0,
+                "recovery_terminal_quantity": 0,
+                "remaining_to_allocate_quantity": 4,
+                "observed_item_barcode": null,
+                "observed_lot": null,
+                "observed_serial": null,
+                "hold": {
+                    "hold_id": 31,
+                    "inventory_balance_id": 41,
+                    "held_quantity": 4
+                },
+                "movement": null,
+                "reported_by": 51,
+                "reported_at": "2026-08-08T20:00:00Z"
+            })
+        );
+    }
+
+    #[test]
+    fn reallocation_and_queue_contracts_are_optimistic_bounded_and_strict() {
+        let request = serde_json::from_value::<ReallocatePickShortageRequest>(json!({
+            "expected_shortage_revision": 2,
+            "expected_order_revision": 7,
+            "strategy": "fefo"
+        }))
+        .unwrap();
+        assert_eq!(request.expected_shortage_revision.get(), 2);
+        assert_eq!(request.expected_order_revision.get(), 7);
+        assert!(
+            serde_json::from_value::<ReallocatePickShortageRequest>(json!({
+                "expected_shortage_revision": 0,
+                "expected_order_revision": 7,
+                "strategy": "fefo"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ReallocatePickShortageRequest>(json!({
+                "expected_shortage_revision": 2,
+                "expected_order_revision": 7,
+                "strategy": "fifo"
+            }))
+            .is_err()
+        );
+
+        let page = serde_json::from_value::<PickShortagePageRequest>(json!({
+            "facility_id": 3,
+            "inventory_owner_id": 4,
+            "order_id": 5,
+            "status": "recovery_in_progress",
+            "limit": 25
+        }))
+        .unwrap();
+        assert_eq!(page.order_id, Some(5));
+        assert_eq!(page.limit.get(), 25);
+        assert!(serde_json::from_value::<PickShortagePageRequest>(json!({
+            "limit": 1001
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<PickShortagePageRequest>(json!({
+            "limit": 25,
+            "offset": 10
+        }))
+        .is_err());
     }
 }

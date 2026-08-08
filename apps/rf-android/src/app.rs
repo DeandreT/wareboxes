@@ -1112,6 +1112,18 @@ const fn action_requested(actions_allowed: bool, requested: bool) -> bool {
     actions_allowed && requested
 }
 
+const fn can_retry_connectivity_check(
+    movement: Activity,
+    cycle_count: Activity,
+    picking: Activity,
+    request_pending: bool,
+) -> bool {
+    matches!(movement, Activity::Idle)
+        && matches!(cycle_count, Activity::Idle)
+        && matches!(picking, Activity::Idle)
+        && !request_pending
+}
+
 fn server_display_name(value: &str) -> String {
     ServerEndpoint::parse(value)
         .ok()
@@ -1228,19 +1240,17 @@ impl eframe::App for RfApp {
                         ) && let Some(notice) = self.connectivity_notice.clone()
                         {
                             Self::message_band(ui, Self::warning(), Icon::WifiOff, &notice);
-                            if self.workflow.activity() == Activity::Idle
-                                && self.cycle_count.activity() == Activity::Idle
-                                && self.expected_claim_request_id.is_none()
-                                && ui
-                                    .add_sized(
-                                        [ui.available_width(), 48.0],
-                                        Self::secondary_button(
-                                            "Try again",
-                                            ui.available_width(),
-                                            48.0,
-                                        ),
-                                    )
-                                    .clicked()
+                            if can_retry_connectivity_check(
+                                self.workflow.activity(),
+                                self.cycle_count.activity(),
+                                self.picking.activity(),
+                                self.expected_claim_request_id.is_some(),
+                            ) && ui
+                                .add_sized(
+                                    [ui.available_width(), 48.0],
+                                    Self::secondary_button("Try again", ui.available_width(), 48.0),
+                                )
+                                .clicked()
                             {
                                 self.connectivity_notice = None;
                                 self.session_gate = SessionGate::Recovering;
@@ -1292,12 +1302,35 @@ impl eframe::App for RfApp {
 
 #[cfg(test)]
 mod tests {
-    use super::action_requested;
+    use super::{action_requested, can_retry_connectivity_check};
+    use crate::workflow::Activity;
 
     #[test]
     fn blocked_lease_rejects_keyboard_button_and_release_requests() {
         assert!(!action_requested(false, true));
         assert!(!action_requested(false, false));
         assert!(action_requested(true, true));
+    }
+
+    #[test]
+    fn connectivity_retry_cannot_replace_any_active_workflow() {
+        assert!(can_retry_connectivity_check(
+            Activity::Idle,
+            Activity::Idle,
+            Activity::Idle,
+            false,
+        ));
+        assert!(!can_retry_connectivity_check(
+            Activity::Idle,
+            Activity::Idle,
+            Activity::Active,
+            false,
+        ));
+        assert!(!can_retry_connectivity_check(
+            Activity::Idle,
+            Activity::Idle,
+            Activity::Idle,
+            true,
+        ));
     }
 }

@@ -939,8 +939,9 @@ pub async fn allocate_inventory(
             (tenant_id, inventory_owner_id, created, modified, created_by,
              reservation_id, inventory_balance_id, facility_id, location_id,
              license_plate_id, item_batch_id, item_id, uom, inventory_status,
-             qty, status)
-        VALUES ($1, $2, $3, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'allocated')
+             qty, status, execution_stage)
+        VALUES ($1, $2, $3, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, 'allocated', 'pick_source')
         RETURNING id
         "#,
     )

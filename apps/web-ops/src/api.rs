@@ -8,10 +8,12 @@ use wareboxes_api_contract::v1::{
     InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
     OpenPackSessionResponse, OrderAllocationReadinessResponse, OrderEntryItemResponse,
     PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
-    PackingQueuePage, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
+    PackingQueuePage, PickShortagePage, PickShortageResponse, PickShortageStatus,
+    PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
     PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
-    ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
-    ReleaseOrderRequest, ReleaseOrderResponse, VoidCartonRequest, VoidCartonResponse,
+    ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleaseInventoryHoldResponse,
+    ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
+    VoidCartonRequest, VoidCartonResponse,
 };
 use wareboxes_api_contract::v1::{
     CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
@@ -56,12 +58,13 @@ mod browser {
         InventoryHoldStatus, InventoryStatusTransitionResponse, OpaqueCursor,
         OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
         OrderEntryItemResponse, OrderPage, PackPickedAllocationRequest,
-        PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage,
-        PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
-        PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
-        ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
-        ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse, VoidCartonRequest,
-        VoidCartonResponse, WebSessionContext,
+        PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage, PickShortagePage,
+        PickShortageResponse, PickShortageStatus, PlaceInventoryHoldRequest,
+        PlaceInventoryHoldResponse, PlaceOrderHoldRequest, PlaceOrderHoldResponse,
+        PlanOrderAllocationRequest, PlanOrderAllocationResponse, ReallocatePickShortageRequest,
+        ReallocatePickShortageResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
+        ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest,
+        ReleaseOrderResponse, VoidCartonRequest, VoidCartonResponse, WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -411,6 +414,45 @@ mod browser {
         .await
     }
 
+    pub async fn pick_shortages(
+        facility_id: Option<i64>,
+        inventory_owner_id: Option<i64>,
+        order_id: Option<i64>,
+        status: Option<PickShortageStatus>,
+        cursor: Option<&OpaqueCursor>,
+    ) -> Result<PickShortagePage, ApiError> {
+        let mut path = "/api/v1/pick-shortages?limit=100".to_owned();
+        append_i64_query(&mut path, "facility_id", facility_id);
+        append_i64_query(&mut path, "inventory_owner_id", inventory_owner_id);
+        append_i64_query(&mut path, "order_id", order_id);
+        if let Some(status) = status {
+            path.push_str("&status=");
+            path.push_str(pick_shortage_status_wire(status));
+        }
+        if let Some(cursor) = cursor {
+            path.push_str("&cursor=");
+            path.push_str(&urlencoding::encode(cursor.as_str()));
+        }
+        get(&path).await
+    }
+
+    pub async fn pick_shortage(shortage_id: i64) -> Result<PickShortageResponse, ApiError> {
+        get(&format!("/api/v1/pick-shortages/{shortage_id}")).await
+    }
+
+    pub async fn reallocate_pick_shortage(
+        shortage_id: i64,
+        request: &ReallocatePickShortageRequest,
+        idempotency_key: &str,
+    ) -> Result<ReallocatePickShortageResponse, ApiError> {
+        post(
+            &format!("/api/v1/pick-shortages/{shortage_id}/reallocations"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
     pub fn new_idempotency_key() -> String {
         uuid::Uuid::new_v4().to_string()
     }
@@ -490,6 +532,23 @@ mod browser {
             path.push_str(cursor.as_str());
         }
         path
+    }
+
+    fn append_i64_query(path: &mut String, name: &str, value: Option<i64>) {
+        if let Some(value) = value {
+            path.push('&');
+            path.push_str(name);
+            path.push('=');
+            path.push_str(&value.to_string());
+        }
+    }
+
+    const fn pick_shortage_status_wire(status: PickShortageStatus) -> &'static str {
+        match status {
+            PickShortageStatus::AwaitingInventory => "awaiting_inventory",
+            PickShortageStatus::RecoveryInProgress => "recovery_in_progress",
+            PickShortageStatus::Resolved => "resolved",
+        }
     }
 }
 
@@ -745,6 +804,31 @@ pub async fn configure_facility_shipping_origin(
     _request: &ConfigureFacilityShippingOriginRequest,
     _idempotency_key: &str,
 ) -> Result<ConfigureFacilityShippingOriginResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn pick_shortages(
+    _facility_id: Option<i64>,
+    _inventory_owner_id: Option<i64>,
+    _order_id: Option<i64>,
+    _status: Option<PickShortageStatus>,
+    _cursor: Option<&OpaqueCursor>,
+) -> Result<PickShortagePage, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn pick_shortage(_shortage_id: i64) -> Result<PickShortageResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn reallocate_pick_shortage(
+    _shortage_id: i64,
+    _request: &ReallocatePickShortageRequest,
+    _idempotency_key: &str,
+) -> Result<ReallocatePickShortageResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

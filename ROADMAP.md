@@ -120,8 +120,9 @@ record. Wareboxes owns facility execution and its auditable inventory consequenc
 - Wave and waveless release, workload planning, pick work, and replenishment.
 - Discrete, batch, cluster, case, pallet, zone, and cart workflows as required by
   supported profiles.
-- Pick confirmation, short picks, substitutions, reversals, staging,
-  consolidation, and supervisor exceptions.
+- Pick confirmation, typed short-pick evidence, discrepancy holds, explicit
+  supervisor reallocation, substitutions, reversals, staging, consolidation,
+  and exception resolution.
 - Cartonization, packing, scale and printer support, outbound QA, documents, labels,
   carrier adapters, manifesting, tracking, and shipment confirmation.
 - Facility shipping-origin configuration with immutable address history, optimistic

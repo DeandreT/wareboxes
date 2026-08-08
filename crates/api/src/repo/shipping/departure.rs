@@ -455,6 +455,7 @@ async fn validate_departure_inventory_tx(
                content.destination_license_plate_id AS license_plate_id,
                content.item_batch_id, content.inventory_status, content.packed_qty,
                allocation.status AS allocation_status,
+               allocation.execution_stage AS allocation_execution_stage,
                allocation.deleted AS allocation_deleted,
                allocation.qty AS allocation_qty,
                balance.qty_on_hand, balance.qty_reserved, balance.qty_held,
@@ -509,6 +510,7 @@ async fn validate_departure_inventory_tx(
             .ok_or_else(|| AppError::internal("packed inventory has an invalid status"))?;
         let valid = quantity > 0
             && row.try_get::<String, _>("allocation_status")? == "allocated"
+            && row.try_get::<String, _>("allocation_execution_stage")? == "packed"
             && row
                 .try_get::<Option<wareboxes_domain::Timestamp>, _>("allocation_deleted")?
                 .is_none()

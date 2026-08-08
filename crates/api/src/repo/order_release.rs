@@ -428,6 +428,7 @@ async fn lock_release_allocations_tx(
          AND allocation.inventory_owner_id = reservation.inventory_owner_id
          AND allocation.reservation_id = reservation.id
          AND allocation.status = 'allocated' AND allocation.deleted IS NULL
+         AND allocation.execution_stage = 'pick_source'
         INNER JOIN inventory_balances balance
           ON balance.tenant_id = allocation.tenant_id
          AND balance.inventory_owner_id = allocation.inventory_owner_id

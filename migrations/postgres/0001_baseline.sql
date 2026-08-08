@@ -50,7 +50,7 @@ BEGIN
         projection_delta := NEW.qty;
     ELSIF OLD.status = 'allocated'
           AND OLD.deleted IS NULL
-          AND NEW.status IN ('released', 'fulfilled')
+          AND NEW.status IN ('released', 'fulfilled', 'shorted')
           AND NEW.deleted IS NOT NULL
     THEN
         projection_delta := -OLD.qty;
@@ -2174,7 +2174,6 @@ BEGIN
           ON confirmation.tenant_id = session.tenant_id
          AND confirmation.inventory_owner_id = session.inventory_owner_id
          AND confirmation.facility_id = session.facility_id
-         AND confirmation.order_release_id = session.order_release_id
          AND confirmation.order_id = session.order_id
          AND confirmation.id = NEW.pick_confirmation_id
         INNER JOIN public.outbound_order_containers container
@@ -2200,7 +2199,6 @@ BEGIN
           AND session.inventory_owner_id = NEW.inventory_owner_id
           AND session.facility_id = NEW.facility_id
           AND session.id = NEW.packing_session_id
-          AND session.order_release_id = NEW.order_release_id
           AND session.order_id = NEW.order_id
           AND session.state = 'open'
           AND confirmation.order_item_id = NEW.order_item_id
@@ -2224,6 +2222,7 @@ BEGIN
           AND allocation.inventory_status = NEW.inventory_status
           AND allocation.qty = NEW.planned_qty
           AND allocation.status = 'allocated'
+          AND allocation.execution_stage = 'staged'
           AND allocation.deleted IS NULL
           AND balance.location_id = NEW.source_location_id
           AND balance.license_plate_id = NEW.source_license_plate_id
@@ -2422,6 +2421,7 @@ BEGIN
           AND source_allocation.inventory_status = NEW.inventory_status
           AND source_allocation.qty = NEW.packed_qty
           AND source_allocation.status = 'fulfilled'
+          AND source_allocation.execution_stage = 'staged'
           AND source_allocation.deleted = NEW.packed_at
           AND destination_allocation.reservation_id = NEW.reservation_id
           AND destination_allocation.inventory_balance_id = NEW.destination_inventory_balance_id
@@ -2434,6 +2434,7 @@ BEGIN
           AND destination_allocation.inventory_status = NEW.inventory_status
           AND destination_allocation.qty = NEW.packed_qty
           AND destination_allocation.status = 'allocated'
+          AND destination_allocation.execution_stage = 'packed'
           AND destination_allocation.deleted IS NULL
           AND destination_allocation.created = NEW.packed_at
           AND destination_allocation.created_by = NEW.packed_by_user_id
@@ -3340,8 +3341,8 @@ BEGIN
             USING ERRCODE = '55000';
     END IF;
 
-    IF OLD.status = 'completed' THEN
-        RAISE EXCEPTION 'completed pick tasks are immutable'
+    IF OLD.status IN ('completed', 'shorted') THEN
+        RAISE EXCEPTION 'terminal pick tasks are immutable'
             USING ERRCODE = '55000';
     END IF;
 
@@ -3362,7 +3363,7 @@ BEGIN
             RAISE EXCEPTION 'releasing pick work requires release attribution'
                 USING ERRCODE = '55000';
         END IF;
-    ELSIF OLD.status = 'in_progress' AND NEW.status = 'completed' THEN
+    ELSIF OLD.status = 'in_progress' AND NEW.status IN ('completed', 'shorted') THEN
         IF NEW.assigned_user_id IS DISTINCT FROM OLD.assigned_user_id
            OR NEW.claimed_at IS DISTINCT FROM OLD.claimed_at
            OR NEW.release_count IS DISTINCT FROM OLD.release_count
@@ -3370,7 +3371,7 @@ BEGIN
            OR NEW.last_release_reason IS DISTINCT FROM OLD.last_release_reason
            OR NEW.last_release_note IS DISTINCT FROM OLD.last_release_note
         THEN
-            RAISE EXCEPTION 'pick completion cannot change claim attribution'
+            RAISE EXCEPTION 'pick terminalization cannot change claim attribution'
                 USING ERRCODE = '55000';
         END IF;
     ELSIF OLD.status = 'in_progress' AND NEW.status = 'in_progress' THEN
@@ -3433,7 +3434,7 @@ BEGIN
     END IF;
 
     IF OLD.state <> 'pending'
-       OR NEW.state <> 'completed'
+       OR NEW.state NOT IN ('completed', 'shorted')
        OR OLD.completed_at IS NOT NULL
        OR NEW.completed_at IS NULL
     THEN
@@ -3507,6 +3508,7 @@ CREATE FUNCTION public.validate_order_release_allocation() RETURNS trigger
 DECLARE
     release_row RECORD;
     allocation_row RECORD;
+    recovery_matches BOOLEAN;
 BEGIN
     SELECT release.inventory_owner_id, release.facility_id, release.order_id
     INTO release_row
@@ -3519,6 +3521,7 @@ BEGIN
            allocation.license_plate_id, allocation.item_batch_id,
            allocation.item_id, allocation.uom, allocation.inventory_status,
            allocation.qty, allocation.status, allocation.deleted,
+           allocation.execution_stage,
            reservation.order_id, reservation.order_item_id,
            (source_location.deleted IS NULL
             AND source_location.active
@@ -3563,11 +3566,42 @@ BEGIN
        OR NEW.facility_id IS DISTINCT FROM allocation_row.facility_id
        OR allocation_row.status <> 'allocated'
        OR allocation_row.deleted IS NOT NULL
+       OR allocation_row.execution_stage <> 'pick_source'
        OR allocation_row.inventory_status <> 'available'
        OR NOT allocation_row.source_is_ready
     THEN
         RAISE EXCEPTION 'release snapshot does not match its active allocation'
             USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.source_kind = 'shortage_recovery' THEN
+        SELECT EXISTS (
+            SELECT 1
+            FROM public.pick_shortage_reallocation_runs run
+            INNER JOIN public.pick_shortages shortage
+              ON shortage.tenant_id = run.tenant_id
+             AND shortage.inventory_owner_id = run.inventory_owner_id
+             AND shortage.facility_id = run.facility_id
+             AND shortage.order_release_id = run.order_release_id
+             AND shortage.order_id = run.order_id
+             AND shortage.order_item_id = run.order_item_id
+             AND shortage.reservation_id = run.reservation_id
+             AND shortage.id = run.pick_shortage_id
+            WHERE run.tenant_id = NEW.tenant_id
+              AND run.inventory_owner_id = NEW.inventory_owner_id
+              AND run.facility_id = NEW.facility_id
+              AND run.order_release_id = NEW.order_release_id
+              AND run.order_id = NEW.order_id
+              AND run.order_item_id = NEW.order_item_id
+              AND run.reservation_id = NEW.reservation_id
+              AND run.pick_shortage_id = NEW.pick_shortage_id
+              AND run.id = NEW.pick_shortage_reallocation_run_id
+        ) INTO recovery_matches;
+
+        IF NOT recovery_matches THEN
+            RAISE EXCEPTION 'shortage recovery snapshot does not match its reallocation run'
+                USING ERRCODE = '23514';
+        END IF;
     END IF;
 
     RETURN NEW;
@@ -3594,17 +3628,38 @@ BEGIN
     INTO snapshot_count, snapshot_qty
     FROM public.order_release_allocations snapshot
     WHERE snapshot.tenant_id = NEW.tenant_id
-      AND snapshot.order_release_id = NEW.id;
+      AND snapshot.order_release_id = NEW.id
+      AND snapshot.source_kind = 'initial';
 
     SELECT COUNT(*) INTO task_count
     FROM public.pick_tasks task
+    INNER JOIN public.order_release_allocations snapshot
+      ON snapshot.tenant_id = task.tenant_id
+     AND snapshot.inventory_owner_id = task.inventory_owner_id
+     AND snapshot.facility_id = task.facility_id
+     AND snapshot.order_release_id = task.order_release_id
+     AND snapshot.order_id = task.order_id
+     AND snapshot.order_item_id = task.order_item_id
+     AND snapshot.reservation_id = task.reservation_id
+     AND snapshot.allocation_id = task.source_allocation_id
     WHERE task.tenant_id = NEW.tenant_id
-      AND task.order_release_id = NEW.id;
+      AND task.order_release_id = NEW.id
+      AND snapshot.source_kind = 'initial';
 
     SELECT COUNT(*) INTO content_count
     FROM public.pick_task_contents content
+    INNER JOIN public.order_release_allocations snapshot
+      ON snapshot.tenant_id = content.tenant_id
+     AND snapshot.inventory_owner_id = content.inventory_owner_id
+     AND snapshot.facility_id = content.facility_id
+     AND snapshot.order_release_id = content.order_release_id
+     AND snapshot.order_id = content.order_id
+     AND snapshot.order_item_id = content.order_item_id
+     AND snapshot.reservation_id = content.reservation_id
+     AND snapshot.allocation_id = content.source_allocation_id
     WHERE content.tenant_id = NEW.tenant_id
-      AND content.order_release_id = NEW.id;
+      AND content.order_release_id = NEW.id
+      AND snapshot.source_kind = 'initial';
 
     SELECT EXISTS (
         SELECT 1 FROM public.orders customer_order
@@ -3820,7 +3875,7 @@ BEGIN
        OR NEW.item_id IS DISTINCT FROM content_row.item_id
        OR NEW.uom IS DISTINCT FROM content_row.uom
        OR NEW.inventory_status IS DISTINCT FROM content_row.inventory_status
-       OR NEW.picked_qty IS DISTINCT FROM content_row.planned_qty
+       OR NEW.picked_qty > content_row.planned_qty
     THEN
         RAISE EXCEPTION 'pick confirmation does not match its immutable content'
             USING ERRCODE = '23514';
@@ -3831,7 +3886,7 @@ BEGIN
            allocation.license_plate_id, allocation.item_batch_id,
            allocation.item_id, allocation.uom, allocation.inventory_status,
            allocation.qty, allocation.status, allocation.modified,
-           allocation.deleted
+           allocation.deleted, allocation.execution_stage
     INTO source_allocation_row
     FROM public.inventory_allocations allocation
     WHERE allocation.tenant_id = NEW.tenant_id
@@ -3844,7 +3899,8 @@ BEGIN
            allocation.license_plate_id, allocation.item_batch_id,
            allocation.item_id, allocation.uom, allocation.inventory_status,
            allocation.qty, allocation.status, allocation.created,
-           allocation.modified, allocation.deleted, allocation.created_by
+           allocation.modified, allocation.deleted, allocation.created_by,
+           allocation.execution_stage
     INTO destination_allocation_row
     FROM public.inventory_allocations allocation
     WHERE allocation.tenant_id = NEW.tenant_id
@@ -3862,8 +3918,14 @@ BEGIN
        OR source_allocation_row.item_id IS DISTINCT FROM NEW.item_id
        OR source_allocation_row.uom IS DISTINCT FROM NEW.uom
        OR source_allocation_row.inventory_status IS DISTINCT FROM NEW.inventory_status
-       OR source_allocation_row.qty IS DISTINCT FROM NEW.picked_qty
-       OR source_allocation_row.status <> 'fulfilled'
+       OR source_allocation_row.qty IS DISTINCT FROM content_row.planned_qty
+       OR source_allocation_row.execution_stage <> 'pick_source'
+       OR (
+           (NEW.picked_qty = content_row.planned_qty
+            AND source_allocation_row.status <> 'fulfilled')
+           OR (NEW.picked_qty < content_row.planned_qty
+               AND source_allocation_row.status <> 'shorted')
+       )
        OR source_allocation_row.modified IS DISTINCT FROM NEW.confirmed_at
        OR source_allocation_row.deleted IS DISTINCT FROM NEW.confirmed_at
     THEN
@@ -3883,6 +3945,7 @@ BEGIN
        OR destination_allocation_row.inventory_status IS DISTINCT FROM NEW.inventory_status
        OR destination_allocation_row.qty IS DISTINCT FROM NEW.picked_qty
        OR destination_allocation_row.status <> 'allocated'
+       OR destination_allocation_row.execution_stage <> 'staged'
        OR destination_allocation_row.created IS DISTINCT FROM NEW.confirmed_at
        OR destination_allocation_row.modified IS NOT NULL
        OR destination_allocation_row.deleted IS NOT NULL
@@ -3964,6 +4027,19 @@ BEGIN
     THEN
         RAISE EXCEPTION 'completed pick content requires an immutable confirmation'
             USING ERRCODE = '23514';
+    ELSIF NEW.state = 'shorted'
+       AND NOT EXISTS (
+           SELECT 1 FROM public.pick_shortages shortage
+           WHERE shortage.tenant_id = NEW.tenant_id
+             AND shortage.inventory_owner_id = NEW.inventory_owner_id
+             AND shortage.facility_id = NEW.facility_id
+             AND shortage.task_id = NEW.task_id
+             AND shortage.pick_task_content_id = NEW.id
+             AND shortage.reported_at = NEW.completed_at
+       )
+    THEN
+        RAISE EXCEPTION 'shorted pick content requires an immutable shortage report'
+            USING ERRCODE = '23514';
     END IF;
 
     RETURN NEW;
@@ -3990,6 +4066,685 @@ BEGIN
        )
     THEN
         RAISE EXCEPTION 'completed pick task requires completed content'
+            USING ERRCODE = '23514';
+    ELSIF NEW.status = 'shorted'
+       AND NOT EXISTS (
+           SELECT 1 FROM public.pick_task_contents content
+           WHERE content.tenant_id = NEW.tenant_id
+             AND content.task_id = NEW.id
+             AND content.state = 'shorted'
+             AND content.completed_at = NEW.completed_at
+       )
+    THEN
+        RAISE EXCEPTION 'shorted pick task requires shorted content'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_pick_shortage_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_pick_shortage_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'pick shortages are retained permanently'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.order_release_id IS DISTINCT FROM OLD.order_release_id
+       OR NEW.order_id IS DISTINCT FROM OLD.order_id
+       OR NEW.order_item_id IS DISTINCT FROM OLD.order_item_id
+       OR NEW.reservation_id IS DISTINCT FROM OLD.reservation_id
+       OR NEW.task_id IS DISTINCT FROM OLD.task_id
+       OR NEW.pick_task_content_id IS DISTINCT FROM OLD.pick_task_content_id
+       OR NEW.source_inventory_allocation_id IS DISTINCT FROM OLD.source_inventory_allocation_id
+       OR NEW.source_inventory_balance_id IS DISTINCT FROM OLD.source_inventory_balance_id
+       OR NEW.source_location_id IS DISTINCT FROM OLD.source_location_id
+       OR NEW.source_license_plate_id IS DISTINCT FROM OLD.source_license_plate_id
+       OR NEW.destination_location_id IS DISTINCT FROM OLD.destination_location_id
+       OR NEW.item_batch_id IS DISTINCT FROM OLD.item_batch_id
+       OR NEW.item_id IS DISTINCT FROM OLD.item_id
+       OR NEW.uom IS DISTINCT FROM OLD.uom
+       OR NEW.inventory_status IS DISTINCT FROM OLD.inventory_status
+       OR NEW.planned_qty IS DISTINCT FROM OLD.planned_qty
+       OR NEW.picked_qty IS DISTINCT FROM OLD.picked_qty
+       OR NEW.short_qty IS DISTINCT FROM OLD.short_qty
+       OR NEW.reason_code IS DISTINCT FROM OLD.reason_code
+       OR NEW.note IS DISTINCT FROM OLD.note
+       OR NEW.observed_item_barcode IS DISTINCT FROM OLD.observed_item_barcode
+       OR NEW.observed_lot IS DISTINCT FROM OLD.observed_lot
+       OR NEW.observed_serial IS DISTINCT FROM OLD.observed_serial
+       OR NEW.inventory_hold_id IS DISTINCT FROM OLD.inventory_hold_id
+       OR NEW.pick_confirmation_id IS DISTINCT FROM OLD.pick_confirmation_id
+       OR NEW.inventory_transaction_id IS DISTINCT FROM OLD.inventory_transaction_id
+       OR NEW.destination_inventory_allocation_id IS DISTINCT FROM OLD.destination_inventory_allocation_id
+       OR NEW.destination_inventory_balance_id IS DISTINCT FROM OLD.destination_inventory_balance_id
+       OR NEW.destination_license_plate_id IS DISTINCT FROM OLD.destination_license_plate_id
+       OR NEW.reported_by_user_id IS DISTINCT FROM OLD.reported_by_user_id
+       OR NEW.reported_at IS DISTINCT FROM OLD.reported_at
+       OR NEW.report_previous_order_revision IS DISTINCT FROM OLD.report_previous_order_revision
+       OR NEW.report_resulting_order_revision IS DISTINCT FROM OLD.report_resulting_order_revision
+    THEN
+        RAISE EXCEPTION 'pick shortage report facts are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF OLD.status = 'resolved' THEN
+        RAISE EXCEPTION 'resolved pick shortages are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.revision <> OLD.revision + 1
+       OR NEW.modified_at <= OLD.modified_at
+       OR NEW.reallocated_qty < OLD.reallocated_qty
+       OR NEW.recovery_terminal_qty < OLD.recovery_terminal_qty
+       OR NEW.remaining_to_allocate_qty > OLD.remaining_to_allocate_qty
+    THEN
+        RAISE EXCEPTION 'invalid pick shortage lifecycle revision'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: reject_pick_shortage_reallocation_run_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_pick_shortage_reallocation_run_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'pick shortage reallocation runs are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: validate_pick_shortage(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_pick_shortage() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    report_matches BOOLEAN;
+    movement_matches BOOLEAN;
+BEGIN
+    IF NEW.revision <> 1
+       OR NEW.modified_at IS DISTINCT FROM NEW.reported_at
+       OR NEW.status <> 'awaiting_inventory'
+       OR NEW.reallocated_qty <> 0
+       OR NEW.recovery_terminal_qty <> 0
+       OR NEW.remaining_to_allocate_qty <> NEW.short_qty
+       OR NEW.resolved_by_user_id IS NOT NULL
+       OR NEW.resolved_at IS NOT NULL
+    THEN
+        RAISE EXCEPTION 'new pick shortage must begin awaiting inventory at revision one'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.pick_tasks task
+        INNER JOIN public.pick_task_contents content
+          ON content.tenant_id = task.tenant_id
+         AND content.inventory_owner_id = task.inventory_owner_id
+         AND content.facility_id = task.facility_id
+         AND content.task_id = task.id
+        INNER JOIN public.order_release_allocations snapshot
+          ON snapshot.tenant_id = content.tenant_id
+         AND snapshot.inventory_owner_id = content.inventory_owner_id
+         AND snapshot.facility_id = content.facility_id
+         AND snapshot.order_release_id = content.order_release_id
+         AND snapshot.order_id = content.order_id
+         AND snapshot.order_item_id = content.order_item_id
+         AND snapshot.reservation_id = content.reservation_id
+         AND snapshot.allocation_id = content.source_allocation_id
+        INNER JOIN public.inventory_allocations source_allocation
+          ON source_allocation.tenant_id = content.tenant_id
+         AND source_allocation.inventory_owner_id = content.inventory_owner_id
+         AND source_allocation.facility_id = content.facility_id
+         AND source_allocation.id = content.source_allocation_id
+        INNER JOIN public.inventory_holds discrepancy_hold
+          ON discrepancy_hold.tenant_id = content.tenant_id
+         AND discrepancy_hold.inventory_owner_id = content.inventory_owner_id
+         AND discrepancy_hold.id = NEW.inventory_hold_id
+        INNER JOIN public.orders order_header
+          ON order_header.tenant_id = content.tenant_id
+         AND order_header.inventory_owner_id = content.inventory_owner_id
+         AND order_header.id = content.order_id
+        WHERE task.tenant_id = NEW.tenant_id
+          AND task.inventory_owner_id = NEW.inventory_owner_id
+          AND task.facility_id = NEW.facility_id
+          AND task.id = NEW.task_id
+          AND task.order_release_id = NEW.order_release_id
+          AND task.order_id = NEW.order_id
+          AND task.order_item_id = NEW.order_item_id
+          AND task.reservation_id = NEW.reservation_id
+          AND task.source_allocation_id = NEW.source_inventory_allocation_id
+          AND task.destination_location_id = NEW.destination_location_id
+          AND task.status = 'in_progress'
+          AND task.assigned_user_id = NEW.reported_by_user_id
+          AND task.claimed_at <= NEW.reported_at
+          AND task.lease_expires_at > NEW.reported_at
+          AND content.id = NEW.pick_task_content_id
+          AND content.state = 'pending'
+          AND content.source_inventory_balance_id = NEW.source_inventory_balance_id
+          AND content.source_location_id = NEW.source_location_id
+          AND content.source_license_plate_id IS NOT DISTINCT FROM NEW.source_license_plate_id
+          AND content.item_batch_id = NEW.item_batch_id
+          AND content.item_id = NEW.item_id
+          AND content.uom = NEW.uom
+          AND content.inventory_status = NEW.inventory_status
+          AND content.planned_qty = NEW.planned_qty
+          AND source_allocation.inventory_balance_id = NEW.source_inventory_balance_id
+          AND source_allocation.location_id = NEW.source_location_id
+          AND source_allocation.license_plate_id IS NOT DISTINCT FROM NEW.source_license_plate_id
+          AND source_allocation.item_batch_id = NEW.item_batch_id
+          AND source_allocation.item_id = NEW.item_id
+          AND source_allocation.uom = NEW.uom
+          AND source_allocation.inventory_status = NEW.inventory_status
+          AND source_allocation.qty = NEW.planned_qty
+          AND source_allocation.status = 'shorted'
+          AND source_allocation.execution_stage = 'pick_source'
+          AND source_allocation.modified = NEW.reported_at
+          AND source_allocation.deleted = NEW.reported_at
+          AND discrepancy_hold.facility_id = NEW.facility_id
+          AND discrepancy_hold.inventory_balance_id = NEW.source_inventory_balance_id
+          AND discrepancy_hold.location_id = NEW.source_location_id
+          AND discrepancy_hold.license_plate_id IS NOT DISTINCT FROM NEW.source_license_plate_id
+          AND discrepancy_hold.item_batch_id = NEW.item_batch_id
+          AND discrepancy_hold.item_id = NEW.item_id
+          AND discrepancy_hold.uom = NEW.uom
+          AND discrepancy_hold.inventory_status = NEW.inventory_status
+          AND discrepancy_hold.qty = NEW.short_qty
+          AND discrepancy_hold.reason_code = 'inventory_discrepancy'
+          AND discrepancy_hold.reference_type = 'pick_shortage_source'
+          AND discrepancy_hold.reference_id = NEW.pick_task_content_id
+          AND discrepancy_hold.status = 'active'
+          AND discrepancy_hold.created_by = NEW.reported_by_user_id
+          AND discrepancy_hold.created = NEW.reported_at
+          AND order_header.deleted IS NULL
+          AND order_header.status = 'processing'
+          AND order_header.revision = NEW.report_previous_order_revision
+    ) INTO report_matches;
+
+    IF NOT report_matches THEN
+        RAISE EXCEPTION 'pick shortage does not match the active claim, source, hold, or order revision'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.picked_qty > 0 THEN
+        SELECT EXISTS (
+            SELECT 1
+            FROM public.pick_confirmations confirmation
+            INNER JOIN public.inventory_allocations destination_allocation
+              ON destination_allocation.tenant_id = confirmation.tenant_id
+             AND destination_allocation.inventory_owner_id = confirmation.inventory_owner_id
+             AND destination_allocation.facility_id = confirmation.facility_id
+             AND destination_allocation.id = confirmation.destination_inventory_allocation_id
+            WHERE confirmation.tenant_id = NEW.tenant_id
+              AND confirmation.inventory_owner_id = NEW.inventory_owner_id
+              AND confirmation.facility_id = NEW.facility_id
+              AND confirmation.id = NEW.pick_confirmation_id
+              AND confirmation.task_id = NEW.task_id
+              AND confirmation.pick_task_content_id = NEW.pick_task_content_id
+              AND confirmation.order_release_id = NEW.order_release_id
+              AND confirmation.order_id = NEW.order_id
+              AND confirmation.order_item_id = NEW.order_item_id
+              AND confirmation.reservation_id = NEW.reservation_id
+              AND confirmation.source_inventory_allocation_id = NEW.source_inventory_allocation_id
+              AND confirmation.destination_inventory_allocation_id = NEW.destination_inventory_allocation_id
+              AND confirmation.source_inventory_balance_id = NEW.source_inventory_balance_id
+              AND confirmation.destination_inventory_balance_id = NEW.destination_inventory_balance_id
+              AND confirmation.source_location_id = NEW.source_location_id
+              AND confirmation.destination_location_id = NEW.destination_location_id
+              AND confirmation.source_license_plate_id IS NOT DISTINCT FROM NEW.source_license_plate_id
+              AND confirmation.destination_license_plate_id = NEW.destination_license_plate_id
+              AND confirmation.item_batch_id = NEW.item_batch_id
+              AND confirmation.item_id = NEW.item_id
+              AND confirmation.uom = NEW.uom
+              AND confirmation.inventory_status = NEW.inventory_status
+              AND confirmation.inventory_transaction_id = NEW.inventory_transaction_id
+              AND confirmation.picked_qty = NEW.picked_qty
+              AND confirmation.confirmed_by_user_id = NEW.reported_by_user_id
+              AND confirmation.confirmed_at = NEW.reported_at
+              AND destination_allocation.status = 'allocated'
+              AND destination_allocation.execution_stage = 'staged'
+              AND destination_allocation.deleted IS NULL
+              AND destination_allocation.qty = NEW.picked_qty
+        ) INTO movement_matches;
+
+        IF NOT movement_matches THEN
+            RAISE EXCEPTION 'partial pick shortage does not match its immutable pick movement'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_pick_shortage_reallocation_run(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_pick_shortage_reallocation_run() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.pick_shortages shortage
+        INNER JOIN public.order_releases release
+          ON release.tenant_id = shortage.tenant_id
+         AND release.inventory_owner_id = shortage.inventory_owner_id
+         AND release.facility_id = shortage.facility_id
+         AND release.id = shortage.order_release_id
+         AND release.order_id = shortage.order_id
+        INNER JOIN public.orders order_header
+          ON order_header.tenant_id = shortage.tenant_id
+         AND order_header.inventory_owner_id = shortage.inventory_owner_id
+         AND order_header.id = shortage.order_id
+        WHERE shortage.tenant_id = NEW.tenant_id
+          AND shortage.inventory_owner_id = NEW.inventory_owner_id
+          AND shortage.facility_id = NEW.facility_id
+          AND shortage.order_release_id = NEW.order_release_id
+          AND shortage.order_id = NEW.order_id
+          AND shortage.order_item_id = NEW.order_item_id
+          AND shortage.reservation_id = NEW.reservation_id
+          AND shortage.id = NEW.pick_shortage_id
+          AND shortage.status <> 'resolved'
+          AND shortage.revision = NEW.expected_shortage_revision
+          AND shortage.remaining_to_allocate_qty = NEW.requested_qty
+          AND order_header.deleted IS NULL
+          AND order_header.status = 'processing'
+          AND order_header.revision = NEW.expected_order_revision
+    ) THEN
+        RAISE EXCEPTION 'pick shortage reallocation run is stale or outside the shortage scope'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_pick_confirmation_execution(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_pick_confirmation_execution() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    planned_qty BIGINT;
+    content_state TEXT;
+    content_completed_at TIMESTAMPTZ;
+    task_status TEXT;
+    task_completed_at TIMESTAMPTZ;
+BEGIN
+    SELECT content.planned_qty, content.state, content.completed_at,
+           task.status, task.completed_at
+    INTO planned_qty, content_state, content_completed_at,
+         task_status, task_completed_at
+    FROM public.pick_task_contents content
+    INNER JOIN public.pick_tasks task
+      ON task.tenant_id = content.tenant_id
+     AND task.inventory_owner_id = content.inventory_owner_id
+     AND task.facility_id = content.facility_id
+     AND task.id = content.task_id
+    WHERE content.tenant_id = NEW.tenant_id
+      AND content.inventory_owner_id = NEW.inventory_owner_id
+      AND content.id = NEW.pick_task_content_id;
+
+    IF NEW.picked_qty = planned_qty THEN
+        IF content_state <> 'completed'
+           OR task_status <> 'completed'
+           OR content_completed_at IS DISTINCT FROM NEW.confirmed_at
+           OR task_completed_at IS DISTINCT FROM NEW.confirmed_at
+        THEN
+            RAISE EXCEPTION 'full pick confirmation requires completed task and content'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF NEW.picked_qty < planned_qty THEN
+        IF content_state <> 'shorted'
+           OR task_status <> 'shorted'
+           OR content_completed_at IS DISTINCT FROM NEW.confirmed_at
+           OR task_completed_at IS DISTINCT FROM NEW.confirmed_at
+           OR NOT EXISTS (
+               SELECT 1 FROM public.pick_shortages shortage
+               WHERE shortage.tenant_id = NEW.tenant_id
+                 AND shortage.inventory_owner_id = NEW.inventory_owner_id
+                 AND shortage.pick_confirmation_id = NEW.id
+                 AND shortage.pick_task_content_id = NEW.pick_task_content_id
+                 AND shortage.reported_at = NEW.confirmed_at
+           )
+        THEN
+            RAISE EXCEPTION 'partial pick confirmation requires a terminal shortage report'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'pick confirmation exceeds planned quantity'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_pick_shortage_consistency(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_pick_shortage_consistency() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    shortage_id BIGINT;
+    shortage_row RECORD;
+    reallocated_qty BIGINT;
+    recovery_terminal_qty BIGINT;
+    expected_status TEXT;
+    order_revision BIGINT;
+BEGIN
+    IF TG_TABLE_NAME = 'pick_shortages' THEN
+        shortage_id := NEW.id;
+    ELSIF TG_TABLE_NAME = 'pick_tasks' THEN
+        SELECT snapshot.pick_shortage_id
+        INTO shortage_id
+        FROM public.order_release_allocations snapshot
+        WHERE snapshot.tenant_id = NEW.tenant_id
+          AND snapshot.inventory_owner_id = NEW.inventory_owner_id
+          AND snapshot.facility_id = NEW.facility_id
+          AND snapshot.order_release_id = NEW.order_release_id
+          AND snapshot.order_id = NEW.order_id
+          AND snapshot.order_item_id = NEW.order_item_id
+          AND snapshot.reservation_id = NEW.reservation_id
+          AND snapshot.allocation_id = NEW.source_allocation_id
+          AND snapshot.source_kind = 'shortage_recovery';
+
+        IF shortage_id IS NULL THEN
+            RETURN NEW;
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'unsupported pick shortage consistency trigger source'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT * INTO shortage_row
+    FROM public.pick_shortages shortage
+    WHERE shortage.tenant_id = NEW.tenant_id
+      AND shortage.id = shortage_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'pick shortage lifecycle projection does not exist'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT COALESCE(SUM(snapshot.planned_qty), 0)::BIGINT,
+           COALESCE(SUM(snapshot.planned_qty) FILTER (
+               WHERE task.status IN ('completed', 'shorted')
+           ), 0)::BIGINT
+    INTO reallocated_qty, recovery_terminal_qty
+    FROM public.order_release_allocations snapshot
+    LEFT JOIN public.pick_tasks task
+      ON task.tenant_id = snapshot.tenant_id
+     AND task.inventory_owner_id = snapshot.inventory_owner_id
+     AND task.facility_id = snapshot.facility_id
+     AND task.order_release_id = snapshot.order_release_id
+     AND task.order_id = snapshot.order_id
+     AND task.order_item_id = snapshot.order_item_id
+     AND task.reservation_id = snapshot.reservation_id
+     AND task.source_allocation_id = snapshot.allocation_id
+    WHERE snapshot.tenant_id = shortage_row.tenant_id
+      AND snapshot.inventory_owner_id = shortage_row.inventory_owner_id
+      AND snapshot.facility_id = shortage_row.facility_id
+      AND snapshot.order_release_id = shortage_row.order_release_id
+      AND snapshot.order_id = shortage_row.order_id
+      AND snapshot.pick_shortage_id = shortage_row.id
+      AND snapshot.source_kind = 'shortage_recovery';
+
+    IF reallocated_qty = recovery_terminal_qty
+       AND reallocated_qty < shortage_row.short_qty
+    THEN
+        expected_status := 'awaiting_inventory';
+    ELSIF recovery_terminal_qty < reallocated_qty
+          AND reallocated_qty <= shortage_row.short_qty
+    THEN
+        expected_status := 'recovery_in_progress';
+    ELSIF recovery_terminal_qty = shortage_row.short_qty
+          AND reallocated_qty = shortage_row.short_qty
+    THEN
+        expected_status := 'resolved';
+    ELSE
+        RAISE EXCEPTION 'pick shortage recovery work does not conserve the shortage quantity'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT order_header.revision INTO order_revision
+    FROM public.orders order_header
+    WHERE order_header.tenant_id = shortage_row.tenant_id
+      AND order_header.inventory_owner_id = shortage_row.inventory_owner_id
+      AND order_header.id = shortage_row.order_id
+      AND order_header.deleted IS NULL;
+
+    IF shortage_row.reallocated_qty <> reallocated_qty
+       OR shortage_row.recovery_terminal_qty <> recovery_terminal_qty
+       OR shortage_row.remaining_to_allocate_qty <> shortage_row.short_qty - reallocated_qty
+       OR shortage_row.status <> expected_status
+       OR order_revision < shortage_row.report_resulting_order_revision
+       OR NOT EXISTS (
+           SELECT 1
+           FROM public.pick_tasks task
+           INNER JOIN public.pick_task_contents content
+             ON content.tenant_id = task.tenant_id
+            AND content.inventory_owner_id = task.inventory_owner_id
+            AND content.facility_id = task.facility_id
+            AND content.task_id = task.id
+           WHERE task.tenant_id = shortage_row.tenant_id
+             AND task.inventory_owner_id = shortage_row.inventory_owner_id
+             AND task.facility_id = shortage_row.facility_id
+             AND task.id = shortage_row.task_id
+             AND task.status = 'shorted'
+             AND task.completed_at = shortage_row.reported_at
+             AND content.id = shortage_row.pick_task_content_id
+             AND content.state = 'shorted'
+             AND content.completed_at = shortage_row.reported_at
+       )
+       OR NOT EXISTS (
+           SELECT 1 FROM public.inventory_holds discrepancy_hold
+           WHERE discrepancy_hold.tenant_id = shortage_row.tenant_id
+             AND discrepancy_hold.inventory_owner_id = shortage_row.inventory_owner_id
+             AND discrepancy_hold.id = shortage_row.inventory_hold_id
+             AND discrepancy_hold.qty = shortage_row.short_qty
+             AND discrepancy_hold.reason_code = 'inventory_discrepancy'
+       )
+       OR (shortage_row.picked_qty > 0 AND NOT EXISTS (
+           SELECT 1 FROM public.pick_confirmations confirmation
+           WHERE confirmation.tenant_id = shortage_row.tenant_id
+             AND confirmation.inventory_owner_id = shortage_row.inventory_owner_id
+             AND confirmation.id = shortage_row.pick_confirmation_id
+             AND confirmation.picked_qty = shortage_row.picked_qty
+             AND confirmation.confirmed_at = shortage_row.reported_at
+       ))
+    THEN
+        RAISE EXCEPTION 'pick shortage lifecycle projection is inconsistent with execution records'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF TG_TABLE_NAME = 'pick_shortages'
+       AND TG_OP = 'INSERT'
+       AND order_revision <> shortage_row.report_resulting_order_revision
+    THEN
+        RAISE EXCEPTION 'pick shortage report did not advance the order revision exactly once'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_pick_shortage_reallocation_consistency(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_pick_shortage_reallocation_consistency() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    run_id BIGINT;
+    run_row RECORD;
+    snapshot_count BIGINT;
+    snapshot_qty BIGINT;
+    task_count BIGINT;
+    content_count BIGINT;
+    shortage_row RECORD;
+    order_revision BIGINT;
+BEGIN
+    IF TG_TABLE_NAME = 'pick_shortage_reallocation_runs' THEN
+        run_id := NEW.id;
+    ELSIF TG_TABLE_NAME = 'order_release_allocations' THEN
+        run_id := NEW.pick_shortage_reallocation_run_id;
+    ELSIF TG_TABLE_NAME = 'pick_tasks' THEN
+        SELECT snapshot.pick_shortage_reallocation_run_id
+        INTO run_id
+        FROM public.order_release_allocations snapshot
+        WHERE snapshot.tenant_id = NEW.tenant_id
+          AND snapshot.inventory_owner_id = NEW.inventory_owner_id
+          AND snapshot.facility_id = NEW.facility_id
+          AND snapshot.order_release_id = NEW.order_release_id
+          AND snapshot.order_id = NEW.order_id
+          AND snapshot.order_item_id = NEW.order_item_id
+          AND snapshot.reservation_id = NEW.reservation_id
+          AND snapshot.allocation_id = NEW.source_allocation_id;
+    ELSIF TG_TABLE_NAME = 'pick_task_contents' THEN
+        SELECT snapshot.pick_shortage_reallocation_run_id
+        INTO run_id
+        FROM public.order_release_allocations snapshot
+        WHERE snapshot.tenant_id = NEW.tenant_id
+          AND snapshot.inventory_owner_id = NEW.inventory_owner_id
+          AND snapshot.facility_id = NEW.facility_id
+          AND snapshot.order_release_id = NEW.order_release_id
+          AND snapshot.order_id = NEW.order_id
+          AND snapshot.order_item_id = NEW.order_item_id
+          AND snapshot.reservation_id = NEW.reservation_id
+          AND snapshot.allocation_id = NEW.source_allocation_id;
+    ELSE
+        RAISE EXCEPTION 'unsupported pick shortage reallocation trigger source'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF run_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT * INTO run_row
+    FROM public.pick_shortage_reallocation_runs run
+    WHERE run.tenant_id = NEW.tenant_id
+      AND run.id = run_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'pick shortage reallocation run does not exist'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT COUNT(*), COALESCE(SUM(snapshot.planned_qty), 0)::BIGINT
+    INTO snapshot_count, snapshot_qty
+    FROM public.order_release_allocations snapshot
+    WHERE snapshot.tenant_id = run_row.tenant_id
+      AND snapshot.inventory_owner_id = run_row.inventory_owner_id
+      AND snapshot.facility_id = run_row.facility_id
+      AND snapshot.order_release_id = run_row.order_release_id
+      AND snapshot.order_id = run_row.order_id
+      AND snapshot.pick_shortage_id = run_row.pick_shortage_id
+      AND snapshot.pick_shortage_reallocation_run_id = run_row.id
+      AND snapshot.source_kind = 'shortage_recovery';
+
+    SELECT COUNT(*) INTO task_count
+    FROM public.pick_tasks task
+    INNER JOIN public.order_release_allocations snapshot
+      ON snapshot.tenant_id = task.tenant_id
+     AND snapshot.inventory_owner_id = task.inventory_owner_id
+     AND snapshot.facility_id = task.facility_id
+     AND snapshot.order_release_id = task.order_release_id
+     AND snapshot.order_id = task.order_id
+     AND snapshot.order_item_id = task.order_item_id
+     AND snapshot.reservation_id = task.reservation_id
+     AND snapshot.allocation_id = task.source_allocation_id
+    WHERE snapshot.tenant_id = run_row.tenant_id
+      AND snapshot.pick_shortage_reallocation_run_id = run_row.id;
+
+    SELECT COUNT(*) INTO content_count
+    FROM public.pick_task_contents content
+    INNER JOIN public.order_release_allocations snapshot
+      ON snapshot.tenant_id = content.tenant_id
+     AND snapshot.inventory_owner_id = content.inventory_owner_id
+     AND snapshot.facility_id = content.facility_id
+     AND snapshot.order_release_id = content.order_release_id
+     AND snapshot.order_id = content.order_id
+     AND snapshot.order_item_id = content.order_item_id
+     AND snapshot.reservation_id = content.reservation_id
+     AND snapshot.allocation_id = content.source_allocation_id
+    WHERE snapshot.tenant_id = run_row.tenant_id
+      AND snapshot.pick_shortage_reallocation_run_id = run_row.id;
+
+    SELECT * INTO shortage_row
+    FROM public.pick_shortages shortage
+    WHERE shortage.tenant_id = run_row.tenant_id
+      AND shortage.inventory_owner_id = run_row.inventory_owner_id
+      AND shortage.id = run_row.pick_shortage_id;
+
+    SELECT order_header.revision INTO order_revision
+    FROM public.orders order_header
+    WHERE order_header.tenant_id = run_row.tenant_id
+      AND order_header.inventory_owner_id = run_row.inventory_owner_id
+      AND order_header.id = run_row.order_id
+      AND order_header.deleted IS NULL;
+
+    IF snapshot_count <> run_row.allocation_count
+       OR snapshot_qty <> run_row.allocated_qty
+       OR task_count <> run_row.allocation_count
+       OR content_count <> run_row.allocation_count
+       OR shortage_row.id IS NULL
+       OR shortage_row.revision < run_row.resulting_shortage_revision
+       OR shortage_row.reallocated_qty < shortage_row.short_qty - run_row.remaining_qty
+       OR shortage_row.remaining_to_allocate_qty > run_row.remaining_qty
+       OR order_revision < run_row.resulting_order_revision
+    THEN
+        RAISE EXCEPTION 'pick shortage reallocation execution snapshot is incomplete'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF TG_TABLE_NAME = 'pick_shortage_reallocation_runs'
+       AND (shortage_row.revision <> run_row.resulting_shortage_revision
+            OR shortage_row.reallocated_qty <> shortage_row.short_qty - run_row.remaining_qty
+            OR shortage_row.remaining_to_allocate_qty <> run_row.remaining_qty
+            OR order_revision <> run_row.resulting_order_revision)
+    THEN
+        RAISE EXCEPTION 'pick shortage reallocation result projection is inconsistent'
             USING ERRCODE = '23514';
     END IF;
 
@@ -4407,6 +5162,7 @@ BEGIN
            OR NEW.inventory_status IS DISTINCT FROM OLD.inventory_status
            OR NEW.allocation_run_id IS DISTINCT FROM OLD.allocation_run_id
            OR NEW.qty IS DISTINCT FROM OLD.qty
+           OR NEW.execution_stage IS DISTINCT FROM OLD.execution_stage
         THEN
             RAISE EXCEPTION 'inventory allocation dimensions are immutable'
                 USING ERRCODE = '55000';
@@ -6478,10 +7234,12 @@ CREATE TABLE public.inventory_allocations (
     allocation_run_id bigint,
     qty bigint NOT NULL,
     status text DEFAULT 'allocated'::text NOT NULL,
-    CONSTRAINT inventory_allocations_check CHECK ((((status = 'allocated'::text) AND (deleted IS NULL)) OR ((status = ANY (ARRAY['released'::text, 'fulfilled'::text])) AND (deleted IS NOT NULL)))),
+    execution_stage text DEFAULT 'pick_source'::text NOT NULL,
+    CONSTRAINT inventory_allocations_check CHECK ((((status = 'allocated'::text) AND (deleted IS NULL)) OR ((status = ANY (ARRAY['released'::text, 'fulfilled'::text, 'shorted'::text])) AND (deleted IS NOT NULL)))),
+    CONSTRAINT inventory_allocations_execution_stage_check CHECK ((execution_stage = ANY (ARRAY['pick_source'::text, 'staged'::text, 'packed'::text]))),
     CONSTRAINT inventory_allocations_inventory_status_check CHECK ((inventory_status = ANY (ARRAY['available'::text, 'hold'::text, 'damaged'::text, 'quarantine'::text]))),
     CONSTRAINT inventory_allocations_qty_check CHECK ((qty > 0)),
-    CONSTRAINT inventory_allocations_status_check CHECK ((status = ANY (ARRAY['allocated'::text, 'released'::text, 'fulfilled'::text]))),
+    CONSTRAINT inventory_allocations_status_check CHECK ((status = ANY (ARRAY['allocated'::text, 'released'::text, 'fulfilled'::text, 'shorted'::text]))),
     CONSTRAINT inventory_allocations_uom_check CHECK ((btrim(uom) <> ''::text))
 );
 
@@ -7842,6 +8600,11 @@ CREATE TABLE public.order_release_allocations (
     inventory_status text NOT NULL,
     planned_qty bigint NOT NULL,
     travel_sequence bigint NOT NULL,
+    source_kind text DEFAULT 'initial'::text NOT NULL,
+    pick_shortage_id bigint,
+    pick_shortage_reallocation_run_id bigint,
+    CONSTRAINT order_release_allocations_recovery_check CHECK ((((source_kind = 'initial'::text) AND (pick_shortage_id IS NULL) AND (pick_shortage_reallocation_run_id IS NULL)) OR ((source_kind = 'shortage_recovery'::text) AND (pick_shortage_id IS NOT NULL) AND (pick_shortage_reallocation_run_id IS NOT NULL)))),
+    CONSTRAINT order_release_allocations_source_kind_check CHECK ((source_kind = ANY (ARRAY['initial'::text, 'shortage_recovery'::text]))),
     CONSTRAINT order_release_allocations_inventory_status_check CHECK (inventory_status = 'available'::text),
     CONSTRAINT order_release_allocations_planned_qty_check CHECK (planned_qty > 0),
     CONSTRAINT order_release_allocations_travel_sequence_check CHECK (travel_sequence > 0),
@@ -8702,14 +9465,14 @@ CREATE TABLE public.pick_tasks (
     last_release_note text,
     release_count bigint DEFAULT 0 NOT NULL,
     completed_at timestamp with time zone,
-    CONSTRAINT pick_tasks_claim_state_check CHECK ((((status = 'open'::text) AND (assigned_user_id IS NULL) AND (claimed_at IS NULL) AND (lease_expires_at IS NULL) AND (completed_at IS NULL)) OR ((status = 'in_progress'::text) AND (assigned_user_id IS NOT NULL) AND (claimed_at IS NOT NULL) AND (lease_expires_at IS NOT NULL) AND (lease_expires_at > claimed_at) AND (completed_at IS NULL)) OR ((status = 'completed'::text) AND (assigned_user_id IS NOT NULL) AND (claimed_at IS NOT NULL) AND (lease_expires_at IS NULL) AND (completed_at IS NOT NULL) AND (completed_at >= claimed_at)))),
+    CONSTRAINT pick_tasks_claim_state_check CHECK ((((status = 'open'::text) AND (assigned_user_id IS NULL) AND (claimed_at IS NULL) AND (lease_expires_at IS NULL) AND (completed_at IS NULL)) OR ((status = 'in_progress'::text) AND (assigned_user_id IS NOT NULL) AND (claimed_at IS NOT NULL) AND (lease_expires_at IS NOT NULL) AND (lease_expires_at > claimed_at) AND (completed_at IS NULL)) OR ((status = ANY (ARRAY['completed'::text, 'shorted'::text])) AND (assigned_user_id IS NOT NULL) AND (claimed_at IS NOT NULL) AND (lease_expires_at IS NULL) AND (completed_at IS NOT NULL) AND (completed_at >= claimed_at)))),
     CONSTRAINT pick_tasks_last_release_check CHECK ((((last_released_at IS NULL) AND (last_release_reason IS NULL) AND (last_release_note IS NULL) AND (release_count = 0)) OR ((last_released_at IS NOT NULL) AND (last_release_reason IS NOT NULL) AND (release_count > 0)))),
     CONSTRAINT pick_tasks_last_release_note_check CHECK (((last_release_note IS NULL) OR ((last_release_note = btrim(last_release_note)) AND (last_release_note <> ''::text) AND (char_length(last_release_note) <= 500)))),
     CONSTRAINT pick_tasks_last_release_reason_check CHECK (((last_release_reason IS NULL) OR (last_release_reason = ANY (ARRAY['work_interrupted'::text, 'equipment_unavailable'::text, 'source_blocked'::text, 'inventory_discrepancy'::text, 'safety_issue'::text, 'lease_expired'::text, 'scope_revoked'::text, 'other'::text])))),
     CONSTRAINT pick_tasks_other_release_note_check CHECK (((last_release_reason <> 'other'::text) OR (last_release_note IS NOT NULL))),
     CONSTRAINT pick_tasks_priority_check CHECK (priority >= 0),
     CONSTRAINT pick_tasks_release_count_check CHECK (release_count >= 0),
-    CONSTRAINT pick_tasks_status_check CHECK ((status = ANY (ARRAY['open'::text, 'in_progress'::text, 'completed'::text]))),
+    CONSTRAINT pick_tasks_status_check CHECK ((status = ANY (ARRAY['open'::text, 'in_progress'::text, 'completed'::text, 'shorted'::text]))),
     CONSTRAINT pick_tasks_timeout_check CHECK (task_timeout_seconds > 0)
 );
 
@@ -8756,10 +9519,10 @@ CREATE TABLE public.pick_task_contents (
     travel_sequence bigint NOT NULL,
     state text DEFAULT 'pending'::text NOT NULL,
     completed_at timestamp with time zone,
-    CONSTRAINT pick_task_contents_completion_check CHECK ((((state = 'pending'::text) AND (completed_at IS NULL)) OR ((state = 'completed'::text) AND (completed_at IS NOT NULL)))),
+    CONSTRAINT pick_task_contents_completion_check CHECK ((((state = 'pending'::text) AND (completed_at IS NULL)) OR ((state = ANY (ARRAY['completed'::text, 'shorted'::text])) AND (completed_at IS NOT NULL)))),
     CONSTRAINT pick_task_contents_inventory_status_check CHECK (inventory_status = 'available'::text),
     CONSTRAINT pick_task_contents_planned_qty_check CHECK (planned_qty > 0),
-    CONSTRAINT pick_task_contents_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'completed'::text]))),
+    CONSTRAINT pick_task_contents_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'completed'::text, 'shorted'::text]))),
     CONSTRAINT pick_task_contents_travel_sequence_check CHECK (travel_sequence > 0),
     CONSTRAINT pick_task_contents_uom_check CHECK ((uom = btrim(uom)) AND (uom <> ''::text))
 );
@@ -8829,6 +9592,136 @@ ALTER TABLE ONLY public.pick_confirmations FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE public.pick_confirmations ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
     SEQUENCE NAME public.pick_confirmations_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: pick_shortage_reallocation_runs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.pick_shortage_reallocation_runs (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    order_release_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    pick_shortage_id bigint NOT NULL,
+    created_by_user_id bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    expected_shortage_revision bigint NOT NULL,
+    resulting_shortage_revision bigint NOT NULL,
+    expected_order_revision bigint NOT NULL,
+    resulting_order_revision bigint NOT NULL,
+    requested_qty bigint NOT NULL,
+    allocated_qty bigint NOT NULL,
+    remaining_qty bigint NOT NULL,
+    allocation_count bigint NOT NULL,
+    outcome text NOT NULL,
+    CONSTRAINT pick_shortage_reallocation_runs_allocation_count_check CHECK (allocation_count >= 0),
+    CONSTRAINT pick_shortage_reallocation_runs_order_revision_check CHECK ((expected_order_revision > 0) AND (resulting_order_revision = (expected_order_revision + 1))),
+    CONSTRAINT pick_shortage_reallocation_runs_outcome_check CHECK ((((outcome = 'not_allocated'::text) AND (allocation_count = 0) AND (allocated_qty = 0) AND (remaining_qty = requested_qty)) OR ((outcome = 'partially_allocated'::text) AND (allocation_count > 0) AND (allocated_qty > 0) AND (allocated_qty < requested_qty) AND (remaining_qty = (requested_qty - allocated_qty))) OR ((outcome = 'fully_allocated'::text) AND (allocation_count > 0) AND (allocated_qty = requested_qty) AND (remaining_qty = 0)))),
+    CONSTRAINT pick_shortage_reallocation_runs_quantity_check CHECK ((requested_qty > 0) AND (allocated_qty >= 0) AND (allocated_qty <= requested_qty) AND (remaining_qty >= 0) AND ((allocated_qty + remaining_qty) = requested_qty)),
+    CONSTRAINT pick_shortage_reallocation_runs_shortage_revision_check CHECK ((expected_shortage_revision > 0) AND (resulting_shortage_revision = (expected_shortage_revision + 1)))
+);
+
+ALTER TABLE ONLY public.pick_shortage_reallocation_runs FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: pick_shortage_reallocation_runs_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.pick_shortage_reallocation_runs ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.pick_shortage_reallocation_runs_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: pick_shortages; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.pick_shortages (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    order_release_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    pick_task_content_id bigint NOT NULL,
+    source_inventory_allocation_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    source_license_plate_id bigint,
+    destination_location_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    inventory_status text NOT NULL,
+    planned_qty bigint NOT NULL,
+    picked_qty bigint NOT NULL,
+    short_qty bigint NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    observed_item_barcode text,
+    observed_lot text,
+    observed_serial text,
+    inventory_hold_id bigint NOT NULL,
+    pick_confirmation_id bigint,
+    inventory_transaction_id bigint,
+    destination_inventory_allocation_id bigint,
+    destination_inventory_balance_id bigint,
+    destination_license_plate_id bigint,
+    reported_by_user_id bigint NOT NULL,
+    reported_at timestamp with time zone NOT NULL,
+    report_previous_order_revision bigint NOT NULL,
+    report_resulting_order_revision bigint NOT NULL,
+    modified_at timestamp with time zone NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
+    status text DEFAULT 'awaiting_inventory'::text NOT NULL,
+    reallocated_qty bigint DEFAULT 0 NOT NULL,
+    recovery_terminal_qty bigint DEFAULT 0 NOT NULL,
+    remaining_to_allocate_qty bigint NOT NULL,
+    resolved_by_user_id bigint,
+    resolved_at timestamp with time zone,
+    CONSTRAINT pick_shortages_inventory_status_check CHECK (inventory_status = 'available'::text),
+    CONSTRAINT pick_shortages_lifecycle_check CHECK ((((status = 'awaiting_inventory'::text) AND (recovery_terminal_qty = reallocated_qty) AND (remaining_to_allocate_qty > 0) AND (resolved_by_user_id IS NULL) AND (resolved_at IS NULL)) OR ((status = 'recovery_in_progress'::text) AND (recovery_terminal_qty < reallocated_qty) AND (resolved_by_user_id IS NULL) AND (resolved_at IS NULL)) OR ((status = 'resolved'::text) AND (recovery_terminal_qty = short_qty) AND (reallocated_qty = short_qty) AND (remaining_to_allocate_qty = 0) AND (resolved_by_user_id IS NOT NULL) AND (resolved_at IS NOT NULL)))),
+    CONSTRAINT pick_shortages_movement_check CHECK ((((picked_qty = 0) AND (pick_confirmation_id IS NULL) AND (inventory_transaction_id IS NULL) AND (destination_inventory_allocation_id IS NULL) AND (destination_inventory_balance_id IS NULL) AND (destination_license_plate_id IS NULL)) OR ((picked_qty > 0) AND (pick_confirmation_id IS NOT NULL) AND (inventory_transaction_id IS NOT NULL) AND (destination_inventory_allocation_id IS NOT NULL) AND (destination_inventory_balance_id IS NOT NULL) AND (destination_license_plate_id IS NOT NULL)))),
+    CONSTRAINT pick_shortages_note_check CHECK (((note IS NULL) OR ((note = btrim(note)) AND (note <> ''::text) AND (char_length(note) <= 500)))),
+    CONSTRAINT pick_shortages_observed_evidence_check CHECK (((observed_item_barcode IS NULL) OR ((observed_item_barcode = btrim(observed_item_barcode)) AND (observed_item_barcode <> ''::text) AND (char_length(observed_item_barcode) <= 200))) AND ((observed_lot IS NULL) OR ((observed_lot = btrim(observed_lot)) AND (observed_lot <> ''::text) AND (char_length(observed_lot) <= 200))) AND ((observed_serial IS NULL) OR ((observed_serial = btrim(observed_serial)) AND (observed_serial <> ''::text) AND (char_length(observed_serial) <= 200)))),
+    CONSTRAINT pick_shortages_order_revision_check CHECK ((report_previous_order_revision > 0) AND (report_resulting_order_revision = (report_previous_order_revision + 1))),
+    CONSTRAINT pick_shortages_quantity_check CHECK ((planned_qty > 0) AND (picked_qty >= 0) AND (short_qty > 0) AND (picked_qty < planned_qty) AND ((picked_qty + short_qty) = planned_qty) AND (recovery_terminal_qty >= 0) AND (recovery_terminal_qty <= reallocated_qty) AND (reallocated_qty >= 0) AND ((reallocated_qty + remaining_to_allocate_qty) = short_qty) AND (remaining_to_allocate_qty >= 0)),
+    CONSTRAINT pick_shortages_reason_check CHECK ((reason_code = ANY (ARRAY['inventory_missing'::text, 'insufficient_quantity'::text, 'damaged_inventory'::text, 'wrong_inventory'::text, 'lot_or_serial_mismatch'::text, 'other'::text]))),
+    CONSTRAINT pick_shortages_reason_evidence_check CHECK (((picked_qty = 0) OR (observed_item_barcode IS NOT NULL)) AND ((reason_code <> 'wrong_inventory'::text) OR (observed_item_barcode IS NOT NULL)) AND ((reason_code <> 'lot_or_serial_mismatch'::text) OR (observed_lot IS NOT NULL) OR (observed_serial IS NOT NULL)) AND ((reason_code <> 'other'::text) OR (note IS NOT NULL))),
+    CONSTRAINT pick_shortages_revision_check CHECK (revision > 0),
+    CONSTRAINT pick_shortages_status_check CHECK ((status = ANY (ARRAY['awaiting_inventory'::text, 'recovery_in_progress'::text, 'resolved'::text]))),
+    CONSTRAINT pick_shortages_uom_check CHECK ((uom = btrim(uom)) AND (uom <> ''::text))
+);
+
+ALTER TABLE ONLY public.pick_shortages FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: pick_shortages_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.pick_shortages ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.pick_shortages_id_seq
     START WITH 1
     INCREMENT BY 1
     NO MINVALUE
@@ -10610,6 +11503,9 @@ ALTER TABLE ONLY public.packing_sessions
 ALTER TABLE ONLY public.packing_sessions
     ADD CONSTRAINT packing_sessions_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, id);
 
+ALTER TABLE ONLY public.packing_sessions
+    ADD CONSTRAINT packing_sessions_order_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, order_id, id);
+
 
 ALTER TABLE ONLY public.packing_sessions
     ADD CONSTRAINT packing_sessions_order_key UNIQUE (tenant_id, inventory_owner_id, order_id);
@@ -10873,6 +11769,58 @@ ALTER TABLE ONLY public.pick_confirmations
 
 ALTER TABLE ONLY public.pick_confirmations
     ADD CONSTRAINT pick_confirmations_transaction_key UNIQUE (tenant_id, inventory_owner_id, inventory_transaction_id);
+
+
+--
+-- Name: pick_shortage_reallocation_runs pick_shortage_reallocation_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_shortage_reallocation_runs
+    ADD CONSTRAINT pick_shortage_reallocation_runs_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.pick_shortage_reallocation_runs
+    ADD CONSTRAINT pick_shortage_reallocation_runs_tenant_id_key UNIQUE (tenant_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortage_reallocation_runs
+    ADD CONSTRAINT pick_shortage_reallocation_runs_scope_key UNIQUE (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, pick_shortage_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortage_reallocation_runs
+    ADD CONSTRAINT pick_shortage_reallocation_runs_revision_key UNIQUE (tenant_id, inventory_owner_id, pick_shortage_id, expected_shortage_revision);
+
+
+--
+-- Name: pick_shortages pick_shortages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_tenant_id_key UNIQUE (tenant_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_scope_key UNIQUE (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_content_key UNIQUE (tenant_id, inventory_owner_id, pick_task_content_id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_source_allocation_key UNIQUE (tenant_id, inventory_owner_id, source_inventory_allocation_id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_inventory_hold_key UNIQUE (tenant_id, inventory_owner_id, inventory_hold_id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_confirmation_key UNIQUE (tenant_id, inventory_owner_id, pick_confirmation_id);
 
 
 --
@@ -12018,6 +12966,48 @@ CREATE INDEX pick_confirmations_order_idx ON public.pick_confirmations USING btr
 
 
 --
+-- Name: pick_shortages_open_queue_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX pick_shortages_open_queue_idx ON public.pick_shortages USING btree (tenant_id, facility_id, status, reported_at, id) WHERE (status <> 'resolved'::text);
+
+
+--
+-- Name: pick_shortages_tenant_status_queue_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX pick_shortages_tenant_status_queue_idx ON public.pick_shortages USING btree (tenant_id, status, reported_at, id);
+
+
+--
+-- Name: pick_shortages_unresolved_queue_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX pick_shortages_unresolved_queue_idx ON public.pick_shortages USING btree (tenant_id, reported_at, id) WHERE (status <> 'resolved'::text);
+
+
+--
+-- Name: pick_shortages_order_history_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX pick_shortages_order_history_idx ON public.pick_shortages USING btree (tenant_id, inventory_owner_id, order_id, reported_at, id);
+
+
+--
+-- Name: pick_shortage_reallocation_runs_shortage_history_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX pick_shortage_reallocation_runs_shortage_history_idx ON public.pick_shortage_reallocation_runs USING btree (tenant_id, inventory_owner_id, pick_shortage_id, created_at, id);
+
+
+--
+-- Name: order_release_allocations_shortage_recovery_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX order_release_allocations_shortage_recovery_idx ON public.order_release_allocations USING btree (tenant_id, inventory_owner_id, pick_shortage_id, pick_shortage_reallocation_run_id, allocation_id) WHERE (source_kind = 'shortage_recovery'::text);
+
+
+--
 -- Name: putaway_tasks_destination_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -12606,6 +13596,9 @@ CREATE TRIGGER order_release_allocations_are_immutable BEFORE DELETE OR UPDATE O
 CREATE TRIGGER order_release_allocations_validate BEFORE INSERT ON public.order_release_allocations FOR EACH ROW EXECUTE FUNCTION public.validate_order_release_allocation();
 
 
+CREATE CONSTRAINT TRIGGER order_release_allocations_require_reallocation_execution AFTER INSERT ON public.order_release_allocations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_pick_shortage_reallocation_consistency();
+
+
 --
 -- Name: pick_tasks pick_tasks_guard_mutation; Type: TRIGGER; Schema: public; Owner: -
 --
@@ -12620,11 +13613,17 @@ CREATE TRIGGER pick_tasks_guard_mutation BEFORE DELETE OR UPDATE ON public.pick_
 CREATE TRIGGER pick_tasks_validate BEFORE INSERT ON public.pick_tasks FOR EACH ROW EXECUTE FUNCTION public.validate_pick_task();
 
 
+CREATE CONSTRAINT TRIGGER pick_tasks_require_reallocation_execution AFTER INSERT ON public.pick_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_pick_shortage_reallocation_consistency();
+
+
 --
 -- Name: pick_tasks pick_tasks_require_completed_content; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE CONSTRAINT TRIGGER pick_tasks_require_completed_content AFTER UPDATE ON public.pick_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_completed_pick_content();
+
+
+CREATE CONSTRAINT TRIGGER pick_tasks_require_shortage_consistency AFTER UPDATE ON public.pick_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_pick_shortage_consistency();
 
 
 --
@@ -12639,6 +13638,9 @@ CREATE TRIGGER pick_task_contents_guard_mutation BEFORE DELETE OR UPDATE ON publ
 --
 
 CREATE TRIGGER pick_task_contents_validate BEFORE INSERT ON public.pick_task_contents FOR EACH ROW EXECUTE FUNCTION public.validate_pick_task_content();
+
+
+CREATE CONSTRAINT TRIGGER pick_task_contents_require_reallocation_execution AFTER INSERT ON public.pick_task_contents DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_pick_shortage_reallocation_consistency();
 
 
 --
@@ -12660,6 +13662,27 @@ CREATE TRIGGER pick_confirmations_are_immutable BEFORE DELETE OR UPDATE ON publi
 --
 
 CREATE TRIGGER pick_confirmations_validate BEFORE INSERT ON public.pick_confirmations FOR EACH ROW EXECUTE FUNCTION public.validate_pick_confirmation();
+
+
+CREATE CONSTRAINT TRIGGER pick_confirmations_require_execution AFTER INSERT ON public.pick_confirmations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_pick_confirmation_execution();
+
+
+CREATE TRIGGER pick_shortage_reallocation_runs_are_immutable BEFORE DELETE OR UPDATE ON public.pick_shortage_reallocation_runs FOR EACH ROW EXECUTE FUNCTION public.reject_pick_shortage_reallocation_run_mutation();
+
+
+CREATE TRIGGER pick_shortage_reallocation_runs_validate BEFORE INSERT ON public.pick_shortage_reallocation_runs FOR EACH ROW EXECUTE FUNCTION public.validate_pick_shortage_reallocation_run();
+
+
+CREATE CONSTRAINT TRIGGER pick_shortage_reallocation_runs_require_execution AFTER INSERT ON public.pick_shortage_reallocation_runs DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_pick_shortage_reallocation_consistency();
+
+
+CREATE TRIGGER pick_shortages_guard_mutation BEFORE DELETE OR UPDATE ON public.pick_shortages FOR EACH ROW EXECUTE FUNCTION public.guard_pick_shortage_mutation();
+
+
+CREATE TRIGGER pick_shortages_validate BEFORE INSERT ON public.pick_shortages FOR EACH ROW EXECUTE FUNCTION public.validate_pick_shortage();
+
+
+CREATE CONSTRAINT TRIGGER pick_shortages_require_consistency AFTER INSERT OR UPDATE ON public.pick_shortages DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_pick_shortage_consistency();
 
 
 --
@@ -14985,6 +16008,22 @@ ALTER TABLE ONLY public.order_release_allocations
 
 
 --
+-- Name: order_release_allocations order_release_allocations_shortage_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_shortage_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, pick_shortage_id) REFERENCES public.pick_shortages(tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, id);
+
+
+--
+-- Name: order_release_allocations order_release_allocations_reallocation_run_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_reallocation_run_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, pick_shortage_id, pick_shortage_reallocation_run_id) REFERENCES public.pick_shortage_reallocation_runs(tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, pick_shortage_id, id);
+
+
+--
 -- Name: order_items order_items_owner_item_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -15156,7 +16195,7 @@ ALTER TABLE ONLY public.packing_sessions
     ADD CONSTRAINT packing_sessions_ready_by_fkey FOREIGN KEY (tenant_id, ready_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
 
 ALTER TABLE ONLY public.packing_session_allocations
-    ADD CONSTRAINT packing_session_allocations_session_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, packing_session_id) REFERENCES public.packing_sessions(tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, id);
+    ADD CONSTRAINT packing_session_allocations_session_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_id, packing_session_id) REFERENCES public.packing_sessions(tenant_id, inventory_owner_id, facility_id, order_id, id);
 ALTER TABLE ONLY public.packing_session_allocations
     ADD CONSTRAINT packing_session_allocations_order_item_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id, order_item_id) REFERENCES public.order_items(tenant_id, inventory_owner_id, order_id, id);
 ALTER TABLE ONLY public.packing_session_allocations
@@ -15479,6 +16518,130 @@ ALTER TABLE ONLY public.pick_confirmations
 
 ALTER TABLE ONLY public.pick_confirmations
     ADD CONSTRAINT pick_confirmations_confirmed_by_fkey FOREIGN KEY (tenant_id, confirmed_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: pick_shortage_reallocation_runs pick_shortage_reallocation_runs_tenant_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_shortage_reallocation_runs
+    ADD CONSTRAINT pick_shortage_reallocation_runs_tenant_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+ALTER TABLE ONLY public.pick_shortage_reallocation_runs
+    ADD CONSTRAINT pick_shortage_reallocation_runs_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+ALTER TABLE ONLY public.pick_shortage_reallocation_runs
+    ADD CONSTRAINT pick_shortage_reallocation_runs_release_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_id, order_release_id) REFERENCES public.order_releases(tenant_id, inventory_owner_id, facility_id, order_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortage_reallocation_runs
+    ADD CONSTRAINT pick_shortage_reallocation_runs_order_item_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id, order_item_id) REFERENCES public.order_items(tenant_id, inventory_owner_id, order_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortage_reallocation_runs
+    ADD CONSTRAINT pick_shortage_reallocation_runs_reservation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, reservation_id) REFERENCES public.inventory_reservations(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortage_reallocation_runs
+    ADD CONSTRAINT pick_shortage_reallocation_runs_shortage_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, pick_shortage_id) REFERENCES public.pick_shortages(tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortage_reallocation_runs
+    ADD CONSTRAINT pick_shortage_reallocation_runs_created_by_fkey FOREIGN KEY (tenant_id, created_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: pick_shortages pick_shortages_tenant_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_tenant_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_release_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_id, order_release_id) REFERENCES public.order_releases(tenant_id, inventory_owner_id, facility_id, order_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_order_item_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id, order_item_id) REFERENCES public.order_items(tenant_id, inventory_owner_id, order_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_reservation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, reservation_id) REFERENCES public.inventory_reservations(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_task_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, source_inventory_allocation_id, task_id) REFERENCES public.pick_tasks(tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, source_allocation_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_content_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, task_id, pick_task_content_id) REFERENCES public.pick_task_contents(tenant_id, inventory_owner_id, facility_id, task_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_source_allocation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_allocation_id) REFERENCES public.inventory_allocations(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_source_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_source_location_fkey FOREIGN KEY (tenant_id, facility_id, source_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_source_license_plate_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_destination_location_fkey FOREIGN KEY (tenant_id, facility_id, destination_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_item_batch_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_item_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_inventory_hold_fkey FOREIGN KEY (tenant_id, inventory_owner_id, inventory_hold_id) REFERENCES public.inventory_holds(tenant_id, inventory_owner_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_confirmation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, pick_confirmation_id) REFERENCES public.pick_confirmations(tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_transaction_fkey FOREIGN KEY (tenant_id, inventory_owner_id, inventory_transaction_id) REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_destination_allocation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, destination_inventory_allocation_id) REFERENCES public.inventory_allocations(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_destination_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, destination_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_destination_license_plate_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, destination_license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_reported_by_fkey FOREIGN KEY (tenant_id, reported_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+ALTER TABLE ONLY public.pick_shortages
+    ADD CONSTRAINT pick_shortages_resolved_by_fkey FOREIGN KEY (tenant_id, resolved_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
 
 
 --
@@ -17028,6 +18191,32 @@ CREATE POLICY pick_confirmations_tenant_isolation ON public.pick_confirmations U
 
 
 --
+-- Name: pick_shortage_reallocation_runs; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.pick_shortage_reallocation_runs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: pick_shortage_reallocation_runs pick_shortage_reallocation_runs_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY pick_shortage_reallocation_runs_tenant_isolation ON public.pick_shortage_reallocation_runs USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: pick_shortages; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.pick_shortages ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: pick_shortages pick_shortages_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY pick_shortages_tenant_isolation ON public.pick_shortages USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
 -- Name: pick_waves; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -17555,6 +18744,55 @@ REVOKE ALL ON FUNCTION public.require_pick_confirmation() FROM PUBLIC;
 --
 
 REVOKE ALL ON FUNCTION public.require_completed_pick_content() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION guard_pick_shortage_mutation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.guard_pick_shortage_mutation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION reject_pick_shortage_reallocation_run_mutation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.reject_pick_shortage_reallocation_run_mutation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_pick_shortage(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_pick_shortage() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_pick_shortage_reallocation_run(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_pick_shortage_reallocation_run() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION require_pick_confirmation_execution(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.require_pick_confirmation_execution() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION require_pick_shortage_consistency(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.require_pick_shortage_consistency() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION require_pick_shortage_reallocation_consistency(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.require_pick_shortage_reallocation_consistency() FROM PUBLIC;
 
 
 --
@@ -18474,6 +19712,34 @@ GRANT SELECT,INSERT ON TABLE public.pick_confirmations TO wareboxes_app;
 --
 
 GRANT USAGE ON SEQUENCE public.pick_confirmations_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE pick_shortage_reallocation_runs; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.pick_shortage_reallocation_runs TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE pick_shortage_reallocation_runs_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.pick_shortage_reallocation_runs_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE pick_shortages; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.pick_shortages TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE pick_shortages_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.pick_shortages_id_seq TO wareboxes_app;
 
 
 --

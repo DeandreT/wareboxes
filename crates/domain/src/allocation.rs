@@ -14,6 +14,34 @@ pub enum AllocationStrategy {
     Fefo,
 }
 
+/// Physical execution stage of inventory protected by an allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllocationExecutionStage {
+    PickSource,
+    Staged,
+    Packed,
+}
+
+impl AllocationExecutionStage {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PickSource => "pick_source",
+            Self::Staged => "staged",
+            Self::Packed => "packed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "pick_source" => Some(Self::PickSource),
+            "staged" => Some(Self::Staged),
+            "packed" => Some(Self::Packed),
+            _ => None,
+        }
+    }
+}
+
 impl AllocationStrategy {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -325,14 +353,17 @@ pub const fn assess_order_allocation_readiness(
     }
 
     match status {
-        OrderStatus::Open | OrderStatus::Processing => {
+        OrderStatus::Open => {
             if remaining_quantity == 0 {
                 OrderAllocationReadiness::AlreadyFullyAllocated
             } else {
                 OrderAllocationReadiness::Ready
             }
         }
-        OrderStatus::AwaitingPacking | OrderStatus::Packing | OrderStatus::AwaitingShipment
+        OrderStatus::Processing
+        | OrderStatus::AwaitingPacking
+        | OrderStatus::Packing
+        | OrderStatus::AwaitingShipment
             if remaining_quantity == 0 =>
         {
             OrderAllocationReadiness::AlreadyFullyAllocated
@@ -553,6 +584,22 @@ mod tests {
     }
 
     #[test]
+    fn allocation_execution_stages_have_stable_wire_values() {
+        for (stage, value) in [
+            (AllocationExecutionStage::PickSource, "pick_source"),
+            (AllocationExecutionStage::Staged, "staged"),
+            (AllocationExecutionStage::Packed, "packed"),
+        ] {
+            assert_eq!(stage.as_str(), value);
+            assert_eq!(AllocationExecutionStage::parse(value), Some(stage));
+            assert_eq!(
+                serde_json::to_string(&stage).unwrap(),
+                format!("\"{value}\"")
+            );
+        }
+    }
+
+    #[test]
     fn readiness_allows_partial_retries_but_blocks_holds_and_terminal_orders() {
         assert_eq!(
             assess_order_allocation_readiness(OrderStatus::Open, 0, 4),
@@ -560,7 +607,9 @@ mod tests {
         );
         assert_eq!(
             assess_order_allocation_readiness(OrderStatus::Processing, 0, 2),
-            OrderAllocationReadiness::Ready
+            OrderAllocationReadiness::Blocked(
+                OrderAllocationBlockReason::OrderStatusNotAllocatable
+            )
         );
         assert_eq!(
             assess_order_allocation_readiness(OrderStatus::Processing, 0, 0),

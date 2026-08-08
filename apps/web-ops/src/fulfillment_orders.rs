@@ -14,6 +14,7 @@ use crate::api;
 use crate::components::{Icon, SearchField, UiIcon};
 use crate::fulfillment_order_allocation::OrderAllocationPanel;
 use crate::fulfillment_order_cancellation::OrderCancellationPanel;
+use crate::fulfillment_pick_shortages::PickShortageWorkbench;
 use crate::fulfillment_shared::{
     cmp_option_str, optional_text, order_destination, order_status_class, parse_optional_timestamp,
     query_encode, short_timestamp, timestamp_input,
@@ -68,11 +69,14 @@ pub fn OrdersWorkbench(
     let selected_pending = RwSignal::new(false);
     let selected_error = RwSignal::new(None::<String>);
     let create_open = RwSignal::new(false);
+    let shortages_open = RwSignal::new(false);
     let sort = RwSignal::new(SortSpec {
         key: OrderSort::Order,
         direction: SortDirection::Descending,
     });
     let toasts = use_toast_bus();
+    let shortage_facilities = StoredValue::new(access.facilities.clone());
+    let shortage_clients = StoredValue::new(access.inventory_owners.clone());
     let detail_facilities = StoredValue::new(access.facilities);
     let detail_locations = StoredValue::new(locations);
     let create_clients = StoredValue::new(access.inventory_owners);
@@ -149,6 +153,9 @@ pub fn OrdersWorkbench(
     });
 
     view! {
+        <Show
+            when=move || shortages_open.get()
+            fallback=move || view! {
         <div class="fulfillment-workbench" class:create-mode=move || create_open.get()>
             <section class="data-section fulfillment-list">
                 <form class="table-toolbar fulfillment-toolbar" on:submit=submit_search>
@@ -181,6 +188,17 @@ pub fn OrdersWorkbench(
                         </label>
                         <button class="button secondary-action" type="submit" disabled=move || pending.get()>
                             {move || if pending.get() { "Loading" } else { "Apply" }}
+                        </button>
+                        <button
+                            class="button secondary-action"
+                            type="button"
+                            on:click=move |_| {
+                                create_open.set(false);
+                                shortages_open.set(true);
+                            }
+                        >
+                            <Icon icon=UiIcon::Alert/>
+                            "Pick shortages"
                         </button>
                         <button
                             class="button primary-action"
@@ -405,6 +423,15 @@ pub fn OrdersWorkbench(
                 </Show>
             </aside>
         </div>
+            }
+        >
+            <PickShortageWorkbench
+                facilities=shortage_facilities.get_value()
+                inventory_owners=shortage_clients.get_value()
+                on_close=Callback::new(move |_| shortages_open.set(false))
+                on_unauthorized
+            />
+        </Show>
     }
 }
 
