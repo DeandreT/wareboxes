@@ -2,6 +2,7 @@
 use wareboxes_api_contract::v1::ReleaseInventoryHoldRequest;
 use wareboxes_api_contract::v1::{
     CancelOrderRequest, CancelOrderResponse, CloseCartonRequest, CloseCartonResponse,
+    ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,
     CreateCartonRequest, CreateCartonResponse, CreateFulfillmentOrderRequest,
     CreateFulfillmentOrderResponse, InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
     InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
@@ -47,7 +48,8 @@ mod browser {
 
     use super::{
         AccessScopeWorkspace, ApiError, CancelOrderRequest, CancelOrderResponse,
-        CloseCartonRequest, CloseCartonResponse, CreateCartonRequest, CreateCartonResponse,
+        CloseCartonRequest, CloseCartonResponse, ConfigureFacilityShippingOriginRequest,
+        ConfigureFacilityShippingOriginResponse, CreateCartonRequest, CreateCartonResponse,
         CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse,
         CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
         CreateInventoryStatusTransitionRequest, InventoryBalancePage, InventoryHoldPage,
@@ -396,6 +398,19 @@ mod browser {
         .await
     }
 
+    pub async fn configure_facility_shipping_origin(
+        facility_id: i64,
+        request: &ConfigureFacilityShippingOriginRequest,
+        idempotency_key: &str,
+    ) -> Result<ConfigureFacilityShippingOriginResponse, ApiError> {
+        post(
+            &format!("/api/v1/facilities/{facility_id}/shipping-origin-configurations"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
     pub fn new_idempotency_key() -> String {
         uuid::Uuid::new_v4().to_string()
     }
@@ -721,6 +736,15 @@ pub async fn create_inventory_relocation_task(
     _request: &CreateInventoryRelocationTaskRequest,
     _idempotency_key: &str,
 ) -> Result<CreateInventoryRelocationTaskResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn configure_facility_shipping_origin(
+    _facility_id: i64,
+    _request: &ConfigureFacilityShippingOriginRequest,
+    _idempotency_key: &str,
+) -> Result<ConfigureFacilityShippingOriginResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

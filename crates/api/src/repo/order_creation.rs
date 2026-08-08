@@ -151,6 +151,10 @@ pub async fn create_fulfillment_order(
         order.rush(),
         order.ship_by(),
         (
+            destination.recipient().name(),
+            destination.recipient().company(),
+            destination.recipient().phone(),
+            destination.recipient().email(),
             destination.line1(),
             destination.line2(),
             destination.city(),
@@ -202,12 +206,18 @@ pub async fn create_fulfillment_order(
     let address_id = address::insert_address_tx(
         &mut tx,
         access.tenant_id,
-        Some(destination.line1()),
-        destination.line2(),
-        Some(destination.city()),
-        Some(destination.region()),
-        Some(destination.postal_code()),
-        Some(destination.country()),
+        address::NewAddress {
+            name: Some(destination.recipient().name()),
+            company: destination.recipient().company(),
+            line1: destination.line1(),
+            line2: destination.line2(),
+            city: Some(destination.city()),
+            state: Some(destination.region()),
+            postal_code: Some(destination.postal_code()),
+            country: destination.country(),
+            phone: destination.recipient().phone(),
+            email: destination.recipient().email(),
+        },
     )
     .await?;
     let (order_id, revision): (i64, i64) = sqlx::query_as(
@@ -436,6 +446,10 @@ async fn enqueue_created_event(
         "ordered_quantity": ordered_quantity,
         "ship_by": order.ship_by(),
         "destination": {
+            "recipient_name": destination.recipient().name(),
+            "company": destination.recipient().company(),
+            "phone": destination.recipient().phone(),
+            "email": destination.recipient().email(),
             "line1": destination.line1(),
             "line2": destination.line2(),
             "city": destination.city(),

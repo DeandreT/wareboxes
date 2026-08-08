@@ -31,7 +31,7 @@ async fn facilities_by_inventory_owner(
         r#"
         SELECT aw.inventory_owner_id AS inventory_owner_id,
                w.id AS id, w.tenant_id AS tenant_id, w.created AS created, w.deleted AS deleted,
-               w.name AS name, w.address_id AS address_id
+               w.name AS name, w.address_id AS address_id, w.revision AS revision
         FROM inventory_owner_facilities aw
         INNER JOIN facilities w
             ON w.tenant_id = aw.tenant_id AND w.id = aw.facility_id
@@ -52,6 +52,7 @@ async fn facilities_by_inventory_owner(
             deleted: r.try_get("deleted")?,
             name: r.try_get("name")?,
             address_id: r.try_get("address_id")?,
+            revision: r.try_get("revision")?,
         });
     }
     Ok(map)
@@ -72,7 +73,8 @@ async fn facilities_by_inventory_owner_in_scope(
         SELECT owner_facility.inventory_owner_id AS inventory_owner_id,
                facility.id AS id, facility.tenant_id AS tenant_id,
                facility.created AS created, facility.deleted AS deleted,
-               facility.name AS name, facility.address_id AS address_id
+               facility.name AS name, facility.address_id AS address_id,
+               facility.revision AS revision
         FROM inventory_owner_facilities owner_facility
         INNER JOIN facilities facility
             ON facility.tenant_id = owner_facility.tenant_id
@@ -102,6 +104,7 @@ async fn facilities_by_inventory_owner_in_scope(
                 deleted: row.try_get("deleted")?,
                 name: row.try_get("name")?,
                 address_id: row.try_get("address_id")?,
+                revision: row.try_get("revision")?,
             });
     }
     Ok(facilities)

@@ -8,7 +8,8 @@ use wareboxes_api_contract::v1::{
 };
 use wareboxes_domain::{
     CatalogItemId, FulfillmentOrderDemandLine, InventoryOwnerId, NewFulfillmentOrder, OrderKey,
-    OrderLineKey, OrderQuantity, OrderStatus, RequestedUom, ShippingDestination, Timestamp,
+    OrderLineKey, OrderQuantity, OrderStatus, RequestedUom, ShippingDestination, ShippingRecipient,
+    Timestamp,
 };
 
 use super::error::{V1Error, V1Result};
@@ -117,7 +118,15 @@ fn new_fulfillment_order(request: CreateFulfillmentOrderRequest) -> V1Result<New
         .map_err(|error| invalid(error.to_string()))?;
     let order_key = OrderKey::new(request.order_key).map_err(domain_validation)?;
     let ship_by = parse_timestamp(request.ship_by.as_deref(), "ship_by")?;
+    let recipient = ShippingRecipient::new(
+        request.destination.recipient_name,
+        request.destination.company,
+        request.destination.phone,
+        request.destination.email,
+    )
+    .map_err(domain_validation)?;
     let destination = ShippingDestination::new(
+        recipient,
         request.destination.line1,
         request.destination.line2,
         request.destination.city,
@@ -187,6 +196,10 @@ mod tests {
             rush: true,
             ship_by: Some("2027-08-12T10:00:00-07:00".into()),
             destination: FulfillmentOrderDestination {
+                recipient_name: "Receiving Team".into(),
+                company: Some("Northstar Retail".into()),
+                phone: Some("+1 775 555 0100".into()),
+                email: Some("receiving@example.com".into()),
                 line1: "125 Shipping Lane".into(),
                 line2: Some("Dock 4".into()),
                 city: "Reno".into(),
@@ -214,6 +227,7 @@ mod tests {
             order.ship_by().map(Timestamp::to_rfc3339).as_deref(),
             Some("2027-08-12T17:00:00+00:00")
         );
+        assert_eq!(order.destination().recipient().name(), "Receiving Team");
         assert_eq!(order.demand_lines()[0].item_id().get(), 41);
     }
 

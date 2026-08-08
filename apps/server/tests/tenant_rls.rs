@@ -275,7 +275,26 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         ),
         ("cartons", "cartons_tenant_isolation"),
         ("carton_contents", "carton_contents_tenant_isolation"),
+        ("shipments", "shipments_tenant_isolation"),
+        (
+            "shipment_address_snapshots",
+            "shipment_address_snapshots_tenant_isolation",
+        ),
+        ("shipment_cartons", "shipment_cartons_tenant_isolation"),
+        ("shipment_manifests", "shipment_manifests_tenant_isolation"),
+        (
+            "shipment_manifest_packages",
+            "shipment_manifest_packages_tenant_isolation",
+        ),
+        (
+            "shipment_confirmations",
+            "shipment_confirmations_tenant_isolation",
+        ),
         ("facilities", "facilities_tenant_isolation"),
+        (
+            "facility_shipping_origin_configurations",
+            "facility_shipping_origin_configurations_tenant_isolation",
+        ),
         ("locations", "locations_tenant_isolation"),
         ("inventory_owners", "inventory_owners_tenant_isolation"),
         (

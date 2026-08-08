@@ -1,0 +1,274 @@
+use axum::extract::{Path, State};
+use axum::Json;
+use wareboxes_api_contract::v1::{
+    ConfirmShipmentDepartureRequest, ConfirmShipmentDepartureResponse, CreateShipmentRequest,
+    CreateShipmentResponse, ManualCarrierManifestResponse, RecordManualManifestRequest,
+    RecordManualManifestResponse, Revision, ShipmentCartonResponse, ShipmentCartonTrackingResponse,
+    ShipmentOrderStatus, ShipmentResponse, ShipmentStatus as ApiShipmentStatus,
+};
+use wareboxes_application::shipping::{
+    ConfirmShipmentDepartureCommand, ConfirmShipmentDepartureResult, CreateShipmentCommand,
+    CreateShipmentResult, ManualCarrierManifestReadModel, RecordManualManifestCommand,
+    RecordManualManifestResult, ShipmentQuery, ShipmentReadModel,
+};
+use wareboxes_domain::{
+    CarrierCode, CarrierServiceCode, CartonId, CartonTrackingAssignment, ManifestReference,
+    OrderId, OrderRevision, OrderStatus, PackSessionId, ShipmentId, ShipmentRevision,
+    ShipmentScanValue, ShipmentStatus, TrackingNumber,
+};
+
+use super::error::{V1Error, V1Result};
+use crate::auth::CurrentTenant;
+use crate::error::AppError;
+use crate::repo;
+use crate::request_context::IdempotencyKey;
+use crate::state::AppState;
+
+const PERMISSION: &str = "wms";
+
+pub async fn create(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(order_id): Path<i64>,
+    Json(body): Json<CreateShipmentRequest>,
+) -> V1Result<Json<CreateShipmentResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let command = CreateShipmentCommand {
+        order_id: positive(order_id, OrderId::new, "order ID")?,
+        packing_session_id: positive(
+            body.packing_session_id,
+            PackSessionId::new,
+            "packing session ID",
+        )?,
+        expected_revision: order_revision(body.expected_revision)?,
+    };
+    let context = user.command_context(&idempotency_key);
+    let result =
+        repo::shipping::create_shipment(&state.db, &user.tenant, &context, &command).await?;
+    Ok(Json(map_create(result)?))
+}
+
+pub async fn get(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(shipment_id): Path<i64>,
+) -> V1Result<Json<ShipmentResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let shipment = repo::shipping::get_shipment(
+        &state.db,
+        &user.tenant,
+        ShipmentQuery {
+            shipment_id: positive(shipment_id, ShipmentId::new, "shipment ID")?,
+        },
+    )
+    .await?;
+    Ok(Json(map_shipment(shipment)?))
+}
+
+pub async fn record_manifest(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(shipment_id): Path<i64>,
+    Json(body): Json<RecordManualManifestRequest>,
+) -> V1Result<Json<RecordManualManifestResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let command = RecordManualManifestCommand {
+        shipment_id: positive(shipment_id, ShipmentId::new, "shipment ID")?,
+        carrier_code: CarrierCode::new(body.carrier_code).map_err(domain_validation)?,
+        service_code: body
+            .service_code
+            .map(CarrierServiceCode::new)
+            .transpose()
+            .map_err(domain_validation)?,
+        manifest_reference: ManifestReference::new(body.manifest_reference)
+            .map_err(domain_validation)?,
+        carton_tracking_assignments: body
+            .carton_tracking_assignments
+            .into_iter()
+            .map(|assignment| {
+                Ok(CartonTrackingAssignment::new(
+                    positive(assignment.carton_id, CartonId::new, "carton ID")?,
+                    TrackingNumber::new(assignment.tracking_number).map_err(domain_validation)?,
+                ))
+            })
+            .collect::<V1Result<Vec<_>>>()?,
+        expected_revision: shipment_revision(body.expected_revision)?,
+    };
+    let context = user.command_context(&idempotency_key);
+    let result =
+        repo::shipping::record_manual_manifest(&state.db, &user.tenant, &context, &command).await?;
+    Ok(Json(map_manifest_result(result)?))
+}
+
+pub async fn confirm_departure(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(shipment_id): Path<i64>,
+    Json(body): Json<ConfirmShipmentDepartureRequest>,
+) -> V1Result<Json<ConfirmShipmentDepartureResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let command = ConfirmShipmentDepartureCommand {
+        shipment_id: positive(shipment_id, ShipmentId::new, "shipment ID")?,
+        scanned_carton_barcodes: body
+            .scanned_carton_barcodes
+            .into_iter()
+            .map(ShipmentScanValue::new)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(domain_validation)?,
+        expected_shipment_revision: shipment_revision(body.expected_shipment_revision)?,
+        expected_order_revision: order_revision(body.expected_order_revision)?,
+    };
+    let context = user.command_context(&idempotency_key);
+    let result =
+        repo::shipping::confirm_departure(&state.db, &user.tenant, &context, &command).await?;
+    Ok(Json(map_departure(result)?))
+}
+
+fn map_create(result: CreateShipmentResult) -> V1Result<CreateShipmentResponse> {
+    Ok(CreateShipmentResponse {
+        shipment: map_shipment(result.shipment)?,
+        order_status: map_order_status(result.order_status)?,
+        order_revision: revision(result.order_revision.get())?,
+    })
+}
+
+fn map_shipment(shipment: ShipmentReadModel) -> V1Result<ShipmentResponse> {
+    Ok(ShipmentResponse {
+        shipment_id: shipment.shipment_id.get(),
+        packing_session_id: shipment.packing_session_id.get(),
+        order_id: shipment.order_id.get(),
+        order_key: shipment.order_key,
+        inventory_owner_id: shipment.inventory_owner_id.get(),
+        facility_id: shipment.facility_id.get(),
+        status: map_shipment_status(shipment.status),
+        revision: revision(shipment.revision.get())?,
+        order_status: map_order_status(shipment.order_status)?,
+        order_revision: revision(shipment.order_revision.get())?,
+        cartons: shipment
+            .cartons
+            .into_iter()
+            .map(|carton| ShipmentCartonResponse {
+                carton_id: carton.carton_id.get(),
+                carton_barcode: carton.carton_barcode.into_inner(),
+                sequence: carton.sequence,
+                content_count: carton.content_count,
+                packed_quantity: carton.packed_quantity,
+                weight_grams: carton.weight_grams,
+                length_mm: carton.length_mm,
+                width_mm: carton.width_mm,
+                height_mm: carton.height_mm,
+                tracking_assignment_id: carton
+                    .tracking_assignment_id
+                    .map(|assignment_id| assignment_id.get()),
+                tracking_number: carton
+                    .tracking_number
+                    .map(wareboxes_domain::TrackingNumber::into_inner),
+            })
+            .collect(),
+        manifest: shipment.manifest.map(map_manifest),
+        created_by: shipment.created_by.get(),
+        created_at: shipment.created_at.to_rfc3339(),
+        departed_by: shipment.departed_by.map(|user_id| user_id.get()),
+        departed_at: shipment.departed_at.map(|timestamp| timestamp.to_rfc3339()),
+    })
+}
+
+fn map_manifest_result(
+    result: RecordManualManifestResult,
+) -> V1Result<RecordManualManifestResponse> {
+    Ok(RecordManualManifestResponse {
+        shipment_id: result.shipment_id.get(),
+        order_id: result.order_id.get(),
+        status: map_shipment_status(result.status),
+        revision: revision(result.revision.get())?,
+        manifest: map_manifest(result.manifest),
+    })
+}
+
+fn map_manifest(manifest: ManualCarrierManifestReadModel) -> ManualCarrierManifestResponse {
+    ManualCarrierManifestResponse {
+        manifest_id: manifest.manifest_id.get(),
+        carrier_code: manifest.carrier_code.into_inner(),
+        service_code: manifest.service_code.map(CarrierServiceCode::into_inner),
+        manifest_reference: manifest.manifest_reference.into_inner(),
+        carton_tracking_assignments: manifest
+            .carton_tracking_assignments
+            .into_iter()
+            .map(|assignment| ShipmentCartonTrackingResponse {
+                tracking_assignment_id: assignment.tracking_assignment_id.get(),
+                carton_id: assignment.carton_id.get(),
+                tracking_number: assignment.tracking_number.into_inner(),
+            })
+            .collect(),
+        manifested_by: manifest.manifested_by.get(),
+        manifested_at: manifest.manifested_at.to_rfc3339(),
+    }
+}
+
+fn map_departure(
+    result: ConfirmShipmentDepartureResult,
+) -> V1Result<ConfirmShipmentDepartureResponse> {
+    Ok(ConfirmShipmentDepartureResponse {
+        shipment_id: result.shipment_id.get(),
+        order_id: result.order_id.get(),
+        shipment_status: map_shipment_status(result.shipment_status),
+        shipment_revision: revision(result.shipment_revision.get())?,
+        order_status: map_order_status(result.order_status)?,
+        order_revision: revision(result.order_revision.get())?,
+        scanned_carton_count: result.scanned_carton_count,
+        departed_by: result.departed_by.get(),
+        departed_at: result.departed_at.to_rfc3339(),
+    })
+}
+
+const fn map_shipment_status(status: ShipmentStatus) -> ApiShipmentStatus {
+    match status {
+        ShipmentStatus::AwaitingManifest => ApiShipmentStatus::AwaitingManifest,
+        ShipmentStatus::Manifested => ApiShipmentStatus::Manifested,
+        ShipmentStatus::Departed => ApiShipmentStatus::Departed,
+    }
+}
+
+fn map_order_status(status: OrderStatus) -> V1Result<ShipmentOrderStatus> {
+    match status {
+        OrderStatus::AwaitingShipment => Ok(ShipmentOrderStatus::AwaitingShipment),
+        OrderStatus::Shipped => Ok(ShipmentOrderStatus::Shipped),
+        _ => Err(V1Error::internal(
+            "shipping workflow produced an invalid order status",
+        )),
+    }
+}
+
+fn order_revision(value: Revision) -> V1Result<OrderRevision> {
+    OrderRevision::new(value.get()).map_err(domain_validation)
+}
+
+fn shipment_revision(value: Revision) -> V1Result<ShipmentRevision> {
+    ShipmentRevision::new(value.get()).map_err(domain_validation)
+}
+
+fn revision(value: i64) -> V1Result<Revision> {
+    Revision::new(value).map_err(|_| V1Error::internal("shipping produced an invalid revision"))
+}
+
+fn positive<T, E>(
+    value: i64,
+    constructor: impl FnOnce(i64) -> Result<T, E>,
+    field: &str,
+) -> V1Result<T>
+where
+    E: std::fmt::Display,
+{
+    constructor(value).map_err(|error| invalid(format!("{field}: {error}")))
+}
+
+fn domain_validation(error: impl std::fmt::Display) -> V1Error {
+    invalid(error.to_string())
+}
+
+fn invalid(message: impl Into<String>) -> V1Error {
+    AppError::bad_request(message).into()
+}

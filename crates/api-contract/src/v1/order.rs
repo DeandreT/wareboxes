@@ -6,6 +6,10 @@ use super::Revision;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FulfillmentOrderDestination {
+    pub recipient_name: String,
+    pub company: Option<String>,
+    pub phone: Option<String>,
+    pub email: Option<String>,
     pub line1: String,
     pub line2: Option<String>,
     pub city: String,
@@ -86,6 +90,10 @@ mod tests {
             "rush": true,
             "ship_by": "2027-08-12T17:00:00Z",
             "destination": {
+                "recipient_name": "Receiving Team",
+                "company": "Northstar Retail",
+                "phone": "+1 775 555 0100",
+                "email": "receiving@example.com",
                 "line1": "125 Shipping Lane",
                 "line2": "Dock 4",
                 "city": "Reno",
@@ -108,6 +116,7 @@ mod tests {
             .expect("valid order creation request");
         assert_eq!(request.order_key, "SO-1001");
         assert_eq!(request.ship_by.as_deref(), Some("2027-08-12T17:00:00Z"));
+        assert_eq!(request.destination.recipient_name, "Receiving Team");
         assert_eq!(request.destination.region, "NV");
         assert_eq!(request.lines[0].requested_uom, "case");
 

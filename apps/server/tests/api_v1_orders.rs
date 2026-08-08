@@ -25,6 +25,10 @@ struct PersistedOrderHeader {
     status: String,
     revision: i64,
     ship_by: wareboxes_domain::Timestamp,
+    recipient_name: String,
+    company: Option<String>,
+    phone: Option<String>,
+    email: Option<String>,
     line1: String,
     line2: Option<String>,
     city: String,
@@ -159,6 +163,10 @@ fn order_request(
         rush: true,
         ship_by: Some("2027-08-12T10:00:00-07:00".into()),
         destination: FulfillmentOrderDestination {
+            recipient_name: "Receiving Team".into(),
+            company: Some("Northstar Retail".into()),
+            phone: Some("+1 775 555 0100".into()),
+            email: Some("receiving@example.com".into()),
             line1: "125 Shipping Lane".into(),
             line2: Some("Dock 4".into()),
             city: "Reno".into(),
@@ -491,6 +499,8 @@ async fn order_entry_and_creation_are_scoped_atomic_and_replay_safe() {
         r#"
         SELECT orders.id, orders.inventory_owner_id, orders.order_key, orders.rush,
                orders.status, orders.revision, orders.ship_by,
+               addresses.name AS recipient_name, addresses.company,
+               addresses.phone, addresses.email,
                addresses.line1, addresses.line2, addresses.city, addresses.state,
                addresses.postal_code, addresses.country
         FROM orders
@@ -514,6 +524,10 @@ async fn order_entry_and_creation_are_scoped_atomic_and_replay_safe() {
     assert_eq!(header.ship_by.to_rfc3339(), "2027-08-12T17:00:00+00:00");
     assert_eq!(
         (
+            &header.recipient_name,
+            header.company.as_deref(),
+            header.phone.as_deref(),
+            header.email.as_deref(),
             &header.line1,
             header.line2.as_deref(),
             &header.city,
@@ -522,6 +536,10 @@ async fn order_entry_and_creation_are_scoped_atomic_and_replay_safe() {
             &header.country
         ),
         (
+            &"Receiving Team".to_owned(),
+            Some("Northstar Retail"),
+            Some("+1 775 555 0100"),
+            Some("receiving@example.com"),
             &"125 Shipping Lane".to_owned(),
             Some("Dock 4"),
             &"Reno".to_owned(),
@@ -612,6 +630,10 @@ async fn order_entry_and_creation_are_scoped_atomic_and_replay_safe() {
             "ordered_quantity": 7,
             "ship_by": "2027-08-12T17:00:00Z",
             "destination": {
+                "recipient_name": "Receiving Team",
+                "company": "Northstar Retail",
+                "phone": "+1 775 555 0100",
+                "email": "receiving@example.com",
                 "line1": "125 Shipping Lane",
                 "line2": "Dock 4",
                 "city": "Reno",

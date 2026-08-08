@@ -4,6 +4,7 @@ mod cursor;
 mod cycle_count;
 mod error;
 mod expected_receiving;
+mod facility_shipping_origin;
 mod idempotency;
 mod inventory;
 mod inventory_hold;
@@ -22,6 +23,8 @@ mod putaway;
 mod putaway_claim;
 mod revision;
 mod rf_session;
+mod shipping;
+mod shipping_queue;
 
 pub use cursor::{
     CursorPage, CursorPageRequest, OpaqueCursor, OpaqueCursorError, PageLimit, PageLimitError,
@@ -38,6 +41,10 @@ pub use expected_receiving::{
     ConfirmExpectedReceiptRequest, ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
     ExpectedReceiptExceptionReason, ExpectedReceiptLine, ExpectedReceiptLineStatus,
     ExpectedReceivingLoadStatus, ExpectedReceivingLocation, ExpectedReceivingSessionResponse,
+};
+pub use facility_shipping_origin::{
+    ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,
+    FacilityShippingOriginResponse,
 };
 pub use idempotency::{
     IdempotencyKey, IdempotencyKeyError, IDEMPOTENCY_KEY_HEADER, MAX_IDEMPOTENCY_KEY_LENGTH,
@@ -126,6 +133,16 @@ pub use revision::{Revision, RevisionError, RevisionPrecondition};
 pub use rf_session::{
     CreateRfSessionRequest, CreateRfSessionResponse, RfSessionOwnerScope, RfSessionSiteScope,
     RfSessionTenant,
+};
+pub use shipping::{
+    ConfirmShipmentDepartureRequest, ConfirmShipmentDepartureResponse, CreateShipmentRequest,
+    CreateShipmentResponse, ManualCarrierManifestResponse, ManualCartonTrackingRequest,
+    RecordManualManifestRequest, RecordManualManifestResponse, ShipmentCartonResponse,
+    ShipmentCartonTrackingResponse, ShipmentOrderStatus, ShipmentResponse, ShipmentStatus,
+};
+pub use shipping_queue::{
+    ShippingQueueEntryResponse, ShippingQueueFacilityId, ShippingQueueFacilityIdError,
+    ShippingQueuePage, ShippingQueuePageRequest, ShippingQueueShipmentResponse,
 };
 
 /// URL prefix for the version 1 public API.

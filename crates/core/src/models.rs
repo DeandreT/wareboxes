@@ -121,6 +121,7 @@ pub struct Facility {
     pub deleted: Option<Timestamp>,
     pub name: Option<String>,
     pub address_id: Option<i64>,
+    pub revision: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

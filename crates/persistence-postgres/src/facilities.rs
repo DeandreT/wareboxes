@@ -17,6 +17,7 @@ fn map(row: &sqlx::postgres::PgRow) -> PersistenceResult<FacilityReadModel> {
         deleted: row.try_get("deleted")?,
         name: row.try_get("name")?,
         address_id: row.try_get("address_id")?,
+        revision: row.try_get("revision")?,
     })
 }
 
@@ -28,7 +29,7 @@ pub async fn get_facilities(
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
-        SELECT id, tenant_id, created, deleted, name, address_id
+        SELECT id, tenant_id, created, deleted, name, address_id, revision
         FROM facilities
         WHERE tenant_id = $1 AND ($2 OR deleted IS NULL)
         ORDER BY id
@@ -60,7 +61,7 @@ pub async fn get_facilities_in_scope(
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
-        SELECT id, tenant_id, created, deleted, name, address_id
+        SELECT id, tenant_id, created, deleted, name, address_id, revision
         FROM facilities
         WHERE tenant_id = $1
           AND ($2 OR deleted IS NULL)

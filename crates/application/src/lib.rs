@@ -3,6 +3,7 @@
 pub mod authorization;
 mod context;
 mod error;
+pub mod facility_shipping_origin;
 pub mod idempotency;
 pub mod identity;
 pub mod integration;
@@ -13,6 +14,7 @@ pub mod order_release;
 pub mod outbox;
 pub mod packing;
 pub mod picking;
+pub mod shipping;
 pub mod topology;
 
 pub use context::CommandContext;

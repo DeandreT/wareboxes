@@ -1,11 +1,13 @@
 //! Domain identifiers and invariants shared across application boundaries.
 
 mod allocation;
+mod facility;
 mod order;
 mod order_cancellation;
 mod order_release;
 mod packing;
 mod picking;
+mod shipping;
 mod tenant;
 
 pub use allocation::{
@@ -14,14 +16,23 @@ pub use allocation::{
     AllocationShortageReason, AllocationStrategy, OrderAllocationBlockReason,
     OrderAllocationReadiness, OrderRevision, PlannedAllocation,
 };
+pub use facility::{
+    FacilityRevision, FacilityShippingOrigin, FacilityShippingOriginError,
+    FacilityShippingOriginField, MAX_FACILITY_ORIGIN_ADDRESS_LINE_LENGTH,
+    MAX_FACILITY_ORIGIN_CITY_LENGTH, MAX_FACILITY_ORIGIN_COMPANY_LENGTH,
+    MAX_FACILITY_ORIGIN_COUNTRY_LENGTH, MAX_FACILITY_ORIGIN_EMAIL_LENGTH,
+    MAX_FACILITY_ORIGIN_NAME_LENGTH, MAX_FACILITY_ORIGIN_PHONE_LENGTH,
+    MAX_FACILITY_ORIGIN_POSTAL_CODE_LENGTH, MAX_FACILITY_ORIGIN_STATE_LENGTH,
+};
 pub use order::{
     CatalogItemId, FulfillmentOrderDemandLine, NewFulfillmentOrder, OrderCreationError,
     OrderCreationField, OrderHoldReason, OrderHoldTransitionError, OrderKey, OrderLineKey,
-    OrderQuantity, OrderStatus, RequestedUom, ShippingDestination,
+    OrderQuantity, OrderStatus, RequestedUom, ShippingDestination, ShippingRecipient,
     MAX_DESTINATION_ADDRESS_LINE_LENGTH, MAX_DESTINATION_CITY_LENGTH,
-    MAX_DESTINATION_COUNTRY_LENGTH, MAX_DESTINATION_POSTAL_CODE_LENGTH,
-    MAX_DESTINATION_REGION_LENGTH, MAX_ORDER_KEY_LENGTH, MAX_ORDER_LINE_KEY_LENGTH,
-    MAX_REQUESTED_UOM_LENGTH,
+    MAX_DESTINATION_COMPANY_LENGTH, MAX_DESTINATION_COUNTRY_LENGTH, MAX_DESTINATION_EMAIL_LENGTH,
+    MAX_DESTINATION_PHONE_LENGTH, MAX_DESTINATION_POSTAL_CODE_LENGTH,
+    MAX_DESTINATION_RECIPIENT_NAME_LENGTH, MAX_DESTINATION_REGION_LENGTH, MAX_ORDER_KEY_LENGTH,
+    MAX_ORDER_LINE_KEY_LENGTH, MAX_REQUESTED_UOM_LENGTH,
 };
 pub use order_cancellation::{
     CancellationNote, OrderCancellationDetails, OrderCancellationError, OrderCancellationReason,
@@ -36,6 +47,14 @@ pub use packing::{
 pub use picking::{
     PickClaimReleaseReason, PickContentState, PickQuantity, PickScanValue, PickingError,
     MAX_PICK_SCAN_VALUE_LENGTH,
+};
+pub use shipping::{
+    confirm_shipment_departure, create_shipment, record_manual_manifest, CarrierCode,
+    CarrierServiceCode, CartonTrackingAssignment, ManifestReference, ShipmentCartonIdentity,
+    ShipmentDepartureTransition, ShipmentRevision, ShipmentScanValue, ShipmentStatus,
+    ShippingError, ShippingTextField, TrackingNumber, MAX_CARRIER_CODE_LENGTH,
+    MAX_CARRIER_SERVICE_CODE_LENGTH, MAX_MANIFEST_REFERENCE_LENGTH, MAX_SHIPMENT_SCAN_VALUE_LENGTH,
+    MAX_TRACKING_NUMBER_LENGTH,
 };
 pub use tenant::TenantStatus;
 
@@ -100,6 +119,11 @@ macro_rules! positive_id {
 positive_id!(TenantId, "tenant ID");
 positive_id!(InventoryOwnerId, "inventory owner ID");
 positive_id!(FacilityId, "facility ID");
+positive_id!(AddressId, "address ID");
+positive_id!(
+    FacilityShippingOriginConfigurationId,
+    "facility shipping origin configuration ID"
+);
 positive_id!(UserId, "user ID");
 positive_id!(OrderId, "order ID");
 positive_id!(OrderLineId, "order line ID");
@@ -110,6 +134,12 @@ positive_id!(PickContentId, "pick content ID");
 positive_id!(PackSessionId, "pack session ID");
 positive_id!(CartonId, "carton ID");
 positive_id!(CartonContentId, "carton content ID");
+positive_id!(ShipmentId, "shipment ID");
+positive_id!(CarrierManifestId, "carrier manifest ID");
+positive_id!(
+    ShipmentTrackingAssignmentId,
+    "shipment tracking assignment ID"
+);
 positive_id!(AllocationRunId, "allocation run ID");
 positive_id!(InventoryReservationId, "inventory reservation ID");
 positive_id!(InventoryAllocationId, "inventory allocation ID");

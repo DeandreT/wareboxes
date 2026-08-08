@@ -376,12 +376,18 @@ pub async fn insert_test_order_header(
     let address_id = repo::address::insert_address_tx(
         &mut tx,
         tenant_id,
-        Some("1 Main St"),
-        None,
-        Some("Reno"),
-        Some("NV"),
-        Some("89501"),
-        Some("US"),
+        repo::address::NewAddress {
+            name: Some("Test Recipient"),
+            company: None,
+            line1: "1 Main St",
+            line2: None,
+            city: Some("Reno"),
+            state: Some("NV"),
+            postal_code: Some("89501"),
+            country: "US",
+            phone: None,
+            email: None,
+        },
     )
     .await
     .unwrap();
