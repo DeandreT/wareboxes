@@ -17,7 +17,7 @@ use wareboxes_domain::{InventoryOwnerId, TenantId};
 use crate::db::{bind_tenant_context, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
-use crate::repo::{address, tasks};
+use crate::repo::{address, inventory_allocation, tasks};
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
@@ -1657,6 +1657,31 @@ async fn active_order_hold_count_tx(
     .await?)
 }
 
+async fn next_outbox_sequence_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    ordering_key: &str,
+) -> AppResult<i64> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("outbox-sequence:{tenant_id}:{ordering_key}"))
+        .execute(&mut **tx)
+        .await?;
+    Ok(sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(
+            (SELECT last_sequence
+             FROM outbox_aggregate_sequences
+             WHERE tenant_id = $1 AND ordering_key = $2),
+            0
+        ) + 1
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(ordering_key)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn enqueue_order_hold_event(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -1670,24 +1695,7 @@ async fn enqueue_order_hold_event(
     payload: serde_json::Value,
 ) -> AppResult<()> {
     let ordering_key = format!("order:{order_id}");
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("outbox-sequence:{tenant_id}:{ordering_key}"))
-        .execute(&mut **tx)
-        .await?;
-    let aggregate_sequence: i64 = sqlx::query_scalar(
-        r#"
-        SELECT COALESCE(
-            (SELECT last_sequence
-             FROM outbox_aggregate_sequences
-             WHERE tenant_id = $1 AND ordering_key = $2),
-            0
-        ) + 1
-        "#,
-    )
-    .bind(tenant_id.get())
-    .bind(&ordering_key)
-    .fetch_one(&mut **tx)
-    .await?;
+    let aggregate_sequence = next_outbox_sequence_tx(tx, tenant_id, &ordering_key).await?;
     let event_key = format!("order-hold:{hold_id}:{transition}");
     let aggregate_id = order_id.to_string();
     let event_type = format!("order.hold.{transition}");
@@ -1704,6 +1712,56 @@ async fn enqueue_order_hold_event(
             ordering_key: &ordering_key,
             aggregate_sequence,
             event_type: &event_type,
+            schema_version: 1,
+            payload: &payload,
+            occurred_at,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enqueue_order_cancelled_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    inventory_owner_id: InventoryOwnerId,
+    actor_user_id: i64,
+    order_id: i64,
+    facility_id: i64,
+    revision: i64,
+    commitments: inventory_allocation::CancelledOrderCommitments,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+) -> AppResult<()> {
+    let ordering_key = format!("order:{order_id}");
+    let aggregate_sequence = next_outbox_sequence_tx(tx, tenant_id, &ordering_key).await?;
+    let aggregate_id = order_id.to_string();
+    let event_key = format!("order:{order_id}:cancelled:{revision}");
+    let payload = serde_json::json!({
+        "order_id": order_id,
+        "inventory_owner_id": inventory_owner_id.get(),
+        "facility_id": facility_id,
+        "revision": revision,
+        "released_reservation_count": commitments.reservation_count,
+        "released_allocation_count": commitments.allocation_count,
+        "released_quantity": commitments.released_quantity,
+    });
+    outbox::enqueue(
+        tx,
+        &NewOutboxEvent {
+            tenant_id,
+            inventory_owner_id: Some(inventory_owner_id),
+            facility_id: Some(
+                wareboxes_domain::FacilityId::new(facility_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+            ),
+            actor_user_id: Some(actor_user_id),
+            event_key: &event_key,
+            aggregate_type: "order",
+            aggregate_id: &aggregate_id,
+            ordering_key: &ordering_key,
+            aggregate_sequence,
+            event_type: "order.cancelled",
             schema_version: 1,
             payload: &payload,
             occurred_at,
@@ -1738,9 +1796,9 @@ pub async fn cancel_order_with_unpack_task(
         .bind(order_id)
         .execute(&mut *tx)
         .await?;
-    let order: Option<(i64, String)> = sqlx::query_as(
+    let order: Option<(i64, String, i64)> = sqlx::query_as(
         r#"
-        SELECT inventory_owner_id, status
+        SELECT inventory_owner_id, status, revision
         FROM orders
         WHERE tenant_id = $1
           AND id = $2
@@ -1756,13 +1814,75 @@ pub async fn cancel_order_with_unpack_task(
     .bind(&scope.inventory_owner_ids)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((inventory_owner_id, status)) = order else {
+    let Some((inventory_owner_id, status, revision)) = order else {
         tx.rollback().await?;
         return Ok(None);
     };
     let inventory_owner_id = InventoryOwnerId::new(inventory_owner_id)
         .map_err(|error| AppError::internal(error.to_string()))?;
     if status != "cancelled" {
+        let commitments = inventory_allocation::cancel_order_commitments_tx(
+            &mut tx,
+            access.tenant_id,
+            command.actor_id.get(),
+            order_id,
+            &scope,
+        )
+        .await?;
+        let occurred_at = now_iso();
+        let hold_rows = sqlx::query(
+            r#"
+            SELECT id, reason_code
+            FROM order_holds
+            WHERE tenant_id = $1 AND order_id = $2 AND released_at IS NULL
+            ORDER BY id
+            FOR UPDATE
+            "#,
+        )
+        .bind(access.tenant_id.get())
+        .bind(order_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for hold in &hold_rows {
+            let hold_id: i64 = hold.try_get("id")?;
+            let reason: String = hold.try_get("reason_code")?;
+            sqlx::query(
+                r#"
+                UPDATE order_holds
+                SET released_at = $1, released_by_user_id = $2,
+                    release_note = 'Order cancelled'
+                WHERE tenant_id = $3 AND id = $4 AND released_at IS NULL
+                "#,
+            )
+            .bind(occurred_at)
+            .bind(command.actor_id.get())
+            .bind(access.tenant_id.get())
+            .bind(hold_id)
+            .execute(&mut *tx)
+            .await?;
+            enqueue_order_hold_event(
+                &mut tx,
+                access.tenant_id,
+                inventory_owner_id,
+                command.actor_id.get(),
+                order_id,
+                hold_id,
+                "released",
+                occurred_at,
+                serde_json::json!({
+                    "order_id": order_id,
+                    "order_hold_id": hold_id,
+                    "reason": reason,
+                    "release_reason": "order_cancelled",
+                    "order_status": "cancelled",
+                    "active_hold_count": 0,
+                }),
+            )
+            .await?;
+        }
+        let resulting_revision = revision
+            .checked_add(1)
+            .ok_or_else(|| AppError::internal("order revision overflow"))?;
         sqlx::query(
             "UPDATE orders SET status = 'cancelled', revision = revision + 1 WHERE tenant_id = $1 AND id = $2",
         )
@@ -1777,6 +1897,18 @@ pub async fn cancel_order_with_unpack_task(
             order_id,
             Some(command.actor_id.get()),
             "cancelled order",
+        )
+        .await?;
+        enqueue_order_cancelled_event(
+            &mut tx,
+            access.tenant_id,
+            inventory_owner_id,
+            command.actor_id.get(),
+            order_id,
+            facility_id,
+            resulting_revision,
+            commitments,
+            occurred_at,
         )
         .await?;
     }

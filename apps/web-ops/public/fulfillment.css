@@ -5,6 +5,10 @@
   gap: 12px;
 }
 
+.fulfillment-workbench:not(.create-mode) {
+  grid-template-columns: minmax(0, 1.2fr) minmax(480px, 0.9fr);
+}
+
 .fulfillment-workbench.create-mode {
   grid-template-columns: minmax(0, 1fr) minmax(560px, 1fr);
 }

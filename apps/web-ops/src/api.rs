@@ -3,8 +3,9 @@ use wareboxes_api_contract::v1::ReleaseInventoryHoldRequest;
 use wareboxes_api_contract::v1::{
     CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse, InventoryBalancePage,
     InventoryHoldPage, InventoryHoldStatus, InventoryStatusTransitionResponse, OpaqueCursor,
-    OrderEntryItemResponse, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
-    PlaceOrderHoldRequest, PlaceOrderHoldResponse, ReleaseInventoryHoldResponse,
+    OrderAllocationReadinessResponse, OrderEntryItemResponse, PlaceInventoryHoldRequest,
+    PlaceInventoryHoldResponse, PlaceOrderHoldRequest, PlaceOrderHoldResponse,
+    PlanOrderAllocationRequest, PlanOrderAllocationResponse, ReleaseInventoryHoldResponse,
     ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
 };
 use wareboxes_api_contract::v1::{
@@ -18,6 +19,8 @@ use wareboxes_core::dto::{OrderPage, WebSessionContext};
 pub struct ApiError {
     pub message: String,
     pub unauthorized: bool,
+    /// The request may have reached the server, so an idempotent command must reuse its key.
+    pub ambiguous_outcome: bool,
 }
 
 impl ApiError {
@@ -26,6 +29,7 @@ impl ApiError {
         Self {
             message: "The browser API client is unavailable during server rendering.".to_owned(),
             unauthorized: false,
+            ambiguous_outcome: false,
         }
     }
 }
@@ -42,9 +46,10 @@ mod browser {
         CreateFulfillmentOrderResponse, CreateInventoryRelocationTaskRequest,
         CreateInventoryRelocationTaskResponse, CreateInventoryStatusTransitionRequest,
         InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
-        InventoryStatusTransitionResponse, OpaqueCursor, OrderEntryItemResponse, OrderPage,
-        PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
-        PlaceOrderHoldResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
+        InventoryStatusTransitionResponse, OpaqueCursor, OrderAllocationReadinessResponse,
+        OrderEntryItemResponse, OrderPage, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
+        PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
+        PlanOrderAllocationResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
         ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, WebSessionContext,
     };
 
@@ -61,6 +66,7 @@ mod browser {
             .map_err(|error| ApiError {
                 message: format!("Could not prepare the sign-in request: {error}"),
                 unauthorized: false,
+                ambiguous_outcome: false,
             })?;
         decode(request.send().await).await
     }
@@ -71,6 +77,7 @@ mod browser {
             .map_err(|error| ApiError {
                 message: format!("Could not prepare the organization switch request: {error}"),
                 unauthorized: false,
+                ambiguous_outcome: false,
             })?;
         decode(request.send().await).await
     }
@@ -120,6 +127,29 @@ mod browser {
         post("/api/v1/orders", request, idempotency_key).await
     }
 
+    pub async fn order_allocation_readiness(
+        order_id: i64,
+        facility_id: i64,
+    ) -> Result<OrderAllocationReadinessResponse, ApiError> {
+        get(&format!(
+            "/api/v1/orders/{order_id}/allocation-readiness?facility_id={facility_id}"
+        ))
+        .await
+    }
+
+    pub async fn plan_order_allocation(
+        order_id: i64,
+        request: &PlanOrderAllocationRequest,
+        idempotency_key: &str,
+    ) -> Result<PlanOrderAllocationResponse, ApiError> {
+        post(
+            &format!("/api/v1/orders/{order_id}/allocation-runs"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
     pub async fn internal_get<T: DeserializeOwned>(path: &str) -> Result<T, ApiError> {
         get(path).await
     }
@@ -137,6 +167,7 @@ mod browser {
             .map_err(|error| ApiError {
                 message: format!("Could not prepare the command: {error}"),
                 unauthorized: false,
+                ambiguous_outcome: false,
             })?;
         decode(request.send().await).await
     }
@@ -263,6 +294,7 @@ mod browser {
             .map_err(|error| ApiError {
                 message: format!("Could not prepare the command: {error}"),
                 unauthorized: false,
+                ambiguous_outcome: false,
             })?;
         decode(request.send().await).await
     }
@@ -273,12 +305,14 @@ mod browser {
         let response = response.map_err(|error| ApiError {
             message: format!("Wareboxes could not reach the server: {error}"),
             unauthorized: false,
+            ambiguous_outcome: true,
         })?;
         let status = response.status();
         if (200..300).contains(&status) {
             return response.json::<T>().await.map_err(|error| ApiError {
                 message: format!("The server returned an unreadable response: {error}"),
                 unauthorized: false,
+                ambiguous_outcome: true,
             });
         }
 
@@ -297,6 +331,7 @@ mod browser {
         Err(ApiError {
             message,
             unauthorized,
+            ambiguous_outcome: false,
         })
     }
 
@@ -370,6 +405,23 @@ pub async fn create_fulfillment_order(
     _request: &CreateFulfillmentOrderRequest,
     _idempotency_key: &str,
 ) -> Result<CreateFulfillmentOrderResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn order_allocation_readiness(
+    _order_id: i64,
+    _facility_id: i64,
+) -> Result<OrderAllocationReadinessResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn plan_order_allocation(
+    _order_id: i64,
+    _request: &PlanOrderAllocationRequest,
+    _idempotency_key: &str,
+) -> Result<PlanOrderAllocationResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

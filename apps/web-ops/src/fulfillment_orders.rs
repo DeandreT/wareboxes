@@ -12,6 +12,7 @@ use wareboxes_core::models::{Order, OrderStatus};
 
 use crate::api;
 use crate::components::{Icon, SearchField, UiIcon};
+use crate::fulfillment_order_allocation::OrderAllocationPanel;
 use crate::fulfillment_shared::{
     cmp_option_str, optional_text, order_destination, order_status_class, parse_optional_timestamp,
     query_encode, short_timestamp, timestamp_input,
@@ -1482,6 +1483,12 @@ fn OrderDetailPanel(
 
             <Show when=move || tab.get() == OrderDetailTab::Fulfillment>
                 <div class="detail-section-stack">
+                    <OrderAllocationPanel
+                        order_id
+                        facilities=facilities.get_value()
+                        on_refreshed
+                        on_unauthorized
+                    />
                     <section class="detail-section">
                         <div class="detail-section-title">
                             <h3>"Reservations"</h3>

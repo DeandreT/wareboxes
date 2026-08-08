@@ -99,6 +99,7 @@ pub fn ClientsWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                     .map_err(|message| api::ApiError {
                         message,
                         unauthorized: false,
+                        ambiguous_outcome: false,
                     })?;
                 }
                 Ok::<_, api::ApiError>(id)
@@ -156,6 +157,7 @@ pub fn ClientsWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                     |message| api::ApiError {
                         message,
                         unauthorized: false,
+                        ambiguous_outcome: false,
                     },
                 )?;
                 let assigned = api::internal_post::<_, bool>(
@@ -170,6 +172,7 @@ pub fn ClientsWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                     |message| api::ApiError {
                         message,
                         unauthorized: false,
+                        ambiguous_outcome: false,
                     },
                 )
             }

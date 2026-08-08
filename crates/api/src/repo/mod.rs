@@ -18,6 +18,7 @@ mod inventory_status_change;
 pub mod items;
 pub mod license_plates;
 pub mod loads;
+pub mod order_allocation;
 pub mod order_creation;
 pub mod orders;
 pub mod tasks;

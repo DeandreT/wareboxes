@@ -9,6 +9,7 @@ mod components;
 mod fulfillment;
 mod fulfillment_load_detail;
 mod fulfillment_loads;
+mod fulfillment_order_allocation;
 mod fulfillment_orders;
 mod fulfillment_shared;
 mod inventory;

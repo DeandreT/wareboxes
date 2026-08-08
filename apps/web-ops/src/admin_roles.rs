@@ -123,6 +123,7 @@ pub fn RolesWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                     return Err(api::ApiError {
                         message: "The selected role no longer exists.".to_owned(),
                         unauthorized: false,
+                        ambiguous_outcome: false,
                     });
                 }
                 if requested_parent != prior_parent {
@@ -150,6 +151,7 @@ pub fn RolesWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                             message: "The role was updated but its hierarchy could not be changed."
                                 .to_owned(),
                             unauthorized: false,
+                            ambiguous_outcome: false,
                         });
                     }
                 }
