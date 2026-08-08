@@ -4,9 +4,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use wareboxes_api_contract::v1::{
     API_PREFIX, ClaimCycleCountByIdRequest, ClaimInventoryRelocationByIdRequest,
-    ClaimNextCycleCountRequest, ClaimNextInventoryRelocationRequest, ClaimNextPutawayRequest,
-    ClaimPutawayByIdRequest, ConfirmCycleCountRequest, ConfirmExpectedReceiptRequest,
-    ConfirmInventoryRelocationRequest, ConfirmLicensePlatePutawayRequest, ConfirmPutawayRequest,
+    ClaimNextCycleCountRequest, ClaimNextInventoryRelocationRequest, ClaimNextPickRequest,
+    ClaimNextPutawayRequest, ClaimPickByIdRequest, ClaimPutawayByIdRequest,
+    ConfirmCycleCountRequest, ConfirmExpectedReceiptRequest, ConfirmInventoryRelocationRequest,
+    ConfirmLicensePlatePutawayRequest, ConfirmPickContentRequest, ConfirmPutawayRequest,
     CycleCountClaimHeartbeatResponse, CycleCountClaimReleaseReason, CycleCountClaimResponse,
     CycleCountConfirmationResponse, ExpectedReceiptConfirmationResponse,
     ExpectedReceiptDisposition, ExpectedReceiptExceptionReason, ExpectedReceivingLoadStatus,
@@ -15,10 +16,12 @@ use wareboxes_api_contract::v1::{
     InventoryRelocationClaimReleaseReason, InventoryRelocationClaimResponse,
     InventoryRelocationClaimWork, InventoryRelocationConfirmationResponse,
     InventoryRelocationWorkflow, LicensePlatePutawayConfirmationResponse,
-    PutawayClaimHeartbeatResponse, PutawayClaimReleaseReason, PutawayClaimResponse,
-    PutawayClaimSourceLocation, PutawayClaimWork, PutawayConfirmationResponse,
-    PutawayWorkflow as ApiPutawayWorkflow, ReleaseCycleCountClaimRequest,
-    ReleaseInventoryRelocationClaimRequest, ReleasePutawayClaimRequest,
+    PickClaimHeartbeatResponse, PickClaimReleaseReason, PickClaimResponse,
+    PickContentConfirmationResponse, PutawayClaimHeartbeatResponse, PutawayClaimReleaseReason,
+    PutawayClaimResponse, PutawayClaimSourceLocation, PutawayClaimWork,
+    PutawayConfirmationResponse, PutawayWorkflow as ApiPutawayWorkflow,
+    ReleaseCycleCountClaimRequest, ReleaseInventoryRelocationClaimRequest, ReleasePickClaimRequest,
+    ReleasePutawayClaimRequest,
 };
 
 use crate::cycle_count::CycleCountClaim;
@@ -28,6 +31,9 @@ use crate::expected_receiving::{
     FacilityId, InventoryOwnerId, ItemBarcode, ItemId, LoadId, LoadLineId, LocationId,
     NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason, ReceivingDock,
     ReceivingLoadStatus, ReceivingSession, ReceivingSessionInput, StockDimension,
+};
+use crate::picking::{
+    PickClaim, PickClaimContent, PickContentState, PickReleaseReason, PickingCommand,
 };
 use crate::workflow::{
     CommandOutcome, CycleCountCommand, DurableCommandDraft, InventoryRelocationClaim,
@@ -65,6 +71,10 @@ pub enum ResponseKind {
     CycleCountClaim,
     CycleCountConfirmation,
     CycleCountRelease,
+    PickOptionalClaim,
+    PickClaim,
+    PickConfirmation,
+    PickRelease,
     ExpectedReceiptConfirmation,
 }
 
@@ -92,6 +102,8 @@ pub enum WireRequestError {
     InvalidCommandId,
     #[error("task ID must be positive")]
     InvalidTaskId,
+    #[error("pick content ID must be positive")]
+    InvalidPickContentId,
     #[error("load ID must be positive")]
     InvalidLoadId,
     #[error("load line ID must be positive")]
@@ -158,6 +170,16 @@ pub fn build_movement_heartbeat_request_parts(
             serde_json::to_vec(&HeartbeatInventoryRelocationClaimRequest::default())?,
         )),
     }
+}
+
+pub fn build_pick_heartbeat_request_parts(
+    task_id: i64,
+) -> Result<(String, Vec<u8>), WireRequestError> {
+    validate_task_id(task_id)?;
+    Ok((
+        format!("{API_PREFIX}/picking-claims/{task_id}/heartbeats"),
+        serde_json::to_vec(&wareboxes_api_contract::v1::HeartbeatPickClaimRequest::default())?,
+    ))
 }
 
 pub fn build_expected_receiving_session_path(load_id: i64) -> Result<String, WireRequestError> {
@@ -376,6 +398,57 @@ pub fn build_durable_request(
                 ResponseKind::CycleCountRelease,
             )
         }
+        RfCommand::Picking(PickingCommand::ClaimNext) => (
+            format!("{API_PREFIX}/picking-claims/next"),
+            serde_json::to_vec(&ClaimNextPickRequest::default())?,
+            ResponseKind::PickOptionalClaim,
+        ),
+        RfCommand::Picking(PickingCommand::ClaimById { task_id }) => {
+            validate_task_id(*task_id)?;
+            (
+                format!("{API_PREFIX}/picking-claims/{task_id}"),
+                serde_json::to_vec(&ClaimPickByIdRequest::default())?,
+                ResponseKind::PickClaim,
+            )
+        }
+        RfCommand::Picking(PickingCommand::Confirm {
+            task_id,
+            content_id,
+            source_location_barcode,
+            item_barcode,
+            source_license_plate_barcode,
+            destination_license_plate_barcode,
+        }) => {
+            validate_task_id(*task_id)?;
+            if *content_id <= 0 {
+                return Err(WireRequestError::InvalidPickContentId);
+            }
+            (
+                format!("{API_PREFIX}/picking-tasks/{task_id}/contents/{content_id}/confirmations"),
+                serde_json::to_vec(&ConfirmPickContentRequest {
+                    source_location_barcode: source_location_barcode.clone(),
+                    item_barcode: item_barcode.clone(),
+                    source_license_plate_barcode: source_license_plate_barcode.clone(),
+                    destination_license_plate_barcode: destination_license_plate_barcode.clone(),
+                })?,
+                ResponseKind::PickConfirmation,
+            )
+        }
+        RfCommand::Picking(PickingCommand::Release {
+            task_id,
+            reason,
+            note,
+        }) => {
+            validate_task_id(*task_id)?;
+            (
+                format!("{API_PREFIX}/picking-claims/{task_id}/releases"),
+                serde_json::to_vec(&ReleasePickClaimRequest {
+                    reason: map_pick_release_reason(*reason),
+                    note: note.clone(),
+                })?,
+                ResponseKind::PickRelease,
+            )
+        }
         RfCommand::ExpectedReceipt(intent) => {
             if !intent.is_current_and_valid() {
                 return Err(WireRequestError::InvalidExpectedReceiptField {
@@ -488,6 +561,32 @@ pub fn decode_command_response(
                 task_id: response.task_id,
             })
         }
+        ResponseKind::PickOptionalClaim => {
+            let claim = serde_json::from_slice::<Option<PickClaimResponse>>(body)?;
+            Ok(CommandOutcome::PickClaimed(
+                claim.map(map_pick_claim).transpose()?.map(Box::new),
+            ))
+        }
+        ResponseKind::PickClaim => Ok(CommandOutcome::PickClaimed(Some(Box::new(map_pick_claim(
+            serde_json::from_slice::<PickClaimResponse>(body)?,
+        )?)))),
+        ResponseKind::PickConfirmation => {
+            let response = serde_json::from_slice::<PickContentConfirmationResponse>(body)?;
+            Ok(CommandOutcome::PickConfirmed {
+                task_id: response.task_id,
+                content_id: response.content_id,
+                task_completed: response.task_completed,
+                order_ready_to_pack: response.order_ready_to_pack,
+            })
+        }
+        ResponseKind::PickRelease => {
+            let response = serde_json::from_slice::<
+                wareboxes_api_contract::v1::PickClaimReleaseResponse,
+            >(body)?;
+            Ok(CommandOutcome::PickReleased {
+                task_id: response.task_id,
+            })
+        }
         ResponseKind::ExpectedReceiptConfirmation => {
             let response = decode_expected_receipt_confirmation_response_from_body(status, body)?;
             Ok(CommandOutcome::ExpectedReceipt(response))
@@ -515,6 +614,61 @@ pub fn decode_cycle_count_claim_response(
     serde_json::from_slice::<Option<CycleCountClaimResponse>>(body)?
         .map(map_cycle_count_claim)
         .transpose()
+}
+
+pub fn decode_pick_claim_response(body: &[u8]) -> Result<Option<PickClaim>, WireResponseError> {
+    serde_json::from_slice::<Option<PickClaimResponse>>(body)?
+        .map(map_pick_claim)
+        .transpose()
+}
+
+pub fn decode_pick_heartbeat_response(
+    expected_task_id: i64,
+    status: u16,
+    body: &[u8],
+) -> Result<PickClaimHeartbeatResponse, WireResponseError> {
+    if !(200..300).contains(&status) {
+        return Err(WireResponseError::UnsuccessfulStatus(status));
+    }
+    if expected_task_id <= 0 {
+        return Err(WireResponseError::InvalidHeartbeatTaskId);
+    }
+    let response = serde_json::from_slice::<PickClaimHeartbeatResponse>(body)?;
+    validate_heartbeat(
+        expected_task_id,
+        response.task_id,
+        &response.heartbeat_at,
+        &response.lease_expires_at,
+    )?;
+    Ok(response)
+}
+
+fn validate_heartbeat(
+    expected_task_id: i64,
+    actual_task_id: i64,
+    heartbeat_at: &str,
+    lease_expires_at: &str,
+) -> Result<(), WireResponseError> {
+    if actual_task_id <= 0 {
+        return Err(WireResponseError::InvalidHeartbeatTaskId);
+    }
+    if actual_task_id != expected_task_id {
+        return Err(WireResponseError::HeartbeatTaskMismatch {
+            expected: expected_task_id,
+            actual: actual_task_id,
+        });
+    }
+    if DateTime::parse_from_rfc3339(heartbeat_at).is_err() {
+        return Err(WireResponseError::InvalidHeartbeatTimestamp {
+            field: "heartbeat_at",
+        });
+    }
+    if DateTime::parse_from_rfc3339(lease_expires_at).is_err() {
+        return Err(WireResponseError::InvalidHeartbeatTimestamp {
+            field: "lease_expires_at",
+        });
+    }
+    Ok(())
 }
 
 pub fn decode_heartbeat_response(
@@ -887,6 +1041,78 @@ fn map_cycle_count_claim(
         lot: response.stock.lot,
         serial: response.stock.serial,
         inventory_status: inventory_status.into(),
+    })
+}
+
+fn map_pick_claim(response: PickClaimResponse) -> Result<PickClaim, WireResponseError> {
+    let content = response.content;
+    if response.task_id <= 0
+        || response.order_id <= 0
+        || response.inventory_owner_id <= 0
+        || response.facility_id <= 0
+        || response.order_key.trim().is_empty()
+        || response.destination_location_id <= 0
+        || response.destination_location_barcode.trim().is_empty()
+        || content.content_id <= 0
+        || content.order_line_id <= 0
+        || content.inventory_allocation_id <= 0
+        || content.source_inventory_balance_id <= 0
+        || content.item_batch_id <= 0
+        || content.source_location_id <= 0
+        || content.source_location_barcode.trim().is_empty()
+        || content.item_id <= 0
+        || content.item_barcodes.is_empty()
+        || content
+            .item_barcodes
+            .iter()
+            .any(|barcode| barcode.trim().is_empty())
+        || content.uom.trim().is_empty()
+        || content.planned_quantity <= 0
+        || content.state != wareboxes_api_contract::v1::PickContentState::Pending
+        || content
+            .source_license_plate_barcode
+            .as_ref()
+            .is_some_and(|barcode| barcode.trim().is_empty())
+        || DateTime::parse_from_rfc3339(&response.lease_expires_at).is_err()
+    {
+        return Err(WireResponseError::InvalidClaim);
+    }
+    if content.source_license_plate_id.is_some() != content.source_license_plate_barcode.is_some() {
+        return Err(WireResponseError::InvalidClaim);
+    }
+    Ok(PickClaim {
+        task_id: response.task_id,
+        order_id: response.order_id,
+        inventory_owner_id: response.inventory_owner_id,
+        facility_id: response.facility_id,
+        order_key: response.order_key,
+        priority: response.priority,
+        ship_by: response.ship_by,
+        lease_expires_at: response.lease_expires_at,
+        destination_location_id: response.destination_location_id,
+        destination_location_barcode: response.destination_location_barcode,
+        destination_location_name: response.destination_location_name,
+        content: PickClaimContent {
+            content_id: content.content_id,
+            order_line_id: content.order_line_id,
+            inventory_allocation_id: content.inventory_allocation_id,
+            source_inventory_balance_id: content.source_inventory_balance_id,
+            item_batch_id: content.item_batch_id,
+            source_location_id: content.source_location_id,
+            source_location_barcode: content.source_location_barcode,
+            source_location_name: content.source_location_name,
+            source_license_plate_id: content.source_license_plate_id,
+            source_license_plate_barcode: content.source_license_plate_barcode,
+            item_id: content.item_id,
+            item_description: content.item_description,
+            item_barcodes: content.item_barcodes,
+            uom: content.uom,
+            lot: content.lot,
+            serial: content.serial,
+            expiration: content.expiration,
+            planned_quantity: content.planned_quantity,
+            state: PickContentState::Pending,
+        },
     })
 }
 
@@ -1340,6 +1566,17 @@ const fn map_cycle_count_release_reason(reason: ReleaseReason) -> CycleCountClai
     }
 }
 
+const fn map_pick_release_reason(reason: PickReleaseReason) -> PickClaimReleaseReason {
+    match reason {
+        PickReleaseReason::WorkInterrupted => PickClaimReleaseReason::WorkInterrupted,
+        PickReleaseReason::EquipmentUnavailable => PickClaimReleaseReason::EquipmentUnavailable,
+        PickReleaseReason::SourceBlocked => PickClaimReleaseReason::SourceBlocked,
+        PickReleaseReason::InventoryDiscrepancy => PickClaimReleaseReason::InventoryDiscrepancy,
+        PickReleaseReason::SafetyIssue => PickClaimReleaseReason::SafetyIssue,
+        PickReleaseReason::Other => PickClaimReleaseReason::Other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -1370,6 +1607,15 @@ mod tests {
             command_id: "cycle-count-command-1".into(),
             idempotency_key: "cycle-count:key-1".into(),
             command: RfCommand::CycleCount(command),
+        }
+    }
+
+    fn pick_draft(command: PickingCommand) -> DurableCommandDraft {
+        DurableCommandDraft {
+            schema_version: 1,
+            command_id: "pick-command-1".into(),
+            idempotency_key: "pick:key-1".into(),
+            command: RfCommand::Picking(command),
         }
     }
 
@@ -1693,6 +1939,104 @@ mod tests {
             ),
             Err(WireResponseError::InvalidClaim)
         ));
+    }
+
+    #[test]
+    fn pick_commands_use_allocation_content_routes_and_exact_scans() {
+        let next = build_durable_request(&pick_draft(PickingCommand::ClaimNext)).unwrap();
+        assert_eq!(next.path, "/api/v1/picking-claims/next");
+        assert_eq!(body(&next), json!({}));
+        assert_eq!(next.response_kind, ResponseKind::PickOptionalClaim);
+
+        let confirmation = build_durable_request(&pick_draft(PickingCommand::Confirm {
+            task_id: 71,
+            content_id: 81,
+            source_location_barcode: "A-01-02".into(),
+            item_barcode: "ITEM-71".into(),
+            source_license_plate_barcode: Some("LP-71".into()),
+            destination_license_plate_barcode: "TOTE-9".into(),
+        }))
+        .unwrap();
+        assert_eq!(
+            confirmation.path,
+            "/api/v1/picking-tasks/71/contents/81/confirmations"
+        );
+        assert_eq!(
+            body(&confirmation),
+            json!({
+                "source_location_barcode": "A-01-02",
+                "item_barcode": "ITEM-71",
+                "source_license_plate_barcode": "LP-71",
+                "destination_license_plate_barcode": "TOTE-9"
+            })
+        );
+        assert_eq!(confirmation.response_kind, ResponseKind::PickConfirmation);
+
+        let release = build_durable_request(&pick_draft(PickingCommand::Release {
+            task_id: 71,
+            reason: PickReleaseReason::InventoryDiscrepancy,
+            note: Some("Source is short".into()),
+        }))
+        .unwrap();
+        assert_eq!(release.path, "/api/v1/picking-claims/71/releases");
+        assert_eq!(
+            body(&release),
+            json!({"reason": "inventory_discrepancy", "note": "Source is short"})
+        );
+        assert_eq!(release.response_kind, ResponseKind::PickRelease);
+    }
+
+    #[test]
+    fn pick_claim_decoder_preserves_allocation_and_scan_identity() {
+        let response = serde_json::to_vec(&json!({
+            "task_id": 71,
+            "order_id": 72,
+            "inventory_owner_id": 7,
+            "facility_id": 9,
+            "order_key": "SO-72",
+            "priority": 80,
+            "ship_by": "2026-08-09T20:00:00Z",
+            "lease_expires_at": "2026-08-08T20:30:00Z",
+            "destination_location_id": 10,
+            "destination_location_barcode": "PACK-01",
+            "destination_location_name": "Pack lane 1",
+            "content": {
+                "content_id": 81,
+                "order_line_id": 82,
+                "inventory_allocation_id": 83,
+                "source_inventory_balance_id": 84,
+                "item_batch_id": 85,
+                "source_location_id": 11,
+                "source_location_barcode": "A-01-02",
+                "source_location_name": "Forward A-01-02",
+                "source_license_plate_id": 12,
+                "source_license_plate_barcode": "LP-71",
+                "item_id": 13,
+                "item_description": "Widget",
+                "item_barcodes": ["ITEM-71", "000071"],
+                "uom": "case",
+                "lot": "LOT-1",
+                "serial": null,
+                "expiration": "2027-01-01T00:00:00Z",
+                "planned_quantity": 4,
+                "state": "pending"
+            }
+        }))
+        .unwrap();
+
+        let CommandOutcome::PickClaimed(Some(claim)) =
+            decode_command_response(ResponseKind::PickOptionalClaim, 200, &response).unwrap()
+        else {
+            panic!("expected pick claim");
+        };
+        assert_eq!(claim.task_id, 71);
+        assert_eq!(claim.content.content_id, 81);
+        assert_eq!(claim.content.inventory_allocation_id, 83);
+        assert_eq!(claim.content.item_barcodes, vec!["ITEM-71", "000071"]);
+        assert_eq!(
+            claim.content.source_license_plate_barcode.as_deref(),
+            Some("LP-71")
+        );
     }
 
     #[test]

@@ -21,6 +21,8 @@ pub mod loads;
 pub mod order_allocation;
 pub mod order_cancellation;
 pub mod order_creation;
+pub mod order_release;
 pub mod orders;
+pub mod picking;
 pub mod tasks;
 pub mod tenants;

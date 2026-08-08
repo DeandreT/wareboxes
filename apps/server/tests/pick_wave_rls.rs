@@ -126,6 +126,75 @@ async fn pick_waves_remain_inaccessible_until_a_typed_workflow_exists() {
     tx.rollback().await.unwrap();
 }
 
+#[tokio::test]
+async fn typed_picking_tables_expose_only_required_runtime_privileges() {
+    let fixture = Fixture::new().await;
+    for (table_name, can_update) in [
+        ("order_releases", false),
+        ("order_release_allocations", false),
+        ("pick_tasks", true),
+        ("pick_task_contents", true),
+        ("pick_confirmations", false),
+    ] {
+        let privileges: TablePrivileges = sqlx::query_as(
+            r#"
+            SELECT has_table_privilege(current_user, $1, 'SELECT') AS can_select,
+                   has_table_privilege(current_user, $1, 'INSERT') AS can_insert,
+                   has_table_privilege(current_user, $1, 'UPDATE') AS can_update,
+                   has_table_privilege(current_user, $1, 'DELETE') AS can_delete,
+                   has_table_privilege(current_user, $1, 'TRUNCATE') AS can_truncate,
+                   has_table_privilege(current_user, $1, 'REFERENCES') AS can_reference,
+                   has_table_privilege(current_user, $1, 'TRIGGER') AS can_trigger
+            "#,
+        )
+        .bind(table_name)
+        .fetch_one(&fixture.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            privileges,
+            TablePrivileges {
+                can_select: true,
+                can_insert: true,
+                can_update,
+                can_delete: false,
+                can_truncate: false,
+                can_reference: false,
+                can_trigger: false,
+            },
+            "unexpected privileges for {table_name}",
+        );
+    }
+
+    for sequence_name in [
+        "order_releases_id_seq",
+        "pick_tasks_id_seq",
+        "pick_task_contents_id_seq",
+        "pick_confirmations_id_seq",
+    ] {
+        let privileges: SequencePrivileges = sqlx::query_as(
+            r#"
+            SELECT has_sequence_privilege(current_user, $1, 'USAGE') AS can_use,
+                   has_sequence_privilege(current_user, $1, 'SELECT') AS can_select,
+                   has_sequence_privilege(current_user, $1, 'UPDATE') AS can_update
+            "#,
+        )
+        .bind(sequence_name)
+        .fetch_one(&fixture.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            privileges,
+            SequencePrivileges {
+                can_use: true,
+                can_select: false,
+                can_update: false,
+            },
+            "unexpected privileges for {sequence_name}",
+        );
+    }
+}
+
 fn assert_sqlstate(error: sqlx::Error, expected: &str) {
     let code = error.as_database_error().and_then(|error| error.code());
     assert_eq!(code.as_deref(), Some(expected));

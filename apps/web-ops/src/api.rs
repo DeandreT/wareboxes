@@ -7,7 +7,7 @@ use wareboxes_api_contract::v1::{
     OrderEntryItemResponse, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
     PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
     PlanOrderAllocationResponse, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
-    ReleaseOrderHoldResponse,
+    ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
 };
 use wareboxes_api_contract::v1::{
     CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
@@ -52,7 +52,7 @@ mod browser {
         PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
         PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
         ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
-        ReleaseOrderHoldResponse, WebSessionContext,
+        ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse, WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -146,6 +146,19 @@ mod browser {
     ) -> Result<PlanOrderAllocationResponse, ApiError> {
         post(
             &format!("/api/v1/orders/{order_id}/allocation-runs"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn release_order(
+        order_id: i64,
+        request: &ReleaseOrderRequest,
+        idempotency_key: &str,
+    ) -> Result<ReleaseOrderResponse, ApiError> {
+        post(
+            &format!("/api/v1/orders/{order_id}/releases"),
             request,
             idempotency_key,
         )
@@ -437,6 +450,15 @@ pub async fn plan_order_allocation(
     _request: &PlanOrderAllocationRequest,
     _idempotency_key: &str,
 ) -> Result<PlanOrderAllocationResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn release_order(
+    _order_id: i64,
+    _request: &ReleaseOrderRequest,
+    _idempotency_key: &str,
+) -> Result<ReleaseOrderResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

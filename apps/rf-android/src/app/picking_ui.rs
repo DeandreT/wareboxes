@@ -1,0 +1,398 @@
+use eframe::egui;
+use lucide_icons::Icon;
+
+use crate::picking::{PickClaim, PickReleaseReason, PickScanStage};
+use crate::workflow::{Activity, Transition, WorkflowEffect};
+
+use super::RfApp;
+
+impl RfApp {
+    pub(super) fn pick_view(&mut self, ui: &mut egui::Ui) {
+        if self.picking.claim().is_some() {
+            self.pick_active(ui);
+        } else {
+            match self.picking.activity() {
+                Activity::Idle => self.pick_idle(ui),
+                Activity::Active => self
+                    .picking
+                    .require_reconciliation("Active pick is missing its claim details".into()),
+                Activity::Persisting
+                | Activity::ReadyToDispatch
+                | Activity::InFlight
+                | Activity::Ambiguous
+                | Activity::ReconcileRequired => {}
+            }
+        }
+        self.pick_command_state(ui);
+        if let Some(error) = self.picking.error() {
+            ui.colored_label(Self::danger(), egui::RichText::new(error).strong());
+        }
+    }
+
+    fn pick_idle(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("DIRECTED PICKING")
+                .small()
+                .strong()
+                .color(Self::accent()),
+        );
+        ui.label("Claim the highest-priority released pick in your facility scope.");
+        ui.add_space(12.0);
+
+        let can_claim = self.can_execute();
+        let clicked = ui
+            .add_enabled(
+                can_claim,
+                egui::Button::new(egui::RichText::new("Get next pick").strong())
+                    .fill(Self::primary_fill(can_claim))
+                    .min_size(egui::vec2(ui.available_width(), 58.0)),
+            )
+            .clicked();
+        if clicked {
+            let (command_id, key) = Self::command_identity("pick-claim");
+            let effect = self.picking.begin_claim_next(command_id, key);
+            self.emit_pick(effect);
+        }
+
+        if let Some(notice) = self.picking.notice() {
+            ui.add_space(12.0);
+            ui.colored_label(Self::warning(), notice);
+        }
+
+        #[cfg(all(debug_assertions, not(target_os = "android")))]
+        {
+            ui.add_space(12.0);
+            if ui
+                .add_sized(
+                    [ui.available_width(), 48.0],
+                    Self::secondary_button("Load preview pick", ui.available_width(), 48.0),
+                )
+                .clicked()
+            {
+                self.picking.load_debug_claim(debug_pick_claim());
+            }
+        }
+    }
+
+    fn pick_active(&mut self, ui: &mut egui::Ui) {
+        let Some(claim) = self.picking.claim().cloned() else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(&claim.order_key)
+                    .strong()
+                    .color(Self::accent()),
+            );
+            ui.weak("|");
+            ui.label(format!("Pick {}", claim.task_id));
+            ui.weak("|");
+            ui.label(format!("Priority {}", claim.priority));
+        });
+
+        pick_location_band(ui, "SOURCE", &claim.content.source_location_barcode);
+        pick_content_band(ui, &claim);
+        pick_location_band(ui, "DESTINATION", &claim.destination_location_barcode);
+
+        let lease_actions_allowed = if self.picking.activity() == Activity::Active {
+            self.heartbeat_status(ui, claim.task_id)
+        } else {
+            false
+        };
+        if let Some(stage) = self.picking.expected_scan() {
+            self.pick_scan_control(ui, claim.task_id, stage, lease_actions_allowed);
+        }
+
+        ui.add_space(8.0);
+        if self.release_confirmation {
+            self.pick_release_confirmation(ui, lease_actions_allowed);
+        } else {
+            let clicked = ui
+                .add_enabled(
+                    lease_actions_allowed,
+                    Self::secondary_button("Release pick", ui.available_width(), 48.0),
+                )
+                .on_disabled_hover_text("Check pick connection first")
+                .clicked();
+            if clicked && lease_actions_allowed {
+                self.release_confirmation = true;
+            }
+        }
+    }
+
+    fn pick_scan_control(
+        &mut self,
+        ui: &mut egui::Ui,
+        task_id: i64,
+        stage: PickScanStage,
+        lease_actions_allowed: bool,
+    ) {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(stage.prompt())
+                .size(19.0)
+                .strong()
+                .color(Self::accent()),
+        );
+        let response = ui
+            .add_enabled_ui(lease_actions_allowed, |ui| {
+                ui.add_sized(
+                    [ui.available_width(), 56.0],
+                    egui::TextEdit::singleline(self.picking.scan_draft_mut())
+                        .id(egui::Id::new(("pick_scan", task_id, stage)))
+                        .font(egui::TextStyle::Monospace)
+                        .hint_text("SCAN"),
+                )
+            })
+            .inner;
+        let focus_key = (task_id, stage);
+        if lease_actions_allowed && self.pick_scan_focus != Some(focus_key) {
+            response.request_focus();
+            self.pick_scan_focus = Some(focus_key);
+        } else if !lease_actions_allowed {
+            self.pick_scan_focus = None;
+        }
+
+        let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let scan_ready = !self.picking.scan_draft_mut().trim().is_empty();
+        let can_confirm = scan_ready && lease_actions_allowed;
+        let clicked = ui
+            .add_enabled(
+                can_confirm,
+                egui::Button::new(egui::RichText::new("Confirm scan").strong())
+                    .fill(Self::primary_fill(can_confirm))
+                    .min_size(egui::vec2(ui.available_width(), 54.0)),
+            )
+            .on_disabled_hover_text(if lease_actions_allowed {
+                "A scan is required"
+            } else {
+                "Check pick connection first"
+            })
+            .clicked();
+        if lease_actions_allowed && (enter || clicked) {
+            let (command_id, key) = Self::command_identity("pick-confirm");
+            let effect = self.picking.submit_scan(command_id, key);
+            self.emit_pick(effect);
+            self.pick_scan_focus = None;
+        }
+    }
+
+    fn pick_release_confirmation(&mut self, ui: &mut egui::Ui, lease_actions_allowed: bool) {
+        egui::Frame::new()
+            .fill(egui::Color32::from_rgb(57, 42, 21))
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.strong("Return this pick to the queue?");
+                ui.label("Scanned progress will be cleared on this device.");
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(Self::secondary_button(
+                            "Keep pick",
+                            ui.available_width() / 2.0 - 4.0,
+                            48.0,
+                        ))
+                        .clicked()
+                    {
+                        self.release_confirmation = false;
+                    }
+                    let clicked = ui
+                        .add_enabled(
+                            lease_actions_allowed,
+                            egui::Button::new("Return to queue")
+                                .fill(if lease_actions_allowed {
+                                    egui::Color32::from_rgb(112, 72, 18)
+                                } else {
+                                    egui::Color32::from_rgb(28, 34, 32)
+                                })
+                                .min_size(egui::vec2(ui.available_width(), 48.0)),
+                        )
+                        .clicked();
+                    if clicked && lease_actions_allowed {
+                        let (command_id, key) = Self::command_identity("pick-release");
+                        let effect = self.picking.begin_release(
+                            command_id,
+                            key,
+                            PickReleaseReason::WorkInterrupted,
+                            None,
+                        );
+                        self.emit_pick(effect);
+                        self.release_confirmation = false;
+                    }
+                });
+            });
+    }
+
+    fn pick_command_state(&mut self, ui: &mut egui::Ui) {
+        match self.picking.activity() {
+            Activity::Persisting => Self::state_band(
+                ui,
+                Self::warning(),
+                Icon::Save,
+                "Saving pick",
+                "Do not scan again",
+            ),
+            Activity::ReadyToDispatch => Self::state_band(
+                ui,
+                Self::warning(),
+                Icon::Send,
+                "Pick saved",
+                "Waiting for connection. Do not scan again.",
+            ),
+            Activity::InFlight => Self::state_band(
+                ui,
+                Self::warning(),
+                Icon::Loader,
+                "Sending pick",
+                "Waiting for the server. Do not scan again.",
+            ),
+            Activity::Ambiguous => {
+                let message = self
+                    .picking
+                    .ambiguous_message()
+                    .unwrap_or("The pick result is unknown");
+                Self::state_band(
+                    ui,
+                    Self::danger(),
+                    Icon::AlertTriangle,
+                    "Checking last pick",
+                    message,
+                );
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 54.0],
+                        egui::Button::new(egui::RichText::new("Check again").strong())
+                            .fill(egui::Color32::from_rgb(112, 72, 18)),
+                    )
+                    .clicked()
+                {
+                    let effect = self.picking.retry_ambiguous();
+                    self.emit_pick(effect);
+                }
+            }
+            Activity::ReconcileRequired => Self::state_band(
+                ui,
+                Self::danger(),
+                Icon::ShieldAlert,
+                "Picking blocked",
+                self.picking
+                    .reconcile_reason()
+                    .unwrap_or("Device and server pick state must be reconciled"),
+            ),
+            Activity::Idle | Activity::Active => {}
+        }
+    }
+
+    pub(super) fn emit_pick(&mut self, effect: Option<WorkflowEffect>) {
+        if let Some(effect) = effect {
+            self.picking_effects.push_back(effect);
+        }
+    }
+
+    pub(super) fn emit_pick_transition(&mut self, transition: Transition) {
+        if let Transition::Effect(effect) = transition {
+            self.picking_effects.push_back(effect);
+        }
+    }
+
+    #[cfg(all(debug_assertions, not(target_os = "android")))]
+    pub(super) fn load_pick_preview(&mut self) {
+        self.work_mode = super::WorkMode::Pick;
+        self.workflow = crate::workflow::MovementWorkflow::default();
+        self.cycle_count = crate::cycle_count::CycleCountWorkflow::default();
+        self.picking.load_debug_claim(debug_pick_claim());
+    }
+}
+
+fn pick_location_band(ui: &mut egui::Ui, label: &str, barcode: &str) {
+    let width = ui.available_width();
+    egui::Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_min_width((width - 24.0).max(0.0));
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(label).small().strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.monospace(egui::RichText::new(barcode).size(22.0).strong());
+                });
+            });
+        });
+}
+
+fn pick_content_band(ui: &mut egui::Ui, claim: &PickClaim) {
+    let content = &claim.content;
+    let width = ui.available_width();
+    egui::Frame::new()
+        .fill(ui.visuals().extreme_bg_color)
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_min_width((width - 24.0).max(0.0));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{} {}", content.planned_quantity, content.uom))
+                        .size(23.0)
+                        .strong()
+                        .color(RfApp::accent()),
+                );
+                ui.weak("|");
+                ui.label(egui::RichText::new(
+                    content
+                        .item_description
+                        .clone()
+                        .unwrap_or_else(|| format!("Item {}", content.item_id)),
+                ));
+            });
+            ui.horizontal_wrapped(|ui| {
+                if let Some(lot) = content.lot.as_deref() {
+                    ui.monospace(format!("Lot {lot}"));
+                }
+                if let Some(serial) = content.serial.as_deref() {
+                    ui.monospace(format!("Serial {serial}"));
+                }
+                if let Some(plate) = content.source_license_plate_barcode.as_deref() {
+                    ui.monospace(format!("From {plate}"));
+                }
+            });
+        });
+}
+
+#[cfg(all(debug_assertions, not(target_os = "android")))]
+fn debug_pick_claim() -> PickClaim {
+    use crate::picking::{PickClaimContent, PickContentState};
+
+    PickClaim {
+        task_id: 410,
+        order_id: 510,
+        inventory_owner_id: 2,
+        facility_id: 3,
+        order_key: "SO-10510".into(),
+        priority: 90,
+        ship_by: Some("2026-08-09T20:00:00Z".into()),
+        lease_expires_at: "2099-08-08T20:00:00Z".into(),
+        destination_location_id: 9,
+        destination_location_barcode: "STAGE-01".into(),
+        destination_location_name: Some("Outbound stage 1".into()),
+        content: PickClaimContent {
+            content_id: 610,
+            order_line_id: 710,
+            inventory_allocation_id: 810,
+            source_inventory_balance_id: 910,
+            item_batch_id: 1_010,
+            source_location_id: 8,
+            source_location_barcode: "A-01-02".into(),
+            source_location_name: Some("Forward A-01-02".into()),
+            source_license_plate_id: Some(12),
+            source_license_plate_barcode: Some("LP-SOURCE-12".into()),
+            item_id: 1_110,
+            item_description: Some("High-efficiency replacement filters".into()),
+            item_barcodes: vec!["CASE-1110".into()],
+            uom: "case".into(),
+            lot: Some("LOT-2028-08".into()),
+            serial: None,
+            expiration: Some("2028-08-01T00:00:00Z".into()),
+            planned_quantity: 4,
+            state: PickContentState::Pending,
+        },
+    }
+}

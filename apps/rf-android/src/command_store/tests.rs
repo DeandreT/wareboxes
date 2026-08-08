@@ -6,6 +6,7 @@ use crate::expected_receiving::{
     NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason, ReceivingDock,
     ReceivingLoadStatus, StockDimension,
 };
+use crate::picking::PickingCommand;
 use crate::workflow::{CycleCountCommand, InventoryRelocationCommand, MovementKind, ReleaseReason};
 
 fn scope() -> ExecutionScope {
@@ -58,6 +59,22 @@ fn cycle_count_confirmation_draft(command_id: &str, key: &str) -> DurableCommand
             license_plate_barcode: None,
             counted_quantity: 4,
             note: None,
+        }),
+    }
+}
+
+fn pick_confirmation_draft(command_id: &str, key: &str) -> DurableCommandDraft {
+    DurableCommandDraft {
+        schema_version: 1,
+        command_id: command_id.into(),
+        idempotency_key: key.into(),
+        command: RfCommand::Picking(PickingCommand::Confirm {
+            task_id: 91,
+            content_id: 92,
+            source_location_barcode: "A-09-01".into(),
+            item_barcode: "ITEM-91".into(),
+            source_license_plate_barcode: Some("LP-91".into()),
+            destination_license_plate_barcode: "TOTE-91".into(),
         }),
     }
 }
@@ -371,6 +388,23 @@ fn cycle_count_confirmation_survives_the_durable_store_boundary() {
         ResponseKind::CycleCountConfirmation
     );
     assert_eq!(record.draft, draft);
+}
+
+#[test]
+fn pick_confirmation_survives_the_durable_store_boundary() {
+    let mut store = CommandStore::open_in_memory().unwrap();
+    let draft = pick_confirmation_draft("pick-confirm-1", "pick:confirm:91:92");
+
+    let record = store.persist(&scope(), draft.clone()).unwrap();
+
+    assert_eq!(record.operation, CommandOperation::PickConfirmation);
+    assert_eq!(
+        record.request.path,
+        "/api/v1/picking-tasks/91/contents/92/confirmations"
+    );
+    assert_eq!(record.request.response_kind, ResponseKind::PickConfirmation);
+    assert_eq!(record.draft, draft);
+    assert!(record.request.verify_body());
 }
 
 #[test]

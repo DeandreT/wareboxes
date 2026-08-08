@@ -20,7 +20,7 @@ use crate::transport::{
 };
 use crate::wire::{
     decode_claim_response, decode_command_response, decode_cycle_count_claim_response,
-    decode_receiving_session, decode_relocation_claim_response,
+    decode_pick_claim_response, decode_receiving_session, decode_relocation_claim_response,
 };
 use crate::workflow::{
     ClaimOperation, DurableCommandDraft, InventoryRelocationClaim, MovementWorkflow, PutawayClaim,
@@ -72,6 +72,7 @@ enum CurrentMovementClaim {
     Putaway(Option<PutawayClaim>),
     InventoryRelocation(Option<InventoryRelocationClaim>),
     CycleCount(Option<crate::cycle_count::CycleCountClaim>),
+    Picking(Option<crate::picking::PickClaim>),
 }
 
 impl CurrentMovementClaim {
@@ -80,6 +81,7 @@ impl CurrentMovementClaim {
             Self::Putaway(claim) => claim.is_none(),
             Self::InventoryRelocation(claim) => claim.is_none(),
             Self::CycleCount(claim) => claim.is_none(),
+            Self::Picking(claim) => claim.is_none(),
         }
     }
 
@@ -88,6 +90,7 @@ impl CurrentMovementClaim {
             Self::Putaway(claim) => claim.as_ref().map(|claim| claim.details().task_id),
             Self::InventoryRelocation(claim) => claim.as_ref().map(|claim| claim.details().task_id),
             Self::CycleCount(claim) => claim.as_ref().map(|claim| claim.task_id),
+            Self::Picking(claim) => claim.as_ref().map(|claim| claim.task_id),
         }
     }
 
@@ -95,6 +98,7 @@ impl CurrentMovementClaim {
         self,
         workflow: &mut MovementWorkflow,
         cycle_count: &mut crate::cycle_count::CycleCountWorkflow,
+        picking: &mut crate::picking::PickingWorkflow,
     ) {
         match self {
             Self::Putaway(claim) => workflow.restore_current_putaway_claim(claim),
@@ -102,6 +106,7 @@ impl CurrentMovementClaim {
                 workflow.restore_current_inventory_relocation_claim(claim)
             }
             Self::CycleCount(claim) => cycle_count.restore_current_claim(claim),
+            Self::Picking(claim) => picking.restore_current_claim(claim),
         }
     }
 }
@@ -366,6 +371,10 @@ impl RfApp {
             self.restore_cycle_count_command(context, record);
             return;
         }
+        if matches!(record.draft.command, RfCommand::Picking(_)) {
+            self.restore_picking_command(context, record);
+            return;
+        }
         if let Some(operation) = record.draft.command.movement_operation() {
             self.work_mode = super::WorkMode::from(operation);
         }
@@ -463,6 +472,55 @@ impl RfApp {
             CommandStatus::ReconcileRequired | CommandStatus::Dispatching => {
                 self.cycle_count.require_reconciliation(
                     "Saved count work needs supervisor review before inventory changes.".into(),
+                );
+            }
+            CommandStatus::Completed | CommandStatus::Rejected => {}
+        }
+    }
+
+    fn restore_picking_command(&mut self, context: &egui::Context, record: DurableCommandRecord) {
+        self.work_mode = super::WorkMode::Pick;
+        match record.status {
+            CommandStatus::Persisted => {
+                let transition = self
+                    .picking
+                    .restore_ready_command(record.record_id, record.draft);
+                self.emit_pick_transition(transition);
+            }
+            CommandStatus::Ambiguous | CommandStatus::Retryable => {
+                self.picking.restore_ambiguous_command(
+                    record.record_id,
+                    record.draft,
+                    "The server may have received the saved pick. Check it before continuing.",
+                );
+            }
+            CommandStatus::ResponseRecorded => {
+                let response = record.response.clone();
+                self.picking.restore_ambiguous_command(
+                    record.record_id,
+                    record.draft.clone(),
+                    "Applying the saved pick result.",
+                );
+                match response {
+                    Some(response) => {
+                        let scope = record.scope.clone();
+                        self.apply_recorded_response(&scope, record, response);
+                        if self.picking.activity() != crate::workflow::Activity::ReconcileRequired {
+                            self.session_gate = SessionGate::Recovering;
+                            self.request_current_claim_for_operation(
+                                context,
+                                ClaimOperation::Picking,
+                            );
+                        }
+                    }
+                    None => self
+                        .picking
+                        .require_reconciliation("The saved pick response is incomplete.".into()),
+                }
+            }
+            CommandStatus::ReconcileRequired | CommandStatus::Dispatching => {
+                self.picking.require_reconciliation(
+                    "Saved pick work needs supervisor review before inventory changes.".into(),
                 );
             }
             CommandStatus::Completed | CommandStatus::Rejected => {}
@@ -648,6 +706,9 @@ impl RfApp {
                 .map(CurrentMovementClaim::InventoryRelocation),
             ClaimOperation::CycleCount => decode_cycle_count_claim_response(&response.body)
                 .map(CurrentMovementClaim::CycleCount),
+            ClaimOperation::Picking => {
+                decode_pick_claim_response(&response.body).map(CurrentMovementClaim::Picking)
+            }
         };
         match claim {
             Ok(claim) => {
@@ -668,15 +729,23 @@ impl RfApp {
                     self.request_current_claim_for_operation(context, ClaimOperation::CycleCount);
                     return;
                 }
+                if lease_check_task_id.is_none()
+                    && operation == ClaimOperation::CycleCount
+                    && claim.is_none()
+                {
+                    self.request_current_claim_for_operation(context, ClaimOperation::Picking);
+                    return;
+                }
                 self.session_gate = SessionGate::Ready;
                 self.clear_claim_heartbeat();
                 if let Some(expected_task_id) = lease_check_task_id {
                     if claim.task_id() == Some(expected_task_id) && !lease_rejection_check {
-                        claim.restore(&mut self.workflow, &mut self.cycle_count);
+                        claim.restore(&mut self.workflow, &mut self.cycle_count, &mut self.picking);
                         self.work_mode = match operation {
                             ClaimOperation::Putaway => super::WorkMode::Putaway,
                             ClaimOperation::InventoryRelocation => super::WorkMode::Relocate,
                             ClaimOperation::CycleCount => super::WorkMode::Count,
+                            ClaimOperation::Picking => super::WorkMode::Pick,
                         };
                     } else {
                         match operation {
@@ -689,32 +758,42 @@ impl RfApp {
                             ClaimOperation::CycleCount => {
                                 self.cycle_count.restore_current_claim(None)
                             }
+                            ClaimOperation::Picking => self.picking.restore_current_claim(None),
                         }
                         self.work_mode = match operation {
                             ClaimOperation::Putaway => super::WorkMode::Putaway,
                             ClaimOperation::InventoryRelocation => super::WorkMode::Relocate,
                             ClaimOperation::CycleCount => super::WorkMode::Count,
+                            ClaimOperation::Picking => super::WorkMode::Pick,
                         };
-                        if operation == ClaimOperation::CycleCount {
-                            self.cycle_count.require_reconciliation(
+                        match operation {
+                            ClaimOperation::CycleCount => self.cycle_count.require_reconciliation(
                                 "This count is no longer assigned. Contact a supervisor.".into(),
-                            );
-                        } else {
-                            self.workflow.require_reconciliation(
-                                "This task is no longer assigned. Do not move its inventory. Contact a supervisor."
+                            ),
+                            ClaimOperation::Picking => self.picking.require_reconciliation(
+                                "This pick is no longer assigned. Do not move its inventory. Contact a supervisor."
                                     .into(),
-                            );
+                            ),
+                            ClaimOperation::Putaway | ClaimOperation::InventoryRelocation => {
+                                self.workflow.require_reconciliation(
+                                    "This task is no longer assigned. Do not move its inventory. Contact a supervisor."
+                                        .into(),
+                                );
+                            }
                         }
                     }
                 } else if !claim.is_none() {
-                    claim.restore(&mut self.workflow, &mut self.cycle_count);
+                    claim.restore(&mut self.workflow, &mut self.cycle_count, &mut self.picking);
                     self.work_mode = match operation {
                         ClaimOperation::Putaway => super::WorkMode::Putaway,
                         ClaimOperation::InventoryRelocation => super::WorkMode::Relocate,
                         ClaimOperation::CycleCount => super::WorkMode::Count,
+                        ClaimOperation::Picking => super::WorkMode::Pick,
                     };
                 } else {
                     self.workflow.restore_current_putaway_claim(None);
+                    self.cycle_count.restore_current_claim(None);
+                    self.picking.restore_current_claim(None);
                     self.work_mode = super::WorkMode::Putaway;
                 }
                 self.connectivity_notice = None;
@@ -724,9 +803,19 @@ impl RfApp {
             Err(_) => {
                 self.session_gate = SessionGate::Ready;
                 self.clear_claim_heartbeat();
-                self.workflow.require_reconciliation(
-                    "The server returned invalid current-work data.".into(),
-                );
+                match operation {
+                    ClaimOperation::CycleCount => self.cycle_count.require_reconciliation(
+                        "The server returned invalid current-count data.".into(),
+                    ),
+                    ClaimOperation::Picking => self.picking.require_reconciliation(
+                        "The server returned invalid current-pick data.".into(),
+                    ),
+                    ClaimOperation::Putaway | ClaimOperation::InventoryRelocation => {
+                        self.workflow.require_reconciliation(
+                            "The server returned invalid current-work data.".into(),
+                        )
+                    }
+                }
             }
         }
     }
@@ -742,12 +831,14 @@ impl RfApp {
         self.clear_claim_heartbeat();
         self.lease_check_task_id = Some(task_id);
         self.lease_rejection_check = false;
-        let operation =
-            if self.work_mode == super::WorkMode::Count || self.cycle_count.claim().is_some() {
-                ClaimOperation::CycleCount
-            } else {
-                self.workflow.operation().into()
-            };
+        let operation = if self.work_mode == super::WorkMode::Pick || self.picking.claim().is_some()
+        {
+            ClaimOperation::Picking
+        } else if self.work_mode == super::WorkMode::Count || self.cycle_count.claim().is_some() {
+            ClaimOperation::CycleCount
+        } else {
+            self.workflow.operation().into()
+        };
         self.request_current_claim_for_operation(context, operation);
     }
 
@@ -785,6 +876,7 @@ impl RfApp {
             };
             let command_id = draft.command_id.clone();
             let is_cycle_count = matches!(draft.command, RfCommand::CycleCount(_));
+            let is_picking = matches!(draft.command, RfCommand::Picking(_));
             match store.persist(scope, draft) {
                 Ok(record) => {
                     if is_cycle_count {
@@ -792,6 +884,11 @@ impl RfApp {
                             .cycle_count
                             .command_persisted(&command_id, record.record_id);
                         self.emit_count_transition(transition);
+                    } else if is_picking {
+                        let transition = self
+                            .picking
+                            .command_persisted(&command_id, record.record_id);
+                        self.emit_pick_transition(transition);
                     } else {
                         let transition = self
                             .workflow
@@ -803,6 +900,10 @@ impl RfApp {
                     if is_cycle_count {
                         self.cycle_count.require_reconciliation(format!(
                             "The count could not be stored durably: {error}"
+                        ));
+                    } else if is_picking {
+                        self.picking.require_reconciliation(format!(
+                            "The pick could not be stored durably: {error}"
                         ));
                     } else {
                         self.workflow.require_reconciliation(format!(
@@ -836,9 +937,19 @@ impl RfApp {
             let attempt = match store.begin_attempt(scope, record_id) {
                 Ok(attempt) => attempt,
                 Err(_) => {
-                    self.workflow.require_reconciliation(
-                        "The saved command could not enter network dispatch.".into(),
-                    );
+                    if self.picking.owns_record(record_id) {
+                        self.picking.require_reconciliation(
+                            "The saved pick could not enter network dispatch.".into(),
+                        );
+                    } else if self.cycle_count.owns_record(record_id) {
+                        self.cycle_count.require_reconciliation(
+                            "The saved count could not enter network dispatch.".into(),
+                        );
+                    } else {
+                        self.workflow.require_reconciliation(
+                            "The saved command could not enter network dispatch.".into(),
+                        );
+                    }
                     continue;
                 }
             };
@@ -856,14 +967,26 @@ impl RfApp {
                         &attempt.attempt_id,
                         &error.to_string(),
                     );
-                    self.workflow.require_reconciliation(
-                        "The saved command failed its integrity check.".into(),
-                    );
+                    if self.picking.owns_record(record_id) {
+                        self.picking.require_reconciliation(
+                            "The saved pick failed its integrity check.".into(),
+                        );
+                    } else if self.cycle_count.owns_record(record_id) {
+                        self.cycle_count.require_reconciliation(
+                            "The saved count failed its integrity check.".into(),
+                        );
+                    } else {
+                        self.workflow.require_reconciliation(
+                            "The saved command failed its integrity check.".into(),
+                        );
+                    }
                     continue;
                 }
             };
             if matches!(attempt.command.draft.command, RfCommand::CycleCount(_)) {
                 self.cycle_count.dispatch_started(record_id);
+            } else if matches!(attempt.command.draft.command, RfCommand::Picking(_)) {
+                self.picking.dispatch_started(record_id);
             } else {
                 self.workflow.dispatch_started(record_id);
             }
@@ -891,6 +1014,14 @@ impl RfApp {
             {
                 self.require_receiving_reconciliation(
                     "The authenticated device scope was lost during dispatch.",
+                );
+            } else if self.picking.owns_record(record_id) {
+                self.picking.require_reconciliation(
+                    "The authenticated device scope was lost during pick dispatch.".into(),
+                );
+            } else if self.cycle_count.owns_record(record_id) {
+                self.cycle_count.require_reconciliation(
+                    "The authenticated device scope was lost during count dispatch.".into(),
                 );
             } else {
                 self.workflow.require_reconciliation(
@@ -926,6 +1057,11 @@ impl RfApp {
                             record_id,
                             "The server may have received the count. Check it before continuing.",
                         );
+                    } else if matches!(stored.draft.command, RfCommand::Picking(_)) {
+                        self.picking.dispatch_ambiguous(
+                            record_id,
+                            "The server may have received the pick. Check it before continuing.",
+                        );
                     } else {
                         self.workflow.dispatch_ambiguous(
                             record_id,
@@ -941,6 +1077,14 @@ impl RfApp {
                     {
                         self.require_receiving_reconciliation(
                             "The interrupted receipt could not be saved for recovery.",
+                        );
+                    } else if self.picking.owns_record(record_id) {
+                        self.picking.require_reconciliation(
+                            "The interrupted pick could not be saved for recovery.".into(),
+                        );
+                    } else if self.cycle_count.owns_record(record_id) {
+                        self.cycle_count.require_reconciliation(
+                            "The interrupted count could not be saved for recovery.".into(),
                         );
                     } else {
                         self.workflow.require_reconciliation(
@@ -971,6 +1115,10 @@ impl RfApp {
                     self.cycle_count.require_reconciliation(
                         "The retryable count result could not be saved.".into(),
                     );
+                } else if self.picking.owns_record(record_id) {
+                    self.picking.require_reconciliation(
+                        "The retryable pick result could not be saved.".into(),
+                    );
                 } else {
                     self.workflow.require_reconciliation(
                         "The retryable server result could not be saved.".into(),
@@ -980,6 +1128,7 @@ impl RfApp {
             };
             let is_receiving = stored.operation == CommandOperation::ExpectedReceiptConfirmation;
             let is_cycle_count = matches!(stored.draft.command, RfCommand::CycleCount(_));
+            let is_picking = matches!(stored.draft.command, RfCommand::Picking(_));
             if response.status == 401 {
                 if is_receiving {
                     if let Some(runtime) = self.receiving_command.as_mut() {
@@ -994,6 +1143,12 @@ impl RfApp {
                         record_id,
                         stored.draft,
                         "Sign in with the same operator account to recover this saved count.",
+                    );
+                } else if is_picking {
+                    self.picking.restore_ambiguous_command(
+                        record_id,
+                        stored.draft,
+                        "Sign in with the same operator account to recover this saved pick.",
                     );
                 } else {
                     self.workflow.restore_ambiguous_command(
@@ -1024,6 +1179,11 @@ impl RfApp {
                         record_id,
                         "The service is temporarily unavailable. Check the saved count again.",
                     );
+                } else if is_picking {
+                    self.picking.dispatch_ambiguous(
+                        record_id,
+                        "The service is temporarily unavailable. Check the saved pick again.",
+                    );
                 } else {
                     self.workflow.dispatch_ambiguous(
                         record_id,
@@ -1049,6 +1209,14 @@ impl RfApp {
                 {
                     self.require_receiving_reconciliation(
                         "The receipt result could not be stored durably.",
+                    );
+                } else if self.picking.owns_record(record_id) {
+                    self.picking.require_reconciliation(
+                        "The pick result could not be stored durably.".into(),
+                    );
+                } else if self.cycle_count.owns_record(record_id) {
+                    self.cycle_count.require_reconciliation(
+                        "The count result could not be stored durably.".into(),
                     );
                 } else {
                     self.workflow.require_reconciliation(
@@ -1079,10 +1247,16 @@ impl RfApp {
                 }
                 Ok(outcome) => {
                     let is_cycle_count = matches!(
-                        outcome,
+                        &outcome,
                         crate::workflow::CommandOutcome::CycleCountClaimed(_)
                             | crate::workflow::CommandOutcome::CycleCountConfirmed { .. }
                             | crate::workflow::CommandOutcome::CycleCountReleased { .. }
+                    );
+                    let is_picking = matches!(
+                        &outcome,
+                        crate::workflow::CommandOutcome::PickClaimed(_)
+                            | crate::workflow::CommandOutcome::PickConfirmed { .. }
+                            | crate::workflow::CommandOutcome::PickReleased { .. }
                     );
                     if self
                         .finalize_record(scope, record_id, CommandStatus::Completed, None)
@@ -1091,6 +1265,8 @@ impl RfApp {
                         if is_cycle_count {
                             self.cycle_count
                                 .durable_outcome_recorded(record_id, outcome);
+                        } else if is_picking {
+                            self.picking.durable_outcome_recorded(record_id, outcome);
                         } else {
                             self.workflow.durable_outcome_recorded(record_id, outcome);
                         }
@@ -1103,6 +1279,18 @@ impl RfApp {
                             scope,
                             record_id,
                             "The server returned an invalid receipt result.",
+                        );
+                    } else if matches!(recorded.draft.command, RfCommand::Picking(_)) {
+                        self.require_pick_record_reconciliation(
+                            scope,
+                            record_id,
+                            "The server returned an invalid pick result.",
+                        );
+                    } else if matches!(recorded.draft.command, RfCommand::CycleCount(_)) {
+                        self.require_count_record_reconciliation(
+                            scope,
+                            record_id,
+                            "The server returned an invalid count result.",
                         );
                     } else {
                         self.require_record_reconciliation(
@@ -1137,6 +1325,8 @@ impl RfApp {
                 if matches!(recorded.draft.command, RfCommand::CycleCount(_)) {
                     self.cycle_count
                         .durable_rejection_recorded(record_id, message);
+                } else if matches!(recorded.draft.command, RfCommand::Picking(_)) {
+                    self.picking.durable_rejection_recorded(record_id, message);
                 } else {
                     self.workflow.durable_rejection_recorded(record_id, message);
                 }
@@ -1150,6 +1340,8 @@ impl RfApp {
                 self.require_receiving_record_reconciliation(scope, record_id, &message);
             } else if matches!(recorded.draft.command, RfCommand::CycleCount(_)) {
                 self.require_count_record_reconciliation(scope, record_id, &message);
+            } else if matches!(recorded.draft.command, RfCommand::Picking(_)) {
+                self.require_pick_record_reconciliation(scope, record_id, &message);
             } else {
                 self.require_record_reconciliation(scope, record_id, &message);
             }
@@ -1294,6 +1486,10 @@ impl RfApp {
                     self.cycle_count.require_reconciliation(
                         "The durable count command could not be finalized.".into(),
                     );
+                } else if self.picking.owns_record(record_id) {
+                    self.picking.require_reconciliation(
+                        "The durable pick command could not be finalized.".into(),
+                    );
                 } else {
                     self.workflow.require_reconciliation(
                         "The durable command could not be finalized.".into(),
@@ -1325,6 +1521,10 @@ impl RfApp {
                 .is_some_and(|runtime| runtime.record_id == record_id)
             {
                 self.require_receiving_reconciliation(message);
+            } else if self.picking.owns_record(record_id) {
+                self.picking.require_reconciliation(message.into());
+            } else if self.cycle_count.owns_record(record_id) {
+                self.cycle_count.require_reconciliation(message.into());
             } else {
                 self.workflow.require_reconciliation(message.into());
             }
@@ -1347,6 +1547,25 @@ impl RfApp {
             .is_some()
         {
             self.cycle_count.require_reconciliation(message.into());
+        }
+    }
+
+    fn require_pick_record_reconciliation(
+        &mut self,
+        scope: &ExecutionScope,
+        record_id: i64,
+        message: &str,
+    ) {
+        if self
+            .finalize_record(
+                scope,
+                record_id,
+                CommandStatus::ReconcileRequired,
+                Some(message),
+            )
+            .is_some()
+        {
+            self.picking.require_reconciliation(message.into());
         }
     }
 

@@ -1883,6 +1883,709 @@ $$;
 
 
 --
+-- Name: reject_order_release_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_order_release_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'order release records are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: guard_pick_task_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_pick_task_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'pick tasks are retained permanently'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.order_release_id IS DISTINCT FROM OLD.order_release_id
+       OR NEW.order_id IS DISTINCT FROM OLD.order_id
+       OR NEW.order_item_id IS DISTINCT FROM OLD.order_item_id
+       OR NEW.reservation_id IS DISTINCT FROM OLD.reservation_id
+       OR NEW.source_allocation_id IS DISTINCT FROM OLD.source_allocation_id
+       OR NEW.destination_location_id IS DISTINCT FROM OLD.destination_location_id
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+       OR NEW.priority IS DISTINCT FROM OLD.priority
+       OR NEW.ship_by IS DISTINCT FROM OLD.ship_by
+       OR NEW.task_timeout_seconds IS DISTINCT FROM OLD.task_timeout_seconds
+    THEN
+        RAISE EXCEPTION 'pick task planning dimensions are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF OLD.status = 'completed' THEN
+        RAISE EXCEPTION 'completed pick tasks are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF OLD.status = 'open' AND NEW.status = 'in_progress' THEN
+        IF NEW.release_count IS DISTINCT FROM OLD.release_count
+           OR NEW.last_released_at IS DISTINCT FROM OLD.last_released_at
+           OR NEW.last_release_reason IS DISTINCT FROM OLD.last_release_reason
+           OR NEW.last_release_note IS DISTINCT FROM OLD.last_release_note
+        THEN
+            RAISE EXCEPTION 'claiming pick work cannot change release history'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF OLD.status = 'in_progress' AND NEW.status = 'open' THEN
+        IF NEW.release_count <> OLD.release_count + 1
+           OR NEW.last_released_at IS NULL
+           OR NEW.last_release_reason IS NULL
+        THEN
+            RAISE EXCEPTION 'releasing pick work requires release attribution'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF OLD.status = 'in_progress' AND NEW.status = 'completed' THEN
+        IF NEW.assigned_user_id IS DISTINCT FROM OLD.assigned_user_id
+           OR NEW.claimed_at IS DISTINCT FROM OLD.claimed_at
+           OR NEW.release_count IS DISTINCT FROM OLD.release_count
+           OR NEW.last_released_at IS DISTINCT FROM OLD.last_released_at
+           OR NEW.last_release_reason IS DISTINCT FROM OLD.last_release_reason
+           OR NEW.last_release_note IS DISTINCT FROM OLD.last_release_note
+        THEN
+            RAISE EXCEPTION 'pick completion cannot change claim attribution'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF OLD.status = 'in_progress' AND NEW.status = 'in_progress' THEN
+        IF NEW.assigned_user_id IS DISTINCT FROM OLD.assigned_user_id
+           OR NEW.claimed_at IS DISTINCT FROM OLD.claimed_at
+           OR NEW.release_count IS DISTINCT FROM OLD.release_count
+           OR NEW.last_released_at IS DISTINCT FROM OLD.last_released_at
+           OR NEW.last_release_reason IS DISTINCT FROM OLD.last_release_reason
+           OR NEW.last_release_note IS DISTINCT FROM OLD.last_release_note
+           OR NEW.completed_at IS DISTINCT FROM OLD.completed_at
+           OR NEW.lease_expires_at <= OLD.lease_expires_at
+        THEN
+            RAISE EXCEPTION 'pick heartbeat may only extend the active lease'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'invalid pick task lifecycle transition'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: guard_pick_task_content_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_pick_task_content_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'pick task contents are retained permanently'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.task_id IS DISTINCT FROM OLD.task_id
+       OR NEW.order_release_id IS DISTINCT FROM OLD.order_release_id
+       OR NEW.order_id IS DISTINCT FROM OLD.order_id
+       OR NEW.order_item_id IS DISTINCT FROM OLD.order_item_id
+       OR NEW.reservation_id IS DISTINCT FROM OLD.reservation_id
+       OR NEW.source_allocation_id IS DISTINCT FROM OLD.source_allocation_id
+       OR NEW.source_inventory_balance_id IS DISTINCT FROM OLD.source_inventory_balance_id
+       OR NEW.source_location_id IS DISTINCT FROM OLD.source_location_id
+       OR NEW.source_license_plate_id IS DISTINCT FROM OLD.source_license_plate_id
+       OR NEW.item_batch_id IS DISTINCT FROM OLD.item_batch_id
+       OR NEW.item_id IS DISTINCT FROM OLD.item_id
+       OR NEW.uom IS DISTINCT FROM OLD.uom
+       OR NEW.inventory_status IS DISTINCT FROM OLD.inventory_status
+       OR NEW.planned_qty IS DISTINCT FROM OLD.planned_qty
+       OR NEW.travel_sequence IS DISTINCT FROM OLD.travel_sequence
+    THEN
+        RAISE EXCEPTION 'pick task content snapshot is immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF OLD.state <> 'pending'
+       OR NEW.state <> 'completed'
+       OR OLD.completed_at IS NOT NULL
+       OR NEW.completed_at IS NULL
+    THEN
+        RAISE EXCEPTION 'invalid pick content lifecycle transition'
+            USING ERRCODE = '55000';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: reject_pick_confirmation_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_pick_confirmation_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'pick confirmations are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: validate_order_release(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_order_release() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    location_matches BOOLEAN;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.locations location
+        WHERE location.tenant_id = NEW.tenant_id
+          AND location.facility_id = NEW.facility_id
+          AND location.id = NEW.destination_location_id
+          AND location.deleted IS NULL
+          AND location.active
+          AND NOT location.pickable
+          AND location.barcode IS NOT NULL
+          AND location.barcode = btrim(location.barcode)
+          AND location.barcode <> ''
+          AND lower(location.type) IN ('staging', 'packing')
+    ) INTO location_matches;
+
+    IF NOT location_matches THEN
+        RAISE EXCEPTION 'order release destination must be an active scannable staging or packing location'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_order_release_allocation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_order_release_allocation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    release_row RECORD;
+    allocation_row RECORD;
+BEGIN
+    SELECT release.inventory_owner_id, release.facility_id, release.order_id
+    INTO release_row
+    FROM public.order_releases release
+    WHERE release.tenant_id = NEW.tenant_id
+      AND release.id = NEW.order_release_id;
+
+    SELECT allocation.reservation_id, allocation.inventory_balance_id,
+           allocation.facility_id, allocation.location_id,
+           allocation.license_plate_id, allocation.item_batch_id,
+           allocation.item_id, allocation.uom, allocation.inventory_status,
+           allocation.qty, allocation.status, allocation.deleted,
+           reservation.order_id, reservation.order_item_id,
+           (source_location.deleted IS NULL
+            AND source_location.active
+            AND source_location.pickable
+            AND source_location.barcode IS NOT NULL
+            AND source_location.barcode = btrim(source_location.barcode)
+            AND source_location.barcode <> '') AS source_is_ready
+    INTO allocation_row
+    FROM public.inventory_allocations allocation
+    INNER JOIN public.inventory_reservations reservation
+        ON reservation.tenant_id = allocation.tenant_id
+       AND reservation.inventory_owner_id = allocation.inventory_owner_id
+       AND reservation.id = allocation.reservation_id
+    INNER JOIN public.locations source_location
+        ON source_location.tenant_id = allocation.tenant_id
+       AND source_location.facility_id = allocation.facility_id
+       AND source_location.id = allocation.location_id
+    WHERE allocation.tenant_id = NEW.tenant_id
+      AND allocation.inventory_owner_id = NEW.inventory_owner_id
+      AND allocation.id = NEW.allocation_id
+    FOR SHARE OF allocation, reservation;
+
+    IF release_row.order_id IS NULL OR allocation_row.order_id IS NULL THEN
+        RAISE EXCEPTION 'release allocation dependencies do not exist'
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF NEW.inventory_owner_id IS DISTINCT FROM release_row.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM release_row.facility_id
+       OR NEW.order_id IS DISTINCT FROM release_row.order_id
+       OR NEW.order_id IS DISTINCT FROM allocation_row.order_id
+       OR NEW.order_item_id IS DISTINCT FROM allocation_row.order_item_id
+       OR NEW.reservation_id IS DISTINCT FROM allocation_row.reservation_id
+       OR NEW.inventory_balance_id IS DISTINCT FROM allocation_row.inventory_balance_id
+       OR NEW.source_location_id IS DISTINCT FROM allocation_row.location_id
+       OR NEW.source_license_plate_id IS DISTINCT FROM allocation_row.license_plate_id
+       OR NEW.item_batch_id IS DISTINCT FROM allocation_row.item_batch_id
+       OR NEW.item_id IS DISTINCT FROM allocation_row.item_id
+       OR NEW.uom IS DISTINCT FROM allocation_row.uom
+       OR NEW.inventory_status IS DISTINCT FROM allocation_row.inventory_status
+       OR NEW.planned_qty IS DISTINCT FROM allocation_row.qty
+       OR NEW.facility_id IS DISTINCT FROM allocation_row.facility_id
+       OR allocation_row.status <> 'allocated'
+       OR allocation_row.deleted IS NOT NULL
+       OR allocation_row.inventory_status <> 'available'
+       OR NOT allocation_row.source_is_ready
+    THEN
+        RAISE EXCEPTION 'release snapshot does not match its active allocation'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_order_release_execution(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_order_release_execution() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    snapshot_count BIGINT;
+    snapshot_qty BIGINT;
+    task_count BIGINT;
+    content_count BIGINT;
+    final_order_matches BOOLEAN;
+BEGIN
+    SELECT COUNT(*), COALESCE(SUM(snapshot.planned_qty), 0)::BIGINT
+    INTO snapshot_count, snapshot_qty
+    FROM public.order_release_allocations snapshot
+    WHERE snapshot.tenant_id = NEW.tenant_id
+      AND snapshot.order_release_id = NEW.id;
+
+    SELECT COUNT(*) INTO task_count
+    FROM public.pick_tasks task
+    WHERE task.tenant_id = NEW.tenant_id
+      AND task.order_release_id = NEW.id;
+
+    SELECT COUNT(*) INTO content_count
+    FROM public.pick_task_contents content
+    WHERE content.tenant_id = NEW.tenant_id
+      AND content.order_release_id = NEW.id;
+
+    SELECT EXISTS (
+        SELECT 1 FROM public.orders customer_order
+        WHERE customer_order.tenant_id = NEW.tenant_id
+          AND customer_order.inventory_owner_id = NEW.inventory_owner_id
+          AND customer_order.id = NEW.order_id
+          AND customer_order.deleted IS NULL
+          AND customer_order.status = 'processing'
+          AND customer_order.revision = NEW.resulting_revision
+    ) INTO final_order_matches;
+
+    IF snapshot_count <> NEW.allocation_count
+       OR snapshot_qty <> NEW.released_qty
+       OR task_count <> NEW.pick_task_count
+       OR content_count <> NEW.pick_task_count
+       OR NOT final_order_matches
+    THEN
+        RAISE EXCEPTION 'order release execution snapshot is incomplete'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_pick_task(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_pick_task() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    task_matches BOOLEAN;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.order_releases release
+        INNER JOIN public.order_release_allocations snapshot
+            ON snapshot.tenant_id = release.tenant_id
+           AND snapshot.inventory_owner_id = release.inventory_owner_id
+           AND snapshot.facility_id = release.facility_id
+           AND snapshot.order_release_id = release.id
+           AND snapshot.order_id = release.order_id
+        WHERE release.tenant_id = NEW.tenant_id
+          AND release.inventory_owner_id = NEW.inventory_owner_id
+          AND release.facility_id = NEW.facility_id
+          AND release.id = NEW.order_release_id
+          AND release.order_id = NEW.order_id
+          AND release.destination_location_id = NEW.destination_location_id
+          AND snapshot.order_item_id = NEW.order_item_id
+          AND snapshot.reservation_id = NEW.reservation_id
+          AND snapshot.allocation_id = NEW.source_allocation_id
+    ) INTO task_matches;
+
+    IF NOT task_matches
+       OR NEW.status <> 'open'
+       OR NEW.assigned_user_id IS NOT NULL
+       OR NEW.claimed_at IS NOT NULL
+       OR NEW.lease_expires_at IS NOT NULL
+       OR NEW.completed_at IS NOT NULL
+    THEN
+        RAISE EXCEPTION 'pick task does not match its release allocation'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_pick_task_content(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_pick_task_content() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    content_matches BOOLEAN;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.pick_tasks task
+        INNER JOIN public.order_release_allocations snapshot
+            ON snapshot.tenant_id = task.tenant_id
+           AND snapshot.inventory_owner_id = task.inventory_owner_id
+           AND snapshot.facility_id = task.facility_id
+           AND snapshot.order_release_id = task.order_release_id
+           AND snapshot.order_id = task.order_id
+           AND snapshot.order_item_id = task.order_item_id
+           AND snapshot.reservation_id = task.reservation_id
+           AND snapshot.allocation_id = task.source_allocation_id
+        WHERE task.tenant_id = NEW.tenant_id
+          AND task.inventory_owner_id = NEW.inventory_owner_id
+          AND task.facility_id = NEW.facility_id
+          AND task.id = NEW.task_id
+          AND task.order_release_id = NEW.order_release_id
+          AND task.order_id = NEW.order_id
+          AND task.order_item_id = NEW.order_item_id
+          AND task.reservation_id = NEW.reservation_id
+          AND task.source_allocation_id = NEW.source_allocation_id
+          AND task.status = 'open'
+          AND snapshot.inventory_balance_id = NEW.source_inventory_balance_id
+          AND snapshot.source_location_id = NEW.source_location_id
+          AND snapshot.source_license_plate_id IS NOT DISTINCT FROM NEW.source_license_plate_id
+          AND snapshot.item_batch_id = NEW.item_batch_id
+          AND snapshot.item_id = NEW.item_id
+          AND snapshot.uom = NEW.uom
+          AND snapshot.inventory_status = NEW.inventory_status
+          AND snapshot.planned_qty = NEW.planned_qty
+          AND snapshot.travel_sequence = NEW.travel_sequence
+    ) INTO content_matches;
+
+    IF NOT content_matches
+       OR NEW.state <> 'pending'
+       OR NEW.completed_at IS NOT NULL
+    THEN
+        RAISE EXCEPTION 'pick content does not match its task and release snapshot'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: validate_pick_confirmation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_pick_confirmation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    content_row RECORD;
+    task_row RECORD;
+    source_allocation_row RECORD;
+    destination_allocation_row RECORD;
+    transaction_row RECORD;
+    entry_count BIGINT;
+    entry_net BIGINT;
+    source_entry_count BIGINT;
+    destination_entry_count BIGINT;
+BEGIN
+    SELECT content.inventory_owner_id, content.facility_id, content.task_id,
+           content.order_release_id, content.order_id, content.order_item_id,
+           content.reservation_id, content.source_allocation_id,
+           content.source_inventory_balance_id, content.source_location_id,
+           content.source_license_plate_id, content.item_batch_id,
+           content.item_id, content.uom, content.inventory_status,
+           content.planned_qty, content.state
+    INTO content_row
+    FROM public.pick_task_contents content
+    WHERE content.tenant_id = NEW.tenant_id
+      AND content.id = NEW.pick_task_content_id
+    FOR UPDATE;
+
+    SELECT task.status, task.assigned_user_id, task.claimed_at,
+           task.lease_expires_at, task.destination_location_id
+    INTO task_row
+    FROM public.pick_tasks task
+    WHERE task.tenant_id = NEW.tenant_id
+      AND task.id = NEW.task_id
+    FOR UPDATE;
+
+    IF content_row.task_id IS NULL OR task_row.status IS NULL
+       OR content_row.state <> 'pending'
+       OR task_row.status <> 'in_progress'
+       OR task_row.assigned_user_id IS DISTINCT FROM NEW.confirmed_by_user_id
+       OR NEW.confirmed_at < task_row.claimed_at
+       OR task_row.lease_expires_at <= NEW.confirmed_at
+       OR task_row.destination_location_id IS DISTINCT FROM NEW.destination_location_id
+    THEN
+        RAISE EXCEPTION 'pick confirmation requires the current active claim'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.locations location
+        WHERE location.tenant_id = NEW.tenant_id
+          AND location.facility_id = NEW.facility_id
+          AND location.id = NEW.destination_location_id
+          AND location.deleted IS NULL
+          AND location.active
+          AND NOT location.pickable
+          AND location.barcode IS NOT NULL
+          AND location.barcode = btrim(location.barcode)
+          AND location.barcode <> ''
+          AND lower(location.type) IN ('staging', 'packing')
+    ) THEN
+        RAISE EXCEPTION 'pick confirmation destination must remain an active scannable staging or packing location'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.inventory_owner_id IS DISTINCT FROM content_row.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM content_row.facility_id
+       OR NEW.task_id IS DISTINCT FROM content_row.task_id
+       OR NEW.order_release_id IS DISTINCT FROM content_row.order_release_id
+       OR NEW.order_id IS DISTINCT FROM content_row.order_id
+       OR NEW.order_item_id IS DISTINCT FROM content_row.order_item_id
+       OR NEW.reservation_id IS DISTINCT FROM content_row.reservation_id
+       OR NEW.source_inventory_allocation_id IS DISTINCT FROM content_row.source_allocation_id
+       OR NEW.source_inventory_balance_id IS DISTINCT FROM content_row.source_inventory_balance_id
+       OR NEW.source_location_id IS DISTINCT FROM content_row.source_location_id
+       OR NEW.source_license_plate_id IS DISTINCT FROM content_row.source_license_plate_id
+       OR NEW.item_batch_id IS DISTINCT FROM content_row.item_batch_id
+       OR NEW.item_id IS DISTINCT FROM content_row.item_id
+       OR NEW.uom IS DISTINCT FROM content_row.uom
+       OR NEW.inventory_status IS DISTINCT FROM content_row.inventory_status
+       OR NEW.picked_qty IS DISTINCT FROM content_row.planned_qty
+    THEN
+        RAISE EXCEPTION 'pick confirmation does not match its immutable content'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT allocation.reservation_id, allocation.inventory_balance_id,
+           allocation.facility_id, allocation.location_id,
+           allocation.license_plate_id, allocation.item_batch_id,
+           allocation.item_id, allocation.uom, allocation.inventory_status,
+           allocation.qty, allocation.status, allocation.modified,
+           allocation.deleted
+    INTO source_allocation_row
+    FROM public.inventory_allocations allocation
+    WHERE allocation.tenant_id = NEW.tenant_id
+      AND allocation.inventory_owner_id = NEW.inventory_owner_id
+      AND allocation.id = NEW.source_inventory_allocation_id
+    FOR SHARE;
+
+    SELECT allocation.reservation_id, allocation.inventory_balance_id,
+           allocation.facility_id, allocation.location_id,
+           allocation.license_plate_id, allocation.item_batch_id,
+           allocation.item_id, allocation.uom, allocation.inventory_status,
+           allocation.qty, allocation.status, allocation.created,
+           allocation.modified, allocation.deleted, allocation.created_by
+    INTO destination_allocation_row
+    FROM public.inventory_allocations allocation
+    WHERE allocation.tenant_id = NEW.tenant_id
+      AND allocation.inventory_owner_id = NEW.inventory_owner_id
+      AND allocation.id = NEW.destination_inventory_allocation_id
+    FOR SHARE;
+
+    IF source_allocation_row.reservation_id IS NULL
+       OR source_allocation_row.reservation_id IS DISTINCT FROM NEW.reservation_id
+       OR source_allocation_row.inventory_balance_id IS DISTINCT FROM NEW.source_inventory_balance_id
+       OR source_allocation_row.facility_id IS DISTINCT FROM NEW.facility_id
+       OR source_allocation_row.location_id IS DISTINCT FROM NEW.source_location_id
+       OR source_allocation_row.license_plate_id IS DISTINCT FROM NEW.source_license_plate_id
+       OR source_allocation_row.item_batch_id IS DISTINCT FROM NEW.item_batch_id
+       OR source_allocation_row.item_id IS DISTINCT FROM NEW.item_id
+       OR source_allocation_row.uom IS DISTINCT FROM NEW.uom
+       OR source_allocation_row.inventory_status IS DISTINCT FROM NEW.inventory_status
+       OR source_allocation_row.qty IS DISTINCT FROM NEW.picked_qty
+       OR source_allocation_row.status <> 'fulfilled'
+       OR source_allocation_row.modified IS DISTINCT FROM NEW.confirmed_at
+       OR source_allocation_row.deleted IS DISTINCT FROM NEW.confirmed_at
+    THEN
+        RAISE EXCEPTION 'source allocation was not fulfilled by this pick'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF destination_allocation_row.reservation_id IS NULL
+       OR destination_allocation_row.reservation_id IS DISTINCT FROM NEW.reservation_id
+       OR destination_allocation_row.inventory_balance_id IS DISTINCT FROM NEW.destination_inventory_balance_id
+       OR destination_allocation_row.facility_id IS DISTINCT FROM NEW.facility_id
+       OR destination_allocation_row.location_id IS DISTINCT FROM NEW.destination_location_id
+       OR destination_allocation_row.license_plate_id IS DISTINCT FROM NEW.destination_license_plate_id
+       OR destination_allocation_row.item_batch_id IS DISTINCT FROM NEW.item_batch_id
+       OR destination_allocation_row.item_id IS DISTINCT FROM NEW.item_id
+       OR destination_allocation_row.uom IS DISTINCT FROM NEW.uom
+       OR destination_allocation_row.inventory_status IS DISTINCT FROM NEW.inventory_status
+       OR destination_allocation_row.qty IS DISTINCT FROM NEW.picked_qty
+       OR destination_allocation_row.status <> 'allocated'
+       OR destination_allocation_row.created IS DISTINCT FROM NEW.confirmed_at
+       OR destination_allocation_row.modified IS NOT NULL
+       OR destination_allocation_row.deleted IS NOT NULL
+       OR destination_allocation_row.created_by IS DISTINCT FROM NEW.confirmed_by_user_id
+    THEN
+        RAISE EXCEPTION 'destination allocation does not protect picked inventory'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT transaction.actor_user_id, transaction.transaction_type,
+           transaction.reference_type, transaction.reference_id
+    INTO transaction_row
+    FROM public.inventory_transactions transaction
+    WHERE transaction.tenant_id = NEW.tenant_id
+      AND transaction.inventory_owner_id = NEW.inventory_owner_id
+      AND transaction.id = NEW.inventory_transaction_id;
+
+    IF transaction_row.transaction_type IS NULL
+       OR transaction_row.actor_user_id IS DISTINCT FROM NEW.confirmed_by_user_id
+       OR transaction_row.transaction_type <> 'move'
+       OR transaction_row.reference_type <> 'pick_task_content'
+       OR transaction_row.reference_id IS DISTINCT FROM NEW.pick_task_content_id
+    THEN
+        RAISE EXCEPTION 'pick inventory transaction does not match confirmation'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT COUNT(*), COALESCE(SUM(entry.quantity_delta), 0)::BIGINT,
+           COUNT(*) FILTER (WHERE entry.facility_id = NEW.facility_id
+                              AND entry.item_batch_id = NEW.item_batch_id
+                              AND entry.item_id = NEW.item_id
+                              AND entry.uom = NEW.uom
+                              AND entry.status = NEW.inventory_status
+                              AND entry.location_id = NEW.source_location_id
+                              AND entry.license_plate_id IS NOT DISTINCT FROM NEW.source_license_plate_id
+                              AND entry.quantity_delta = -NEW.picked_qty),
+           COUNT(*) FILTER (WHERE entry.facility_id = NEW.facility_id
+                              AND entry.item_batch_id = NEW.item_batch_id
+                              AND entry.item_id = NEW.item_id
+                              AND entry.uom = NEW.uom
+                              AND entry.status = NEW.inventory_status
+                              AND entry.location_id = NEW.destination_location_id
+                              AND entry.license_plate_id = NEW.destination_license_plate_id
+                              AND entry.quantity_delta = NEW.picked_qty)
+    INTO entry_count, entry_net, source_entry_count, destination_entry_count
+    FROM public.inventory_entries entry
+    WHERE entry.tenant_id = NEW.tenant_id
+      AND entry.inventory_owner_id = NEW.inventory_owner_id
+      AND entry.transaction_id = NEW.inventory_transaction_id;
+
+    IF entry_count <> 2 OR entry_net <> 0
+       OR source_entry_count <> 1 OR destination_entry_count <> 1
+    THEN
+        RAISE EXCEPTION 'pick inventory entries do not conserve confirmed quantity'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_pick_confirmation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_pick_confirmation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NEW.state = 'completed'
+       AND NOT EXISTS (
+           SELECT 1 FROM public.pick_confirmations confirmation
+           WHERE confirmation.tenant_id = NEW.tenant_id
+             AND confirmation.pick_task_content_id = NEW.id
+             AND confirmation.confirmed_at = NEW.completed_at
+       )
+    THEN
+        RAISE EXCEPTION 'completed pick content requires an immutable confirmation'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_completed_pick_content(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_completed_pick_content() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NEW.status = 'completed'
+       AND NOT EXISTS (
+           SELECT 1 FROM public.pick_task_contents content
+           WHERE content.tenant_id = NEW.tenant_id
+             AND content.task_id = NEW.id
+             AND content.state = 'completed'
+             AND content.completed_at = NEW.completed_at
+       )
+    THEN
+        RAISE EXCEPTION 'completed pick task requires completed content'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: reject_license_plate_putaway_content_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5660,6 +6363,80 @@ ALTER TABLE public.order_holds ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY 
 
 
 --
+-- Name: order_releases; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.order_releases (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    released_by_user_id bigint NOT NULL,
+    released_at timestamp with time zone NOT NULL,
+    release_mode text NOT NULL,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    allocation_count bigint NOT NULL,
+    released_qty bigint NOT NULL,
+    pick_task_count bigint NOT NULL,
+    CONSTRAINT order_releases_allocation_count_check CHECK (allocation_count > 0),
+    CONSTRAINT order_releases_mode_check CHECK (release_mode = 'waveless'::text),
+    CONSTRAINT order_releases_pick_task_count_check CHECK ((pick_task_count > 0) AND (pick_task_count = allocation_count)),
+    CONSTRAINT order_releases_released_qty_check CHECK (released_qty > 0),
+    CONSTRAINT order_releases_revision_check CHECK ((expected_revision > 0) AND (resulting_revision = (expected_revision + 1)))
+);
+
+ALTER TABLE ONLY public.order_releases FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: order_releases_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_releases ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.order_releases_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: order_release_allocations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.order_release_allocations (
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    order_release_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    allocation_id bigint NOT NULL,
+    inventory_balance_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    source_license_plate_id bigint,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    inventory_status text NOT NULL,
+    planned_qty bigint NOT NULL,
+    travel_sequence bigint NOT NULL,
+    CONSTRAINT order_release_allocations_inventory_status_check CHECK (inventory_status = 'available'::text),
+    CONSTRAINT order_release_allocations_planned_qty_check CHECK (planned_qty > 0),
+    CONSTRAINT order_release_allocations_travel_sequence_check CHECK (travel_sequence > 0),
+    CONSTRAINT order_release_allocations_uom_check CHECK ((uom = btrim(uom)) AND (uom <> ''::text))
+);
+
+ALTER TABLE ONLY public.order_release_allocations FORCE ROW LEVEL SECURITY;
+
+
+--
 -- Name: order_items; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5946,6 +6723,169 @@ ALTER TABLE ONLY public.permissions FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE public.permissions ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
     SEQUENCE NAME public.permissions_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: pick_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.pick_tasks (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    order_release_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    source_allocation_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    priority bigint DEFAULT 0 NOT NULL,
+    ship_by timestamp with time zone,
+    status text DEFAULT 'open'::text NOT NULL,
+    assigned_user_id bigint,
+    claimed_at timestamp with time zone,
+    lease_expires_at timestamp with time zone,
+    task_timeout_seconds bigint DEFAULT 1800 NOT NULL,
+    last_released_at timestamp with time zone,
+    last_release_reason text,
+    last_release_note text,
+    release_count bigint DEFAULT 0 NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT pick_tasks_claim_state_check CHECK ((((status = 'open'::text) AND (assigned_user_id IS NULL) AND (claimed_at IS NULL) AND (lease_expires_at IS NULL) AND (completed_at IS NULL)) OR ((status = 'in_progress'::text) AND (assigned_user_id IS NOT NULL) AND (claimed_at IS NOT NULL) AND (lease_expires_at IS NOT NULL) AND (lease_expires_at > claimed_at) AND (completed_at IS NULL)) OR ((status = 'completed'::text) AND (assigned_user_id IS NOT NULL) AND (claimed_at IS NOT NULL) AND (lease_expires_at IS NULL) AND (completed_at IS NOT NULL) AND (completed_at >= claimed_at)))),
+    CONSTRAINT pick_tasks_last_release_check CHECK ((((last_released_at IS NULL) AND (last_release_reason IS NULL) AND (last_release_note IS NULL) AND (release_count = 0)) OR ((last_released_at IS NOT NULL) AND (last_release_reason IS NOT NULL) AND (release_count > 0)))),
+    CONSTRAINT pick_tasks_last_release_note_check CHECK (((last_release_note IS NULL) OR ((last_release_note = btrim(last_release_note)) AND (last_release_note <> ''::text) AND (char_length(last_release_note) <= 500)))),
+    CONSTRAINT pick_tasks_last_release_reason_check CHECK (((last_release_reason IS NULL) OR (last_release_reason = ANY (ARRAY['work_interrupted'::text, 'equipment_unavailable'::text, 'source_blocked'::text, 'inventory_discrepancy'::text, 'safety_issue'::text, 'lease_expired'::text, 'scope_revoked'::text, 'other'::text])))),
+    CONSTRAINT pick_tasks_other_release_note_check CHECK (((last_release_reason <> 'other'::text) OR (last_release_note IS NOT NULL))),
+    CONSTRAINT pick_tasks_priority_check CHECK (priority >= 0),
+    CONSTRAINT pick_tasks_release_count_check CHECK (release_count >= 0),
+    CONSTRAINT pick_tasks_status_check CHECK ((status = ANY (ARRAY['open'::text, 'in_progress'::text, 'completed'::text]))),
+    CONSTRAINT pick_tasks_timeout_check CHECK (task_timeout_seconds > 0)
+);
+
+ALTER TABLE ONLY public.pick_tasks FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: pick_tasks_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.pick_tasks ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.pick_tasks_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: pick_task_contents; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.pick_task_contents (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    order_release_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    source_allocation_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    source_license_plate_id bigint,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    inventory_status text NOT NULL,
+    planned_qty bigint NOT NULL,
+    travel_sequence bigint NOT NULL,
+    state text DEFAULT 'pending'::text NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT pick_task_contents_completion_check CHECK ((((state = 'pending'::text) AND (completed_at IS NULL)) OR ((state = 'completed'::text) AND (completed_at IS NOT NULL)))),
+    CONSTRAINT pick_task_contents_inventory_status_check CHECK (inventory_status = 'available'::text),
+    CONSTRAINT pick_task_contents_planned_qty_check CHECK (planned_qty > 0),
+    CONSTRAINT pick_task_contents_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'completed'::text]))),
+    CONSTRAINT pick_task_contents_travel_sequence_check CHECK (travel_sequence > 0),
+    CONSTRAINT pick_task_contents_uom_check CHECK ((uom = btrim(uom)) AND (uom <> ''::text))
+);
+
+ALTER TABLE ONLY public.pick_task_contents FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: pick_task_contents_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.pick_task_contents ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.pick_task_contents_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
+-- Name: pick_confirmations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.pick_confirmations (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    pick_task_content_id bigint NOT NULL,
+    order_release_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    source_inventory_allocation_id bigint NOT NULL,
+    destination_inventory_allocation_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    destination_inventory_balance_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    source_license_plate_id bigint,
+    destination_license_plate_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    inventory_status text NOT NULL,
+    inventory_transaction_id bigint NOT NULL,
+    picked_qty bigint NOT NULL,
+    confirmed_by_user_id bigint NOT NULL,
+    confirmed_at timestamp with time zone NOT NULL,
+    CONSTRAINT pick_confirmations_distinct_allocations_check CHECK (source_inventory_allocation_id <> destination_inventory_allocation_id),
+    CONSTRAINT pick_confirmations_distinct_balances_check CHECK (source_inventory_balance_id <> destination_inventory_balance_id),
+    CONSTRAINT pick_confirmations_distinct_locations_check CHECK (source_location_id <> destination_location_id),
+    CONSTRAINT pick_confirmations_inventory_status_check CHECK (inventory_status = 'available'::text),
+    CONSTRAINT pick_confirmations_picked_qty_check CHECK (picked_qty > 0),
+    CONSTRAINT pick_confirmations_uom_check CHECK ((uom = btrim(uom)) AND (uom <> ''::text))
+);
+
+ALTER TABLE ONLY public.pick_confirmations FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: pick_confirmations_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+ALTER TABLE public.pick_confirmations ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.pick_confirmations_id_seq
     START WITH 1
     INCREMENT BY 1
     NO MINVALUE
@@ -6845,6 +7785,14 @@ ALTER TABLE ONLY public.inventory_allocations
 
 
 --
+-- Name: inventory_allocations inventory_allocations_tenant_owner_facility_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_allocations
+    ADD CONSTRAINT inventory_allocations_tenant_owner_facility_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
 -- Name: inventory_balances inventory_balances_cycle_count_target_unique; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -7042,6 +7990,14 @@ ALTER TABLE ONLY public.inventory_reservations
 
 ALTER TABLE ONLY public.inventory_reservations
     ADD CONSTRAINT inventory_reservations_tenant_id_inventory_owner_id_id_key UNIQUE (tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: inventory_reservations inventory_reservations_tenant_owner_facility_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inventory_reservations
+    ADD CONSTRAINT inventory_reservations_tenant_owner_facility_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, id);
 
 
 --
@@ -7429,6 +8385,62 @@ ALTER TABLE ONLY public.order_holds
 
 
 --
+-- Name: order_releases order_releases_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_releases
+    ADD CONSTRAINT order_releases_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: order_releases order_releases_scope_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_releases
+    ADD CONSTRAINT order_releases_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, order_id, id);
+
+
+--
+-- Name: order_releases order_releases_order_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_releases
+    ADD CONSTRAINT order_releases_order_key UNIQUE (tenant_id, inventory_owner_id, order_id);
+
+
+--
+-- Name: order_release_allocations order_release_allocations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_pkey PRIMARY KEY (tenant_id, order_release_id, allocation_id);
+
+
+--
+-- Name: order_release_allocations order_release_allocations_allocation_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_allocation_key UNIQUE (tenant_id, inventory_owner_id, allocation_id);
+
+
+--
+-- Name: order_release_allocations order_release_allocations_scope_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_scope_key UNIQUE (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, allocation_id);
+
+
+--
+-- Name: order_release_allocations order_release_allocations_sequence_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_sequence_key UNIQUE (tenant_id, order_release_id, travel_sequence);
+
+
+--
 -- Name: order_items order_items_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -7626,6 +8638,94 @@ ALTER TABLE ONLY public.permissions
 
 ALTER TABLE ONLY public.permissions
     ADD CONSTRAINT permissions_tenant_id_name_key UNIQUE (tenant_id, name);
+
+
+--
+-- Name: pick_tasks pick_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_tasks
+    ADD CONSTRAINT pick_tasks_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: pick_tasks pick_tasks_scope_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_tasks
+    ADD CONSTRAINT pick_tasks_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: pick_tasks pick_tasks_release_allocation_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_tasks
+    ADD CONSTRAINT pick_tasks_release_allocation_key UNIQUE (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, source_allocation_id, id);
+
+
+--
+-- Name: pick_task_contents pick_task_contents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_task_contents
+    ADD CONSTRAINT pick_task_contents_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: pick_task_contents pick_task_contents_scope_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_task_contents
+    ADD CONSTRAINT pick_task_contents_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, task_id, id);
+
+
+--
+-- Name: pick_task_contents pick_task_contents_task_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_task_contents
+    ADD CONSTRAINT pick_task_contents_task_key UNIQUE (tenant_id, task_id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_content_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_content_key UNIQUE (tenant_id, inventory_owner_id, pick_task_content_id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_source_allocation_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_source_allocation_key UNIQUE (tenant_id, inventory_owner_id, source_inventory_allocation_id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_destination_allocation_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_destination_allocation_key UNIQUE (tenant_id, inventory_owner_id, destination_inventory_allocation_id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_transaction_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_transaction_key UNIQUE (tenant_id, inventory_owner_id, inventory_transaction_id);
 
 
 --
@@ -8308,6 +9408,20 @@ CREATE INDEX idx_order_holds_order_id ON public.order_holds USING btree (tenant_
 
 
 --
+-- Name: idx_order_releases_facility_history; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_order_releases_facility_history ON public.order_releases USING btree (tenant_id, facility_id, released_at DESC, id DESC);
+
+
+--
+-- Name: idx_order_release_allocations_order; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_order_release_allocations_order ON public.order_release_allocations USING btree (tenant_id, inventory_owner_id, order_id, travel_sequence);
+
+
+--
 -- Name: order_holds_active_reason_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -8655,6 +9769,48 @@ CREATE INDEX outbox_events_tenant_ready_idx ON public.outbox_events USING btree 
 --
 
 CREATE INDEX outbox_events_tenant_terminal_idx ON public.outbox_events USING btree (tenant_id, COALESCE(published_at, discarded_at), id) WHERE ((published_at IS NOT NULL) OR (discarded_at IS NOT NULL));
+
+
+--
+-- Name: pick_tasks_open_queue_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX pick_tasks_open_queue_idx ON public.pick_tasks USING btree (tenant_id, facility_id, inventory_owner_id, status, priority DESC, ship_by, created_at, id) WHERE (status = 'open'::text);
+
+
+--
+-- Name: pick_tasks_expiring_claims_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX pick_tasks_expiring_claims_idx ON public.pick_tasks USING btree (tenant_id, lease_expires_at, id) WHERE (status = 'in_progress'::text);
+
+
+--
+-- Name: pick_tasks_one_allocation_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX pick_tasks_one_allocation_idx ON public.pick_tasks USING btree (tenant_id, inventory_owner_id, source_allocation_id);
+
+
+--
+-- Name: pick_tasks_one_active_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX pick_tasks_one_active_user_idx ON public.pick_tasks USING btree (tenant_id, assigned_user_id) WHERE ((status = 'in_progress'::text) AND (assigned_user_id IS NOT NULL));
+
+
+--
+-- Name: pick_task_contents_release_route_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX pick_task_contents_release_route_idx ON public.pick_task_contents USING btree (tenant_id, order_release_id, travel_sequence, id);
+
+
+--
+-- Name: pick_confirmations_order_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX pick_confirmations_order_idx ON public.pick_confirmations USING btree (tenant_id, inventory_owner_id, order_id, confirmed_at, id);
 
 
 --
@@ -9082,6 +10238,97 @@ CREATE TRIGGER order_allocation_run_lines_are_immutable BEFORE DELETE OR UPDATE 
 --
 
 CREATE TRIGGER order_cancellations_are_immutable BEFORE DELETE OR UPDATE ON public.order_cancellations FOR EACH ROW EXECUTE FUNCTION public.reject_order_cancellation_mutation();
+
+
+--
+-- Name: order_releases order_releases_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER order_releases_are_immutable BEFORE DELETE OR UPDATE ON public.order_releases FOR EACH ROW EXECUTE FUNCTION public.reject_order_release_mutation();
+
+
+--
+-- Name: order_releases order_releases_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER order_releases_validate BEFORE INSERT ON public.order_releases FOR EACH ROW EXECUTE FUNCTION public.validate_order_release();
+
+
+--
+-- Name: order_releases order_releases_require_execution; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER order_releases_require_execution AFTER INSERT ON public.order_releases DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_order_release_execution();
+
+
+--
+-- Name: order_release_allocations order_release_allocations_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER order_release_allocations_are_immutable BEFORE DELETE OR UPDATE ON public.order_release_allocations FOR EACH ROW EXECUTE FUNCTION public.reject_order_release_mutation();
+
+
+--
+-- Name: order_release_allocations order_release_allocations_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER order_release_allocations_validate BEFORE INSERT ON public.order_release_allocations FOR EACH ROW EXECUTE FUNCTION public.validate_order_release_allocation();
+
+
+--
+-- Name: pick_tasks pick_tasks_guard_mutation; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER pick_tasks_guard_mutation BEFORE DELETE OR UPDATE ON public.pick_tasks FOR EACH ROW EXECUTE FUNCTION public.guard_pick_task_mutation();
+
+
+--
+-- Name: pick_tasks pick_tasks_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER pick_tasks_validate BEFORE INSERT ON public.pick_tasks FOR EACH ROW EXECUTE FUNCTION public.validate_pick_task();
+
+
+--
+-- Name: pick_tasks pick_tasks_require_completed_content; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER pick_tasks_require_completed_content AFTER UPDATE ON public.pick_tasks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_completed_pick_content();
+
+
+--
+-- Name: pick_task_contents pick_task_contents_guard_mutation; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER pick_task_contents_guard_mutation BEFORE DELETE OR UPDATE ON public.pick_task_contents FOR EACH ROW EXECUTE FUNCTION public.guard_pick_task_content_mutation();
+
+
+--
+-- Name: pick_task_contents pick_task_contents_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER pick_task_contents_validate BEFORE INSERT ON public.pick_task_contents FOR EACH ROW EXECUTE FUNCTION public.validate_pick_task_content();
+
+
+--
+-- Name: pick_task_contents pick_task_contents_require_confirmation; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER pick_task_contents_require_confirmation AFTER UPDATE ON public.pick_task_contents DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_pick_confirmation();
+
+
+--
+-- Name: pick_confirmations pick_confirmations_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER pick_confirmations_are_immutable BEFORE DELETE OR UPDATE ON public.pick_confirmations FOR EACH ROW EXECUTE FUNCTION public.reject_pick_confirmation_mutation();
+
+
+--
+-- Name: pick_confirmations pick_confirmations_validate; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER pick_confirmations_validate BEFORE INSERT ON public.pick_confirmations FOR EACH ROW EXECUTE FUNCTION public.validate_pick_confirmation();
 
 
 --
@@ -11279,6 +12526,134 @@ ALTER TABLE ONLY public.order_holds
 
 
 --
+-- Name: order_releases order_releases_tenant_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_releases
+    ADD CONSTRAINT order_releases_tenant_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: order_releases order_releases_owner_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_releases
+    ADD CONSTRAINT order_releases_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id) REFERENCES public.inventory_owners(tenant_id, id);
+
+
+--
+-- Name: order_releases order_releases_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_releases
+    ADD CONSTRAINT order_releases_facility_fkey FOREIGN KEY (tenant_id, facility_id) REFERENCES public.facilities(tenant_id, id);
+
+
+--
+-- Name: order_releases order_releases_owner_facility_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_releases
+    ADD CONSTRAINT order_releases_owner_facility_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id) REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id);
+
+
+--
+-- Name: order_releases order_releases_order_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_releases
+    ADD CONSTRAINT order_releases_order_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES public.orders(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: order_releases order_releases_destination_location_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_releases
+    ADD CONSTRAINT order_releases_destination_location_fkey FOREIGN KEY (tenant_id, facility_id, destination_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: order_releases order_releases_released_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_releases
+    ADD CONSTRAINT order_releases_released_by_fkey FOREIGN KEY (tenant_id, released_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: order_release_allocations order_release_allocations_release_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_release_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_id, order_release_id) REFERENCES public.order_releases(tenant_id, inventory_owner_id, facility_id, order_id, id);
+
+
+--
+-- Name: order_release_allocations order_release_allocations_order_item_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_order_item_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id, order_item_id) REFERENCES public.order_items(tenant_id, inventory_owner_id, order_id, id);
+
+
+--
+-- Name: order_release_allocations order_release_allocations_reservation_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_reservation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, reservation_id) REFERENCES public.inventory_reservations(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: order_release_allocations order_release_allocations_allocation_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_allocation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, allocation_id) REFERENCES public.inventory_allocations(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: order_release_allocations order_release_allocations_balance_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: order_release_allocations order_release_allocations_location_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_location_fkey FOREIGN KEY (tenant_id, facility_id, source_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: order_release_allocations order_release_allocations_license_plate_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_license_plate_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: order_release_allocations order_release_allocations_item_batch_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_item_batch_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: order_release_allocations order_release_allocations_item_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_item_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
 -- Name: order_items order_items_owner_item_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -11436,6 +12811,206 @@ ALTER TABLE ONLY public.outbox_events
 
 ALTER TABLE ONLY public.permissions
     ADD CONSTRAINT permissions_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id);
+
+
+--
+-- Name: pick_tasks pick_tasks_release_allocation_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_tasks
+    ADD CONSTRAINT pick_tasks_release_allocation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, source_allocation_id) REFERENCES public.order_release_allocations(tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, allocation_id);
+
+
+--
+-- Name: pick_tasks pick_tasks_destination_location_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_tasks
+    ADD CONSTRAINT pick_tasks_destination_location_fkey FOREIGN KEY (tenant_id, facility_id, destination_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: pick_tasks pick_tasks_assigned_user_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_tasks
+    ADD CONSTRAINT pick_tasks_assigned_user_fkey FOREIGN KEY (tenant_id, assigned_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
+--
+-- Name: pick_task_contents pick_task_contents_task_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_task_contents
+    ADD CONSTRAINT pick_task_contents_task_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, source_allocation_id, task_id) REFERENCES public.pick_tasks(tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, source_allocation_id, id);
+
+
+--
+-- Name: pick_task_contents pick_task_contents_release_allocation_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_task_contents
+    ADD CONSTRAINT pick_task_contents_release_allocation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, source_allocation_id) REFERENCES public.order_release_allocations(tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, allocation_id);
+
+
+--
+-- Name: pick_task_contents pick_task_contents_balance_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_task_contents
+    ADD CONSTRAINT pick_task_contents_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: pick_task_contents pick_task_contents_location_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_task_contents
+    ADD CONSTRAINT pick_task_contents_location_fkey FOREIGN KEY (tenant_id, facility_id, source_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: pick_task_contents pick_task_contents_license_plate_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_task_contents
+    ADD CONSTRAINT pick_task_contents_license_plate_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: pick_task_contents pick_task_contents_item_batch_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_task_contents
+    ADD CONSTRAINT pick_task_contents_item_batch_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: pick_task_contents pick_task_contents_item_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_task_contents
+    ADD CONSTRAINT pick_task_contents_item_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_content_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_content_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, task_id, pick_task_content_id) REFERENCES public.pick_task_contents(tenant_id, inventory_owner_id, facility_id, task_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_task_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_task_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, source_inventory_allocation_id, task_id) REFERENCES public.pick_tasks(tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, source_allocation_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_reservation_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_reservation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, reservation_id) REFERENCES public.inventory_reservations(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_source_allocation_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_source_allocation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_allocation_id) REFERENCES public.inventory_allocations(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_destination_allocation_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_destination_allocation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, destination_inventory_allocation_id) REFERENCES public.inventory_allocations(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_source_balance_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_source_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_destination_balance_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_destination_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, destination_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_source_location_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_source_location_fkey FOREIGN KEY (tenant_id, facility_id, source_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_destination_location_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_destination_location_fkey FOREIGN KEY (tenant_id, facility_id, destination_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_source_license_plate_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_source_license_plate_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_destination_license_plate_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_destination_license_plate_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, destination_license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_item_batch_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_item_batch_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_item_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_item_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_transaction_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_transaction_fkey FOREIGN KEY (tenant_id, inventory_owner_id, inventory_transaction_id) REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id);
+
+
+--
+-- Name: pick_confirmations pick_confirmations_confirmed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_confirmations
+    ADD CONSTRAINT pick_confirmations_confirmed_by_fkey FOREIGN KEY (tenant_id, confirmed_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
 
 
 --
@@ -12755,6 +14330,32 @@ CREATE POLICY order_holds_tenant_isolation ON public.order_holds USING ((tenant_
 
 
 --
+-- Name: order_releases; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_releases ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: order_releases order_releases_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY order_releases_tenant_isolation ON public.order_releases USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: order_release_allocations; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.order_release_allocations ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: order_release_allocations order_release_allocations_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY order_release_allocations_tenant_isolation ON public.order_release_allocations USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
 -- Name: order_items; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -12869,6 +14470,45 @@ ALTER TABLE public.permissions ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY permissions_tenant_isolation ON public.permissions USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: pick_tasks; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.pick_tasks ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: pick_tasks pick_tasks_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY pick_tasks_tenant_isolation ON public.pick_tasks USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: pick_task_contents; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.pick_task_contents ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: pick_task_contents pick_task_contents_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY pick_task_contents_tenant_isolation ON public.pick_task_contents USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
+--
+-- Name: pick_confirmations; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.pick_confirmations ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: pick_confirmations pick_confirmations_tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY pick_confirmations_tenant_isolation ON public.pick_confirmations USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
 
 
 --
@@ -13294,6 +14934,90 @@ REVOKE ALL ON FUNCTION public.reject_order_allocation_run_mutation() FROM PUBLIC
 --
 
 REVOKE ALL ON FUNCTION public.reject_order_cancellation_mutation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION reject_order_release_mutation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.reject_order_release_mutation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION guard_pick_task_mutation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.guard_pick_task_mutation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION guard_pick_task_content_mutation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.guard_pick_task_content_mutation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION reject_pick_confirmation_mutation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.reject_pick_confirmation_mutation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_order_release(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_order_release() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_order_release_allocation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_order_release_allocation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION require_order_release_execution(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.require_order_release_execution() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_pick_task(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_pick_task() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_pick_task_content(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_pick_task_content() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION validate_pick_confirmation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.validate_pick_confirmation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION require_pick_confirmation(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.require_pick_confirmation() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION require_completed_pick_content(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.require_completed_pick_content() FROM PUBLIC;
 
 
 --
@@ -14021,6 +15745,27 @@ GRANT SELECT,USAGE ON SEQUENCE public.order_holds_id_seq TO wareboxes_app;
 
 
 --
+-- Name: TABLE order_releases; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.order_releases TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE order_releases_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.order_releases_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE order_release_allocations; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.order_release_allocations TO wareboxes_app;
+
+
+--
 -- Name: TABLE order_items; Type: ACL; Schema: public; Owner: -
 --
 
@@ -14102,6 +15847,48 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.outbox_events TO wareboxes_app
 --
 
 GRANT SELECT,USAGE ON SEQUENCE public.outbox_events_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE pick_tasks; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.pick_tasks TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE pick_tasks_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.pick_tasks_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE pick_task_contents; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT,UPDATE ON TABLE public.pick_task_contents TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE pick_task_contents_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.pick_task_contents_id_seq TO wareboxes_app;
+
+
+--
+-- Name: TABLE pick_confirmations; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT,INSERT ON TABLE public.pick_confirmations TO wareboxes_app;
+
+
+--
+-- Name: SEQUENCE pick_confirmations_id_seq; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT USAGE ON SEQUENCE public.pick_confirmations_id_seq TO wareboxes_app;
 
 
 --

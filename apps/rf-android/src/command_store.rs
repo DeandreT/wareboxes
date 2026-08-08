@@ -8,6 +8,7 @@ use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
+use crate::picking::PickingCommand;
 use crate::wire::{
     DurableHttpRequest, HttpMethod, ResponseKind, WireRequestError, build_durable_request,
 };
@@ -56,6 +57,7 @@ pub enum CommandOperation {
     Release,
     ExpectedReceiptConfirmation,
     CycleCountConfirmation,
+    PickConfirmation,
 }
 
 impl CommandOperation {
@@ -68,6 +70,7 @@ impl CommandOperation {
             Self::Release => "release",
             Self::ExpectedReceiptConfirmation => "expected_receipt_confirmation",
             Self::CycleCountConfirmation => "cycle_count_confirmation",
+            Self::PickConfirmation => "pick_confirmation",
         }
     }
 
@@ -80,6 +83,7 @@ impl CommandOperation {
             "release" => Ok(Self::Release),
             "expected_receipt_confirmation" => Ok(Self::ExpectedReceiptConfirmation),
             "cycle_count_confirmation" => Ok(Self::CycleCountConfirmation),
+            "pick_confirmation" => Ok(Self::PickConfirmation),
             _ => Err(CommandStoreError::CorruptRecord(
                 "unknown command operation".into(),
             )),
@@ -117,6 +121,10 @@ impl From<&RfCommand> for CommandOperation {
                 Self::CycleCountConfirmation
             }
             RfCommand::CycleCount(CycleCountCommand::Release { .. }) => Self::Release,
+            RfCommand::Picking(PickingCommand::ClaimNext) => Self::ClaimNext,
+            RfCommand::Picking(PickingCommand::ClaimById { .. }) => Self::ClaimById,
+            RfCommand::Picking(PickingCommand::Confirm { .. }) => Self::PickConfirmation,
+            RfCommand::Picking(PickingCommand::Release { .. }) => Self::Release,
         }
     }
 }
@@ -1187,6 +1195,10 @@ const fn response_kind_name(kind: ResponseKind) -> &'static str {
         ResponseKind::CycleCountClaim => "cycle_count_claim",
         ResponseKind::CycleCountConfirmation => "cycle_count_confirmation",
         ResponseKind::CycleCountRelease => "cycle_count_release",
+        ResponseKind::PickOptionalClaim => "pick_optional_claim",
+        ResponseKind::PickClaim => "pick_claim",
+        ResponseKind::PickConfirmation => "pick_confirmation",
+        ResponseKind::PickRelease => "pick_release",
         ResponseKind::ExpectedReceiptConfirmation => "expected_receipt_confirmation",
     }
 }
@@ -1206,6 +1218,10 @@ fn parse_response_kind(value: &str) -> Result<ResponseKind, CommandStoreError> {
         "cycle_count_claim" => Ok(ResponseKind::CycleCountClaim),
         "cycle_count_confirmation" => Ok(ResponseKind::CycleCountConfirmation),
         "cycle_count_release" => Ok(ResponseKind::CycleCountRelease),
+        "pick_optional_claim" => Ok(ResponseKind::PickOptionalClaim),
+        "pick_claim" => Ok(ResponseKind::PickClaim),
+        "pick_confirmation" => Ok(ResponseKind::PickConfirmation),
+        "pick_release" => Ok(ResponseKind::PickRelease),
         "expected_receipt_confirmation" => Ok(ResponseKind::ExpectedReceiptConfirmation),
         _ => Err(CommandStoreError::CorruptRecord(
             "unknown response kind".into(),

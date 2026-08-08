@@ -10,18 +10,29 @@ use crate::routes::validate;
 use crate::state::AppState;
 
 const PERM: &str = "wms";
+const READ_PERMS: &[&str] = &["admin", "wms", "orders"];
 
 pub async fn list(
     State(state): State<AppState>,
     user: CurrentTenant,
     Query(q): Query<ShowDeleted>,
 ) -> AppResult<Json<Vec<Location>>> {
-    user.require_permission(&state.db, PERM).await?;
+    user.require_any_permission(&state.db, READ_PERMS).await?;
+    Ok(Json(
+        list_for_access(&state, &user.tenant, q.show_deleted).await?,
+    ))
+}
+
+pub(crate) async fn list_for_access(
+    state: &AppState,
+    access: &wareboxes_core::models::TenantAccess,
+    show_deleted: bool,
+) -> AppResult<Vec<Location>> {
     let locations = wareboxes_persistence_postgres::locations::get_locations_in_scope(
         &state.db,
-        user.tenant.tenant_id,
-        &user.tenant.site_scope,
-        q.show_deleted,
+        access.tenant_id,
+        &access.site_scope,
+        show_deleted,
     )
     .await?
     .into_iter()
@@ -41,7 +52,7 @@ pub async fn list(
         receivable: location.receivable,
     })
     .collect();
-    Ok(Json(locations))
+    Ok(locations)
 }
 
 pub async fn add(

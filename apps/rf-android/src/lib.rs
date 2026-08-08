@@ -5,6 +5,7 @@ pub mod command_store;
 pub mod cycle_count;
 pub mod expected_receiving;
 pub mod lease;
+pub mod picking;
 pub mod transport;
 pub mod wire;
 pub mod workflow;

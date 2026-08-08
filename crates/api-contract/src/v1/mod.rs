@@ -15,6 +15,8 @@ mod order;
 mod order_allocation;
 mod order_cancellation;
 mod order_hold;
+mod order_release;
+mod picking;
 mod putaway;
 mod putaway_claim;
 mod revision;
@@ -90,6 +92,13 @@ pub use order_cancellation::{
 pub use order_hold::{
     OrderHoldOrderStatus, OrderHoldReason, PlaceOrderHoldRequest, PlaceOrderHoldResponse,
     ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
+};
+pub use order_release::{OrderReleaseStatus, ReleaseOrderRequest, ReleaseOrderResponse};
+pub use picking::{
+    ClaimNextPickRequest, ClaimPickByIdRequest, ConfirmPickContentRequest, CurrentPickResponse,
+    HeartbeatPickClaimRequest, PickClaimContent, PickClaimHeartbeatResponse,
+    PickClaimReleaseReason, PickClaimReleaseResponse, PickClaimResponse,
+    PickContentConfirmationResponse, PickContentState, PickOrderStatus, ReleasePickClaimRequest,
 };
 pub use putaway::{
     ConfirmPutawayRequest, CreatePutawayTaskRequest, CreatePutawayTaskResponse,

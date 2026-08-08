@@ -9,7 +9,9 @@ pub mod integration;
 pub mod inventory;
 pub mod order_allocation;
 pub mod order_cancellation;
+pub mod order_release;
 pub mod outbox;
+pub mod picking;
 pub mod topology;
 
 pub use context::CommandContext;
