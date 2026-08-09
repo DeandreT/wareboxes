@@ -94,7 +94,7 @@ pub(super) fn ShipmentCancellationAction(
                         ><Icon icon=UiIcon::Close/></button>
                     </header>
                     <p>
-                        "This is allowed only before manifesting. Shipment snapshots remain in immutable history; packing recovery and a new shipment attempt become available."
+                        "This is allowed only before any carton departs. Shipment snapshots, manifest, tracking assignments, and documents remain in immutable history; packing recovery and a new shipment attempt become available."
                     </p>
                     <label>
                         <span>"Reason"</span>

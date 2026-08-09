@@ -154,6 +154,7 @@ pub struct ShipmentCartonReadModel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShipmentCancellationReadModel {
     pub cancellation_id: ShipmentCancellationId,
+    pub previous_status: ShipmentStatus,
     pub details: ShipmentCancellationDetails,
     pub cancelled_by: UserId,
     pub cancelled_at: Timestamp,
@@ -280,14 +281,24 @@ impl ShipmentReadModel {
                     && self.departure_progress.remaining_carton_count == 0
             }
             ShipmentStatus::Cancelled => {
-                self.manifest.is_none()
-                    && self.cancellation.is_some()
-                    && self.departed_by.is_none()
+                self.cancellation.as_ref().is_some_and(|cancellation| {
+                    match cancellation.previous_status {
+                        ShipmentStatus::AwaitingManifest => {
+                            self.revision.get() == 2
+                                && self.manifest.is_none()
+                                && self.cartons.iter().all(|carton| {
+                                    carton.tracking_assignment_id.is_none()
+                                        && carton.tracking_number.is_none()
+                                })
+                        }
+                        ShipmentStatus::Manifested => {
+                            self.revision.get() == 3 && self.manifest_covers_cartons()
+                        }
+                        _ => false,
+                    }
+                }) && self.departed_by.is_none()
                     && self.departed_at.is_none()
                     && self.departure_progress.departed_carton_count == 0
-                    && self.cartons.iter().all(|carton| {
-                        carton.tracking_assignment_id.is_none() && carton.tracking_number.is_none()
-                    })
             }
         }
     }
@@ -588,6 +599,7 @@ mod tests {
         }
         cancelled.cancellation = Some(ShipmentCancellationReadModel {
             cancellation_id: ShipmentCancellationId::new(11).unwrap(),
+            previous_status: ShipmentStatus::AwaitingManifest,
             details: ShipmentCancellationDetails::new(
                 ShipmentCancellationReason::PackingCorrection,
                 None,
@@ -598,6 +610,26 @@ mod tests {
         });
         assert!(cancelled.is_consistent());
         cancelled.cancellation = None;
+        assert!(!cancelled.is_consistent());
+    }
+
+    #[test]
+    fn cancelled_manifested_attempt_retains_exact_tracking_history() {
+        let mut cancelled = manifested_shipment(ShipmentStatus::Cancelled);
+        cancelled.revision = ShipmentRevision::new(3).unwrap();
+        cancelled.cancellation = Some(ShipmentCancellationReadModel {
+            cancellation_id: ShipmentCancellationId::new(12).unwrap(),
+            previous_status: ShipmentStatus::Manifested,
+            details: ShipmentCancellationDetails::new(
+                ShipmentCancellationReason::ShippingDataCorrection,
+                None,
+            )
+            .unwrap(),
+            cancelled_by: UserId::new(9).unwrap(),
+            cancelled_at: "2026-08-08T20:05:00Z".parse().unwrap(),
+        });
+        assert!(cancelled.is_consistent());
+        cancelled.cartons[0].tracking_number = None;
         assert!(!cancelled.is_consistent());
     }
 }

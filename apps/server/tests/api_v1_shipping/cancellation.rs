@@ -5,7 +5,7 @@ use wareboxes_api_contract::v1::{
 };
 
 #[tokio::test]
-async fn unmanifested_shipment_cancellation_replays_recovers_and_permits_a_new_attempt() {
+async fn predeparture_shipment_cancellation_replays_recovers_and_permits_new_attempts() {
     let fixture = Fixture::new().await;
     let operator = fixture.wms_user("shipment-cancel@test.local").await;
     let access = default_tenant_for_user(&fixture.db, operator.id)
@@ -157,6 +157,15 @@ async fn unmanifested_shipment_cancellation_replays_recovers_and_permits_a_new_a
     assert_eq!(cancelled.shipment.attempt, 1);
     assert_eq!(cancelled.shipment.order_revision, first.order_revision);
     assert_eq!(cancelled.packing_session_revision, first.order_revision);
+    assert_eq!(
+        cancelled
+            .shipment
+            .cancellation
+            .as_ref()
+            .expect("cancellation evidence")
+            .previous_status,
+        ShipmentStatus::AwaitingManifest
+    );
     assert_eq!(
         cancelled
             .shipment
@@ -369,20 +378,146 @@ async fn unmanifested_shipment_cancellation_replays_recovers_and_permits_a_new_a
     assert_eq!(second.shipment.attempt, 2);
     assert_ne!(second.shipment.shipment_id, first.shipment.shipment_id);
 
-    let manifest = send(
-        &app,
-        &token,
-        access.tenant_id,
-        Method::POST,
-        &format!(
-            "/api/v1/shipments/{}/manifests",
-            second.shipment.shipment_id
-        ),
-        Some("ship-cancel-manifest-2"),
-        Some(manifest_body(&ready, "SHIP-CANCEL-MANIFEST", 1)),
+    let manifested: RecordManualManifestResponse = response_json(
+        expect_status(
+            send(
+                &app,
+                &token,
+                access.tenant_id,
+                Method::POST,
+                &format!(
+                    "/api/v1/shipments/{}/manifests",
+                    second.shipment.shipment_id
+                ),
+                Some("ship-cancel-manifest-2"),
+                Some(manifest_body(&ready, "SHIP-CANCEL-MANIFEST", 1)),
+            )
+            .await,
+            StatusCode::OK,
+            "manifest replacement shipment",
+        )
+        .await,
     )
     .await;
-    expect_status(manifest, StatusCode::OK, "manifest replacement shipment").await;
+    let manifested_cancelled: CancelShipmentResponse = response_json(
+        expect_status(
+            send(
+                &app,
+                &token,
+                access.tenant_id,
+                Method::POST,
+                &format!(
+                    "/api/v1/shipments/{}/cancellations",
+                    second.shipment.shipment_id
+                ),
+                Some("ship-cancel-manifested"),
+                Some(json!({
+                    "expected_shipment_revision": manifested.revision,
+                    "expected_order_revision": second.order_revision,
+                    "reason": "shipping_data_correction",
+                    "note": "Carrier data requires a new manifested attempt"
+                })),
+            )
+            .await,
+            StatusCode::OK,
+            "cancel manifested shipment before departure",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(manifested_cancelled.shipment.revision.get(), 3);
+    assert_eq!(
+        manifested_cancelled.shipment.manifest,
+        Some(manifested.manifest)
+    );
+    assert!(manifested_cancelled
+        .shipment
+        .cartons
+        .iter()
+        .all(|carton| carton.tracking_number.is_some()));
+    assert_eq!(
+        manifested_cancelled
+            .shipment
+            .cancellation
+            .as_ref()
+            .expect("manifested cancellation evidence")
+            .previous_status,
+        ShipmentStatus::Manifested
+    );
+
+    ready.order_revision = manifested_cancelled.packing_session_revision.get();
+    let third: CreateShipmentResponse = response_json(
+        expect_status(
+            send(
+                &app,
+                &token,
+                access.tenant_id,
+                Method::POST,
+                &create_path,
+                Some("ship-cancel-create-3"),
+                Some(create_shipment_body(&ready)),
+            )
+            .await,
+            StatusCode::OK,
+            "create third shipment attempt",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(third.shipment.attempt, 3);
+    let third_manifest: RecordManualManifestResponse = response_json(
+        expect_status(
+            send(
+                &app,
+                &token,
+                access.tenant_id,
+                Method::POST,
+                &format!("/api/v1/shipments/{}/manifests", third.shipment.shipment_id),
+                Some("ship-cancel-manifest-3"),
+                Some(json!({
+                    "carrier_code": "UPS",
+                    "service_code": "GROUND",
+                    "manifest_reference": "SHIP-CANCEL-MANIFEST-3",
+                    "carton_tracking_assignments": [
+                        {"carton_id": ready.carton_ids[0], "tracking_number": format!("TRACK-{}-3-1", ready.order_id)},
+                        {"carton_id": ready.carton_ids[1], "tracking_number": format!("TRACK-{}-3-2", ready.order_id)}
+                    ],
+                    "expected_revision": 1
+                })),
+            )
+            .await,
+            StatusCode::OK,
+            "manifest third shipment attempt",
+        )
+        .await,
+    )
+    .await;
+    let partial: ConfirmShipmentDepartureResponse = response_json(
+        expect_status(
+            send(
+                &app,
+                &token,
+                access.tenant_id,
+                Method::POST,
+                &format!(
+                    "/api/v1/shipments/{}/departures",
+                    third.shipment.shipment_id
+                ),
+                Some("ship-cancel-partial-departure"),
+                Some(json!({
+                    "scanned_carton_barcodes": [ready.carton_barcodes[0]],
+                    "expected_shipment_revision": third_manifest.revision,
+                    "expected_order_revision": third.order_revision
+                })),
+            )
+            .await,
+            StatusCode::OK,
+            "partially depart third shipment attempt",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(partial.shipment_status, ShipmentStatus::PartiallyDeparted);
     assert_eq!(
         send(
             &app,
@@ -391,12 +526,12 @@ async fn unmanifested_shipment_cancellation_replays_recovers_and_permits_a_new_a
             Method::POST,
             &format!(
                 "/api/v1/shipments/{}/cancellations",
-                second.shipment.shipment_id
+                third.shipment.shipment_id
             ),
             Some("ship-cancel-too-late"),
             Some(json!({
-                "expected_shipment_revision": 2,
-                "expected_order_revision": second.order_revision,
+                "expected_shipment_revision": partial.shipment_revision,
+                "expected_order_revision": partial.order_revision,
                 "reason": "operator_error"
             })),
         )
@@ -406,12 +541,16 @@ async fn unmanifested_shipment_cancellation_replays_recovers_and_permits_a_new_a
     );
 
     let admin = admin_db_for(&fixture.db).await;
-    let counts: (i64, i64, i64) = sqlx::query_as(
+    let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT (SELECT COUNT(*) FROM shipments WHERE tenant_id=$1 AND order_id=$2),
                (SELECT COUNT(*) FROM shipment_cancellations WHERE tenant_id=$1 AND order_id=$2),
                (SELECT COUNT(*) FROM outbox_events WHERE tenant_id=$1 AND event_type='shipping.shipment_cancelled'
-                    AND payload->>'order_id'=$2::text)
+                    AND payload->>'order_id'=$2::text),
+               (SELECT COUNT(*) FROM shipment_cancellations WHERE tenant_id=$1 AND order_id=$2
+                    AND previous_shipment_state='awaiting manifest' AND carrier_manifest_id IS NULL),
+               (SELECT COUNT(*) FROM shipment_cancellations WHERE tenant_id=$1 AND order_id=$2
+                    AND previous_shipment_state='manifested' AND carrier_manifest_id IS NOT NULL)
         "#,
     )
     .bind(access.tenant_id.get())
@@ -419,7 +558,7 @@ async fn unmanifested_shipment_cancellation_replays_recovers_and_permits_a_new_a
     .fetch_one(&admin)
     .await
     .unwrap();
-    assert_eq!(counts, (2, 1, 1));
+    assert_eq!(counts, (3, 2, 2, 1, 1));
     assert!(
         sqlx::query("UPDATE shipment_cancellations SET note='forged' WHERE tenant_id=$1")
             .bind(access.tenant_id.get())

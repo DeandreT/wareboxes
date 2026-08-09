@@ -50,6 +50,7 @@ pub(super) async fn load_shipment_tx(
                confirmation.confirmed_by_user_id AS departed_by_user_id,
                shipment.departed_at,
                cancellation.id AS cancellation_id,
+               cancellation.previous_shipment_state AS cancellation_previous_state,
                cancellation.reason_code AS cancellation_reason,
                cancellation.note AS cancellation_note,
                cancellation.cancelled_by_user_id,
@@ -164,8 +165,14 @@ fn cancellation_from_row(
         .map_err(|error| AppError::internal(error.to_string()))?;
     let details = ShipmentCancellationDetails::new(reason, note)
         .map_err(|error| AppError::internal(error.to_string()))?;
+    let previous_status =
+        ShipmentStatus::parse(&row.try_get::<String, _>("cancellation_previous_state")?)
+            .ok_or_else(|| {
+                AppError::internal("shipment cancellation previous status is invalid")
+            })?;
     Ok(Some(ShipmentCancellationReadModel {
         cancellation_id: positive(id, ShipmentCancellationId::new)?,
+        previous_status,
         details,
         cancelled_by: positive(row.try_get("cancelled_by_user_id")?, UserId::new)?,
         cancelled_at: row.try_get("cancelled_at")?,

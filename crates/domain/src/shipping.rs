@@ -407,7 +407,9 @@ pub fn record_manual_manifest(
 
 pub const fn cancel_shipment(status: ShipmentStatus) -> Result<ShipmentStatus, ShippingError> {
     match status {
-        ShipmentStatus::AwaitingManifest => Ok(ShipmentStatus::Cancelled),
+        ShipmentStatus::AwaitingManifest | ShipmentStatus::Manifested => {
+            Ok(ShipmentStatus::Cancelled)
+        }
         _ => Err(ShippingError::ShipmentNotCancellable { status }),
     }
 }
@@ -512,7 +514,7 @@ pub enum ShippingError {
     DuplicateTrackingNumber,
     #[error("only a manifested or partially departed shipment can depart, got {status}")]
     ShipmentNotManifested { status: ShipmentStatus },
-    #[error("only an awaiting-manifest shipment can be cancelled, got {status}")]
+    #[error("only an undeparted awaiting-manifest or manifested shipment can be cancelled, got {status}")]
     ShipmentNotCancellable { status: ShipmentStatus },
     #[error(
         "shipment cancellation note must be nonblank, trimmed, control-free, and at most {MAX_SHIPMENT_CANCELLATION_NOTE_LENGTH} characters"
@@ -602,15 +604,19 @@ mod tests {
     }
 
     #[test]
-    fn only_unmanifested_shipments_can_be_cancelled_with_typed_evidence() {
+    fn only_predeparture_shipments_can_be_cancelled_with_typed_evidence() {
         assert_eq!(
             cancel_shipment(ShipmentStatus::AwaitingManifest),
             Ok(ShipmentStatus::Cancelled)
         );
         assert_eq!(
             cancel_shipment(ShipmentStatus::Manifested),
+            Ok(ShipmentStatus::Cancelled)
+        );
+        assert_eq!(
+            cancel_shipment(ShipmentStatus::PartiallyDeparted),
             Err(ShippingError::ShipmentNotCancellable {
-                status: ShipmentStatus::Manifested,
+                status: ShipmentStatus::PartiallyDeparted,
             })
         );
         assert_eq!(

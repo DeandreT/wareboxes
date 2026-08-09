@@ -228,6 +228,7 @@ pub struct ShipmentCartonResponse {
 #[serde(deny_unknown_fields)]
 pub struct ShipmentCancellationResponse {
     pub cancellation_id: i64,
+    pub previous_status: ShipmentStatus,
     pub reason: ShipmentCancellationReason,
     pub note: Option<String>,
     pub cancelled_by: i64,

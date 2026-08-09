@@ -318,6 +318,7 @@ fn map_shipment(shipment: ShipmentReadModel) -> V1Result<ShipmentResponse> {
             .cancellation
             .map(|cancellation| ShipmentCancellationResponse {
                 cancellation_id: cancellation.cancellation_id.get(),
+                previous_status: map_shipment_status(cancellation.previous_status),
                 reason: api_cancellation_reason(cancellation.details.reason()),
                 note: cancellation
                     .details

@@ -112,6 +112,28 @@ async fn staged_carton_must_be_restored_before_replay_safe_cancellation() {
     )
     .await;
     let load_id = planned.outbound_load.outbound_load_id;
+    assert_eq!(
+        send(
+            &app,
+            &token,
+            access.tenant_id,
+            Method::POST,
+            &format!(
+                "/api/v1/shipments/{}/cancellations",
+                created.shipment.shipment_id
+            ),
+            Some("outbound-recovery-shipment-cancel-blocked"),
+            Some(json!({
+                "expected_shipment_revision": manifested.revision,
+                "expected_order_revision": created.order_revision,
+                "reason": "shipping_data_correction",
+                "note": "must first cancel the active load"
+            })),
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
     expect_status(
         send(
             &app,

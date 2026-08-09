@@ -5231,6 +5231,8 @@ DECLARE
     confirmation_carton_count bigint;
     confirmation_shipped_qty bigint;
     cancellation_count bigint;
+    cancellation_previous_state text;
+    cancellation_manifest_id bigint;
     order_status text;
     order_revision bigint;
 BEGIN
@@ -5311,7 +5313,9 @@ BEGIN
       AND carton.facility_id = shipment_row.facility_id
       AND carton.shipment_id = shipment_row.id;
 
-    SELECT COUNT(*) INTO cancellation_count
+    SELECT COUNT(*), MAX(cancellation.previous_shipment_state),
+           MAX(cancellation.carrier_manifest_id)
+    INTO cancellation_count, cancellation_previous_state, cancellation_manifest_id
     FROM public.shipment_cancellations cancellation
     WHERE cancellation.tenant_id = shipment_row.tenant_id
       AND cancellation.inventory_owner_id = shipment_row.inventory_owner_id
@@ -5329,10 +5333,39 @@ BEGIN
            OR carton_count <> shipment_row.carton_count
            OR content_count <> shipment_row.content_count
            OR packed_qty <> shipment_row.shipped_qty
-           OR manifest_count <> 0 OR package_count <> 0 OR confirmation_count <> 0
+           OR confirmation_count <> 0
            OR confirmation_carton_count <> 0 OR confirmation_shipped_qty <> 0
            OR cancellation_count <> 1
            OR shipment_row.departed_carton_count <> 0 OR shipment_row.departed_qty <> 0
+           OR cancellation_previous_state NOT IN ('awaiting manifest','manifested')
+           OR (cancellation_previous_state = 'awaiting manifest' AND (
+               cancellation_manifest_id IS NOT NULL
+               OR manifest_count <> 0 OR package_count <> 0))
+           OR (cancellation_previous_state = 'manifested' AND (
+               cancellation_manifest_id IS NULL
+               OR manifest_count <> 1
+               OR package_count <> shipment_row.carton_count
+               OR NOT EXISTS (
+                   SELECT 1 FROM public.shipment_manifests manifest
+                   WHERE manifest.tenant_id = shipment_row.tenant_id
+                     AND manifest.inventory_owner_id = shipment_row.inventory_owner_id
+                     AND manifest.facility_id = shipment_row.facility_id
+                     AND manifest.shipment_id = shipment_row.id
+                     AND manifest.id = cancellation_manifest_id)
+               OR EXISTS (
+                   SELECT 1 FROM public.shipment_cartons shipment_carton
+                   WHERE shipment_carton.tenant_id = shipment_row.tenant_id
+                     AND shipment_carton.inventory_owner_id = shipment_row.inventory_owner_id
+                     AND shipment_carton.facility_id = shipment_row.facility_id
+                     AND shipment_carton.shipment_id = shipment_row.id
+                     AND NOT EXISTS (
+                         SELECT 1 FROM public.shipment_manifest_packages package
+                         WHERE package.tenant_id = shipment_carton.tenant_id
+                           AND package.inventory_owner_id = shipment_carton.inventory_owner_id
+                           AND package.facility_id = shipment_carton.facility_id
+                           AND package.shipment_id = shipment_carton.shipment_id
+                           AND package.manifest_id = cancellation_manifest_id
+                           AND package.shipment_carton_id = shipment_carton.id))))
            OR NOT EXISTS (
                SELECT 1 FROM public.shipment_address_snapshots snapshot
                WHERE snapshot.tenant_id = shipment_row.tenant_id
@@ -5350,6 +5383,8 @@ BEGIN
                  AND cancellation.facility_id = shipment_row.facility_id
                  AND cancellation.shipment_id = shipment_row.id
                  AND cancellation.attempt = shipment_row.attempt
+                 AND cancellation.previous_shipment_state = cancellation_previous_state
+                 AND cancellation.carrier_manifest_id IS NOT DISTINCT FROM cancellation_manifest_id
                  AND cancellation.resulting_shipment_revision = shipment_row.revision
                  AND cancellation.cancelled_by_user_id = shipment_row.cancelled_by_user_id
                  AND cancellation.cancelled_at = shipment_row.cancelled_at)
@@ -30940,10 +30975,11 @@ ON public.outbound_qa_sessions TO wareboxes_app;
 REVOKE ALL ON FUNCTION public.validate_outbound_qa_cancellation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_outbound_qa_cancellation_mutation() FROM PUBLIC;
 
--- Unmanifested shipment attempts may be cancelled without deleting their
--- immutable address/carton/document snapshots. Cancellation advances the
--- packing-session revision to the order revision established by creation, so
--- packing recovery and later shipment attempts resume from one shared revision.
+-- Pre-departure shipment attempts may be cancelled without deleting their
+-- immutable address, carton, manifest, tracking, or document snapshots.
+-- Cancellation advances the packing-session revision to the order revision
+-- established by creation, so packing recovery and later shipment attempts
+-- resume from one shared revision.
 ALTER TABLE public.shipments
     ADD COLUMN attempt bigint NOT NULL DEFAULT 1,
     ADD COLUMN cancelled_by_user_id bigint,
@@ -30979,12 +31015,16 @@ ALTER TABLE public.shipments
             AND departed_at >= manifested_at
             AND departed_carton_count = carton_count AND departed_qty = shipped_qty
             AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL)
-        OR ((state = 'cancelled') AND revision = 2
-            AND carrier IS NULL AND service IS NULL
-            AND manifested_at IS NULL AND departed_at IS NULL
+        OR ((state = 'cancelled') AND revision IN (2, 3)
+            AND ((revision = 2 AND carrier IS NULL AND service IS NULL
+                  AND manifested_at IS NULL)
+                 OR (revision = 3 AND carrier IS NOT NULL
+                     AND manifested_at IS NOT NULL
+                     AND manifested_at >= created_at))
+            AND departed_at IS NULL
             AND departed_carton_count = 0 AND departed_qty = 0
             AND cancelled_by_user_id IS NOT NULL AND cancelled_at IS NOT NULL
-            AND cancelled_at >= created_at)),
+            AND cancelled_at >= COALESCE(manifested_at, created_at))),
     ADD CONSTRAINT shipments_order_attempt_key UNIQUE (
         tenant_id, inventory_owner_id, order_id, attempt),
     ADD CONSTRAINT shipments_cancelled_by_fkey FOREIGN KEY (
@@ -31009,6 +31049,8 @@ CREATE TABLE public.shipment_cancellations (
     inventory_owner_id bigint NOT NULL,
     facility_id bigint NOT NULL,
     shipment_id bigint NOT NULL,
+    previous_shipment_state text NOT NULL,
+    carrier_manifest_id bigint,
     packing_session_id bigint NOT NULL,
     order_release_id bigint NOT NULL,
     order_id bigint NOT NULL,
@@ -31027,8 +31069,14 @@ CREATE TABLE public.shipment_cancellations (
     cancelled_by_user_id bigint NOT NULL,
     cancelled_at timestamp with time zone NOT NULL,
     CONSTRAINT shipment_cancellations_attempt_check CHECK (attempt > 0),
+    CONSTRAINT shipment_cancellations_previous_state_check CHECK (
+        previous_shipment_state IN ('awaiting manifest','manifested')),
+    CONSTRAINT shipment_cancellations_manifest_check CHECK (
+        (previous_shipment_state = 'awaiting manifest' AND carrier_manifest_id IS NULL)
+        OR (previous_shipment_state = 'manifested' AND carrier_manifest_id IS NOT NULL)),
     CONSTRAINT shipment_cancellations_revision_check CHECK (
-        expected_shipment_revision = 1
+        ((previous_shipment_state = 'awaiting manifest' AND expected_shipment_revision = 1)
+         OR (previous_shipment_state = 'manifested' AND expected_shipment_revision = 2))
         AND resulting_shipment_revision = expected_shipment_revision + 1
         AND expected_order_revision > 0
         AND resulting_order_revision = expected_order_revision
@@ -31056,6 +31104,10 @@ CREATE TABLE public.shipment_cancellations (
         REFERENCES public.shipments (
             tenant_id, inventory_owner_id, facility_id,
             packing_session_id, order_release_id, order_id, id),
+    CONSTRAINT shipment_cancellations_manifest_fkey FOREIGN KEY (
+        tenant_id, inventory_owner_id, facility_id, shipment_id, carrier_manifest_id)
+        REFERENCES public.shipment_manifests (
+            tenant_id, inventory_owner_id, facility_id, shipment_id, id),
     CONSTRAINT shipment_cancellations_actor_fkey FOREIGN KEY (
         tenant_id, cancelled_by_user_id)
         REFERENCES public.tenant_memberships (tenant_id, user_id)
@@ -31141,10 +31193,12 @@ BEGIN
         RAISE EXCEPTION 'shipment identity and plan are immutable' USING ERRCODE = '55000';
     END IF;
 
-    IF OLD.state = 'awaiting manifest' AND NEW.state = 'cancelled'
+    IF OLD.state IN ('awaiting manifest','manifested') AND NEW.state = 'cancelled'
        AND NEW.revision = OLD.revision + 1
-       AND NEW.carrier IS NULL AND NEW.service IS NULL
-       AND NEW.manifested_at IS NULL AND NEW.departed_at IS NULL
+       AND NEW.carrier IS NOT DISTINCT FROM OLD.carrier
+       AND NEW.service IS NOT DISTINCT FROM OLD.service
+       AND NEW.manifested_at IS NOT DISTINCT FROM OLD.manifested_at
+       AND NEW.departed_at IS NULL
        AND NEW.departed_carton_count = 0 AND NEW.departed_qty = 0
        AND NEW.cancelled_by_user_id IS NOT NULL AND NEW.cancelled_at IS NOT NULL
        AND EXISTS (
@@ -31153,6 +31207,7 @@ BEGIN
              AND cancellation.inventory_owner_id = OLD.inventory_owner_id
              AND cancellation.facility_id = OLD.facility_id
              AND cancellation.shipment_id = OLD.id
+             AND cancellation.previous_shipment_state = OLD.state
              AND cancellation.expected_shipment_revision = OLD.revision
              AND cancellation.resulting_shipment_revision = NEW.revision
              AND cancellation.cancelled_by_user_id = NEW.cancelled_by_user_id
@@ -31213,7 +31268,7 @@ BEGIN
            shipment.creation_expected_order_revision,
            shipment.creation_resulting_order_revision,
            shipment.carton_count,shipment.content_count,shipment.shipped_qty,
-           shipment.created_at,session.state AS packing_state,
+           shipment.created_at,shipment.manifested_at,session.state AS packing_state,
            session.revision AS packing_revision,
            order_header.status AS order_status,
            order_header.revision AS order_revision
@@ -31239,7 +31294,8 @@ BEGIN
       AND shipment.order_id=NEW.order_id
     FOR SHARE OF shipment,session,order_header;
 
-    IF NOT FOUND OR source.state <> 'awaiting manifest'
+    IF NOT FOUND OR source.state NOT IN ('awaiting manifest','manifested')
+       OR source.state <> NEW.previous_shipment_state
        OR source.revision <> NEW.expected_shipment_revision
        OR NEW.resulting_shipment_revision <> source.revision + 1
        OR source.attempt <> NEW.attempt
@@ -31255,10 +31311,21 @@ BEGIN
        OR NEW.resulting_order_revision <> source.order_revision
        OR NEW.resulting_packing_revision <> source.packing_revision + 1
        OR NEW.resulting_packing_revision <> source.order_revision
-       OR NEW.cancelled_at < source.created_at
-       OR EXISTS (
+       OR NEW.cancelled_at < COALESCE(source.manifested_at, source.created_at)
+       OR (source.state = 'awaiting manifest' AND (
+           NEW.carrier_manifest_id IS NOT NULL OR EXISTS (
+               SELECT 1 FROM public.shipment_manifests manifest
+               WHERE manifest.tenant_id=NEW.tenant_id
+                 AND manifest.inventory_owner_id=NEW.inventory_owner_id
+                 AND manifest.facility_id=NEW.facility_id
+                 AND manifest.shipment_id=NEW.shipment_id)))
+       OR (source.state = 'manifested' AND NOT EXISTS (
            SELECT 1 FROM public.shipment_manifests manifest
-           WHERE manifest.tenant_id=NEW.tenant_id AND manifest.shipment_id=NEW.shipment_id)
+           WHERE manifest.tenant_id=NEW.tenant_id
+             AND manifest.inventory_owner_id=NEW.inventory_owner_id
+             AND manifest.facility_id=NEW.facility_id
+             AND manifest.shipment_id=NEW.shipment_id
+             AND manifest.id=NEW.carrier_manifest_id))
        OR EXISTS (
            SELECT 1 FROM public.outbound_load_shipments link
            WHERE link.tenant_id=NEW.tenant_id AND link.shipment_id=NEW.shipment_id

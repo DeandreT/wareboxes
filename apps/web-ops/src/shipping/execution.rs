@@ -27,6 +27,7 @@ pub(super) fn ShipmentExecution(
         .sum::<i64>();
     let shipment_id = shipment.shipment_id;
     let shipment_revision = shipment.revision;
+    let order_revision = shipment.order_revision;
     view! {
         <div class="shipping-execution">
             <section class="shipping-cartons">
@@ -76,7 +77,7 @@ pub(super) fn ShipmentExecution(
                             <ShipmentCancellationAction
                                 shipment_id
                                 shipment_revision
-                                order_revision=shipment.order_revision
+                                order_revision
                                 blocked=Signal::derive(move || signals.pending.get() || signals.retry.get().is_some())
                                 on_cancel
                             />
@@ -84,6 +85,15 @@ pub(super) fn ShipmentExecution(
                     }.into_any(),
                     ShipmentStatus::Manifested => view! {
                         <DeparturePanel shipment signals scan_input on_scan on_depart/>
+                        {can_cancel.then(|| view! {
+                            <ShipmentCancellationAction
+                                shipment_id
+                                shipment_revision
+                                order_revision
+                                blocked=Signal::derive(move || signals.pending.get() || signals.retry.get().is_some())
+                                on_cancel
+                            />
+                        })}
                     }.into_any(),
                     ShipmentStatus::PartiallyDeparted => view! {
                         <DeparturePanel shipment signals scan_input on_scan on_depart/>

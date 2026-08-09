@@ -6,7 +6,7 @@ use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     cancel_shipment as validate_cancellation, OrderRevision, OrderStatus, ShipmentCancellationId,
-    ShipmentCancellationReason, TenantId,
+    ShipmentCancellationReason, ShipmentStatus, TenantId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
@@ -89,6 +89,45 @@ pub async fn cancel_shipment(
     }
     let status = validate_cancellation(shipment.status)
         .map_err(|error| AppError::conflict(error.to_string()))?;
+    let active_load_exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM outbound_load_shipments
+            WHERE tenant_id=$1 AND inventory_owner_id=$2 AND facility_id=$3
+              AND shipment_id=$4 AND closed_at IS NULL)
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(shipment.inventory_owner_id.get())
+    .bind(shipment.facility_id.get())
+    .bind(shipment.id.get())
+    .fetch_one(&mut *tx)
+    .await?;
+    if active_load_exists {
+        return Err(AppError::conflict(
+            "shipment is assigned to an active outbound load",
+        ));
+    }
+    let carrier_manifest_id: Option<i64> = if shipment.status == ShipmentStatus::Manifested {
+        Some(
+            sqlx::query_scalar(
+                r#"
+                SELECT id FROM shipment_manifests
+                WHERE tenant_id=$1 AND inventory_owner_id=$2 AND facility_id=$3
+                  AND shipment_id=$4
+                "#,
+            )
+            .bind(access.tenant_id.get())
+            .bind(shipment.inventory_owner_id.get())
+            .bind(shipment.facility_id.get())
+            .bind(shipment.id.get())
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| AppError::internal("manifested shipment has no manifest"))?,
+        )
+    } else {
+        None
+    };
     let next_shipment_revision = shipment
         .revision
         .checked_next()
@@ -119,14 +158,15 @@ pub async fn cancel_shipment(
         r#"
         INSERT INTO shipment_cancellations (
             tenant_id,inventory_owner_id,facility_id,shipment_id,
+            previous_shipment_state,carrier_manifest_id,
             packing_session_id,order_release_id,order_id,attempt,
             expected_shipment_revision,resulting_shipment_revision,
             expected_order_revision,resulting_order_revision,
             expected_packing_revision,resulting_packing_revision,
             carton_count,content_count,packed_qty,reason_code,note,
             cancelled_by_user_id,cancelled_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11,$12,$13,
-                $14,$15,$16,$17,$18,$19,$20)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,$14,$15,
+                $16,$17,$18,$19,$20,$21,$22)
         RETURNING id
         "#,
     )
@@ -134,6 +174,8 @@ pub async fn cancel_shipment(
     .bind(shipment.inventory_owner_id.get())
     .bind(shipment.facility_id.get())
     .bind(shipment.id.get())
+    .bind(shipment.status.as_str())
+    .bind(carrier_manifest_id)
     .bind(shipment.packing_session_id.get())
     .bind(shipment.order_release_id)
     .bind(shipment.order_id.get())
@@ -157,7 +199,7 @@ pub async fn cancel_shipment(
         r#"
         UPDATE shipments
         SET state=$1,revision=$2,cancelled_by_user_id=$3,cancelled_at=$4
-        WHERE tenant_id=$5 AND id=$6 AND state='awaiting manifest' AND revision=$7
+        WHERE tenant_id=$5 AND id=$6 AND state=$7 AND revision=$8
         "#,
     )
     .bind(status.as_str())
@@ -166,6 +208,7 @@ pub async fn cancel_shipment(
     .bind(cancelled_at)
     .bind(access.tenant_id.get())
     .bind(shipment.id.get())
+    .bind(shipment.status.as_str())
     .bind(shipment.revision.get())
     .execute(&mut *tx)
     .await?;
@@ -198,7 +241,7 @@ pub async fn cancel_shipment(
         shipment.order_id.get(),
         Some(context.actor_id.get()),
         &format!(
-            "cancelled shipment {} attempt {} before manifest ({})",
+            "cancelled shipment {} attempt {} before departure ({})",
             shipment.id,
             shipment.attempt,
             cancellation_reason_wire(command.details.reason())
@@ -218,6 +261,8 @@ pub async fn cancel_shipment(
             "cancellation_id": cancellation_id,
             "shipment_id": shipment.id,
             "attempt": shipment.attempt,
+            "previous_status": shipment.status.as_str(),
+            "carrier_manifest_id": carrier_manifest_id,
             "packing_session_id": shipment.packing_session_id,
             "order_id": shipment.order_id,
             "shipment_revision": next_shipment_revision,
