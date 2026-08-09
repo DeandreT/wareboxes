@@ -595,10 +595,13 @@ async fn cancellation_and_operator_claim_race_has_one_winner_and_no_stranded_sou
     let cancel_future = cancel(&rig, work_id, "cancel-race-cancel", "demand_removed", None);
     let (claim, cancellation) = tokio::join!(claim_future, cancel_future);
     let statuses = (claim.status(), cancellation.status());
-    assert!(matches!(
-        statuses,
-        (StatusCode::OK, StatusCode::CONFLICT) | (StatusCode::CONFLICT, StatusCode::OK)
-    ));
+    assert!(
+        matches!(
+            statuses,
+            (StatusCode::OK, StatusCode::CONFLICT) | (StatusCode::CONFLICT, StatusCode::OK)
+        ),
+        "unexpected claim/cancellation race statuses: {statuses:?}"
+    );
 
     let mut tx = tenant_tx(&rig.fixture.db, rig.access.tenant_id).await;
     let row = sqlx::query(

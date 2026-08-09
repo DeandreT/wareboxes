@@ -557,7 +557,7 @@ async fn lock_claim_target_tx(
              work.lease_expires_at>statement_timestamp() AS lease_current,
              work.facility_id,work.inventory_owner_id
            FROM work_tasks work JOIN replenishment_tasks detail ON detail.tenant_id=work.tenant_id
-             AND detail.task_id=work.id AND detail.closed_at IS NULL
+             AND detail.task_id=work.id
            WHERE work.tenant_id=$1 AND work.id=$2 AND work.task_type='replenishment'
              AND work.deleted IS NULL FOR UPDATE OF work"#,
     )
