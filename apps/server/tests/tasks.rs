@@ -6,7 +6,10 @@ use common::*;
 use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::{routes, state::AppState};
+use wareboxes_application::order_cancellation::CancelOrderCommand;
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::WorkTask;
+use wareboxes_domain::{OrderCancellationReason, OrderId, OrderRevision};
 
 #[tokio::test]
 async fn work_tasks_are_precise_and_deduplicate_generated_tasks() {
@@ -476,14 +479,54 @@ async fn cancelled_order_unpack_task_is_facility_scoped_and_deduplicated() {
         .order_header(tenant_id, "CANCEL-TASK-1", inventory_owner)
         .await;
     let order_item_id = fixture.order_item(tenant_id, order_id, item, 3).await;
-    let mut cancellation_tx = tenant_tx(db, tenant_id).await;
-    sqlx::query("UPDATE orders SET status = 'cancelled' WHERE tenant_id = $1 AND id = $2")
-        .bind(tenant_id.get())
-        .bind(order_id)
-        .execute(&mut *cancellation_tx)
+    let orders_permission = wareboxes_persistence_postgres::permissions::add_permission(
+        db,
+        tenant_id,
+        "orders",
+        Some("Orders"),
+    )
+    .await
+    .unwrap();
+    let orders_role = wareboxes_persistence_postgres::roles::add_role(
+        db,
+        tenant_id,
+        "cancel-task-orders",
+        Some("Cancel task fixture"),
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        db,
+        tenant_id,
+        orders_role,
+        orders_permission,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(db, tenant_id, user.id, orders_role)
         .await
         .unwrap();
-    cancellation_tx.commit().await.unwrap();
+    let access = default_tenant_for_user(db, user.id).await.unwrap();
+    let cancellation = CancelOrderCommand::new(
+        OrderId::new(order_id).unwrap(),
+        OrderRevision::new(1).unwrap(),
+        OrderCancellationReason::ClientRequest,
+        None,
+    )
+    .unwrap();
+    repo::order_cancellation::cancel_order(
+        db,
+        &access,
+        &CommandContext {
+            tenant_id,
+            actor_id: access.user_id,
+            request_id: "cancel-task-fixture".to_owned(),
+            idempotency_key: Some("cancel-task-fixture".to_owned()),
+        },
+        &cancellation,
+    )
+    .await
+    .unwrap();
     let unpack_task = repo::tasks::create_unpack_cancelled_order_task(
         db,
         tenant_id,

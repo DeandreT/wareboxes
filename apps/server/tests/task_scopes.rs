@@ -10,9 +10,11 @@ use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
+use wareboxes_application::order_cancellation::CancelOrderCommand;
 use wareboxes_application::CommandContext;
 use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::WorkTask;
+use wareboxes_domain::{OrderCancellationReason, OrderId, OrderRevision};
 
 static NEXT_IDEMPOTENCY_KEY: AtomicU64 = AtomicU64::new(1);
 
@@ -65,20 +67,32 @@ async fn response_json<T: serde::de::DeserializeOwned>(response: axum::response:
 async fn cancel_order(
     db: &db::Db,
     tenant_id: TenantId,
-    _user_id: i64,
+    user_id: i64,
     order_id: i64,
     _facility_id: i64,
 ) {
-    let mut tx = tenant_tx(db, tenant_id).await;
-    let updated =
-        sqlx::query("UPDATE orders SET status = 'cancelled' WHERE tenant_id = $1 AND id = $2")
-            .bind(tenant_id.get())
-            .bind(order_id)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-    tx.commit().await.unwrap();
-    assert_eq!(updated.rows_affected(), 1);
+    let access = default_tenant_for_user(db, user_id).await.unwrap();
+    let command = CancelOrderCommand::new(
+        OrderId::new(order_id).unwrap(),
+        OrderRevision::new(1).unwrap(),
+        OrderCancellationReason::ClientRequest,
+        None,
+    )
+    .unwrap();
+    let result = repo::order_cancellation::cancel_order(
+        db,
+        &access,
+        &CommandContext {
+            tenant_id,
+            actor_id: access.user_id,
+            request_id: format!("cancel-task-scope-{order_id}"),
+            idempotency_key: Some(format!("cancel-task-scope-{order_id}")),
+        },
+        &command,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.order_id.get(), order_id);
 }
 
 #[tokio::test]
@@ -129,6 +143,30 @@ async fn work_task_routes_enforce_facility_and_owner_scopes() {
         tenant_id,
         operator_role,
         orders_permission,
+    )
+    .await
+    .unwrap();
+    let administrator_orders_role = wareboxes_persistence_postgres::roles::add_role(
+        &fixture.db,
+        tenant_id,
+        "task-scope-admin-orders-role",
+        Some("Task scope fixture order cancellation"),
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_id,
+        administrator_orders_role,
+        orders_permission,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_id,
+        administrator.id,
+        administrator_orders_role,
     )
     .await
     .unwrap();
