@@ -22,6 +22,7 @@ mod order_release;
 mod outbound_load;
 mod outbound_qa;
 mod packing;
+mod pick_wave;
 mod picking;
 mod putaway;
 mod putaway_claim;
@@ -145,6 +146,11 @@ pub use packing::{
     PackingQueueFacilityIdError, PackingQueueOrderStatus, PackingQueuePage,
     PackingQueuePageRequest, PackingQueueSessionResponse, VoidCartonRequest, VoidCartonResponse,
     WeightGrams,
+};
+pub use pick_wave::{
+    CancelPickWaveRequest, PickWaveCancellationReason, PickWaveOrderResponse, PickWavePage,
+    PickWavePageRequest, PickWaveResponse, PickWaveSort, PickWaveSortDirection, PickWaveStatus,
+    PlanPickWaveOrderRequest, PlanPickWaveRequest, ReleasePickWaveRequest,
 };
 pub use picking::{
     AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,

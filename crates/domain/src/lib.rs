@@ -10,6 +10,7 @@ mod order_release;
 mod outbound_load;
 mod outbound_qa;
 mod packing;
+mod pick_wave;
 mod picking;
 mod replenishment;
 mod shipping;
@@ -76,6 +77,12 @@ pub use packing::{
     begin_packing, complete_packing, continue_packing, open_carton, CartonDimensions,
     CartonMeasurements, CartonStatus, DimensionMillimeters, PackQuantity, PackScanValue,
     PackSessionStatus, PackingError, PackingProgress, WeightGrams, MAX_PACK_SCAN_VALUE_LENGTH,
+};
+pub use pick_wave::{
+    cancel_pick_wave, release_pick_wave, validate_pick_wave_plan, PickWaveCancellationNote,
+    PickWaveCancellationReason, PickWaveError, PickWaveName, PickWaveOrderPrecondition,
+    PickWaveRevision, PickWaveStatus, MAX_PICK_WAVE_CANCELLATION_NOTE_LENGTH,
+    MAX_PICK_WAVE_NAME_LENGTH,
 };
 pub use picking::{
     resolve_pick_shortage_as_short_ship, reverse_pick_before_packing, ActualPickQuantity,
@@ -184,6 +191,7 @@ positive_id!(OrderCancellationId, "order cancellation ID");
 positive_id!(BackorderPolicyId, "backorder policy ID");
 positive_id!(BackorderSplitId, "backorder split ID");
 positive_id!(OrderReleaseId, "order release ID");
+positive_id!(PickWaveId, "pick wave ID");
 positive_id!(PickTaskId, "pick task ID");
 positive_id!(PickContentId, "pick content ID");
 positive_id!(PickConfirmationId, "pick confirmation ID");

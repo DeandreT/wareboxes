@@ -5,8 +5,8 @@ use leptos_router::{
 };
 use wareboxes_api_contract::v1::{
     InventoryBalanceResponse, InventoryHoldResponse, InventoryHoldStatus, OpaqueCursor,
-    OutboundLoadQueuePage, PackingQueuePage, ReplenishmentPolicyPage, ReplenishmentQueuePage,
-    ShippingQueuePage,
+    OutboundLoadQueuePage, PackingQueuePage, PickWavePage, ReplenishmentPolicyPage,
+    ReplenishmentQueuePage, ShippingQueuePage,
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 use wareboxes_core::dto::{OrderPage, WebSessionContext};
@@ -25,6 +25,7 @@ use crate::inventory_integrity::InventoryIntegrityWorkbench;
 use crate::orders::OrderTable;
 use crate::outbound_loads::OutboundLoadsWorkspace;
 use crate::packing::PackingWorkspace;
+use crate::pick_waves::PickWavesWorkspace;
 use crate::preferences::provide_display_preferences;
 use crate::replenishment::ReplenishmentWorkspace;
 use crate::shipping::ShippingWorkspace;
@@ -46,6 +47,7 @@ pub struct InitialWebWorkspace(pub Option<WorkspaceBootstrap>);
 pub enum WorkspaceBootstrapSection {
     Overview,
     Orders,
+    PickWaves,
     Packing,
     Shipping,
     OutboundLoads,
@@ -57,6 +59,7 @@ pub enum WorkspaceBootstrapSection {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceBootstrapData {
     pub orders: Option<OrderPage>,
+    pub pick_waves: Option<PickWavePage>,
     pub packing_queue: Option<PackingQueuePage>,
     pub shipping_queue: Option<ShippingQueuePage>,
     pub outbound_load_queue: Option<OutboundLoadQueuePage>,
@@ -90,6 +93,7 @@ pub(crate) enum SessionState {
 #[derive(Clone, Default)]
 struct WorkspaceData {
     orders: Option<OrderPage>,
+    pick_waves: Option<PickWavePage>,
     packing_queue: Option<PackingQueuePage>,
     shipping_queue: Option<ShippingQueuePage>,
     outbound_load_queue: Option<OutboundLoadQueuePage>,
@@ -109,6 +113,7 @@ impl From<WorkspaceBootstrapData> for WorkspaceData {
     fn from(bootstrap: WorkspaceBootstrapData) -> Self {
         Self {
             orders: bootstrap.orders,
+            pick_waves: bootstrap.pick_waves,
             packing_queue: bootstrap.packing_queue,
             shipping_queue: bootstrap.shipping_queue,
             outbound_load_queue: bootstrap.outbound_load_queue,
@@ -135,6 +140,7 @@ enum WorkspaceState {
 pub(crate) enum Section {
     Overview,
     Orders,
+    PickWaves,
     Packing,
     Shipping,
     OutboundLoads,
@@ -154,6 +160,7 @@ impl Section {
         match self {
             Self::Overview => Some(WorkspaceBootstrapSection::Overview),
             Self::Orders => Some(WorkspaceBootstrapSection::Orders),
+            Self::PickWaves => Some(WorkspaceBootstrapSection::PickWaves),
             Self::Packing => Some(WorkspaceBootstrapSection::Packing),
             Self::Shipping => Some(WorkspaceBootstrapSection::Shipping),
             Self::OutboundLoads => Some(WorkspaceBootstrapSection::OutboundLoads),
@@ -208,6 +215,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/pick-shortages.css"/>
                 <link rel="stylesheet" href="/order-allocation.css"/>
                 <link rel="stylesheet" href="/packing.css"/>
+                <link rel="stylesheet" href="/pick-waves.css"/>
                 <link rel="stylesheet" href="/shipping.css"/>
                 <link rel="stylesheet" href="/outbound-loads.css"/>
                 <link rel="stylesheet" href="/replenishment.css"/>
@@ -254,6 +262,7 @@ pub fn App() -> impl IntoView {
                 <Routes fallback=|| view! { <NotFoundPage/> }.into_any()>
                     <Route path=StaticSegment("") view=OverviewPage/>
                     <Route path=StaticSegment("orders") view=OrdersPage/>
+                    <Route path=StaticSegment("pick-waves") view=PickWavesPage/>
                     <Route path=StaticSegment("packing") view=PackingPage/>
                     <Route path=StaticSegment("shipping") view=ShippingPage/>
                     <Route path=StaticSegment("outbound-loads") view=OutboundLoadsPage/>
@@ -544,6 +553,26 @@ async fn load_workspace(
             data.access = api::access().await?;
             data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
         }
+        Section::PickWaves if has_permission(session, "wms_supervisor") => {
+            data.pick_waves = Some(
+                api::pick_waves(
+                    None,
+                    None,
+                    wareboxes_api_contract::v1::PickWaveSort::PlannedAt,
+                    wareboxes_api_contract::v1::PickWaveSortDirection::Desc,
+                    None,
+                )
+                .await?,
+            );
+            data.orders = Some(
+                api::internal_get(
+                    "/api/orders?limit=100&offset=0&status=open&sort=order&direction=asc",
+                )
+                .await?,
+            );
+            data.access = api::access().await?;
+            data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
+        }
         Section::Packing if has_permission(session, "wms") => {
             data.packing_queue = Some(api::packing_queue(None, None).await?);
             data.access = api::access().await?;
@@ -600,6 +629,7 @@ async fn load_workspace(
         }
         Section::Administration(_) if has_permission(session, "admin") => {}
         Section::Orders
+        | Section::PickWaves
         | Section::Packing
         | Section::Shipping
         | Section::OutboundLoads
@@ -623,6 +653,11 @@ fn OverviewPage() -> impl IntoView {
 #[component]
 fn OrdersPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::Orders/> }
+}
+
+#[component]
+fn PickWavesPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::PickWaves/> }
 }
 
 #[component]
@@ -738,6 +773,15 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
             Section::Orders if has_permission(&session, "orders") => {
                 view! { <Orders data on_unauthorized=session_expired_callback()/> }.into_any()
             }
+            Section::PickWaves if has_permission(&session, "wms_supervisor") => view! {
+                <PickWavesWorkspace
+                    initial_page=data.pick_waves.unwrap_or_else(|| PickWavePage::new(Vec::new(), None))
+                    initial_orders=data.orders.unwrap_or_else(empty_order_page)
+                    access=data.access
+                    locations=data.locations
+                    on_unauthorized=session_expired_callback()
+                />
+            }.into_any(),
             Section::Packing if has_permission(&session, "wms") => view! {
                 <PackingWorkspace
                     initial_queue=data.packing_queue.unwrap_or_else(|| PackingQueuePage::new(Vec::new(), None))

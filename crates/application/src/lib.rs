@@ -17,6 +17,7 @@ pub mod outbound_load;
 pub mod outbound_qa;
 pub mod outbox;
 pub mod packing;
+pub mod pick_wave;
 pub mod picking;
 pub mod replenishment;
 pub mod shipping;

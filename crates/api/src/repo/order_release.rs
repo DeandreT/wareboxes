@@ -12,7 +12,7 @@ use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     release_order as transition_order, InventoryOwnerId, OrderId, OrderReleaseId, OrderRevision,
-    OrderStatus, TenantId, Timestamp,
+    OrderStatus, PickWaveId, TenantId, Timestamp,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
@@ -23,6 +23,28 @@ use crate::repo::access::{lock_current_scope_tx, require_permission_tx, ScopeBin
 use crate::repo::orders::{insert_order_activity_tx, next_outbox_sequence_tx};
 
 const PICK_LEASE_SECONDS: i64 = 30 * 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrderReleaseMode {
+    Waveless,
+    Wave(PickWaveId),
+}
+
+impl OrderReleaseMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Waveless => "waveless",
+            Self::Wave(_) => "wave",
+        }
+    }
+
+    const fn wave_id(self) -> Option<PickWaveId> {
+        match self {
+            Self::Waveless => None,
+            Self::Wave(id) => Some(id),
+        }
+    }
+}
 
 #[derive(Debug)]
 struct LockedOrder {
@@ -82,10 +104,34 @@ pub async fn release_order(
         return Ok(result);
     }
 
+    let result = release_order_tx(
+        &mut tx,
+        access.tenant_id,
+        context.actor_id.get(),
+        &scope,
+        command,
+        OrderReleaseMode::Waveless,
+        now_iso(),
+    )
+    .await?;
+
+    Ok(prepared.commit(tx, result).await?)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn release_order_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    actor_user_id: i64,
+    scope: &ScopeBindings,
+    command: &ReleaseOrderCommand,
+    mode: OrderReleaseMode,
+    released_at: Timestamp,
+) -> AppResult<ReleaseOrderResult> {
     if !scope.includes_facility(command.facility_id.get()) {
         return Err(AppError::not_found("order release"));
     }
-    let order = lock_order_tx(&mut tx, access.tenant_id, command.order_id, &scope).await?;
+    let order = lock_order_tx(tx, tenant_id, command.order_id, scope).await?;
     if order.revision != command.expected_revision {
         return Err(AppError::conflict(
             "order revision does not match expected revision",
@@ -94,37 +140,30 @@ pub async fn release_order(
     let resulting_status =
         transition_order(order.status).map_err(|error| AppError::conflict(error.to_string()))?;
     lock_active_owner_facility_tx(
-        &mut tx,
-        access.tenant_id,
+        tx,
+        tenant_id,
         order.inventory_owner_id,
         command.facility_id.get(),
     )
     .await?;
     lock_destination_location_tx(
-        &mut tx,
-        access.tenant_id,
+        tx,
+        tenant_id,
         command.facility_id.get(),
         command.destination_location_id.get(),
     )
     .await?;
-    require_no_active_holds_tx(
-        &mut tx,
-        access.tenant_id,
-        order.inventory_owner_id,
-        command.order_id,
-    )
-    .await?;
+    require_no_active_holds_tx(tx, tenant_id, order.inventory_owner_id, command.order_id).await?;
 
-    let lines = lock_demand_lines_tx(
-        &mut tx,
-        access.tenant_id,
-        order.inventory_owner_id,
-        command.order_id,
-    )
-    .await?;
+    if mode == OrderReleaseMode::Waveless {
+        require_no_active_wave_tx(tx, tenant_id, command.order_id).await?;
+    }
+
+    let lines =
+        lock_demand_lines_tx(tx, tenant_id, order.inventory_owner_id, command.order_id).await?;
     let allocations = lock_release_allocations_tx(
-        &mut tx,
-        access.tenant_id,
+        tx,
+        tenant_id,
         order.inventory_owner_id,
         command.order_id,
         command.facility_id.get(),
@@ -140,17 +179,17 @@ pub async fn release_order(
         .ok_or_else(|| AppError::internal("released order quantity exceeds i64"))?;
     let allocation_count = i64::try_from(allocations.len())
         .map_err(|_| AppError::internal("release allocation count exceeds i64"))?;
-    let released_at = now_iso();
     let resulting_revision = order
         .revision
         .checked_next()
         .ok_or_else(|| AppError::internal("order revision overflow"))?;
     let release_id = insert_release_tx(
-        &mut tx,
-        access.tenant_id,
+        tx,
+        tenant_id,
         order.inventory_owner_id,
-        context.actor_id.get(),
+        actor_user_id,
         command,
+        mode,
         resulting_revision,
         allocation_count,
         released_quantity,
@@ -158,10 +197,10 @@ pub async fn release_order(
     )
     .await?;
     insert_pick_work_tx(
-        &mut tx,
-        access.tenant_id,
+        tx,
+        tenant_id,
         order.inventory_owner_id,
-        context.actor_id.get(),
+        actor_user_id,
         command,
         &order,
         release_id,
@@ -170,22 +209,23 @@ pub async fn release_order(
     )
     .await?;
     update_order_tx(
-        &mut tx,
-        access.tenant_id,
+        tx,
+        tenant_id,
         command.order_id,
         order.status,
         order.revision,
         resulting_status,
         resulting_revision,
         released_at,
+        mode.wave_id(),
     )
     .await?;
     insert_order_activity_tx(
-        &mut tx,
-        access.tenant_id,
+        tx,
+        tenant_id,
         order.inventory_owner_id,
         command.order_id.get(),
-        Some(context.actor_id.get()),
+        Some(actor_user_id),
         &format!("released order to {} pick task(s)", allocation_count),
     )
     .await?;
@@ -204,15 +244,35 @@ pub async fn release_order(
         released_at,
     };
     enqueue_release_event_tx(
-        &mut tx,
-        access.tenant_id,
-        context.actor_id.get(),
+        tx,
+        tenant_id,
+        actor_user_id,
         command.expected_revision,
         &result,
+        mode,
     )
     .await?;
 
-    Ok(prepared.commit(tx, result).await?)
+    Ok(result)
+}
+
+async fn require_no_active_wave_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    order_id: OrderId,
+) -> AppResult<()> {
+    let active: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pick_wave_orders WHERE tenant_id=$1 AND order_id=$2 AND active)",
+    )
+    .bind(tenant_id.get())
+    .bind(order_id.get())
+    .fetch_one(&mut **tx)
+    .await?;
+    if active {
+        Err(AppError::conflict("order belongs to an active pick wave"))
+    } else {
+        Ok(())
+    }
 }
 
 async fn lock_order_tx(
@@ -643,6 +703,7 @@ async fn insert_release_tx(
     inventory_owner_id: InventoryOwnerId,
     actor_user_id: i64,
     command: &ReleaseOrderCommand,
+    mode: OrderReleaseMode,
     resulting_revision: OrderRevision,
     allocation_count: i64,
     released_quantity: i64,
@@ -654,8 +715,8 @@ async fn insert_release_tx(
             tenant_id, inventory_owner_id, facility_id, order_id,
             destination_location_id, released_by_user_id, released_at,
             release_mode, expected_revision, resulting_revision,
-            allocation_count, released_qty, pick_task_count
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'waveless', $8, $9, $10, $11, $10)
+            allocation_count, released_qty, pick_task_count, pick_wave_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $11, $13)
         RETURNING id
         "#,
     )
@@ -666,10 +727,12 @@ async fn insert_release_tx(
     .bind(command.destination_location_id.get())
     .bind(actor_user_id)
     .bind(released_at)
+    .bind(mode.as_str())
     .bind(command.expected_revision.get())
     .bind(resulting_revision.get())
     .bind(allocation_count)
     .bind(released_quantity)
+    .bind(mode.wave_id().map(PickWaveId::get))
     .fetch_one(&mut **tx)
     .await?;
     OrderReleaseId::new(id).map_err(|error| AppError::internal(error.to_string()))
@@ -803,18 +866,20 @@ async fn update_order_tx(
     status: OrderStatus,
     revision: OrderRevision,
     occurred_at: Timestamp,
+    wave_id: Option<PickWaveId>,
 ) -> AppResult<()> {
     let updated = sqlx::query(
         r#"
         UPDATE orders
-        SET status = $1, revision = $2, confirmed = COALESCE(confirmed, $3)
-        WHERE tenant_id = $4 AND id = $5 AND deleted IS NULL
-          AND status = $6 AND revision = $7
+        SET status = $1, revision = $2, confirmed = COALESCE(confirmed, $3), wave_id = $4
+        WHERE tenant_id = $5 AND id = $6 AND deleted IS NULL
+          AND status = $7 AND revision = $8
         "#,
     )
     .bind(status.as_str())
     .bind(revision.get())
     .bind(occurred_at)
+    .bind(wave_id.map(PickWaveId::get))
     .bind(tenant_id.get())
     .bind(order_id.get())
     .bind(expected_status.as_str())
@@ -861,6 +926,7 @@ async fn enqueue_release_event_tx(
     actor_user_id: i64,
     expected_revision: OrderRevision,
     result: &ReleaseOrderResult,
+    mode: OrderReleaseMode,
 ) -> AppResult<()> {
     let event_key = format!("order-release:{}", result.release_id.get());
     let aggregate_id = result.order_id.get().to_string();
@@ -870,7 +936,8 @@ async fn enqueue_release_event_tx(
         "inventory_owner_id": result.inventory_owner_id,
         "facility_id": result.facility_id,
         "destination_location_id": result.destination_location_id,
-        "release_mode": "waveless",
+        "release_mode": mode.as_str(),
+        "pick_wave_id": mode.wave_id(),
         "expected_revision": expected_revision,
         "revision": result.revision,
         "allocation_count": result.allocation_count,

@@ -40,6 +40,7 @@ pub enum UiIcon {
     SignOut,
     Unlock,
     Users,
+    Waves,
 }
 
 #[component]
@@ -79,6 +80,7 @@ pub fn Icon(icon: UiIcon) -> impl IntoView {
                 UiIcon::SignOut => view! { <LogOut size=16/> }.into_any(),
                 UiIcon::Unlock => view! { <LockKeyholeOpen size=16/> }.into_any(),
                 UiIcon::Users => view! { <ShieldCheck size=16/> }.into_any(),
+                UiIcon::Waves => view! { <ClipboardList size=16/> }.into_any(),
             }}
         </span>
     }

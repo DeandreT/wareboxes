@@ -261,6 +261,7 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "audit_wave_assignments_tenant_isolation",
         ),
         ("pick_waves", "pick_waves_tenant_isolation"),
+        ("pick_wave_orders", "pick_wave_orders_tenant_isolation"),
         ("pick_tasks", "pick_tasks_tenant_isolation"),
         ("pick_task_contents", "pick_task_contents_tenant_isolation"),
         ("pick_confirmations", "pick_confirmations_tenant_isolation"),

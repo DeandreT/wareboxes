@@ -89,6 +89,7 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
     match path {
         "/" => Some(WorkspaceBootstrapSection::Overview),
         "/orders" | "/orders/" => Some(WorkspaceBootstrapSection::Orders),
+        "/pick-waves" | "/pick-waves/" => Some(WorkspaceBootstrapSection::PickWaves),
         "/packing" | "/packing/" => Some(WorkspaceBootstrapSection::Packing),
         "/shipping" | "/shipping/" => Some(WorkspaceBootstrapSection::Shipping),
         "/outbound-loads" | "/outbound-loads/" => Some(WorkspaceBootstrapSection::OutboundLoads),
@@ -132,6 +133,7 @@ async fn workspace_bootstrap(
                 balances.map_or_else(|| (Vec::new(), None), |page| (page.items, page.next_cursor));
             Ok(WorkspaceBootstrapData {
                 orders,
+                pick_waves: None,
                 packing_queue: None,
                 shipping_queue: None,
                 outbound_load_queue: None,
@@ -163,6 +165,34 @@ async fn workspace_bootstrap(
                 load_locations,
             )?;
             Ok(WorkspaceBootstrapData {
+                orders: Some(orders),
+                access: access_workspace,
+                locations,
+                ..WorkspaceBootstrapData::default()
+            })
+        }
+        WorkspaceBootstrapSection::PickWaves => {
+            if !has_permission(session, "wms_supervisor") {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            let load_locations = routes::locations::list_for_access(state, access, false);
+            let (pick_waves, orders, access_workspace, locations) = tokio::try_join!(
+                routes::v1::pick_waves::page_for_access(state, access, None, None, 100),
+                repo::orders::get_orders_page_in_scope_sorted(
+                    &state.db,
+                    access,
+                    100,
+                    0,
+                    Some(wareboxes_core::models::OrderStatus::Open),
+                    None,
+                    repo::orders::OrderPageSort::Order,
+                    repo::orders::OrderPageSortDirection::Ascending,
+                ),
+                routes::access::workspace_for_access(state, access),
+                load_locations,
+            )?;
+            Ok(WorkspaceBootstrapData {
+                pick_waves: Some(pick_waves),
                 orders: Some(orders),
                 access: access_workspace,
                 locations,
@@ -272,6 +302,10 @@ mod tests {
         assert_eq!(
             section_for_path("/orders"),
             Some(WorkspaceBootstrapSection::Orders)
+        );
+        assert_eq!(
+            section_for_path("/pick-waves"),
+            Some(WorkspaceBootstrapSection::PickWaves)
         );
         assert_eq!(
             section_for_path("/packing"),

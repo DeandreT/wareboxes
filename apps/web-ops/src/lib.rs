@@ -23,6 +23,7 @@ mod inventory_rollups;
 mod orders;
 mod outbound_loads;
 mod packing;
+mod pick_waves;
 mod preferences;
 mod replenishment;
 mod shipping;

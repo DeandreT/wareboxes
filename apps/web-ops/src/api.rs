@@ -31,6 +31,8 @@ use wareboxes_core::dto::{OrderPage, WebSessionContext};
 
 mod backorder;
 pub use backorder::{configure_backorder_policy, split_order_backorder};
+mod pick_wave;
+pub use pick_wave::{cancel_pick_wave, pick_wave, pick_waves, plan_pick_wave, release_pick_wave};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiError {
@@ -607,7 +609,7 @@ mod browser {
         uuid::Uuid::new_v4().to_string()
     }
 
-    async fn get<T: DeserializeOwned>(path: &str) -> Result<T, ApiError> {
+    pub(super) async fn get<T: DeserializeOwned>(path: &str) -> Result<T, ApiError> {
         decode(Request::get(&url(path)).send().await).await
     }
 

@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use lucide_leptos::{ArrowDown, ArrowUp, ArrowUpDown};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortDirection {
     Ascending,
     Descending,

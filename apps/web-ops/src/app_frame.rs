@@ -121,6 +121,14 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                 icon=UiIcon::Orders
                                 active=section == Section::Orders
                             />
+                            {can_supervise_wms.then(|| view! {
+                                <NavItem
+                                    href="/pick-waves"
+                                    label="Pick waves"
+                                    icon=UiIcon::Waves
+                                    active=section == Section::PickWaves
+                                />
+                            })}
                         }
                     })}
                     {can_view_inventory.then(|| {

@@ -1,0 +1,246 @@
+use serde::{Deserialize, Serialize};
+
+use super::{CursorPage, OpaqueCursor, PageLimit, Revision};
+
+pub const MAX_PICK_WAVE_NAME_LENGTH: usize = 100;
+pub const MAX_PICK_WAVE_CANCELLATION_NOTE_LENGTH: usize = 500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickWaveStatus {
+    Planned,
+    Released,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickWaveCancellationReason {
+    OperationalChange,
+    CapacityConstraint,
+    OrderChange,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickWaveSort {
+    Name,
+    Status,
+    Orders,
+    Tasks,
+    Units,
+    #[default]
+    PlannedAt,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickWaveSortDirection {
+    Asc,
+    #[default]
+    Desc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanPickWaveOrderRequest {
+    pub order_id: i64,
+    pub expected_revision: Revision,
+    pub sequence: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlanPickWaveRequest {
+    pub facility_id: i64,
+    pub destination_location_id: i64,
+    pub name: String,
+    pub orders: Vec<PlanPickWaveOrderRequest>,
+}
+
+impl<'de> Deserialize<'de> for PlanPickWaveRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            facility_id: i64,
+            destination_location_id: i64,
+            name: String,
+            orders: Vec<PlanPickWaveOrderRequest>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.facility_id <= 0 || raw.destination_location_id <= 0 {
+            return Err(serde::de::Error::custom(
+                "facility and destination IDs must be positive",
+            ));
+        }
+        if raw.name.is_empty()
+            || raw.name.trim() != raw.name
+            || raw.name.chars().count() > MAX_PICK_WAVE_NAME_LENGTH
+            || raw.name.chars().any(char::is_control)
+        {
+            return Err(serde::de::Error::custom("pick wave name is invalid"));
+        }
+        if raw.orders.is_empty()
+            || raw
+                .orders
+                .iter()
+                .any(|order| order.order_id <= 0 || order.sequence == 0)
+        {
+            return Err(serde::de::Error::custom("pick wave orders are invalid"));
+        }
+        Ok(Self {
+            facility_id: raw.facility_id,
+            destination_location_id: raw.destination_location_id,
+            name: raw.name,
+            orders: raw.orders,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleasePickWaveRequest {
+    pub expected_revision: Revision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CancelPickWaveRequest {
+    pub expected_revision: Revision,
+    pub reason: PickWaveCancellationReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CancelPickWaveRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            expected_revision: Revision,
+            reason: PickWaveCancellationReason,
+            #[serde(default)]
+            note: Option<String>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.note.as_ref().is_some_and(|note| {
+            note.is_empty()
+                || note.trim() != note
+                || note.chars().count() > MAX_PICK_WAVE_CANCELLATION_NOTE_LENGTH
+                || note.chars().any(char::is_control)
+        }) || (raw.reason == PickWaveCancellationReason::Other && raw.note.is_none())
+        {
+            return Err(serde::de::Error::custom(
+                "pick wave cancellation note is invalid",
+            ));
+        }
+        Ok(Self {
+            expected_revision: raw.expected_revision,
+            reason: raw.reason,
+            note: raw.note,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickWaveOrderResponse {
+    pub order_id: i64,
+    pub inventory_owner_id: i64,
+    pub order_key: String,
+    pub sequence: u32,
+    pub expected_revision: Revision,
+    pub resulting_revision: Option<Revision>,
+    pub release_id: Option<i64>,
+    pub status: String,
+    pub allocation_count: i64,
+    pub pick_task_count: i64,
+    pub released_quantity: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickWaveResponse {
+    pub wave_id: i64,
+    pub facility_id: i64,
+    pub facility_name: String,
+    pub destination_location_id: i64,
+    pub destination_location_name: String,
+    pub name: String,
+    pub status: PickWaveStatus,
+    pub revision: Revision,
+    pub order_count: i64,
+    pub allocation_count: i64,
+    pub pick_task_count: i64,
+    pub released_quantity: i64,
+    pub orders: Vec<PickWaveOrderResponse>,
+    pub planned_by: i64,
+    pub planned_at: String,
+    pub released_by: Option<i64>,
+    pub released_at: Option<String>,
+    pub cancelled_by: Option<i64>,
+    pub cancelled_at: Option<String>,
+    pub cancellation_reason: Option<PickWaveCancellationReason>,
+    pub cancellation_note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickWavePageRequest {
+    #[serde(default)]
+    pub facility_id: Option<i64>,
+    #[serde(default)]
+    pub status: Option<PickWaveStatus>,
+    #[serde(default)]
+    pub cursor: Option<OpaqueCursor>,
+    #[serde(default)]
+    pub sort: PickWaveSort,
+    #[serde(default)]
+    pub direction: PickWaveSortDirection,
+    #[serde(default)]
+    pub limit: PageLimit,
+}
+
+pub type PickWavePage = CursorPage<PickWaveResponse>;
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn plan_is_strict_and_contains_only_server_checkable_preconditions() {
+        let request = serde_json::from_value::<PlanPickWaveRequest>(json!({
+            "facility_id": 2,
+            "destination_location_id": 3,
+            "name": "AM parcel",
+            "orders": [{"order_id": 4, "expected_revision": 2, "sequence": 1}]
+        }))
+        .unwrap();
+        assert_eq!(request.orders.len(), 1);
+        assert!(serde_json::from_value::<PlanPickWaveRequest>(json!({
+            "facility_id": 2,
+            "destination_location_id": 3,
+            "name": "AM parcel",
+            "orders": [{"order_id": 4, "expected_revision": 2, "sequence": 1}],
+            "tenant_id": 9
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn other_cancellation_requires_a_note() {
+        assert!(serde_json::from_value::<CancelPickWaveRequest>(json!({
+            "expected_revision": 1,
+            "reason": "other"
+        }))
+        .is_err());
+    }
+}

@@ -27935,6 +27935,393 @@ REVOKE ALL ON FUNCTION public.validate_order_backorder_split_line() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_order_backorder_evidence_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_order_backorder_split_consistency() FROM PUBLIC;
 
+-- Typed, multi-order pick waves replace the inaccessible legacy header. Planning
+-- snapshots exact order revisions; release reuses the same immutable order-release
+-- and RF work ledgers as waveless execution.
+DROP TABLE public.pick_waves CASCADE;
+
+CREATE TABLE public.pick_waves (
+    id bigint GENERATED ALWAYS AS IDENTITY,
+    tenant_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    name text NOT NULL,
+    status text NOT NULL DEFAULT 'planned',
+    revision bigint NOT NULL DEFAULT 1,
+    order_count bigint NOT NULL,
+    allocation_count bigint NOT NULL DEFAULT 0,
+    pick_task_count bigint NOT NULL DEFAULT 0,
+    released_qty bigint NOT NULL DEFAULT 0,
+    planned_by_user_id bigint NOT NULL,
+    planned_at timestamptz NOT NULL,
+    released_by_user_id bigint,
+    released_at timestamptz,
+    cancelled_by_user_id bigint,
+    cancelled_at timestamptz,
+    cancellation_reason text,
+    cancellation_note text,
+    PRIMARY KEY (id),
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, facility_id, id),
+    CHECK (name = btrim(name) AND name <> '' AND char_length(name) <= 100),
+    CHECK (status IN ('planned','released','cancelled')),
+    CHECK (revision > 0),
+    CHECK (order_count > 0),
+    CHECK (allocation_count >= 0 AND pick_task_count >= 0 AND released_qty >= 0),
+    CHECK (cancellation_reason IS NULL OR cancellation_reason IN (
+        'operational_change','capacity_constraint','order_change','other')),
+    CHECK (cancellation_note IS NULL OR (
+        cancellation_note = btrim(cancellation_note)
+        AND cancellation_note <> '' AND char_length(cancellation_note) <= 500)),
+    CHECK (cancellation_reason <> 'other' OR cancellation_note IS NOT NULL),
+    CHECK (
+        (status = 'planned' AND revision = 1
+         AND allocation_count = 0 AND pick_task_count = 0 AND released_qty = 0
+         AND released_by_user_id IS NULL AND released_at IS NULL
+         AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL
+         AND cancellation_reason IS NULL AND cancellation_note IS NULL)
+        OR
+        (status = 'released' AND revision = 2
+         AND allocation_count > 0 AND pick_task_count = allocation_count AND released_qty > 0
+         AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL
+         AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL
+         AND cancellation_reason IS NULL AND cancellation_note IS NULL)
+        OR
+        (status = 'cancelled' AND revision = 2
+         AND allocation_count = 0 AND pick_task_count = 0 AND released_qty = 0
+         AND released_by_user_id IS NULL AND released_at IS NULL
+         AND cancelled_by_user_id IS NOT NULL AND cancelled_at IS NOT NULL
+         AND cancellation_reason IS NOT NULL))
+);
+ALTER TABLE public.pick_waves FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.pick_waves
+    ADD CONSTRAINT pick_waves_tenant_fkey FOREIGN KEY (tenant_id)
+        REFERENCES public.tenants(id),
+    ADD CONSTRAINT pick_waves_facility_fkey FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities(tenant_id, id),
+    ADD CONSTRAINT pick_waves_destination_fkey
+        FOREIGN KEY (tenant_id, facility_id, destination_location_id)
+        REFERENCES public.locations(tenant_id, facility_id, id),
+    ADD CONSTRAINT pick_waves_planned_by_fkey
+        FOREIGN KEY (tenant_id, planned_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id),
+    ADD CONSTRAINT pick_waves_released_by_fkey
+        FOREIGN KEY (tenant_id, released_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id),
+    ADD CONSTRAINT pick_waves_cancelled_by_fkey
+        FOREIGN KEY (tenant_id, cancelled_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+ALTER TABLE public.order_releases
+    ADD COLUMN pick_wave_id bigint,
+    DROP CONSTRAINT order_releases_mode_check,
+    ADD CONSTRAINT order_releases_mode_check
+        CHECK (release_mode IN ('waveless','wave')),
+    ADD CONSTRAINT order_releases_wave_mode_check CHECK (
+        (release_mode = 'waveless' AND pick_wave_id IS NULL)
+        OR (release_mode = 'wave' AND pick_wave_id IS NOT NULL)),
+    ADD CONSTRAINT order_releases_pick_wave_fkey
+        FOREIGN KEY (tenant_id, facility_id, pick_wave_id)
+        REFERENCES public.pick_waves(tenant_id, facility_id, id);
+
+ALTER TABLE public.orders
+    ADD CONSTRAINT orders_tenant_id_wave_id_fkey
+        FOREIGN KEY (tenant_id, wave_id) REFERENCES public.pick_waves(tenant_id, id);
+
+CREATE TABLE public.pick_wave_orders (
+    id bigint GENERATED ALWAYS AS IDENTITY,
+    tenant_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    pick_wave_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_key text NOT NULL,
+    wave_sequence bigint NOT NULL,
+    expected_order_revision bigint NOT NULL,
+    resulting_order_revision bigint,
+    order_release_id bigint,
+    allocation_count bigint NOT NULL DEFAULT 0,
+    pick_task_count bigint NOT NULL DEFAULT 0,
+    released_qty bigint NOT NULL DEFAULT 0,
+    active boolean NOT NULL DEFAULT true,
+    PRIMARY KEY (id),
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, facility_id, pick_wave_id, id),
+    UNIQUE (tenant_id, pick_wave_id, order_id),
+    UNIQUE (tenant_id, pick_wave_id, wave_sequence),
+    CHECK (order_key = btrim(order_key) AND order_key <> '' AND char_length(order_key) <= 200),
+    CHECK (wave_sequence > 0 AND expected_order_revision > 0),
+    CHECK (resulting_order_revision IS NULL
+           OR resulting_order_revision = expected_order_revision + 1),
+    CHECK (allocation_count >= 0 AND pick_task_count >= 0 AND released_qty >= 0),
+    CHECK (
+        (active AND resulting_order_revision IS NULL AND order_release_id IS NULL
+         AND allocation_count = 0 AND pick_task_count = 0 AND released_qty = 0)
+        OR
+        (NOT active AND resulting_order_revision IS NULL AND order_release_id IS NULL
+         AND allocation_count = 0 AND pick_task_count = 0 AND released_qty = 0)
+        OR
+        (NOT active AND resulting_order_revision IS NOT NULL AND order_release_id IS NOT NULL
+         AND allocation_count > 0 AND pick_task_count = allocation_count AND released_qty > 0))
+);
+ALTER TABLE public.pick_wave_orders FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.pick_wave_orders
+    ADD CONSTRAINT pick_wave_orders_wave_fkey
+        FOREIGN KEY (tenant_id, facility_id, pick_wave_id)
+        REFERENCES public.pick_waves(tenant_id, facility_id, id),
+    ADD CONSTRAINT pick_wave_orders_owner_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    ADD CONSTRAINT pick_wave_orders_owner_facility_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id)
+        REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id),
+    ADD CONSTRAINT pick_wave_orders_order_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, order_id)
+        REFERENCES public.orders(tenant_id, inventory_owner_id, id),
+    ADD CONSTRAINT pick_wave_orders_release_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_id, order_release_id)
+        REFERENCES public.order_releases(
+            tenant_id, inventory_owner_id, facility_id, order_id, id);
+
+CREATE UNIQUE INDEX pick_wave_orders_active_order_key
+ON public.pick_wave_orders (tenant_id, order_id) WHERE active;
+CREATE INDEX pick_waves_queue_idx
+ON public.pick_waves (tenant_id, status, planned_at DESC, id DESC);
+CREATE INDEX pick_wave_orders_owner_scope_idx
+ON public.pick_wave_orders (tenant_id, pick_wave_id, inventory_owner_id);
+
+CREATE FUNCTION public.validate_pick_wave() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+DECLARE destination public.locations%ROWTYPE;
+BEGIN
+    SELECT * INTO destination FROM public.locations
+    WHERE tenant_id = NEW.tenant_id AND facility_id = NEW.facility_id
+      AND id = NEW.destination_location_id AND deleted IS NULL
+    FOR SHARE;
+    IF destination.id IS NULL OR NOT destination.active
+       OR destination.pickable OR destination.receivable
+       OR destination.barcode IS NULL OR btrim(destination.barcode) = ''
+    THEN
+        RAISE EXCEPTION 'pick wave destination is not scanner-ready staging inventory'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_pick_wave_mutation() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'pick wave evidence is immutable' USING ERRCODE = '55000';
+    END IF;
+    IF OLD.status <> 'planned' OR NEW.status NOT IN ('released','cancelled')
+       OR NEW.revision <> OLD.revision + 1
+       OR NEW.tenant_id <> OLD.tenant_id OR NEW.id <> OLD.id
+       OR NEW.facility_id <> OLD.facility_id
+       OR NEW.destination_location_id <> OLD.destination_location_id
+       OR NEW.name <> OLD.name OR NEW.order_count <> OLD.order_count
+       OR NEW.planned_by_user_id <> OLD.planned_by_user_id
+       OR NEW.planned_at <> OLD.planned_at
+    THEN
+        RAISE EXCEPTION 'pick wave permits only one guarded terminal transition'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_pick_wave_order() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+DECLARE wave_row public.pick_waves%ROWTYPE;
+DECLARE order_row public.orders%ROWTYPE;
+BEGIN
+    SELECT * INTO wave_row FROM public.pick_waves
+    WHERE tenant_id = NEW.tenant_id AND facility_id = NEW.facility_id
+      AND id = NEW.pick_wave_id FOR SHARE;
+    SELECT * INTO order_row FROM public.orders
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND id = NEW.order_id AND deleted IS NULL FOR SHARE;
+    IF wave_row.id IS NULL OR wave_row.status <> 'planned'
+       OR order_row.id IS NULL OR order_row.status <> 'open'
+       OR order_row.revision <> NEW.expected_order_revision
+       OR order_row.order_key <> NEW.order_key
+       OR NOT EXISTS (
+          SELECT 1 FROM public.inventory_owner_facilities assignment
+          WHERE assignment.tenant_id = NEW.tenant_id
+            AND assignment.inventory_owner_id = NEW.inventory_owner_id
+            AND assignment.facility_id = NEW.facility_id
+            AND assignment.deleted IS NULL)
+    THEN
+        RAISE EXCEPTION 'pick wave order snapshot is stale or outside the wave scope'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_pick_wave_order_mutation() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'pick wave order evidence is immutable' USING ERRCODE = '55000';
+    END IF;
+    IF NOT OLD.active OR NEW.active
+       OR NEW.tenant_id <> OLD.tenant_id OR NEW.id <> OLD.id
+       OR NEW.facility_id <> OLD.facility_id OR NEW.pick_wave_id <> OLD.pick_wave_id
+       OR NEW.inventory_owner_id <> OLD.inventory_owner_id OR NEW.order_id <> OLD.order_id
+       OR NEW.order_key <> OLD.order_key OR NEW.wave_sequence <> OLD.wave_sequence
+       OR NEW.expected_order_revision <> OLD.expected_order_revision
+    THEN
+        RAISE EXCEPTION 'pick wave order permits only guarded release or cancellation closure'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_order_release_wave_membership() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+BEGIN
+    IF NEW.release_mode = 'waveless' AND EXISTS (
+        SELECT 1 FROM public.pick_wave_orders member
+        WHERE member.tenant_id = NEW.tenant_id
+          AND member.order_id = NEW.order_id AND member.active)
+    THEN
+        RAISE EXCEPTION 'order belongs to an active pick wave' USING ERRCODE = '55000';
+    END IF;
+    IF NEW.release_mode = 'wave' AND NOT EXISTS (
+        SELECT 1 FROM public.pick_wave_orders member
+        JOIN public.pick_waves wave
+          ON wave.tenant_id = member.tenant_id AND wave.id = member.pick_wave_id
+        WHERE member.tenant_id = NEW.tenant_id
+          AND member.inventory_owner_id = NEW.inventory_owner_id
+          AND member.facility_id = NEW.facility_id
+          AND member.pick_wave_id = NEW.pick_wave_id
+          AND member.order_id = NEW.order_id AND member.active
+          AND member.expected_order_revision = NEW.expected_revision
+          AND wave.status = 'planned')
+    THEN
+        RAISE EXCEPTION 'wave order release does not match active planned membership'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.require_pick_wave_consistency() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+DECLARE wave_id_value bigint;
+DECLARE wave_row public.pick_waves%ROWTYPE;
+DECLARE totals record;
+BEGIN
+    IF TG_TABLE_NAME = 'pick_waves' THEN
+        wave_id_value := NEW.id;
+    ELSE
+        wave_id_value := NEW.pick_wave_id;
+    END IF;
+    SELECT * INTO wave_row FROM public.pick_waves
+    WHERE tenant_id = NEW.tenant_id AND id = wave_id_value;
+    SELECT COUNT(*)::bigint AS order_count,
+           COALESCE(SUM(allocation_count),0)::bigint AS allocation_count,
+           COALESCE(SUM(pick_task_count),0)::bigint AS pick_task_count,
+           COALESCE(SUM(released_qty),0)::bigint AS released_qty,
+           COUNT(*) FILTER (WHERE active)::bigint AS active_count,
+           COUNT(*) FILTER (WHERE order_release_id IS NOT NULL)::bigint AS release_count,
+           MIN(wave_sequence)::bigint AS minimum_sequence,
+           MAX(wave_sequence)::bigint AS maximum_sequence
+    INTO totals FROM public.pick_wave_orders
+    WHERE tenant_id = wave_row.tenant_id AND pick_wave_id = wave_row.id;
+    IF wave_row.id IS NULL OR totals.order_count <> wave_row.order_count
+       OR totals.minimum_sequence <> 1 OR totals.maximum_sequence <> wave_row.order_count
+       OR (wave_row.status = 'planned' AND (
+           totals.active_count <> wave_row.order_count OR totals.release_count <> 0))
+       OR (wave_row.status = 'cancelled' AND (
+           totals.active_count <> 0 OR totals.release_count <> 0))
+       OR (wave_row.status = 'released' AND (
+           totals.active_count <> 0 OR totals.release_count <> wave_row.order_count
+           OR totals.allocation_count <> wave_row.allocation_count
+           OR totals.pick_task_count <> wave_row.pick_task_count
+           OR totals.released_qty <> wave_row.released_qty
+           OR EXISTS (
+              SELECT 1 FROM public.pick_wave_orders member
+              JOIN public.orders order_row
+                ON order_row.tenant_id = member.tenant_id
+               AND order_row.inventory_owner_id = member.inventory_owner_id
+               AND order_row.id = member.order_id
+              JOIN public.order_releases release
+                ON release.tenant_id = member.tenant_id
+               AND release.inventory_owner_id = member.inventory_owner_id
+               AND release.facility_id = member.facility_id
+               AND release.id = member.order_release_id
+              WHERE member.tenant_id = wave_row.tenant_id
+                AND member.pick_wave_id = wave_row.id
+                AND (order_row.status <> 'processing'
+                  OR order_row.revision <> member.resulting_order_revision
+                  OR order_row.wave_id <> wave_row.id
+                  OR release.pick_wave_id <> wave_row.id
+                  OR release.release_mode <> 'wave'
+                  OR release.resulting_revision <> member.resulting_order_revision
+                  OR release.allocation_count <> member.allocation_count
+                  OR release.pick_task_count <> member.pick_task_count
+                  OR release.released_qty <> member.released_qty))))
+    THEN
+        RAISE EXCEPTION 'pick wave header, membership, releases, and orders do not reconcile'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER pick_waves_validate BEFORE INSERT ON public.pick_waves
+FOR EACH ROW EXECUTE FUNCTION public.validate_pick_wave();
+CREATE TRIGGER pick_waves_guard BEFORE DELETE OR UPDATE ON public.pick_waves
+FOR EACH ROW EXECUTE FUNCTION public.guard_pick_wave_mutation();
+CREATE TRIGGER pick_wave_orders_validate BEFORE INSERT ON public.pick_wave_orders
+FOR EACH ROW EXECUTE FUNCTION public.validate_pick_wave_order();
+CREATE TRIGGER pick_wave_orders_guard BEFORE DELETE OR UPDATE ON public.pick_wave_orders
+FOR EACH ROW EXECUTE FUNCTION public.guard_pick_wave_order_mutation();
+CREATE TRIGGER order_releases_validate_wave BEFORE INSERT ON public.order_releases
+FOR EACH ROW EXECUTE FUNCTION public.validate_order_release_wave_membership();
+CREATE CONSTRAINT TRIGGER pick_waves_reconcile
+AFTER INSERT OR UPDATE ON public.pick_waves DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_pick_wave_consistency();
+CREATE CONSTRAINT TRIGGER pick_wave_orders_reconcile
+AFTER INSERT OR UPDATE ON public.pick_wave_orders DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_pick_wave_consistency();
+
+ALTER TABLE public.pick_waves ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.pick_waves FORCE ROW LEVEL SECURITY;
+CREATE POLICY pick_waves_tenant_isolation ON public.pick_waves
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+ALTER TABLE public.pick_wave_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.pick_wave_orders FORCE ROW LEVEL SECURITY;
+CREATE POLICY pick_wave_orders_tenant_isolation ON public.pick_wave_orders
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT, INSERT ON public.pick_waves TO wareboxes_app;
+GRANT UPDATE (status, revision, allocation_count, pick_task_count, released_qty,
+              released_by_user_id, released_at, cancelled_by_user_id, cancelled_at,
+              cancellation_reason, cancellation_note)
+ON public.pick_waves TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.pick_waves_id_seq TO wareboxes_app;
+GRANT SELECT, INSERT ON public.pick_wave_orders TO wareboxes_app;
+GRANT UPDATE (resulting_order_revision, order_release_id, allocation_count,
+              pick_task_count, released_qty, active)
+ON public.pick_wave_orders TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.pick_wave_orders_id_seq TO wareboxes_app;
+GRANT UPDATE (wave_id) ON public.orders TO wareboxes_app;
+
+REVOKE ALL ON FUNCTION public.validate_pick_wave() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_pick_wave_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_pick_wave_order() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_pick_wave_order_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_order_release_wave_membership() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_pick_wave_consistency() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

@@ -20,6 +20,7 @@ pub(crate) mod outbound_loads;
 mod outbound_qa;
 pub(crate) mod packing;
 mod pick_shortages;
+pub(crate) mod pick_waves;
 mod picking;
 mod putaway;
 mod putaway_claim_lifecycle;
@@ -292,6 +293,13 @@ pub fn router() -> Router<AppState> {
         .route(
             "/picking-tasks/{task_id}/contents/{content_id}/short-picks",
             post(pick_shortages::report),
+        )
+        .route("/pick-waves", get(pick_waves::list).post(pick_waves::plan))
+        .route("/pick-waves/{wave_id}", get(pick_waves::get))
+        .route("/pick-waves/{wave_id}/releases", post(pick_waves::release))
+        .route(
+            "/pick-waves/{wave_id}/cancellations",
+            post(pick_waves::cancel),
         )
         .route("/pick-shortages", get(pick_shortages::list))
         .route("/pick-shortages/{shortage_id}", get(pick_shortages::get))

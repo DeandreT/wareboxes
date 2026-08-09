@@ -354,6 +354,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'pick_waves_tenant_isolation'
                 ),
                 (
+                    'pick_wave_orders',
+                    'pick_wave_orders_tenant_isolation'
+                ),
+                (
                     'pick_tasks',
                     'pick_tasks_tenant_isolation'
                 ),
