@@ -54,6 +54,19 @@ BEGIN
           AND NEW.deleted IS NOT NULL
     THEN
         projection_delta := -OLD.qty;
+    ELSIF OLD.status = 'fulfilled'
+          AND OLD.deleted IS NOT NULL
+          AND NEW.status = 'allocated'
+          AND NEW.deleted IS NULL
+          AND EXISTS (
+              SELECT 1
+              FROM public.pick_reversals reversal
+              WHERE reversal.tenant_id = NEW.tenant_id
+                AND reversal.inventory_owner_id = NEW.inventory_owner_id
+                AND reversal.source_inventory_allocation_id = NEW.id
+          )
+    THEN
+        projection_delta := OLD.qty;
     END IF;
 
     IF projection_delta <> 0 THEN
@@ -5513,6 +5526,29 @@ BEGIN
             USING ERRCODE = '55000';
     END IF;
 
+    IF OLD.status = 'completed' AND NEW.status = 'open' THEN
+        IF NEW.assigned_user_id IS NOT NULL
+           OR NEW.claimed_at IS NOT NULL
+           OR NEW.lease_expires_at IS NOT NULL
+           OR NEW.completed_at IS NOT NULL
+           OR NEW.release_count IS DISTINCT FROM OLD.release_count
+           OR NEW.last_released_at IS DISTINCT FROM OLD.last_released_at
+           OR NEW.last_release_reason IS DISTINCT FROM OLD.last_release_reason
+           OR NEW.last_release_note IS DISTINCT FROM OLD.last_release_note
+           OR NOT EXISTS (
+               SELECT 1 FROM public.pick_reversals reversal
+               WHERE reversal.tenant_id = NEW.tenant_id
+                 AND reversal.inventory_owner_id = NEW.inventory_owner_id
+                 AND reversal.facility_id = NEW.facility_id
+                 AND reversal.task_id = NEW.id
+           )
+        THEN
+            RAISE EXCEPTION 'reopening completed pick work requires exact reversal evidence'
+                USING ERRCODE = '55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+
     IF OLD.status IN ('completed', 'shorted', 'cancelled') THEN
         RAISE EXCEPTION 'terminal pick tasks are immutable'
             USING ERRCODE = '55000';
@@ -5618,10 +5654,25 @@ BEGIN
             USING ERRCODE = '55000';
     END IF;
 
-    IF OLD.state <> 'pending'
-       OR NEW.state NOT IN ('completed', 'shorted', 'cancelled')
-       OR OLD.completed_at IS NOT NULL
-       OR NEW.completed_at IS NULL
+    IF OLD.state = 'completed' AND NEW.state = 'pending' THEN
+        IF OLD.completed_at IS NULL
+           OR NEW.completed_at IS NOT NULL
+           OR NOT EXISTS (
+               SELECT 1 FROM public.pick_reversals reversal
+               WHERE reversal.tenant_id = NEW.tenant_id
+                 AND reversal.inventory_owner_id = NEW.inventory_owner_id
+                 AND reversal.facility_id = NEW.facility_id
+                 AND reversal.pick_task_content_id = NEW.id
+                 AND reversal.task_id = NEW.task_id
+           )
+        THEN
+            RAISE EXCEPTION 'reopening completed pick content requires exact reversal evidence'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF OLD.state <> 'pending'
+          OR NEW.state NOT IN ('completed', 'shorted', 'cancelled')
+          OR OLD.completed_at IS NOT NULL
+          OR NEW.completed_at IS NULL
     THEN
         RAISE EXCEPTION 'invalid pick content lifecycle transition'
             USING ERRCODE = '55000';
@@ -5642,6 +5693,351 @@ CREATE FUNCTION public.reject_pick_confirmation_mutation() RETURNS trigger
 BEGIN
     RAISE EXCEPTION 'pick confirmations are immutable'
         USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: reject_pick_reversal_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reject_pick_reversal_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'pick reversals are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: validate_pick_reversal(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.validate_pick_reversal() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    target RECORD;
+    transaction_row RECORD;
+BEGIN
+    SELECT confirmation.inventory_owner_id,
+           confirmation.facility_id,
+           confirmation.task_id,
+           confirmation.pick_task_content_id,
+           confirmation.order_release_id,
+           confirmation.order_id,
+           confirmation.order_item_id,
+           confirmation.reservation_id,
+           confirmation.source_inventory_allocation_id,
+           confirmation.destination_inventory_allocation_id,
+           confirmation.source_inventory_balance_id,
+           confirmation.destination_inventory_balance_id,
+           confirmation.source_location_id,
+           confirmation.destination_location_id,
+           confirmation.source_license_plate_id,
+           confirmation.destination_license_plate_id,
+           confirmation.item_batch_id,
+           confirmation.item_id,
+           confirmation.uom,
+           confirmation.inventory_status,
+           confirmation.picked_qty,
+           confirmation.confirmed_at,
+           content.planned_qty,
+           content.state AS content_state,
+           content.completed_at AS content_completed_at,
+           task.status AS task_status,
+           task.completed_at AS task_completed_at,
+           order_header.status AS order_status,
+           order_header.revision AS order_revision,
+           source_allocation.status AS source_allocation_status,
+           source_allocation.deleted AS source_allocation_deleted,
+           source_allocation.execution_stage AS source_execution_stage,
+           staged_allocation.status AS staged_allocation_status,
+           staged_allocation.deleted AS staged_allocation_deleted,
+           staged_allocation.execution_stage AS staged_execution_stage,
+           source_balance.qty_on_hand AS source_on_hand,
+           staged_balance.qty_on_hand AS staged_on_hand,
+           staged_balance.qty_reserved AS staged_reserved
+    INTO target
+    FROM public.pick_confirmations confirmation
+    INNER JOIN public.pick_task_contents content
+      ON content.tenant_id = confirmation.tenant_id
+     AND content.inventory_owner_id = confirmation.inventory_owner_id
+     AND content.facility_id = confirmation.facility_id
+     AND content.task_id = confirmation.task_id
+     AND content.id = confirmation.pick_task_content_id
+    INNER JOIN public.pick_tasks task
+      ON task.tenant_id = confirmation.tenant_id
+     AND task.inventory_owner_id = confirmation.inventory_owner_id
+     AND task.facility_id = confirmation.facility_id
+     AND task.id = confirmation.task_id
+    INNER JOIN public.orders order_header
+      ON order_header.tenant_id = confirmation.tenant_id
+     AND order_header.inventory_owner_id = confirmation.inventory_owner_id
+     AND order_header.id = confirmation.order_id
+    INNER JOIN public.inventory_allocations source_allocation
+      ON source_allocation.tenant_id = confirmation.tenant_id
+     AND source_allocation.inventory_owner_id = confirmation.inventory_owner_id
+     AND source_allocation.id = confirmation.source_inventory_allocation_id
+    INNER JOIN public.inventory_allocations staged_allocation
+      ON staged_allocation.tenant_id = confirmation.tenant_id
+     AND staged_allocation.inventory_owner_id = confirmation.inventory_owner_id
+     AND staged_allocation.id = confirmation.destination_inventory_allocation_id
+    INNER JOIN public.inventory_balances source_balance
+      ON source_balance.tenant_id = confirmation.tenant_id
+     AND source_balance.inventory_owner_id = confirmation.inventory_owner_id
+     AND source_balance.id = confirmation.source_inventory_balance_id
+    INNER JOIN public.inventory_balances staged_balance
+      ON staged_balance.tenant_id = confirmation.tenant_id
+     AND staged_balance.inventory_owner_id = confirmation.inventory_owner_id
+     AND staged_balance.id = confirmation.destination_inventory_balance_id
+    WHERE confirmation.tenant_id = NEW.tenant_id
+      AND confirmation.inventory_owner_id = NEW.inventory_owner_id
+      AND confirmation.id = NEW.pick_confirmation_id
+    FOR UPDATE OF content, task, order_header, source_allocation,
+                  staged_allocation, source_balance, staged_balance;
+
+    IF target.task_id IS NULL THEN
+        RAISE EXCEPTION 'pick confirmation does not exist'
+            USING ERRCODE = '23503';
+    END IF;
+
+    IF target.inventory_owner_id IS DISTINCT FROM NEW.inventory_owner_id
+       OR target.facility_id IS DISTINCT FROM NEW.facility_id
+       OR target.task_id IS DISTINCT FROM NEW.task_id
+       OR target.pick_task_content_id IS DISTINCT FROM NEW.pick_task_content_id
+       OR target.order_release_id IS DISTINCT FROM NEW.order_release_id
+       OR target.order_id IS DISTINCT FROM NEW.order_id
+       OR target.order_item_id IS DISTINCT FROM NEW.order_item_id
+       OR target.reservation_id IS DISTINCT FROM NEW.reservation_id
+       OR target.source_inventory_allocation_id IS DISTINCT FROM NEW.source_inventory_allocation_id
+       OR target.destination_inventory_allocation_id IS DISTINCT FROM NEW.staged_inventory_allocation_id
+       OR target.source_inventory_balance_id IS DISTINCT FROM NEW.source_inventory_balance_id
+       OR target.destination_inventory_balance_id IS DISTINCT FROM NEW.staged_inventory_balance_id
+       OR target.source_location_id IS DISTINCT FROM NEW.source_location_id
+       OR target.destination_location_id IS DISTINCT FROM NEW.staged_location_id
+       OR target.source_license_plate_id IS DISTINCT FROM NEW.source_license_plate_id
+       OR target.destination_license_plate_id IS DISTINCT FROM NEW.staged_license_plate_id
+       OR target.item_batch_id IS DISTINCT FROM NEW.item_batch_id
+       OR target.item_id IS DISTINCT FROM NEW.item_id
+       OR target.uom IS DISTINCT FROM NEW.uom
+       OR target.inventory_status IS DISTINCT FROM NEW.inventory_status
+       OR target.picked_qty IS DISTINCT FROM NEW.reversed_qty
+       OR target.planned_qty IS DISTINCT FROM NEW.reversed_qty
+    THEN
+        RAISE EXCEPTION 'pick reversal does not match the immutable confirmation'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF target.order_status NOT IN ('processing', 'awaiting packing')
+       OR target.order_revision IS DISTINCT FROM NEW.expected_order_revision
+       OR NEW.resulting_order_revision <> NEW.expected_order_revision + 1
+       OR target.content_state <> 'completed'
+       OR target.content_completed_at IS DISTINCT FROM target.confirmed_at
+       OR target.task_status <> 'completed'
+       OR target.task_completed_at IS DISTINCT FROM target.confirmed_at
+       OR target.source_allocation_status <> 'fulfilled'
+       OR target.source_allocation_deleted IS DISTINCT FROM target.confirmed_at
+       OR target.source_execution_stage <> 'pick_source'
+       OR target.staged_allocation_status <> 'allocated'
+       OR target.staged_allocation_deleted IS NOT NULL
+       OR target.staged_execution_stage <> 'staged'
+       OR target.staged_on_hand < NEW.reversed_qty
+       OR target.staged_reserved < NEW.reversed_qty
+       OR NEW.reversed_at < target.confirmed_at
+    THEN
+        RAISE EXCEPTION 'pick confirmation is not reversible in its current execution state'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM public.pick_shortages shortage
+        WHERE shortage.tenant_id = NEW.tenant_id
+          AND shortage.inventory_owner_id = NEW.inventory_owner_id
+          AND (
+              shortage.pick_confirmation_id = NEW.pick_confirmation_id
+              OR shortage.pick_task_content_id = NEW.pick_task_content_id
+          )
+    ) THEN
+        RAISE EXCEPTION 'shortage-backed picks require shortage recovery'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM public.packing_sessions session
+        WHERE session.tenant_id = NEW.tenant_id
+          AND session.inventory_owner_id = NEW.inventory_owner_id
+          AND session.order_id = NEW.order_id
+    ) THEN
+        RAISE EXCEPTION 'pick reversal is unavailable after packing begins'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM public.license_plates plate
+        WHERE plate.tenant_id = NEW.tenant_id
+          AND plate.inventory_owner_id = NEW.inventory_owner_id
+          AND plate.facility_id = NEW.facility_id
+          AND plate.id = NEW.staged_license_plate_id
+          AND plate.location_id = NEW.staged_location_id
+          AND plate.deleted IS NULL
+    ) OR (
+        NEW.source_license_plate_id IS NOT NULL
+        AND NOT EXISTS (
+            SELECT 1 FROM public.license_plates plate
+            WHERE plate.tenant_id = NEW.tenant_id
+              AND plate.inventory_owner_id = NEW.inventory_owner_id
+              AND plate.facility_id = NEW.facility_id
+              AND plate.id = NEW.source_license_plate_id
+              AND plate.location_id = NEW.source_location_id
+              AND plate.deleted IS NULL
+        )
+    ) THEN
+        RAISE EXCEPTION 'pick reversal license plates are not at the recorded locations'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT transaction.actor_user_id, transaction.transaction_type,
+           transaction.reference_type, transaction.reference_id,
+           transaction.operation, transaction.created
+    INTO transaction_row
+    FROM public.inventory_transactions transaction
+    WHERE transaction.tenant_id = NEW.tenant_id
+      AND transaction.inventory_owner_id = NEW.inventory_owner_id
+      AND transaction.id = NEW.inventory_transaction_id;
+
+    IF transaction_row.transaction_type IS NULL
+       OR transaction_row.actor_user_id IS DISTINCT FROM NEW.reversed_by_user_id
+       OR transaction_row.transaction_type <> 'move'
+       OR transaction_row.reference_type <> 'pick_confirmation'
+       OR transaction_row.reference_id IS DISTINCT FROM NEW.pick_confirmation_id
+       OR transaction_row.operation <> 'picking.confirmation.reverse.v1'
+       OR transaction_row.created IS DISTINCT FROM NEW.reversed_at
+    THEN
+        RAISE EXCEPTION 'pick reversal inventory transaction does not match the command'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: require_pick_reversal_consistency(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_pick_reversal_consistency() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    entry_count BIGINT;
+    entry_net BIGINT;
+    source_entry_count BIGINT;
+    staged_entry_count BIGINT;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.orders order_header
+        INNER JOIN public.pick_tasks task
+          ON task.tenant_id = order_header.tenant_id
+         AND task.inventory_owner_id = order_header.inventory_owner_id
+         AND task.order_id = order_header.id
+         AND task.id = NEW.task_id
+        INNER JOIN public.pick_task_contents content
+          ON content.tenant_id = task.tenant_id
+         AND content.inventory_owner_id = task.inventory_owner_id
+         AND content.facility_id = task.facility_id
+         AND content.task_id = task.id
+         AND content.id = NEW.pick_task_content_id
+        INNER JOIN public.inventory_allocations source_allocation
+          ON source_allocation.tenant_id = NEW.tenant_id
+         AND source_allocation.inventory_owner_id = NEW.inventory_owner_id
+         AND source_allocation.id = NEW.source_inventory_allocation_id
+        INNER JOIN public.inventory_allocations staged_allocation
+          ON staged_allocation.tenant_id = NEW.tenant_id
+         AND staged_allocation.inventory_owner_id = NEW.inventory_owner_id
+         AND staged_allocation.id = NEW.staged_inventory_allocation_id
+        INNER JOIN public.inventory_balances source_balance
+          ON source_balance.tenant_id = NEW.tenant_id
+         AND source_balance.inventory_owner_id = NEW.inventory_owner_id
+         AND source_balance.id = NEW.source_inventory_balance_id
+        INNER JOIN public.inventory_balances staged_balance
+          ON staged_balance.tenant_id = NEW.tenant_id
+         AND staged_balance.inventory_owner_id = NEW.inventory_owner_id
+         AND staged_balance.id = NEW.staged_inventory_balance_id
+        WHERE order_header.tenant_id = NEW.tenant_id
+          AND order_header.inventory_owner_id = NEW.inventory_owner_id
+          AND order_header.id = NEW.order_id
+          AND order_header.status = 'processing'
+          AND order_header.revision = NEW.resulting_order_revision
+          AND task.status = 'open'
+          AND task.assigned_user_id IS NULL
+          AND task.claimed_at IS NULL
+          AND task.lease_expires_at IS NULL
+          AND task.completed_at IS NULL
+          AND content.state = 'pending'
+          AND content.completed_at IS NULL
+          AND source_allocation.status = 'allocated'
+          AND source_allocation.deleted IS NULL
+          AND source_allocation.modified IS NULL
+          AND source_allocation.execution_stage = 'pick_source'
+          AND source_allocation.inventory_balance_id = NEW.source_inventory_balance_id
+          AND source_allocation.qty = NEW.reversed_qty
+          AND staged_allocation.status = 'released'
+          AND staged_allocation.deleted = NEW.reversed_at
+          AND staged_allocation.modified = NEW.reversed_at
+          AND staged_allocation.execution_stage = 'staged'
+          AND staged_allocation.inventory_balance_id = NEW.staged_inventory_balance_id
+          AND staged_allocation.qty = NEW.reversed_qty
+          AND source_balance.qty_on_hand >= NEW.reversed_qty
+          AND source_balance.qty_reserved >= NEW.reversed_qty
+          AND staged_balance.qty_on_hand >= 0
+          AND staged_balance.qty_reserved >= 0
+    ) THEN
+        RAISE EXCEPTION 'pick reversal does not reconcile with reopened work or inventory projections'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT COUNT(*), COALESCE(SUM(entry.quantity_delta), 0)::BIGINT,
+           COUNT(*) FILTER (
+               WHERE entry.facility_id = NEW.facility_id
+                 AND entry.location_id = NEW.source_location_id
+                 AND entry.license_plate_id IS NOT DISTINCT FROM NEW.source_license_plate_id
+                 AND entry.item_batch_id = NEW.item_batch_id
+                 AND entry.item_id = NEW.item_id
+                 AND entry.uom = NEW.uom
+                 AND entry.status = NEW.inventory_status
+                 AND entry.quantity_delta = NEW.reversed_qty
+           ),
+           COUNT(*) FILTER (
+               WHERE entry.facility_id = NEW.facility_id
+                 AND entry.location_id = NEW.staged_location_id
+                 AND entry.license_plate_id = NEW.staged_license_plate_id
+                 AND entry.item_batch_id = NEW.item_batch_id
+                 AND entry.item_id = NEW.item_id
+                 AND entry.uom = NEW.uom
+                 AND entry.status = NEW.inventory_status
+                 AND entry.quantity_delta = -NEW.reversed_qty
+           )
+    INTO entry_count, entry_net, source_entry_count, staged_entry_count
+    FROM public.inventory_entries entry
+    WHERE entry.tenant_id = NEW.tenant_id
+      AND entry.inventory_owner_id = NEW.inventory_owner_id
+      AND entry.transaction_id = NEW.inventory_transaction_id;
+
+    IF entry_count <> 2 OR entry_net <> 0
+       OR source_entry_count <> 1 OR staged_entry_count <> 1
+    THEN
+        RAISE EXCEPTION 'pick reversal inventory entries do not conserve reversed quantity'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NULL;
 END;
 $$;
 
@@ -5994,6 +6390,27 @@ DECLARE
     source_entry_count BIGINT;
     destination_entry_count BIGINT;
 BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM public.pick_confirmations earlier
+        WHERE earlier.tenant_id = NEW.tenant_id
+          AND earlier.inventory_owner_id = NEW.inventory_owner_id
+          AND (
+              earlier.pick_task_content_id = NEW.pick_task_content_id
+              OR earlier.source_inventory_allocation_id =
+                 NEW.source_inventory_allocation_id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM public.pick_reversals reversal
+              WHERE reversal.tenant_id = earlier.tenant_id
+                AND reversal.inventory_owner_id = earlier.inventory_owner_id
+                AND reversal.pick_confirmation_id = earlier.id
+          )
+    ) THEN
+        RAISE EXCEPTION 'pick content or source allocation already has an active confirmation'
+            USING ERRCODE = '55000';
+    END IF;
+
     SELECT content.inventory_owner_id, content.facility_id, content.task_id,
            content.order_release_id, content.order_id, content.order_item_id,
            content.reservation_id, content.source_allocation_id,
@@ -7673,8 +8090,23 @@ BEGIN
                OR NEW.modified IS DISTINCT FROM OLD.modified
            )
         THEN
-            RAISE EXCEPTION 'terminal inventory allocation is immutable'
-                USING ERRCODE = '55000';
+            IF OLD.status <> 'fulfilled'
+               OR OLD.deleted IS NULL
+               OR NEW.status <> 'allocated'
+               OR NEW.deleted IS NOT NULL
+               OR NEW.modified IS NOT NULL
+               OR NEW.execution_stage <> 'pick_source'
+               OR NOT EXISTS (
+                   SELECT 1 FROM public.pick_reversals reversal
+                   WHERE reversal.tenant_id = NEW.tenant_id
+                     AND reversal.inventory_owner_id = NEW.inventory_owner_id
+                     AND reversal.facility_id = NEW.facility_id
+                     AND reversal.source_inventory_allocation_id = NEW.id
+               )
+            THEN
+                RAISE EXCEPTION 'terminal inventory allocation is immutable'
+                    USING ERRCODE = '55000';
+            END IF;
         END IF;
     ELSIF NEW.status <> 'allocated' OR NEW.deleted IS NOT NULL THEN
         RAISE EXCEPTION 'new inventory allocation must be active'
@@ -12273,6 +12705,67 @@ ALTER TABLE public.pick_shortage_reallocation_runs ALTER COLUMN id ADD GENERATED
 
 
 --
+-- Name: pick_reversals; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.pick_reversals (
+    id bigint NOT NULL,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    pick_confirmation_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    pick_task_content_id bigint NOT NULL,
+    order_release_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    source_inventory_allocation_id bigint NOT NULL,
+    staged_inventory_allocation_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    staged_inventory_balance_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    staged_location_id bigint NOT NULL,
+    source_license_plate_id bigint,
+    staged_license_plate_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    inventory_status text NOT NULL,
+    inventory_transaction_id bigint NOT NULL,
+    reversed_qty bigint NOT NULL,
+    expected_order_revision bigint NOT NULL,
+    resulting_order_revision bigint NOT NULL,
+    reason text NOT NULL,
+    note text,
+    reversed_by_user_id bigint NOT NULL,
+    reversed_at timestamp with time zone NOT NULL,
+    CONSTRAINT pick_reversals_distinct_allocations_check CHECK (source_inventory_allocation_id <> staged_inventory_allocation_id),
+    CONSTRAINT pick_reversals_distinct_balances_check CHECK (source_inventory_balance_id <> staged_inventory_balance_id),
+    CONSTRAINT pick_reversals_distinct_locations_check CHECK (source_location_id <> staged_location_id),
+    CONSTRAINT pick_reversals_inventory_status_check CHECK (inventory_status = 'available'::text),
+    CONSTRAINT pick_reversals_note_check CHECK ((note IS NULL) OR ((note = btrim(note)) AND (note <> ''::text) AND (char_length(note) <= 500))),
+    CONSTRAINT pick_reversals_other_note_check CHECK ((reason <> 'other'::text) OR (note IS NOT NULL)),
+    CONSTRAINT pick_reversals_qty_check CHECK (reversed_qty > 0),
+    CONSTRAINT pick_reversals_reason_check CHECK (reason = ANY (ARRAY['mis_pick'::text, 'wrong_quantity'::text, 'wrong_lot_or_serial'::text, 'damaged_during_pick'::text, 'order_exception'::text, 'other'::text])),
+    CONSTRAINT pick_reversals_revision_check CHECK ((expected_order_revision > 0) AND (resulting_order_revision = expected_order_revision + 1)),
+    CONSTRAINT pick_reversals_uom_check CHECK ((uom = btrim(uom)) AND (uom <> ''::text))
+);
+
+ALTER TABLE ONLY public.pick_reversals FORCE ROW LEVEL SECURITY;
+
+
+ALTER TABLE public.pick_reversals ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME public.pick_reversals_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: pick_short_ship_dispositions; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -14748,22 +15241,6 @@ ALTER TABLE ONLY public.pick_confirmations
 
 
 --
--- Name: pick_confirmations pick_confirmations_content_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pick_confirmations
-    ADD CONSTRAINT pick_confirmations_content_key UNIQUE (tenant_id, inventory_owner_id, pick_task_content_id);
-
-
---
--- Name: pick_confirmations pick_confirmations_source_allocation_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pick_confirmations
-    ADD CONSTRAINT pick_confirmations_source_allocation_key UNIQUE (tenant_id, inventory_owner_id, source_inventory_allocation_id);
-
-
---
 -- Name: pick_confirmations pick_confirmations_destination_allocation_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -14777,6 +15254,30 @@ ALTER TABLE ONLY public.pick_confirmations
 
 ALTER TABLE ONLY public.pick_confirmations
     ADD CONSTRAINT pick_confirmations_transaction_key UNIQUE (tenant_id, inventory_owner_id, inventory_transaction_id);
+
+
+--
+-- Name: pick_reversals pick_reversals_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_pkey PRIMARY KEY (id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_tenant_id_key UNIQUE (tenant_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_confirmation_key UNIQUE (tenant_id, inventory_owner_id, pick_confirmation_id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_transaction_key UNIQUE (tenant_id, inventory_owner_id, inventory_transaction_id);
 
 
 --
@@ -16089,6 +16590,12 @@ CREATE INDEX pick_task_contents_release_route_idx ON public.pick_task_contents U
 CREATE INDEX pick_confirmations_order_idx ON public.pick_confirmations USING btree (tenant_id, inventory_owner_id, order_id, confirmed_at, id);
 
 
+CREATE INDEX pick_reversals_order_idx ON public.pick_reversals USING btree (tenant_id, inventory_owner_id, order_id, reversed_at, id);
+
+
+CREATE INDEX pick_reversals_content_idx ON public.pick_reversals USING btree (tenant_id, inventory_owner_id, pick_task_content_id, id);
+
+
 --
 -- Name: pick_shortages_open_queue_idx; Type: INDEX; Schema: public; Owner: -
 --
@@ -16853,6 +17360,15 @@ CREATE TRIGGER pick_confirmations_validate BEFORE INSERT ON public.pick_confirma
 
 
 CREATE CONSTRAINT TRIGGER pick_confirmations_require_execution AFTER INSERT ON public.pick_confirmations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_pick_confirmation_execution();
+
+
+CREATE TRIGGER pick_reversals_are_immutable BEFORE DELETE OR UPDATE ON public.pick_reversals FOR EACH ROW EXECUTE FUNCTION public.reject_pick_reversal_mutation();
+
+
+CREATE TRIGGER pick_reversals_validate BEFORE INSERT ON public.pick_reversals FOR EACH ROW EXECUTE FUNCTION public.validate_pick_reversal();
+
+
+CREATE CONSTRAINT TRIGGER pick_reversals_require_consistency AFTER INSERT ON public.pick_reversals DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_pick_reversal_consistency();
 
 
 CREATE TRIGGER pick_shortage_reallocation_runs_are_immutable BEFORE DELETE OR UPDATE ON public.pick_shortage_reallocation_runs FOR EACH ROW EXECUTE FUNCTION public.reject_pick_shortage_reallocation_run_mutation();
@@ -19797,6 +20313,70 @@ ALTER TABLE ONLY public.pick_confirmations
     ADD CONSTRAINT pick_confirmations_confirmed_by_fkey FOREIGN KEY (tenant_id, confirmed_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
 
 
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_confirmation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, pick_confirmation_id) REFERENCES public.pick_confirmations(tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_content_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, task_id, pick_task_content_id) REFERENCES public.pick_task_contents(tenant_id, inventory_owner_id, facility_id, task_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_task_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, source_inventory_allocation_id, task_id) REFERENCES public.pick_tasks(tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, order_item_id, reservation_id, source_allocation_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_reservation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, reservation_id) REFERENCES public.inventory_reservations(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_source_allocation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_allocation_id) REFERENCES public.inventory_allocations(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_staged_allocation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, staged_inventory_allocation_id) REFERENCES public.inventory_allocations(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_source_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_staged_balance_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, staged_inventory_balance_id) REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_source_location_fkey FOREIGN KEY (tenant_id, facility_id, source_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_staged_location_fkey FOREIGN KEY (tenant_id, facility_id, staged_location_id) REFERENCES public.locations(tenant_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_source_license_plate_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_staged_license_plate_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, staged_license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_item_batch_fkey FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id) REFERENCES public.item_batches(tenant_id, inventory_owner_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_item_fkey FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_transaction_fkey FOREIGN KEY (tenant_id, inventory_owner_id, inventory_transaction_id) REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id);
+
+
+ALTER TABLE ONLY public.pick_reversals
+    ADD CONSTRAINT pick_reversals_reversed_by_fkey FOREIGN KEY (tenant_id, reversed_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+
 --
 -- Name: pick_shortage_reallocation_runs pick_shortage_reallocation_runs_tenant_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
@@ -21675,6 +22255,12 @@ ALTER TABLE public.pick_confirmations ENABLE ROW LEVEL SECURITY;
 CREATE POLICY pick_confirmations_tenant_isolation ON public.pick_confirmations USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
 
 
+ALTER TABLE public.pick_reversals ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY pick_reversals_tenant_isolation ON public.pick_reversals USING ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint)) WITH CHECK ((tenant_id = (NULLIF(current_setting('wareboxes.tenant_id'::text, true), ''::text))::bigint));
+
+
 --
 -- Name: pick_shortage_reallocation_runs; Type: ROW SECURITY; Schema: public; Owner: -
 --
@@ -22246,6 +22832,9 @@ REVOKE ALL ON FUNCTION public.guard_pick_task_content_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_pick_confirmation_mutation() FROM PUBLIC;
 
 
+REVOKE ALL ON FUNCTION public.reject_pick_reversal_mutation() FROM PUBLIC;
+
+
 --
 -- Name: FUNCTION validate_order_release(); Type: ACL; Schema: public; Owner: -
 --
@@ -22286,6 +22875,9 @@ REVOKE ALL ON FUNCTION public.validate_pick_task_content() FROM PUBLIC;
 --
 
 REVOKE ALL ON FUNCTION public.validate_pick_confirmation() FROM PUBLIC;
+
+
+REVOKE ALL ON FUNCTION public.validate_pick_reversal() FROM PUBLIC;
 
 
 --
@@ -22341,6 +22933,9 @@ REVOKE ALL ON FUNCTION public.validate_pick_shortage_reallocation_run() FROM PUB
 --
 
 REVOKE ALL ON FUNCTION public.require_pick_confirmation_execution() FROM PUBLIC;
+
+
+REVOKE ALL ON FUNCTION public.require_pick_reversal_consistency() FROM PUBLIC;
 
 
 --
@@ -23281,6 +23876,12 @@ GRANT SELECT,INSERT ON TABLE public.pick_confirmations TO wareboxes_app;
 --
 
 GRANT USAGE ON SEQUENCE public.pick_confirmations_id_seq TO wareboxes_app;
+
+
+GRANT SELECT,INSERT ON TABLE public.pick_reversals TO wareboxes_app;
+
+
+GRANT USAGE ON SEQUENCE public.pick_reversals_id_seq TO wareboxes_app;
 
 
 --

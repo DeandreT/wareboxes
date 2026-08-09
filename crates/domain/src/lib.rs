@@ -66,12 +66,13 @@ pub use packing::{
     PackSessionStatus, PackingError, PackingProgress, WeightGrams, MAX_PACK_SCAN_VALUE_LENGTH,
 };
 pub use picking::{
-    resolve_pick_shortage_as_short_ship, ActualPickQuantity, PickClaimReleaseReason,
-    PickContentState, PickQuantity, PickScanValue, PickShortShipDetails, PickShortShipNote,
+    resolve_pick_shortage_as_short_ship, reverse_pick_before_packing, ActualPickQuantity,
+    PickClaimReleaseReason, PickContentState, PickQuantity, PickReversalDetails, PickReversalNote,
+    PickReversalReason, PickScanValue, PickShortShipDetails, PickShortShipNote,
     PickShortShipReason, PickShortShipTransition, PickShortageDetails, PickShortageNote,
     PickShortageQuantities, PickShortageReason, PickShortageResolution, PickShortageRevision,
-    PickShortageStatus, PickingError, ShortShipDemandQuantities, MAX_PICK_SCAN_VALUE_LENGTH,
-    MAX_PICK_SHORTAGE_NOTE_LENGTH, MAX_PICK_SHORT_SHIP_NOTE_LENGTH,
+    PickShortageStatus, PickingError, ShortShipDemandQuantities, MAX_PICK_REVERSAL_NOTE_LENGTH,
+    MAX_PICK_SCAN_VALUE_LENGTH, MAX_PICK_SHORTAGE_NOTE_LENGTH, MAX_PICK_SHORT_SHIP_NOTE_LENGTH,
 };
 pub use replenishment::{
     assess_replenishment_source, plan_replenishment, select_replenishment_sources,
@@ -171,6 +172,8 @@ positive_id!(OrderCancellationId, "order cancellation ID");
 positive_id!(OrderReleaseId, "order release ID");
 positive_id!(PickTaskId, "pick task ID");
 positive_id!(PickContentId, "pick content ID");
+positive_id!(PickConfirmationId, "pick confirmation ID");
+positive_id!(PickReversalId, "pick reversal ID");
 positive_id!(PickShortageId, "pick shortage ID");
 positive_id!(PickShortageDispositionId, "pick shortage disposition ID");
 positive_id!(

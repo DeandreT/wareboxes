@@ -5,7 +5,8 @@ use wareboxes_domain::{
     ActualPickQuantity, AllocationExecutionStage, AllocationOutcome, AllocationQuantity,
     AllocationStrategy, FacilityId, InventoryAllocationId, InventoryBalanceId, InventoryHoldId,
     InventoryOwnerId, ItemBatchId, LicensePlateId, LocationId, OrderId, OrderLineId, OrderRevision,
-    OrderStatus, PickClaimReleaseReason, PickContentId, PickContentState, PickQuantity,
+    OrderStatus, PickClaimReleaseReason, PickConfirmationId, PickContentId, PickContentState,
+    PickQuantity, PickReversalDetails, PickReversalId, PickReversalNote, PickReversalReason,
     PickScanValue, PickShortShipDetails, PickShortShipNote, PickShortShipReason,
     PickShortageDetails, PickShortageDispositionId, PickShortageId, PickShortageQuantities,
     PickShortageReallocationRunId, PickShortageResolution, PickShortageRevision,
@@ -13,6 +14,7 @@ use wareboxes_domain::{
 };
 
 pub const REPORT_PICK_SHORTAGE_OPERATION: &str = "picking.shortage.report.v1";
+pub const REVERSE_PICK_CONFIRMATION_OPERATION: &str = "picking.confirmation.reverse.v1";
 pub const REALLOCATE_PICK_SHORTAGE_OPERATION: &str = "picking.shortage.reallocate.v1";
 pub const ACCEPT_PICK_SHORTAGE_AS_SHORT_SHIP_OPERATION: &str =
     "picking.shortage.accept_short_ship.v1";
@@ -139,6 +141,111 @@ pub struct ConfirmPickContentResult {
     pub order_ready_to_pack: bool,
     pub order_status: wareboxes_domain::OrderStatus,
     pub order_revision: OrderRevision,
+}
+
+/// Scan-verified supervisor command that returns one completed pick to RF work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReversePickConfirmationCommand {
+    pub confirmation_id: PickConfirmationId,
+    pub expected_order_revision: OrderRevision,
+    pub staged_location_barcode: PickScanValue,
+    pub staged_license_plate_barcode: PickScanValue,
+    pub item_barcode: PickScanValue,
+    pub lot_scan: Option<PickScanValue>,
+    pub serial_scan: Option<PickScanValue>,
+    pub return_location_barcode: PickScanValue,
+    pub return_license_plate_barcode: Option<PickScanValue>,
+    pub reason: PickReversalReason,
+    pub note: Option<PickReversalNote>,
+}
+
+impl ReversePickConfirmationCommand {
+    pub fn validate_details(&self) -> Result<PickReversalDetails, wareboxes_domain::PickingError> {
+        PickReversalDetails::new(self.reason, self.note.clone())
+    }
+}
+
+/// Replay-stable evidence of one equal-and-opposite pick movement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReversePickConfirmationResult {
+    pub reversal_id: PickReversalId,
+    pub confirmation_id: PickConfirmationId,
+    pub task_id: PickTaskId,
+    pub content_id: PickContentId,
+    pub order_id: OrderId,
+    pub inventory_transaction_id: i64,
+    pub source_inventory_allocation_id: InventoryAllocationId,
+    pub staged_inventory_allocation_id: InventoryAllocationId,
+    pub source_inventory_balance_id: InventoryBalanceId,
+    pub staged_inventory_balance_id: InventoryBalanceId,
+    pub source_location_id: LocationId,
+    pub staged_location_id: LocationId,
+    pub source_license_plate_id: Option<LicensePlateId>,
+    pub staged_license_plate_id: LicensePlateId,
+    pub reversed_quantity: PickQuantity,
+    pub content_state: PickContentState,
+    pub order_status: OrderStatus,
+    pub order_revision: OrderRevision,
+    pub reason: PickReversalReason,
+    pub note: Option<PickReversalNote>,
+    pub reversed_by: UserId,
+    pub reversed_at: Timestamp,
+}
+
+/// Stable keyset boundary for one order's pick-confirmation history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PickConfirmationHistoryCursor {
+    pub confirmed_at: Timestamp,
+    pub confirmation_id: PickConfirmationId,
+}
+
+/// Bounded query for immutable pick confirmations and optional reversals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PickConfirmationHistoryQuery {
+    pub order_id: OrderId,
+    pub cursor: Option<PickConfirmationHistoryCursor>,
+    pub limit: u16,
+}
+
+/// Reversal evidence paired with its original confirmation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PickReversalHistoryReadModel {
+    pub reversal_id: PickReversalId,
+    pub reason: PickReversalReason,
+    pub note: Option<PickReversalNote>,
+    pub reversed_by: UserId,
+    pub reversed_at: Timestamp,
+}
+
+/// Manager-facing execution history for one physical pick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PickConfirmationHistoryReadModel {
+    pub confirmation_id: PickConfirmationId,
+    pub task_id: PickTaskId,
+    pub content_id: PickContentId,
+    pub order_id: OrderId,
+    pub item_id: i64,
+    pub item_description: String,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub serial: Option<String>,
+    pub picked_quantity: PickQuantity,
+    pub source_location_id: LocationId,
+    pub source_location_name: String,
+    pub source_license_plate_required: bool,
+    pub staged_location_id: LocationId,
+    pub staged_location_name: String,
+    pub staged_license_plate_id: LicensePlateId,
+    pub confirmed_by: UserId,
+    pub confirmed_at: Timestamp,
+    pub reversal: Option<PickReversalHistoryReadModel>,
+}
+
+/// One keyset page of pick-confirmation history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickConfirmationHistoryPage {
+    pub items: Vec<PickConfirmationHistoryReadModel>,
+    pub next_cursor: Option<PickConfirmationHistoryCursor>,
 }
 
 /// Physical outcome reported by the operator for a short pick.

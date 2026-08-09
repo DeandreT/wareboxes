@@ -583,6 +583,13 @@ pub(super) fn OrderDetailPanel(
                         on_refreshed
                         on_unauthorized
                     />
+                    <PickReversalPanel
+                        order_id
+                        order_revision=order.revision
+                        order_status=order.status
+                        on_refreshed
+                        on_unauthorized
+                    />
                     <section class="detail-section">
                         <div class="detail-section-title">
                             <h3>"Reservations"</h3>

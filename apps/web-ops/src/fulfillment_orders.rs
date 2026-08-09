@@ -25,8 +25,10 @@ use crate::view_model::format_quantity;
 use crate::workspace_layout::{PaneControls, SplitPaneHandle, SplitPaneState};
 
 mod detail;
+mod pick_reversal;
 
 use detail::{title_case, OrderDetailPanel};
+use pick_reversal::PickReversalPanel;
 
 const ORDER_PAGE_SIZE: i64 = 100;
 

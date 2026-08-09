@@ -1,20 +1,26 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use wareboxes_api_contract::v1::{
     ClaimNextPickRequest, ClaimPickByIdRequest, ConfirmPickContentRequest, CurrentPickResponse,
     HeartbeatPickClaimRequest, PickClaimContent as ApiPickClaimContent, PickClaimHeartbeatResponse,
     PickClaimReleaseReason as ApiReleaseReason, PickClaimReleaseResponse, PickClaimResponse,
-    PickContentConfirmationResponse, PickContentState as ApiContentState, PickOrderStatus,
-    ReleasePickClaimRequest, Revision,
+    PickConfirmationHistoryPage as ApiConfirmationHistoryPage, PickConfirmationHistoryPageRequest,
+    PickConfirmationHistoryResponse, PickContentConfirmationResponse,
+    PickContentState as ApiContentState, PickOrderStatus, PickReversalHistoryResponse,
+    PickReversalReason as ApiReversalReason, ReleasePickClaimRequest,
+    ReversePickConfirmationRequest, ReversePickConfirmationResponse, Revision,
 };
 use wareboxes_application::picking::{
     ClaimNextPickCommand, ClaimPickByIdCommand, ConfirmPickContentCommand,
     ConfirmPickContentResult, HeartbeatPickClaimCommand, PickClaim, PickClaimContent,
-    PickClaimHeartbeatResult, PickClaimReleaseResult, ReleasePickClaimCommand,
+    PickClaimHeartbeatResult, PickClaimReleaseResult, PickConfirmationHistoryCursor,
+    PickConfirmationHistoryPage, PickConfirmationHistoryQuery, PickConfirmationHistoryReadModel,
+    ReleasePickClaimCommand, ReversePickConfirmationCommand, ReversePickConfirmationResult,
 };
 use wareboxes_domain::{
-    OrderStatus, PickClaimReleaseReason, PickContentId, PickContentState, PickScanValue,
-    PickTaskId, MAX_PICK_SCAN_VALUE_LENGTH,
+    OrderStatus, PickClaimReleaseReason, PickConfirmationId, PickContentId, PickContentState,
+    PickReversalNote, PickReversalReason, PickScanValue, PickTaskId, Timestamp,
+    MAX_PICK_SCAN_VALUE_LENGTH,
 };
 
 use super::error::{V1Error, V1Result};
@@ -26,6 +32,7 @@ use crate::state::AppState;
 
 const PERMISSION: &str = "wms";
 const MAX_RELEASE_NOTE_LENGTH: usize = 500;
+const CONFIRMATION_CURSOR_PREFIX: &str = "pc1.";
 
 pub async fn claim_next(
     State(state): State<AppState>,
@@ -125,6 +132,79 @@ pub async fn confirm(
     let context = user.command_context(&idempotency_key);
     let result = repo::picking::confirm_content(&state.db, &user.tenant, &context, command).await?;
     Ok(Json(map_confirmation(result)?))
+}
+
+pub async fn reverse_confirmation(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(confirmation_id): Path<i64>,
+    Json(body): Json<ReversePickConfirmationRequest>,
+) -> V1Result<Json<ReversePickConfirmationResponse>> {
+    user.require_permission(&state.db, "wms_supervisor").await?;
+    let command = ReversePickConfirmationCommand {
+        confirmation_id: PickConfirmationId::new(confirmation_id).map_err(domain_validation)?,
+        expected_order_revision: wareboxes_domain::OrderRevision::new(
+            body.expected_order_revision.get(),
+        )
+        .map_err(domain_validation)?,
+        staged_location_barcode: scan(body.staged_location_barcode, "staged location barcode")?,
+        staged_license_plate_barcode: scan(
+            body.staged_license_plate_barcode,
+            "staged license plate barcode",
+        )?,
+        item_barcode: scan(body.item_barcode, "item barcode")?,
+        lot_scan: body
+            .lot_scan
+            .map(|value| scan(value, "lot scan"))
+            .transpose()?,
+        serial_scan: body
+            .serial_scan
+            .map(|value| scan(value, "serial scan"))
+            .transpose()?,
+        return_location_barcode: scan(body.return_location_barcode, "return location barcode")?,
+        return_license_plate_barcode: body
+            .return_license_plate_barcode
+            .map(|value| scan(value, "return license plate barcode"))
+            .transpose()?,
+        reason: map_reversal_reason(body.reason),
+        note: body
+            .note
+            .map(PickReversalNote::new)
+            .transpose()
+            .map_err(domain_validation)?,
+    };
+    command.validate_details().map_err(domain_validation)?;
+    let context = user.command_context(&idempotency_key);
+    let result =
+        repo::picking::reverse_confirmation(&state.db, &user.tenant, &context, &command).await?;
+    Ok(Json(map_reversal(result)?))
+}
+
+pub async fn list_confirmation_history(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(order_id): Path<i64>,
+    Query(request): Query<PickConfirmationHistoryPageRequest>,
+) -> V1Result<Json<ApiConfirmationHistoryPage>> {
+    user.require_permission(&state.db, "orders").await?;
+    if request.limit.get() > 100 {
+        return Err(invalid(
+            "pick confirmation history limit must be between 1 and 100",
+        ));
+    }
+    let order_id = wareboxes_domain::OrderId::new(order_id).map_err(domain_validation)?;
+    let query = PickConfirmationHistoryQuery {
+        order_id,
+        cursor: request
+            .cursor
+            .as_ref()
+            .map(|cursor| decode_confirmation_cursor(cursor, order_id))
+            .transpose()?,
+        limit: request.limit.get(),
+    };
+    let page = repo::picking::list_confirmation_history(&state.db, &user.tenant, query).await?;
+    Ok(Json(map_confirmation_history_page(page, order_id)?))
 }
 
 fn map_claim(claim: PickClaim) -> V1Result<PickClaimResponse> {
@@ -230,6 +310,143 @@ fn map_confirmation(result: ConfirmPickContentResult) -> V1Result<PickContentCon
     })
 }
 
+fn map_reversal(
+    result: ReversePickConfirmationResult,
+) -> V1Result<ReversePickConfirmationResponse> {
+    if result.order_status != OrderStatus::Processing {
+        return Err(V1Error::internal(
+            "pick reversal produced an invalid order status",
+        ));
+    }
+    Ok(ReversePickConfirmationResponse {
+        reversal_id: result.reversal_id.get(),
+        confirmation_id: result.confirmation_id.get(),
+        task_id: result.task_id.get(),
+        content_id: result.content_id.get(),
+        order_id: result.order_id.get(),
+        inventory_transaction_id: result.inventory_transaction_id,
+        source_inventory_allocation_id: result.source_inventory_allocation_id.get(),
+        staged_inventory_allocation_id: result.staged_inventory_allocation_id.get(),
+        source_inventory_balance_id: result.source_inventory_balance_id.get(),
+        staged_inventory_balance_id: result.staged_inventory_balance_id.get(),
+        source_location_id: result.source_location_id.get(),
+        staged_location_id: result.staged_location_id.get(),
+        source_license_plate_id: result.source_license_plate_id.map(|id| id.get()),
+        staged_license_plate_id: result.staged_license_plate_id.get(),
+        reversed_quantity: result.reversed_quantity.get(),
+        content_state: map_content_state(result.content_state),
+        order_status: PickOrderStatus::Processing,
+        order_revision: Revision::new(result.order_revision.get())
+            .map_err(|error| V1Error::internal(error.to_string()))?,
+        reason: map_reversal_reason_to_api(result.reason),
+        note: result.note.map(|note| note.as_str().to_owned()),
+        reversed_by: result.reversed_by.get(),
+        reversed_at: result.reversed_at.to_rfc3339(),
+    })
+}
+
+fn map_confirmation_history_page(
+    page: PickConfirmationHistoryPage,
+    order_id: wareboxes_domain::OrderId,
+) -> V1Result<ApiConfirmationHistoryPage> {
+    let next_cursor = page
+        .next_cursor
+        .map(|cursor| encode_confirmation_cursor(cursor, order_id))
+        .transpose()?;
+    Ok(ApiConfirmationHistoryPage::new(
+        page.items
+            .into_iter()
+            .map(map_confirmation_history)
+            .collect(),
+        next_cursor,
+    ))
+}
+
+fn map_confirmation_history(
+    item: PickConfirmationHistoryReadModel,
+) -> PickConfirmationHistoryResponse {
+    PickConfirmationHistoryResponse {
+        confirmation_id: item.confirmation_id.get(),
+        task_id: item.task_id.get(),
+        content_id: item.content_id.get(),
+        order_id: item.order_id.get(),
+        item_id: item.item_id,
+        item_description: item.item_description,
+        uom: item.uom,
+        lot: item.lot,
+        serial: item.serial,
+        picked_quantity: item.picked_quantity.get(),
+        source_location_id: item.source_location_id.get(),
+        source_location_name: item.source_location_name,
+        source_license_plate_required: item.source_license_plate_required,
+        staged_location_id: item.staged_location_id.get(),
+        staged_location_name: item.staged_location_name,
+        staged_license_plate_id: item.staged_license_plate_id.get(),
+        confirmed_by: item.confirmed_by.get(),
+        confirmed_at: item.confirmed_at.to_rfc3339(),
+        reversal: item.reversal.map(|reversal| PickReversalHistoryResponse {
+            reversal_id: reversal.reversal_id.get(),
+            reason: map_reversal_reason_to_api(reversal.reason),
+            note: reversal.note.map(|note| note.as_str().to_owned()),
+            reversed_by: reversal.reversed_by.get(),
+            reversed_at: reversal.reversed_at.to_rfc3339(),
+        }),
+    }
+}
+
+fn decode_confirmation_cursor(
+    cursor: &wareboxes_api_contract::v1::OpaqueCursor,
+    expected_order_id: wareboxes_domain::OrderId,
+) -> V1Result<PickConfirmationHistoryCursor> {
+    let encoded = cursor
+        .as_str()
+        .strip_prefix(CONFIRMATION_CURSOR_PREFIX)
+        .ok_or_else(|| V1Error::invalid_cursor_for("pick confirmation history"))?;
+    let mut parts = encoded.split('.');
+    let order_id = parts
+        .next()
+        .filter(|part| part.len() == 16)
+        .and_then(|part| i64::from_str_radix(part, 16).ok())
+        .and_then(|value| wareboxes_domain::OrderId::new(value).ok())
+        .filter(|value| *value == expected_order_id)
+        .ok_or_else(|| V1Error::invalid_cursor_for("pick confirmation history"))?;
+    let _ = order_id;
+    let sortable = parts
+        .next()
+        .filter(|part| part.len() == 16)
+        .and_then(|part| u64::from_str_radix(part, 16).ok())
+        .ok_or_else(|| V1Error::invalid_cursor_for("pick confirmation history"))?;
+    let confirmation_id = parts
+        .next()
+        .filter(|part| part.len() == 16)
+        .and_then(|part| i64::from_str_radix(part, 16).ok())
+        .and_then(|value| PickConfirmationId::new(value).ok())
+        .ok_or_else(|| V1Error::invalid_cursor_for("pick confirmation history"))?;
+    if parts.next().is_some() {
+        return Err(V1Error::invalid_cursor_for("pick confirmation history"));
+    }
+    let micros = (sortable ^ (1_u64 << 63)) as i64;
+    let confirmed_at = Timestamp::from_timestamp_micros(micros)
+        .ok_or_else(|| V1Error::invalid_cursor_for("pick confirmation history"))?;
+    Ok(PickConfirmationHistoryCursor {
+        confirmed_at,
+        confirmation_id,
+    })
+}
+
+fn encode_confirmation_cursor(
+    cursor: PickConfirmationHistoryCursor,
+    order_id: wareboxes_domain::OrderId,
+) -> V1Result<wareboxes_api_contract::v1::OpaqueCursor> {
+    let sortable = (cursor.confirmed_at.timestamp_micros() as u64) ^ (1_u64 << 63);
+    wareboxes_api_contract::v1::OpaqueCursor::new(format!(
+        "{CONFIRMATION_CURSOR_PREFIX}{:016x}.{sortable:016x}.{:016x}",
+        order_id.get(),
+        cursor.confirmation_id.get()
+    ))
+    .map_err(|_| V1Error::internal("generated an invalid pick confirmation cursor"))
+}
+
 fn validate_release(body: &ReleasePickClaimRequest) -> V1Result<()> {
     if let Some(note) = body.note.as_deref() {
         if note.trim() != note || note.is_empty() {
@@ -286,6 +503,28 @@ fn map_release_reason_to_api(reason: PickClaimReleaseReason) -> ApiReleaseReason
         PickClaimReleaseReason::InventoryDiscrepancy => ApiReleaseReason::InventoryDiscrepancy,
         PickClaimReleaseReason::SafetyIssue => ApiReleaseReason::SafetyIssue,
         PickClaimReleaseReason::Other => ApiReleaseReason::Other,
+    }
+}
+
+fn map_reversal_reason(reason: ApiReversalReason) -> PickReversalReason {
+    match reason {
+        ApiReversalReason::MisPick => PickReversalReason::MisPick,
+        ApiReversalReason::WrongQuantity => PickReversalReason::WrongQuantity,
+        ApiReversalReason::WrongLotOrSerial => PickReversalReason::WrongLotOrSerial,
+        ApiReversalReason::DamagedDuringPick => PickReversalReason::DamagedDuringPick,
+        ApiReversalReason::OrderException => PickReversalReason::OrderException,
+        ApiReversalReason::Other => PickReversalReason::Other,
+    }
+}
+
+fn map_reversal_reason_to_api(reason: PickReversalReason) -> ApiReversalReason {
+    match reason {
+        PickReversalReason::MisPick => ApiReversalReason::MisPick,
+        PickReversalReason::WrongQuantity => ApiReversalReason::WrongQuantity,
+        PickReversalReason::WrongLotOrSerial => ApiReversalReason::WrongLotOrSerial,
+        PickReversalReason::DamagedDuringPick => ApiReversalReason::DamagedDuringPick,
+        PickReversalReason::OrderException => ApiReversalReason::OrderException,
+        PickReversalReason::Other => ApiReversalReason::Other,
     }
 }
 

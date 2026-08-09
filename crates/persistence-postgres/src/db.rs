@@ -366,6 +366,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'pick_confirmations_tenant_isolation'
                 ),
                 (
+                    'pick_reversals',
+                    'pick_reversals_tenant_isolation'
+                ),
+                (
                     'pick_shortage_reallocation_runs',
                     'pick_shortage_reallocation_runs_tenant_isolation'
                 ),

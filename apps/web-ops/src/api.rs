@@ -11,14 +11,15 @@ use wareboxes_api_contract::v1::{
     InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
     OpenPackSessionResponse, OrderAllocationReadinessResponse, OrderEntryItemResponse,
     PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
-    PackingQueuePage, PickShortagePage, PickShortageResponse, PickShortageStatus,
-    PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
-    PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
-    PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
-    ReallocatePickShortageResponse, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
-    ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse, ReplenishmentPolicyPage,
-    ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
-    RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse, VoidCartonRequest,
+    PackingQueuePage, PickConfirmationHistoryPage, PickShortagePage, PickShortageResponse,
+    PickShortageStatus, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
+    PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
+    PlanOrderAllocationResponse, PlanReplenishmentRequest, PlanReplenishmentResponse,
+    ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleaseInventoryHoldResponse,
+    ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
+    ReplenishmentPolicyPage, ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse,
+    ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
+    ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
     VoidCartonResponse,
 };
 use wareboxes_api_contract::v1::{
@@ -67,17 +68,18 @@ mod browser {
         InventoryHoldStatus, InventoryStatusTransitionResponse, OpaqueCursor,
         OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
         OrderEntryItemResponse, OrderPage, PackPickedAllocationRequest,
-        PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage, PickShortagePage,
-        PickShortageResponse, PickShortageStatus, PlaceInventoryHoldRequest,
-        PlaceInventoryHoldResponse, PlaceOrderHoldRequest, PlaceOrderHoldResponse,
-        PlanOrderAllocationRequest, PlanOrderAllocationResponse, PlanReplenishmentRequest,
-        PlanReplenishmentResponse, ReallocatePickShortageRequest, ReallocatePickShortageResponse,
-        ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
-        ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
-        ReplenishmentPolicyPage, ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse,
-        ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest,
-        RetireReplenishmentPolicyResponse, VoidCartonRequest, VoidCartonResponse,
-        WebSessionContext,
+        PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage,
+        PickConfirmationHistoryPage, PickShortagePage, PickShortageResponse, PickShortageStatus,
+        PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
+        PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
+        PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
+        ReallocatePickShortageResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
+        ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest,
+        ReleaseOrderResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
+        ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
+        RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
+        ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
+        VoidCartonResponse, WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -578,6 +580,26 @@ mod browser {
         .await
     }
 
+    pub async fn pick_confirmation_history(
+        order_id: i64,
+        cursor: Option<&OpaqueCursor>,
+    ) -> Result<PickConfirmationHistoryPage, ApiError> {
+        get(&super::pick_confirmation_history_path(order_id, cursor)).await
+    }
+
+    pub async fn reverse_pick_confirmation(
+        confirmation_id: i64,
+        request: &ReversePickConfirmationRequest,
+        idempotency_key: &str,
+    ) -> Result<ReversePickConfirmationResponse, ApiError> {
+        post(
+            &super::pick_reversal_path(confirmation_id),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
     pub fn new_idempotency_key() -> String {
         uuid::Uuid::new_v4().to_string()
     }
@@ -1039,6 +1061,23 @@ pub async fn cancel_replenishment_work(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub async fn pick_confirmation_history(
+    _order_id: i64,
+    _cursor: Option<&OpaqueCursor>,
+) -> Result<PickConfirmationHistoryPage, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn reverse_pick_confirmation(
+    _confirmation_id: i64,
+    _request: &ReversePickConfirmationRequest,
+    _idempotency_key: &str,
+) -> Result<ReversePickConfirmationResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn new_idempotency_key() -> String {
     "server-rendering-does-not-submit-commands".to_owned()
 }
@@ -1085,6 +1124,18 @@ fn replenishment_queue_page_path(
 #[cfg(any(target_arch = "wasm32", test))]
 fn replenishment_cancellation_path(work_id: i64) -> String {
     format!("/api/v1/replenishment-tasks/{work_id}/cancellations")
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn pick_confirmation_history_path(order_id: i64, cursor: Option<&OpaqueCursor>) -> String {
+    let mut path = format!("/api/v1/orders/{order_id}/pick-confirmations?limit=50");
+    append_cursor(&mut path, cursor);
+    path
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn pick_reversal_path(confirmation_id: i64) -> String {
+    format!("/api/v1/pick-confirmations/{confirmation_id}/reversals")
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -1150,6 +1201,19 @@ mod tests {
         assert_eq!(
             replenishment_cancellation_path(42),
             "/api/v1/replenishment-tasks/42/cancellations"
+        );
+    }
+
+    #[test]
+    fn pick_history_cursor_and_reversal_paths_are_stable() {
+        let cursor = OpaqueCursor::new("pc1.encoded".to_owned()).unwrap();
+        assert_eq!(
+            pick_confirmation_history_path(17, Some(&cursor)),
+            "/api/v1/orders/17/pick-confirmations?limit=50&cursor=pc1.encoded"
+        );
+        assert_eq!(
+            pick_reversal_path(23),
+            "/api/v1/pick-confirmations/23/reversals"
         );
     }
 }

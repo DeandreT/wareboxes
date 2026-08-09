@@ -2,8 +2,8 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 use lucide_leptos::{
     ArrowLeft, ArrowRightLeft, ArrowUpFromLine, Boxes, Building2, ClipboardList, LayoutDashboard,
-    LockKeyhole, LockKeyholeOpen, LogOut, PackageOpen, Plus, Printer, RefreshCw, ScanBarcode,
-    Search, ShieldCheck, Trash2, TriangleAlert, Truck,
+    LockKeyhole, LockKeyholeOpen, LogOut, PackageOpen, Plus, Printer, RefreshCw, RotateCcw,
+    ScanBarcode, Search, ShieldCheck, Trash2, TriangleAlert, Truck, X,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -15,6 +15,7 @@ pub enum UiIcon {
     Building,
     Catalog,
     Clients,
+    Close,
     Counts,
     Disposition,
     Employees,
@@ -28,6 +29,7 @@ pub enum UiIcon {
     Print,
     Refresh,
     Replenishment,
+    Reverse,
     Release,
     Remove,
     Roles,
@@ -51,6 +53,7 @@ pub fn Icon(icon: UiIcon) -> impl IntoView {
                 UiIcon::Building => view! { <Building2 size=16/> }.into_any(),
                 UiIcon::Catalog => view! { <Boxes size=16/> }.into_any(),
                 UiIcon::Clients => view! { <Building2 size=16/> }.into_any(),
+                UiIcon::Close => view! { <X size=16/> }.into_any(),
                 UiIcon::Counts => view! { <ClipboardList size=16/> }.into_any(),
                 UiIcon::Disposition => view! { <ArrowRightLeft size=16/> }.into_any(),
                 UiIcon::Employees => view! { <ShieldCheck size=16/> }.into_any(),
@@ -64,6 +67,7 @@ pub fn Icon(icon: UiIcon) -> impl IntoView {
                 UiIcon::Print => view! { <Printer size=16/> }.into_any(),
                 UiIcon::Refresh => view! { <RefreshCw size=16/> }.into_any(),
                 UiIcon::Replenishment => view! { <ArrowUpFromLine size=16/> }.into_any(),
+                UiIcon::Reverse => view! { <RotateCcw size=16/> }.into_any(),
                 UiIcon::Release => view! { <PackageOpen size=16/> }.into_any(),
                 UiIcon::Remove => view! { <Trash2 size=16/> }.into_any(),
                 UiIcon::Roles => view! { <ShieldCheck size=16/> }.into_any(),

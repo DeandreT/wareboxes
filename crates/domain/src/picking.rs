@@ -5,6 +5,7 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub const MAX_PICK_SCAN_VALUE_LENGTH: usize = 200;
+pub const MAX_PICK_REVERSAL_NOTE_LENGTH: usize = 500;
 pub const MAX_PICK_SHORTAGE_NOTE_LENGTH: usize = 500;
 pub const MAX_PICK_SHORT_SHIP_NOTE_LENGTH: usize = 500;
 
@@ -15,6 +16,131 @@ pub enum PickContentState {
     Pending,
     Completed,
     Shorted,
+}
+
+/// Supervisor reason for reversing a physical pick before packing begins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickReversalReason {
+    MisPick,
+    WrongQuantity,
+    WrongLotOrSerial,
+    DamagedDuringPick,
+    OrderException,
+    Other,
+}
+
+impl PickReversalReason {
+    pub const ALL: [Self; 6] = [
+        Self::MisPick,
+        Self::WrongQuantity,
+        Self::WrongLotOrSerial,
+        Self::DamagedDuringPick,
+        Self::OrderException,
+        Self::Other,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MisPick => "mis_pick",
+            Self::WrongQuantity => "wrong_quantity",
+            Self::WrongLotOrSerial => "wrong_lot_or_serial",
+            Self::DamagedDuringPick => "damaged_during_pick",
+            Self::OrderException => "order_exception",
+            Self::Other => "other",
+        }
+    }
+
+    pub const fn requires_note(self) -> bool {
+        matches!(self, Self::Other)
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == value)
+    }
+}
+
+/// Trimmed, bounded supervisor context retained with a pick reversal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct PickReversalNote(String);
+
+impl PickReversalNote {
+    pub fn new(value: impl Into<String>) -> Result<Self, PickingError> {
+        let value = value.into();
+        if value.is_empty() || value.trim() != value {
+            return Err(PickingError::InvalidReversalNote);
+        }
+        if value.chars().count() > MAX_PICK_REVERSAL_NOTE_LENGTH {
+            return Err(PickingError::ReversalNoteTooLong);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PickReversalNote {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(D::Error::custom)
+    }
+}
+
+/// Validated reason and context for one pick reversal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PickReversalDetails {
+    reason: PickReversalReason,
+    note: Option<PickReversalNote>,
+}
+
+impl PickReversalDetails {
+    pub fn new(
+        reason: PickReversalReason,
+        note: Option<PickReversalNote>,
+    ) -> Result<Self, PickingError> {
+        if reason.requires_note() && note.is_none() {
+            return Err(PickingError::ReversalNoteRequired);
+        }
+        Ok(Self { reason, note })
+    }
+
+    pub const fn reason(&self) -> PickReversalReason {
+        self.reason
+    }
+
+    pub fn note(&self) -> Option<&PickReversalNote> {
+        self.note.as_ref()
+    }
+}
+
+/// Returns the workflow state after a safe pre-packing pick reversal.
+pub const fn reverse_pick_before_packing(
+    order_status: crate::OrderStatus,
+    has_downstream_execution: bool,
+    shortage_backed: bool,
+) -> Result<crate::OrderStatus, PickingError> {
+    if has_downstream_execution {
+        return Err(PickingError::ReversalAfterPackingStarted);
+    }
+    if shortage_backed {
+        return Err(PickingError::ShortagePickRequiresShortageRecovery);
+    }
+    match order_status {
+        crate::OrderStatus::Processing | crate::OrderStatus::AwaitingPacking => {
+            Ok(crate::OrderStatus::Processing)
+        }
+        _ => Err(PickingError::OrderNotReversible {
+            status: order_status,
+        }),
+    }
 }
 
 impl PickContentState {
@@ -733,6 +859,18 @@ pub enum PickingError {
     ContentAlreadyCompleted,
     #[error("pick content is already shorted")]
     ContentAlreadyShorted,
+    #[error("pick reversal note must be trimmed and nonblank")]
+    InvalidReversalNote,
+    #[error("pick reversal note cannot exceed {MAX_PICK_REVERSAL_NOTE_LENGTH} characters")]
+    ReversalNoteTooLong,
+    #[error("pick reversal reason other requires a note")]
+    ReversalNoteRequired,
+    #[error("order {status} cannot reverse a pick")]
+    OrderNotReversible { status: crate::OrderStatus },
+    #[error("pick cannot be reversed after packing execution begins")]
+    ReversalAfterPackingStarted,
+    #[error("shortage-backed picks must be resolved through shortage recovery")]
+    ShortagePickRequiresShortageRecovery,
     #[error("actual pick quantity cannot be negative, got {value}")]
     InvalidActualQuantity { value: i64 },
     #[error("pick shortage revision must be positive, got {value}")]
@@ -805,6 +943,30 @@ mod tests {
         assert_eq!(
             PickContentState::Completed.complete(),
             Err(PickingError::ContentAlreadyCompleted)
+        );
+    }
+
+    #[test]
+    fn pick_reversal_requires_prepacking_work_and_valid_context() {
+        assert_eq!(
+            reverse_pick_before_packing(crate::OrderStatus::AwaitingPacking, false, false),
+            Ok(crate::OrderStatus::Processing)
+        );
+        assert_eq!(
+            reverse_pick_before_packing(crate::OrderStatus::Processing, true, false),
+            Err(PickingError::ReversalAfterPackingStarted)
+        );
+        assert_eq!(
+            reverse_pick_before_packing(crate::OrderStatus::Processing, false, true),
+            Err(PickingError::ShortagePickRequiresShortageRecovery)
+        );
+        assert_eq!(
+            PickReversalDetails::new(PickReversalReason::Other, None),
+            Err(PickingError::ReversalNoteRequired)
+        );
+        assert_eq!(
+            PickReversalNote::new(" padded "),
+            Err(PickingError::InvalidReversalNote)
         );
     }
 

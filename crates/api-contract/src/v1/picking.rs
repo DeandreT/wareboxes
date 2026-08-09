@@ -157,6 +157,105 @@ pub struct PickContentConfirmationResponse {
     pub order_revision: Revision,
 }
 
+/// Supervisor reason retained with an immutable pick-reversal record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PickReversalReason {
+    MisPick,
+    WrongQuantity,
+    WrongLotOrSerial,
+    DamagedDuringPick,
+    OrderException,
+    Other,
+}
+
+/// Exact scans required to reverse one completed pick before packing begins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReversePickConfirmationRequest {
+    pub expected_order_revision: Revision,
+    pub staged_location_barcode: String,
+    pub staged_license_plate_barcode: String,
+    pub item_barcode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lot_scan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_scan: Option<String>,
+    pub return_location_barcode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_license_plate_barcode: Option<String>,
+    pub reason: PickReversalReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Equal-and-opposite movement and reopened RF work produced by a reversal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReversePickConfirmationResponse {
+    pub reversal_id: i64,
+    pub confirmation_id: i64,
+    pub task_id: i64,
+    pub content_id: i64,
+    pub order_id: i64,
+    pub inventory_transaction_id: i64,
+    pub source_inventory_allocation_id: i64,
+    pub staged_inventory_allocation_id: i64,
+    pub source_inventory_balance_id: i64,
+    pub staged_inventory_balance_id: i64,
+    pub source_location_id: i64,
+    pub staged_location_id: i64,
+    pub source_license_plate_id: Option<i64>,
+    pub staged_license_plate_id: i64,
+    pub reversed_quantity: i64,
+    pub content_state: PickContentState,
+    pub order_status: PickOrderStatus,
+    pub order_revision: Revision,
+    pub reason: PickReversalReason,
+    pub note: Option<String>,
+    pub reversed_by: i64,
+    pub reversed_at: String,
+}
+
+/// Immutable reversal evidence attached to one confirmation-history row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickReversalHistoryResponse {
+    pub reversal_id: i64,
+    pub reason: PickReversalReason,
+    pub note: Option<String>,
+    pub reversed_by: i64,
+    pub reversed_at: String,
+}
+
+/// One physical pick confirmation shown in an order's fulfillment history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PickConfirmationHistoryResponse {
+    pub confirmation_id: i64,
+    pub task_id: i64,
+    pub content_id: i64,
+    pub order_id: i64,
+    pub item_id: i64,
+    pub item_description: String,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub serial: Option<String>,
+    pub picked_quantity: i64,
+    pub source_location_id: i64,
+    pub source_location_name: String,
+    pub source_license_plate_required: bool,
+    pub staged_location_id: i64,
+    pub staged_location_name: String,
+    pub staged_license_plate_id: i64,
+    pub confirmed_by: i64,
+    pub confirmed_at: String,
+    pub reversal: Option<PickReversalHistoryResponse>,
+}
+
+pub type PickConfirmationHistoryPageRequest = super::CursorPageRequest;
+pub type PickConfirmationHistoryPage = super::CursorPage<PickConfirmationHistoryResponse>;
+
 /// Physical reason an operator could not complete the directed quantity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -538,6 +637,34 @@ mod tests {
             "picked_quantity": 4
         }))
         .is_err());
+    }
+
+    #[test]
+    fn reversal_is_revisioned_scan_only_and_strict() {
+        let request = serde_json::from_value::<ReversePickConfirmationRequest>(json!({
+            "expected_order_revision": 4,
+            "staged_location_barcode": "STAGE-01",
+            "staged_license_plate_barcode": "TOTE-1",
+            "item_barcode": "SKU-1",
+            "lot_scan": "LOT-1",
+            "return_location_barcode": "A-01",
+            "return_license_plate_barcode": "LP-1",
+            "reason": "mis_pick"
+        }))
+        .unwrap();
+        assert_eq!(request.reason, PickReversalReason::MisPick);
+        assert!(
+            serde_json::from_value::<ReversePickConfirmationRequest>(json!({
+                "expected_order_revision": 4,
+                "staged_location_barcode": "STAGE-01",
+                "staged_license_plate_barcode": "TOTE-1",
+                "item_barcode": "SKU-1",
+                "return_location_barcode": "A-01",
+                "reason": "mis_pick",
+                "quantity": 1
+            }))
+            .is_err()
+        );
     }
 
     #[test]

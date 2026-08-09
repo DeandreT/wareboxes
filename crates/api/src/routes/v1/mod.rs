@@ -242,6 +242,14 @@ pub fn router() -> Router<AppState> {
             post(picking::confirm),
         )
         .route(
+            "/pick-confirmations/{confirmation_id}/reversals",
+            post(picking::reverse_confirmation),
+        )
+        .route(
+            "/orders/{order_id}/pick-confirmations",
+            get(picking::list_confirmation_history),
+        )
+        .route(
             "/picking-tasks/{task_id}/contents/{content_id}/short-picks",
             post(pick_shortages::report),
         )
