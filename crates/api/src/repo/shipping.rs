@@ -187,7 +187,9 @@ pub(super) async fn order_demand_tx(
     let row = sqlx::query(
         r#"
         SELECT COALESCE(SUM(original_qty), 0)::BIGINT AS ordered_quantity,
-               COALESCE(SUM(accepted_short_qty), 0)::BIGINT AS accepted_short_quantity
+               COALESCE(SUM(accepted_short_qty), 0)::BIGINT AS accepted_short_quantity,
+               COALESCE(SUM(accepted_substitute_qty), 0)::BIGINT
+                   AS accepted_substitute_quantity
         FROM outbound_effective_demand
         WHERE tenant_id = $1 AND inventory_owner_id = $2 AND order_id = $3
         "#,
@@ -197,10 +199,12 @@ pub(super) async fn order_demand_tx(
     .bind(order_id.get())
     .fetch_one(&mut **tx)
     .await?;
-    ShortShipDemandQuantities::new(
+    ShortShipDemandQuantities::with_substitution(
         PickQuantity::new(row.try_get("ordered_quantity")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
         ActualPickQuantity::new(row.try_get("accepted_short_quantity")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        ActualPickQuantity::new(row.try_get("accepted_substitute_quantity")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
     )
     .map_err(|error| AppError::internal(error.to_string()))

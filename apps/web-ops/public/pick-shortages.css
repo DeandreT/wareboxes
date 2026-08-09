@@ -165,7 +165,14 @@
 }
 
 .shortage-action-section .form-actions {
+  flex-wrap: wrap;
   padding: 9px 10px 0;
+}
+
+.shortage-action-section .shortage-detail-refresh {
+  width: var(--control-height);
+  min-width: var(--control-height);
+  height: var(--control-height);
 }
 
 .shortage-action-state {
@@ -256,4 +263,115 @@
 .short-ship-confirmation .shortage-retry-note,
 .short-ship-confirmation .inline-command-error {
   margin: 0;
+}
+
+.substitution-confirmation {
+  margin: 6px 10px;
+  padding: 7px;
+  gap: 5px;
+}
+
+.substitution-conversion {
+  overflow: hidden;
+  font-size: 11px !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.substitution-fields {
+  display: grid;
+  grid-template-columns: minmax(190px, 1.35fr) minmax(135px, 0.65fr);
+  align-items: start;
+  gap: 7px;
+}
+
+.substitution-policy-field select {
+  width: 100%;
+}
+
+.substitution-note-field {
+  grid-column: 1 / -1;
+}
+
+.substitution-note-field textarea {
+  min-height: 48px;
+}
+
+.substitution-confirmation .shortage-retry-note,
+.substitution-confirmation .inline-command-error {
+  margin: 0;
+}
+
+.substitution-rule-manager {
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+}
+
+.substitution-rule-manager > summary {
+  display: flex;
+  min-height: 30px;
+  padding: 0 8px;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 720;
+}
+
+.substitution-rule-manager > summary strong {
+  color: var(--ink-soft);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.substitution-rule-list {
+  border-top: 1px solid var(--line);
+}
+
+.substitution-rule-row {
+  display: flex;
+  min-height: 30px;
+  padding: 3px 6px 3px 8px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 10px;
+}
+
+.substitution-rule-row > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.substitution-rule-row .icon-button {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+}
+
+.substitution-rule-form {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) 105px 115px auto;
+  padding: 7px;
+  align-items: end;
+  gap: 6px;
+}
+
+.substitution-item-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 5px;
+}
+
+.substitution-item-result {
+  grid-column: 1 / -1;
+}
+
+.substitution-rule-manager > .inline-command-error {
+  margin: 0 7px 7px;
 }

@@ -377,6 +377,7 @@ const fn map_demand(demand: wareboxes_domain::ShortShipDemandQuantities) -> Ship
         ordered_quantity: demand.ordered().get(),
         shipped_quantity: demand.effective().get(),
         accepted_short_quantity: demand.accepted_short().get(),
+        accepted_substitute_quantity: demand.accepted_substitute().get(),
     }
 }
 

@@ -262,15 +262,17 @@ impl PickShortageStatus {
 pub enum PickShortageResolution {
     Recovered,
     ShortShip,
+    Substituted,
 }
 
 impl PickShortageResolution {
-    pub const ALL: [Self; 2] = [Self::Recovered, Self::ShortShip];
+    pub const ALL: [Self; 3] = [Self::Recovered, Self::ShortShip, Self::Substituted];
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Recovered => "recovered",
             Self::ShortShip => "short_ship",
+            Self::Substituted => "substituted",
         }
     }
 
@@ -278,6 +280,7 @@ impl PickShortageResolution {
         match value {
             "recovered" => Some(Self::Recovered),
             "short_ship" => Some(Self::ShortShip),
+            "substituted" => Some(Self::Substituted),
             _ => None,
         }
     }
@@ -405,11 +408,12 @@ impl<'de> Deserialize<'de> for PickShortShipDetails {
     }
 }
 
-/// Original demand, cumulative accepted shortage, and remaining executable demand.
+/// Gross line demand, accepted non-executable quantities, and executable demand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ShortShipDemandQuantities {
     ordered: PickQuantity,
     accepted_short: ActualPickQuantity,
+    accepted_substitute: ActualPickQuantity,
     effective: ActualPickQuantity,
 }
 
@@ -418,16 +422,32 @@ impl ShortShipDemandQuantities {
         ordered: PickQuantity,
         accepted_short: ActualPickQuantity,
     ) -> Result<Self, PickingError> {
-        if accepted_short.get() > ordered.get() {
+        Self::with_substitution(ordered, accepted_short, ActualPickQuantity(0))
+    }
+
+    pub const fn with_substitution(
+        ordered: PickQuantity,
+        accepted_short: ActualPickQuantity,
+        accepted_substitute: ActualPickQuantity,
+    ) -> Result<Self, PickingError> {
+        let Some(accepted_total) = accepted_short.get().checked_add(accepted_substitute.get())
+        else {
             return Err(PickingError::AcceptedShortExceedsDemand {
                 ordered: ordered.get(),
-                accepted_short: accepted_short.get(),
+                accepted_short: i64::MAX,
+            });
+        };
+        if accepted_total > ordered.get() {
+            return Err(PickingError::AcceptedShortExceedsDemand {
+                ordered: ordered.get(),
+                accepted_short: accepted_total,
             });
         }
         Ok(Self {
             ordered,
             accepted_short,
-            effective: ActualPickQuantity(ordered.get() - accepted_short.get()),
+            accepted_substitute,
+            effective: ActualPickQuantity(ordered.get() - accepted_total),
         })
     }
 
@@ -437,6 +457,10 @@ impl ShortShipDemandQuantities {
 
     pub const fn accepted_short(self) -> ActualPickQuantity {
         self.accepted_short
+    }
+
+    pub const fn accepted_substitute(self) -> ActualPickQuantity {
+        self.accepted_substitute
     }
 
     pub const fn effective(self) -> ActualPickQuantity {
@@ -454,11 +478,14 @@ impl<'de> Deserialize<'de> for ShortShipDemandQuantities {
         struct RawQuantities {
             ordered: PickQuantity,
             accepted_short: ActualPickQuantity,
+            accepted_substitute: ActualPickQuantity,
             effective: ActualPickQuantity,
         }
 
         let raw = RawQuantities::deserialize(deserializer)?;
-        let quantities = Self::new(raw.ordered, raw.accepted_short).map_err(D::Error::custom)?;
+        let quantities =
+            Self::with_substitution(raw.ordered, raw.accepted_short, raw.accepted_substitute)
+                .map_err(D::Error::custom)?;
         if quantities.effective != raw.effective {
             return Err(D::Error::custom("short-shipment demand does not conserve"));
         }
@@ -1138,6 +1165,22 @@ mod tests {
         assert_eq!(quantities.ordered().get(), 12);
         assert_eq!(quantities.accepted_short().get(), 3);
         assert_eq!(quantities.effective().get(), 9);
+        let substituted = ShortShipDemandQuantities::with_substitution(
+            PickQuantity::new(12).unwrap(),
+            ActualPickQuantity::new(3).unwrap(),
+            ActualPickQuantity::new(4).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(substituted.accepted_short().get(), 3);
+        assert_eq!(substituted.accepted_substitute().get(), 4);
+        assert_eq!(substituted.effective().get(), 5);
+        assert_eq!(
+            serde_json::from_str::<ShortShipDemandQuantities>(
+                r#"{"ordered":12,"accepted_short":3,"accepted_substitute":4,"effective":5}"#
+            )
+            .unwrap(),
+            substituted
+        );
         assert_eq!(
             ShortShipDemandQuantities::new(
                 PickQuantity::new(2).unwrap(),

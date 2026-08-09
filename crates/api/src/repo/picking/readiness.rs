@@ -9,6 +9,7 @@ pub(in crate::repo) struct OrderPickReadiness {
     pub(in crate::repo) staged_quantity: i64,
     pub(in crate::repo) ordered_quantity: i64,
     pub(in crate::repo) accepted_short_quantity: i64,
+    pub(in crate::repo) accepted_substitute_quantity: i64,
     pub(in crate::repo) effective_demand_quantity: i64,
     has_executable_work: bool,
     has_unresolved_shortage: bool,
@@ -69,14 +70,18 @@ pub(in crate::repo) async fn order_pick_readiness_tx(
             ) AS has_line_demand_mismatch,
             demand.ordered_quantity,
             demand.accepted_short_quantity,
-            demand.ordered_quantity - demand.accepted_short_quantity
-                AS effective_demand_quantity,
+            demand.accepted_substitute_quantity,
+            demand.effective_demand_quantity,
             COALESCE(staged.allocation_count, 0)::BIGINT AS staged_allocation_count,
             COALESCE(staged.quantity, 0)::BIGINT AS staged_quantity
         FROM (
             SELECT COALESCE(SUM(demand.original_qty), 0)::BIGINT AS ordered_quantity,
                    COALESCE(SUM(demand.accepted_short_qty), 0)::BIGINT
-                       AS accepted_short_quantity
+                       AS accepted_short_quantity,
+                   COALESCE(SUM(demand.accepted_substitute_qty), 0)::BIGINT
+                       AS accepted_substitute_quantity,
+                   COALESCE(SUM(demand.effective_qty), 0)::BIGINT
+                       AS effective_demand_quantity
             FROM outbound_effective_demand demand
             WHERE demand.tenant_id = $1 AND demand.inventory_owner_id = $2
               AND demand.order_id = $3
@@ -109,6 +114,7 @@ pub(in crate::repo) async fn order_pick_readiness_tx(
         staged_quantity: row.try_get("staged_quantity")?,
         ordered_quantity: row.try_get("ordered_quantity")?,
         accepted_short_quantity: row.try_get("accepted_short_quantity")?,
+        accepted_substitute_quantity: row.try_get("accepted_substitute_quantity")?,
         effective_demand_quantity: row.try_get("effective_demand_quantity")?,
         has_executable_work: row.try_get("has_executable_work")?,
         has_unresolved_shortage: row.try_get("has_unresolved_shortage")?,
@@ -118,10 +124,12 @@ pub(in crate::repo) async fn order_pick_readiness_tx(
         || readiness.staged_quantity < 0
         || readiness.ordered_quantity <= 0
         || readiness.accepted_short_quantity < 0
+        || readiness.accepted_substitute_quantity < 0
         || readiness.effective_demand_quantity < 0
         || readiness
             .accepted_short_quantity
-            .checked_add(readiness.effective_demand_quantity)
+            .checked_add(readiness.accepted_substitute_quantity)
+            .and_then(|accepted| accepted.checked_add(readiness.effective_demand_quantity))
             != Some(readiness.ordered_quantity)
     {
         return Err(AppError::internal("order pick readiness is invalid"));

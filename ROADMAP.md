@@ -129,7 +129,8 @@ record. Wareboxes owns facility execution and its auditable inventory consequenc
 - Facility shipping-origin configuration with immutable address history, optimistic
   revisions, scope enforcement, and audit evidence.
 - Parcel shipment creation from closed cartons with immutable origin, destination,
-  and carton snapshots; conserved ordered, shipped, and accepted-short demand;
+  and carton snapshots; conserved ordered, shipped, accepted-short, and approved
+  substitute demand;
   exact carton-to-tracking assignment; and scan-confirmed departure that posts the
   inventory journal and order transition atomically.
 - A cursor-paginated desktop shipping queue for readiness resolution, manifesting,

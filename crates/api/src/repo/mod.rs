@@ -17,6 +17,7 @@ pub(crate) mod inventory_journal;
 mod inventory_locking;
 pub mod inventory_owners;
 mod inventory_status_change;
+pub mod item_substitution;
 pub mod items;
 pub mod license_plates;
 pub mod loads;

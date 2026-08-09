@@ -56,6 +56,7 @@ struct DocumentLine {
     uom: String,
     ordered_quantity: i64,
     accepted_short_quantity: i64,
+    accepted_substitute_quantity: i64,
     packed_quantity: i64,
 }
 
@@ -228,6 +229,7 @@ pub async fn generate_packing_slip(
             "ordered_quantity": shipment.demand.ordered(),
             "packed_quantity": shipment.demand.effective(),
             "accepted_short_quantity": shipment.demand.accepted_short(),
+            "accepted_substitute_quantity": shipment.demand.accepted_substitute(),
             "content_sha256": content_sha256_hex,
             "generated_at": generated_at,
         }),
@@ -543,10 +545,12 @@ fn map_document_row(row: &sqlx::postgres::PgRow) -> AppResult<ShipmentDocumentRe
         )?,
         carton_count: row.try_get("carton_count")?,
         line_count: row.try_get("line_count")?,
-        demand: ShortShipDemandQuantities::new(
+        demand: ShortShipDemandQuantities::with_substitution(
             PickQuantity::new(row.try_get("ordered_qty")?)
                 .map_err(|error| AppError::internal(error.to_string()))?,
             ActualPickQuantity::new(row.try_get("accepted_short_qty")?)
+                .map_err(|error| AppError::internal(error.to_string()))?,
+            ActualPickQuantity::new(row.try_get("accepted_substitute_qty")?)
                 .map_err(|error| AppError::internal(error.to_string()))?,
         )
         .map_err(|error| AppError::internal(error.to_string()))?,
@@ -603,7 +607,8 @@ async fn load_document_lines_tx(
                item.item_id, item.uom,
                COALESCE(NULLIF(btrim(catalog.description), ''), 'Item ' || item.item_id::text)
                    AS item_description,
-               demand.original_qty, demand.accepted_short_qty, demand.effective_qty,
+               demand.original_qty, demand.accepted_short_qty,
+               demand.accepted_substitute_qty, demand.effective_qty,
                COALESCE(SUM(content.packed_qty), 0)::bigint AS packed_qty
         FROM outbound_effective_demand demand
         INNER JOIN order_items item
@@ -620,6 +625,7 @@ async fn load_document_lines_tx(
         WHERE demand.tenant_id = $1 AND demand.inventory_owner_id = $2 AND demand.order_id = $3
         GROUP BY item.id, item.line_number, item.line_key, item.item_id, item.uom,
                  catalog.description, demand.original_qty, demand.accepted_short_qty,
+                 demand.accepted_substitute_qty,
                  demand.effective_qty
         ORDER BY item.line_number, item.id
         "#,
@@ -634,7 +640,7 @@ async fn load_document_lines_tx(
         .map(|row| {
             let effective: i64 = row.try_get("effective_qty")?;
             let packed: i64 = row.try_get("packed_qty")?;
-            if effective != packed || effective <= 0 {
+            if effective != packed || effective < 0 {
                 return Err(AppError::internal(
                     "shipment line packing quantity does not match effective demand",
                 ));
@@ -648,6 +654,7 @@ async fn load_document_lines_tx(
                 uom: row.try_get("uom")?,
                 ordered_quantity: row.try_get("original_qty")?,
                 accepted_short_quantity: row.try_get("accepted_short_qty")?,
+                accepted_substitute_quantity: row.try_get("accepted_substitute_qty")?,
                 packed_quantity: packed,
             })
         })
@@ -798,11 +805,11 @@ async fn insert_document_tx(
             document_type, carrier_manifest_id, carrier_code, service_code,
             manifest_reference, file_name, media_type, renderer_version,
             shipment_revision_at_generation, carton_count, line_count,
-            ordered_qty, accepted_short_qty, packed_qty, content, content_length,
-            content_sha256, generated_by_user_id, generated_at
+            ordered_qty, accepted_short_qty, accepted_substitute_qty, packed_qty,
+            content, content_length, content_sha256, generated_by_user_id, generated_at
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-            $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
+            $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
         ) RETURNING id
         "#,
     )
@@ -832,6 +839,7 @@ async fn insert_document_tx(
     .bind(line_count)
     .bind(shipment.demand.ordered().get())
     .bind(shipment.demand.accepted_short().get())
+    .bind(shipment.demand.accepted_substitute().get())
     .bind(shipment.demand.effective().get())
     .bind(document.content)
     .bind(content_length)
@@ -882,8 +890,9 @@ async fn insert_document_lines_tx(
             r#"INSERT INTO shipment_document_lines (
                    tenant_id, inventory_owner_id, facility_id, shipment_document_id,
                    shipment_id, order_id, order_item_id, sequence, line_key, item_id,
-                   item_description, uom, ordered_qty, accepted_short_qty, packed_qty
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#,
+                   item_description, uom, ordered_qty, accepted_short_qty,
+                   accepted_substitute_qty, packed_qty
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#,
         )
         .bind(tenant_id.get())
         .bind(owner_id)
@@ -899,6 +908,7 @@ async fn insert_document_lines_tx(
         .bind(&line.uom)
         .bind(line.ordered_quantity)
         .bind(line.accepted_short_quantity)
+        .bind(line.accepted_substitute_quantity)
         .bind(line.packed_quantity)
         .execute(&mut **tx)
         .await?;
@@ -974,7 +984,7 @@ fn render_packing_slip(
     html.push_str("</div></div><div class=\"addresses\">");
     render_address("Ship from", origin, &mut html);
     render_address("Ship to", destination, &mut html);
-    html.push_str("</div><h2>Contents</h2><table><thead><tr><th>Line</th><th>Item</th><th>Description</th><th>UOM</th><th class=\"num\">Ordered</th><th class=\"num\">Packed</th><th class=\"num\">Short</th></tr></thead><tbody>");
+    html.push_str("</div><h2>Contents</h2><table><thead><tr><th>Line</th><th>Item</th><th>Description</th><th>UOM</th><th class=\"num\">Ordered</th><th class=\"num\">Packed</th><th class=\"num\">Short</th><th class=\"num\">Substituted</th></tr></thead><tbody>");
     for line in lines {
         html.push_str("<tr><td>");
         escape_html_into(&line.line_key, &mut html);
@@ -990,6 +1000,8 @@ fn render_packing_slip(
         html.push_str(&line.packed_quantity.to_string());
         html.push_str("</td><td class=\"num\">");
         html.push_str(&line.accepted_short_quantity.to_string());
+        html.push_str("</td><td class=\"num\">");
+        html.push_str(&line.accepted_substitute_quantity.to_string());
         html.push_str("</td></tr>");
     }
     html.push_str("</tbody></table><h2>Cartons</h2><table><thead><tr><th>#</th><th>Carton</th><th class=\"num\">Quantity</th><th class=\"num\">Weight (g)</th></tr></thead><tbody>");
@@ -1016,6 +1028,8 @@ fn render_packing_slip(
     html.push_str(&demand.effective().get().to_string());
     html.push_str("</td></tr><tr><th>Accepted short</th><td class=\"num\">");
     html.push_str(&demand.accepted_short().get().to_string());
+    html.push_str("</td></tr><tr><th>Accepted substitution</th><td class=\"num\">");
+    html.push_str(&demand.accepted_substitute().get().to_string());
     html.push_str("</td></tr></tbody></table></body></html>");
     html
 }

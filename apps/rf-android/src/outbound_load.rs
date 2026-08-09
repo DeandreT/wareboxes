@@ -805,7 +805,8 @@ pub(crate) fn example_outbound_load() -> OutboundLoadResponse {
             "demand": {
                 "ordered_quantity": 24,
                 "shipped_quantity": 24,
-                "accepted_short_quantity": 0
+                "accepted_short_quantity": 0,
+                "accepted_substitute_quantity": 0
             }
         }],
         "cartons": [

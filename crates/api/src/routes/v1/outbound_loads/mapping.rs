@@ -368,6 +368,7 @@ const fn demand(value: wareboxes_domain::ShortShipDemandQuantities) -> ShipmentD
         ordered_quantity: value.ordered().get(),
         shipped_quantity: value.effective().get(),
         accepted_short_quantity: value.accepted_short().get(),
+        accepted_substitute_quantity: value.accepted_substitute().get(),
     }
 }
 fn revision(value: i64) -> V1Result<Revision> {

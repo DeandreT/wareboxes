@@ -204,10 +204,12 @@ pub async fn accept_short_shipment(
         shortage.order_line_id,
     )
     .await?;
-    let order_demand = ShortShipDemandQuantities::new(
+    let order_demand = ShortShipDemandQuantities::with_substitution(
         PickQuantity::new(readiness.ordered_quantity)
             .map_err(|error| AppError::internal(error.to_string()))?,
         ActualPickQuantity::new(readiness.accepted_short_quantity)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        ActualPickQuantity::new(readiness.accepted_substitute_quantity)
             .map_err(|error| AppError::internal(error.to_string()))?,
     )
     .map_err(|error| AppError::internal(error.to_string()))?;
@@ -605,7 +607,8 @@ async fn line_demand_tx(
     let row = sqlx::query(
         r#"
         SELECT original_qty AS ordered_quantity,
-               accepted_short_qty AS accepted_short_quantity
+               accepted_short_qty AS accepted_short_quantity,
+               accepted_substitute_qty AS accepted_substitute_quantity
         FROM outbound_effective_demand
         WHERE tenant_id = $1 AND inventory_owner_id = $2
           AND order_id = $3 AND order_item_id = $4
@@ -618,10 +621,12 @@ async fn line_demand_tx(
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| AppError::not_found("order line"))?;
-    ShortShipDemandQuantities::new(
+    ShortShipDemandQuantities::with_substitution(
         PickQuantity::new(row.try_get("ordered_quantity")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
         ActualPickQuantity::new(row.try_get("accepted_short_quantity")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        ActualPickQuantity::new(row.try_get("accepted_substitute_quantity")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
     )
     .map_err(|error| AppError::internal(error.to_string()))

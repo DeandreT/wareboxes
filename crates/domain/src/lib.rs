@@ -3,6 +3,7 @@
 mod allocation;
 mod backorder;
 mod facility;
+mod item_substitution;
 mod order;
 mod order_amendment;
 mod order_cancellation;
@@ -35,6 +36,12 @@ pub use facility::{
     MAX_FACILITY_ORIGIN_COUNTRY_LENGTH, MAX_FACILITY_ORIGIN_EMAIL_LENGTH,
     MAX_FACILITY_ORIGIN_NAME_LENGTH, MAX_FACILITY_ORIGIN_PHONE_LENGTH,
     MAX_FACILITY_ORIGIN_POSTAL_CODE_LENGTH, MAX_FACILITY_ORIGIN_STATE_LENGTH,
+};
+pub use item_substitution::{
+    substitute_pick_shortage, ItemSubstitutionDefinition, ItemSubstitutionDetails,
+    ItemSubstitutionError, ItemSubstitutionNote, ItemSubstitutionPolicyRevision,
+    ItemSubstitutionReason, SubstitutePickShortageTransition, SubstitutionQuantity,
+    SubstitutionUom, MAX_ITEM_SUBSTITUTION_NOTE_LENGTH,
 };
 pub use order::{
     CatalogItemId, FulfillmentOrderDemandLine, NewFulfillmentOrder, OrderCreationError,
@@ -195,6 +202,8 @@ positive_id!(OrderLineAmendmentId, "order line amendment ID");
 positive_id!(OrderCancellationId, "order cancellation ID");
 positive_id!(BackorderPolicyId, "backorder policy ID");
 positive_id!(BackorderSplitId, "backorder split ID");
+positive_id!(ItemSubstitutionPolicyId, "item substitution policy ID");
+positive_id!(ItemSubstitutionId, "item substitution ID");
 positive_id!(OrderReleaseId, "order release ID");
 positive_id!(PickWaveId, "pick wave ID");
 positive_id!(PickTaskId, "pick task ID");

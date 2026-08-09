@@ -10,6 +10,7 @@ mod inventory_holds;
 mod inventory_relocation;
 mod inventory_rollups;
 mod inventory_status_transitions;
+mod item_substitutions;
 mod license_plate_putaway;
 mod order_allocations;
 mod order_cancellations;
@@ -238,6 +239,18 @@ pub fn router() -> Router<AppState> {
         .route(
             "/backorder-policies",
             get(backorders::get_policy).post(backorders::configure_policy),
+        )
+        .route(
+            "/item-substitution-policies",
+            get(item_substitutions::list).post(item_substitutions::configure),
+        )
+        .route(
+            "/item-substitution-policies/{policy_id}/retirements",
+            post(item_substitutions::retire),
+        )
+        .route(
+            "/pick-shortages/{shortage_id}/substitutions",
+            post(item_substitutions::substitute_shortage),
         )
         .route(
             "/orders/{order_id}/backorder-splits",

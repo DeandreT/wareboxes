@@ -530,6 +530,7 @@ pub struct PickShortageReadModel {
     pub recovery_terminal_quantity: ActualPickQuantity,
     pub remaining_to_allocate_quantity: ActualPickQuantity,
     pub accepted_short_quantity: ActualPickQuantity,
+    pub accepted_substitute_quantity: ActualPickQuantity,
     pub observed_item_barcode: Option<PickScanValue>,
     pub observed_lot: Option<PickScanValue>,
     pub observed_serial: Option<PickScanValue>,
@@ -552,6 +553,7 @@ fn shortage_recovery_quantities_are_consistent(shortage: &PickShortageReadModel)
     let recovery_terminal_quantity = shortage.recovery_terminal_quantity;
     let remaining_to_allocate_quantity = shortage.remaining_to_allocate_quantity;
     let accepted_short_quantity = shortage.accepted_short_quantity;
+    let accepted_substitute_quantity = shortage.accepted_substitute_quantity;
     recovery_terminal_quantity.get() <= reallocated_quantity.get()
         && reallocated_quantity
             .get()
@@ -561,6 +563,7 @@ fn shortage_recovery_quantities_are_consistent(shortage: &PickShortageReadModel)
             PickShortageStatus::AwaitingInventory => {
                 shortage.resolution.is_none()
                     && accepted_short_quantity.is_zero()
+                    && accepted_substitute_quantity.is_zero()
                     && reallocated_quantity == recovery_terminal_quantity
                     && recovery_terminal_quantity.get() < short_quantity.get()
                     && shortage.resolved_at.is_none()
@@ -568,19 +571,29 @@ fn shortage_recovery_quantities_are_consistent(shortage: &PickShortageReadModel)
             PickShortageStatus::RecoveryInProgress => {
                 shortage.resolution.is_none()
                     && accepted_short_quantity.is_zero()
+                    && accepted_substitute_quantity.is_zero()
                     && recovery_terminal_quantity.get() < reallocated_quantity.get()
                     && shortage.resolved_at.is_none()
             }
             PickShortageStatus::Resolved => match shortage.resolution {
                 Some(PickShortageResolution::Recovered) => {
                     accepted_short_quantity.is_zero()
+                        && accepted_substitute_quantity.is_zero()
                         && remaining_to_allocate_quantity.is_zero()
                         && recovery_terminal_quantity.get() == short_quantity.get()
                         && shortage.resolved_at.is_some()
                 }
                 Some(PickShortageResolution::ShortShip) => {
                     !accepted_short_quantity.is_zero()
+                        && accepted_substitute_quantity.is_zero()
                         && accepted_short_quantity == remaining_to_allocate_quantity
+                        && recovery_terminal_quantity == reallocated_quantity
+                        && shortage.resolved_at.is_some()
+                }
+                Some(PickShortageResolution::Substituted) => {
+                    accepted_short_quantity.is_zero()
+                        && !accepted_substitute_quantity.is_zero()
+                        && accepted_substitute_quantity == remaining_to_allocate_quantity
                         && recovery_terminal_quantity == reallocated_quantity
                         && shortage.resolved_at.is_some()
                 }

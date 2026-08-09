@@ -5293,6 +5293,15 @@ BEGIN
                    AND split_line.facility_id = reservation.facility_id
                    AND split_line.parent_order_id = reservation.order_id
                    AND split_line.parent_order_item_id = reservation.order_item_id
+             ) + (
+                 SELECT COALESCE(SUM(substitution.accepted_source_qty), 0)::BIGINT
+                 FROM public.pick_shortage_substitutions substitution
+                 WHERE substitution.tenant_id = reservation.tenant_id
+                   AND substitution.inventory_owner_id = reservation.inventory_owner_id
+                   AND substitution.facility_id = reservation.facility_id
+                   AND substitution.order_id = reservation.order_id
+                   AND substitution.source_order_item_id = reservation.order_item_id
+                   AND substitution.source_reservation_id = reservation.id
              )
        )
        OR EXISTS (
@@ -6906,20 +6915,36 @@ BEGIN
        AND NEW.reallocated_qty = NEW.short_qty
        AND NEW.remaining_to_allocate_qty = 0
        AND NEW.accepted_short_qty = 0
+       AND NEW.accepted_substitute_qty = 0
     THEN
         NEW.resolution := 'recovered';
     END IF;
 
     IF NEW.resolution IS DISTINCT FROM OLD.resolution
        OR NEW.accepted_short_qty IS DISTINCT FROM OLD.accepted_short_qty
+       OR NEW.accepted_substitute_qty IS DISTINCT FROM OLD.accepted_substitute_qty
     THEN
         IF NOT (
             OLD.status = 'awaiting_inventory'
             AND OLD.resolution IS NULL
             AND OLD.accepted_short_qty = 0
+            AND OLD.accepted_substitute_qty = 0
             AND NEW.status = 'resolved'
             AND NEW.resolution = 'short_ship'
             AND NEW.accepted_short_qty = OLD.remaining_to_allocate_qty
+            AND NEW.accepted_substitute_qty = 0
+            AND NEW.reallocated_qty = OLD.reallocated_qty
+            AND NEW.recovery_terminal_qty = OLD.recovery_terminal_qty
+            AND NEW.remaining_to_allocate_qty = OLD.remaining_to_allocate_qty
+        ) AND NOT (
+            OLD.status = 'awaiting_inventory'
+            AND OLD.resolution IS NULL
+            AND OLD.accepted_short_qty = 0
+            AND OLD.accepted_substitute_qty = 0
+            AND NEW.status = 'resolved'
+            AND NEW.resolution = 'substituted'
+            AND NEW.accepted_short_qty = 0
+            AND NEW.accepted_substitute_qty = OLD.remaining_to_allocate_qty
             AND NEW.reallocated_qty = OLD.reallocated_qty
             AND NEW.recovery_terminal_qty = OLD.recovery_terminal_qty
             AND NEW.remaining_to_allocate_qty = OLD.remaining_to_allocate_qty
@@ -6927,6 +6952,7 @@ BEGIN
             NEW.status = 'resolved'
             AND NEW.resolution = 'recovered'
             AND NEW.accepted_short_qty = 0
+            AND NEW.accepted_substitute_qty = 0
             AND NEW.reallocated_qty = NEW.short_qty
             AND NEW.recovery_terminal_qty = NEW.short_qty
             AND NEW.remaining_to_allocate_qty = 0
@@ -7167,6 +7193,7 @@ BEGIN
        OR NEW.status <> 'awaiting_inventory'
        OR NEW.resolution IS NOT NULL
        OR NEW.accepted_short_qty <> 0
+       OR NEW.accepted_substitute_qty <> 0
        OR NEW.reallocated_qty <> 0
        OR NEW.recovery_terminal_qty <> 0
        OR NEW.remaining_to_allocate_qty <> NEW.short_qty
@@ -7448,6 +7475,12 @@ DECLARE
     disposition_resulting_order_revision BIGINT;
     disposition_disposed_by_user_id BIGINT;
     disposition_disposed_at TIMESTAMPTZ;
+    substitution_count BIGINT;
+    substitution_accepted_qty BIGINT;
+    substitution_resulting_shortage_revision BIGINT;
+    substitution_resulting_order_revision BIGINT;
+    substitution_actor_id BIGINT;
+    substitution_at TIMESTAMPTZ;
     reallocated_qty BIGINT;
     recovery_terminal_qty BIGINT;
     expected_status TEXT;
@@ -7458,6 +7491,8 @@ BEGIN
     IF TG_TABLE_NAME = 'pick_shortages' THEN
         shortage_id := NEW.id;
     ELSIF TG_TABLE_NAME = 'pick_short_ship_dispositions' THEN
+        shortage_id := NEW.pick_shortage_id;
+    ELSIF TG_TABLE_NAME = 'pick_shortage_substitutions' THEN
         shortage_id := NEW.pick_shortage_id;
     ELSIF TG_TABLE_NAME = 'pick_tasks' THEN
         SELECT snapshot.pick_shortage_id
@@ -7536,7 +7571,33 @@ BEGIN
       AND disposition.reservation_id = shortage_row.reservation_id
       AND disposition.pick_shortage_id = shortage_row.id;
 
-    IF disposition_count = 1
+    SELECT COUNT(*), MAX(substitution.accepted_source_qty),
+           MAX(substitution.resulting_shortage_revision),
+           MAX(substitution.resulting_order_revision),
+           MAX(substitution.substituted_by_user_id), MAX(substitution.substituted_at)
+    INTO substitution_count, substitution_accepted_qty,
+         substitution_resulting_shortage_revision,
+         substitution_resulting_order_revision,
+         substitution_actor_id, substitution_at
+    FROM public.pick_shortage_substitutions substitution
+    WHERE substitution.tenant_id = shortage_row.tenant_id
+      AND substitution.inventory_owner_id = shortage_row.inventory_owner_id
+      AND substitution.facility_id = shortage_row.facility_id
+      AND substitution.order_release_id = shortage_row.order_release_id
+      AND substitution.order_id = shortage_row.order_id
+      AND substitution.source_order_item_id = shortage_row.order_item_id
+      AND substitution.source_reservation_id = shortage_row.reservation_id
+      AND substitution.pick_shortage_id = shortage_row.id;
+
+    IF substitution_count = 1 AND disposition_count = 0
+       AND reallocated_qty = recovery_terminal_qty
+       AND reallocated_qty < shortage_row.short_qty
+       AND substitution_accepted_qty = shortage_row.short_qty - reallocated_qty
+    THEN
+        expected_status := 'resolved';
+        expected_resolution := 'substituted';
+        expected_accepted_short_qty := 0;
+    ELSIF disposition_count = 1 AND substitution_count = 0
        AND reallocated_qty = recovery_terminal_qty
        AND reallocated_qty < shortage_row.short_qty
        AND disposition_accepted_short_qty = shortage_row.short_qty - reallocated_qty
@@ -7544,21 +7605,21 @@ BEGIN
         expected_status := 'resolved';
         expected_resolution := 'short_ship';
         expected_accepted_short_qty := disposition_accepted_short_qty;
-    ELSIF disposition_count = 0
+    ELSIF disposition_count = 0 AND substitution_count = 0
        AND reallocated_qty = recovery_terminal_qty
        AND reallocated_qty < shortage_row.short_qty
     THEN
         expected_status := 'awaiting_inventory';
         expected_resolution := NULL;
         expected_accepted_short_qty := 0;
-    ELSIF disposition_count = 0
+    ELSIF disposition_count = 0 AND substitution_count = 0
           AND recovery_terminal_qty < reallocated_qty
           AND reallocated_qty <= shortage_row.short_qty
     THEN
         expected_status := 'recovery_in_progress';
         expected_resolution := NULL;
         expected_accepted_short_qty := 0;
-    ELSIF disposition_count = 0
+    ELSIF disposition_count = 0 AND substitution_count = 0
           AND recovery_terminal_qty = shortage_row.short_qty
           AND reallocated_qty = shortage_row.short_qty
     THEN
@@ -7583,12 +7644,21 @@ BEGIN
        OR shortage_row.status <> expected_status
        OR shortage_row.resolution IS DISTINCT FROM expected_resolution
        OR shortage_row.accepted_short_qty <> expected_accepted_short_qty
+       OR shortage_row.accepted_substitute_qty <>
+          (CASE WHEN expected_resolution = 'substituted'
+                THEN substitution_accepted_qty ELSE 0 END)
        OR order_revision < shortage_row.report_resulting_order_revision
        OR (expected_resolution = 'short_ship' AND (
             shortage_row.revision <> disposition_resulting_shortage_revision
             OR shortage_row.resolved_by_user_id <> disposition_disposed_by_user_id
             OR shortage_row.resolved_at <> disposition_disposed_at
             OR order_revision < disposition_resulting_order_revision
+       ))
+       OR (expected_resolution = 'substituted' AND (
+            shortage_row.revision <> substitution_resulting_shortage_revision
+            OR shortage_row.resolved_by_user_id <> substitution_actor_id
+            OR shortage_row.resolved_at <> substitution_at
+            OR order_revision < substitution_resulting_order_revision
        ))
        OR NOT EXISTS (
            SELECT 1
@@ -7647,6 +7717,15 @@ BEGIN
            OR order_revision <> NEW.resulting_order_revision
         THEN
             RAISE EXCEPTION 'short-ship disposition did not advance shortage and order revisions exactly once'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+
+    IF TG_TABLE_NAME = 'pick_shortage_substitutions' THEN
+        IF shortage_row.revision <> NEW.resulting_shortage_revision
+           OR order_revision <> NEW.resulting_order_revision
+        THEN
+            RAISE EXCEPTION 'item substitution did not advance shortage and order revisions exactly once'
                 USING ERRCODE = '23514';
         END IF;
     END IF;
@@ -8642,6 +8721,7 @@ CREATE FUNCTION public.require_fulfilled_reservation_effective_demand() RETURNS 
 DECLARE
     packed_qty BIGINT;
     accepted_short_qty BIGINT;
+    substituted_qty BIGINT;
     backordered_qty BIGINT;
 BEGIN
     IF NEW.status <> 'fulfilled' THEN
@@ -8686,8 +8766,18 @@ BEGIN
       AND split_line.parent_order_id = NEW.order_id
       AND split_line.parent_order_item_id = NEW.order_item_id;
 
+    SELECT COALESCE(SUM(substitution.accepted_source_qty), 0)::BIGINT
+    INTO substituted_qty
+    FROM public.pick_shortage_substitutions substitution
+    WHERE substitution.tenant_id = NEW.tenant_id
+      AND substitution.inventory_owner_id = NEW.inventory_owner_id
+      AND substitution.facility_id = NEW.facility_id
+      AND substitution.order_id = NEW.order_id
+      AND substitution.source_order_item_id = NEW.order_item_id
+      AND substitution.source_reservation_id = NEW.id;
+
     IF NEW.deleted IS DISTINCT FROM NEW.modified
-       OR packed_qty + accepted_short_qty + backordered_qty <> NEW.qty
+       OR packed_qty + accepted_short_qty + backordered_qty + substituted_qty <> NEW.qty
        OR NOT EXISTS (
            SELECT 1
            FROM public.orders order_header
@@ -13017,13 +13107,14 @@ CREATE TABLE public.pick_shortages (
     status text DEFAULT 'awaiting_inventory'::text NOT NULL,
     resolution text,
     accepted_short_qty bigint DEFAULT 0 NOT NULL,
+    accepted_substitute_qty bigint DEFAULT 0 NOT NULL,
     reallocated_qty bigint DEFAULT 0 NOT NULL,
     recovery_terminal_qty bigint DEFAULT 0 NOT NULL,
     remaining_to_allocate_qty bigint NOT NULL,
     resolved_by_user_id bigint,
     resolved_at timestamp with time zone,
     CONSTRAINT pick_shortages_inventory_status_check CHECK (inventory_status = 'available'::text),
-    CONSTRAINT pick_shortages_lifecycle_check CHECK ((((status = 'awaiting_inventory'::text) AND (resolution IS NULL) AND (accepted_short_qty = 0) AND (recovery_terminal_qty = reallocated_qty) AND (remaining_to_allocate_qty > 0) AND (resolved_by_user_id IS NULL) AND (resolved_at IS NULL)) OR ((status = 'recovery_in_progress'::text) AND (resolution IS NULL) AND (accepted_short_qty = 0) AND (recovery_terminal_qty < reallocated_qty) AND (resolved_by_user_id IS NULL) AND (resolved_at IS NULL)) OR ((status = 'resolved'::text) AND (resolution = 'recovered'::text) AND (accepted_short_qty = 0) AND (recovery_terminal_qty = short_qty) AND (reallocated_qty = short_qty) AND (remaining_to_allocate_qty = 0) AND (resolved_by_user_id IS NOT NULL) AND (resolved_at IS NOT NULL)) OR ((status = 'resolved'::text) AND (resolution = 'short_ship'::text) AND (accepted_short_qty = remaining_to_allocate_qty) AND (accepted_short_qty > 0) AND (recovery_terminal_qty = reallocated_qty) AND (reallocated_qty < short_qty) AND (remaining_to_allocate_qty > 0) AND (resolved_by_user_id IS NOT NULL) AND (resolved_at IS NOT NULL)))),
+    CONSTRAINT pick_shortages_lifecycle_check CHECK ((((status = 'awaiting_inventory'::text) AND (resolution IS NULL) AND (accepted_short_qty = 0) AND (accepted_substitute_qty = 0) AND (recovery_terminal_qty = reallocated_qty) AND (remaining_to_allocate_qty > 0) AND (resolved_by_user_id IS NULL) AND (resolved_at IS NULL)) OR ((status = 'recovery_in_progress'::text) AND (resolution IS NULL) AND (accepted_short_qty = 0) AND (accepted_substitute_qty = 0) AND (recovery_terminal_qty < reallocated_qty) AND (resolved_by_user_id IS NULL) AND (resolved_at IS NULL)) OR ((status = 'resolved'::text) AND (resolution = 'recovered'::text) AND (accepted_short_qty = 0) AND (accepted_substitute_qty = 0) AND (recovery_terminal_qty = short_qty) AND (reallocated_qty = short_qty) AND (remaining_to_allocate_qty = 0) AND (resolved_by_user_id IS NOT NULL) AND (resolved_at IS NOT NULL)) OR ((status = 'resolved'::text) AND (resolution = 'short_ship'::text) AND (accepted_short_qty = remaining_to_allocate_qty) AND (accepted_short_qty > 0) AND (accepted_substitute_qty = 0) AND (recovery_terminal_qty = reallocated_qty) AND (reallocated_qty < short_qty) AND (remaining_to_allocate_qty > 0) AND (resolved_by_user_id IS NOT NULL) AND (resolved_at IS NOT NULL)) OR ((status = 'resolved'::text) AND (resolution = 'substituted'::text) AND (accepted_short_qty = 0) AND (accepted_substitute_qty = remaining_to_allocate_qty) AND (accepted_substitute_qty > 0) AND (recovery_terminal_qty = reallocated_qty) AND (reallocated_qty < short_qty) AND (remaining_to_allocate_qty > 0) AND (resolved_by_user_id IS NOT NULL) AND (resolved_at IS NOT NULL)))),
     CONSTRAINT pick_shortages_movement_check CHECK ((((picked_qty = 0) AND (pick_confirmation_id IS NULL) AND (inventory_transaction_id IS NULL) AND (destination_inventory_allocation_id IS NULL) AND (destination_inventory_balance_id IS NULL) AND (destination_license_plate_id IS NULL)) OR ((picked_qty > 0) AND (pick_confirmation_id IS NOT NULL) AND (inventory_transaction_id IS NOT NULL) AND (destination_inventory_allocation_id IS NOT NULL) AND (destination_inventory_balance_id IS NOT NULL) AND (destination_license_plate_id IS NOT NULL)))),
     CONSTRAINT pick_shortages_note_check CHECK (((note IS NULL) OR ((note = btrim(note)) AND (note <> ''::text) AND (char_length(note) <= 500)))),
     CONSTRAINT pick_shortages_observed_evidence_check CHECK (((observed_item_barcode IS NULL) OR ((observed_item_barcode = btrim(observed_item_barcode)) AND (observed_item_barcode <> ''::text) AND (char_length(observed_item_barcode) <= 200))) AND ((observed_lot IS NULL) OR ((observed_lot = btrim(observed_lot)) AND (observed_lot <> ''::text) AND (char_length(observed_lot) <= 200))) AND ((observed_serial IS NULL) OR ((observed_serial = btrim(observed_serial)) AND (observed_serial <> ''::text) AND (char_length(observed_serial) <= 200)))),
@@ -13032,7 +13123,7 @@ CREATE TABLE public.pick_shortages (
     CONSTRAINT pick_shortages_reason_check CHECK ((reason_code = ANY (ARRAY['inventory_missing'::text, 'insufficient_quantity'::text, 'damaged_inventory'::text, 'wrong_inventory'::text, 'lot_or_serial_mismatch'::text, 'other'::text]))),
     CONSTRAINT pick_shortages_reason_evidence_check CHECK (((picked_qty = 0) OR (observed_item_barcode IS NOT NULL)) AND ((reason_code <> 'wrong_inventory'::text) OR (observed_item_barcode IS NOT NULL)) AND ((reason_code <> 'lot_or_serial_mismatch'::text) OR (observed_lot IS NOT NULL) OR (observed_serial IS NOT NULL)) AND ((reason_code <> 'other'::text) OR (note IS NOT NULL))),
     CONSTRAINT pick_shortages_revision_check CHECK (revision > 0),
-    CONSTRAINT pick_shortages_resolution_check CHECK ((resolution IS NULL) OR (resolution = ANY (ARRAY['recovered'::text, 'short_ship'::text]))),
+    CONSTRAINT pick_shortages_resolution_check CHECK ((resolution IS NULL) OR (resolution = ANY (ARRAY['recovered'::text, 'short_ship'::text, 'substituted'::text]))),
     CONSTRAINT pick_shortages_status_check CHECK ((status = ANY (ARRAY['awaiting_inventory'::text, 'recovery_in_progress'::text, 'resolved'::text]))),
     CONSTRAINT pick_shortages_uom_check CHECK ((uom = btrim(uom)) AND (uom <> ''::text))
 );
@@ -26399,6 +26490,7 @@ CREATE TABLE public.shipment_documents (
     line_count bigint NOT NULL,
     ordered_qty bigint NOT NULL,
     accepted_short_qty bigint NOT NULL,
+    accepted_substitute_qty bigint NOT NULL,
     packed_qty bigint NOT NULL,
     content text NOT NULL,
     content_length bigint NOT NULL,
@@ -26430,8 +26522,9 @@ CREATE TABLE public.shipment_documents (
     CONSTRAINT shipment_documents_revision_check CHECK (shipment_revision_at_generation > 0),
     CONSTRAINT shipment_documents_counts_check CHECK (carton_count > 0 AND line_count > 0),
     CONSTRAINT shipment_documents_quantity_check CHECK (
-        ordered_qty > 0 AND accepted_short_qty >= 0 AND packed_qty > 0
-        AND ordered_qty = packed_qty + accepted_short_qty),
+        ordered_qty > 0 AND accepted_short_qty >= 0 AND accepted_substitute_qty >= 0
+        AND packed_qty > 0
+        AND ordered_qty = packed_qty + accepted_short_qty + accepted_substitute_qty),
     CONSTRAINT shipment_documents_content_check CHECK (
         content_length = octet_length(content) AND content_length > 0 AND content_length <= 16777216
         AND octet_length(content_sha256) = 32)
@@ -26454,6 +26547,7 @@ CREATE TABLE public.shipment_document_lines (
     uom text NOT NULL,
     ordered_qty bigint NOT NULL,
     accepted_short_qty bigint NOT NULL,
+    accepted_substitute_qty bigint NOT NULL,
     packed_qty bigint NOT NULL,
     CONSTRAINT shipment_document_lines_sequence_check CHECK (sequence > 0),
     CONSTRAINT shipment_document_lines_line_key_check CHECK (
@@ -26463,8 +26557,9 @@ CREATE TABLE public.shipment_document_lines (
     CONSTRAINT shipment_document_lines_uom_check CHECK (
         uom = btrim(uom) AND uom <> '' AND char_length(uom) <= 32),
     CONSTRAINT shipment_document_lines_quantity_check CHECK (
-        ordered_qty > 0 AND accepted_short_qty >= 0 AND packed_qty > 0
-        AND ordered_qty = packed_qty + accepted_short_qty)
+        ordered_qty > 0 AND accepted_short_qty >= 0 AND accepted_substitute_qty >= 0
+        AND packed_qty >= 0
+        AND ordered_qty = packed_qty + accepted_short_qty + accepted_substitute_qty)
 );
 ALTER TABLE public.shipment_document_lines FORCE ROW LEVEL SECURITY;
 
@@ -26640,6 +26735,7 @@ BEGIN
     END IF;
     SELECT COALESCE(SUM(original_qty), 0)::bigint AS ordered_qty,
            COALESCE(SUM(accepted_short_qty), 0)::bigint AS accepted_short_qty,
+           COALESCE(SUM(accepted_substitute_qty), 0)::bigint AS accepted_substitute_qty,
            COALESCE(SUM(effective_qty), 0)::bigint AS packed_qty,
            COUNT(*)::bigint AS line_count
     INTO demand_row
@@ -26649,6 +26745,7 @@ BEGIN
       AND demand.order_id = NEW.order_id;
     IF demand_row.ordered_qty <> NEW.ordered_qty
        OR demand_row.accepted_short_qty <> NEW.accepted_short_qty
+       OR demand_row.accepted_substitute_qty <> NEW.accepted_substitute_qty
        OR demand_row.packed_qty <> NEW.packed_qty
        OR demand_row.line_count <> NEW.line_count
        OR shipment_row.shipped_qty <> NEW.packed_qty
@@ -26734,7 +26831,8 @@ BEGIN
     IF NOT FOUND OR document_row.order_id <> NEW.order_id THEN
         RAISE EXCEPTION 'shipment document line scope does not match document' USING ERRCODE = '23514';
     END IF;
-    SELECT demand.original_qty, demand.accepted_short_qty, demand.effective_qty,
+    SELECT demand.original_qty, demand.accepted_short_qty,
+           demand.accepted_substitute_qty, demand.effective_qty,
            item.line_key, item.line_number, item.item_id, item.uom,
            COALESCE(NULLIF(btrim(catalog.description), ''), 'Item ' || item.item_id::text)
                AS item_description,
@@ -26754,7 +26852,8 @@ BEGIN
     WHERE demand.tenant_id = NEW.tenant_id
       AND demand.inventory_owner_id = NEW.inventory_owner_id
       AND demand.order_id = NEW.order_id AND demand.order_item_id = NEW.order_item_id
-    GROUP BY demand.original_qty, demand.accepted_short_qty, demand.effective_qty,
+    GROUP BY demand.original_qty, demand.accepted_short_qty,
+             demand.accepted_substitute_qty, demand.effective_qty,
              item.line_key, item.line_number, item.item_id, item.uom, catalog.description;
     IF NOT FOUND
        OR NEW.sequence <> source_row.line_number
@@ -26764,6 +26863,7 @@ BEGIN
        OR NEW.uom <> source_row.uom
        OR NEW.ordered_qty <> source_row.original_qty
        OR NEW.accepted_short_qty <> source_row.accepted_short_qty
+       OR NEW.accepted_substitute_qty <> source_row.accepted_substitute_qty
        OR NEW.packed_qty <> source_row.effective_qty
        OR NEW.packed_qty <> source_row.packed_qty
     THEN
@@ -26783,6 +26883,7 @@ DECLARE
     line_count_value bigint;
     ordered_qty_value bigint;
     accepted_short_qty_value bigint;
+    accepted_substitute_qty_value bigint;
     packed_qty_value bigint;
     carton_count_value bigint;
     carton_qty_value bigint;
@@ -26799,8 +26900,10 @@ BEGIN
     END IF;
     SELECT COUNT(*)::bigint, COALESCE(SUM(ordered_qty), 0)::bigint,
            COALESCE(SUM(accepted_short_qty), 0)::bigint,
+           COALESCE(SUM(accepted_substitute_qty), 0)::bigint,
            COALESCE(SUM(packed_qty), 0)::bigint
-    INTO line_count_value, ordered_qty_value, accepted_short_qty_value, packed_qty_value
+    INTO line_count_value, ordered_qty_value, accepted_short_qty_value,
+         accepted_substitute_qty_value, packed_qty_value
     FROM public.shipment_document_lines
     WHERE tenant_id = document_row.tenant_id AND shipment_document_id = document_row.id;
     SELECT COUNT(*)::bigint, COALESCE(SUM(packed_qty), 0)::bigint
@@ -26810,6 +26913,7 @@ BEGIN
     IF line_count_value <> document_row.line_count
        OR ordered_qty_value <> document_row.ordered_qty
        OR accepted_short_qty_value <> document_row.accepted_short_qty
+       OR accepted_substitute_qty_value <> document_row.accepted_substitute_qty
        OR packed_qty_value <> document_row.packed_qty
        OR carton_count_value <> document_row.carton_count
        OR carton_qty_value <> document_row.packed_qty
@@ -28445,6 +28549,7 @@ CREATE FUNCTION public.guard_order_item_line_replacement() RETURNS trigger
 LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
 DECLARE
     amendment_id bigint;
+    substitution_id bigint;
     allowed boolean;
     order_revision bigint;
 BEGIN
@@ -28453,6 +28558,8 @@ BEGIN
     END IF;
     amendment_id := NULLIF(
         current_setting('wareboxes.order_line_amendment_id', true), '')::bigint;
+    substitution_id := NULLIF(
+        current_setting('wareboxes.item_substitution_id', true), '')::bigint;
     IF TG_OP = 'UPDATE' THEN
         IF OLD.deleted IS NOT NULL OR NEW.deleted IS NULL
            OR ROW(OLD.tenant_id, OLD.inventory_owner_id, OLD.created, OLD.line_key,
@@ -28495,6 +28602,26 @@ BEGIN
           INTO allowed;
         IF NOT COALESCE(allowed, false) THEN
             RAISE EXCEPTION 'replacement demand line does not match typed evidence'
+                USING ERRCODE = '55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF substitution_id IS NOT NULL THEN
+        SELECT EXISTS(
+            SELECT 1 FROM public.pick_shortage_substitutions substitution
+            WHERE substitution.tenant_id = NEW.tenant_id
+              AND substitution.inventory_owner_id = NEW.inventory_owner_id
+              AND substitution.order_id = NEW.order_id
+              AND substitution.substitute_order_item_id = NEW.id
+              AND substitution.substitute_item_id = NEW.item_id
+              AND substitution.substitute_uom = NEW.uom
+              AND substitution.substitute_qty = NEW.qty
+              AND substitution.id = substitution_id
+              AND substitution.substituted_at = NEW.created)
+          INTO allowed;
+        IF NOT COALESCE(allowed, false) THEN
+            RAISE EXCEPTION 'substitute demand line does not match typed evidence'
                 USING ERRCODE = '55000';
         END IF;
         RETURN NEW;
@@ -28697,6 +28824,583 @@ REVOKE ALL ON FUNCTION public.validate_order_line_amendment() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_order_item_line_replacement() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_order_line_amendment_evidence_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_order_line_amendment_consistency() FROM PUBLIC;
+
+-- Versioned, owner/facility-scoped approval for exact item substitutions.
+CREATE TABLE public.item_substitution_policies (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    source_item_id bigint NOT NULL,
+    source_uom text NOT NULL,
+    substitute_item_id bigint NOT NULL,
+    substitute_uom text NOT NULL,
+    source_qty bigint NOT NULL CHECK (source_qty > 0),
+    substitute_qty bigint NOT NULL CHECK (substitute_qty > 0),
+    revision bigint NOT NULL CHECK (revision > 0),
+    supersedes_policy_id bigint,
+    effective_from timestamptz NOT NULL,
+    effective_to timestamptz,
+    configured_by_user_id bigint NOT NULL,
+    configured_at timestamptz NOT NULL,
+    retired_by_user_id bigint,
+    CHECK (source_uom = btrim(source_uom) AND source_uom <> ''
+           AND char_length(source_uom) <= 32),
+    CHECK (substitute_uom = btrim(substitute_uom) AND substitute_uom <> ''
+           AND char_length(substitute_uom) <= 32),
+    CHECK (source_item_id <> substitute_item_id OR source_uom <> substitute_uom),
+    CHECK (configured_at = effective_from),
+    CHECK ((effective_to IS NULL AND retired_by_user_id IS NULL)
+           OR effective_to > effective_from),
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, facility_id,
+            source_item_id, source_uom, substitute_item_id, substitute_uom, revision),
+    FOREIGN KEY (tenant_id) REFERENCES public.tenants(id),
+    FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities(tenant_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id)
+        REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, source_item_id)
+        REFERENCES public.inventory_owner_items(tenant_id, inventory_owner_id, item_id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, substitute_item_id)
+        REFERENCES public.inventory_owner_items(tenant_id, inventory_owner_id, item_id),
+    FOREIGN KEY (tenant_id, configured_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id),
+    FOREIGN KEY (tenant_id, retired_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, supersedes_policy_id)
+        REFERENCES public.item_substitution_policies(
+            tenant_id, inventory_owner_id, facility_id, id)
+);
+ALTER TABLE public.item_substitution_policies FORCE ROW LEVEL SECURITY;
+CREATE UNIQUE INDEX item_substitution_policies_active_natural_key
+ON public.item_substitution_policies (
+    tenant_id, inventory_owner_id, facility_id,
+    source_item_id, source_uom, substitute_item_id, substitute_uom)
+WHERE effective_to IS NULL;
+CREATE INDEX item_substitution_policies_source_lookup_idx
+ON public.item_substitution_policies (
+    tenant_id, inventory_owner_id, facility_id, source_item_id, source_uom,
+    substitute_item_id, substitute_uom, revision DESC);
+
+CREATE FUNCTION public.validate_item_substitution_policy() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+DECLARE
+    predecessor public.item_substitution_policies%ROWTYPE;
+    source_catalog_uom text;
+    substitute_catalog_uom text;
+BEGIN
+    SELECT item.packaging_unit INTO source_catalog_uom
+    FROM public.inventory_owner_items owner_item
+    JOIN public.items item ON item.tenant_id = owner_item.tenant_id
+                          AND item.id = owner_item.item_id
+    WHERE owner_item.tenant_id = NEW.tenant_id
+      AND owner_item.inventory_owner_id = NEW.inventory_owner_id
+      AND owner_item.item_id = NEW.source_item_id
+      AND owner_item.deleted IS NULL AND item.deleted IS NULL
+    FOR SHARE OF owner_item, item;
+    SELECT item.packaging_unit INTO substitute_catalog_uom
+    FROM public.inventory_owner_items owner_item
+    JOIN public.items item ON item.tenant_id = owner_item.tenant_id
+                          AND item.id = owner_item.item_id
+    WHERE owner_item.tenant_id = NEW.tenant_id
+      AND owner_item.inventory_owner_id = NEW.inventory_owner_id
+      AND owner_item.item_id = NEW.substitute_item_id
+      AND owner_item.deleted IS NULL AND item.deleted IS NULL
+    FOR SHARE OF owner_item, item;
+    IF source_catalog_uom IS DISTINCT FROM NEW.source_uom
+       OR substitute_catalog_uom IS DISTINCT FROM NEW.substitute_uom
+       OR NOT EXISTS (
+           SELECT 1 FROM public.inventory_owner_facilities assignment
+           WHERE assignment.tenant_id = NEW.tenant_id
+             AND assignment.inventory_owner_id = NEW.inventory_owner_id
+             AND assignment.facility_id = NEW.facility_id
+             AND assignment.deleted IS NULL)
+    THEN
+        RAISE EXCEPTION 'item substitution policy scope, items, or UOM is unavailable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.supersedes_policy_id IS NULL THEN
+        IF NEW.revision <> 1 THEN
+            RAISE EXCEPTION 'initial item substitution policy revision must be one'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        SELECT * INTO predecessor FROM public.item_substitution_policies
+        WHERE tenant_id = NEW.tenant_id
+          AND inventory_owner_id = NEW.inventory_owner_id
+          AND facility_id = NEW.facility_id
+          AND source_item_id = NEW.source_item_id
+          AND source_uom = NEW.source_uom
+          AND substitute_item_id = NEW.substitute_item_id
+          AND substitute_uom = NEW.substitute_uom
+          AND id = NEW.supersedes_policy_id
+        FOR SHARE;
+        IF NOT FOUND OR predecessor.revision + 1 <> NEW.revision
+           OR predecessor.effective_to IS NULL
+           OR predecessor.effective_to > NEW.effective_from
+           OR (predecessor.retired_by_user_id IS NULL
+               AND predecessor.effective_to IS DISTINCT FROM NEW.effective_from) THEN
+            RAISE EXCEPTION 'item substitution policy predecessor does not reconcile'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_item_substitution_policy_mutation() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+BEGIN
+    IF TG_OP = 'DELETE' OR OLD.effective_to IS NOT NULL
+       OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.source_item_id IS DISTINCT FROM OLD.source_item_id
+       OR NEW.source_uom IS DISTINCT FROM OLD.source_uom
+       OR NEW.substitute_item_id IS DISTINCT FROM OLD.substitute_item_id
+       OR NEW.substitute_uom IS DISTINCT FROM OLD.substitute_uom
+       OR NEW.source_qty IS DISTINCT FROM OLD.source_qty
+       OR NEW.substitute_qty IS DISTINCT FROM OLD.substitute_qty
+       OR NEW.revision IS DISTINCT FROM OLD.revision
+       OR NEW.supersedes_policy_id IS DISTINCT FROM OLD.supersedes_policy_id
+       OR NEW.effective_from IS DISTINCT FROM OLD.effective_from
+       OR NEW.configured_by_user_id IS DISTINCT FROM OLD.configured_by_user_id
+       OR NEW.configured_at IS DISTINCT FROM OLD.configured_at
+       OR NEW.effective_to IS NULL OR NEW.effective_to <= OLD.effective_from
+       OR (OLD.retired_by_user_id IS NOT NULL)
+    THEN
+        RAISE EXCEPTION 'item substitution policy versions are immutable except closure'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.require_item_substitution_policy_closure() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+BEGIN
+    IF NEW.effective_to IS NULL THEN
+        RETURN NULL;
+    END IF;
+    IF NEW.retired_by_user_id IS NULL AND NOT EXISTS (
+        SELECT 1 FROM public.item_substitution_policies successor
+        WHERE successor.tenant_id = NEW.tenant_id
+          AND successor.inventory_owner_id = NEW.inventory_owner_id
+          AND successor.facility_id = NEW.facility_id
+          AND successor.source_item_id = NEW.source_item_id
+          AND successor.source_uom = NEW.source_uom
+          AND successor.substitute_item_id = NEW.substitute_item_id
+          AND successor.substitute_uom = NEW.substitute_uom
+          AND successor.supersedes_policy_id = NEW.id
+          AND successor.revision = NEW.revision + 1
+          AND successor.effective_from = NEW.effective_to)
+    THEN
+        RAISE EXCEPTION 'closed item substitution policy requires retirement or successor'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER item_substitution_policies_validate
+BEFORE INSERT ON public.item_substitution_policies
+FOR EACH ROW EXECUTE FUNCTION public.validate_item_substitution_policy();
+CREATE TRIGGER item_substitution_policies_guard
+BEFORE UPDATE OR DELETE ON public.item_substitution_policies
+FOR EACH ROW EXECUTE FUNCTION public.guard_item_substitution_policy_mutation();
+CREATE CONSTRAINT TRIGGER item_substitution_policies_require_closure
+AFTER UPDATE OF effective_to, retired_by_user_id ON public.item_substitution_policies
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_item_substitution_policy_closure();
+
+ALTER TABLE public.item_substitution_policies ENABLE ROW LEVEL SECURITY;
+CREATE POLICY item_substitution_policies_tenant_isolation
+ON public.item_substitution_policies
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT, INSERT ON public.item_substitution_policies TO wareboxes_app;
+GRANT UPDATE (effective_to, retired_by_user_id)
+ON public.item_substitution_policies TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.item_substitution_policies_id_seq TO wareboxes_app;
+
+REVOKE ALL ON FUNCTION public.validate_item_substitution_policy() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_item_substitution_policy_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_item_substitution_policy_closure() FROM PUBLIC;
+
+-- Immutable execution evidence for resolving a pick shortage with approved
+-- substitute demand on the same order and release.
+CREATE TABLE public.pick_shortage_substitutions (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    order_release_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    pick_shortage_id bigint NOT NULL,
+    policy_id bigint NOT NULL,
+    policy_revision bigint NOT NULL CHECK (policy_revision > 0),
+    source_order_item_id bigint NOT NULL,
+    source_reservation_id bigint NOT NULL,
+    source_item_id bigint NOT NULL,
+    source_uom text NOT NULL,
+    substitute_order_item_id bigint NOT NULL,
+    substitute_reservation_id bigint NOT NULL,
+    substitute_item_id bigint NOT NULL,
+    substitute_uom text NOT NULL,
+    accepted_source_qty bigint NOT NULL CHECK (accepted_source_qty > 0),
+    substitute_qty bigint NOT NULL CHECK (substitute_qty > 0),
+    expected_shortage_revision bigint NOT NULL CHECK (expected_shortage_revision > 0),
+    resulting_shortage_revision bigint NOT NULL,
+    expected_order_revision bigint NOT NULL CHECK (expected_order_revision > 0),
+    resulting_order_revision bigint NOT NULL,
+    allocation_count bigint NOT NULL CHECK (allocation_count > 0),
+    reason_code text NOT NULL CHECK (
+        reason_code IN ('client_authorized','inventory_unavailable','service_recovery','other')),
+    note text,
+    substituted_by_user_id bigint NOT NULL,
+    substituted_at timestamptz NOT NULL,
+    CHECK (resulting_shortage_revision = expected_shortage_revision + 1),
+    CHECK (resulting_order_revision = expected_order_revision + 1),
+    CHECK (source_item_id <> substitute_item_id OR source_uom <> substitute_uom),
+    CHECK (source_uom = btrim(source_uom) AND source_uom <> ''
+           AND char_length(source_uom) <= 32),
+    CHECK (substitute_uom = btrim(substitute_uom) AND substitute_uom <> ''
+           AND char_length(substitute_uom) <= 32),
+    CHECK (reason_code <> 'other' OR note IS NOT NULL),
+    CHECK (note IS NULL OR (note=btrim(note) AND note<>'' AND char_length(note)<=500)),
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, pick_shortage_id),
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id,
+            substitute_order_item_id, substitute_reservation_id, id),
+    FOREIGN KEY (tenant_id) REFERENCES public.tenants(id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id)
+        REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id,
+                 source_order_item_id, source_reservation_id, pick_shortage_id)
+        REFERENCES public.pick_shortages(tenant_id, inventory_owner_id, facility_id,
+                 order_release_id, order_id, order_item_id, reservation_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, policy_id)
+        REFERENCES public.item_substitution_policies(tenant_id, inventory_owner_id, facility_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_id, source_order_item_id)
+        REFERENCES public.order_items(tenant_id, inventory_owner_id, order_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_id, substitute_order_item_id)
+        REFERENCES public.order_items(tenant_id, inventory_owner_id, order_id, id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_reservation_id)
+        REFERENCES public.inventory_reservations(tenant_id, inventory_owner_id, facility_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, substitute_reservation_id)
+        REFERENCES public.inventory_reservations(tenant_id, inventory_owner_id, facility_id, id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (tenant_id, source_item_id) REFERENCES public.items(tenant_id, id),
+    FOREIGN KEY (tenant_id, substitute_item_id) REFERENCES public.items(tenant_id, id),
+    FOREIGN KEY (tenant_id, substituted_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id)
+);
+ALTER TABLE public.pick_shortage_substitutions FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE public.order_release_allocations
+    ADD COLUMN item_substitution_id bigint;
+ALTER TABLE public.order_release_allocations
+    DROP CONSTRAINT order_release_allocations_recovery_check;
+ALTER TABLE public.order_release_allocations
+    DROP CONSTRAINT order_release_allocations_source_kind_check;
+ALTER TABLE public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_recovery_check CHECK (
+        (source_kind='initial' AND pick_shortage_id IS NULL
+         AND pick_shortage_reallocation_run_id IS NULL AND item_substitution_id IS NULL)
+        OR
+        (source_kind='shortage_recovery' AND pick_shortage_id IS NOT NULL
+         AND pick_shortage_reallocation_run_id IS NOT NULL AND item_substitution_id IS NULL)
+        OR
+        (source_kind='item_substitution' AND pick_shortage_id IS NULL
+         AND pick_shortage_reallocation_run_id IS NULL AND item_substitution_id IS NOT NULL));
+ALTER TABLE public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_source_kind_check CHECK (
+        source_kind IN ('initial','shortage_recovery','item_substitution'));
+ALTER TABLE public.order_release_allocations
+    ADD CONSTRAINT order_release_allocations_item_substitution_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id,
+                 order_item_id, reservation_id, item_substitution_id)
+    REFERENCES public.pick_shortage_substitutions(
+        tenant_id, inventory_owner_id, facility_id, order_release_id, order_id,
+        substitute_order_item_id, substitute_reservation_id, id)
+    DEFERRABLE INITIALLY DEFERRED;
+CREATE INDEX order_release_allocations_item_substitution_idx
+ON public.order_release_allocations (
+    tenant_id,inventory_owner_id,item_substitution_id,allocation_id)
+WHERE source_kind='item_substitution';
+
+CREATE FUNCTION public.validate_pick_shortage_substitution() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+DECLARE
+    shortage public.pick_shortages%ROWTYPE;
+    policy public.item_substitution_policies%ROWTYPE;
+    order_revision bigint;
+BEGIN
+    SELECT * INTO shortage FROM public.pick_shortages
+    WHERE tenant_id=NEW.tenant_id AND inventory_owner_id=NEW.inventory_owner_id
+      AND id=NEW.pick_shortage_id FOR SHARE;
+    SELECT * INTO policy FROM public.item_substitution_policies
+    WHERE tenant_id=NEW.tenant_id AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.facility_id AND id=NEW.policy_id FOR SHARE;
+    SELECT revision INTO order_revision FROM public.orders
+    WHERE tenant_id=NEW.tenant_id AND inventory_owner_id=NEW.inventory_owner_id
+      AND id=NEW.order_id FOR SHARE;
+    IF shortage.id IS NULL OR policy.id IS NULL
+       OR shortage.status <> 'awaiting_inventory' OR shortage.resolution IS NOT NULL
+       OR shortage.revision <> NEW.expected_shortage_revision
+       OR order_revision <> NEW.expected_order_revision
+       OR shortage.order_release_id <> NEW.order_release_id
+       OR shortage.order_id <> NEW.order_id
+       OR shortage.order_item_id <> NEW.source_order_item_id
+       OR shortage.reservation_id <> NEW.source_reservation_id
+       OR shortage.item_id <> NEW.source_item_id OR shortage.uom <> NEW.source_uom
+       OR shortage.reallocated_qty <> shortage.recovery_terminal_qty
+       OR shortage.remaining_to_allocate_qty <> NEW.accepted_source_qty
+       OR policy.revision <> NEW.policy_revision OR policy.effective_to IS NOT NULL
+       OR policy.source_item_id <> NEW.source_item_id OR policy.source_uom <> NEW.source_uom
+       OR policy.substitute_item_id <> NEW.substitute_item_id
+       OR policy.substitute_uom <> NEW.substitute_uom
+       OR NEW.accepted_source_qty * policy.substitute_qty
+          <> NEW.substitute_qty * policy.source_qty
+    THEN
+        RAISE EXCEPTION 'pick shortage substitution preconditions do not reconcile'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.reject_pick_shortage_substitution_mutation() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+BEGIN
+    RAISE EXCEPTION 'pick shortage substitution evidence is immutable'
+        USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION public.validate_item_substitution_release_snapshot() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+BEGIN
+    IF NEW.source_kind <> 'item_substitution' THEN
+        RETURN NEW;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM public.pick_shortage_substitutions substitution
+        WHERE substitution.tenant_id=NEW.tenant_id
+          AND substitution.inventory_owner_id=NEW.inventory_owner_id
+          AND substitution.facility_id=NEW.facility_id
+          AND substitution.order_release_id=NEW.order_release_id
+          AND substitution.order_id=NEW.order_id
+          AND substitution.substitute_order_item_id=NEW.order_item_id
+          AND substitution.substitute_reservation_id=NEW.reservation_id
+          AND substitution.substitute_item_id=NEW.item_id
+          AND substitution.substitute_uom=NEW.uom
+          AND substitution.id=NEW.item_substitution_id)
+    THEN
+        RAISE EXCEPTION 'substitute release snapshot does not match immutable substitution evidence'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.require_pick_shortage_substitution_consistency() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+DECLARE
+    substitution_id bigint;
+    substitution public.pick_shortage_substitutions%ROWTYPE;
+    snapshot_count bigint;
+    snapshot_qty bigint;
+    task_count bigint;
+    content_count bigint;
+BEGIN
+    IF TG_TABLE_NAME='pick_shortage_substitutions' THEN
+        substitution_id:=NEW.id;
+    ELSIF TG_TABLE_NAME='order_release_allocations' THEN
+        substitution_id:=NEW.item_substitution_id;
+    ELSE
+        SELECT snapshot.item_substitution_id INTO substitution_id
+        FROM public.order_release_allocations snapshot
+        WHERE snapshot.tenant_id=NEW.tenant_id
+          AND snapshot.inventory_owner_id=NEW.inventory_owner_id
+          AND snapshot.facility_id=NEW.facility_id
+          AND snapshot.order_release_id=NEW.order_release_id
+          AND snapshot.order_id=NEW.order_id
+          AND snapshot.order_item_id=NEW.order_item_id
+          AND snapshot.reservation_id=NEW.reservation_id
+          AND snapshot.allocation_id=NEW.source_allocation_id
+          AND snapshot.source_kind='item_substitution';
+    END IF;
+    IF substitution_id IS NULL THEN RETURN NULL; END IF;
+    SELECT * INTO substitution FROM public.pick_shortage_substitutions
+    WHERE tenant_id=NEW.tenant_id AND id=substitution_id;
+
+    SELECT COUNT(*),COALESCE(SUM(planned_qty),0) INTO snapshot_count,snapshot_qty
+    FROM public.order_release_allocations
+    WHERE tenant_id=substitution.tenant_id
+      AND item_substitution_id=substitution.id AND source_kind='item_substitution';
+    SELECT COUNT(*) INTO task_count FROM public.pick_tasks task
+    JOIN public.order_release_allocations snapshot
+      ON snapshot.tenant_id=task.tenant_id
+     AND snapshot.inventory_owner_id=task.inventory_owner_id
+     AND snapshot.facility_id=task.facility_id
+     AND snapshot.order_release_id=task.order_release_id
+     AND snapshot.order_id=task.order_id AND snapshot.order_item_id=task.order_item_id
+     AND snapshot.reservation_id=task.reservation_id
+     AND snapshot.allocation_id=task.source_allocation_id
+    WHERE snapshot.tenant_id=substitution.tenant_id
+      AND snapshot.item_substitution_id=substitution.id;
+    SELECT COUNT(*) INTO content_count FROM public.pick_task_contents content
+    JOIN public.order_release_allocations snapshot
+      ON snapshot.tenant_id=content.tenant_id
+     AND snapshot.inventory_owner_id=content.inventory_owner_id
+     AND snapshot.facility_id=content.facility_id
+     AND snapshot.order_release_id=content.order_release_id
+     AND snapshot.order_id=content.order_id AND snapshot.order_item_id=content.order_item_id
+     AND snapshot.reservation_id=content.reservation_id
+     AND snapshot.allocation_id=content.source_allocation_id
+    WHERE snapshot.tenant_id=substitution.tenant_id
+      AND snapshot.item_substitution_id=substitution.id;
+
+    IF snapshot_count<>substitution.allocation_count
+       OR snapshot_qty<>substitution.substitute_qty
+       OR task_count<>snapshot_count OR content_count<>snapshot_count
+       OR NOT EXISTS (
+           SELECT 1 FROM public.order_items item
+           WHERE item.tenant_id=substitution.tenant_id
+             AND item.inventory_owner_id=substitution.inventory_owner_id
+             AND item.order_id=substitution.order_id
+             AND item.id=substitution.substitute_order_item_id
+             AND item.item_id=substitution.substitute_item_id
+             AND item.uom=substitution.substitute_uom
+             AND item.qty=substitution.substitute_qty AND item.deleted IS NULL
+             AND item.created=substitution.substituted_at)
+       OR NOT EXISTS (
+           SELECT 1 FROM public.inventory_reservations reservation
+           WHERE reservation.tenant_id=substitution.tenant_id
+             AND reservation.inventory_owner_id=substitution.inventory_owner_id
+             AND reservation.facility_id=substitution.facility_id
+             AND reservation.id=substitution.substitute_reservation_id
+             AND reservation.order_id=substitution.order_id
+             AND reservation.order_item_id=substitution.substitute_order_item_id
+             AND reservation.item_id=substitution.substitute_item_id
+             AND reservation.uom=substitution.substitute_uom
+             AND reservation.qty=substitution.substitute_qty
+             AND reservation.status IN ('active','fulfilled')
+             AND reservation.created=substitution.substituted_at)
+       OR NOT EXISTS (
+           SELECT 1 FROM public.pick_shortages shortage
+           WHERE shortage.tenant_id=substitution.tenant_id
+             AND shortage.id=substitution.pick_shortage_id
+             AND shortage.status='resolved' AND shortage.resolution='substituted'
+             AND shortage.accepted_substitute_qty=substitution.accepted_source_qty
+             AND shortage.revision=substitution.resulting_shortage_revision
+             AND shortage.resolved_by_user_id=substitution.substituted_by_user_id
+             AND shortage.resolved_at=substitution.substituted_at)
+       OR NOT EXISTS (
+           SELECT 1 FROM public.orders order_header
+           WHERE order_header.tenant_id=substitution.tenant_id
+             AND order_header.id=substitution.order_id
+             AND order_header.status IN (
+                 'processing','awaiting packing','awaiting shipment','shipped')
+             AND order_header.revision>=substitution.resulting_order_revision)
+    THEN
+        RAISE EXCEPTION 'pick shortage substitution does not reconcile to derived demand and work'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER pick_shortage_substitutions_validate
+BEFORE INSERT ON public.pick_shortage_substitutions
+FOR EACH ROW EXECUTE FUNCTION public.validate_pick_shortage_substitution();
+CREATE TRIGGER pick_shortage_substitutions_immutable
+BEFORE UPDATE OR DELETE ON public.pick_shortage_substitutions
+FOR EACH ROW EXECUTE FUNCTION public.reject_pick_shortage_substitution_mutation();
+CREATE TRIGGER order_release_allocations_validate_substitution
+BEFORE INSERT ON public.order_release_allocations
+FOR EACH ROW EXECUTE FUNCTION public.validate_item_substitution_release_snapshot();
+CREATE CONSTRAINT TRIGGER pick_shortage_substitutions_reconcile
+AFTER INSERT ON public.pick_shortage_substitutions DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_pick_shortage_substitution_consistency();
+CREATE CONSTRAINT TRIGGER order_release_allocations_substitution_reconcile
+AFTER INSERT ON public.order_release_allocations DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_pick_shortage_substitution_consistency();
+CREATE CONSTRAINT TRIGGER pick_tasks_substitution_reconcile
+AFTER INSERT OR UPDATE ON public.pick_tasks DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_pick_shortage_substitution_consistency();
+CREATE CONSTRAINT TRIGGER pick_task_contents_substitution_reconcile
+AFTER INSERT OR UPDATE ON public.pick_task_contents DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_pick_shortage_substitution_consistency();
+CREATE CONSTRAINT TRIGGER pick_shortage_substitutions_require_shortage_consistency
+AFTER INSERT ON public.pick_shortage_substitutions DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_pick_shortage_consistency();
+
+ALTER TABLE public.pick_shortage_substitutions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY pick_shortage_substitutions_tenant_isolation
+ON public.pick_shortage_substitutions
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+GRANT SELECT,INSERT ON public.pick_shortage_substitutions TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.pick_shortage_substitutions_id_seq TO wareboxes_app;
+GRANT UPDATE (accepted_substitute_qty) ON public.pick_shortages TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_pick_shortage_substitution() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_pick_shortage_substitution_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_item_substitution_release_snapshot() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_pick_shortage_substitution_consistency() FROM PUBLIC;
+
+CREATE OR REPLACE VIEW public.outbound_effective_demand
+WITH (security_invoker='true') AS
+SELECT order_line.tenant_id,
+       order_line.inventory_owner_id,
+       order_line.order_id,
+       order_line.id AS order_item_id,
+       order_line.item_id,
+       order_line.uom,
+       (order_line.qty - COALESCE(backorder.backordered_qty,0))::bigint AS original_qty,
+       COALESCE(short_ship.accepted_short_qty,0)::bigint AS accepted_short_qty,
+       (order_line.qty - COALESCE(backorder.backordered_qty,0)
+        - COALESCE(short_ship.accepted_short_qty,0)
+        - COALESCE(substitution.accepted_substitute_qty,0))::bigint AS effective_qty,
+       COALESCE(backorder.backordered_qty,0)::bigint AS backordered_qty,
+       COALESCE(substitution.accepted_substitute_qty,0)::bigint AS accepted_substitute_qty
+FROM public.order_items order_line
+LEFT JOIN (
+    SELECT tenant_id,inventory_owner_id,parent_order_id AS order_id,
+           parent_order_item_id AS order_item_id,
+           SUM(newly_backordered_qty) AS backordered_qty
+    FROM public.order_backorder_split_lines
+    GROUP BY tenant_id,inventory_owner_id,parent_order_id,parent_order_item_id
+) backorder ON backorder.tenant_id=order_line.tenant_id
+ AND backorder.inventory_owner_id=order_line.inventory_owner_id
+ AND backorder.order_id=order_line.order_id AND backorder.order_item_id=order_line.id
+LEFT JOIN (
+    SELECT tenant_id,inventory_owner_id,order_id,order_item_id,
+           SUM(accepted_short_qty) AS accepted_short_qty
+    FROM public.pick_short_ship_dispositions
+    GROUP BY tenant_id,inventory_owner_id,order_id,order_item_id
+) short_ship ON short_ship.tenant_id=order_line.tenant_id
+ AND short_ship.inventory_owner_id=order_line.inventory_owner_id
+ AND short_ship.order_id=order_line.order_id AND short_ship.order_item_id=order_line.id
+LEFT JOIN (
+    SELECT tenant_id,inventory_owner_id,order_id,
+           source_order_item_id AS order_item_id,
+           SUM(accepted_source_qty) AS accepted_substitute_qty
+    FROM public.pick_shortage_substitutions
+    GROUP BY tenant_id,inventory_owner_id,order_id,source_order_item_id
+) substitution ON substitution.tenant_id=order_line.tenant_id
+ AND substitution.inventory_owner_id=order_line.inventory_owner_id
+ AND substitution.order_id=order_line.order_id
+ AND substitution.order_item_id=order_line.id
+WHERE order_line.deleted IS NULL;
 
 -- PostgreSQL database dump complete
 --

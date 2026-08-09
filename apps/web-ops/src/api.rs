@@ -30,6 +30,11 @@ use wareboxes_core::dto::{OrderPage, WebSessionContext};
 
 mod backorder;
 pub use backorder::{configure_backorder_policy, split_order_backorder};
+mod item_substitution;
+pub use item_substitution::{
+    configure_item_substitution_policy, item_substitution_policies,
+    retire_item_substitution_policy, substitute_pick_shortage,
+};
 mod order;
 pub use order::{
     amend_fulfillment_order, create_fulfillment_order, order_entry_items,

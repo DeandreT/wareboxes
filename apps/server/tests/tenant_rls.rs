@@ -356,6 +356,14 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         ("order_items", "order_items_tenant_isolation"),
         ("backorder_policies", "backorder_policies_tenant_isolation"),
         (
+            "item_substitution_policies",
+            "item_substitution_policies_tenant_isolation",
+        ),
+        (
+            "pick_shortage_substitutions",
+            "pick_shortage_substitutions_tenant_isolation",
+        ),
+        (
             "order_backorder_splits",
             "order_backorder_splits_tenant_isolation",
         ),

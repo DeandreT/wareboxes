@@ -183,6 +183,7 @@ pub struct ShipmentDemandResponse {
     pub ordered_quantity: i64,
     pub shipped_quantity: i64,
     pub accepted_short_quantity: i64,
+    pub accepted_substitute_quantity: i64,
 }
 
 /// Complete shipment read model used for create, resume, and operator display.
@@ -349,6 +350,7 @@ mod tests {
                 ordered_quantity: 7,
                 shipped_quantity: 5,
                 accepted_short_quantity: 2,
+                accepted_substitute_quantity: 0,
             },
             departed_by: 4,
             departed_at: "2026-08-08T22:00:00Z".into(),
@@ -371,7 +373,8 @@ mod tests {
                 "demand": {
                     "ordered_quantity": 7,
                     "shipped_quantity": 5,
-                    "accepted_short_quantity": 2
+                    "accepted_short_quantity": 2,
+                    "accepted_substitute_quantity": 0
                 },
                 "departed_by": 4,
                 "departed_at": "2026-08-08T22:00:00Z"

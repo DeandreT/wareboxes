@@ -12,6 +12,7 @@ mod inventory_hold;
 mod inventory_relocation;
 mod inventory_rollup;
 mod inventory_status_transition;
+mod item_substitution;
 mod license_plate_putaway;
 mod order;
 mod order_allocation;
@@ -89,6 +90,11 @@ pub use inventory_rollup::{
 pub use inventory_status_transition::{
     CreateInventoryStatusTransitionRequest, InventoryStatusTransitionReason,
     InventoryStatusTransitionResponse,
+};
+pub use item_substitution::{
+    ConfigureItemSubstitutionPolicyRequest, ItemSubstitutionPolicyListRequest,
+    ItemSubstitutionPolicyResponse, ItemSubstitutionReason, RetireItemSubstitutionPolicyRequest,
+    SubstitutePickShortageRequest, SubstitutePickShortageResponse, SubstitutePickWorkResponse,
 };
 pub use license_plate_putaway::{
     ConfirmLicensePlatePutawayRequest, CreateLicensePlatePutawayTaskRequest,

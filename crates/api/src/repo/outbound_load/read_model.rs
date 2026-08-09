@@ -363,7 +363,9 @@ async fn shipment_rows_tx(
                shipment.revision AS shipment_revision, orders.order_key,
                orders.status AS order_status, orders.revision AS order_revision,
                COALESCE(SUM(demand.original_qty), 0)::BIGINT AS ordered_qty,
-               COALESCE(SUM(demand.accepted_short_qty), 0)::BIGINT AS accepted_short_qty
+               COALESCE(SUM(demand.accepted_short_qty), 0)::BIGINT AS accepted_short_qty,
+               COALESCE(SUM(demand.accepted_substitute_qty), 0)::BIGINT
+                   AS accepted_substitute_qty
         FROM outbound_load_shipments link
         JOIN shipments shipment
           ON shipment.tenant_id = link.tenant_id
@@ -397,6 +399,9 @@ async fn shipment_rows_tx(
                 .map_err(|error| AppError::internal(error.to_string()))?;
             let accepted = ActualPickQuantity::new(row.try_get("accepted_short_qty")?)
                 .map_err(|error| AppError::internal(error.to_string()))?;
+            let accepted_substitute =
+                ActualPickQuantity::new(row.try_get("accepted_substitute_qty")?)
+                    .map_err(|error| AppError::internal(error.to_string()))?;
             Ok(OutboundLoadShipmentReadModel {
                 outbound_load_shipment_id: positive(
                     row.try_get("id")?,
@@ -423,8 +428,12 @@ async fn shipment_rows_tx(
                 order_status: OrderStatus::parse(&row.try_get::<String, _>("order_status")?)
                     .ok_or_else(|| AppError::internal("order status is invalid"))?,
                 order_revision: positive(row.try_get("order_revision")?, OrderRevision::new)?,
-                demand: ShortShipDemandQuantities::new(ordered, accepted)
-                    .map_err(|error| AppError::internal(error.to_string()))?,
+                demand: ShortShipDemandQuantities::with_substitution(
+                    ordered,
+                    accepted,
+                    accepted_substitute,
+                )
+                .map_err(|error| AppError::internal(error.to_string()))?,
             })
         })
         .collect()

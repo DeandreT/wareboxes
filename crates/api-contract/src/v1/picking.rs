@@ -283,6 +283,7 @@ pub enum PickShortageStatus {
 pub enum PickShortageResolution {
     Recovered,
     ShortShip,
+    Substituted,
 }
 
 /// Business reason for accepting unmet demand as a short shipment.
@@ -483,6 +484,7 @@ pub struct AcceptPickShortageAsShortShipRequest {
 pub struct ShortShipDemandResponse {
     pub ordered: i64,
     pub accepted_short: i64,
+    pub accepted_substitute: i64,
     pub effective: i64,
 }
 
@@ -569,6 +571,7 @@ pub struct PickShortageResponse {
     pub recovery_terminal_quantity: i64,
     pub remaining_to_allocate_quantity: i64,
     pub accepted_short_quantity: i64,
+    pub accepted_substitute_quantity: i64,
     pub observed_item_barcode: Option<String>,
     pub observed_lot: Option<String>,
     pub observed_serial: Option<String>,
@@ -938,11 +941,13 @@ mod tests {
             line_demand: ShortShipDemandResponse {
                 ordered: 5,
                 accepted_short: 3,
+                accepted_substitute: 0,
                 effective: 2,
             },
             order_demand: ShortShipDemandResponse {
                 ordered: 12,
                 accepted_short: 3,
+                accepted_substitute: 0,
                 effective: 9,
             },
             inventory_hold_id: 41,

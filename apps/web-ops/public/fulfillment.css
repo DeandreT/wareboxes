@@ -1,6 +1,6 @@
 .fulfillment-workbench {
   height: calc(100vh - 76px);
-  min-height: 560px;
+  min-height: min(560px, calc(100vh - 76px));
   align-items: stretch;
 }
 

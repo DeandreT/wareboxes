@@ -32,6 +32,7 @@ const SHORTAGE_SELECT: &str = r#"
            shortage.planned_qty, shortage.picked_qty, shortage.short_qty,
            shortage.reallocated_qty, shortage.recovery_terminal_qty,
            shortage.remaining_to_allocate_qty, shortage.accepted_short_qty,
+           shortage.accepted_substitute_qty,
            shortage.observed_item_barcode,
            shortage.observed_lot, shortage.observed_serial,
            shortage.reason_code, shortage.note, shortage.inventory_hold_id,
@@ -277,6 +278,10 @@ fn map_shortage(
         .map_err(|error| AppError::internal(error.to_string()))?,
         accepted_short_quantity: ActualPickQuantity::new(row.try_get("accepted_short_qty")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
+        accepted_substitute_quantity: ActualPickQuantity::new(
+            row.try_get("accepted_substitute_qty")?,
+        )
+        .map_err(|error| AppError::internal(error.to_string()))?,
         observed_item_barcode: optional_scan(&row, "observed_item_barcode")?,
         observed_lot: optional_scan(&row, "observed_lot")?,
         observed_serial: optional_scan(&row, "observed_serial")?,

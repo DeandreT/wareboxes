@@ -334,6 +334,7 @@ const fn map_demand(demand: ShortShipDemandQuantities) -> ShortShipDemandRespons
     ShortShipDemandResponse {
         ordered: demand.ordered().get(),
         accepted_short: demand.accepted_short().get(),
+        accepted_substitute: demand.accepted_substitute().get(),
         effective: demand.effective().get(),
     }
 }
@@ -383,6 +384,7 @@ fn map_shortage(result: PickShortageReadModel) -> V1Result<PickShortageResponse>
         recovery_terminal_quantity: result.recovery_terminal_quantity.get(),
         remaining_to_allocate_quantity: result.remaining_to_allocate_quantity.get(),
         accepted_short_quantity: result.accepted_short_quantity.get(),
+        accepted_substitute_quantity: result.accepted_substitute_quantity.get(),
         observed_item_barcode: result.observed_item_barcode.map(PickScanValue::into_inner),
         observed_lot: result.observed_lot.map(PickScanValue::into_inner),
         observed_serial: result.observed_serial.map(PickScanValue::into_inner),
@@ -511,6 +513,7 @@ const fn map_resolution(resolution: PickShortageResolution) -> ApiShortageResolu
     match resolution {
         PickShortageResolution::Recovered => ApiShortageResolution::Recovered,
         PickShortageResolution::ShortShip => ApiShortageResolution::ShortShip,
+        PickShortageResolution::Substituted => ApiShortageResolution::Substituted,
     }
 }
 

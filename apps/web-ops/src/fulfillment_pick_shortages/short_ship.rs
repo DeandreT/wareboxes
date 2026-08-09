@@ -137,6 +137,12 @@ fn dispatch_short_ship(shortage_id: i64, signals: DetailSignals) {
     if signals.command_pending.get_untracked().is_some() {
         return;
     }
+    if let Some((retry_id, _, _)) = signals.substitution_retry.get_untracked() {
+        signals.short_ship_error.set(Some(format!(
+            "Resolve the unknown substitution result for pick exception #{retry_id} first."
+        )));
+        return;
+    }
     if let Some((retry_id, _, _)) = signals.reallocation_retry.get_untracked() {
         signals.short_ship_error.set(Some(format!(
             "Resolve the unknown recovery result for pick exception #{retry_id} first."

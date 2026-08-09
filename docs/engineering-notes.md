@@ -11,6 +11,10 @@
 - A short pick terminalizes the directed source allocation and records immutable
   physical evidence. Replacement inventory is selected through the typed shortage
   recovery workflow; generic order allocation cannot bypass active execution.
+- An approved item substitution preserves the original shortage and discrepancy hold,
+  records a versioned conversion policy, and creates a distinct substitute order line,
+  reservation, allocation, and RF pick. Packing and shipping consume the derived
+  physical demand while documents retain the accepted original-item quantity.
 - Demand replenishment plans only loose, available stock from an explicit versioned
   reserve-source set. Scanner confirmation posts a conserved move into the pick face;
   it does not implicitly allocate that stock, so allocation remains an explicit,
