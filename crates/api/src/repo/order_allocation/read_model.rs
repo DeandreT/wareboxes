@@ -68,9 +68,15 @@ pub(super) async fn load_line_states_tx(
     let rows = sqlx::query(
         r#"
         SELECT line.id, line.line_key, line.item_id, item.description,
-               line.uom, line.qty,
-               reservation.id AS reservation_id, reservation.qty AS reserved_qty
+               line.uom, line.qty AS original_qty, demand.backordered_qty,
+               demand.effective_qty,
+               reservation.id AS reservation_id,
+               reservation.qty - demand.backordered_qty AS reserved_qty
         FROM order_items line
+        INNER JOIN outbound_effective_demand demand
+            ON demand.tenant_id=line.tenant_id
+           AND demand.inventory_owner_id=line.inventory_owner_id
+           AND demand.order_id=line.order_id AND demand.order_item_id=line.id
         INNER JOIN items item
             ON item.tenant_id = line.tenant_id AND item.id = line.item_id
         LEFT JOIN inventory_reservations reservation
@@ -103,7 +109,9 @@ pub(super) async fn load_line_states_tx(
         load_allocation_details_tx(tx, tenant_id, &reservation_ids).await?;
     rows.iter()
         .map(|row| {
-            let demand_quantity = AllocationQuantity::new(row.try_get("qty")?)
+            let original_demand_quantity: i64 = row.try_get("original_qty")?;
+            let backordered_quantity: i64 = row.try_get("backordered_qty")?;
+            let demand_quantity = AllocationQuantity::new(row.try_get("effective_qty")?)
                 .map_err(|error| AppError::internal(error.to_string()))?;
             let reservation_id = row
                 .try_get::<Option<i64>, _>("reservation_id")?
@@ -133,6 +141,8 @@ pub(super) async fn load_line_states_tx(
                 item_id: row.try_get("item_id")?,
                 item_description: row.try_get("description")?,
                 uom: row.try_get("uom")?,
+                original_demand_quantity,
+                backordered_quantity,
                 demand_quantity,
                 reservation_id,
                 reserved_quantity,
@@ -232,12 +242,20 @@ async fn load_allocation_details_tx(
 }
 
 pub(super) fn line_state_totals(lines: &[OrderAllocationLineState]) -> AppResult<AllocationTotals> {
-    let (demand_quantity, reserved_quantity, allocated_quantity) = lines
+    let (
+        original_demand_quantity,
+        backordered_quantity,
+        demand_quantity,
+        reserved_quantity,
+        allocated_quantity,
+    ) = lines
         .iter()
         .try_fold(
-            (0_i64, 0_i64, 0_i64),
-            |(demand, reserved, allocated), line| {
+            (0_i64, 0_i64, 0_i64, 0_i64, 0_i64),
+            |(original, backordered, demand, reserved, allocated), line| {
                 Some((
+                    original.checked_add(line.original_demand_quantity)?,
+                    backordered.checked_add(line.backordered_quantity)?,
                     demand.checked_add(line.demand_quantity.get())?,
                     reserved.checked_add(line.reserved_quantity)?,
                     allocated.checked_add(line.allocated_quantity)?,
@@ -249,6 +267,8 @@ pub(super) fn line_state_totals(lines: &[OrderAllocationLineState]) -> AppResult
         .checked_sub(allocated_quantity)
         .ok_or_else(|| AppError::internal("allocated quantity exceeds order demand"))?;
     Ok(AllocationTotals {
+        original_demand_quantity,
+        backordered_quantity,
         demand_quantity,
         reserved_quantity,
         allocated_quantity,

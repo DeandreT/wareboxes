@@ -69,7 +69,8 @@ pub async fn policy_page(
                 WHERE task.tenant_id=policy.tenant_id AND task.policy_id=policy.id
                   AND task.closed_at IS NULL) AS active_inbound,
                (SELECT COALESCE(sum(GREATEST(
-                    reservation.qty-COALESCE(disposition.accepted,0)-COALESCE(allocation.allocated,0),0
+                    reservation.qty-COALESCE(disposition.accepted,0)
+                      -COALESCE(backorder.qty,0)-COALESCE(allocation.allocated,0),0
                   )),0)::bigint
                 FROM inventory_reservations reservation
                 LEFT JOIN LATERAL (SELECT sum(value.accepted_short_qty)::bigint accepted
@@ -77,6 +78,12 @@ pub async fn policy_page(
                   WHERE value.tenant_id=reservation.tenant_id
                     AND value.inventory_owner_id=reservation.inventory_owner_id
                     AND value.reservation_id=reservation.id) disposition ON true
+                LEFT JOIN LATERAL (SELECT sum(value.newly_backordered_qty)::bigint qty
+                  FROM order_backorder_split_lines value
+                  WHERE value.tenant_id=reservation.tenant_id
+                    AND value.inventory_owner_id=reservation.inventory_owner_id
+                    AND value.parent_order_id=reservation.order_id
+                    AND value.parent_order_item_id=reservation.order_item_id) backorder ON true
                 LEFT JOIN LATERAL (SELECT sum(value.qty)::bigint allocated
                   FROM inventory_allocations value
                   WHERE value.tenant_id=reservation.tenant_id

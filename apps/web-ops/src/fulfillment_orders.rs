@@ -86,6 +86,7 @@ pub fn OrdersWorkbench(
     let pending = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let selected = RwSignal::new(None::<Order>);
+    let detail_tab = RwSignal::new(OrderDetailTab::Header);
     let selected_pending = RwSignal::new(false);
     let selected_error = RwSignal::new(None::<String>);
     let create_open = RwSignal::new(false);
@@ -142,6 +143,9 @@ pub fn OrdersWorkbench(
     let open_order = move |order_id: i64| {
         layout.show_detail();
         create_open.set(false);
+        if selected.get_untracked().as_ref().map(|order| order.id) != Some(order_id) {
+            detail_tab.set(OrderDetailTab::Header);
+        }
         request_order_detail(
             order_id,
             selected,
@@ -174,6 +178,7 @@ pub fn OrdersWorkbench(
 
     let created = Callback::new(move |order_id: i64| {
         create_open.set(false);
+        detail_tab.set(OrderDetailTab::Header);
         request_order_detail(
             order_id,
             selected,
@@ -413,6 +418,7 @@ pub fn OrdersWorkbench(
                                             view! {
                                                 <OrderDetailPanel
                                                     order
+                                                    tab=detail_tab
                                                     facilities=detail_facilities.get_value()
                                                     locations=detail_locations.get_value()
                                                     pending=selected_pending

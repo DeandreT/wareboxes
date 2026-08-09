@@ -1,5 +1,6 @@
 //! Version 1 public API primitives.
 
+mod backorder;
 mod cursor;
 mod cycle_count;
 mod error;
@@ -30,6 +31,11 @@ mod rf_session;
 mod shipping;
 mod shipping_queue;
 
+pub use backorder::{
+    BackorderPolicyMode, BackorderPolicyRequest, BackorderPolicyResponse, BackorderReason,
+    BackorderSplitLineResponse, ConfigureBackorderPolicyRequest, SplitOrderBackorderRequest,
+    SplitOrderBackorderResponse,
+};
 pub use cursor::{
     CursorPage, CursorPageRequest, OpaqueCursor, OpaqueCursorError, PageLimit, PageLimitError,
     DEFAULT_PAGE_LIMIT, MAX_CURSOR_LENGTH, MAX_PAGE_LIMIT,

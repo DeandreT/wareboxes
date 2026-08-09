@@ -353,6 +353,15 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         ("addresses", "addresses_tenant_isolation"),
         ("orders", "orders_tenant_isolation"),
         ("order_items", "order_items_tenant_isolation"),
+        ("backorder_policies", "backorder_policies_tenant_isolation"),
+        (
+            "order_backorder_splits",
+            "order_backorder_splits_tenant_isolation",
+        ),
+        (
+            "order_backorder_split_lines",
+            "order_backorder_split_lines_tenant_isolation",
+        ),
         ("outbox_event_keys", "outbox_event_keys_tenant_isolation"),
         (
             "outbox_aggregate_sequences",

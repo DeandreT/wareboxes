@@ -8,6 +8,8 @@ use wareboxes_domain::{
     OrderRevision, Timestamp,
 };
 
+use crate::backorder::BackorderPolicyReadModel;
+
 /// Stable idempotency operation for the first order allocation command schema.
 pub const ORDER_ALLOCATION_OPERATION: &str = "order.allocate.v1";
 
@@ -49,6 +51,8 @@ pub struct OrderAllocationLineState {
     pub item_id: i64,
     pub item_description: Option<String>,
     pub uom: String,
+    pub original_demand_quantity: i64,
+    pub backordered_quantity: i64,
     pub demand_quantity: AllocationQuantity,
     pub reservation_id: Option<InventoryReservationId>,
     pub reserved_quantity: i64,
@@ -61,7 +65,11 @@ pub struct OrderAllocationLineState {
 impl OrderAllocationLineState {
     /// Checks the quantity conservation required of repository projections.
     pub fn quantities_are_consistent(&self) -> bool {
-        self.reserved_quantity >= 0
+        self.original_demand_quantity > 0
+            && self.backordered_quantity >= 0
+            && self.original_demand_quantity
+                == self.demand_quantity.get() + self.backordered_quantity
+            && self.reserved_quantity >= 0
             && self.reserved_quantity <= self.demand_quantity.get()
             && self.allocated_quantity >= 0
             && self.allocated_quantity <= self.reserved_quantity
@@ -88,6 +96,8 @@ pub struct PlanOrderAllocationResult {
     pub outcome: AllocationOutcome,
     pub revision: OrderRevision,
     pub newly_allocated_quantity: i64,
+    pub original_demand_quantity: i64,
+    pub backordered_quantity: i64,
     pub demand_quantity: i64,
     pub allocated_quantity: i64,
     pub shortage_quantity: i64,
@@ -97,6 +107,9 @@ pub struct PlanOrderAllocationResult {
 impl PlanOrderAllocationResult {
     pub fn quantities_are_consistent(&self) -> bool {
         if self.newly_allocated_quantity < 0
+            || self.original_demand_quantity <= 0
+            || self.backordered_quantity < 0
+            || self.original_demand_quantity != self.demand_quantity + self.backordered_quantity
             || self.demand_quantity <= 0
             || self.allocated_quantity < 0
             || self.shortage_quantity < 0
@@ -110,9 +123,11 @@ impl PlanOrderAllocationResult {
         }
 
         let totals = self.lines.iter().try_fold(
-            (0_i64, 0_i64, 0_i64),
-            |(demand, allocated, shortage), line| {
+            (0_i64, 0_i64, 0_i64, 0_i64, 0_i64),
+            |(original, backordered, demand, allocated, shortage), line| {
                 Some((
+                    original.checked_add(line.original_demand_quantity)?,
+                    backordered.checked_add(line.backordered_quantity)?,
                     demand.checked_add(line.demand_quantity.get())?,
                     allocated.checked_add(line.allocated_quantity)?,
                     shortage.checked_add(line.shortage_quantity)?,
@@ -121,6 +136,8 @@ impl PlanOrderAllocationResult {
         );
         totals
             == Some((
+                self.original_demand_quantity,
+                self.backordered_quantity,
                 self.demand_quantity,
                 self.allocated_quantity,
                 self.shortage_quantity,
@@ -158,11 +175,14 @@ pub struct OrderAllocationReadinessReadModel {
     pub order_key: String,
     pub facility_id: FacilityId,
     pub eligible_facilities: Vec<OrderAllocationFacilityReadModel>,
+    pub backorder_policy: Option<BackorderPolicyReadModel>,
     pub revision: OrderRevision,
     pub status: OrderAllocationReadinessStatus,
     pub blocking_reasons: Vec<OrderAllocationReadinessBlocker>,
     pub strategy: AllocationStrategy,
     pub outcome: AllocationOutcome,
+    pub original_demand_quantity: i64,
+    pub backordered_quantity: i64,
     pub demand_quantity: i64,
     pub reserved_quantity: i64,
     pub allocated_quantity: i64,
@@ -172,7 +192,10 @@ pub struct OrderAllocationReadinessReadModel {
 
 impl OrderAllocationReadinessReadModel {
     pub fn quantities_are_consistent(&self) -> bool {
-        self.demand_quantity > 0
+        self.original_demand_quantity > 0
+            && self.backordered_quantity >= 0
+            && self.original_demand_quantity == self.demand_quantity + self.backordered_quantity
+            && self.demand_quantity > 0
             && self.reserved_quantity >= 0
             && self.reserved_quantity <= self.demand_quantity
             && self.allocated_quantity >= 0
@@ -198,6 +221,8 @@ mod tests {
             item_id: 41,
             item_description: Some("Case-picked item".into()),
             uom: "case".into(),
+            original_demand_quantity: 8,
+            backordered_quantity: 0,
             demand_quantity: AllocationQuantity::new(8).unwrap(),
             reservation_id: Some(InventoryReservationId::new(22).unwrap()),
             reserved_quantity: 8,
@@ -256,6 +281,8 @@ mod tests {
             outcome: AllocationOutcome::PartiallyAllocated,
             revision: OrderRevision::new(4).unwrap(),
             newly_allocated_quantity: 5,
+            original_demand_quantity: 8,
+            backordered_quantity: 0,
             demand_quantity: 8,
             allocated_quantity: 5,
             shortage_quantity: 3,

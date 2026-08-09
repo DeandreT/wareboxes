@@ -120,14 +120,19 @@ pub(super) async fn lock_order_lines_tx(
 ) -> AppResult<Vec<LockedOrderLine>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, line_key, item_id, uom, qty
-        FROM order_items
-        WHERE tenant_id = $1
-          AND inventory_owner_id = $2
-          AND order_id = $3
-          AND deleted IS NULL
-        ORDER BY line_number, id
-        FOR UPDATE
+        SELECT line.id, line.line_key, line.item_id, line.uom,
+               line.qty AS original_qty, demand.backordered_qty, demand.effective_qty
+        FROM order_items line
+        INNER JOIN outbound_effective_demand demand
+          ON demand.tenant_id=line.tenant_id
+         AND demand.inventory_owner_id=line.inventory_owner_id
+         AND demand.order_id=line.order_id AND demand.order_item_id=line.id
+        WHERE line.tenant_id = $1
+          AND line.inventory_owner_id = $2
+          AND line.order_id = $3
+          AND line.deleted IS NULL
+        ORDER BY line.line_number, line.id
+        FOR UPDATE OF line
         "#,
     )
     .bind(tenant_id.get())
@@ -145,7 +150,7 @@ fn map_order_line(row: &sqlx::postgres::PgRow) -> AppResult<LockedOrderLine> {
         line_key: row.try_get("line_key")?,
         item_id: row.try_get("item_id")?,
         uom: row.try_get("uom")?,
-        quantity: AllocationQuantity::new(row.try_get("qty")?)
+        quantity: AllocationQuantity::new(row.try_get("effective_qty")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
     })
 }
@@ -184,15 +189,24 @@ pub(super) async fn lock_active_reservations_tx(
 ) -> AppResult<HashMap<i64, ActiveReservation>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, order_item_id, facility_id, qty
-        FROM inventory_reservations
-        WHERE tenant_id = $1
-          AND inventory_owner_id = $2
-          AND order_id = $3
-          AND deleted IS NULL
-          AND status = 'active'
-        ORDER BY order_item_id, facility_id, id
-        FOR UPDATE
+        SELECT reservation.id, reservation.order_item_id, reservation.facility_id,
+               reservation.qty - COALESCE(backorder.qty, 0) AS effective_qty
+        FROM inventory_reservations reservation
+        LEFT JOIN LATERAL (
+          SELECT SUM(split_line.newly_backordered_qty)::bigint AS qty
+          FROM order_backorder_split_lines split_line
+          WHERE split_line.tenant_id=reservation.tenant_id
+            AND split_line.inventory_owner_id=reservation.inventory_owner_id
+            AND split_line.parent_order_id=reservation.order_id
+            AND split_line.parent_order_item_id=reservation.order_item_id
+        ) backorder ON true
+        WHERE reservation.tenant_id = $1
+          AND reservation.inventory_owner_id = $2
+          AND reservation.order_id = $3
+          AND reservation.deleted IS NULL
+          AND reservation.status = 'active'
+        ORDER BY reservation.order_item_id, reservation.facility_id, reservation.id
+        FOR UPDATE OF reservation
         "#,
     )
     .bind(tenant_id.get())
@@ -209,7 +223,7 @@ pub(super) async fn lock_active_reservations_tx(
                 .map_err(|error| AppError::internal(error.to_string()))?,
             facility_id: FacilityId::new(row.try_get("facility_id")?)
                 .map_err(|error| AppError::internal(error.to_string()))?,
-            quantity: AllocationQuantity::new(row.try_get("qty")?)
+            quantity: AllocationQuantity::new(row.try_get("effective_qty")?)
                 .map_err(|error| AppError::internal(error.to_string()))?,
             allocated_quantity: 0,
         };

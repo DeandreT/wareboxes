@@ -1,5 +1,6 @@
 //! Version 1 public HTTP routes.
 
+mod backorders;
 mod cycle_count;
 mod error;
 mod expected_receiving;
@@ -228,6 +229,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/orders/{order_id}/allocation-runs",
             post(order_allocations::plan),
+        )
+        .route(
+            "/backorder-policies",
+            get(backorders::get_policy).post(backorders::configure_policy),
+        )
+        .route(
+            "/orders/{order_id}/backorder-splits",
+            post(backorders::split_shortage),
         )
         .route(
             "/orders/{order_id}/allocation-readiness",

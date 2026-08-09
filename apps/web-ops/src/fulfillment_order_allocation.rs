@@ -13,6 +13,9 @@ use crate::components::{Icon, UiIcon};
 use crate::toast::use_toast_bus;
 use crate::view_model::format_quantity;
 
+mod backorder;
+use backorder::BackorderControls;
+
 type AllocationRetry = (PlanOrderAllocationRequest, String);
 type ReleaseRetry = (ReleaseOrderRequest, String);
 
@@ -61,6 +64,10 @@ pub(super) fn OrderAllocationPanel(
         request_generation,
         on_unauthorized,
     };
+    let backorder_changed = Callback::new(move |selected_facility: i64| {
+        on_refreshed.run(order_id);
+        request_readiness(order_id, selected_facility, readiness_state);
+    });
 
     Effect::new(move |_| {
         let selected_facility = facility_id.get();
@@ -331,6 +338,15 @@ pub(super) fn OrderAllocationPanel(
                 </p>
             </Show>
 
+            <BackorderControls
+                order_id
+                readiness
+                allocation_pending=command_pending
+                release_pending
+                on_changed=backorder_changed
+                on_unauthorized
+            />
+
             <Show when=move || {
                 release_retry.get().is_some()
                     || readiness.get().is_some_and(|state| {
@@ -432,6 +448,7 @@ fn AllocationReadiness(state: OrderAllocationReadinessResponse) -> impl IntoView
     let blocking_reasons = state.blocking_reasons.clone();
     let lines = state.lines.clone();
     let has_shortage = state.shortage_quantity > 0;
+    let has_backorder = state.backordered_quantity > 0;
     let blocker_view = if blocking_reasons.is_empty() {
         ().into_any()
     } else {
@@ -455,7 +472,9 @@ fn AllocationReadiness(state: OrderAllocationReadinessResponse) -> impl IntoView
         </div>
         {blocker_view}
         <dl class="allocation-totals">
-            <div><dt>"Requested"</dt><dd>{format_quantity(state.demand_quantity)}</dd></div>
+            <div><dt>"Original"</dt><dd>{format_quantity(state.original_demand_quantity)}</dd></div>
+            <div class:backordered=has_backorder><dt>"Backordered"</dt><dd>{format_quantity(state.backordered_quantity)}</dd></div>
+            <div><dt>"Demand"</dt><dd>{format_quantity(state.demand_quantity)}</dd></div>
             <div><dt>"Reserved"</dt><dd>{format_quantity(state.reserved_quantity)}</dd></div>
             <div><dt>"Allocated"</dt><dd>{format_quantity(state.allocated_quantity)}</dd></div>
             <div class:short=has_shortage>
@@ -469,7 +488,9 @@ fn AllocationReadiness(state: OrderAllocationReadinessResponse) -> impl IntoView
                     <tr>
                         <th>"Line"</th>
                         <th>"Item / UOM"</th>
-                        <th class="numeric">"Req."</th>
+                        <th class="numeric">"Orig."</th>
+                        <th class="numeric">"B/O"</th>
+                        <th class="numeric">"Demand"</th>
                         <th class="numeric">"Res."</th>
                         <th class="numeric">"Alloc."</th>
                         <th class="numeric">"Short"</th>
@@ -511,6 +532,8 @@ fn allocation_line_view(line: OrderAllocationLineResponse) -> impl IntoView {
                     <strong title=item_label.clone()>{item_label.clone()}</strong>
                     <small class="cell-detail">{format!("Item #{} / {}", line.item_id, line.uom)}</small>
                 </td>
+                <td class="numeric">{format_quantity(line.original_demand_quantity)}</td>
+                <td class="numeric allocation-backordered">{format_quantity(line.backordered_quantity)}</td>
                 <td class="numeric">{format_quantity(line.demand_quantity)}</td>
                 <td class="numeric">{format_quantity(line.reserved_quantity)}</td>
                 <td class="numeric strong">{format_quantity(line.allocated_quantity)}</td>
@@ -519,7 +542,7 @@ fn allocation_line_view(line: OrderAllocationLineResponse) -> impl IntoView {
                 </td>
             </tr>
             <tr class="allocation-source-row">
-                <td colspan="6">
+                <td colspan="8">
                     {if allocations.is_empty() {
                         view! { <span class="allocation-no-source">{no_source_label}</span> }.into_any()
                     } else {

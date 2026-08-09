@@ -382,6 +382,18 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'pick_shortages_tenant_isolation'
                 ),
                 (
+                    'backorder_policies',
+                    'backorder_policies_tenant_isolation'
+                ),
+                (
+                    'order_backorder_splits',
+                    'order_backorder_splits_tenant_isolation'
+                ),
+                (
+                    'order_backorder_split_lines',
+                    'order_backorder_split_lines_tenant_isolation'
+                ),
+                (
                     'outbound_order_containers',
                     'outbound_order_containers_tenant_isolation'
                 ),

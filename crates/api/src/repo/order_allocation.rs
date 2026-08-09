@@ -154,6 +154,8 @@ struct PlannedLine {
 
 #[derive(Debug, Clone, Copy)]
 struct AllocationTotals {
+    original_demand_quantity: i64,
+    backordered_quantity: i64,
     demand_quantity: i64,
     reserved_quantity: i64,
     allocated_quantity: i64,
@@ -388,6 +390,16 @@ pub async fn plan_order_allocation(
         outcome,
         revision: resulting_revision,
         newly_allocated_quantity,
+        original_demand_quantity: lines
+            .iter()
+            .map(|line| line.original_demand_quantity)
+            .try_fold(0_i64, i64::checked_add)
+            .ok_or_else(|| AppError::internal("original order demand exceeds i64"))?,
+        backordered_quantity: lines
+            .iter()
+            .map(|line| line.backordered_quantity)
+            .try_fold(0_i64, i64::checked_add)
+            .ok_or_else(|| AppError::internal("backordered order demand exceeds i64"))?,
         demand_quantity,
         allocated_quantity,
         shortage_quantity,
@@ -451,6 +463,25 @@ pub async fn order_allocation_readiness(
         return Err(AppError::internal("order has no active demand lines"));
     }
     let totals = line_state_totals(&lines)?;
+    let backorder_policy = crate::repo::backorder::active_policy_tx(
+        &mut tx,
+        access.tenant_id,
+        order.inventory_owner_id,
+        facility_id,
+        false,
+    )
+    .await?
+    .map(
+        |policy| wareboxes_application::backorder::BackorderPolicyReadModel {
+            policy_id: policy.policy_id,
+            inventory_owner_id: order.inventory_owner_id,
+            facility_id,
+            mode: policy.mode,
+            revision: policy.revision,
+            configured_by: policy.configured_by,
+            configured_at: policy.configured_at,
+        },
+    );
     let remaining_quantity_u64 = u64::try_from(totals.shortage_quantity)
         .map_err(|_| AppError::internal("remaining order quantity is invalid"))?;
     let active_hold_count_u64 = u64::try_from(active_hold_count)
@@ -492,11 +523,14 @@ pub async fn order_allocation_readiness(
         order_key: order.order_key,
         facility_id,
         eligible_facilities,
+        backorder_policy,
         revision: order.revision,
         status,
         blocking_reasons,
         strategy: AllocationStrategy::Fefo,
         outcome: totals.outcome,
+        original_demand_quantity: totals.original_demand_quantity,
+        backordered_quantity: totals.backordered_quantity,
         demand_quantity: totals.demand_quantity,
         reserved_quantity: totals.reserved_quantity,
         allocated_quantity: totals.allocated_quantity,

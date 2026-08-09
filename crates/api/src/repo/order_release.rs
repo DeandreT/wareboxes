@@ -359,11 +359,15 @@ async fn lock_demand_lines_tx(
 ) -> AppResult<Vec<DemandLine>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, qty, item_id, uom
-        FROM order_items
-        WHERE tenant_id = $1 AND inventory_owner_id = $2
-          AND order_id = $3 AND deleted IS NULL
-        ORDER BY line_number, id FOR SHARE
+        SELECT line.id, demand.effective_qty AS qty, line.item_id, line.uom
+        FROM order_items line
+        INNER JOIN outbound_effective_demand demand
+          ON demand.tenant_id=line.tenant_id
+         AND demand.inventory_owner_id=line.inventory_owner_id
+         AND demand.order_id=line.order_id AND demand.order_item_id=line.id
+        WHERE line.tenant_id = $1 AND line.inventory_owner_id = $2
+          AND line.order_id = $3 AND line.deleted IS NULL
+        ORDER BY line.line_number, line.id FOR SHARE OF line
         "#,
     )
     .bind(tenant_id.get())

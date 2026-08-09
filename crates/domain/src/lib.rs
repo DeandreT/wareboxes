@@ -1,6 +1,7 @@
 //! Domain identifiers and invariants shared across application boundaries.
 
 mod allocation;
+mod backorder;
 mod facility;
 mod order;
 mod order_amendment;
@@ -19,6 +20,11 @@ pub use allocation::{
     AllocationExecutionStage, AllocationOutcome, AllocationPlan, AllocationPlanError,
     AllocationQuantity, AllocationShortageReason, AllocationStrategy, OrderAllocationBlockReason,
     OrderAllocationReadiness, OrderRevision, PlannedAllocation,
+};
+pub use backorder::{
+    split_current_allocation_shortage, BackorderDetails, BackorderError, BackorderLineSnapshot,
+    BackorderNote, BackorderPolicyMode, BackorderPolicyRevision, BackorderReason,
+    BackorderSplitLineTransition, BackorderSplitTransition, MAX_BACKORDER_NOTE_LENGTH,
 };
 pub use facility::{
     FacilityRevision, FacilityShippingOrigin, FacilityShippingOriginError,
@@ -175,6 +181,8 @@ positive_id!(OrderId, "order ID");
 positive_id!(OrderLineId, "order line ID");
 positive_id!(OrderAmendmentId, "order amendment ID");
 positive_id!(OrderCancellationId, "order cancellation ID");
+positive_id!(BackorderPolicyId, "backorder policy ID");
+positive_id!(BackorderSplitId, "backorder split ID");
 positive_id!(OrderReleaseId, "order release ID");
 positive_id!(PickTaskId, "pick task ID");
 positive_id!(PickContentId, "pick content ID");

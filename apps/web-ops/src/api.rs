@@ -29,6 +29,9 @@ use wareboxes_api_contract::v1::{
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 use wareboxes_core::dto::{OrderPage, WebSessionContext};
 
+mod backorder;
+pub use backorder::{configure_backorder_policy, split_order_backorder};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiError {
     pub message: String,
@@ -608,7 +611,7 @@ mod browser {
         decode(Request::get(&url(path)).send().await).await
     }
 
-    async fn post<TRequest, TResponse>(
+    pub(super) async fn post<TRequest, TResponse>(
         path: &str,
         body: &TRequest,
         idempotency_key: &str,

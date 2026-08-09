@@ -1279,6 +1279,7 @@ BEGIN
         GREATEST(
             reservation.qty
             - COALESCE(disposition.accepted_short_qty, 0)
+            - COALESCE(backorder.backordered_qty, 0)
             - COALESCE(allocation.allocated_qty, 0),
             0
         )
@@ -1292,6 +1293,14 @@ BEGIN
           AND accepted.inventory_owner_id = reservation.inventory_owner_id
           AND accepted.reservation_id = reservation.id
     ) disposition ON true
+    LEFT JOIN LATERAL (
+        SELECT sum(split_line.newly_backordered_qty)::bigint AS backordered_qty
+        FROM public.order_backorder_split_lines split_line
+        WHERE split_line.tenant_id = reservation.tenant_id
+          AND split_line.inventory_owner_id = reservation.inventory_owner_id
+          AND split_line.parent_order_id = reservation.order_id
+          AND split_line.parent_order_item_id = reservation.order_item_id
+    ) backorder ON true
     LEFT JOIN LATERAL (
         SELECT sum(current_allocation.qty)::bigint AS allocated_qty
         FROM public.inventory_allocations current_allocation
@@ -5276,6 +5285,14 @@ BEGIN
                    AND disposition.order_id = reservation.order_id
                    AND disposition.order_item_id = reservation.order_item_id
                    AND disposition.reservation_id = reservation.id
+             ) + (
+                 SELECT COALESCE(SUM(split_line.newly_backordered_qty), 0)::BIGINT
+                 FROM public.order_backorder_split_lines split_line
+                 WHERE split_line.tenant_id = reservation.tenant_id
+                   AND split_line.inventory_owner_id = reservation.inventory_owner_id
+                   AND split_line.facility_id = reservation.facility_id
+                   AND split_line.parent_order_id = reservation.order_id
+                   AND split_line.parent_order_item_id = reservation.order_item_id
              )
        )
        OR EXISTS (
@@ -6967,6 +6984,8 @@ DECLARE
     previously_accepted_order_qty BIGINT;
     previously_accepted_line_qty BIGINT;
     previously_accepted_reservation_qty BIGINT;
+    backordered_order_qty BIGINT;
+    backordered_line_qty BIGINT;
 BEGIN
     SELECT order_header.status, order_header.revision
     INTO order_status, order_revision
@@ -7088,12 +7107,24 @@ BEGIN
       AND disposition.inventory_owner_id = NEW.inventory_owner_id
       AND disposition.order_id = NEW.order_id;
 
-    IF original_order_qty - previously_accepted_order_qty - NEW.accepted_short_qty <= 0 THEN
+    SELECT COALESCE(SUM(split_line.newly_backordered_qty), 0)::BIGINT,
+           COALESCE(SUM(split_line.newly_backordered_qty) FILTER (
+               WHERE split_line.parent_order_item_id = NEW.order_item_id
+           ), 0)::BIGINT
+    INTO backordered_order_qty, backordered_line_qty
+    FROM public.order_backorder_split_lines split_line
+    WHERE split_line.tenant_id = NEW.tenant_id
+      AND split_line.inventory_owner_id = NEW.inventory_owner_id
+      AND split_line.parent_order_id = NEW.order_id;
+
+    IF original_order_qty - backordered_order_qty
+       - previously_accepted_order_qty - NEW.accepted_short_qty <= 0 THEN
         RAISE EXCEPTION 'short-ship disposition cannot reduce order effective demand to zero'
             USING ERRCODE = '55000';
     END IF;
 
-    IF original_line_qty - previously_accepted_line_qty - NEW.accepted_short_qty < 0
+    IF original_line_qty - backordered_line_qty
+           - previously_accepted_line_qty - NEW.accepted_short_qty < 0
        OR reservation_qty - previously_accepted_reservation_qty - NEW.accepted_short_qty < 0
     THEN
         RAISE EXCEPTION 'accepted short quantity exceeds original line or reservation demand'
@@ -8611,6 +8642,7 @@ CREATE FUNCTION public.require_fulfilled_reservation_effective_demand() RETURNS 
 DECLARE
     packed_qty BIGINT;
     accepted_short_qty BIGINT;
+    backordered_qty BIGINT;
 BEGIN
     IF NEW.status <> 'fulfilled' THEN
         RETURN NEW;
@@ -8645,8 +8677,17 @@ BEGIN
       AND disposition.order_item_id = NEW.order_item_id
       AND disposition.reservation_id = NEW.id;
 
+    SELECT COALESCE(SUM(split_line.newly_backordered_qty), 0)::BIGINT
+    INTO backordered_qty
+    FROM public.order_backorder_split_lines split_line
+    WHERE split_line.tenant_id = NEW.tenant_id
+      AND split_line.inventory_owner_id = NEW.inventory_owner_id
+      AND split_line.facility_id = NEW.facility_id
+      AND split_line.parent_order_id = NEW.order_id
+      AND split_line.parent_order_item_id = NEW.order_item_id;
+
     IF NEW.deleted IS DISTINCT FROM NEW.modified
-       OR packed_qty + accepted_short_qty <> NEW.qty
+       OR packed_qty + accepted_short_qty + backordered_qty <> NEW.qty
        OR NOT EXISTS (
            SELECT 1
            FROM public.orders order_header
@@ -27456,6 +27497,443 @@ REVOKE ALL ON FUNCTION public.validate_outbound_qa_completion() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_outbound_qa_evidence_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_outbound_qa_session_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_outbound_qa_before_shipment() FROM PUBLIC;
+
+-- Versioned pre-release backorder policy and immutable parent/child demand lineage.
+CREATE TABLE public.backorder_policies (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    mode text NOT NULL CHECK (mode IN ('block', 'split_shortage')),
+    revision bigint NOT NULL CHECK (revision > 0),
+    supersedes_policy_id bigint,
+    effective_from timestamptz NOT NULL,
+    effective_to timestamptz,
+    configured_by_user_id bigint NOT NULL,
+    configured_at timestamptz NOT NULL,
+    CHECK (configured_at = effective_from),
+    CHECK (effective_to IS NULL OR effective_to > effective_from),
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, id),
+    FOREIGN KEY (tenant_id) REFERENCES public.tenants(id),
+    FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities(tenant_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id)
+        REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id),
+    FOREIGN KEY (tenant_id, configured_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, supersedes_policy_id)
+        REFERENCES public.backorder_policies(tenant_id, inventory_owner_id, facility_id, id)
+);
+ALTER TABLE public.backorder_policies FORCE ROW LEVEL SECURITY;
+CREATE UNIQUE INDEX backorder_policies_active_scope_key
+ON public.backorder_policies (tenant_id, inventory_owner_id, facility_id)
+WHERE effective_to IS NULL;
+
+CREATE TABLE public.order_backorder_splits (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    policy_id bigint NOT NULL,
+    policy_revision bigint NOT NULL CHECK (policy_revision > 0),
+    parent_order_id bigint NOT NULL,
+    child_order_id bigint NOT NULL,
+    expected_parent_revision bigint NOT NULL CHECK (expected_parent_revision > 0),
+    resulting_parent_revision bigint NOT NULL,
+    child_revision bigint NOT NULL CHECK (child_revision = 1),
+    line_count bigint NOT NULL CHECK (line_count > 0),
+    original_qty bigint NOT NULL CHECK (original_qty > 0),
+    allocated_qty bigint NOT NULL CHECK (allocated_qty >= 0),
+    previously_backordered_qty bigint NOT NULL CHECK (previously_backordered_qty >= 0),
+    newly_backordered_qty bigint NOT NULL CHECK (newly_backordered_qty > 0),
+    parent_effective_qty bigint NOT NULL CHECK (parent_effective_qty > 0),
+    reason_code text NOT NULL CHECK (
+        reason_code IN ('inventory_unavailable', 'client_requested', 'service_level', 'other')),
+    note text,
+    split_by_user_id bigint NOT NULL,
+    split_at timestamptz NOT NULL,
+    CHECK (resulting_parent_revision = expected_parent_revision + 1),
+    CHECK (original_qty = allocated_qty + previously_backordered_qty + newly_backordered_qty),
+    CHECK (reason_code <> 'other' OR note IS NOT NULL),
+    CHECK (note IS NULL OR (
+        note = btrim(note) AND note <> '' AND char_length(note) <= 500)),
+    CHECK (parent_order_id <> child_order_id),
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, child_order_id),
+    UNIQUE (tenant_id, inventory_owner_id, parent_order_id, expected_parent_revision),
+    FOREIGN KEY (tenant_id) REFERENCES public.tenants(id),
+    FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities(tenant_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id)
+        REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, policy_id)
+        REFERENCES public.backorder_policies(tenant_id, inventory_owner_id, facility_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, parent_order_id)
+        REFERENCES public.orders(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, child_order_id)
+        REFERENCES public.orders(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, split_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id)
+);
+ALTER TABLE public.order_backorder_splits FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE public.order_backorder_split_lines (
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    backorder_split_id bigint NOT NULL,
+    parent_order_id bigint NOT NULL,
+    child_order_id bigint NOT NULL,
+    parent_order_item_id bigint NOT NULL,
+    child_order_item_id bigint NOT NULL,
+    line_key text NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    original_qty bigint NOT NULL CHECK (original_qty > 0),
+    allocated_qty bigint NOT NULL CHECK (allocated_qty >= 0),
+    previously_backordered_qty bigint NOT NULL CHECK (previously_backordered_qty >= 0),
+    newly_backordered_qty bigint NOT NULL CHECK (newly_backordered_qty > 0),
+    resulting_parent_qty bigint NOT NULL CHECK (resulting_parent_qty >= 0),
+    CHECK (line_key = btrim(line_key) AND line_key <> '' AND char_length(line_key) <= 200),
+    CHECK (uom = btrim(uom) AND uom <> '' AND char_length(uom) <= 32),
+    CHECK (resulting_parent_qty = allocated_qty),
+    CHECK (original_qty = allocated_qty + previously_backordered_qty + newly_backordered_qty),
+    PRIMARY KEY (tenant_id, backorder_split_id, parent_order_item_id),
+    UNIQUE (tenant_id, inventory_owner_id, child_order_id, child_order_item_id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, backorder_split_id)
+        REFERENCES public.order_backorder_splits(tenant_id, inventory_owner_id, facility_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, parent_order_id, parent_order_item_id)
+        REFERENCES public.order_items(tenant_id, inventory_owner_id, order_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, child_order_id, child_order_item_id)
+        REFERENCES public.order_items(tenant_id, inventory_owner_id, order_id, id),
+    FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id)
+);
+ALTER TABLE public.order_backorder_split_lines FORCE ROW LEVEL SECURITY;
+CREATE INDEX order_backorder_split_lines_parent_demand_idx
+ON public.order_backorder_split_lines
+    (tenant_id, inventory_owner_id, parent_order_id, parent_order_item_id);
+
+CREATE OR REPLACE VIEW public.outbound_effective_demand
+WITH (security_invoker='true') AS
+SELECT order_line.tenant_id,
+       order_line.inventory_owner_id,
+       order_line.order_id,
+       order_line.id AS order_item_id,
+       order_line.item_id,
+       order_line.uom,
+       (order_line.qty - COALESCE(backorder.backordered_qty, 0))::bigint AS original_qty,
+       COALESCE(short_ship.accepted_short_qty, 0)::bigint AS accepted_short_qty,
+       (order_line.qty - COALESCE(backorder.backordered_qty, 0)
+        - COALESCE(short_ship.accepted_short_qty, 0))::bigint AS effective_qty,
+       COALESCE(backorder.backordered_qty, 0)::bigint AS backordered_qty
+FROM public.order_items order_line
+LEFT JOIN (
+    SELECT split_line.tenant_id, split_line.inventory_owner_id,
+           split_line.parent_order_id AS order_id,
+           split_line.parent_order_item_id AS order_item_id,
+           SUM(split_line.newly_backordered_qty) AS backordered_qty
+    FROM public.order_backorder_split_lines split_line
+    GROUP BY split_line.tenant_id, split_line.inventory_owner_id,
+             split_line.parent_order_id, split_line.parent_order_item_id
+) backorder
+  ON backorder.tenant_id = order_line.tenant_id
+ AND backorder.inventory_owner_id = order_line.inventory_owner_id
+ AND backorder.order_id = order_line.order_id
+ AND backorder.order_item_id = order_line.id
+LEFT JOIN (
+    SELECT accepted.tenant_id, accepted.inventory_owner_id,
+           accepted.order_id, accepted.order_item_id,
+           SUM(accepted.accepted_short_qty) AS accepted_short_qty
+    FROM public.pick_short_ship_dispositions accepted
+    GROUP BY accepted.tenant_id, accepted.inventory_owner_id,
+             accepted.order_id, accepted.order_item_id
+) short_ship
+  ON short_ship.tenant_id = order_line.tenant_id
+ AND short_ship.inventory_owner_id = order_line.inventory_owner_id
+ AND short_ship.order_id = order_line.order_id
+ AND short_ship.order_item_id = order_line.id
+WHERE order_line.deleted IS NULL;
+
+CREATE FUNCTION public.validate_backorder_policy() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+DECLARE predecessor public.backorder_policies%ROWTYPE;
+BEGIN
+    IF NEW.supersedes_policy_id IS NULL THEN
+        IF NEW.revision <> 1 THEN
+            RAISE EXCEPTION 'initial backorder policy revision must be one'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        SELECT * INTO predecessor FROM public.backorder_policies
+        WHERE tenant_id = NEW.tenant_id
+          AND inventory_owner_id = NEW.inventory_owner_id
+          AND facility_id = NEW.facility_id
+          AND id = NEW.supersedes_policy_id
+        FOR SHARE;
+        IF NOT FOUND OR predecessor.revision + 1 <> NEW.revision
+           OR predecessor.effective_to IS DISTINCT FROM NEW.effective_from THEN
+            RAISE EXCEPTION 'backorder policy predecessor does not reconcile'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_backorder_policy_mutation() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+BEGIN
+    IF TG_OP = 'DELETE' OR OLD.effective_to IS NOT NULL
+       OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.mode IS DISTINCT FROM OLD.mode
+       OR NEW.revision IS DISTINCT FROM OLD.revision
+       OR NEW.supersedes_policy_id IS DISTINCT FROM OLD.supersedes_policy_id
+       OR NEW.effective_from IS DISTINCT FROM OLD.effective_from
+       OR NEW.configured_by_user_id IS DISTINCT FROM OLD.configured_by_user_id
+       OR NEW.configured_at IS DISTINCT FROM OLD.configured_at
+       OR NEW.effective_to IS NULL OR NEW.effective_to <= OLD.effective_from
+    THEN
+        RAISE EXCEPTION 'backorder policy versions are immutable except retirement'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_order_backorder_split() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+DECLARE parent_row public.orders%ROWTYPE;
+DECLARE child_row public.orders%ROWTYPE;
+BEGIN
+    SELECT * INTO parent_row FROM public.orders
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND id = NEW.parent_order_id AND deleted IS NULL
+    FOR SHARE;
+    SELECT * INTO child_row FROM public.orders
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND id = NEW.child_order_id AND deleted IS NULL
+    FOR SHARE;
+    IF parent_row.id IS NULL OR parent_row.status <> 'open'
+       OR parent_row.revision <> NEW.resulting_parent_revision
+       OR child_row.id IS NULL OR child_row.status <> 'open'
+       OR child_row.revision <> NEW.child_revision
+       OR child_row.address_id <> parent_row.address_id
+       OR child_row.rush <> parent_row.rush
+       OR child_row.ship_by IS DISTINCT FROM parent_row.ship_by
+       OR NOT EXISTS (
+          SELECT 1 FROM public.backorder_policies policy
+          WHERE policy.tenant_id = NEW.tenant_id
+            AND policy.inventory_owner_id = NEW.inventory_owner_id
+            AND policy.facility_id = NEW.facility_id
+            AND policy.id = NEW.policy_id
+            AND policy.revision = NEW.policy_revision
+            AND policy.mode = 'split_shortage'
+            AND policy.effective_to IS NULL)
+       OR EXISTS (SELECT 1 FROM public.order_releases release
+                  WHERE release.tenant_id = NEW.tenant_id
+                    AND release.order_id = NEW.parent_order_id)
+       OR EXISTS (SELECT 1 FROM public.packing_sessions session
+                  WHERE session.tenant_id = NEW.tenant_id
+                    AND session.order_id = NEW.parent_order_id)
+       OR EXISTS (SELECT 1 FROM public.shipments shipment
+                  WHERE shipment.tenant_id = NEW.tenant_id
+                    AND shipment.order_id = NEW.parent_order_id)
+    THEN
+        RAISE EXCEPTION 'backorder split does not match an eligible open parent and child'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_order_backorder_split_line() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+DECLARE parent_line public.order_items%ROWTYPE;
+DECLARE child_line public.order_items%ROWTYPE;
+DECLARE allocated_value bigint;
+DECLARE previous_value bigint;
+DECLARE reservation_id_value bigint;
+DECLARE reservation_value bigint;
+BEGIN
+    SELECT * INTO parent_line FROM public.order_items
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND order_id = NEW.parent_order_id
+      AND id = NEW.parent_order_item_id AND deleted IS NULL
+    FOR SHARE;
+    SELECT * INTO child_line FROM public.order_items
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND order_id = NEW.child_order_id
+      AND id = NEW.child_order_item_id AND deleted IS NULL
+    FOR SHARE;
+    SELECT reservation.id, reservation.qty
+    INTO reservation_id_value, reservation_value
+    FROM public.inventory_reservations reservation
+    WHERE reservation.tenant_id = NEW.tenant_id
+      AND reservation.inventory_owner_id = NEW.inventory_owner_id
+      AND reservation.facility_id = NEW.facility_id
+      AND reservation.order_id = NEW.parent_order_id
+      AND reservation.order_item_id = NEW.parent_order_item_id
+      AND reservation.status = 'active' AND reservation.deleted IS NULL
+    FOR SHARE;
+    SELECT COALESCE(SUM(allocation.qty) FILTER (
+               WHERE allocation.status = 'allocated' AND allocation.deleted IS NULL), 0)::bigint
+    INTO allocated_value
+    FROM public.inventory_allocations allocation
+    WHERE allocation.tenant_id = NEW.tenant_id
+      AND allocation.inventory_owner_id = NEW.inventory_owner_id
+      AND allocation.reservation_id = reservation_id_value;
+    SELECT COALESCE(SUM(existing.newly_backordered_qty), 0)::bigint
+    INTO previous_value
+    FROM public.order_backorder_split_lines existing
+    WHERE existing.tenant_id = NEW.tenant_id
+      AND existing.inventory_owner_id = NEW.inventory_owner_id
+      AND existing.parent_order_id = NEW.parent_order_id
+      AND existing.parent_order_item_id = NEW.parent_order_item_id;
+    IF parent_line.id IS NULL OR child_line.id IS NULL
+       OR parent_line.qty <> NEW.original_qty
+       OR parent_line.line_key <> NEW.line_key
+       OR parent_line.item_id <> NEW.item_id OR parent_line.uom <> NEW.uom
+       OR child_line.line_key <> NEW.line_key
+       OR child_line.item_id <> NEW.item_id OR child_line.uom <> NEW.uom
+       OR child_line.qty <> NEW.newly_backordered_qty
+       OR reservation_value <> NEW.original_qty
+       OR allocated_value <> NEW.allocated_qty
+       OR previous_value <> NEW.previously_backordered_qty
+    THEN
+        RAISE EXCEPTION 'backorder split line does not conserve parent allocation and child demand'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.reject_order_backorder_evidence_mutation() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+BEGIN
+    RAISE EXCEPTION 'backorder split evidence is immutable' USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE FUNCTION public.require_order_backorder_split_consistency() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+DECLARE split_id_value bigint;
+DECLARE split_row public.order_backorder_splits%ROWTYPE;
+DECLARE counts record;
+BEGIN
+    IF TG_TABLE_NAME = 'order_backorder_splits' THEN
+        split_id_value := NEW.id;
+    ELSE
+        split_id_value := NEW.backorder_split_id;
+    END IF;
+    SELECT * INTO split_row FROM public.order_backorder_splits
+    WHERE tenant_id = NEW.tenant_id AND id = split_id_value;
+    SELECT COUNT(*)::bigint AS line_count,
+           COALESCE(SUM(original_qty), 0)::bigint AS original_qty,
+           COALESCE(SUM(allocated_qty), 0)::bigint AS allocated_qty,
+           COALESCE(SUM(previously_backordered_qty), 0)::bigint AS previous_qty,
+           COALESCE(SUM(newly_backordered_qty), 0)::bigint AS new_qty
+    INTO counts FROM public.order_backorder_split_lines
+    WHERE tenant_id = split_row.tenant_id
+      AND backorder_split_id = split_row.id;
+    IF split_row.id IS NULL
+       OR counts.line_count <> split_row.line_count
+       OR counts.original_qty <> split_row.original_qty
+       OR counts.allocated_qty <> split_row.allocated_qty
+       OR counts.previous_qty <> split_row.previously_backordered_qty
+       OR counts.new_qty <> split_row.newly_backordered_qty
+       OR (SELECT COALESCE(SUM(qty), 0)::bigint FROM public.order_items
+           WHERE tenant_id = split_row.tenant_id
+             AND inventory_owner_id = split_row.inventory_owner_id
+             AND order_id = split_row.child_order_id AND deleted IS NULL)
+          <> split_row.newly_backordered_qty
+       OR (SELECT COALESCE(SUM(effective_qty), 0)::bigint
+           FROM public.outbound_effective_demand demand
+           WHERE demand.tenant_id = split_row.tenant_id
+             AND demand.inventory_owner_id = split_row.inventory_owner_id
+             AND demand.order_id = split_row.parent_order_id)
+          <> split_row.parent_effective_qty
+       OR EXISTS (
+          SELECT 1 FROM public.outbound_effective_demand demand
+          WHERE demand.tenant_id = split_row.tenant_id
+            AND demand.inventory_owner_id = split_row.inventory_owner_id
+            AND demand.order_id = split_row.parent_order_id
+            AND demand.effective_qty <> (
+                SELECT COALESCE(SUM(allocation.qty), 0)::bigint
+                FROM public.inventory_allocations allocation
+                JOIN public.inventory_reservations reservation
+                  ON reservation.tenant_id = allocation.tenant_id
+                 AND reservation.inventory_owner_id = allocation.inventory_owner_id
+                 AND reservation.id = allocation.reservation_id
+                WHERE allocation.tenant_id = demand.tenant_id
+                  AND allocation.inventory_owner_id = demand.inventory_owner_id
+                  AND reservation.order_id = demand.order_id
+                  AND reservation.order_item_id = demand.order_item_id
+                  AND allocation.status = 'allocated' AND allocation.deleted IS NULL))
+    THEN
+        RAISE EXCEPTION 'backorder split header, lines, parent demand, and child demand do not reconcile'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER backorder_policies_validate BEFORE INSERT ON public.backorder_policies
+FOR EACH ROW EXECUTE FUNCTION public.validate_backorder_policy();
+CREATE TRIGGER backorder_policies_guard BEFORE DELETE OR UPDATE ON public.backorder_policies
+FOR EACH ROW EXECUTE FUNCTION public.guard_backorder_policy_mutation();
+CREATE TRIGGER order_backorder_splits_validate BEFORE INSERT ON public.order_backorder_splits
+FOR EACH ROW EXECUTE FUNCTION public.validate_order_backorder_split();
+CREATE TRIGGER order_backorder_splits_immutable BEFORE DELETE OR UPDATE ON public.order_backorder_splits
+FOR EACH ROW EXECUTE FUNCTION public.reject_order_backorder_evidence_mutation();
+CREATE CONSTRAINT TRIGGER order_backorder_splits_reconcile
+AFTER INSERT ON public.order_backorder_splits DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_order_backorder_split_consistency();
+CREATE TRIGGER order_backorder_split_lines_validate BEFORE INSERT ON public.order_backorder_split_lines
+FOR EACH ROW EXECUTE FUNCTION public.validate_order_backorder_split_line();
+CREATE TRIGGER order_backorder_split_lines_immutable BEFORE DELETE OR UPDATE ON public.order_backorder_split_lines
+FOR EACH ROW EXECUTE FUNCTION public.reject_order_backorder_evidence_mutation();
+CREATE CONSTRAINT TRIGGER order_backorder_split_lines_reconcile
+AFTER INSERT ON public.order_backorder_split_lines DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_order_backorder_split_consistency();
+
+ALTER TABLE public.backorder_policies ENABLE ROW LEVEL SECURITY;
+CREATE POLICY backorder_policies_tenant_isolation ON public.backorder_policies
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+ALTER TABLE public.order_backorder_splits ENABLE ROW LEVEL SECURITY;
+CREATE POLICY order_backorder_splits_tenant_isolation ON public.order_backorder_splits
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+ALTER TABLE public.order_backorder_split_lines ENABLE ROW LEVEL SECURITY;
+CREATE POLICY order_backorder_split_lines_tenant_isolation ON public.order_backorder_split_lines
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT, INSERT ON public.backorder_policies TO wareboxes_app;
+GRANT UPDATE (effective_to) ON public.backorder_policies TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.backorder_policies_id_seq TO wareboxes_app;
+GRANT SELECT, INSERT ON public.order_backorder_splits TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.order_backorder_splits_id_seq TO wareboxes_app;
+GRANT SELECT, INSERT ON public.order_backorder_split_lines TO wareboxes_app;
+
+REVOKE ALL ON FUNCTION public.validate_backorder_policy() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_backorder_policy_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_order_backorder_split() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_order_backorder_split_line() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_order_backorder_evidence_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_order_backorder_split_consistency() FROM PUBLIC;
 
 -- PostgreSQL database dump complete
 --

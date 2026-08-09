@@ -3,6 +3,7 @@ use super::*;
 #[component]
 pub(super) fn OrderDetailPanel(
     order: Order,
+    tab: RwSignal<OrderDetailTab>,
     facilities: Vec<AccessScopeResource>,
     locations: Vec<Location>,
     pending: RwSignal<bool>,
@@ -10,7 +11,6 @@ pub(super) fn OrderDetailPanel(
     on_refreshed: Callback<i64>,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
-    let tab = RwSignal::new(OrderDetailTab::Header);
     let order_id = order.id;
     let cancellation_order_key = StoredValue::new(order.order_key.clone());
     let rush = RwSignal::new(order.rush);

@@ -419,7 +419,8 @@ async fn lock_snapshot_tx(
     let unallocated: i64 = sqlx::query_scalar(
         r#"
         SELECT COALESCE(sum(GREATEST(
-          reservation.qty-COALESCE(disposition.accepted,0)-COALESCE(allocation.allocated,0),0
+          reservation.qty-COALESCE(disposition.accepted,0)
+            -COALESCE(backorder.qty,0)-COALESCE(allocation.allocated,0),0
         )),0)::bigint
         FROM inventory_reservations reservation
         LEFT JOIN LATERAL (
@@ -429,6 +430,14 @@ async fn lock_snapshot_tx(
             AND value.inventory_owner_id=reservation.inventory_owner_id
             AND value.reservation_id=reservation.id
         ) disposition ON true
+        LEFT JOIN LATERAL (
+          SELECT sum(value.newly_backordered_qty)::bigint qty
+          FROM order_backorder_split_lines value
+          WHERE value.tenant_id=reservation.tenant_id
+            AND value.inventory_owner_id=reservation.inventory_owner_id
+            AND value.parent_order_id=reservation.order_id
+            AND value.parent_order_item_id=reservation.order_item_id
+        ) backorder ON true
         LEFT JOIN LATERAL (
           SELECT sum(value.qty)::bigint allocated
           FROM inventory_allocations value

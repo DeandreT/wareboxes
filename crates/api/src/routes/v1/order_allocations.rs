@@ -1,8 +1,9 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use wareboxes_api_contract::v1::{
-    OrderAllocationDetailResponse, OrderAllocationFacilityResponse, OrderAllocationLineResponse,
-    OrderAllocationOutcome, OrderAllocationReadinessBlocker, OrderAllocationReadinessRequest,
+    BackorderPolicyMode, BackorderPolicyResponse, OrderAllocationDetailResponse,
+    OrderAllocationFacilityResponse, OrderAllocationLineResponse, OrderAllocationOutcome,
+    OrderAllocationReadinessBlocker, OrderAllocationReadinessRequest,
     OrderAllocationReadinessResponse, OrderAllocationReadinessStatus,
     OrderAllocationShortageReason, OrderAllocationStrategy, PlanOrderAllocationRequest,
     PlanOrderAllocationResponse, Revision,
@@ -92,6 +93,8 @@ fn map_plan_result(result: PlanOrderAllocationResult) -> V1Result<PlanOrderAlloc
         outcome: map_outcome(result.outcome),
         revision: map_revision(result.revision)?,
         newly_allocated_quantity: result.newly_allocated_quantity,
+        original_demand_quantity: result.original_demand_quantity,
+        backordered_quantity: result.backordered_quantity,
         demand_quantity: result.demand_quantity,
         allocated_quantity: result.allocated_quantity,
         shortage_quantity: result.shortage_quantity,
@@ -121,6 +124,26 @@ fn map_readiness(
                 facility_name: facility.facility_name,
             })
             .collect(),
+        backorder_policy: readiness
+            .backorder_policy
+            .map(|policy| {
+                Ok::<BackorderPolicyResponse, V1Error>(BackorderPolicyResponse {
+                    policy_id: policy.policy_id.get(),
+                    inventory_owner_id: policy.inventory_owner_id.get(),
+                    facility_id: policy.facility_id.get(),
+                    mode: match policy.mode {
+                        wareboxes_domain::BackorderPolicyMode::Block => BackorderPolicyMode::Block,
+                        wareboxes_domain::BackorderPolicyMode::SplitShortage => {
+                            BackorderPolicyMode::SplitShortage
+                        }
+                    },
+                    revision: Revision::new(policy.revision.get())
+                        .map_err(|_| V1Error::internal("backorder policy revision is invalid"))?,
+                    configured_by: policy.configured_by.get(),
+                    configured_at: policy.configured_at.to_rfc3339(),
+                })
+            })
+            .transpose()?,
         revision: map_revision(readiness.revision)?,
         status: map_readiness_status(readiness.status),
         blocking_reasons: readiness
@@ -130,6 +153,8 @@ fn map_readiness(
             .collect(),
         strategy: map_strategy(readiness.strategy),
         outcome: map_outcome(readiness.outcome),
+        original_demand_quantity: readiness.original_demand_quantity,
+        backordered_quantity: readiness.backordered_quantity,
         demand_quantity: readiness.demand_quantity,
         reserved_quantity: readiness.reserved_quantity,
         allocated_quantity: readiness.allocated_quantity,
@@ -145,6 +170,8 @@ fn map_line(line: OrderAllocationLineState) -> OrderAllocationLineResponse {
         item_id: line.item_id,
         item_description: line.item_description,
         uom: line.uom,
+        original_demand_quantity: line.original_demand_quantity,
+        backordered_quantity: line.backordered_quantity,
         demand_quantity: line.demand_quantity.get(),
         reservation_id: line.reservation_id.map(|id| id.get()),
         reserved_quantity: line.reserved_quantity,
@@ -257,6 +284,8 @@ mod tests {
             item_id: 41,
             item_description: Some("Case-picked item".into()),
             uom: "case".into(),
+            original_demand_quantity: 8,
+            backordered_quantity: 0,
             demand_quantity: AllocationQuantity::new(8).unwrap(),
             reservation_id: Some(InventoryReservationId::new(22).unwrap()),
             reserved_quantity: 8,
@@ -315,6 +344,8 @@ mod tests {
             outcome: AllocationOutcome::PartiallyAllocated,
             revision: OrderRevision::new(4).unwrap(),
             newly_allocated_quantity: 5,
+            original_demand_quantity: 8,
+            backordered_quantity: 0,
             demand_quantity: 8,
             allocated_quantity: 5,
             shortage_quantity: 3,
@@ -345,11 +376,14 @@ mod tests {
                 facility_id: FacilityId::new(8).unwrap(),
                 facility_name: "Reno DC".into(),
             }],
+            backorder_policy: None,
             revision: OrderRevision::new(4).unwrap(),
             status: AppReadinessStatus::Blocked,
             blocking_reasons: vec![AppBlocker::OwnerFacilityUnavailable],
             strategy: AllocationStrategy::Fefo,
             outcome: AllocationOutcome::PartiallyAllocated,
+            original_demand_quantity: 8,
+            backordered_quantity: 0,
             demand_quantity: 8,
             reserved_quantity: 8,
             allocated_quantity: 5,

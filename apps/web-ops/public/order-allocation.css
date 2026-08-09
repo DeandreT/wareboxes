@@ -1,10 +1,11 @@
 .allocation-section {
   display: grid;
+  min-width: 0;
 }
 
 .allocation-toolbar {
   display: grid;
-  grid-template-columns: minmax(110px, 1fr) minmax(120px, 0.75fr) 30px auto;
+  grid-template-columns: minmax(78px, 1fr) minmax(90px, 0.75fr) 28px auto;
   min-height: 39px;
   align-items: center;
   gap: 6px;
@@ -83,6 +84,42 @@
   margin: 0;
   padding: 7px 8px;
   border-bottom: 1px solid var(--line);
+}
+
+.allocation-backorder-toolbar {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto auto;
+  min-height: 37px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  border-bottom: 1px solid var(--line);
+  background: var(--amber-soft);
+}
+
+.allocation-backorder-toolbar > div {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.allocation-backorder-toolbar strong {
+  font-size: 10px;
+}
+
+.allocation-backorder-toolbar span {
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.allocation-backorder-toolbar .button {
+  min-height: 27px;
+  margin: 0;
+  padding: 0 8px;
+  white-space: nowrap;
 }
 
 .order-release-toolbar {
@@ -187,7 +224,7 @@
 
 .allocation-totals {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   margin: 0;
   border-bottom: 1px solid var(--line);
 }
@@ -223,6 +260,11 @@
   color: var(--red);
 }
 
+.allocation-totals .backordered dd,
+.allocation-backordered {
+  color: var(--amber);
+}
+
 .allocation-lines {
   min-width: 0;
   overflow: hidden;
@@ -241,15 +283,15 @@
 }
 
 .allocation-lines-table th:nth-child(1) {
-  width: 11%;
+  width: 9%;
 }
 
 .allocation-lines-table th:nth-child(2) {
-  width: 39%;
+  width: 31%;
 }
 
 .allocation-lines-table th:nth-child(n+3) {
-  width: 12.5%;
+  width: 10%;
 }
 
 .allocation-lines-table td {
@@ -347,4 +389,118 @@
 
 .allocation-source .numeric {
   text-align: right;
+}
+
+.allocation-dialog-backdrop {
+  position: fixed;
+  z-index: 90;
+  inset: 0;
+  display: grid;
+  place-items: start center;
+  padding: 42px 16px;
+  background: rgb(0 0 0 / 55%);
+}
+
+.allocation-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-height: calc(100vh - 84px);
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--surface-raised);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 35%);
+}
+
+.allocation-dialog > header,
+.allocation-dialog > footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.allocation-dialog > header > div {
+  flex: 1;
+}
+
+.allocation-dialog h2 {
+  margin: 1px 0 0;
+  font-size: 14px;
+}
+
+.allocation-dialog > footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--line);
+  border-bottom: 0;
+}
+
+.allocation-dialog-body {
+  display: grid;
+  gap: 9px;
+  padding: 10px;
+}
+
+.allocation-dialog-body > label {
+  display: grid;
+  gap: 3px;
+  color: var(--label-ink);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.allocation-dialog-body select,
+.allocation-dialog-body textarea {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--control-ink);
+}
+
+.allocation-dialog-body select {
+  height: 30px;
+  padding: 0 7px;
+}
+
+.allocation-dialog-body textarea {
+  min-height: 66px;
+  resize: vertical;
+  padding: 6px 7px;
+}
+
+.allocation-dialog-body > p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.allocation-dialog-totals {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 0;
+  border: 1px solid var(--line);
+}
+
+.allocation-dialog-totals > div {
+  padding: 6px 8px;
+  border-right: 1px solid var(--line);
+}
+
+.allocation-dialog-totals > div:last-child {
+  border-right: 0;
+}
+
+.allocation-dialog-totals dt {
+  color: var(--label-ink);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.allocation-dialog-totals dd {
+  margin: 1px 0 0;
+  font-size: 14px;
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
 }
