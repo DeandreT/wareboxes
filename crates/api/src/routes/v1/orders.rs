@@ -5,15 +5,20 @@ use serde::Deserialize;
 use wareboxes_api_contract::v1::{
     AmendFulfillmentOrderRequest, AmendFulfillmentOrderResponse, AmendedFulfillmentOrderStatus,
     CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse, CreatedFulfillmentOrderLine,
-    CreatedFulfillmentOrderStatus, FulfillmentOrderDestination, OrderEntryItemResponse, Revision,
+    CreatedFulfillmentOrderStatus, FulfillmentOrderDestination, OrderEntryItemResponse,
+    ReplaceFulfillmentOrderLinesRequest, ReplaceFulfillmentOrderLinesResponse,
+    ReplacedFulfillmentOrderLineResponse, ReplacedFulfillmentOrderStatus, Revision,
 };
 use wareboxes_application::order_amendment::{
     AmendFulfillmentOrderCommand, AmendFulfillmentOrderResult,
 };
+use wareboxes_application::order_line_amendment::{
+    ReplaceFulfillmentOrderLinesCommand, ReplaceFulfillmentOrderLinesResult, ReplacementOrderLine,
+};
 use wareboxes_domain::{
-    CatalogItemId, FulfillmentOrderDemandLine, InventoryOwnerId, NewFulfillmentOrder, OrderKey,
-    OrderLineKey, OrderQuantity, OrderStatus, RequestedUom, ShippingDestination, ShippingRecipient,
-    Timestamp,
+    CatalogItemId, FulfillmentOrderDemandLine, InventoryOwnerId, NewFulfillmentOrder, OrderId,
+    OrderKey, OrderLineKey, OrderQuantity, OrderRevision, OrderStatus, RequestedUom,
+    ShippingDestination, ShippingRecipient, Timestamp,
 };
 
 use super::error::{V1Error, V1Result};
@@ -92,6 +97,26 @@ pub async fn amend(
     )
     .await?;
     Ok(Json(amendment_response(result)?))
+}
+
+pub async fn replace_lines(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(order_id): Path<i64>,
+    Json(body): Json<ReplaceFulfillmentOrderLinesRequest>,
+) -> V1Result<Json<ReplaceFulfillmentOrderLinesResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let command = line_replacement_command(order_id, body)?;
+    let context = user.command_context(&idempotency_key);
+    let result = repo::order_line_amendment::replace_fulfillment_order_lines(
+        &state.db,
+        &user.tenant,
+        &context,
+        &command,
+    )
+    .await?;
+    Ok(Json(line_replacement_response(result)?))
 }
 
 pub async fn entry_items(
@@ -203,6 +228,74 @@ fn amendment_response(
         rush: result.rush,
         ship_by: result.ship_by.map(|value| value.to_rfc3339()),
         destination: destination_response(&result.destination),
+        amended_by: result.amended_by.get(),
+        amended_at: result.amended_at.to_rfc3339(),
+    })
+}
+
+fn line_replacement_command(
+    order_id: i64,
+    request: ReplaceFulfillmentOrderLinesRequest,
+) -> V1Result<ReplaceFulfillmentOrderLinesCommand> {
+    let lines = request
+        .lines
+        .into_iter()
+        .map(|line| {
+            ReplacementOrderLine::new(
+                line.line_key,
+                line.item_id,
+                line.quantity,
+                line.requested_uom,
+            )
+            .map_err(domain_validation)
+        })
+        .collect::<V1Result<Vec<_>>>()?;
+    Ok(ReplaceFulfillmentOrderLinesCommand::new(
+        OrderId::new(order_id).map_err(domain_validation)?,
+        OrderRevision::new(request.expected_revision.get()).map_err(domain_validation)?,
+        lines,
+    ))
+}
+
+fn line_replacement_response(
+    result: ReplaceFulfillmentOrderLinesResult,
+) -> V1Result<ReplaceFulfillmentOrderLinesResponse> {
+    let order_status = match result.order_status {
+        OrderStatus::Open => ReplacedFulfillmentOrderStatus::Open,
+        OrderStatus::Held => ReplacedFulfillmentOrderStatus::Held,
+        _ => {
+            return Err(V1Error::internal(
+                "line replacement produced an invalid order status",
+            ));
+        }
+    };
+    Ok(ReplaceFulfillmentOrderLinesResponse {
+        amendment_id: result.amendment_id.get(),
+        order_id: result.order_id.get(),
+        inventory_owner_id: result.inventory_owner_id.get(),
+        order_status,
+        previous_revision: Revision::new(result.previous_revision.get())
+            .map_err(|_| V1Error::internal("line replacement produced an invalid revision"))?,
+        revision: Revision::new(result.revision.get())
+            .map_err(|_| V1Error::internal("line replacement produced an invalid revision"))?,
+        previous_line_count: result.previous_line_count,
+        previous_quantity: result.previous_quantity,
+        resulting_quantity: result.resulting_quantity,
+        released_reservation_count: result.released_reservation_count,
+        released_allocation_count: result.released_allocation_count,
+        released_quantity: result.released_quantity,
+        lines: result
+            .lines
+            .into_iter()
+            .map(|line| ReplacedFulfillmentOrderLineResponse {
+                order_line_id: line.order_line_id.get(),
+                line_key: line.line_key,
+                line_number: line.line_number,
+                item_id: line.item_id.get(),
+                quantity: line.quantity,
+                requested_uom: line.requested_uom,
+            })
+            .collect(),
         amended_by: result.amended_by.get(),
         amended_at: result.amended_at.to_rfc3339(),
     })
@@ -350,5 +443,28 @@ mod tests {
         assert_eq!(command.expected_revision().get(), 3);
         assert_eq!(command.ship_by(), None);
         assert_eq!(command.destination().recipient().name(), "Receiving Team");
+    }
+
+    #[test]
+    fn constructs_a_path_bound_exact_line_replacement() {
+        let command = line_replacement_command(
+            17,
+            ReplaceFulfillmentOrderLinesRequest {
+                expected_revision: Revision::new(3).unwrap(),
+                lines: vec![
+                    wareboxes_api_contract::v1::ReplaceFulfillmentOrderLineRequest {
+                        line_key: "replacement-1".into(),
+                        item_id: 41,
+                        quantity: 9,
+                        requested_uom: "case".into(),
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        assert_eq!(command.order_id().get(), 17);
+        assert_eq!(command.expected_revision().get(), 3);
+        assert_eq!(command.lines()[0].line_key(), "replacement-1");
+        assert_eq!(command.lines()[0].quantity(), 9);
     }
 }

@@ -136,6 +136,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/orders", post(orders::create))
         .route("/orders/{order_id}/amendments", post(orders::amend))
+        .route(
+            "/orders/{order_id}/line-amendments",
+            post(orders::replace_lines),
+        )
         .route("/orders/{order_id}/shipments", post(shipping::create))
         .route("/shipments/{shipment_id}", get(shipping::get))
         .route(

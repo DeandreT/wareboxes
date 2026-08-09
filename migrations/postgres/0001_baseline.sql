@@ -28322,6 +28322,382 @@ REVOKE ALL ON FUNCTION public.guard_pick_wave_order_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_order_release_wave_membership() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_pick_wave_consistency() FROM PUBLIC;
 
+-- Exact pre-execution demand-line replacement. Existing line identities are
+-- retired, never rewritten; the accepted replacement receives new identities and
+-- stale reservations/allocations are released in the same transaction.
+ALTER TABLE public.order_items
+    DROP CONSTRAINT order_items_tenant_owner_order_line_key_key,
+    DROP CONSTRAINT order_items_tenant_owner_order_line_number_key;
+CREATE UNIQUE INDEX order_items_active_line_key
+ON public.order_items (tenant_id, inventory_owner_id, order_id, line_key)
+WHERE deleted IS NULL;
+CREATE UNIQUE INDEX order_items_active_line_number
+ON public.order_items (tenant_id, inventory_owner_id, order_id, line_number)
+WHERE deleted IS NULL;
+
+CREATE TABLE public.order_line_amendments (
+    id bigint GENERATED ALWAYS AS IDENTITY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_status text NOT NULL,
+    expected_order_revision bigint NOT NULL,
+    resulting_order_revision bigint NOT NULL,
+    previous_line_count bigint NOT NULL,
+    previous_qty bigint NOT NULL,
+    resulting_line_count bigint NOT NULL,
+    resulting_qty bigint NOT NULL,
+    released_reservation_count bigint NOT NULL,
+    released_allocation_count bigint NOT NULL,
+    released_qty bigint NOT NULL,
+    amended_by_user_id bigint NOT NULL,
+    amended_at timestamptz NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, order_id, id),
+    UNIQUE (tenant_id, order_id, expected_order_revision),
+    CHECK (order_status IN ('open','held')),
+    CHECK (expected_order_revision > 0
+           AND resulting_order_revision = expected_order_revision + 1),
+    CHECK (previous_line_count > 0 AND previous_qty > 0),
+    CHECK (resulting_line_count > 0 AND resulting_qty > 0),
+    CHECK (released_reservation_count >= 0
+           AND released_allocation_count >= 0 AND released_qty >= 0),
+    FOREIGN KEY (tenant_id) REFERENCES public.tenants(id),
+    FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_id)
+        REFERENCES public.orders(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, amended_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id)
+);
+ALTER TABLE public.order_line_amendments FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE public.order_line_amendment_lines (
+    id bigint GENERATED ALWAYS AS IDENTITY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_line_amendment_id bigint NOT NULL,
+    snapshot_kind text NOT NULL,
+    order_item_id bigint NOT NULL,
+    line_key text NOT NULL,
+    line_number bigint NOT NULL,
+    item_id bigint NOT NULL,
+    qty bigint NOT NULL,
+    uom text NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, order_line_amendment_id, snapshot_kind, order_item_id),
+    UNIQUE (tenant_id, order_line_amendment_id, snapshot_kind, line_key),
+    UNIQUE (tenant_id, order_line_amendment_id, snapshot_kind, line_number),
+    CHECK (snapshot_kind IN ('previous','resulting')),
+    CHECK (line_key = btrim(line_key) AND line_key <> '' AND char_length(line_key) <= 200),
+    CHECK (line_number > 0 AND qty > 0),
+    CHECK (uom = btrim(uom) AND uom <> '' AND char_length(uom) <= 32),
+    FOREIGN KEY (tenant_id) REFERENCES public.tenants(id),
+    FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_id)
+        REFERENCES public.orders(tenant_id, inventory_owner_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_id, order_line_amendment_id)
+        REFERENCES public.order_line_amendments(tenant_id, inventory_owner_id, order_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_id, order_item_id)
+        REFERENCES public.order_items(tenant_id, inventory_owner_id, order_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, item_id)
+        REFERENCES public.inventory_owner_items(tenant_id, inventory_owner_id, item_id)
+);
+ALTER TABLE public.order_line_amendment_lines FORCE ROW LEVEL SECURITY;
+
+CREATE FUNCTION public.validate_order_line_amendment() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+DECLARE
+    current_status text;
+    current_revision bigint;
+    current_owner bigint;
+    current_wave bigint;
+BEGIN
+    SELECT status, revision, inventory_owner_id, wave_id
+      INTO current_status, current_revision, current_owner, current_wave
+    FROM public.orders
+    WHERE tenant_id = NEW.tenant_id AND id = NEW.order_id AND deleted IS NULL
+    FOR UPDATE;
+    IF NOT FOUND OR current_owner <> NEW.inventory_owner_id THEN
+        RAISE EXCEPTION 'order line amendment order is not current'
+            USING ERRCODE = '55000';
+    END IF;
+    IF current_status <> NEW.order_status
+       OR current_status NOT IN ('open','held')
+       OR current_revision <> NEW.expected_order_revision
+       OR current_wave IS NOT NULL
+       OR EXISTS (
+           SELECT 1 FROM public.order_releases release
+           WHERE release.tenant_id = NEW.tenant_id AND release.order_id = NEW.order_id)
+    THEN
+        RAISE EXCEPTION 'order line amendment requires an unreleased open or held order'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_order_item_line_replacement() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+DECLARE
+    amendment_id bigint;
+    allowed boolean;
+    order_revision bigint;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'order demand lines cannot be deleted' USING ERRCODE = '55000';
+    END IF;
+    amendment_id := NULLIF(
+        current_setting('wareboxes.order_line_amendment_id', true), '')::bigint;
+    IF TG_OP = 'UPDATE' THEN
+        IF OLD.deleted IS NOT NULL OR NEW.deleted IS NULL
+           OR ROW(OLD.tenant_id, OLD.inventory_owner_id, OLD.created, OLD.line_key,
+                  OLD.line_number, OLD.qty, OLD.item_id, OLD.order_id, OLD.uom)
+              IS DISTINCT FROM
+              ROW(NEW.tenant_id, NEW.inventory_owner_id, NEW.created, NEW.line_key,
+                  NEW.line_number, NEW.qty, NEW.item_id, NEW.order_id, NEW.uom)
+        THEN
+            RAISE EXCEPTION 'order demand line facts are immutable'
+                USING ERRCODE = '55000';
+        END IF;
+        SELECT EXISTS(
+            SELECT 1 FROM public.order_line_amendments amendment
+            INNER JOIN public.order_line_amendment_lines evidence
+              ON evidence.tenant_id = amendment.tenant_id
+             AND evidence.order_line_amendment_id = amendment.id
+             AND evidence.snapshot_kind = 'previous'
+             AND evidence.order_item_id = OLD.id
+            WHERE amendment.tenant_id = NEW.tenant_id
+              AND amendment.inventory_owner_id = NEW.inventory_owner_id
+              AND amendment.order_id = NEW.order_id
+              AND amendment.id = amendment_id
+              AND amendment.amended_at = NEW.deleted)
+          INTO allowed;
+        IF NOT COALESCE(allowed, false) THEN
+            RAISE EXCEPTION 'order demand lines require typed replacement evidence'
+                USING ERRCODE = '55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF amendment_id IS NOT NULL THEN
+        SELECT EXISTS(
+            SELECT 1 FROM public.order_line_amendments amendment
+            WHERE amendment.tenant_id = NEW.tenant_id
+              AND amendment.inventory_owner_id = NEW.inventory_owner_id
+              AND amendment.order_id = NEW.order_id
+              AND amendment.id = amendment_id
+              AND amendment.amended_at = NEW.created)
+          INTO allowed;
+        IF NOT COALESCE(allowed, false) THEN
+            RAISE EXCEPTION 'replacement demand line does not match typed evidence'
+                USING ERRCODE = '55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    SELECT revision INTO order_revision
+    FROM public.orders
+    WHERE tenant_id = NEW.tenant_id AND id = NEW.order_id;
+    IF order_revision <> 1 OR EXISTS (
+        SELECT 1 FROM public.order_line_amendments amendment
+        WHERE amendment.tenant_id = NEW.tenant_id AND amendment.order_id = NEW.order_id)
+    THEN
+        RAISE EXCEPTION 'new demand lines require order creation or typed replacement'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.reject_order_line_amendment_evidence_mutation() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+BEGIN
+    RAISE EXCEPTION 'order line amendment evidence is immutable' USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE FUNCTION public.require_order_line_amendment_consistency() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog', 'public' AS $$
+DECLARE
+    amendment_id_value bigint;
+    amendment public.order_line_amendments%ROWTYPE;
+    previous_count bigint;
+    previous_qty bigint;
+    resulting_count bigint;
+    resulting_qty bigint;
+    reservation_count bigint;
+    allocation_count bigint;
+    released_qty bigint;
+BEGIN
+    IF TG_TABLE_NAME = 'order_line_amendments' THEN
+        amendment_id_value := NEW.id;
+    ELSIF TG_TABLE_NAME = 'order_line_amendment_lines' THEN
+        amendment_id_value := NEW.order_line_amendment_id;
+    ELSE
+        amendment_id_value := NULLIF(
+            current_setting('wareboxes.order_line_amendment_id', true), '')::bigint;
+        IF amendment_id_value IS NULL THEN
+            RETURN NULL;
+        END IF;
+    END IF;
+    SELECT * INTO amendment FROM public.order_line_amendments
+    WHERE tenant_id = NEW.tenant_id AND id = amendment_id_value;
+
+    SELECT COUNT(*), COALESCE(SUM(qty), 0)
+      INTO previous_count, previous_qty
+    FROM public.order_line_amendment_lines
+    WHERE tenant_id = amendment.tenant_id
+      AND order_line_amendment_id = amendment.id
+      AND snapshot_kind = 'previous';
+    SELECT COUNT(*), COALESCE(SUM(qty), 0)
+      INTO resulting_count, resulting_qty
+    FROM public.order_line_amendment_lines
+    WHERE tenant_id = amendment.tenant_id
+      AND order_line_amendment_id = amendment.id
+      AND snapshot_kind = 'resulting';
+
+    SELECT COUNT(*) INTO reservation_count
+    FROM public.inventory_reservations reservation
+    WHERE reservation.tenant_id = amendment.tenant_id
+      AND reservation.order_id = amendment.order_id
+      AND reservation.status = 'cancelled'
+      AND reservation.deleted = amendment.amended_at
+      AND reservation.modified = amendment.amended_at;
+    SELECT COUNT(*), COALESCE(SUM(allocation.qty), 0)
+      INTO allocation_count, released_qty
+    FROM public.inventory_allocations allocation
+    INNER JOIN public.inventory_reservations reservation
+      ON reservation.tenant_id = allocation.tenant_id
+     AND reservation.id = allocation.reservation_id
+    WHERE allocation.tenant_id = amendment.tenant_id
+      AND reservation.order_id = amendment.order_id
+      AND allocation.status = 'released'
+      AND allocation.deleted = amendment.amended_at
+      AND allocation.modified = amendment.amended_at;
+
+    IF previous_count <> amendment.previous_line_count
+       OR previous_qty <> amendment.previous_qty
+       OR resulting_count <> amendment.resulting_line_count
+       OR resulting_qty <> amendment.resulting_qty
+       OR reservation_count <> amendment.released_reservation_count
+       OR allocation_count <> amendment.released_allocation_count
+       OR released_qty <> amendment.released_qty
+       OR EXISTS (
+           SELECT 1 FROM public.orders order_header
+           WHERE order_header.tenant_id = amendment.tenant_id
+             AND order_header.id = amendment.order_id
+             AND (order_header.inventory_owner_id <> amendment.inventory_owner_id
+                  OR order_header.status <> amendment.order_status
+                  OR order_header.revision <> amendment.resulting_order_revision
+                  OR order_header.wave_id IS NOT NULL))
+       OR NOT EXISTS (
+           SELECT 1 FROM public.orders order_header
+           WHERE order_header.tenant_id = amendment.tenant_id
+             AND order_header.id = amendment.order_id)
+       OR EXISTS (
+           SELECT 1 FROM public.order_line_amendment_lines snapshot
+           INNER JOIN public.order_items item
+             ON item.tenant_id = snapshot.tenant_id
+            AND item.inventory_owner_id = snapshot.inventory_owner_id
+            AND item.order_id = snapshot.order_id
+            AND item.id = snapshot.order_item_id
+           WHERE snapshot.tenant_id = amendment.tenant_id
+             AND snapshot.order_line_amendment_id = amendment.id
+             AND (snapshot.line_key <> item.line_key
+                  OR snapshot.line_number <> item.line_number
+                  OR snapshot.item_id <> item.item_id
+                  OR snapshot.qty <> item.qty OR snapshot.uom <> item.uom
+                  OR (snapshot.snapshot_kind = 'previous'
+                      AND item.deleted IS DISTINCT FROM amendment.amended_at)
+                  OR (snapshot.snapshot_kind = 'resulting'
+                      AND (item.deleted IS NOT NULL
+                           OR item.created <> amendment.amended_at))))
+       OR EXISTS (
+           SELECT 1 FROM public.order_items item
+           WHERE item.tenant_id = amendment.tenant_id
+             AND item.inventory_owner_id = amendment.inventory_owner_id
+             AND item.order_id = amendment.order_id
+             AND item.deleted IS NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM public.order_line_amendment_lines snapshot
+                 WHERE snapshot.tenant_id = item.tenant_id
+                   AND snapshot.order_line_amendment_id = amendment.id
+                   AND snapshot.snapshot_kind = 'resulting'
+                   AND snapshot.order_item_id = item.id))
+       OR EXISTS (
+           SELECT 1 FROM public.inventory_reservations reservation
+           WHERE reservation.tenant_id = amendment.tenant_id
+             AND reservation.order_id = amendment.order_id
+             AND reservation.deleted IS NULL AND reservation.status = 'active')
+       OR EXISTS (
+           SELECT 1 FROM public.inventory_allocations allocation
+           INNER JOIN public.inventory_reservations reservation
+             ON reservation.tenant_id = allocation.tenant_id
+            AND reservation.id = allocation.reservation_id
+           WHERE allocation.tenant_id = amendment.tenant_id
+             AND reservation.order_id = amendment.order_id
+             AND allocation.deleted IS NULL
+             AND allocation.status = 'allocated')
+    THEN
+        RAISE EXCEPTION 'order line replacement does not reconcile'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER order_line_amendments_validate
+BEFORE INSERT ON public.order_line_amendments
+FOR EACH ROW EXECUTE FUNCTION public.validate_order_line_amendment();
+CREATE TRIGGER order_line_amendments_immutable
+BEFORE UPDATE OR DELETE ON public.order_line_amendments
+FOR EACH ROW EXECUTE FUNCTION public.reject_order_line_amendment_evidence_mutation();
+CREATE TRIGGER order_line_amendment_lines_immutable
+BEFORE UPDATE OR DELETE ON public.order_line_amendment_lines
+FOR EACH ROW EXECUTE FUNCTION public.reject_order_line_amendment_evidence_mutation();
+CREATE TRIGGER order_items_guard_line_replacement
+BEFORE INSERT OR UPDATE OR DELETE ON public.order_items
+FOR EACH ROW EXECUTE FUNCTION public.guard_order_item_line_replacement();
+CREATE CONSTRAINT TRIGGER order_line_amendments_reconcile
+AFTER INSERT ON public.order_line_amendments DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_order_line_amendment_consistency();
+CREATE CONSTRAINT TRIGGER order_line_amendment_lines_reconcile
+AFTER INSERT ON public.order_line_amendment_lines DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_order_line_amendment_consistency();
+CREATE CONSTRAINT TRIGGER order_items_line_replacement_reconcile
+AFTER INSERT OR UPDATE ON public.order_items DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_order_line_amendment_consistency();
+
+ALTER TABLE public.order_line_amendments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.order_line_amendments FORCE ROW LEVEL SECURITY;
+CREATE POLICY order_line_amendments_tenant_isolation
+ON public.order_line_amendments
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+ALTER TABLE public.order_line_amendment_lines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.order_line_amendment_lines FORCE ROW LEVEL SECURITY;
+CREATE POLICY order_line_amendment_lines_tenant_isolation
+ON public.order_line_amendment_lines
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT, INSERT ON public.order_line_amendments TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.order_line_amendments_id_seq TO wareboxes_app;
+GRANT SELECT, INSERT ON public.order_line_amendment_lines TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.order_line_amendment_lines_id_seq TO wareboxes_app;
+REVOKE DELETE, UPDATE ON public.order_items FROM wareboxes_app;
+GRANT UPDATE (deleted) ON public.order_items TO wareboxes_app;
+
+REVOKE ALL ON FUNCTION public.validate_order_line_amendment() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_order_item_line_replacement() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_order_line_amendment_evidence_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_order_line_amendment_consistency() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

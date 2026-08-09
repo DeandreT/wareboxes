@@ -2,23 +2,22 @@
 use wareboxes_api_contract::v1::ReleaseInventoryHoldRequest;
 use wareboxes_api_contract::v1::{
     AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
-    AmendFulfillmentOrderRequest, AmendFulfillmentOrderResponse, CancelOrderRequest,
-    CancelOrderResponse, CancelReplenishmentWorkRequest, CloseCartonRequest, CloseCartonResponse,
-    ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,
-    ConfigureReplenishmentPolicyRequest, ConfigureReplenishmentPolicyResponse, CreateCartonRequest,
-    CreateCartonResponse, CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse,
+    CancelOrderRequest, CancelOrderResponse, CancelReplenishmentWorkRequest, CloseCartonRequest,
+    CloseCartonResponse, ConfigureFacilityShippingOriginRequest,
+    ConfigureFacilityShippingOriginResponse, ConfigureReplenishmentPolicyRequest,
+    ConfigureReplenishmentPolicyResponse, CreateCartonRequest, CreateCartonResponse,
     InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
     InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
-    OpenPackSessionResponse, OrderAllocationReadinessResponse, OrderEntryItemResponse,
-    PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
-    PackingQueuePage, PickConfirmationHistoryPage, PickShortagePage, PickShortageResponse,
-    PickShortageStatus, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
-    PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
-    PlanOrderAllocationResponse, PlanReplenishmentRequest, PlanReplenishmentResponse,
-    ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleaseInventoryHoldResponse,
-    ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
-    ReplenishmentPolicyPage, ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse,
-    ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
+    OpenPackSessionResponse, OrderAllocationReadinessResponse, PackPickedAllocationRequest,
+    PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage,
+    PickConfirmationHistoryPage, PickShortagePage, PickShortageResponse, PickShortageStatus,
+    PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
+    PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
+    PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
+    ReallocatePickShortageResponse, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
+    ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse, ReplenishmentPolicyPage,
+    ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
+    RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
     ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
     VoidCartonResponse,
 };
@@ -31,6 +30,11 @@ use wareboxes_core::dto::{OrderPage, WebSessionContext};
 
 mod backorder;
 pub use backorder::{configure_backorder_policy, split_order_backorder};
+mod order;
+pub use order::{
+    amend_fulfillment_order, create_fulfillment_order, order_entry_items,
+    replace_fulfillment_order_lines,
+};
 mod pick_wave;
 pub use pick_wave::{cancel_pick_wave, pick_wave, pick_waves, plan_pick_wave, release_pick_wave};
 
@@ -62,25 +66,23 @@ mod browser {
 
     use super::{
         AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
-        AccessScopeWorkspace, AmendFulfillmentOrderRequest, AmendFulfillmentOrderResponse,
-        ApiError, CancelOrderRequest, CancelOrderResponse, CancelReplenishmentWorkRequest,
-        CloseCartonRequest, CloseCartonResponse, ConfigureFacilityShippingOriginRequest,
-        ConfigureFacilityShippingOriginResponse, ConfigureReplenishmentPolicyRequest,
-        ConfigureReplenishmentPolicyResponse, CreateCartonRequest, CreateCartonResponse,
-        CreateFulfillmentOrderRequest, CreateFulfillmentOrderResponse,
-        CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
-        CreateInventoryStatusTransitionRequest, InventoryBalancePage, InventoryHoldPage,
-        InventoryHoldStatus, InventoryStatusTransitionResponse, OpaqueCursor,
-        OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
-        OrderEntryItemResponse, OrderPage, PackPickedAllocationRequest,
-        PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage,
-        PickConfirmationHistoryPage, PickShortagePage, PickShortageResponse, PickShortageStatus,
-        PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
-        PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
-        PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
-        ReallocatePickShortageResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
-        ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest,
-        ReleaseOrderResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
+        AccessScopeWorkspace, ApiError, CancelOrderRequest, CancelOrderResponse,
+        CancelReplenishmentWorkRequest, CloseCartonRequest, CloseCartonResponse,
+        ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,
+        ConfigureReplenishmentPolicyRequest, ConfigureReplenishmentPolicyResponse,
+        CreateCartonRequest, CreateCartonResponse, CreateInventoryRelocationTaskRequest,
+        CreateInventoryRelocationTaskResponse, CreateInventoryStatusTransitionRequest,
+        InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
+        InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
+        OpenPackSessionResponse, OrderAllocationReadinessResponse, OrderPage,
+        PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
+        PackingQueuePage, PickConfirmationHistoryPage, PickShortagePage, PickShortageResponse,
+        PickShortageStatus, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
+        PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
+        PlanOrderAllocationResponse, PlanReplenishmentRequest, PlanReplenishmentResponse,
+        ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleaseInventoryHoldRequest,
+        ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
+        ReleaseOrderRequest, ReleaseOrderResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
         ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
         RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
         ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
@@ -143,39 +145,6 @@ mod browser {
 
     pub async fn access() -> Result<AccessScopeWorkspace, ApiError> {
         get("/api/web/access").await
-    }
-
-    pub async fn order_entry_items(
-        inventory_owner_id: i64,
-        search: &str,
-    ) -> Result<Vec<OrderEntryItemResponse>, ApiError> {
-        let mut path =
-            format!("/api/v1/inventory-owners/{inventory_owner_id}/order-entry-items?limit=50");
-        if !search.trim().is_empty() {
-            path.push_str("&search=");
-            path.push_str(&urlencoding::encode(search.trim()));
-        }
-        get(&path).await
-    }
-
-    pub async fn create_fulfillment_order(
-        request: &CreateFulfillmentOrderRequest,
-        idempotency_key: &str,
-    ) -> Result<CreateFulfillmentOrderResponse, ApiError> {
-        post("/api/v1/orders", request, idempotency_key).await
-    }
-
-    pub async fn amend_fulfillment_order(
-        order_id: i64,
-        request: &AmendFulfillmentOrderRequest,
-        idempotency_key: &str,
-    ) -> Result<AmendFulfillmentOrderResponse, ApiError> {
-        post(
-            &format!("/api/v1/orders/{order_id}/amendments"),
-            request,
-            idempotency_key,
-        )
-        .await
     }
 
     pub async fn order_allocation_readiness(
@@ -745,31 +714,6 @@ pub async fn search_balances(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn access() -> Result<AccessScopeWorkspace, ApiError> {
-    Err(ApiError::unavailable())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn order_entry_items(
-    _inventory_owner_id: i64,
-    _search: &str,
-) -> Result<Vec<OrderEntryItemResponse>, ApiError> {
-    Err(ApiError::unavailable())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn create_fulfillment_order(
-    _request: &CreateFulfillmentOrderRequest,
-    _idempotency_key: &str,
-) -> Result<CreateFulfillmentOrderResponse, ApiError> {
-    Err(ApiError::unavailable())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn amend_fulfillment_order(
-    _order_id: i64,
-    _request: &AmendFulfillmentOrderRequest,
-    _idempotency_key: &str,
-) -> Result<AmendFulfillmentOrderResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

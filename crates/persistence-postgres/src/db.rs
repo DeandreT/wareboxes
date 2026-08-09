@@ -602,6 +602,14 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'order_amendments_tenant_isolation'
                 ),
                 (
+                    'order_line_amendments',
+                    'order_line_amendments_tenant_isolation'
+                ),
+                (
+                    'order_line_amendment_lines',
+                    'order_line_amendment_lines_tenant_isolation'
+                ),
+                (
                     'order_releases',
                     'order_releases_tenant_isolation'
                 ),

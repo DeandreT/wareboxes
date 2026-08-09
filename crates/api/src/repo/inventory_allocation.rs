@@ -427,6 +427,7 @@ pub(crate) async fn cancel_order_commitments_tx(
     order_id: i64,
     scope: &ScopeBindings,
     occurred_at: Timestamp,
+    reason: &'static str,
 ) -> AppResult<CancelledOrderCommitments> {
     let reservation_rows = sqlx::query(
         r#"
@@ -572,7 +573,7 @@ pub(crate) async fn cancel_order_commitments_tx(
             "inventory_owner_id": reservation.inventory_owner_id,
             "facility_id": allocation.facility_id,
             "released_quantity": allocation.qty,
-            "reason": "order_cancelled",
+            "reason": reason,
         });
         enqueue_allocation_event(
             tx,
@@ -622,7 +623,7 @@ pub(crate) async fn cancel_order_commitments_tx(
             "uom": reservation.uom,
             "quantity": reservation.qty,
             "released_quantity": released_quantity,
-            "reason": "order_cancelled",
+            "reason": reason,
         });
         enqueue_reservation_event(
             tx,

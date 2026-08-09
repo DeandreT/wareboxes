@@ -6,6 +6,7 @@ mod facility;
 mod order;
 mod order_amendment;
 mod order_cancellation;
+mod order_line_amendment;
 mod order_release;
 mod outbound_load;
 mod outbound_qa;
@@ -52,6 +53,9 @@ pub use order_cancellation::{
     cancel_order_before_physical_execution, CancellationNote, OrderCancellationDetails,
     OrderCancellationError, OrderCancellationExecution, OrderCancellationReason,
     OrderCancellationTransitionError, MAX_CANCELLATION_NOTE_LENGTH,
+};
+pub use order_line_amendment::{
+    replace_fulfillment_order_lines, OrderLineAmendmentError, OrderLineAmendmentTransition,
 };
 pub use order_release::{release_order, OrderReleaseError};
 pub use outbound_load::{
@@ -187,6 +191,7 @@ positive_id!(UserId, "user ID");
 positive_id!(OrderId, "order ID");
 positive_id!(OrderLineId, "order line ID");
 positive_id!(OrderAmendmentId, "order amendment ID");
+positive_id!(OrderLineAmendmentId, "order line amendment ID");
 positive_id!(OrderCancellationId, "order cancellation ID");
 positive_id!(BackorderPolicyId, "backorder policy ID");
 positive_id!(BackorderSplitId, "backorder split ID");

@@ -448,6 +448,55 @@
   width: 40px;
 }
 
+.order-line-amendment {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  background: var(--surface);
+}
+
+.order-line-amendment-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.order-line-amendment-heading > div {
+  display: grid;
+  gap: 2px;
+}
+
+.order-line-amendment-heading strong {
+  font-size: 11px;
+}
+
+.order-line-amendment-heading span,
+.order-line-amendment-total {
+  color: var(--ink-soft);
+  font-size: 9px;
+}
+
+.order-line-amendment-table td:first-child input {
+  width: 100%;
+  min-width: 0;
+  height: 25px;
+  padding: 0 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 10px;
+}
+
+.order-line-amendment-table td:last-child {
+  text-align: center;
+}
+
+.order-line-amendment .form-actions {
+  justify-content: space-between;
+}
+
 .order-lines-draft-table td {
   height: 34px;
   padding: 3px 6px;

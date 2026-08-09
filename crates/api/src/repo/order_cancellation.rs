@@ -87,6 +87,7 @@ pub async fn cancel_order(
         command.order_id().get(),
         &scope,
         occurred_at,
+        "order_cancelled",
     )
     .await?;
     let released_hold_count = release_active_holds_tx(

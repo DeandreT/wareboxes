@@ -18,6 +18,7 @@ mod order_allocation;
 mod order_amendment;
 mod order_cancellation;
 mod order_hold;
+mod order_line_amendment;
 mod order_release;
 mod outbound_load;
 mod outbound_qa;
@@ -114,6 +115,11 @@ pub use order_cancellation::{
 pub use order_hold::{
     OrderHoldOrderStatus, OrderHoldReason, PlaceOrderHoldRequest, PlaceOrderHoldResponse,
     ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
+};
+pub use order_line_amendment::{
+    ReplaceFulfillmentOrderLineRequest, ReplaceFulfillmentOrderLinesRequest,
+    ReplaceFulfillmentOrderLinesResponse, ReplacedFulfillmentOrderLineResponse,
+    ReplacedFulfillmentOrderStatus,
 };
 pub use order_release::{OrderReleaseStatus, ReleaseOrderRequest, ReleaseOrderResponse};
 pub use outbound_load::{

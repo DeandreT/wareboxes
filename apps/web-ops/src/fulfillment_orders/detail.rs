@@ -27,6 +27,11 @@ pub(super) fn OrderDetailPanel(
     let country = RwSignal::new(order.country.clone().unwrap_or_default());
     let command_pending = RwSignal::new(false);
     let command_error = RwSignal::new(None::<String>);
+    let line_editor_open = RwSignal::new(false);
+    let line_editor_order = StoredValue::new(order.clone());
+    let demand_lines = StoredValue::new(order.order_items.clone());
+    let demand_line_count = order.order_items.len();
+    let lines_editable = matches!(order.status, OrderStatus::Open | OrderStatus::Held);
     let amendment_retry = RwSignal::new(None::<(AmendFulfillmentOrderRequest, String)>);
     let cancel_open = RwSignal::new(false);
     let hold_open = RwSignal::new(false);
@@ -532,9 +537,30 @@ pub(super) fn OrderDetailPanel(
             <Show when=move || tab.get() == OrderDetailTab::Lines>
                 <div class="detail-section">
                     <div class="detail-section-title">
-                        <h3>"Demand lines"</h3>
-                        <span>{format!("{} lines", order.order_items.len())}</span>
+                        <div>
+                            <h3>"Demand lines"</h3>
+                            <span>{format!("{demand_line_count} lines")}</span>
+                        </div>
+                        <Show when=move || lines_editable && !line_editor_open.get()>
+                            <button
+                                type="button"
+                                class="button secondary-action"
+                                on:click=move |_| line_editor_open.set(true)
+                            >
+                                <Icon icon=UiIcon::Disposition/>
+                                "Edit lines"
+                            </button>
+                        </Show>
                     </div>
+                    <Show when=move || line_editor_open.get()>
+                        <OrderLineAmendmentEditor
+                            order=line_editor_order.get_value()
+                            on_close=Callback::new(move |_| line_editor_open.set(false))
+                            on_refreshed
+                            on_unauthorized
+                        />
+                    </Show>
+                    <Show when=move || !line_editor_open.get()>
                     <div class="table-scroll">
                         <table class="data-table detail-table order-demand-lines-table">
                             <thead>
@@ -544,9 +570,8 @@ pub(super) fn OrderDetailPanel(
                                 </tr>
                             </thead>
                             <tbody>
-                                {order
-                                    .order_items
-                                    .clone()
+                                {demand_lines
+                                    .get_value()
                                     .into_iter()
                                     .map(|line| {
                                         view! {
@@ -567,10 +592,11 @@ pub(super) fn OrderDetailPanel(
                                     .collect_view()}
                             </tbody>
                         </table>
-                        {order.order_items.is_empty().then(|| {
+                        {demand_lines.get_value().is_empty().then(|| {
                             view! { <p class="empty-state">"No demand lines are attached to this order."</p> }
                         })}
                     </div>
+                    </Show>
                 </div>
             </Show>
 
