@@ -9,6 +9,7 @@ use crate::error::{AppError, AppResult};
 use crate::repo;
 use crate::routes::validate;
 use crate::state::AppState;
+use repo::orders::{OrderPageSort, OrderPageSortDirection};
 
 const PERM: &str = "orders";
 const DEFAULT_ORDER_LIMIT: i64 = 500;
@@ -20,6 +21,26 @@ pub struct OrderListQuery {
     pub offset: Option<i64>,
     pub search: Option<String>,
     pub status: Option<OrderStatus>,
+    pub sort: Option<OrderListSort>,
+    pub direction: Option<OrderListSortDirection>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderListSort {
+    Order,
+    Client,
+    Status,
+    Units,
+    ShipBy,
+    Destination,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderListSortDirection {
+    Asc,
+    Desc,
 }
 
 pub async fn list(
@@ -33,16 +54,41 @@ pub async fn list(
         .unwrap_or(DEFAULT_ORDER_LIMIT)
         .clamp(1, MAX_ORDER_LIMIT);
     let offset = q.offset.unwrap_or(0).max(0);
-    let orders = repo::orders::get_orders_page_in_scope(
+    let orders = repo::orders::get_orders_page_in_scope_sorted(
         &state.db,
         &user.tenant,
         limit,
         offset,
         q.status,
         q.search.as_deref(),
+        q.sort.map_or(OrderPageSort::Created, Into::into),
+        q.direction
+            .map_or(OrderPageSortDirection::Descending, Into::into),
     )
     .await?;
     Ok(Json(orders))
+}
+
+impl From<OrderListSort> for OrderPageSort {
+    fn from(value: OrderListSort) -> Self {
+        match value {
+            OrderListSort::Order => Self::Order,
+            OrderListSort::Client => Self::Client,
+            OrderListSort::Status => Self::Status,
+            OrderListSort::Units => Self::Units,
+            OrderListSort::ShipBy => Self::ShipBy,
+            OrderListSort::Destination => Self::Destination,
+        }
+    }
+}
+
+impl From<OrderListSortDirection> for OrderPageSortDirection {
+    fn from(value: OrderListSortDirection) -> Self {
+        match value {
+            OrderListSortDirection::Asc => Self::Ascending,
+            OrderListSortDirection::Desc => Self::Descending,
+        }
+    }
 }
 
 pub async fn get(

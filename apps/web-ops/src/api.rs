@@ -117,6 +117,10 @@ mod browser {
         get("/api/orders?limit=50&offset=0").await
     }
 
+    pub async fn orders_workbench() -> Result<OrderPage, ApiError> {
+        get("/api/orders?limit=100&offset=0&sort=order&direction=desc").await
+    }
+
     pub async fn balances(cursor: Option<&OpaqueCursor>) -> Result<InventoryBalancePage, ApiError> {
         let path = balance_page_path(None, cursor);
         get(&path).await
@@ -691,6 +695,11 @@ pub async fn logout() {}
 
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn orders() -> Result<OrderPage, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn orders_workbench() -> Result<OrderPage, ApiError> {
     Err(ApiError::unavailable())
 }
 

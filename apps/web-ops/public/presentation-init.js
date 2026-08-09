@@ -14,4 +14,8 @@
     "wareboxes.display.reduce-motion",
     "false",
   );
+  root.dataset.navigationHidden = read(
+    "wareboxes.display.hide-navigation",
+    "false",
+  );
 })();

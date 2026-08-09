@@ -4,6 +4,7 @@ use lucide_leptos::PanelTop;
 const THEME_STORAGE_KEY: &str = "wareboxes.display.theme";
 const DENSITY_STORAGE_KEY: &str = "wareboxes.display.density";
 const REDUCE_MOTION_STORAGE_KEY: &str = "wareboxes.display.reduce-motion";
+const HIDE_NAVIGATION_STORAGE_KEY: &str = "wareboxes.display.hide-navigation";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThemePreference {
@@ -61,6 +62,7 @@ pub struct DisplayPreferences {
     theme: RwSignal<ThemePreference>,
     density: RwSignal<DensityPreference>,
     reduce_motion: RwSignal<bool>,
+    hide_navigation: RwSignal<bool>,
 }
 
 impl DisplayPreferences {
@@ -69,6 +71,7 @@ impl DisplayPreferences {
             theme: RwSignal::new(ThemePreference::default()),
             density: RwSignal::new(DensityPreference::default()),
             reduce_motion: RwSignal::new(false),
+            hide_navigation: RwSignal::new(false),
         }
     }
 
@@ -82,6 +85,10 @@ impl DisplayPreferences {
 
     pub fn reduce_motion(self) -> ReadSignal<bool> {
         self.reduce_motion.read_only()
+    }
+
+    pub fn hide_navigation(self) -> ReadSignal<bool> {
+        self.hide_navigation.read_only()
     }
 
     pub fn set_theme(self, theme: ThemePreference) {
@@ -103,6 +110,13 @@ impl DisplayPreferences {
         browser::set_root_attribute("data-reduce-motion", value);
     }
 
+    pub fn set_hide_navigation(self, hide_navigation: bool) {
+        self.hide_navigation.set(hide_navigation);
+        let value = if hide_navigation { "true" } else { "false" };
+        browser::set_preference(HIDE_NAVIGATION_STORAGE_KEY, value);
+        browser::set_root_attribute("data-navigation-hidden", value);
+    }
+
     fn load_from_browser(self) {
         let theme = browser::preference(THEME_STORAGE_KEY)
             .as_deref()
@@ -114,15 +128,22 @@ impl DisplayPreferences {
             .unwrap_or_default();
         let reduce_motion =
             browser::preference(REDUCE_MOTION_STORAGE_KEY).as_deref() == Some("true");
+        let hide_navigation =
+            browser::preference(HIDE_NAVIGATION_STORAGE_KEY).as_deref() == Some("true");
 
         self.theme.set(theme);
         self.density.set(density);
         self.reduce_motion.set(reduce_motion);
+        self.hide_navigation.set(hide_navigation);
         browser::set_root_attribute("data-theme", theme.storage_value());
         browser::set_root_attribute("data-density", density.storage_value());
         browser::set_root_attribute(
             "data-reduce-motion",
             if reduce_motion { "true" } else { "false" },
+        );
+        browser::set_root_attribute(
+            "data-navigation-hidden",
+            if hide_navigation { "true" } else { "false" },
         );
     }
 }
@@ -146,6 +167,7 @@ pub fn DisplayOptionsMenu() -> impl IntoView {
     let theme = preferences.theme();
     let density = preferences.density();
     let reduce_motion = preferences.reduce_motion();
+    let hide_navigation = preferences.hide_navigation();
 
     view! {
         <details class="display-options">
@@ -246,6 +268,22 @@ pub fn DisplayOptionsMenu() -> impl IntoView {
                         prop:checked=move || reduce_motion.get()
                         on:change=move |event| {
                             preferences.set_reduce_motion(event_target_checked(&event));
+                        }
+                    />
+                    <i aria-hidden="true"></i>
+                </label>
+
+                <label class="preference-toggle">
+                    <span>
+                        <strong>"Hide navigation"</strong>
+                        <small>"Use the full width for operations"</small>
+                    </span>
+                    <input
+                        type="checkbox"
+                        role="switch"
+                        prop:checked=move || hide_navigation.get()
+                        on:change=move |event| {
+                            preferences.set_hide_navigation(event_target_checked(&event));
                         }
                     />
                     <i aria-hidden="true"></i>

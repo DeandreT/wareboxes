@@ -385,6 +385,14 @@ a {
   grid-template-columns: 196px minmax(0, 1fr);
 }
 
+html[data-navigation-hidden="true"] .app-shell {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+html[data-navigation-hidden="true"] .sidebar {
+  display: none;
+}
+
 .sidebar {
   position: sticky;
   top: 0;
@@ -589,9 +597,9 @@ a {
 
 .workspace {
   width: 100%;
-  max-width: 1580px;
-  margin: 0 auto;
-  padding: 22px clamp(18px, 2vw, 30px) 34px;
+  max-width: none;
+  margin: 0;
+  padding: 8px 10px 16px;
 }
 
 .page-heading {

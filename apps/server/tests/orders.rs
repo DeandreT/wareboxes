@@ -6,6 +6,7 @@ use common::*;
 use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::{routes, state::AppState};
+use wareboxes_core::dto::OrderPage;
 use wareboxes_core::models::Order;
 
 #[tokio::test]
@@ -88,6 +89,81 @@ async fn order_pagination_filters_and_reports_total() {
             .await
             .unwrap();
     assert_eq!(open_page.page.total, 3);
+
+    grant_orders(db, tenant_id, user.id).await;
+    let token = auth::create_session(db, user.id).await.unwrap();
+    let app = routes::app(AppState::new(db.clone()));
+    let sorted = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/orders?limit=2&offset=0&sort=order&direction=asc")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(TENANT_ID_HEADER, tenant_id.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sorted.status(), StatusCode::OK);
+    let sorted: OrderPage =
+        serde_json::from_slice(&to_bytes(sorted.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        sorted
+            .page
+            .items
+            .iter()
+            .map(|order| order.order_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["OTHER-C", "PAGE-A"]
+    );
+
+    let next = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/orders?limit=2&offset=2&sort=order&direction=asc")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(TENANT_ID_HEADER, tenant_id.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let next: OrderPage =
+        serde_json::from_slice(&to_bytes(next.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        next.page
+            .items
+            .iter()
+            .map(|order| order.order_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["PAGE-B"]
+    );
+}
+
+async fn grant_orders(db: &db::Db, tenant_id: TenantId, user_id: i64) {
+    let permission = wareboxes_persistence_postgres::permissions::add_permission(
+        db,
+        tenant_id,
+        "orders",
+        Some("Fulfillment orders"),
+    )
+    .await
+    .unwrap();
+    let role = wareboxes_persistence_postgres::roles::add_role(
+        db,
+        tenant_id,
+        "order-page-reader",
+        Some("Read order pages"),
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_permission(db, tenant_id, role, permission)
+        .await
+        .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(db, tenant_id, user_id, role)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

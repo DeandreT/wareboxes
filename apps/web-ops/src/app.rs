@@ -170,7 +170,6 @@ impl Section {
         matches!(
             self,
             Self::Overview
-                | Self::Orders
                 | Self::Loads
                 | Self::Inventory
                 | Self::InventoryHolds
@@ -239,6 +238,7 @@ pub fn App() -> impl IntoView {
         <Stylesheet id="wareboxes-web" href="/pkg/wareboxes-web.css"/>
         <Stylesheet id="wareboxes-holds" href="/holds.css"/>
         <Stylesheet id="wareboxes-presentation" href="/presentation.css"/>
+        <Stylesheet id="wareboxes-workspace-layout" href="/workspace-layout.css"/>
         <Stylesheet id="wareboxes-disposition" href="/disposition.css"/>
         <Stylesheet id="wareboxes-inventory-integrity" href="/inventory-integrity.css"/>
         <Stylesheet id="wareboxes-inventory-rollups" href="/inventory-rollups.css"/>
@@ -543,7 +543,7 @@ async fn load_workspace(
             }
         }
         Section::Orders if has_permission(session, "orders") => {
-            data.orders = Some(api::orders().await?);
+            data.orders = Some(api::orders_workbench().await?);
             data.access = api::access().await?;
             data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
         }
@@ -1426,7 +1426,7 @@ mod tests {
         });
 
         assert!(Section::Overview.supports_workspace_refresh());
-        assert!(Section::Orders.supports_workspace_refresh());
+        assert!(!Section::Orders.supports_workspace_refresh());
         assert!(!Section::Packing.supports_workspace_refresh());
         assert!(!Section::Shipping.supports_workspace_refresh());
         assert!(!Section::Catalog.supports_workspace_refresh());

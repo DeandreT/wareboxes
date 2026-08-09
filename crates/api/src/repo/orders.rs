@@ -29,6 +29,50 @@ struct OrderPageParameters<'a> {
     offset: i64,
     status: Option<OrderStatus>,
     search: Option<&'a str>,
+    sort: OrderPageSort,
+    direction: OrderPageSortDirection,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OrderPageSort {
+    #[default]
+    Created,
+    Order,
+    Client,
+    Status,
+    Units,
+    ShipBy,
+    Destination,
+}
+
+impl OrderPageSort {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Order => "order",
+            Self::Client => "client",
+            Self::Status => "status",
+            Self::Units => "units",
+            Self::ShipBy => "ship_by",
+            Self::Destination => "destination",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OrderPageSortDirection {
+    Ascending,
+    #[default]
+    Descending,
+}
+
+impl OrderPageSortDirection {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ascending => "asc",
+            Self::Descending => "desc",
+        }
+    }
 }
 
 fn map_order(row: &sqlx::postgres::PgRow) -> AppResult<Order> {
@@ -677,6 +721,8 @@ pub async fn get_orders_page(
             offset,
             status,
             search,
+            sort: OrderPageSort::Created,
+            direction: OrderPageSortDirection::Descending,
         },
     )
     .await
@@ -700,6 +746,36 @@ pub async fn get_orders_page_in_scope(
             offset,
             status,
             search,
+            sort: OrderPageSort::Created,
+            direction: OrderPageSortDirection::Descending,
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn get_orders_page_in_scope_sorted(
+    db: &Db,
+    access: &TenantAccess,
+    limit: i64,
+    offset: i64,
+    status: Option<OrderStatus>,
+    search: Option<&str>,
+    sort: OrderPageSort,
+    direction: OrderPageSortDirection,
+) -> AppResult<OrderPage> {
+    let scope = ScopeBindings::for_access(access);
+    get_orders_page_with_scope(
+        db,
+        access.tenant_id,
+        &scope,
+        OrderPageParameters {
+            limit,
+            offset,
+            status,
+            search,
+            sort,
+            direction,
         },
     )
     .await
@@ -772,6 +848,13 @@ async fn get_orders_page_with_scope(
         LEFT JOIN addresses a ON a.tenant_id = o.tenant_id AND a.id = o.address_id
         INNER JOIN inventory_owners acct
             ON acct.tenant_id = o.tenant_id AND acct.id = o.inventory_owner_id
+        LEFT JOIN LATERAL (
+            SELECT COALESCE(SUM(item.qty), 0)::BIGINT AS ordered_qty
+            FROM order_items item
+            WHERE item.tenant_id = o.tenant_id
+              AND item.order_id = o.id
+              AND item.deleted IS NULL
+        ) quantity ON TRUE
         WHERE o.tenant_id = $1
           AND o.deleted IS NULL
           AND ($4 OR o.inventory_owner_id = ANY($5))
@@ -785,8 +868,28 @@ async fn get_orders_page_with_scope(
               OR a.postal_code ILIKE $3
               OR acct.name ILIKE $3
           )
-        ORDER BY o.created DESC, o.id DESC
-        LIMIT $6 OFFSET $7
+        ORDER BY
+          CASE WHEN $6 = 'created' AND $7 = 'asc' THEN o.created END ASC,
+          CASE WHEN $6 = 'created' AND $7 = 'desc' THEN o.created END DESC,
+          CASE WHEN $6 = 'order' AND $7 = 'asc' THEN LOWER(o.order_key) END ASC,
+          CASE WHEN $6 = 'order' AND $7 = 'desc' THEN LOWER(o.order_key) END DESC,
+          CASE WHEN $6 = 'client' AND $7 = 'asc' THEN LOWER(acct.name) END ASC,
+          CASE WHEN $6 = 'client' AND $7 = 'desc' THEN LOWER(acct.name) END DESC,
+          CASE WHEN $6 = 'status' AND $7 = 'asc' THEN o.status END ASC,
+          CASE WHEN $6 = 'status' AND $7 = 'desc' THEN o.status END DESC,
+          CASE WHEN $6 = 'units' AND $7 = 'asc' THEN quantity.ordered_qty END ASC,
+          CASE WHEN $6 = 'units' AND $7 = 'desc' THEN quantity.ordered_qty END DESC,
+          CASE WHEN $6 = 'ship_by' AND $7 = 'asc' THEN o.ship_by END ASC NULLS LAST,
+          CASE WHEN $6 = 'ship_by' AND $7 = 'desc' THEN o.ship_by END DESC NULLS LAST,
+          CASE WHEN $6 = 'destination' AND $7 = 'asc' THEN
+            LOWER(CONCAT_WS(', ', NULLIF(a.city, ''), NULLIF(a.state, ''), NULLIF(a.postal_code, ''), NULLIF(a.country, '')))
+          END ASC,
+          CASE WHEN $6 = 'destination' AND $7 = 'desc' THEN
+            LOWER(CONCAT_WS(', ', NULLIF(a.city, ''), NULLIF(a.state, ''), NULLIF(a.postal_code, ''), NULLIF(a.country, '')))
+          END DESC,
+          CASE WHEN $7 = 'asc' THEN o.id END ASC,
+          CASE WHEN $7 = 'desc' THEN o.id END DESC
+        LIMIT $8 OFFSET $9
         "#,
     )
     .bind(tenant_id.get())
@@ -794,6 +897,8 @@ async fn get_orders_page_with_scope(
     .bind(search_pattern.as_deref())
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
+    .bind(parameters.sort.as_str())
+    .bind(parameters.direction.as_str())
     .bind(parameters.limit)
     .bind(parameters.offset)
     .fetch_all(&mut *tx)

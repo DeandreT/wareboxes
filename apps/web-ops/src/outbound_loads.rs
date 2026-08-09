@@ -15,6 +15,7 @@ use wareboxes_core::models::Location;
 use crate::api;
 use crate::components::{Icon, UiIcon};
 use crate::toast::{use_toast_bus, ToastBus};
+use crate::workspace_layout::{PaneControls, SplitPaneHandle, SplitPaneState};
 
 #[cfg(target_arch = "wasm32")]
 use std::time::Duration;
@@ -146,6 +147,7 @@ pub(crate) fn OutboundLoadsWorkspace(
         cancellation_reason: RwSignal::new(OutboundLoadCancellationReason::PlanningError),
         cancellation_note: RwSignal::new(String::new()),
     };
+    let layout = SplitPaneState::new("outbound-loads", 620);
 
     #[cfg(target_arch = "wasm32")]
     install_poll(signals);
@@ -159,6 +161,7 @@ pub(crate) fn OutboundLoadsWorkspace(
     });
     let select = Callback::new(move |load_id: i64| {
         if !signals.command_pending.get_untracked() {
+            layout.show_detail();
             signals.selected_id.set(Some(load_id));
             signals.detail.set(None);
             load_detail(load_id, signals);
@@ -271,8 +274,9 @@ pub(crate) fn OutboundLoadsWorkspace(
             <header class="outbound-loads-toolbar">
                 <div class="outbound-loads-heading">
                     <Icon icon=UiIcon::Shipping/>
-                    <div><h1>"Outbound loads"</h1><span>"Carrier consolidation and dock execution"</span></div>
+                    <div><h1>"Outbound loads"</h1></div>
                 </div>
+                <PaneControls layout master_label="load queue" detail_label="load detail"/>
                 <label><span>"Facility"</span><select on:change=move |event| {
                     signals.facility_id.set(parse_optional_id(&event_target_value(&event)));
                     invalidate_queue(signals);
@@ -291,9 +295,13 @@ pub(crate) fn OutboundLoadsWorkspace(
                 <button class="icon-button" type="button" title="Refresh loads" aria-label="Refresh loads" disabled=move || signals.queue_pending.get() on:click=move |_| refresh.run(())><Icon icon=UiIcon::Refresh/></button>
                 {can_supervise.then(|| view! { <button class="button primary-action compact" type="button" disabled=move || signals.command_pending.get() on:click=move |_| open_plan(drafts, signals)><Icon icon=UiIcon::Add/><span>"Plan load"</span></button> })}
             </header>
-            <div class="outbound-loads-body">
-                <section class="outbound-loads-queue">
-                    <header><h2>"Load queue"</h2><span>{move || format!("{} loads", signals.entries.get().len())}</span></header>
+            <div
+                class="outbound-loads-body split-workspace"
+                style=move || layout.style()
+                data-pane-mode=move || layout.mode_attribute()
+            >
+                <section class="outbound-loads-queue split-master">
+                    <header><h2>"Load queue"</h2><span>{move || format!("{} loaded", signals.entries.get().len())}</span></header>
                     <div class="outbound-loads-table-scroll">
                         <table><thead><tr><th>"Load"</th><th>"State"</th><th>"Progress"</th><th>"Facility"</th><th>"Trailer"</th><th><span class="sr-only">"Open detail"</span></th></tr></thead>
                         <tbody>{move || signals.entries.get().into_iter().map(|entry| {
@@ -310,7 +318,8 @@ pub(crate) fn OutboundLoadsWorkspace(
                     </div>
                     {move || signals.next_cursor.get().map(|_| view! { <button class="button quiet-action outbound-loads-more" type="button" disabled=move || signals.queue_pending.get() on:click=move |_| load_more.run(())>"Load more"</button> })}
                 </section>
-                <section class="outbound-loads-detail">
+                <SplitPaneHandle layout/>
+                <section class="outbound-loads-detail split-detail">
                     <div class:error=move || signals.error.get() class="outbound-loads-status" role="status"><span>{move || signals.message.get()}</span>{move || signals.retry.get().map(|_| view! { <button type="button" class="button quiet-action compact" on:click=move |_| retry.run(())>"Retry exact command"</button> })}</div>
                     {move || signals.detail.get().map(|load| detail_view(load, signals, drafts, can_supervise, release)).unwrap_or_else(|| view! { <div class="outbound-loads-empty"><Icon icon=UiIcon::Shipping/><h2>"No load selected"</h2></div> }.into_any())}
                 </section>

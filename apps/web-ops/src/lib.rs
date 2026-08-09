@@ -29,6 +29,7 @@ mod shipping;
 mod sorting;
 mod toast;
 mod view_model;
+mod workspace_layout;
 
 #[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
 #[wasm_bindgen::prelude::wasm_bindgen]

@@ -149,7 +149,16 @@ async fn workspace_bootstrap(
             }
             let load_locations = routes::locations::list_for_access(state, access, false);
             let (orders, access_workspace, locations) = tokio::try_join!(
-                repo::orders::get_orders_page_in_scope(&state.db, access, 50, 0, None, None),
+                repo::orders::get_orders_page_in_scope_sorted(
+                    &state.db,
+                    access,
+                    100,
+                    0,
+                    None,
+                    None,
+                    repo::orders::OrderPageSort::Order,
+                    repo::orders::OrderPageSortDirection::Descending,
+                ),
                 routes::access::workspace_for_access(state, access),
                 load_locations,
             )?;

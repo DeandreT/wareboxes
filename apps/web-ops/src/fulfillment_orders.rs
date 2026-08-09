@@ -16,12 +16,13 @@ use crate::fulfillment_order_allocation::OrderAllocationPanel;
 use crate::fulfillment_order_cancellation::OrderCancellationPanel;
 use crate::fulfillment_pick_shortages::PickShortageWorkbench;
 use crate::fulfillment_shared::{
-    cmp_option_str, optional_text, order_destination, order_status_class, parse_optional_timestamp,
-    query_encode, short_timestamp, timestamp_input,
+    optional_text, order_destination, order_status_class, parse_optional_timestamp, query_encode,
+    short_timestamp, timestamp_input,
 };
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::toast::use_toast_bus;
 use crate::view_model::format_quantity;
+use crate::workspace_layout::{PaneControls, SplitPaneHandle, SplitPaneState};
 
 mod detail;
 
@@ -37,6 +38,19 @@ enum OrderSort {
     Units,
     ShipBy,
     Destination,
+}
+
+impl OrderSort {
+    const fn wire_value(self) -> &'static str {
+        match self {
+            Self::Order => "order",
+            Self::Client => "client",
+            Self::Status => "status",
+            Self::Units => "units",
+            Self::ShipBy => "ship_by",
+            Self::Destination => "destination",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -78,6 +92,7 @@ pub fn OrdersWorkbench(
         key: OrderSort::Order,
         direction: SortDirection::Descending,
     });
+    let layout = SplitPaneState::new("orders", 720);
     let toasts = use_toast_bus();
     let shortage_facilities = StoredValue::new(access.facilities.clone());
     let shortage_clients = StoredValue::new(access.inventory_owners.clone());
@@ -93,8 +108,9 @@ pub fn OrdersWorkbench(
         error.set(None);
         let search_value = search.get_untracked();
         let status_value = status.get_untracked();
+        let sort_value = sort.get_untracked();
         leptos::task::spawn_local(async move {
-            match fetch_orders(offset, &search_value, &status_value).await {
+            match fetch_orders(offset, &search_value, &status_value, sort_value).await {
                 Ok(next) => {
                     page.set(next);
                     pending.set(false);
@@ -108,12 +124,21 @@ pub fn OrdersWorkbench(
         });
     };
 
+    let change_sort = Callback::new(move |key: OrderSort| {
+        if pending.get_untracked() {
+            return;
+        }
+        SortSpec::select(sort, key);
+        run_search(0);
+    });
+
     let submit_search = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
         run_search(0);
     };
 
     let open_order = move |order_id: i64| {
+        layout.show_detail();
         create_open.set(false);
         request_order_detail(
             order_id,
@@ -134,9 +159,10 @@ pub fn OrdersWorkbench(
         );
         let search_value = search.get_untracked();
         let status_value = status.get_untracked();
+        let sort_value = sort.get_untracked();
         let offset = page.get_untracked().page.offset;
         leptos::task::spawn_local(async move {
-            match fetch_orders(offset, &search_value, &status_value).await {
+            match fetch_orders(offset, &search_value, &status_value, sort_value).await {
                 Ok(next) => page.set(next),
                 Err(api_error) if api_error.unauthorized => on_unauthorized.run(()),
                 Err(api_error) => toasts.error(api_error.message),
@@ -160,12 +186,18 @@ pub fn OrdersWorkbench(
         <Show
             when=move || shortages_open.get()
             fallback=move || view! {
-        <div class="fulfillment-workbench" class:create-mode=move || create_open.get()>
-            <section class="data-section fulfillment-list">
+        <div
+            class="fulfillment-workbench split-workspace"
+            class:create-mode=move || create_open.get()
+            style=move || layout.style()
+            data-pane-mode=move || layout.mode_attribute()
+        >
+            <section class="data-section fulfillment-list split-master">
                 <form class="table-toolbar fulfillment-toolbar" on:submit=submit_search>
                     <div class="toolbar-summary">
                         <strong>{move || format_quantity(page.get().page.total)}</strong>
                         <span>"orders"</span>
+                        <PaneControls layout master_label="order list" detail_label="order detail"/>
                     </div>
                     <div class="fulfillment-filters">
                         <SearchField
@@ -208,6 +240,7 @@ pub fn OrdersWorkbench(
                             class="button primary-action"
                             type="button"
                             on:click=move |_| {
+                                layout.show_detail();
                                 selected.set(None);
                                 create_open.set(true);
                             }
@@ -225,75 +258,47 @@ pub fn OrdersWorkbench(
                                     label="Order"
                                     active=move || sort.get().key == OrderSort::Order
                                     direction=move || sort.get().direction
-                                    on_sort=Callback::new(move |_| SortSpec::select(sort, OrderSort::Order))
+                                    on_sort=Callback::new(move |_| change_sort.run(OrderSort::Order))
                                 />
                                 <SortableHeader
                                     label="Client"
                                     active=move || sort.get().key == OrderSort::Client
                                     direction=move || sort.get().direction
-                                    on_sort=Callback::new(move |_| SortSpec::select(sort, OrderSort::Client))
+                                    on_sort=Callback::new(move |_| change_sort.run(OrderSort::Client))
                                 />
                                 <SortableHeader
                                     label="Status"
                                     active=move || sort.get().key == OrderSort::Status
                                     direction=move || sort.get().direction
-                                    on_sort=Callback::new(move |_| SortSpec::select(sort, OrderSort::Status))
+                                    on_sort=Callback::new(move |_| change_sort.run(OrderSort::Status))
                                 />
                                 <SortableHeader
                                     label="Units"
                                     active=move || sort.get().key == OrderSort::Units
                                     direction=move || sort.get().direction
-                                    on_sort=Callback::new(move |_| SortSpec::select(sort, OrderSort::Units))
+                                    on_sort=Callback::new(move |_| change_sort.run(OrderSort::Units))
                                     numeric=true
                                 />
                                 <SortableHeader
                                     label="Ship by"
                                     active=move || sort.get().key == OrderSort::ShipBy
                                     direction=move || sort.get().direction
-                                    on_sort=Callback::new(move |_| SortSpec::select(sort, OrderSort::ShipBy))
+                                    on_sort=Callback::new(move |_| change_sort.run(OrderSort::ShipBy))
                                 />
                                 <SortableHeader
                                     label="Destination"
                                     active=move || sort.get().key == OrderSort::Destination
                                     direction=move || sort.get().direction
                                     on_sort=Callback::new(move |_| {
-                                        SortSpec::select(sort, OrderSort::Destination)
+                                        change_sort.run(OrderSort::Destination)
                                     })
                                 />
                             </tr>
                         </thead>
                         <tbody>
                             {move || {
-                                let spec = sort.get();
                                 let selected_id = selected.get().map(|order| order.id);
-                                let mut orders = page.get().page.items;
-                                orders.sort_by(|left, right| {
-                                    let ordering = match spec.key {
-                                        OrderSort::Order => left
-                                            .order_key
-                                            .to_ascii_lowercase()
-                                            .cmp(&right.order_key.to_ascii_lowercase()),
-                                        OrderSort::Client => cmp_option_str(
-                                            left.inventory_owner_name.as_deref(),
-                                            right.inventory_owner_name.as_deref(),
-                                        ),
-                                        OrderSort::Status => {
-                                            left.status.as_str().cmp(right.status.as_str())
-                                        }
-                                        OrderSort::Units => left.ordered_qty.cmp(&right.ordered_qty),
-                                        OrderSort::ShipBy => left.ship_by.cmp(&right.ship_by),
-                                        OrderSort::Destination => order_destination(left)
-                                            .to_ascii_lowercase()
-                                            .cmp(&order_destination(right).to_ascii_lowercase()),
-                                    }
-                                    .then_with(|| left.id.cmp(&right.id));
-                                    if spec.direction == SortDirection::Ascending {
-                                        ordering
-                                    } else {
-                                        ordering.reverse()
-                                    }
-                                });
-                                orders
+                                page.get().page.items
                                     .into_iter()
                                     .map(|order| {
                                         let id = order.id;
@@ -381,7 +386,9 @@ pub fn OrdersWorkbench(
                 </Show>
             </section>
 
-            <aside class="command-panel fulfillment-detail">
+            <SplitPaneHandle layout/>
+
+            <aside class="command-panel fulfillment-detail split-detail">
                 <Show
                     when=move || create_open.get()
                     fallback=move || {
@@ -1024,7 +1031,12 @@ fn CreateOrderPanel(
     }
 }
 
-async fn fetch_orders(offset: i64, search: &str, status: &str) -> Result<OrderPage, api::ApiError> {
+async fn fetch_orders(
+    offset: i64,
+    search: &str,
+    status: &str,
+    sort: SortSpec<OrderSort>,
+) -> Result<OrderPage, api::ApiError> {
     let mut path = format!("/api/orders?limit={ORDER_PAGE_SIZE}&offset={offset}");
     let search = search.trim();
     if !search.is_empty() {
@@ -1036,6 +1048,13 @@ async fn fetch_orders(offset: i64, search: &str, status: &str) -> Result<OrderPa
         path.push_str("&status=");
         path.push_str(&query_encode(status));
     }
+    path.push_str("&sort=");
+    path.push_str(sort.key.wire_value());
+    path.push_str("&direction=");
+    path.push_str(match sort.direction {
+        SortDirection::Ascending => "asc",
+        SortDirection::Descending => "desc",
+    });
     api::internal_get(&path).await
 }
 
