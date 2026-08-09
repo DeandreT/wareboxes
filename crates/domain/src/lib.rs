@@ -85,11 +85,13 @@ pub use outbound_qa::{
     OutboundQaSessionRevision, OutboundQaSessionStatus, MAX_OUTBOUND_QA_SCAN_VALUE_LENGTH,
 };
 pub use packing::{
-    begin_packing, complete_packing, continue_packing, open_carton, remove_packed_content,
-    CartonDimensions, CartonMeasurements, CartonStatus, DimensionMillimeters,
-    PackContentRemovalDetails, PackContentRemovalNote, PackContentRemovalReason, PackQuantity,
-    PackScanValue, PackSessionStatus, PackingError, PackingProgress, WeightGrams,
-    MAX_PACK_CONTENT_REMOVAL_NOTE_LENGTH, MAX_PACK_SCAN_VALUE_LENGTH,
+    abandon_empty_packing, begin_packing, complete_packing, continue_packing, open_carton,
+    remove_packed_content, CartonDimensions, CartonMeasurements, CartonStatus,
+    DimensionMillimeters, PackContentRemovalDetails, PackContentRemovalNote,
+    PackContentRemovalReason, PackQuantity, PackScanValue, PackSessionAbandonmentDetails,
+    PackSessionAbandonmentNote, PackSessionAbandonmentReason, PackSessionStatus, PackingError,
+    PackingProgress, WeightGrams, MAX_PACK_CONTENT_REMOVAL_NOTE_LENGTH, MAX_PACK_SCAN_VALUE_LENGTH,
+    MAX_PACK_SESSION_ABANDONMENT_NOTE_LENGTH,
 };
 pub use pick_wave::{
     cancel_pick_wave, release_pick_wave, validate_pick_wave_plan, PickWaveCancellationNote,

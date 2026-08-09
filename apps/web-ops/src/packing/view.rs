@@ -168,6 +168,7 @@ pub(super) fn PackingActive(
     on_change_source: Callback<()>,
     on_close: Callback<()>,
     on_void: Callback<()>,
+    on_abandon: Callback<()>,
     on_remove: Callback<PendingContentRemoval>,
     on_next_order: Callback<()>,
 ) -> impl IntoView {
@@ -211,6 +212,14 @@ pub(super) fn PackingActive(
         .as_ref()
         .map(|carton| carton.carton_barcode.clone());
     let cartons = current.cartons.clone();
+    let can_abandon = current.progress.packed_allocation_count == 0
+        && current.progress.packed_quantity == 0
+        && current.progress.open_carton_count == 0
+        && current.progress.closed_carton_count == 0
+        && current
+            .cartons
+            .iter()
+            .all(|carton| matches!(carton.lifecycle, PackCartonLifecycleResponse::Voided { .. }));
     let active_carton_for_form = StoredValue::new(open_carton.clone());
     let has_active_carton = active_carton_for_form.get_value().is_some();
     let active_carton_for_summary = open_carton.clone();
@@ -449,6 +458,17 @@ pub(super) fn PackingActive(
                             carton.content_count
                         )}</p>
                     })}
+                    <Show when=move || can_abandon>
+                        <button
+                            class="button danger-action packing-abandon-action"
+                            type="button"
+                            disabled=move || signals.blocked()
+                            on:click=move |_| on_abandon.run(())
+                        >
+                            <Icon icon=UiIcon::Remove/>
+                            "Abandon empty session"
+                        </button>
+                    </Show>
                 </section>
             </div>
         </div>

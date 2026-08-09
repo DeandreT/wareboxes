@@ -1,8 +1,54 @@
 use super::super::*;
 use wareboxes_api_contract::v1::{
-    ConfirmShipmentDepartureResponse, CreateShipmentResponse, PackAllocationDispositionResponse,
-    RecordManualManifestResponse, RemovePackedContentResponse,
+    AbandonPackSessionResponse, CancelOrderResponse, ConfirmShipmentDepartureResponse,
+    CreateShipmentResponse, PackAllocationDispositionResponse, PackSessionStatus,
+    RecordManualManifestResponse, RemovePackedContentResponse, ReversePickConfirmationResponse,
 };
+
+async fn grant_supervisor(fixture: &Fixture, tenant_id: TenantId, user_id: i64, key: &str) {
+    let permission_id = match wareboxes_persistence_postgres::permissions::find_by_name(
+        &fixture.db,
+        tenant_id,
+        "wms_supervisor",
+    )
+    .await
+    .unwrap()
+    {
+        Some(permission) => permission.id,
+        None => wareboxes_persistence_postgres::permissions::add_permission(
+            &fixture.db,
+            tenant_id,
+            "wms_supervisor",
+            Some("Packing recovery supervisor permission"),
+        )
+        .await
+        .unwrap(),
+    };
+    let role = wareboxes_persistence_postgres::roles::add_role(
+        &fixture.db,
+        tenant_id,
+        key,
+        Some("Packing recovery supervisor"),
+    )
+    .await
+    .unwrap();
+    assert!(wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_id,
+        role,
+        permission_id,
+    )
+    .await
+    .unwrap());
+    assert!(wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_id,
+        user_id,
+        role,
+    )
+    .await
+    .unwrap());
+}
 
 async fn configure_shipping_origin(
     fixture: &Fixture,
@@ -539,4 +585,433 @@ async fn open_carton_content_can_be_returned_replayed_and_repacked_exactly() {
     .unwrap();
     tx.rollback().await.unwrap();
     assert_eq!(shipped, ("shipped".into(), 3, 2, 1));
+}
+
+#[tokio::test]
+async fn empty_session_abandonment_unlocks_pick_reversal_and_order_cancellation() {
+    let fixture = Fixture::new().await;
+    let supervisor = fixture.wms_user("packing-abandonment@test.local").await;
+    let access = default_tenant_for_user(&fixture.db, supervisor.id)
+        .await
+        .unwrap();
+    grant_orders(
+        &fixture.db,
+        access.tenant_id,
+        supervisor.id,
+        "packing-abandonment-orders",
+    )
+    .await;
+    grant_supervisor(
+        &fixture,
+        access.tenant_id,
+        supervisor.id,
+        "packing-abandonment-supervisor",
+    )
+    .await;
+    let owner_id = fixture
+        .inventory_owner(access.tenant_id, "Packing Abandonment Owner")
+        .await;
+    let facility_id = fixture
+        .facility(access.tenant_id, "Packing Abandonment Facility")
+        .await;
+    fixture
+        .assign_owner_to_facility(access.tenant_id, owner_id, facility_id)
+        .await;
+    let station_id = execution_location(
+        &fixture,
+        access.tenant_id,
+        facility_id,
+        "PACK-ABANDON-STATION",
+        "packing",
+    )
+    .await;
+    plate_at(
+        &fixture,
+        access.tenant_id,
+        owner_id,
+        facility_id,
+        station_id,
+        "PACK-ABANDON-TOTE",
+    )
+    .await;
+    let token = auth::create_session(&fixture.db, supervisor.id)
+        .await
+        .unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let order = prepare_order(
+        &fixture,
+        &app,
+        &token,
+        &access,
+        owner_id,
+        facility_id,
+        "PACK-ABANDON",
+        &[3],
+    )
+    .await;
+    release_order(
+        &app,
+        &token,
+        access.tenant_id,
+        order.order_id,
+        facility_id,
+        station_id,
+        "pack-abandon-release",
+    )
+    .await;
+    let picks = pick_order(
+        &app,
+        &token,
+        access.tenant_id,
+        "PACK-ABANDON-TOTE",
+        1,
+        "pack-abandon",
+    )
+    .await;
+    let confirmation_id = picks[0].result_id;
+    let opened = open_session(
+        &app,
+        &token,
+        access.tenant_id,
+        order.order_id,
+        facility_id,
+        station_id,
+        "pack-abandon-open",
+    )
+    .await;
+    let session_id = opened.session.session_id;
+    let original = opened.session.allocations[0].clone();
+    let carton = create_carton(
+        &app,
+        &token,
+        access.tenant_id,
+        session_id,
+        "PACK-ABANDON-CARTON",
+        5,
+        "pack-abandon-carton",
+    )
+    .await;
+    let carton_id = carton.carton.carton_id;
+    let packed = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::POST,
+        &format!("/api/v1/packing-sessions/{session_id}/cartons/{carton_id}/contents"),
+        Some("pack-abandon-pack"),
+        Some(pack_body(
+            original.inventory_allocation_id,
+            &original.item_barcodes[0],
+            original.lot.as_deref().unwrap(),
+            "PACK-ABANDON-TOTE",
+            "PACK-ABANDON-CARTON",
+            6,
+        )),
+    )
+    .await;
+    let packed: PackPickedAllocationResponse =
+        response_json(expect_status(packed, StatusCode::OK, "pack before abandonment").await).await;
+    let removed = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::POST,
+        &format!(
+            "/api/v1/packing-sessions/{session_id}/cartons/{carton_id}/contents/{}/removals",
+            packed.content_id
+        ),
+        Some("pack-abandon-remove"),
+        Some(removal_body(
+            &original,
+            "PACK-ABANDON-CARTON",
+            "PACK-ABANDON-TOTE",
+            7,
+        )),
+    )
+    .await;
+    let removed: RemovePackedContentResponse = response_json(
+        expect_status(removed, StatusCode::OK, "return content before abandonment").await,
+    )
+    .await;
+    assert_eq!(removed.revision.get(), 8);
+
+    let abandon_path = format!("/api/v1/packing-sessions/{session_id}/abandonments");
+    let abandon_body = json!({
+        "reason": "order_cancellation",
+        "note": "Client cancelled after packing began",
+        "expected_revision": 8
+    });
+    let not_voided = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::POST,
+        &abandon_path,
+        Some("pack-abandon-carton-not-voided"),
+        Some(abandon_body.clone()),
+    )
+    .await;
+    assert_eq!(not_voided.status(), StatusCode::CONFLICT);
+    let voided = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::POST,
+        &format!("/api/v1/packing-sessions/{session_id}/cartons/{carton_id}/voids"),
+        Some("pack-abandon-void"),
+        Some(json!({
+            "carton_barcode": "PACK-ABANDON-CARTON",
+            "expected_revision": 8
+        })),
+    )
+    .await;
+    let voided: VoidCartonResponse =
+        response_json(expect_status(voided, StatusCode::OK, "void restored carton").await).await;
+    assert_eq!(voided.revision.get(), 9);
+
+    let abandon_body = json!({
+        "reason": "order_cancellation",
+        "note": "Client cancelled after packing began",
+        "expected_revision": 9
+    });
+    let left = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::POST,
+        &abandon_path,
+        Some("pack-abandon-left"),
+        Some(abandon_body.clone()),
+    );
+    let right = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::POST,
+        &abandon_path,
+        Some("pack-abandon-right"),
+        Some(abandon_body.clone()),
+    );
+    let (left, right) = tokio::join!(left, right);
+    let (winner, loser, winner_key) = if left.status() == StatusCode::OK {
+        (left, right, "pack-abandon-left")
+    } else {
+        (right, left, "pack-abandon-right")
+    };
+    assert_eq!(loser.status(), StatusCode::CONFLICT);
+    let abandoned: AbandonPackSessionResponse = response_json(winner).await;
+    assert_eq!(abandoned.revision.get(), 10);
+    assert_eq!(abandoned.session_status, PackSessionStatus::Abandoned);
+    assert_eq!(abandoned.progress.status, PackSessionStatus::Abandoned);
+    let replay = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::POST,
+        &abandon_path,
+        Some(winner_key),
+        Some(abandon_body.clone()),
+    )
+    .await;
+    assert_eq!(
+        response_json::<AbandonPackSessionResponse>(replay).await,
+        abandoned
+    );
+    set_scope(
+        &fixture.db,
+        access.tenant_id,
+        supervisor.id,
+        Vec::new(),
+        Vec::new(),
+    )
+    .await;
+    let concealed_replay = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::POST,
+        &abandon_path,
+        Some(winner_key),
+        Some(abandon_body.clone()),
+    )
+    .await;
+    assert_eq!(concealed_replay.status(), StatusCode::NOT_FOUND);
+    let concealed_changed_replay = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::POST,
+        &abandon_path,
+        Some(winner_key),
+        Some(json!({
+            "reason": "station_issue",
+            "note": "Changed while concealed",
+            "expected_revision": 9
+        })),
+    )
+    .await;
+    assert_eq!(concealed_changed_replay.status(), StatusCode::NOT_FOUND);
+    set_scope(
+        &fixture.db,
+        access.tenant_id,
+        supervisor.id,
+        vec![facility_id],
+        vec![owner_id],
+    )
+    .await;
+    let active = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::GET,
+        &format!("/api/v1/orders/{}/packing-session", order.order_id),
+        None,
+        None,
+    )
+    .await;
+    assert!(response_json::<Option<PackSessionResponse>>(active)
+        .await
+        .is_none());
+    let premature_reopen = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::POST,
+        &format!("/api/v1/orders/{}/packing-sessions", order.order_id),
+        Some("pack-abandon-premature-reopen"),
+        Some(json!({
+            "facility_id": facility_id,
+            "station_location_id": station_id,
+            "expected_revision": 10
+        })),
+    )
+    .await;
+    assert_eq!(premature_reopen.status(), StatusCode::CONFLICT);
+    let history = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::GET,
+        &format!("/api/v1/packing-sessions/{session_id}"),
+        None,
+        None,
+    )
+    .await;
+    let history: PackSessionResponse = response_json(history).await;
+    assert_eq!(history.status, PackSessionStatus::Abandoned);
+    assert!(history.abandonment.is_some());
+
+    let mut tx = tenant_tx(&fixture.db, access.tenant_id).await;
+    let scan = sqlx::query(
+        r#"SELECT source_location.barcode AS source_location_barcode,
+                  source_plate.barcode AS source_plate_barcode,
+                  batch.lot,batch.serial
+           FROM pick_confirmations confirmation
+           JOIN locations source_location
+             ON source_location.tenant_id=confirmation.tenant_id
+            AND source_location.id=confirmation.source_location_id
+           LEFT JOIN license_plates source_plate
+             ON source_plate.tenant_id=confirmation.tenant_id
+            AND source_plate.id=confirmation.source_license_plate_id
+           JOIN item_batches batch
+             ON batch.tenant_id=confirmation.tenant_id
+            AND batch.id=confirmation.item_batch_id
+           WHERE confirmation.tenant_id=$1 AND confirmation.id=$2"#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(confirmation_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    let reverse = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::POST,
+        &format!("/api/v1/pick-confirmations/{confirmation_id}/reversals"),
+        Some("pack-abandon-reverse-pick"),
+        Some(json!({
+            "expected_order_revision": 10,
+            "staged_location_barcode": "PACK-ABANDON-STATION",
+            "staged_license_plate_barcode": "PACK-ABANDON-TOTE",
+            "item_barcode": original.item_barcodes[0],
+            "lot_scan": scan.try_get::<Option<String>, _>("lot").unwrap(),
+            "serial_scan": scan.try_get::<Option<String>, _>("serial").unwrap(),
+            "return_location_barcode": scan.try_get::<String, _>("source_location_barcode").unwrap(),
+            "return_license_plate_barcode": scan.try_get::<Option<String>, _>("source_plate_barcode").unwrap(),
+            "reason": "order_exception",
+            "note": "Restored packing content before client cancellation"
+        })),
+    )
+    .await;
+    let reversed: ReversePickConfirmationResponse =
+        response_json(expect_status(reverse, StatusCode::OK, "reverse restored pick").await).await;
+    assert_eq!(
+        reversed.staged_inventory_allocation_id,
+        removed.destination_inventory_allocation_id
+    );
+    assert_eq!(reversed.order_revision.get(), 11);
+
+    let cancellation = send(
+        &app,
+        &token,
+        access.tenant_id,
+        Method::POST,
+        &format!("/api/v1/orders/{}/cancellations", order.order_id),
+        Some("pack-abandon-cancel-order"),
+        Some(json!({
+            "expected_revision": 11,
+            "reason": "client_request",
+            "note": "Client cancelled after physical recovery"
+        })),
+    )
+    .await;
+    let cancelled: CancelOrderResponse = response_json(
+        expect_status(
+            cancellation,
+            StatusCode::OK,
+            "cancel recovered packed order",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(cancelled.revision.get(), 12);
+    assert_eq!(cancelled.reversed_pick_confirmation_count, 1);
+
+    let mut tx = tenant_tx(&fixture.db, access.tenant_id).await;
+    let evidence: (String, String, i64, i64, i64) = sqlx::query_as(
+        r#"SELECT order_header.status,session.state,
+                  (SELECT COUNT(*) FROM outbox_events event
+                   WHERE event.tenant_id=$1 AND event.event_type='packing.session_abandoned'
+                     AND event.aggregate_id=$2::TEXT),
+                  (SELECT COUNT(*) FROM command_idempotency_records record
+                   WHERE record.tenant_id=$1 AND record.operation='packing.session.abandon.v1'),
+                  (SELECT COUNT(*) FROM packing_sessions current_session
+                   WHERE current_session.tenant_id=$1 AND current_session.order_id=$2
+                     AND current_session.state<>'abandoned')
+           FROM orders order_header
+           JOIN packing_sessions session ON session.tenant_id=order_header.tenant_id
+                                        AND session.order_id=order_header.id
+           WHERE order_header.tenant_id=$1 AND order_header.id=$2"#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(order.order_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(evidence, ("cancelled".into(), "abandoned".into(), 1, 1, 0));
+
+    let admin = admin_db_for(&fixture.db).await;
+    let mut admin_tx = admin.begin().await.unwrap();
+    let mutation = sqlx::query(
+        "UPDATE packing_sessions SET abandonment_note='forged' WHERE tenant_id=$1 AND id=$2",
+    )
+    .bind(access.tenant_id.get())
+    .bind(session_id)
+    .execute(&mut *admin_tx)
+    .await;
+    assert!(mutation.is_err(), "abandonment evidence must be immutable");
+    admin_tx.rollback().await.unwrap();
 }

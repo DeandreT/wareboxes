@@ -3610,6 +3610,7 @@ BEGIN
                SELECT 1 FROM public.packing_sessions session
                WHERE session.tenant_id = NEW.tenant_id
                  AND session.order_id = NEW.order_id
+                 AND session.state <> 'abandoned'
            )
         THEN
             RAISE EXCEPTION 'processing order cancellation requires untouched or restored terminal pick work'
@@ -3767,8 +3768,8 @@ BEGIN
             USING ERRCODE = '55000';
     END IF;
 
-    IF OLD.state = 'ready_to_manifest' THEN
-        RAISE EXCEPTION 'ready packing sessions are immutable'
+    IF OLD.state IN ('ready_to_manifest', 'abandoned') THEN
+        RAISE EXCEPTION 'terminal packing sessions are immutable'
             USING ERRCODE = '55000';
     END IF;
 
@@ -3776,6 +3777,10 @@ BEGIN
         IF NEW.revision <> OLD.revision + 1
            OR NEW.ready_by_user_id IS NOT NULL
            OR NEW.ready_at IS NOT NULL
+           OR NEW.abandonment_reason IS NOT NULL
+           OR NEW.abandonment_note IS NOT NULL
+           OR NEW.abandoned_by_user_id IS NOT NULL
+           OR NEW.abandoned_at IS NOT NULL
         THEN
             RAISE EXCEPTION 'open packing session updates must advance revision once'
                 USING ERRCODE = '55000';
@@ -3785,8 +3790,29 @@ BEGIN
            OR NEW.revision <> OLD.revision + 1
            OR NEW.ready_by_user_id IS NULL
            OR NEW.ready_at IS NULL
+           OR NEW.abandonment_reason IS NOT NULL
+           OR NEW.abandonment_note IS NOT NULL
+           OR NEW.abandoned_by_user_id IS NOT NULL
+           OR NEW.abandoned_at IS NOT NULL
         THEN
             RAISE EXCEPTION 'invalid packing session completion transition'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF NEW.state = 'abandoned' THEN
+        IF OLD.state <> 'open'
+           OR NEW.revision <> OLD.revision + 1
+           OR NEW.ready_by_user_id IS NOT NULL
+           OR NEW.ready_at IS NOT NULL
+           OR NEW.abandonment_reason IS NULL
+           OR NEW.abandoned_by_user_id IS NULL
+           OR NEW.abandoned_at IS NULL
+           OR NEW.abandoned_at < NEW.started_at
+           OR NEW.packed_allocation_count <> 0
+           OR NEW.packed_qty <> 0
+           OR NEW.open_carton_count <> 0
+           OR NEW.closed_carton_count <> 0
+        THEN
+            RAISE EXCEPTION 'invalid packing session abandonment transition'
                 USING ERRCODE = '55000';
         END IF;
     ELSE
@@ -3965,6 +3991,10 @@ BEGIN
        OR NEW.closed_carton_count <> 0
        OR NEW.ready_by_user_id IS NOT NULL
        OR NEW.ready_at IS NOT NULL
+       OR NEW.abandonment_reason IS NOT NULL
+       OR NEW.abandonment_note IS NOT NULL
+       OR NEW.abandoned_by_user_id IS NOT NULL
+       OR NEW.abandoned_at IS NOT NULL
     THEN
         RAISE EXCEPTION 'packing sessions must begin open with empty execution counters'
             USING ERRCODE = '23514';
@@ -4508,6 +4538,26 @@ BEGIN
                            AND order_status = 'shipped'
                            AND order_revision = shipment.creation_resulting_order_revision
                                + (shipment.revision - 2)))
+            )
+       ))
+       OR (session_row.state = 'abandoned' AND (
+            order_status IS DISTINCT FROM 'awaiting packing'
+            OR order_revision IS DISTINCT FROM session_row.revision
+            OR session_row.packed_allocation_count <> 0
+            OR session_row.packed_qty <> 0
+            OR session_row.open_carton_count <> 0
+            OR session_row.closed_carton_count <> 0
+            OR EXISTS (
+                SELECT 1 FROM public.packing_allocation_positions position
+                WHERE position.tenant_id = session_row.tenant_id
+                  AND position.packing_session_id = session_row.id
+                  AND position.state = 'packed'
+            )
+            OR EXISTS (
+                SELECT 1 FROM public.cartons carton
+                WHERE carton.tenant_id = session_row.tenant_id
+                  AND carton.packing_session_id = session_row.id
+                  AND carton.state <> 'voided'
             )
        ))
     THEN
@@ -5931,13 +5981,13 @@ BEGIN
            confirmation.order_item_id,
            confirmation.reservation_id,
            confirmation.source_inventory_allocation_id,
-           confirmation.destination_inventory_allocation_id,
+           staged_allocation.id AS destination_inventory_allocation_id,
            confirmation.source_inventory_balance_id,
-           confirmation.destination_inventory_balance_id,
+           staged_balance.id AS destination_inventory_balance_id,
            confirmation.source_location_id,
-           confirmation.destination_location_id,
+           staged_allocation.location_id AS destination_location_id,
            confirmation.source_license_plate_id,
-           confirmation.destination_license_plate_id,
+           staged_allocation.license_plate_id AS destination_license_plate_id,
            confirmation.item_batch_id,
            confirmation.item_id,
            confirmation.uom,
@@ -5981,10 +6031,32 @@ BEGIN
       ON source_allocation.tenant_id = confirmation.tenant_id
      AND source_allocation.inventory_owner_id = confirmation.inventory_owner_id
      AND source_allocation.id = confirmation.source_inventory_allocation_id
+    LEFT JOIN public.packing_session_allocations pack_snapshot
+      ON pack_snapshot.tenant_id = confirmation.tenant_id
+     AND pack_snapshot.inventory_owner_id = confirmation.inventory_owner_id
+     AND pack_snapshot.facility_id = confirmation.facility_id
+     AND pack_snapshot.pick_confirmation_id = confirmation.id
+    LEFT JOIN public.packing_sessions pack_session
+      ON pack_session.tenant_id = pack_snapshot.tenant_id
+     AND pack_session.inventory_owner_id = pack_snapshot.inventory_owner_id
+     AND pack_session.facility_id = pack_snapshot.facility_id
+     AND pack_session.id = pack_snapshot.packing_session_id
+     AND pack_session.state = 'abandoned'
+    LEFT JOIN public.packing_allocation_positions pack_position
+      ON pack_position.tenant_id = pack_snapshot.tenant_id
+     AND pack_position.inventory_owner_id = pack_snapshot.inventory_owner_id
+     AND pack_position.facility_id = pack_snapshot.facility_id
+     AND pack_position.packing_session_id = pack_snapshot.packing_session_id
+     AND pack_position.packing_session_allocation_id = pack_snapshot.id
+     AND pack_position.state = 'available'
+     AND pack_session.id IS NOT NULL
     INNER JOIN public.inventory_allocations staged_allocation
       ON staged_allocation.tenant_id = confirmation.tenant_id
      AND staged_allocation.inventory_owner_id = confirmation.inventory_owner_id
-     AND staged_allocation.id = confirmation.destination_inventory_allocation_id
+     AND staged_allocation.id = COALESCE(
+         pack_position.current_inventory_allocation_id,
+         confirmation.destination_inventory_allocation_id
+     )
     INNER JOIN public.inventory_balances source_balance
       ON source_balance.tenant_id = confirmation.tenant_id
      AND source_balance.inventory_owner_id = confirmation.inventory_owner_id
@@ -5992,7 +6064,7 @@ BEGIN
     INNER JOIN public.inventory_balances staged_balance
       ON staged_balance.tenant_id = confirmation.tenant_id
      AND staged_balance.inventory_owner_id = confirmation.inventory_owner_id
-     AND staged_balance.id = confirmation.destination_inventory_balance_id
+     AND staged_balance.id = staged_allocation.inventory_balance_id
     WHERE confirmation.tenant_id = NEW.tenant_id
       AND confirmation.inventory_owner_id = NEW.inventory_owner_id
       AND confirmation.id = NEW.pick_confirmation_id
@@ -6070,6 +6142,7 @@ BEGIN
         WHERE session.tenant_id = NEW.tenant_id
           AND session.inventory_owner_id = NEW.inventory_owner_id
           AND session.order_id = NEW.order_id
+          AND session.state <> 'abandoned'
     ) THEN
         RAISE EXCEPTION 'pick reversal is unavailable after packing begins'
             USING ERRCODE = '55000';
@@ -12299,10 +12372,17 @@ CREATE TABLE public.packing_sessions (
     started_at timestamp with time zone NOT NULL,
     ready_by_user_id bigint,
     ready_at timestamp with time zone,
+    abandonment_reason text,
+    abandonment_note text,
+    abandoned_by_user_id bigint,
+    abandoned_at timestamp with time zone,
     CONSTRAINT packing_sessions_counts_check CHECK ((expected_allocation_count > 0) AND (expected_qty > 0) AND (packed_allocation_count >= 0) AND (packed_allocation_count <= expected_allocation_count) AND (packed_qty >= 0) AND (packed_qty <= expected_qty) AND (open_carton_count >= 0) AND (open_carton_count <= 1) AND (closed_carton_count >= 0)),
     CONSTRAINT packing_sessions_revision_check CHECK (revision > 0),
-    CONSTRAINT packing_sessions_state_check CHECK ((state = ANY (ARRAY['open'::text, 'ready_to_manifest'::text]))),
-    CONSTRAINT packing_sessions_state_fields_check CHECK ((((state = 'open'::text) AND (ready_by_user_id IS NULL) AND (ready_at IS NULL)) OR ((state = 'ready_to_manifest'::text) AND (ready_by_user_id IS NOT NULL) AND (ready_at IS NOT NULL) AND (ready_at >= started_at) AND (packed_allocation_count = expected_allocation_count) AND (packed_qty = expected_qty) AND (open_carton_count = 0) AND (closed_carton_count > 0))))
+    CONSTRAINT packing_sessions_abandonment_note_check CHECK (((abandonment_note IS NULL) OR ((abandonment_note = btrim(abandonment_note)) AND (abandonment_note <> ''::text) AND (char_length(abandonment_note) <= 500)))),
+    CONSTRAINT packing_sessions_abandonment_other_note_check CHECK (((abandonment_reason <> 'other'::text) OR (abandonment_note IS NOT NULL))),
+    CONSTRAINT packing_sessions_abandonment_reason_check CHECK (((abandonment_reason IS NULL) OR (abandonment_reason = ANY (ARRAY['order_cancellation'::text, 'repack'::text, 'station_issue'::text, 'other'::text])))),
+    CONSTRAINT packing_sessions_state_check CHECK ((state = ANY (ARRAY['open'::text, 'ready_to_manifest'::text, 'abandoned'::text]))),
+    CONSTRAINT packing_sessions_state_fields_check CHECK ((((state = 'open'::text) AND (ready_by_user_id IS NULL) AND (ready_at IS NULL) AND (abandonment_reason IS NULL) AND (abandonment_note IS NULL) AND (abandoned_by_user_id IS NULL) AND (abandoned_at IS NULL)) OR ((state = 'ready_to_manifest'::text) AND (ready_by_user_id IS NOT NULL) AND (ready_at IS NOT NULL) AND (ready_at >= started_at) AND (packed_allocation_count = expected_allocation_count) AND (packed_qty = expected_qty) AND (open_carton_count = 0) AND (closed_carton_count > 0) AND (abandonment_reason IS NULL) AND (abandonment_note IS NULL) AND (abandoned_by_user_id IS NULL) AND (abandoned_at IS NULL)) OR ((state = 'abandoned'::text) AND (ready_by_user_id IS NULL) AND (ready_at IS NULL) AND (abandonment_reason IS NOT NULL) AND (abandoned_by_user_id IS NOT NULL) AND (abandoned_at IS NOT NULL) AND (abandoned_at >= started_at) AND (packed_allocation_count = 0) AND (packed_qty = 0) AND (open_carton_count = 0) AND (closed_carton_count = 0))))
 );
 
 ALTER TABLE ONLY public.packing_sessions FORCE ROW LEVEL SECURITY;
@@ -15310,10 +15390,6 @@ ALTER TABLE ONLY public.packing_sessions
     ADD CONSTRAINT packing_sessions_order_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, order_id, id);
 
 
-ALTER TABLE ONLY public.packing_sessions
-    ADD CONSTRAINT packing_sessions_order_key UNIQUE (tenant_id, inventory_owner_id, order_id);
-
-
 --
 -- Name: packing_session_allocations packing_session_allocations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
@@ -16833,6 +16909,8 @@ CREATE UNIQUE INDEX outbound_order_containers_active_license_plate_key ON public
 --
 
 CREATE INDEX packing_sessions_state_idx ON public.packing_sessions USING btree (tenant_id, facility_id, inventory_owner_id, state, started_at, id);
+
+CREATE UNIQUE INDEX packing_sessions_active_order_key ON public.packing_sessions USING btree (tenant_id, inventory_owner_id, order_id) WHERE (state <> 'abandoned');
 
 
 --
@@ -20311,6 +20389,8 @@ ALTER TABLE ONLY public.packing_sessions
     ADD CONSTRAINT packing_sessions_started_by_fkey FOREIGN KEY (tenant_id, started_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
 ALTER TABLE ONLY public.packing_sessions
     ADD CONSTRAINT packing_sessions_ready_by_fkey FOREIGN KEY (tenant_id, ready_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+ALTER TABLE ONLY public.packing_sessions
+    ADD CONSTRAINT packing_sessions_abandoned_by_fkey FOREIGN KEY (tenant_id, abandoned_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
 
 ALTER TABLE ONLY public.packing_session_allocations
     ADD CONSTRAINT packing_session_allocations_session_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_id, packing_session_id) REFERENCES public.packing_sessions(tenant_id, inventory_owner_id, facility_id, order_id, id);
@@ -27958,7 +28038,8 @@ BEGIN
                     AND release.order_id = NEW.parent_order_id)
        OR EXISTS (SELECT 1 FROM public.packing_sessions session
                   WHERE session.tenant_id = NEW.tenant_id
-                    AND session.order_id = NEW.parent_order_id)
+                    AND session.order_id = NEW.parent_order_id
+                    AND session.state <> 'abandoned')
        OR EXISTS (SELECT 1 FROM public.shipments shipment
                   WHERE shipment.tenant_id = NEW.tenant_id
                     AND shipment.order_id = NEW.parent_order_id)

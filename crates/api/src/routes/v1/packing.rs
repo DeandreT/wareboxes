@@ -6,12 +6,14 @@ use wareboxes_api_contract::v1::{
     DimensionMillimeters as ApiDimensionMillimeters, OpaqueCursor, OpenPackSessionRequest,
     OpenPackSessionResponse, PackAllocationDispositionResponse, PackCartonLifecycleResponse,
     PackCartonResponse, PackContentRemovalReason as ApiPackContentRemovalReason,
-    PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
-    PackSessionStatus as ApiSessionStatus, PackableAllocationResponse, PackingOrderStatus,
-    PackingProgressResponse, PackingQueueEntryResponse, PackingQueueOrderStatus,
-    PackingQueuePage as ApiPackingQueuePage, PackingQueuePageRequest, PackingQueueSessionResponse,
-    RemovePackedContentRequest, RemovePackedContentResponse, Revision, VoidCartonRequest,
-    VoidCartonResponse, WeightGrams as ApiWeightGrams,
+    PackPickedAllocationRequest, PackPickedAllocationResponse,
+    PackSessionAbandonmentReason as ApiPackSessionAbandonmentReason,
+    PackSessionAbandonmentResponse, PackSessionResponse, PackSessionStatus as ApiSessionStatus,
+    PackableAllocationResponse, PackingOrderStatus, PackingProgressResponse,
+    PackingQueueEntryResponse, PackingQueueOrderStatus, PackingQueuePage as ApiPackingQueuePage,
+    PackingQueuePageRequest, PackingQueueSessionResponse, RemovePackedContentRequest,
+    RemovePackedContentResponse, Revision, VoidCartonRequest, VoidCartonResponse,
+    WeightGrams as ApiWeightGrams,
 };
 use wareboxes_application::packing::{
     CloseCartonCommand, CloseCartonResult, CreateCartonCommand, CreateCartonResult,
@@ -25,7 +27,8 @@ use wareboxes_domain::{
     CartonContentId, CartonDimensions, CartonId, CartonMeasurements, DimensionMillimeters,
     FacilityId, InventoryAllocationId, LocationId, OrderId, OrderRevision, OrderStatus,
     PackContentRemovalDetails, PackContentRemovalNote, PackContentRemovalReason, PackScanValue,
-    PackSessionId, PackSessionStatus, PackingProgress, WeightGrams, MAX_PACK_SCAN_VALUE_LENGTH,
+    PackSessionAbandonmentReason, PackSessionId, PackSessionStatus, PackingProgress, WeightGrams,
+    MAX_PACK_SCAN_VALUE_LENGTH,
 };
 
 use super::error::{V1Error, V1Result};
@@ -37,6 +40,9 @@ use crate::state::AppState;
 
 const PERMISSION: &str = "wms";
 const QUEUE_CURSOR_PREFIX: &str = "pq1.";
+
+mod abandonment;
+pub use abandonment::abandon_session;
 
 pub async fn queue(
     State(state): State<AppState>,
@@ -450,6 +456,15 @@ fn encode_queue_cursor(cursor: repo::packing::PackingQueueCursor) -> AppResult<O
 }
 
 fn map_session(session: PackSessionReadModel) -> V1Result<PackSessionResponse> {
+    let status = map_session_status(session.status);
+    let abandonment = session
+        .abandonment
+        .map(|value| PackSessionAbandonmentResponse {
+            reason: map_abandonment_reason(value.details.reason()),
+            note: value.details.note().map(|note| note.as_str().to_owned()),
+            abandoned_by: value.abandoned_by.get(),
+            abandoned_at: value.abandoned_at.to_rfc3339(),
+        });
     Ok(PackSessionResponse {
         session_id: session.session_id.get(),
         order_id: session.order_id.get(),
@@ -460,7 +475,8 @@ fn map_session(session: PackSessionReadModel) -> V1Result<PackSessionResponse> {
         station_location_name: session.station_location_name,
         order_key: session.order_key,
         revision: revision(session.revision)?,
-        progress: map_progress(session.progress),
+        status,
+        progress: map_progress_with_status(session.progress, status),
         cartons: session
             .cartons
             .into_iter()
@@ -473,7 +489,29 @@ fn map_session(session: PackSessionReadModel) -> V1Result<PackSessionResponse> {
             .collect(),
         started_by: session.started_by.get(),
         started_at: session.started_at.to_rfc3339(),
+        abandonment,
     })
+}
+
+const fn map_session_status(status: PackSessionStatus) -> ApiSessionStatus {
+    match status {
+        PackSessionStatus::Open => ApiSessionStatus::Open,
+        PackSessionStatus::ReadyToManifest => ApiSessionStatus::ReadyToManifest,
+        PackSessionStatus::Abandoned => ApiSessionStatus::Abandoned,
+    }
+}
+
+const fn map_abandonment_reason(
+    reason: PackSessionAbandonmentReason,
+) -> ApiPackSessionAbandonmentReason {
+    match reason {
+        PackSessionAbandonmentReason::OrderCancellation => {
+            ApiPackSessionAbandonmentReason::OrderCancellation
+        }
+        PackSessionAbandonmentReason::Repack => ApiPackSessionAbandonmentReason::Repack,
+        PackSessionAbandonmentReason::StationIssue => ApiPackSessionAbandonmentReason::StationIssue,
+        PackSessionAbandonmentReason::Other => ApiPackSessionAbandonmentReason::Other,
+    }
 }
 
 fn map_created_carton(result: CreateCartonResult) -> V1Result<CreateCartonResponse> {
@@ -677,8 +715,18 @@ fn map_progress(progress: PackingProgress) -> PackingProgressResponse {
         status: match progress.status() {
             PackSessionStatus::Open => ApiSessionStatus::Open,
             PackSessionStatus::ReadyToManifest => ApiSessionStatus::ReadyToManifest,
+            PackSessionStatus::Abandoned => ApiSessionStatus::Abandoned,
         },
     }
+}
+
+fn map_progress_with_status(
+    progress: PackingProgress,
+    status: ApiSessionStatus,
+) -> PackingProgressResponse {
+    let mut mapped = map_progress(progress);
+    mapped.status = status;
+    mapped
 }
 
 fn measurements_from_api(value: ApiCartonMeasurements) -> V1Result<CartonMeasurements> {
@@ -760,6 +808,7 @@ fn domain_validation(error: impl std::fmt::Display) -> V1Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wareboxes_api_contract::v1::AbandonPackSessionRequest;
 
     fn revision_value(value: i64) -> Revision {
         Revision::new(value).unwrap()
@@ -963,6 +1012,34 @@ mod tests {
                 reason: ApiPackContentRemovalReason::WrongItem,
                 note: None,
                 expected_revision: revision_value(6),
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn session_abandonment_validates_identity_reason_note_and_revision() {
+        let command = abandonment::abandon_session_command(
+            10,
+            AbandonPackSessionRequest {
+                reason: ApiPackSessionAbandonmentReason::OrderCancellation,
+                note: Some("client requested cancellation".into()),
+                expected_revision: revision_value(8),
+            },
+        )
+        .unwrap();
+        assert_eq!(command.session_id.get(), 10);
+        assert_eq!(command.expected_revision.get(), 8);
+        assert_eq!(
+            command.details.reason(),
+            PackSessionAbandonmentReason::OrderCancellation
+        );
+        assert!(abandonment::abandon_session_command(
+            0,
+            AbandonPackSessionRequest {
+                reason: ApiPackSessionAbandonmentReason::Other,
+                note: None,
+                expected_revision: revision_value(8),
             },
         )
         .is_err());

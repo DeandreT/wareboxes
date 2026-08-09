@@ -1,14 +1,15 @@
 use sqlx::Row;
 use wareboxes_application::packing::{
-    PackAllocationDisposition, PackCarton, PackCartonLifecycle, PackSessionQuery,
-    PackSessionReadModel, PackableAllocation,
+    PackAllocationDisposition, PackCarton, PackCartonLifecycle, PackSessionAbandonment,
+    PackSessionQuery, PackSessionReadModel, PackableAllocation,
 };
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     CartonContentId, CartonDimensions, CartonId, CartonMeasurements, DimensionMillimeters,
     FacilityId, InventoryAllocationId, InventoryBalanceId, InventoryOwnerId, ItemBatchId,
     LicensePlateId, LocationId, OrderId, OrderLineId, OrderRevision, PackQuantity, PackScanValue,
-    PackSessionId, PackingProgress, TenantId, Timestamp, UserId, WeightGrams,
+    PackSessionAbandonmentDetails, PackSessionAbandonmentNote, PackSessionAbandonmentReason,
+    PackSessionId, PackSessionStatus, PackingProgress, TenantId, Timestamp, UserId, WeightGrams,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, Db};
 
@@ -40,8 +41,11 @@ pub async fn packing_session_for_order(
         r#"
         SELECT id FROM packing_sessions
         WHERE tenant_id = $1 AND order_id = $2
+          AND state <> 'abandoned'
           AND ($3 OR facility_id = ANY($4))
           AND ($5 OR inventory_owner_id = ANY($6))
+        ORDER BY id DESC
+        LIMIT 1
         "#,
     )
     .bind(access.tenant_id.get())
@@ -82,7 +86,9 @@ pub(super) async fn load_session_tx(
                session.packed_allocation_count, session.expected_qty,
                session.packed_qty, session.open_carton_count,
                session.closed_carton_count, session.started_by_user_id,
-               session.started_at, orders.order_key,
+               session.started_at, session.state, session.abandonment_reason,
+               session.abandonment_note, session.abandoned_by_user_id,
+               session.abandoned_at, orders.order_key,
                location.barcode AS station_location_barcode,
                location.name AS station_location_name
         FROM packing_sessions session
@@ -122,6 +128,7 @@ pub(super) async fn load_session_tx(
     .map_err(|error| AppError::internal(error.to_string()))?;
     let cartons = load_cartons_tx(tx, tenant_id, session_id).await?;
     let allocations = load_allocations_tx(tx, tenant_id, session_id).await?;
+    let (status, abandonment) = map_session_lifecycle(&row)?;
     Ok(PackSessionReadModel {
         session_id,
         order_id: positive(row.try_get("order_id")?, OrderId::new)?,
@@ -132,12 +139,57 @@ pub(super) async fn load_session_tx(
         station_location_name: row.try_get("station_location_name")?,
         order_key: row.try_get("order_key")?,
         revision: positive(row.try_get("revision")?, OrderRevision::new)?,
+        status,
         progress,
         cartons,
         allocations,
         started_by: positive(row.try_get("started_by_user_id")?, UserId::new)?,
         started_at: row.try_get("started_at")?,
+        abandonment,
     })
+}
+
+fn map_session_lifecycle(
+    row: &sqlx::postgres::PgRow,
+) -> AppResult<(PackSessionStatus, Option<PackSessionAbandonment>)> {
+    match row.try_get::<String, _>("state")?.as_str() {
+        "open" => Ok((PackSessionStatus::Open, None)),
+        "ready_to_manifest" => Ok((PackSessionStatus::ReadyToManifest, None)),
+        "abandoned" => {
+            let reason = match row
+                .try_get::<Option<String>, _>("abandonment_reason")?
+                .as_deref()
+            {
+                Some("order_cancellation") => PackSessionAbandonmentReason::OrderCancellation,
+                Some("repack") => PackSessionAbandonmentReason::Repack,
+                Some("station_issue") => PackSessionAbandonmentReason::StationIssue,
+                Some("other") => PackSessionAbandonmentReason::Other,
+                _ => return Err(AppError::internal("abandoned session has invalid reason")),
+            };
+            let note = row
+                .try_get::<Option<String>, _>("abandonment_note")?
+                .map(PackSessionAbandonmentNote::new)
+                .transpose()
+                .map_err(|error| AppError::internal(error.to_string()))?;
+            let details = PackSessionAbandonmentDetails::new(reason, note)
+                .map_err(|error| AppError::internal(error.to_string()))?;
+            Ok((
+                PackSessionStatus::Abandoned,
+                Some(PackSessionAbandonment {
+                    details,
+                    abandoned_by: positive(
+                        row.try_get::<Option<i64>, _>("abandoned_by_user_id")?
+                            .ok_or_else(|| AppError::internal("abandoned session has no actor"))?,
+                        UserId::new,
+                    )?,
+                    abandoned_at: row
+                        .try_get::<Option<Timestamp>, _>("abandoned_at")?
+                        .ok_or_else(|| AppError::internal("abandoned session has no timestamp"))?,
+                }),
+            ))
+        }
+        _ => Err(AppError::internal("packing session has invalid state")),
+    }
 }
 
 async fn load_cartons_tx(

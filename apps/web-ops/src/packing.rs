@@ -1,11 +1,11 @@
 use leptos::html;
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
-    CartonDimensions, CartonMeasurements, CloseCartonRequest, CreateCartonRequest,
-    DimensionMillimeters, OpaqueCursor, OpenPackSessionRequest, PackAllocationDispositionResponse,
-    PackCartonLifecycleResponse, PackPickedAllocationRequest, PackSessionResponse,
-    PackingQueueEntryResponse, PackingQueuePage, RemovePackedContentRequest, VoidCartonRequest,
-    WeightGrams,
+    AbandonPackSessionRequest, CartonDimensions, CartonMeasurements, CloseCartonRequest,
+    CreateCartonRequest, DimensionMillimeters, OpaqueCursor, OpenPackSessionRequest,
+    PackAllocationDispositionResponse, PackCartonLifecycleResponse, PackPickedAllocationRequest,
+    PackSessionResponse, PackingQueueEntryResponse, PackingQueuePage, RemovePackedContentRequest,
+    VoidCartonRequest, WeightGrams,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 use wareboxes_core::models::Location;
@@ -15,11 +15,13 @@ use crate::components::{Icon, UiIcon};
 use crate::toast::{use_toast_bus, ToastBus};
 use crate::view_model::format_quantity;
 
+mod abandonment;
 mod commands;
 mod identity;
 mod removal;
 mod view;
 
+use self::abandonment::PackingAbandonmentDialog;
 use self::commands::{execute_command, PackingCommandResult, PendingPackingCommand};
 use self::identity::{advance_item_identity, matching_item_candidates, start_item_identity};
 use self::removal::{PackingRemovalDialog, PendingContentRemoval};
@@ -40,6 +42,7 @@ struct PackingSignals {
     source_plate: RwSignal<Option<String>>,
     item_identity: RwSignal<Option<PendingItemIdentity>>,
     removal: RwSignal<Option<PendingContentRemoval>>,
+    abandonment_open: RwSignal<bool>,
     completed_order_ids: RwSignal<Vec<i64>>,
     focus_epoch: RwSignal<u64>,
     measurements: CartonMeasurementSignals,
@@ -63,6 +66,7 @@ impl PackingSignals {
             || self.retry.get().is_some()
             || self.refresh_order_id.get().is_some()
             || self.removal.get().is_some()
+            || self.abandonment_open.get()
     }
 
     fn refocus(self) {
@@ -152,6 +156,7 @@ pub(crate) fn PackingWorkspace(
     let source_plate = RwSignal::new(None::<String>);
     let item_identity = RwSignal::new(None::<PendingItemIdentity>);
     let removal = RwSignal::new(None::<PendingContentRemoval>);
+    let abandonment_open = RwSignal::new(false);
     let completed_order_ids = RwSignal::new(Vec::<i64>::new());
     let focus_epoch = RwSignal::new(0_u64);
     let measurements = CartonMeasurementSignals {
@@ -173,6 +178,7 @@ pub(crate) fn PackingWorkspace(
         source_plate,
         item_identity,
         removal,
+        abandonment_open,
         completed_order_ids,
         focus_epoch,
         measurements,
@@ -279,6 +285,32 @@ pub(crate) fn PackingWorkspace(
     });
     let close_carton = Callback::new(move |_| close_current_carton(signals));
     let void_carton = Callback::new(move |_| void_current_carton(signals));
+    let start_abandonment = Callback::new(move |_| {
+        if signals.pending.get_untracked() || signals.retry.get_untracked().is_some() {
+            return;
+        }
+        signals.abandonment_open.set(true);
+    });
+    let cancel_abandonment = Callback::new(move |_| {
+        if signals.pending.get_untracked() || signals.retry.get_untracked().is_some() {
+            return;
+        }
+        signals.abandonment_open.set(false);
+        signals.refocus();
+    });
+    let submit_abandonment = Callback::new(move |request: AbandonPackSessionRequest| {
+        let Some(current) = signals.session.get_untracked() else {
+            return;
+        };
+        dispatch_command(
+            PendingPackingCommand::AbandonSession {
+                session_id: current.session_id,
+                request,
+                idempotency_key: api::new_idempotency_key(),
+            },
+            signals,
+        );
+    });
     let start_removal = Callback::new(move |selection: PendingContentRemoval| {
         if signals.blocked() {
             return;
@@ -403,6 +435,7 @@ pub(crate) fn PackingWorkspace(
                         on_change_source=change_source
                         on_close=close_carton
                         on_void=void_carton
+                        on_abandon=start_abandonment
                         on_remove=start_removal
                         on_next_order=next_order
                     />
@@ -417,6 +450,20 @@ pub(crate) fn PackingWorkspace(
                         command_error=Signal::derive(move || error.get().then(|| message.get()))
                         on_cancel=cancel_removal
                         on_submit=submit_removal
+                        on_retry=retry_command
+                    />
+                })}
+            </Show>
+            <Show when=move || abandonment_open.get() && session.get().is_some()>
+                {move || session.get().map(|current| view! {
+                    <PackingAbandonmentDialog
+                        order_key=current.order_key
+                        expected_revision=current.revision
+                        pending=Signal::derive(move || pending.get())
+                        retrying=Signal::derive(move || retry.get().is_some())
+                        command_error=Signal::derive(move || error.get().then(|| message.get()))
+                        on_cancel=cancel_abandonment
+                        on_submit=submit_abandonment
                         on_retry=retry_command
                     />
                 })}
@@ -949,6 +996,23 @@ fn apply_command_result(result: PackingCommandResult, signals: PackingSignals) {
                 .toasts
                 .success(format!("Empty carton {carton_barcode} voided."));
             refresh_session(order_id, signals);
+        }
+        PackingCommandResult::Abandoned { order_id } => {
+            signals.abandonment_open.set(false);
+            signals.session.set(None);
+            signals.source_plate.set(None);
+            signals.measurements.clear();
+            signals.completed_order_ids.update(|ids| {
+                if !ids.contains(&order_id) {
+                    ids.push(order_id);
+                }
+            });
+            signals.message.set(
+                "Packing session abandoned. Reverse restored picks before cancelling or restart execution."
+                    .to_owned(),
+            );
+            signals.toasts.success("Empty packing session abandoned.");
+            signals.refocus();
         }
     }
 }

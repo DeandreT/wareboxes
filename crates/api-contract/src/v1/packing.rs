@@ -11,6 +11,7 @@ use super::{CursorPage, OpaqueCursor, PageLimit, Revision};
 pub enum PackSessionStatus {
     Open,
     ReadyToManifest,
+    Abandoned,
 }
 
 /// Order states observable during the packing workflow.
@@ -247,6 +248,16 @@ pub enum PackContentRemovalReason {
     Other,
 }
 
+/// Audit reason for abandoning a physically empty pack session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackSessionAbandonmentReason {
+    OrderCancellation,
+    Repack,
+    StationIssue,
+    Other,
+}
+
 /// Returns one active carton content row to the tote captured by the pack session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -279,6 +290,16 @@ pub struct CloseCartonRequest {
 #[serde(deny_unknown_fields)]
 pub struct VoidCartonRequest {
     pub carton_barcode: String,
+    pub expected_revision: Revision,
+}
+
+/// Abandons an empty session at the aggregate revision observed by the station.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AbandonPackSessionRequest {
+    pub reason: PackSessionAbandonmentReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     pub expected_revision: Revision,
 }
 
@@ -365,11 +386,22 @@ pub struct PackSessionResponse {
     pub station_location_name: Option<String>,
     pub order_key: String,
     pub revision: Revision,
+    pub status: PackSessionStatus,
     pub progress: PackingProgressResponse,
     pub cartons: Vec<PackCartonResponse>,
     pub allocations: Vec<PackableAllocationResponse>,
     pub started_by: i64,
     pub started_at: String,
+    pub abandonment: Option<PackSessionAbandonmentResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackSessionAbandonmentResponse {
+    pub reason: PackSessionAbandonmentReason,
+    pub note: Option<String>,
+    pub abandoned_by: i64,
+    pub abandoned_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -470,11 +502,28 @@ pub struct VoidCartonResponse {
     pub progress: PackingProgressResponse,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AbandonPackSessionResponse {
+    pub session_id: i64,
+    pub order_id: i64,
+    pub previous_order_status: PackingOrderStatus,
+    pub order_status: PackingQueueOrderStatus,
+    pub session_status: PackSessionStatus,
+    pub revision: Revision,
+    pub progress: PackingProgressResponse,
+    pub reason: PackSessionAbandonmentReason,
+    pub note: Option<String>,
+    pub abandoned_by: i64,
+    pub abandoned_at: String,
+}
+
 impl fmt::Display for PackSessionStatus {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Open => "open",
             Self::ReadyToManifest => "ready_to_manifest",
+            Self::Abandoned => "abandoned",
         })
     }
 }
@@ -568,6 +617,18 @@ mod tests {
             "delete": true
         }))
         .is_err());
+        assert!(serde_json::from_value::<AbandonPackSessionRequest>(json!({
+            "reason": "order_cancellation",
+            "expected_revision": 4,
+            "force": true
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<AbandonPackSessionRequest>(json!({
+            "reason": "other",
+            "expected_revision": 4,
+            "note": ""
+        }))
+        .is_ok());
         assert!(
             serde_json::from_value::<PackPickedAllocationRequest>(json!({
                 "inventory_allocation_id": 4,

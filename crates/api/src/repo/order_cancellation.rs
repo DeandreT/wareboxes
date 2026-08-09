@@ -298,6 +298,7 @@ async fn cancel_pending_pick_work_tx(
             EXISTS (
                 SELECT 1 FROM packing_sessions session
                 WHERE session.tenant_id = $1 AND session.order_id = $2
+                  AND session.state <> 'abandoned'
             ) AS has_packing
         "#,
     )

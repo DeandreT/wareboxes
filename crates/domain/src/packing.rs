@@ -8,6 +8,7 @@ use crate::OrderStatus;
 
 pub const MAX_PACK_SCAN_VALUE_LENGTH: usize = 200;
 pub const MAX_PACK_CONTENT_REMOVAL_NOTE_LENGTH: usize = 500;
+pub const MAX_PACK_SESSION_ABANDONMENT_NOTE_LENGTH: usize = 500;
 
 /// Lifecycle of an order's pack-station session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -15,6 +16,73 @@ pub const MAX_PACK_CONTENT_REMOVAL_NOTE_LENGTH: usize = 500;
 pub enum PackSessionStatus {
     Open,
     ReadyToManifest,
+    Abandoned,
+}
+
+/// Operator-selected reason for abandoning an empty pack session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackSessionAbandonmentReason {
+    OrderCancellation,
+    Repack,
+    StationIssue,
+    Other,
+}
+
+/// Optional bounded audit note attached to one pack-session abandonment.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PackSessionAbandonmentNote(String);
+
+impl PackSessionAbandonmentNote {
+    pub fn new(value: impl Into<String>) -> Result<Self, PackingError> {
+        let value = value.into();
+        if value.trim() != value {
+            return Err(PackingError::UntrimmedAbandonmentNote);
+        }
+        if value.is_empty() {
+            return Err(PackingError::EmptyAbandonmentNote);
+        }
+        if value.chars().count() > MAX_PACK_SESSION_ABANDONMENT_NOTE_LENGTH {
+            return Err(PackingError::AbandonmentNoteTooLong);
+        }
+        if value.chars().any(char::is_control) {
+            return Err(PackingError::InvalidAbandonmentNoteCharacter);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Validated reason and note captured for an immutable session abandonment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackSessionAbandonmentDetails {
+    reason: PackSessionAbandonmentReason,
+    note: Option<PackSessionAbandonmentNote>,
+}
+
+impl PackSessionAbandonmentDetails {
+    pub fn new(
+        reason: PackSessionAbandonmentReason,
+        note: Option<PackSessionAbandonmentNote>,
+    ) -> Result<Self, PackingError> {
+        if reason == PackSessionAbandonmentReason::Other && note.is_none() {
+            return Err(PackingError::AbandonmentNoteRequired);
+        }
+        Ok(Self { reason, note })
+    }
+
+    pub const fn reason(&self) -> PackSessionAbandonmentReason {
+        self.reason
+    }
+
+    pub fn note(&self) -> Option<&PackSessionAbandonmentNote> {
+        self.note.as_ref()
+    }
 }
 
 /// Lifecycle of one physical shipping carton.
@@ -490,6 +558,24 @@ pub const fn continue_packing(status: OrderStatus) -> Result<OrderStatus, Packin
     }
 }
 
+/// Returns an empty, open pack session to awaiting-packing for recovery work.
+pub const fn abandon_empty_packing(
+    status: OrderStatus,
+    progress: PackingProgress,
+) -> Result<OrderStatus, PackingError> {
+    if !matches!(status, OrderStatus::Packing) {
+        return Err(PackingError::OrderNotPacking { status });
+    }
+    if progress.packed_allocation_count() != 0
+        || progress.packed_quantity() != 0
+        || progress.open_carton_count() != 0
+        || progress.closed_carton_count() != 0
+    {
+        return Err(PackingError::SessionNotEmpty);
+    }
+    Ok(OrderStatus::AwaitingPacking)
+}
+
 /// Completes packing only after every picked allocation is in a closed carton.
 pub const fn complete_packing(
     status: OrderStatus,
@@ -544,6 +630,20 @@ pub enum PackingError {
     InvalidRemovalNoteCharacter,
     #[error("pack-content removal reason Other requires a note")]
     RemovalNoteRequired,
+    #[error("pack-session abandonment note cannot be empty")]
+    EmptyAbandonmentNote,
+    #[error("pack-session abandonment note must be trimmed")]
+    UntrimmedAbandonmentNote,
+    #[error(
+        "pack-session abandonment note cannot exceed {MAX_PACK_SESSION_ABANDONMENT_NOTE_LENGTH} characters"
+    )]
+    AbandonmentNoteTooLong,
+    #[error("pack-session abandonment note cannot contain control characters")]
+    InvalidAbandonmentNoteCharacter,
+    #[error("pack-session abandonment reason Other requires a note")]
+    AbandonmentNoteRequired,
+    #[error("a pack session must have no packed content or active cartons before abandonment")]
+    SessionNotEmpty,
     #[error("only an awaiting-packing order can start packing, got {status}")]
     OrderNotAwaitingPacking { status: OrderStatus },
     #[error("only a packing order can be changed at a pack station, got {status}")]
@@ -575,6 +675,17 @@ mod tests {
         assert_eq!(
             complete_packing(OrderStatus::Packing, ready_progress()),
             Ok(OrderStatus::AwaitingShipment)
+        );
+        assert_eq!(
+            abandon_empty_packing(
+                OrderStatus::Packing,
+                PackingProgress::new(2, 0, 8, 0, 0, 0).unwrap()
+            ),
+            Ok(OrderStatus::AwaitingPacking)
+        );
+        assert_eq!(
+            abandon_empty_packing(OrderStatus::Packing, ready_progress()),
+            Err(PackingError::SessionNotEmpty)
         );
         assert_eq!(
             complete_packing(
@@ -656,6 +767,25 @@ mod tests {
         assert!(
             PackContentRemovalDetails::new(PackContentRemovalReason::Other, Some(note)).is_ok()
         );
+    }
+
+    #[test]
+    fn session_abandonment_details_require_a_bounded_other_note() {
+        assert!(PackSessionAbandonmentDetails::new(
+            PackSessionAbandonmentReason::OrderCancellation,
+            None,
+        )
+        .is_ok());
+        assert_eq!(
+            PackSessionAbandonmentDetails::new(PackSessionAbandonmentReason::Other, None),
+            Err(PackingError::AbandonmentNoteRequired)
+        );
+        let note = PackSessionAbandonmentNote::new("station scanner failed").unwrap();
+        assert!(PackSessionAbandonmentDetails::new(
+            PackSessionAbandonmentReason::Other,
+            Some(note),
+        )
+        .is_ok());
     }
 
     #[test]

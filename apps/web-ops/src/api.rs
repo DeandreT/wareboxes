@@ -1,12 +1,12 @@
 #[cfg(target_arch = "wasm32")]
 use wareboxes_api_contract::v1::ReleaseInventoryHoldRequest;
 use wareboxes_api_contract::v1::{
-    AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
-    CancelOrderRequest, CancelOrderResponse, CancelReplenishmentWorkRequest, CloseCartonRequest,
-    CloseCartonResponse, ConfigureFacilityShippingOriginRequest,
-    ConfigureFacilityShippingOriginResponse, ConfigureReplenishmentPolicyRequest,
-    ConfigureReplenishmentPolicyResponse, CreateCartonRequest, CreateCartonResponse,
-    InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
+    AbandonPackSessionRequest, AbandonPackSessionResponse, AcceptPickShortageAsShortShipRequest,
+    AcceptPickShortageAsShortShipResponse, CancelOrderRequest, CancelOrderResponse,
+    CancelReplenishmentWorkRequest, CloseCartonRequest, CloseCartonResponse,
+    ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,
+    ConfigureReplenishmentPolicyRequest, ConfigureReplenishmentPolicyResponse, CreateCartonRequest,
+    CreateCartonResponse, InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
     InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
     OpenPackSessionResponse, OrderAllocationReadinessResponse, PackPickedAllocationRequest,
     PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage,
@@ -71,6 +71,7 @@ mod browser {
     use wareboxes_core::dto::{LoginRequest, SelectTenantRequest};
 
     use super::{
+        AbandonPackSessionRequest, AbandonPackSessionResponse,
         AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
         AccessScopeWorkspace, ApiError, CancelOrderRequest, CancelOrderResponse,
         CancelReplenishmentWorkRequest, CloseCartonRequest, CloseCartonResponse,
@@ -304,6 +305,19 @@ mod browser {
     ) -> Result<VoidCartonResponse, ApiError> {
         post(
             &format!("/api/v1/packing-sessions/{session_id}/cartons/{carton_id}/voids"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn abandon_pack_session(
+        session_id: i64,
+        request: &AbandonPackSessionRequest,
+        idempotency_key: &str,
+    ) -> Result<AbandonPackSessionResponse, ApiError> {
+        post(
+            &format!("/api/v1/packing-sessions/{session_id}/abandonments"),
             request,
             idempotency_key,
         )
@@ -847,6 +861,15 @@ pub async fn void_pack_carton(
     _request: &VoidCartonRequest,
     _idempotency_key: &str,
 ) -> Result<VoidCartonResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn abandon_pack_session(
+    _session_id: i64,
+    _request: &AbandonPackSessionRequest,
+    _idempotency_key: &str,
+) -> Result<AbandonPackSessionResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

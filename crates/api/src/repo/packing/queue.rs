@@ -103,6 +103,7 @@ pub async fn packing_queue(
          AND session.order_id = orders.id
          AND session.order_release_id = release.id
          AND session.facility_id = release.facility_id
+         AND session.state <> 'abandoned'
         LEFT JOIN locations station
           ON station.tenant_id = session.tenant_id
          AND station.facility_id = session.facility_id

@@ -272,6 +272,10 @@ pub fn router() -> Router<AppState> {
         .route("/orders/{order_id}/packing-sessions", post(packing::open))
         .route("/packing-sessions/{session_id}", get(packing::get))
         .route(
+            "/packing-sessions/{session_id}/abandonments",
+            post(packing::abandon_session),
+        )
+        .route(
             "/packing-sessions/{session_id}/cartons",
             post(packing::create_carton),
         )

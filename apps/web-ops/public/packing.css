@@ -650,6 +650,27 @@
   overflow-y: auto;
 }
 
+.packing-abandonment-form {
+  gap: 9px;
+}
+
+.packing-abandonment-warning {
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--red);
+  background: var(--surface-raised);
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.packing-abandon-action {
+  width: 100%;
+  min-height: 30px;
+  margin-top: 7px;
+}
+
 .packing-removal-facts {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

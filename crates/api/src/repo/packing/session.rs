@@ -81,7 +81,7 @@ pub async fn open_session(
     )
     .await?;
     let existing: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM packing_sessions WHERE tenant_id = $1 AND order_id = $2)",
+        "SELECT EXISTS (SELECT 1 FROM packing_sessions WHERE tenant_id = $1 AND order_id = $2 AND state <> 'abandoned')",
     )
     .bind(access.tenant_id.get())
     .bind(command.order_id.get())
@@ -98,6 +98,13 @@ pub async fn open_session(
         command.order_id.get(),
         command.facility_id.get(),
         command.station_location_id.get(),
+    )
+    .await?;
+    require_fresh_pick_execution_tx(
+        &mut tx,
+        access.tenant_id,
+        command.order_id.get(),
+        &allocations,
     )
     .await?;
     let expected_count = i64::try_from(allocations.len())
@@ -268,6 +275,45 @@ async fn require_packing_location_tx(
     {
         return Err(AppError::conflict(
             "packing station must be an active, scannable packing location",
+        ));
+    }
+    Ok(())
+}
+
+async fn require_fresh_pick_execution_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    order_id: i64,
+    allocations: &[PickedAllocation],
+) -> AppResult<()> {
+    let confirmation_ids = allocations
+        .iter()
+        .map(|allocation| allocation.pick_confirmation_id)
+        .collect::<Vec<_>>();
+    let already_abandoned: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM packing_session_allocations snapshot
+            INNER JOIN packing_sessions session
+              ON session.tenant_id=snapshot.tenant_id
+             AND session.inventory_owner_id=snapshot.inventory_owner_id
+             AND session.facility_id=snapshot.facility_id
+             AND session.id=snapshot.packing_session_id
+            WHERE snapshot.tenant_id=$1 AND snapshot.order_id=$2
+              AND snapshot.pick_confirmation_id=ANY($3)
+              AND session.state='abandoned'
+        )
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(order_id)
+    .bind(&confirmation_ids)
+    .fetch_one(&mut **tx)
+    .await?;
+    if already_abandoned {
+        return Err(AppError::conflict(
+            "restored picks must be reversed and repicked before reopening packing",
         ));
     }
     Ok(())

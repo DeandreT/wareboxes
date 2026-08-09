@@ -1,5 +1,6 @@
 //! Allocation-backed desktop packing sessions and cartons.
 
+mod abandonment;
 mod carton;
 mod content;
 mod queue;
@@ -7,6 +8,7 @@ mod read_model;
 mod removal;
 mod session;
 
+pub use abandonment::abandon_session;
 pub use carton::{close_carton, create_carton, void_carton};
 pub use content::pack_picked_allocation;
 pub use queue::{packing_queue, PackingQueueCursor, PackingQueueEntry, PackingQueuePage};

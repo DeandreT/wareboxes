@@ -371,6 +371,7 @@ async fn has_packing_execution_tx(
         SELECT EXISTS (
             SELECT 1 FROM packing_sessions
             WHERE tenant_id = $1 AND inventory_owner_id = $2 AND order_id = $3
+              AND state <> 'abandoned'
         )
         "#,
     )
@@ -504,13 +505,13 @@ async fn lock_target_tx(
                confirmation.order_item_id, confirmation.reservation_id,
                confirmation.inventory_owner_id, confirmation.facility_id,
                confirmation.source_inventory_allocation_id,
-               confirmation.destination_inventory_allocation_id,
+               staged_allocation.id AS destination_inventory_allocation_id,
                confirmation.source_inventory_balance_id,
-               confirmation.destination_inventory_balance_id,
+               staged_balance.id AS destination_inventory_balance_id,
                confirmation.source_location_id,
-               confirmation.destination_location_id,
+               staged_allocation.location_id AS destination_location_id,
                confirmation.source_license_plate_id,
-               confirmation.destination_license_plate_id,
+               staged_allocation.license_plate_id AS destination_license_plate_id,
                confirmation.item_batch_id, confirmation.item_id,
                confirmation.uom, confirmation.inventory_status,
                confirmation.picked_qty, confirmation.confirmed_at,
@@ -547,10 +548,32 @@ async fn lock_target_tx(
           ON source_allocation.tenant_id = confirmation.tenant_id
          AND source_allocation.inventory_owner_id = confirmation.inventory_owner_id
          AND source_allocation.id = confirmation.source_inventory_allocation_id
+        LEFT JOIN packing_session_allocations pack_snapshot
+          ON pack_snapshot.tenant_id = confirmation.tenant_id
+         AND pack_snapshot.inventory_owner_id = confirmation.inventory_owner_id
+         AND pack_snapshot.facility_id = confirmation.facility_id
+         AND pack_snapshot.pick_confirmation_id = confirmation.id
+        LEFT JOIN packing_sessions pack_session
+          ON pack_session.tenant_id = pack_snapshot.tenant_id
+         AND pack_session.inventory_owner_id = pack_snapshot.inventory_owner_id
+         AND pack_session.facility_id = pack_snapshot.facility_id
+         AND pack_session.id = pack_snapshot.packing_session_id
+         AND pack_session.state = 'abandoned'
+        LEFT JOIN packing_allocation_positions pack_position
+          ON pack_position.tenant_id = pack_snapshot.tenant_id
+         AND pack_position.inventory_owner_id = pack_snapshot.inventory_owner_id
+         AND pack_position.facility_id = pack_snapshot.facility_id
+         AND pack_position.packing_session_id = pack_snapshot.packing_session_id
+         AND pack_position.packing_session_allocation_id = pack_snapshot.id
+         AND pack_position.state = 'available'
+         AND pack_session.id IS NOT NULL
         INNER JOIN inventory_allocations staged_allocation
           ON staged_allocation.tenant_id = confirmation.tenant_id
          AND staged_allocation.inventory_owner_id = confirmation.inventory_owner_id
-         AND staged_allocation.id = confirmation.destination_inventory_allocation_id
+         AND staged_allocation.id = COALESCE(
+             pack_position.current_inventory_allocation_id,
+             confirmation.destination_inventory_allocation_id
+         )
         INNER JOIN inventory_balances source_balance
           ON source_balance.tenant_id = confirmation.tenant_id
          AND source_balance.inventory_owner_id = confirmation.inventory_owner_id
@@ -558,7 +581,7 @@ async fn lock_target_tx(
         INNER JOIN inventory_balances staged_balance
           ON staged_balance.tenant_id = confirmation.tenant_id
          AND staged_balance.inventory_owner_id = confirmation.inventory_owner_id
-         AND staged_balance.id = confirmation.destination_inventory_balance_id
+         AND staged_balance.id = staged_allocation.inventory_balance_id
         INNER JOIN item_batches batch
           ON batch.tenant_id = confirmation.tenant_id
          AND batch.inventory_owner_id = confirmation.inventory_owner_id
@@ -570,7 +593,7 @@ async fn lock_target_tx(
         INNER JOIN locations staged_location
           ON staged_location.tenant_id = confirmation.tenant_id
          AND staged_location.facility_id = confirmation.facility_id
-         AND staged_location.id = confirmation.destination_location_id
+         AND staged_location.id = staged_allocation.location_id
         LEFT JOIN license_plates source_plate
           ON source_plate.tenant_id = confirmation.tenant_id
          AND source_plate.inventory_owner_id = confirmation.inventory_owner_id
@@ -580,7 +603,7 @@ async fn lock_target_tx(
           ON staged_plate.tenant_id = confirmation.tenant_id
          AND staged_plate.inventory_owner_id = confirmation.inventory_owner_id
          AND staged_plate.facility_id = confirmation.facility_id
-         AND staged_plate.id = confirmation.destination_license_plate_id
+         AND staged_plate.id = staged_allocation.license_plate_id
         WHERE confirmation.tenant_id = $1
           AND confirmation.inventory_owner_id = $2
           AND confirmation.id = $3

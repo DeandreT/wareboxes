@@ -5,8 +5,8 @@ use wareboxes_domain::{
     CartonContentId, CartonContentRemovalId, CartonId, CartonMeasurements, FacilityId,
     InventoryAllocationId, InventoryBalanceId, InventoryOwnerId, ItemBatchId, LicensePlateId,
     LocationId, OrderId, OrderLineId, OrderRevision, OrderStatus, PackContentRemovalDetails,
-    PackQuantity, PackScanValue, PackSessionId, PackSessionStatus, PackingProgress, Timestamp,
-    UserId,
+    PackQuantity, PackScanValue, PackSessionAbandonmentDetails, PackSessionId, PackSessionStatus,
+    PackingProgress, Timestamp, UserId,
 };
 
 pub const OPEN_PACK_SESSION_OPERATION: &str = "packing.session.open.v1";
@@ -15,6 +15,7 @@ pub const PACK_PICKED_ALLOCATION_OPERATION: &str = "packing.content.confirm.v1";
 pub const REMOVE_PACKED_CONTENT_OPERATION: &str = "packing.content.remove.v1";
 pub const CLOSE_CARTON_OPERATION: &str = "packing.carton.close.v1";
 pub const VOID_CARTON_OPERATION: &str = "packing.carton.void.v1";
+pub const ABANDON_PACK_SESSION_OPERATION: &str = "packing.session.abandon.v1";
 
 /// Starts packing one picked order at a scoped physical station.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +24,28 @@ pub struct OpenPackSessionCommand {
     pub facility_id: FacilityId,
     pub station_location_id: LocationId,
     pub expected_revision: OrderRevision,
+}
+
+/// Abandons one physically empty session and returns its order to recovery work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AbandonPackSessionCommand {
+    pub session_id: PackSessionId,
+    pub expected_revision: OrderRevision,
+    pub details: PackSessionAbandonmentDetails,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbandonPackSessionResult {
+    pub session_id: PackSessionId,
+    pub order_id: OrderId,
+    pub previous_order_status: OrderStatus,
+    pub order_status: OrderStatus,
+    pub session_status: PackSessionStatus,
+    pub revision: OrderRevision,
+    pub progress: PackingProgress,
+    pub details: PackSessionAbandonmentDetails,
+    pub abandoned_by: UserId,
+    pub abandoned_at: Timestamp,
 }
 
 /// Reads a resumable station session by durable identity.
@@ -99,6 +122,14 @@ pub struct PackCarton {
     pub created_at: Timestamp,
 }
 
+/// Immutable evidence attached to a terminal abandoned session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackSessionAbandonment {
+    pub details: PackSessionAbandonmentDetails,
+    pub abandoned_by: UserId,
+    pub abandoned_at: Timestamp,
+}
+
 /// Complete read model needed to resume a station after reconnect or handoff.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackSessionReadModel {
@@ -111,16 +142,18 @@ pub struct PackSessionReadModel {
     pub station_location_name: Option<String>,
     pub order_key: String,
     pub revision: OrderRevision,
+    pub status: PackSessionStatus,
     pub progress: PackingProgress,
     pub cartons: Vec<PackCarton>,
     pub allocations: Vec<PackableAllocation>,
     pub started_by: UserId,
     pub started_at: Timestamp,
+    pub abandonment: Option<PackSessionAbandonment>,
 }
 
 impl PackSessionReadModel {
     pub const fn status(&self) -> PackSessionStatus {
-        self.progress.status()
+        self.status
     }
 }
 
