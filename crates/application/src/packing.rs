@@ -2,11 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
-    CartonContentId, CartonContentRemovalId, CartonId, CartonMeasurements, FacilityId,
-    InventoryAllocationId, InventoryBalanceId, InventoryOwnerId, ItemBatchId, LicensePlateId,
-    LocationId, OrderId, OrderLineId, OrderRevision, OrderStatus, PackContentRemovalDetails,
-    PackQuantity, PackScanValue, PackSessionAbandonmentDetails, PackSessionId, PackSessionStatus,
-    PackingProgress, Timestamp, UserId,
+    CartonContentId, CartonContentRemovalId, CartonId, CartonMeasurements, CartonReopenDetails,
+    CartonReopeningId, FacilityId, InventoryAllocationId, InventoryBalanceId, InventoryOwnerId,
+    ItemBatchId, LicensePlateId, LocationId, OrderId, OrderLineId, OrderRevision, OrderStatus,
+    PackContentRemovalDetails, PackQuantity, PackScanValue, PackSessionAbandonmentDetails,
+    PackSessionId, PackSessionStatus, PackingProgress, Timestamp, UserId,
 };
 
 pub const OPEN_PACK_SESSION_OPERATION: &str = "packing.session.open.v1";
@@ -16,6 +16,7 @@ pub const REMOVE_PACKED_CONTENT_OPERATION: &str = "packing.content.remove.v1";
 pub const CLOSE_CARTON_OPERATION: &str = "packing.carton.close.v1";
 pub const VOID_CARTON_OPERATION: &str = "packing.carton.void.v1";
 pub const ABANDON_PACK_SESSION_OPERATION: &str = "packing.session.abandon.v1";
+pub const REOPEN_CARTON_OPERATION: &str = "packing.carton.reopen.v1";
 
 /// Starts packing one picked order at a scoped physical station.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,6 +287,36 @@ pub struct CloseCartonResult {
     pub progress: PackingProgress,
 }
 
+/// Reopens one nonempty closed carton before downstream QA or shipping begins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReopenCartonCommand {
+    pub session_id: PackSessionId,
+    pub carton_id: CartonId,
+    pub carton_barcode: PackScanValue,
+    pub expected_revision: OrderRevision,
+    pub details: CartonReopenDetails,
+}
+
+/// Replay-stable audit evidence for one closed-carton recovery transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReopenCartonResult {
+    pub reopening_id: CartonReopeningId,
+    pub session_id: PackSessionId,
+    pub carton_id: CartonId,
+    pub order_id: OrderId,
+    pub previous_order_status: OrderStatus,
+    pub order_status: OrderStatus,
+    pub lifecycle: PackCartonLifecycle,
+    pub previous_measurements: CartonMeasurements,
+    pub previous_closed_by: UserId,
+    pub previous_closed_at: Timestamp,
+    pub revision: OrderRevision,
+    pub progress: PackingProgress,
+    pub details: CartonReopenDetails,
+    pub reopened_by: UserId,
+    pub reopened_at: Timestamp,
+}
+
 /// Permanently abandons an empty carton while preserving its audit identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoidCartonCommand {
@@ -366,6 +397,21 @@ mod tests {
                 carton_id,
                 carton_barcode: PackScanValue::new("CARTON-1").unwrap(),
                 expected_revision: revision,
+            }
+            .expected_revision,
+            revision
+        );
+        assert_eq!(
+            ReopenCartonCommand {
+                session_id,
+                carton_id,
+                carton_barcode: PackScanValue::new("CARTON-1").unwrap(),
+                expected_revision: revision,
+                details: CartonReopenDetails::new(
+                    wareboxes_domain::CartonReopenReason::PackingCorrection,
+                    None,
+                )
+                .unwrap(),
             }
             .expected_revision,
             revision

@@ -428,6 +428,23 @@
   box-shadow: inset 3px 0 var(--amber);
 }
 
+.packing-carton-row {
+  grid-template-columns: minmax(0, 1fr) 28px;
+  gap: 6px;
+}
+
+.packing-carton-row-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.packing-reopen-carton {
+  width: 24px;
+  height: 24px;
+  justify-self: end;
+}
+
 .packing-source-row strong,
 .packing-carton-row strong {
   overflow: hidden;

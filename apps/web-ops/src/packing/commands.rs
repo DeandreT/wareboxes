@@ -1,7 +1,7 @@
 use wareboxes_api_contract::v1::{
     AbandonPackSessionRequest, CloseCartonRequest, CreateCartonRequest, OpenPackSessionRequest,
     PackPickedAllocationRequest, PackSessionResponse, RemovePackedContentRequest,
-    VoidCartonRequest,
+    ReopenCartonRequest, VoidCartonRequest,
 };
 
 use crate::api;
@@ -48,6 +48,12 @@ pub(super) enum PendingPackingCommand {
         request: AbandonPackSessionRequest,
         idempotency_key: String,
     },
+    ReopenCarton {
+        session_id: i64,
+        carton_id: i64,
+        request: ReopenCartonRequest,
+        idempotency_key: String,
+    },
 }
 
 pub(super) enum PackingCommandResult {
@@ -79,6 +85,10 @@ pub(super) enum PackingCommandResult {
     Abandoned {
         order_id: i64,
     },
+    Reopened {
+        order_id: i64,
+        carton_barcode: String,
+    },
 }
 
 impl PendingPackingCommand {
@@ -91,6 +101,7 @@ impl PendingPackingCommand {
             Self::CloseCarton { .. } => "Closing carton...",
             Self::VoidCarton { .. } => "Voiding empty carton...",
             Self::AbandonSession { .. } => "Abandoning empty packing session...",
+            Self::ReopenCarton { .. } => "Reopening carton...",
         }
     }
 }
@@ -179,6 +190,17 @@ pub(super) async fn execute_command(
             .await
             .map(|response| PackingCommandResult::Abandoned {
                 order_id: response.order_id,
+            }),
+        PendingPackingCommand::ReopenCarton {
+            session_id,
+            carton_id,
+            request,
+            idempotency_key,
+        } => api::reopen_pack_carton(*session_id, *carton_id, request, idempotency_key)
+            .await
+            .map(|response| PackingCommandResult::Reopened {
+                order_id: response.order_id,
+                carton_barcode: request.carton_barcode.clone(),
             }),
     }
 }

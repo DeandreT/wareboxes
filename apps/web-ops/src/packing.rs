@@ -19,12 +19,14 @@ mod abandonment;
 mod commands;
 mod identity;
 mod removal;
+mod reopening;
 mod view;
 
 use self::abandonment::PackingAbandonmentDialog;
 use self::commands::{execute_command, PackingCommandResult, PendingPackingCommand};
 use self::identity::{advance_item_identity, matching_item_candidates, start_item_identity};
 use self::removal::{PackingRemovalDialog, PendingContentRemoval};
+use self::reopening::{reopening_callbacks, PackingReopeningDialog, PendingCartonReopening};
 use self::view::{
     facility_label, packing_locations, packing_progress_label, selected_location, station_label,
     PackingActive, PackingIdle,
@@ -42,6 +44,7 @@ struct PackingSignals {
     source_plate: RwSignal<Option<String>>,
     item_identity: RwSignal<Option<PendingItemIdentity>>,
     removal: RwSignal<Option<PendingContentRemoval>>,
+    reopening: RwSignal<Option<PendingCartonReopening>>,
     abandonment_open: RwSignal<bool>,
     completed_order_ids: RwSignal<Vec<i64>>,
     focus_epoch: RwSignal<u64>,
@@ -66,6 +69,7 @@ impl PackingSignals {
             || self.retry.get().is_some()
             || self.refresh_order_id.get().is_some()
             || self.removal.get().is_some()
+            || self.reopening.get().is_some()
             || self.abandonment_open.get()
     }
 
@@ -156,6 +160,7 @@ pub(crate) fn PackingWorkspace(
     let source_plate = RwSignal::new(None::<String>);
     let item_identity = RwSignal::new(None::<PendingItemIdentity>);
     let removal = RwSignal::new(None::<PendingContentRemoval>);
+    let reopening = RwSignal::new(None::<PendingCartonReopening>);
     let abandonment_open = RwSignal::new(false);
     let completed_order_ids = RwSignal::new(Vec::<i64>::new());
     let focus_epoch = RwSignal::new(0_u64);
@@ -178,6 +183,7 @@ pub(crate) fn PackingWorkspace(
         source_plate,
         item_identity,
         removal,
+        reopening,
         abandonment_open,
         completed_order_ids,
         focus_epoch,
@@ -349,6 +355,7 @@ pub(crate) fn PackingWorkspace(
             signals,
         );
     });
+    let (start_reopening, cancel_reopening, submit_reopening) = reopening_callbacks(signals);
     let change_source = Callback::new(move |_| {
         source_plate.set(None);
         item_identity.set(None);
@@ -437,6 +444,7 @@ pub(crate) fn PackingWorkspace(
                         on_void=void_carton
                         on_abandon=start_abandonment
                         on_remove=start_removal
+                        on_reopen=start_reopening
                         on_next_order=next_order
                     />
                 })}
@@ -450,6 +458,19 @@ pub(crate) fn PackingWorkspace(
                         command_error=Signal::derive(move || error.get().then(|| message.get()))
                         on_cancel=cancel_removal
                         on_submit=submit_removal
+                        on_retry=retry_command
+                    />
+                })}
+            </Show>
+            <Show when=move || reopening.get().is_some()>
+                {move || reopening.get().map(|selection| view! {
+                    <PackingReopeningDialog
+                        selection
+                        pending=Signal::derive(move || pending.get())
+                        retrying=Signal::derive(move || retry.get().is_some())
+                        command_error=Signal::derive(move || error.get().then(|| message.get()))
+                        on_cancel=cancel_reopening
+                        on_submit=submit_reopening
                         on_retry=retry_command
                     />
                 })}
@@ -488,6 +509,7 @@ fn packing_queue_is_idle(signals: PackingSignals) -> bool {
         && signals.source_plate.get_untracked().is_none()
         && signals.item_identity.get_untracked().is_none()
         && signals.removal.get_untracked().is_none()
+        && signals.reopening.get_untracked().is_none()
 }
 
 fn request_packing_queue(queue: PackingQueueSignals, signals: PackingSignals, append: bool) {
@@ -883,7 +905,20 @@ fn dispatch_command(command: PendingPackingCommand, signals: PackingSignals) {
                 } else {
                     signals.retry.set(None);
                     signals.message.set(api_error.message.clone());
-                    signals.refocus();
+                    if matches!(command, PendingPackingCommand::ReopenCarton { .. }) {
+                        signals.reopening.set(None);
+                        if let Some(order_id) = signals
+                            .session
+                            .get_untracked()
+                            .map(|current| current.order_id)
+                        {
+                            refresh_session(order_id, signals);
+                        } else {
+                            signals.refocus();
+                        }
+                    } else {
+                        signals.refocus();
+                    }
                 }
                 signals.toasts.error(api_error.message);
             }
@@ -1013,6 +1048,22 @@ fn apply_command_result(result: PackingCommandResult, signals: PackingSignals) {
             );
             signals.toasts.success("Empty packing session abandoned.");
             signals.refocus();
+        }
+        PackingCommandResult::Reopened {
+            order_id,
+            carton_barcode,
+        } => {
+            signals.reopening.set(None);
+            signals.completed_order_ids.update(|ids| {
+                ids.retain(|id| *id != order_id);
+            });
+            signals.message.set(format!(
+                "Carton {carton_barcode} reopened. Correct its contents, then close it again."
+            ));
+            signals
+                .toasts
+                .success(format!("Carton {carton_barcode} reopened."));
+            refresh_session(order_id, signals);
         }
     }
 }

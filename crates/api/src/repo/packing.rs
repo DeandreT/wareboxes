@@ -6,6 +6,7 @@ mod content;
 mod queue;
 mod read_model;
 mod removal;
+mod reopening;
 mod session;
 
 pub use abandonment::abandon_session;
@@ -14,6 +15,7 @@ pub use content::pack_picked_allocation;
 pub use queue::{packing_queue, PackingQueueCursor, PackingQueueEntry, PackingQueuePage};
 pub use read_model::{packing_session, packing_session_for_order};
 pub use removal::remove_packed_content;
+pub use reopening::reopen_carton_command;
 pub use session::open_session;
 
 use sqlx::Row;

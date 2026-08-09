@@ -353,7 +353,11 @@ pub async fn close_carton(
         context.actor_id.get(),
         order_id,
         "packing.carton_closed",
-        &format!("carton:{}:closed", command.carton_id.get()),
+        &format!(
+            "carton:{}:closed:{}",
+            command.carton_id.get(),
+            carton.reopen_count + 1
+        ),
         serde_json::json!({
             "packing_session_id": session.id,
             "carton_id": command.carton_id,
@@ -528,6 +532,7 @@ struct LockedCarton {
     license_plate_id: i64,
     barcode: String,
     state: String,
+    reopen_count: i64,
 }
 
 async fn lock_carton_tx(
@@ -538,7 +543,7 @@ async fn lock_carton_tx(
 ) -> AppResult<LockedCarton> {
     let row = sqlx::query(
         r#"
-        SELECT carton.license_plate_id, plate.barcode, carton.state
+        SELECT carton.license_plate_id, plate.barcode, carton.state, carton.reopen_count
         FROM cartons carton
         INNER JOIN license_plates plate
           ON plate.tenant_id = carton.tenant_id
@@ -560,6 +565,7 @@ async fn lock_carton_tx(
         license_plate_id: row.try_get("license_plate_id")?,
         barcode: row.try_get("barcode")?,
         state: row.try_get("state")?,
+        reopen_count: row.try_get("reopen_count")?,
     })
 }
 

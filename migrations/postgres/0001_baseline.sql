@@ -30116,6 +30116,421 @@ REVOKE ALL ON FUNCTION public.require_packing_allocation_position_evidence() FRO
 REVOKE ALL ON FUNCTION public.validate_carton_content_removal() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_carton_content_removal_mutation() FROM PUBLIC;
 
+-- Closed-carton recovery is append-only evidence plus a guarded carton projection.
+ALTER TABLE public.cartons
+    ADD COLUMN reopen_count bigint DEFAULT 0 NOT NULL,
+    ADD CONSTRAINT cartons_reopen_count_check CHECK (reopen_count >= 0);
+
+CREATE TABLE public.carton_reopenings (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    packing_session_id bigint NOT NULL,
+    order_release_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    carton_id bigint NOT NULL,
+    previous_order_status text NOT NULL,
+    resulting_order_status text NOT NULL,
+    previous_session_state text NOT NULL,
+    resulting_session_state text NOT NULL,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    previous_reopen_count bigint NOT NULL,
+    resulting_reopen_count bigint NOT NULL,
+    previous_closed_by_user_id bigint NOT NULL,
+    previous_closed_at timestamp with time zone NOT NULL,
+    previous_weight_g bigint,
+    previous_length_mm bigint,
+    previous_width_mm bigint,
+    previous_height_mm bigint,
+    reason_code text NOT NULL,
+    note text,
+    reopened_by_user_id bigint NOT NULL,
+    reopened_at timestamp with time zone NOT NULL,
+    CONSTRAINT carton_reopenings_scope_id_key UNIQUE
+        (tenant_id, inventory_owner_id, facility_id, packing_session_id, id),
+    CONSTRAINT carton_reopenings_cycle_key UNIQUE
+        (tenant_id, inventory_owner_id, facility_id, carton_id, resulting_reopen_count),
+    CONSTRAINT carton_reopenings_status_check CHECK (
+        previous_order_status IN ('packing', 'awaiting shipment')
+        AND resulting_order_status = 'packing'
+        AND previous_session_state IN ('open', 'ready_to_manifest')
+        AND resulting_session_state = 'open'
+        AND ((previous_order_status = 'packing' AND previous_session_state = 'open')
+          OR (previous_order_status = 'awaiting shipment'
+              AND previous_session_state = 'ready_to_manifest'))
+    ),
+    CONSTRAINT carton_reopenings_revision_check CHECK (
+        expected_revision > 0 AND resulting_revision = expected_revision + 1
+    ),
+    CONSTRAINT carton_reopenings_cycle_check CHECK (
+        previous_reopen_count >= 0
+        AND resulting_reopen_count = previous_reopen_count + 1
+    ),
+    CONSTRAINT carton_reopenings_dimensions_check CHECK (
+        (previous_length_mm IS NULL AND previous_width_mm IS NULL AND previous_height_mm IS NULL)
+        OR (previous_length_mm > 0 AND previous_width_mm > 0 AND previous_height_mm > 0)
+    ),
+    CONSTRAINT carton_reopenings_weight_check CHECK (
+        previous_weight_g IS NULL OR previous_weight_g > 0
+    ),
+    CONSTRAINT carton_reopenings_reason_check CHECK (
+        reason_code IN ('packing_correction', 'quality_issue', 'order_cancellation', 'other')
+    ),
+    CONSTRAINT carton_reopenings_note_check CHECK (
+        note IS NULL OR (note = btrim(note) AND note <> '' AND char_length(note) <= 500)
+    ),
+    CONSTRAINT carton_reopenings_other_note_check CHECK (
+        reason_code <> 'other' OR note IS NOT NULL
+    ),
+    CONSTRAINT carton_reopenings_session_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, packing_session_id)
+        REFERENCES public.packing_sessions
+        (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, id),
+    CONSTRAINT carton_reopenings_carton_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id, packing_session_id, carton_id)
+        REFERENCES public.cartons
+        (tenant_id, inventory_owner_id, facility_id, packing_session_id, id),
+    CONSTRAINT carton_reopenings_order_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, order_id)
+        REFERENCES public.orders (tenant_id, inventory_owner_id, id),
+    CONSTRAINT carton_reopenings_previous_actor_fkey FOREIGN KEY
+        (tenant_id, previous_closed_by_user_id)
+        REFERENCES public.tenant_memberships (tenant_id, user_id),
+    CONSTRAINT carton_reopenings_actor_fkey FOREIGN KEY
+        (tenant_id, reopened_by_user_id)
+        REFERENCES public.tenant_memberships (tenant_id, user_id)
+);
+
+ALTER TABLE public.carton_reopenings FORCE ROW LEVEL SECURITY;
+
+CREATE FUNCTION public.validate_carton_reopening() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    content_count bigint;
+BEGIN
+    SELECT COUNT(*) INTO content_count
+    FROM public.carton_contents content
+    INNER JOIN public.packing_allocation_positions position
+      ON position.tenant_id = content.tenant_id
+     AND position.inventory_owner_id = content.inventory_owner_id
+     AND position.facility_id = content.facility_id
+     AND position.packing_session_id = content.packing_session_id
+     AND position.packing_session_allocation_id = content.packing_session_allocation_id
+     AND position.current_carton_content_id = content.id
+     AND position.state = 'packed'
+    WHERE content.tenant_id = NEW.tenant_id
+      AND content.inventory_owner_id = NEW.inventory_owner_id
+      AND content.facility_id = NEW.facility_id
+      AND content.packing_session_id = NEW.packing_session_id
+      AND content.carton_id = NEW.carton_id;
+
+    IF content_count <= 0
+       OR NOT EXISTS (
+            SELECT 1
+            FROM public.cartons carton
+            INNER JOIN public.packing_sessions session
+              ON session.tenant_id = carton.tenant_id
+             AND session.inventory_owner_id = carton.inventory_owner_id
+             AND session.facility_id = carton.facility_id
+             AND session.id = carton.packing_session_id
+            INNER JOIN public.orders order_header
+              ON order_header.tenant_id = carton.tenant_id
+             AND order_header.inventory_owner_id = carton.inventory_owner_id
+             AND order_header.id = carton.order_id
+             AND order_header.deleted IS NULL
+            WHERE carton.tenant_id = NEW.tenant_id
+              AND carton.inventory_owner_id = NEW.inventory_owner_id
+              AND carton.facility_id = NEW.facility_id
+              AND carton.packing_session_id = NEW.packing_session_id
+              AND carton.order_release_id = NEW.order_release_id
+              AND carton.order_id = NEW.order_id
+              AND carton.id = NEW.carton_id
+              AND carton.state = 'closed'
+              AND carton.reopen_count = NEW.previous_reopen_count
+              AND carton.closed_by_user_id = NEW.previous_closed_by_user_id
+              AND carton.closed_at = NEW.previous_closed_at
+              AND carton.weight_g IS NOT DISTINCT FROM NEW.previous_weight_g
+              AND carton.length_mm IS NOT DISTINCT FROM NEW.previous_length_mm
+              AND carton.width_mm IS NOT DISTINCT FROM NEW.previous_width_mm
+              AND carton.height_mm IS NOT DISTINCT FROM NEW.previous_height_mm
+              AND session.order_release_id = NEW.order_release_id
+              AND session.order_id = NEW.order_id
+              AND session.state = NEW.previous_session_state
+              AND session.revision = NEW.expected_revision
+              AND session.open_carton_count = 0
+              AND session.closed_carton_count > 0
+              AND order_header.status = NEW.previous_order_status
+              AND order_header.revision = NEW.expected_revision
+              AND NEW.resulting_revision = NEW.expected_revision + 1
+              AND NEW.resulting_reopen_count = carton.reopen_count + 1
+              AND NEW.reopened_at >= carton.closed_at
+       )
+       OR EXISTS (
+            SELECT 1 FROM public.outbound_qa_sessions qa
+            WHERE qa.tenant_id = NEW.tenant_id
+              AND qa.inventory_owner_id = NEW.inventory_owner_id
+              AND qa.facility_id = NEW.facility_id
+              AND qa.packing_session_id = NEW.packing_session_id
+       )
+       OR EXISTS (
+            SELECT 1 FROM public.shipments shipment
+            WHERE shipment.tenant_id = NEW.tenant_id
+              AND shipment.inventory_owner_id = NEW.inventory_owner_id
+              AND shipment.facility_id = NEW.facility_id
+              AND shipment.packing_session_id = NEW.packing_session_id
+       )
+    THEN
+        RAISE EXCEPTION 'carton reopening does not match closed pre-downstream packing state'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.require_carton_reopening_consistency() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.cartons carton
+        INNER JOIN public.packing_sessions session
+          ON session.tenant_id = carton.tenant_id
+         AND session.inventory_owner_id = carton.inventory_owner_id
+         AND session.facility_id = carton.facility_id
+         AND session.id = carton.packing_session_id
+        INNER JOIN public.orders order_header
+          ON order_header.tenant_id = carton.tenant_id
+         AND order_header.inventory_owner_id = carton.inventory_owner_id
+         AND order_header.id = carton.order_id
+        WHERE carton.tenant_id = NEW.tenant_id
+          AND carton.inventory_owner_id = NEW.inventory_owner_id
+          AND carton.facility_id = NEW.facility_id
+          AND carton.packing_session_id = NEW.packing_session_id
+          AND carton.id = NEW.carton_id
+          AND carton.state = 'open'
+          AND carton.reopen_count = NEW.resulting_reopen_count
+          AND carton.closed_by_user_id IS NULL
+          AND carton.closed_at IS NULL
+          AND carton.weight_g IS NULL
+          AND carton.length_mm IS NULL
+          AND carton.width_mm IS NULL
+          AND carton.height_mm IS NULL
+          AND session.state = 'open'
+          AND session.revision = NEW.resulting_revision
+          AND session.open_carton_count = 1
+          AND order_header.status = 'packing'
+          AND order_header.revision = NEW.resulting_revision
+    ) THEN
+        RAISE EXCEPTION 'carton reopening evidence and final packing state do not reconcile'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.require_carton_reopening_evidence() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF OLD.state = 'closed' AND NEW.state = 'open' AND NOT EXISTS (
+        SELECT 1 FROM public.carton_reopenings reopening
+        WHERE reopening.tenant_id = NEW.tenant_id
+          AND reopening.inventory_owner_id = NEW.inventory_owner_id
+          AND reopening.facility_id = NEW.facility_id
+          AND reopening.packing_session_id = NEW.packing_session_id
+          AND reopening.carton_id = NEW.id
+          AND reopening.previous_reopen_count = OLD.reopen_count
+          AND reopening.resulting_reopen_count = NEW.reopen_count
+          AND reopening.previous_closed_by_user_id = OLD.closed_by_user_id
+          AND reopening.previous_closed_at = OLD.closed_at
+    ) THEN
+        RAISE EXCEPTION 'carton reopening requires immutable evidence'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.reject_carton_reopening_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    RAISE EXCEPTION 'carton reopenings are immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.guard_packing_session_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.order_release_id IS DISTINCT FROM OLD.order_release_id
+       OR NEW.order_id IS DISTINCT FROM OLD.order_id
+       OR NEW.packing_location_id IS DISTINCT FROM OLD.packing_location_id
+       OR NEW.expected_allocation_count IS DISTINCT FROM OLD.expected_allocation_count
+       OR NEW.expected_qty IS DISTINCT FROM OLD.expected_qty
+       OR NEW.started_by_user_id IS DISTINCT FROM OLD.started_by_user_id
+       OR NEW.started_at IS DISTINCT FROM OLD.started_at
+    THEN
+        RAISE EXCEPTION 'packing session identity and plan are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF OLD.state = 'abandoned' THEN
+        RAISE EXCEPTION 'abandoned packing sessions are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF OLD.state = 'ready_to_manifest' AND NEW.state = 'open' THEN
+        IF NEW.revision <> OLD.revision + 1
+           OR NEW.ready_by_user_id IS NOT NULL
+           OR NEW.ready_at IS NOT NULL
+           OR NEW.packed_allocation_count <> OLD.packed_allocation_count
+           OR NEW.packed_qty <> OLD.packed_qty
+           OR NEW.open_carton_count <> 1
+           OR NEW.closed_carton_count <> OLD.closed_carton_count - 1
+           OR NEW.abandonment_reason IS NOT NULL
+           OR NEW.abandonment_note IS NOT NULL
+           OR NEW.abandoned_by_user_id IS NOT NULL
+           OR NEW.abandoned_at IS NOT NULL
+        THEN
+            RAISE EXCEPTION 'invalid completed-session carton reopening transition'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF NEW.state = 'open' THEN
+        IF NEW.revision <> OLD.revision + 1
+           OR NEW.ready_by_user_id IS NOT NULL
+           OR NEW.ready_at IS NOT NULL
+           OR NEW.abandonment_reason IS NOT NULL
+           OR NEW.abandonment_note IS NOT NULL
+           OR NEW.abandoned_by_user_id IS NOT NULL
+           OR NEW.abandoned_at IS NOT NULL
+        THEN
+            RAISE EXCEPTION 'open packing session updates must advance revision once'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF NEW.state = 'ready_to_manifest' THEN
+        IF OLD.state <> 'open'
+           OR NEW.revision <> OLD.revision + 1
+           OR NEW.ready_by_user_id IS NULL
+           OR NEW.ready_at IS NULL
+           OR NEW.abandonment_reason IS NOT NULL
+           OR NEW.abandonment_note IS NOT NULL
+           OR NEW.abandoned_by_user_id IS NOT NULL
+           OR NEW.abandoned_at IS NOT NULL
+        THEN
+            RAISE EXCEPTION 'invalid packing session completion transition'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF NEW.state = 'abandoned' THEN
+        IF OLD.state <> 'open'
+           OR NEW.revision <> OLD.revision + 1
+           OR NEW.ready_by_user_id IS NOT NULL
+           OR NEW.ready_at IS NOT NULL
+           OR NEW.abandonment_reason IS NULL
+           OR NEW.abandoned_by_user_id IS NULL
+           OR NEW.abandoned_at IS NULL
+           OR NEW.abandoned_at < NEW.started_at
+           OR NEW.packed_allocation_count <> 0
+           OR NEW.packed_qty <> 0
+           OR NEW.open_carton_count <> 0
+           OR NEW.closed_carton_count <> 0
+        THEN
+            RAISE EXCEPTION 'invalid packing session abandonment transition'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'invalid packing session state'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.guard_carton_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.packing_session_id IS DISTINCT FROM OLD.packing_session_id
+       OR NEW.order_release_id IS DISTINCT FROM OLD.order_release_id
+       OR NEW.order_id IS DISTINCT FROM OLD.order_id
+       OR NEW.packing_location_id IS DISTINCT FROM OLD.packing_location_id
+       OR NEW.license_plate_id IS DISTINCT FROM OLD.license_plate_id
+       OR NEW.created_by_user_id IS DISTINCT FROM OLD.created_by_user_id
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+    THEN
+        RAISE EXCEPTION 'carton identity is immutable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF OLD.state = 'open' AND NEW.state IN ('closed', 'voided') THEN
+        IF NEW.reopen_count <> OLD.reopen_count
+           OR (NEW.state = 'closed' AND (
+                NEW.closed_by_user_id IS NULL OR NEW.closed_at IS NULL
+                OR NEW.voided_by_user_id IS NOT NULL OR NEW.voided_at IS NOT NULL
+           ))
+           OR (NEW.state = 'voided' AND (
+                NEW.voided_by_user_id IS NULL OR NEW.voided_at IS NULL
+                OR NEW.closed_by_user_id IS NOT NULL OR NEW.closed_at IS NOT NULL
+           ))
+        THEN
+            RAISE EXCEPTION 'invalid open-carton terminal transition'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF OLD.state = 'closed' AND NEW.state = 'open' THEN
+        IF NEW.reopen_count <> OLD.reopen_count + 1
+           OR NEW.closed_by_user_id IS NOT NULL OR NEW.closed_at IS NOT NULL
+           OR NEW.voided_by_user_id IS NOT NULL OR NEW.voided_at IS NOT NULL
+           OR NEW.weight_g IS NOT NULL OR NEW.length_mm IS NOT NULL
+           OR NEW.width_mm IS NOT NULL OR NEW.height_mm IS NOT NULL
+        THEN
+            RAISE EXCEPTION 'invalid closed-carton reopening transition'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'invalid carton lifecycle transition'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER carton_reopenings_validate
+BEFORE INSERT ON public.carton_reopenings
+FOR EACH ROW EXECUTE FUNCTION public.validate_carton_reopening();
+CREATE CONSTRAINT TRIGGER carton_reopenings_validate_consistency
+AFTER INSERT ON public.carton_reopenings DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_carton_reopening_consistency();
+CREATE TRIGGER carton_reopenings_immutable
+BEFORE UPDATE OR DELETE ON public.carton_reopenings
+FOR EACH ROW EXECUTE FUNCTION public.reject_carton_reopening_mutation();
+CREATE CONSTRAINT TRIGGER cartons_require_reopening_evidence
+AFTER UPDATE ON public.cartons DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_carton_reopening_evidence();
+
+ALTER TABLE public.carton_reopenings ENABLE ROW LEVEL SECURITY;
+CREATE POLICY carton_reopenings_tenant_isolation
+ON public.carton_reopenings
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.carton_reopenings TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.carton_reopenings_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_carton_reopening() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_carton_reopening_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_carton_reopening_evidence() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_carton_reopening_mutation() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

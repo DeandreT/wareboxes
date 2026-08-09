@@ -11,6 +11,7 @@ use crate::components::{Icon, UiIcon};
 use crate::view_model::format_quantity;
 
 use super::removal::PendingContentRemoval;
+use super::reopening::PendingCartonReopening;
 use super::{
     CartonMeasurementSignals, IdentityScanStage, PackingLocation, PackingQueueSignals,
     PackingSignals, PendingItemIdentity,
@@ -170,6 +171,7 @@ pub(super) fn PackingActive(
     on_void: Callback<()>,
     on_abandon: Callback<()>,
     on_remove: Callback<PendingContentRemoval>,
+    on_reopen: Callback<PendingCartonReopening>,
     on_next_order: Callback<()>,
 ) -> impl IntoView {
     let order_id = current.order_id;
@@ -199,6 +201,7 @@ pub(super) fn PackingActive(
     let packed_count = current.progress.packed_allocation_count;
     let expected_count = current.progress.expected_allocation_count;
     let order_key = current.order_key.clone();
+    let reopen_order_key = current.order_key.clone();
     let station_name = current
         .station_location_name
         .clone()
@@ -223,6 +226,7 @@ pub(super) fn PackingActive(
     let active_carton_for_form = StoredValue::new(open_carton.clone());
     let has_active_carton = active_carton_for_form.get_value().is_some();
     let active_carton_for_summary = open_carton.clone();
+    let can_reopen_carton = open_carton.is_none();
 
     view! {
         <div class="packing-active">
@@ -425,24 +429,50 @@ pub(super) fn PackingActive(
                             .into_iter()
                             .rev()
                             .map(|carton| {
-                                let (state, detail) = match carton.lifecycle {
+                                let reopening = (can_reopen_carton
+                                    && carton.content_count > 0
+                                    && matches!(carton.lifecycle, PackCartonLifecycleResponse::Closed { .. }))
+                                    .then(|| PendingCartonReopening {
+                                        session_id,
+                                        order_id,
+                                        order_key: reopen_order_key.clone(),
+                                        carton_id: carton.carton_id,
+                                        carton_barcode: carton.carton_barcode.clone(),
+                                        content_count: carton.content_count,
+                                        expected_revision,
+                                    });
+                                let (state, detail) = match &carton.lifecycle {
                                     PackCartonLifecycleResponse::Open => (
                                         "Open",
                                         format!("{} contents", carton.content_count),
                                     ),
                                     PackCartonLifecycleResponse::Closed { closed_at, .. } => (
                                         "Closed",
-                                        format!("{} contents - {}", carton.content_count, compact_time(&closed_at)),
+                                        format!("{} contents - {}", carton.content_count, compact_time(closed_at)),
                                     ),
                                     PackCartonLifecycleResponse::Voided { voided_at, .. } => (
                                         "Voided",
-                                        format!("Empty - {}", compact_time(&voided_at)),
+                                        format!("Empty - {}", compact_time(voided_at)),
                                     ),
                                 };
                                 view! {
                                     <div class="packing-carton-row">
-                                        <strong>{carton.carton_barcode}</strong>
-                                        <small>{format!("{state} - {detail}")}</small>
+                                        <div class="packing-carton-row-copy">
+                                            <strong>{carton.carton_barcode}</strong>
+                                            <small>{format!("{state} - {detail}")}</small>
+                                        </div>
+                                        {reopening.map(|selection| view! {
+                                            <button
+                                                type="button"
+                                                class="icon-button packing-reopen-carton"
+                                                title="Reopen closed carton"
+                                                aria-label="Reopen closed carton"
+                                                disabled=move || signals.blocked()
+                                                on:click=move |_| on_reopen.run(selection.clone())
+                                            >
+                                                <Icon icon=UiIcon::Reverse/>
+                                            </button>
+                                        })}
                                     </div>
                                 }
                             })

@@ -292,6 +292,10 @@ pub fn router() -> Router<AppState> {
             post(packing::close_carton),
         )
         .route(
+            "/packing-sessions/{session_id}/cartons/{carton_id}/reopenings",
+            post(packing::reopen_carton),
+        )
+        .route(
             "/packing-sessions/{session_id}/cartons/{carton_id}/voids",
             post(packing::void_carton),
         )

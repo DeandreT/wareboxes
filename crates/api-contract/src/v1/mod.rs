@@ -150,8 +150,8 @@ pub use outbound_qa::{
 };
 pub use packing::{
     AbandonPackSessionRequest, AbandonPackSessionResponse, CartonDimensions, CartonMeasurements,
-    CloseCartonRequest, CloseCartonResponse, CreateCartonRequest, CreateCartonResponse,
-    DimensionMillimeters, OpenPackSessionRequest, OpenPackSessionResponse,
+    CartonReopenReason, CloseCartonRequest, CloseCartonResponse, CreateCartonRequest,
+    CreateCartonResponse, DimensionMillimeters, OpenPackSessionRequest, OpenPackSessionResponse,
     PackAllocationDispositionResponse, PackCartonLifecycleResponse, PackCartonResponse,
     PackContentRemovalReason, PackPickedAllocationRequest, PackPickedAllocationResponse,
     PackSessionAbandonmentReason, PackSessionAbandonmentResponse, PackSessionResponse,
@@ -159,7 +159,8 @@ pub use packing::{
     PackingProgressResponse, PackingQueueEntryResponse, PackingQueueFacilityId,
     PackingQueueFacilityIdError, PackingQueueOrderStatus, PackingQueuePage,
     PackingQueuePageRequest, PackingQueueSessionResponse, RemovePackedContentRequest,
-    RemovePackedContentResponse, VoidCartonRequest, VoidCartonResponse, WeightGrams,
+    RemovePackedContentResponse, ReopenCartonRequest, ReopenCartonResponse, VoidCartonRequest,
+    VoidCartonResponse, WeightGrams,
 };
 pub use pick_wave::{
     CancelPickWaveRequest, PickWaveCancellationReason, PickWaveOrderResponse, PickWavePage,

@@ -1,6 +1,7 @@
 mod common;
 mod api_v1_packing {
     mod removal;
+    mod reopening;
 }
 
 use axum::body::{to_bytes, Body};

@@ -258,6 +258,16 @@ pub enum PackSessionAbandonmentReason {
     Other,
 }
 
+/// Audit reason for reopening a closed carton before downstream execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CartonReopenReason {
+    PackingCorrection,
+    QualityIssue,
+    OrderCancellation,
+    Other,
+}
+
 /// Returns one active carton content row to the tote captured by the pack session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -298,6 +308,17 @@ pub struct VoidCartonRequest {
 #[serde(deny_unknown_fields)]
 pub struct AbandonPackSessionRequest {
     pub reason: PackSessionAbandonmentReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub expected_revision: Revision,
+}
+
+/// Reopens one nonempty closed carton at the observed packing revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReopenCartonRequest {
+    pub carton_barcode: String,
+    pub reason: CartonReopenReason,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     pub expected_revision: Revision,
@@ -516,6 +537,27 @@ pub struct AbandonPackSessionResponse {
     pub note: Option<String>,
     pub abandoned_by: i64,
     pub abandoned_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReopenCartonResponse {
+    pub reopening_id: i64,
+    pub session_id: i64,
+    pub carton_id: i64,
+    pub order_id: i64,
+    pub previous_order_status: PackingOrderStatus,
+    pub order_status: PackingOrderStatus,
+    pub lifecycle: PackCartonLifecycleResponse,
+    pub previous_measurements: CartonMeasurements,
+    pub previous_closed_by: i64,
+    pub previous_closed_at: String,
+    pub revision: Revision,
+    pub progress: PackingProgressResponse,
+    pub reason: CartonReopenReason,
+    pub note: Option<String>,
+    pub reopened_by: i64,
+    pub reopened_at: String,
 }
 
 impl fmt::Display for PackSessionStatus {

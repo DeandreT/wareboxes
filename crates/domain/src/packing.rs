@@ -9,6 +9,7 @@ use crate::OrderStatus;
 pub const MAX_PACK_SCAN_VALUE_LENGTH: usize = 200;
 pub const MAX_PACK_CONTENT_REMOVAL_NOTE_LENGTH: usize = 500;
 pub const MAX_PACK_SESSION_ABANDONMENT_NOTE_LENGTH: usize = 500;
+pub const MAX_CARTON_REOPEN_NOTE_LENGTH: usize = 500;
 
 /// Lifecycle of an order's pack-station session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -94,6 +95,70 @@ pub enum CartonStatus {
     Voided,
 }
 
+/// Audit reason for reopening a closed carton before downstream execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CartonReopenReason {
+    PackingCorrection,
+    QualityIssue,
+    OrderCancellation,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CartonReopenNote(String);
+
+impl CartonReopenNote {
+    pub fn new(value: impl Into<String>) -> Result<Self, PackingError> {
+        let value = value.into();
+        if value.trim() != value {
+            return Err(PackingError::UntrimmedCartonReopenNote);
+        }
+        if value.is_empty() {
+            return Err(PackingError::EmptyCartonReopenNote);
+        }
+        if value.chars().count() > MAX_CARTON_REOPEN_NOTE_LENGTH {
+            return Err(PackingError::CartonReopenNoteTooLong);
+        }
+        if value.chars().any(char::is_control) {
+            return Err(PackingError::InvalidCartonReopenNoteCharacter);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CartonReopenDetails {
+    reason: CartonReopenReason,
+    note: Option<CartonReopenNote>,
+}
+
+impl CartonReopenDetails {
+    pub fn new(
+        reason: CartonReopenReason,
+        note: Option<CartonReopenNote>,
+    ) -> Result<Self, PackingError> {
+        if reason == CartonReopenReason::Other && note.is_none() {
+            return Err(PackingError::CartonReopenNoteRequired);
+        }
+        Ok(Self { reason, note })
+    }
+
+    pub const fn reason(&self) -> CartonReopenReason {
+        self.reason
+    }
+
+    pub fn note(&self) -> Option<&CartonReopenNote> {
+        self.note.as_ref()
+    }
+}
+
 impl CartonStatus {
     pub const fn close(self, content_count: i64) -> Result<Self, PackingError> {
         match self {
@@ -108,6 +173,14 @@ impl CartonStatus {
             Self::Closed | Self::Voided => Err(PackingError::CartonNotOpen),
             Self::Open if content_count != 0 => Err(PackingError::NonemptyCarton),
             Self::Open => Ok(Self::Voided),
+        }
+    }
+
+    pub const fn reopen(self, content_count: i64) -> Result<Self, PackingError> {
+        match self {
+            Self::Open | Self::Voided => Err(PackingError::CartonNotClosed),
+            Self::Closed if content_count <= 0 => Err(PackingError::EmptyCarton),
+            Self::Closed => Ok(Self::Open),
         }
     }
 }
@@ -576,6 +649,44 @@ pub const fn abandon_empty_packing(
     Ok(OrderStatus::AwaitingPacking)
 }
 
+/// Reopens one closed carton and returns a completed session to active packing.
+pub const fn reopen_carton(
+    order_status: OrderStatus,
+    session_status: PackSessionStatus,
+    progress: PackingProgress,
+    carton_status: CartonStatus,
+    content_count: i64,
+) -> Result<(OrderStatus, PackingProgress), PackingError> {
+    if !matches!(
+        (order_status, session_status),
+        (OrderStatus::Packing, PackSessionStatus::Open)
+            | (
+                OrderStatus::AwaitingShipment,
+                PackSessionStatus::ReadyToManifest
+            )
+    ) {
+        return Err(PackingError::CartonReopenStateMismatch);
+    }
+    if let Err(error) = carton_status.reopen(content_count) {
+        return Err(error);
+    }
+    if progress.open_carton_count() != 0 || progress.closed_carton_count() <= 0 {
+        return Err(PackingError::CartonReopenProgressMismatch);
+    }
+    let next = match PackingProgress::new(
+        progress.expected_allocation_count(),
+        progress.packed_allocation_count(),
+        progress.expected_quantity(),
+        progress.packed_quantity(),
+        1,
+        progress.closed_carton_count() - 1,
+    ) {
+        Ok(progress) => progress,
+        Err(_) => return Err(PackingError::CartonReopenProgressMismatch),
+    };
+    Ok((OrderStatus::Packing, next))
+}
+
 /// Completes packing only after every picked allocation is in a closed carton.
 pub const fn complete_packing(
     status: OrderStatus,
@@ -630,6 +741,22 @@ pub enum PackingError {
     InvalidRemovalNoteCharacter,
     #[error("pack-content removal reason Other requires a note")]
     RemovalNoteRequired,
+    #[error("carton-reopen note cannot be empty")]
+    EmptyCartonReopenNote,
+    #[error("carton-reopen note must be trimmed")]
+    UntrimmedCartonReopenNote,
+    #[error("carton-reopen note cannot exceed {MAX_CARTON_REOPEN_NOTE_LENGTH} characters")]
+    CartonReopenNoteTooLong,
+    #[error("carton-reopen note cannot contain control characters")]
+    InvalidCartonReopenNoteCharacter,
+    #[error("carton-reopen reason Other requires a note")]
+    CartonReopenNoteRequired,
+    #[error("only a nonempty closed carton can be reopened")]
+    CartonNotClosed,
+    #[error("carton reopening does not match the current order and session states")]
+    CartonReopenStateMismatch,
+    #[error("carton reopening requires no other open carton and at least one closed carton")]
+    CartonReopenProgressMismatch,
     #[error("pack-session abandonment note cannot be empty")]
     EmptyAbandonmentNote,
     #[error("pack-session abandonment note must be trimmed")]
@@ -786,6 +913,41 @@ mod tests {
             Some(note),
         )
         .is_ok());
+    }
+
+    #[test]
+    fn closed_carton_reopening_reactivates_ready_packing_exactly() {
+        let (status, progress) = reopen_carton(
+            OrderStatus::AwaitingShipment,
+            PackSessionStatus::ReadyToManifest,
+            ready_progress(),
+            CartonStatus::Closed,
+            2,
+        )
+        .unwrap();
+        assert_eq!(status, OrderStatus::Packing);
+        assert_eq!(progress.open_carton_count(), 1);
+        assert_eq!(progress.closed_carton_count(), 0);
+        assert_eq!(progress.status(), PackSessionStatus::Open);
+        assert_eq!(
+            reopen_carton(
+                OrderStatus::Packing,
+                PackSessionStatus::Open,
+                PackingProgress::new(2, 2, 8, 8, 1, 0).unwrap(),
+                CartonStatus::Closed,
+                2,
+            ),
+            Err(PackingError::CartonReopenProgressMismatch)
+        );
+    }
+
+    #[test]
+    fn carton_reopen_other_reason_requires_a_bounded_note() {
+        assert_eq!(
+            CartonReopenDetails::new(CartonReopenReason::Other, None),
+            Err(PackingError::CartonReopenNoteRequired)
+        );
+        assert!(CartonReopenDetails::new(CartonReopenReason::PackingCorrection, None,).is_ok());
     }
 
     #[test]

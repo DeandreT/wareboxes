@@ -43,6 +43,8 @@ const QUEUE_CURSOR_PREFIX: &str = "pq1.";
 
 mod abandonment;
 pub use abandonment::abandon_session;
+mod reopening;
+pub use reopening::reopen_carton;
 
 pub async fn queue(
     State(state): State<AppState>,

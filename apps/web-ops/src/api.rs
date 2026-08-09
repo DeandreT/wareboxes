@@ -16,8 +16,9 @@ use wareboxes_api_contract::v1::{
     PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
     ReallocatePickShortageResponse, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
     ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
-    RemovePackedContentRequest, RemovePackedContentResponse, ReplenishmentPolicyPage,
-    ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
+    RemovePackedContentRequest, RemovePackedContentResponse, ReopenCartonRequest,
+    ReopenCartonResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
+    ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
     RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
     ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
     VoidCartonResponse,
@@ -90,11 +91,11 @@ mod browser {
         ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleaseInventoryHoldRequest,
         ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
         ReleaseOrderRequest, ReleaseOrderResponse, RemovePackedContentRequest,
-        RemovePackedContentResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
-        ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
-        RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
-        ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
-        VoidCartonResponse, WebSessionContext,
+        RemovePackedContentResponse, ReopenCartonRequest, ReopenCartonResponse,
+        ReplenishmentPolicyPage, ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse,
+        ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest,
+        RetireReplenishmentPolicyResponse, ReversePickConfirmationRequest,
+        ReversePickConfirmationResponse, VoidCartonRequest, VoidCartonResponse, WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -318,6 +319,20 @@ mod browser {
     ) -> Result<AbandonPackSessionResponse, ApiError> {
         post(
             &format!("/api/v1/packing-sessions/{session_id}/abandonments"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn reopen_pack_carton(
+        session_id: i64,
+        carton_id: i64,
+        request: &ReopenCartonRequest,
+        idempotency_key: &str,
+    ) -> Result<ReopenCartonResponse, ApiError> {
+        post(
+            &format!("/api/v1/packing-sessions/{session_id}/cartons/{carton_id}/reopenings"),
             request,
             idempotency_key,
         )
@@ -870,6 +885,16 @@ pub async fn abandon_pack_session(
     _request: &AbandonPackSessionRequest,
     _idempotency_key: &str,
 ) -> Result<AbandonPackSessionResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn reopen_pack_carton(
+    _session_id: i64,
+    _carton_id: i64,
+    _request: &ReopenCartonRequest,
+    _idempotency_key: &str,
+) -> Result<ReopenCartonResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 
