@@ -51,6 +51,10 @@ pub fn router() -> Router<AppState> {
             "/expected-receiving/lines/{load_line_id}/confirmations",
             post(expected_receiving::confirm),
         )
+        .route(
+            "/expected-receiving/loads/{load_id}/unexpected-receipts",
+            post(expected_receiving::confirm_unexpected),
+        )
         .route("/rf/sessions", post(rf_sessions::create))
         .route(
             "/facilities/{facility_id}/shipping-origin-configurations",

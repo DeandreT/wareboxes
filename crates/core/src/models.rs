@@ -1017,6 +1017,37 @@ pub enum InboundReceiptQuarantineReason {
     Other,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UnexpectedReceiptReason {
+    Excess,
+    UnexpectedItem,
+    BlindReceipt,
+    MisShipped,
+    Other,
+}
+
+impl UnexpectedReceiptReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Excess => "excess",
+            Self::UnexpectedItem => "unexpected_item",
+            Self::BlindReceipt => "blind_receipt",
+            Self::MisShipped => "mis_shipped",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn hold_reason(self) -> InventoryHoldReason {
+        match self {
+            Self::MisShipped => InventoryHoldReason::CustomerRequest,
+            Self::Excess | Self::UnexpectedItem | Self::BlindReceipt | Self::Other => {
+                InventoryHoldReason::InventoryDiscrepancy
+            }
+        }
+    }
+}
+
 impl InboundReceiptQuarantineReason {
     pub fn exception_reason(self) -> InboundReceiptExceptionReason {
         match self {
@@ -1068,6 +1099,35 @@ pub struct ReceiveExpectedInventoryResult {
     pub cumulative_missing_qty: i64,
     pub remaining_quantity: i64,
     pub receive_completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfirmUnexpectedReceiptResult {
+    pub unexpected_receipt_id: i64,
+    pub load_id: i64,
+    pub inventory_owner_id: i64,
+    pub facility_id: i64,
+    pub item_id: i64,
+    pub uom: String,
+    pub quantity: i64,
+    pub receiving_location_id: i64,
+    pub observed_item_barcode: String,
+    pub observed_receiving_location_barcode: String,
+    pub inventory_transaction_id: i64,
+    pub inventory_balance_id: i64,
+    pub item_batch_id: i64,
+    pub license_plate_id: Option<i64>,
+    pub license_plate_barcode: Option<String>,
+    pub lot: Option<String>,
+    pub serial: Option<String>,
+    pub expiration: Option<Timestamp>,
+    pub inventory_hold_id: i64,
+    pub inventory_status: InventoryStatus,
+    pub reason: UnexpectedReceiptReason,
+    pub note: Option<String>,
+    pub load_status: LoadStatus,
+    pub confirmed_by_user_id: i64,
+    pub confirmed_at: Timestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

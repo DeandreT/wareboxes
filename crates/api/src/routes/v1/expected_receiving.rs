@@ -2,14 +2,17 @@ use axum::extract::{Path, State};
 use axum::Json;
 use chrono::{DateTime, Utc};
 use wareboxes_api_contract::v1::{
-    ConfirmExpectedReceiptRequest, ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
+    ConfirmExpectedReceiptRequest, ConfirmUnexpectedReceiptRequest,
+    ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
     ExpectedReceiptExceptionReason, ExpectedReceiptLine, ExpectedReceiptLineStatus,
     ExpectedReceiptQuarantineReason, ExpectedReceivingLoadStatus, ExpectedReceivingLocation,
     ExpectedReceivingSessionResponse, InventoryBalanceStatus,
+    UnexpectedReceiptConfirmationResponse, UnexpectedReceiptReason as ApiUnexpectedReceiptReason,
 };
 use wareboxes_core::models::{
-    InboundReceiptExceptionReason, InboundReceiptQuarantineReason, InventoryStatus, LoadLineStatus,
-    LoadStatus, ReceiveExpectedInventoryResult,
+    ConfirmUnexpectedReceiptResult, InboundReceiptExceptionReason, InboundReceiptQuarantineReason,
+    InventoryStatus, LoadLineStatus, LoadStatus, ReceiveExpectedInventoryResult,
+    UnexpectedReceiptReason,
 };
 
 use super::error::{V1Error, V1Result};
@@ -84,6 +87,39 @@ pub async fn confirm(
         mapped.disposition,
         mapped.quantity,
     )?))
+}
+
+pub async fn confirm_unexpected(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(load_id): Path<i64>,
+    Json(body): Json<ConfirmUnexpectedReceiptRequest>,
+) -> V1Result<Json<UnexpectedReceiptConfirmationResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    require_positive(load_id, "load ID")?;
+    validate_unexpected_confirmation(&body)?;
+    let expiration = parse_timestamp(body.expiration.as_deref(), "expiration")?;
+    let context = user.command_context(&idempotency_key);
+    let result = repo::unexpected_receipt::confirm_unexpected_receipt(
+        &state.db,
+        &user.tenant,
+        &context,
+        load_id,
+        &repo::unexpected_receipt::ConfirmUnexpectedReceiptCommand {
+            item_barcode: &body.item_barcode,
+            receiving_location_barcode: &body.receiving_location_barcode,
+            quantity: body.quantity,
+            license_plate_barcode: body.license_plate_barcode.as_deref(),
+            lot: body.lot.as_deref(),
+            serial: body.serial.as_deref(),
+            expiration,
+            reason: map_unexpected_reason(body.reason),
+            note: body.note.as_deref(),
+        },
+    )
+    .await?;
+    Ok(Json(map_unexpected_result(result)?))
 }
 
 struct MappedConfirmation<'a> {
@@ -300,6 +336,78 @@ fn map_inventory_status(status: InventoryStatus) -> InventoryBalanceStatus {
     }
 }
 
+fn map_unexpected_reason(reason: ApiUnexpectedReceiptReason) -> UnexpectedReceiptReason {
+    match reason {
+        ApiUnexpectedReceiptReason::Excess => UnexpectedReceiptReason::Excess,
+        ApiUnexpectedReceiptReason::UnexpectedItem => UnexpectedReceiptReason::UnexpectedItem,
+        ApiUnexpectedReceiptReason::BlindReceipt => UnexpectedReceiptReason::BlindReceipt,
+        ApiUnexpectedReceiptReason::MisShipped => UnexpectedReceiptReason::MisShipped,
+        ApiUnexpectedReceiptReason::Other => UnexpectedReceiptReason::Other,
+    }
+}
+
+fn map_unexpected_result(
+    result: ConfirmUnexpectedReceiptResult,
+) -> V1Result<UnexpectedReceiptConfirmationResponse> {
+    let reason = match result.reason {
+        UnexpectedReceiptReason::Excess => ApiUnexpectedReceiptReason::Excess,
+        UnexpectedReceiptReason::UnexpectedItem => ApiUnexpectedReceiptReason::UnexpectedItem,
+        UnexpectedReceiptReason::BlindReceipt => ApiUnexpectedReceiptReason::BlindReceipt,
+        UnexpectedReceiptReason::MisShipped => ApiUnexpectedReceiptReason::MisShipped,
+        UnexpectedReceiptReason::Other => ApiUnexpectedReceiptReason::Other,
+    };
+    Ok(UnexpectedReceiptConfirmationResponse {
+        unexpected_receipt_id: result.unexpected_receipt_id,
+        load_id: result.load_id,
+        inventory_owner_id: result.inventory_owner_id,
+        facility_id: result.facility_id,
+        item_id: result.item_id,
+        uom: result.uom,
+        quantity: result.quantity,
+        receiving_location_id: result.receiving_location_id,
+        observed_item_barcode: result.observed_item_barcode,
+        observed_receiving_location_barcode: result.observed_receiving_location_barcode,
+        inventory_transaction_id: result.inventory_transaction_id,
+        inventory_balance_id: result.inventory_balance_id,
+        item_batch_id: result.item_batch_id,
+        license_plate_id: result.license_plate_id,
+        license_plate_barcode: result.license_plate_barcode,
+        lot: result.lot,
+        serial: result.serial,
+        expiration: result.expiration.map(|value| value.to_rfc3339()),
+        inventory_hold_id: result.inventory_hold_id,
+        inventory_status: map_inventory_status(result.inventory_status),
+        reason,
+        note: result.note,
+        load_status: map_load_status(result.load_status)?,
+        confirmed_by_user_id: result.confirmed_by_user_id,
+        confirmed_at: result.confirmed_at.to_rfc3339(),
+    })
+}
+
+fn validate_unexpected_confirmation(body: &ConfirmUnexpectedReceiptRequest) -> V1Result<()> {
+    validate_required_text(&body.item_barcode, "item_barcode", MAX_BARCODE_LENGTH)?;
+    validate_required_text(
+        &body.receiving_location_barcode,
+        "receiving_location_barcode",
+        MAX_BARCODE_LENGTH,
+    )?;
+    validate_optional_text(
+        body.license_plate_barcode.as_deref(),
+        "license_plate_barcode",
+        MAX_BARCODE_LENGTH,
+    )?;
+    validate_optional_text(body.lot.as_deref(), "lot", MAX_DIMENSION_LENGTH)?;
+    validate_optional_text(body.serial.as_deref(), "serial", MAX_DIMENSION_LENGTH)?;
+    validate_optional_text(body.note.as_deref(), "note", MAX_NOTE_LENGTH)?;
+    if body.reason == ApiUnexpectedReceiptReason::Other && body.note.is_none() {
+        return Err(invalid(
+            "note is required when unexpected receipt reason is other",
+        ));
+    }
+    require_positive(body.quantity, "quantity")
+}
+
 fn validate_exception(reason: ExpectedReceiptExceptionReason, note: Option<&str>) -> V1Result<()> {
     validate_optional_text(note, "note", MAX_NOTE_LENGTH)?;
     if reason == ExpectedReceiptExceptionReason::Other && note.is_none() {
@@ -389,6 +497,9 @@ fn map_session(
             }
             repo::expected_receiving::ExpectedReceivingLoadStatus::Receiving => {
                 ExpectedReceivingLoadStatus::Receiving
+            }
+            repo::expected_receiving::ExpectedReceivingLoadStatus::Received => {
+                ExpectedReceivingLoadStatus::Received
             }
         },
         receiving_location: ExpectedReceivingLocation {

@@ -37,3 +37,4 @@ pub mod replenishment;
 pub mod shipping;
 pub mod tasks;
 pub mod tenants;
+pub mod unexpected_receipt;

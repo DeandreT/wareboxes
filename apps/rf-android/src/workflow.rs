@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::expected_receiving::ConfirmationIntent;
+use crate::expected_receiving::{ConfirmationIntent, ReceivingCommandIntent};
 use crate::outbound_load::OutboundLoadCommand;
 use crate::picking::{PickClaim, PickShortageReportResult, PickingCommand};
 use crate::replenishment::{
@@ -370,7 +370,7 @@ pub enum RfCommand {
     Picking(PickingCommand),
     Replenishment(ReplenishmentCommand),
     OutboundLoad(OutboundLoadCommand),
-    ExpectedReceipt(Box<ConfirmationIntent>),
+    ExpectedReceipt(Box<ReceivingCommandIntent>),
 }
 
 impl RfCommand {
@@ -395,7 +395,7 @@ impl From<PutawayCommand> for RfCommand {
 
 impl From<ConfirmationIntent> for RfCommand {
     fn from(intent: ConfirmationIntent) -> Self {
-        Self::ExpectedReceipt(Box::new(intent))
+        Self::ExpectedReceipt(Box::new(ReceivingCommandIntent::Expected(Box::new(intent))))
     }
 }
 
@@ -489,6 +489,7 @@ pub enum CommandOutcome {
     },
     OutboundCartonMoved(Box<wareboxes_api_contract::v1::MovePackedCartonResponse>),
     ExpectedReceipt(crate::expected_receiving::ConfirmationResult),
+    UnexpectedReceipt(Box<crate::expected_receiving::UnexpectedReceiptResult>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -889,6 +890,7 @@ impl MovementWorkflow {
                 self.notice = Some(format!("{} returned to the queue", self.operation.label()));
             }
             CommandOutcome::ExpectedReceipt(_)
+            | CommandOutcome::UnexpectedReceipt(_)
             | CommandOutcome::CycleCountClaimed(_)
             | CommandOutcome::CycleCountConfirmed { .. }
             | CommandOutcome::CycleCountReleased { .. }

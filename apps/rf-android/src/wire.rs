@@ -8,32 +8,36 @@ use wareboxes_api_contract::v1::{
     ClaimNextPutawayRequest, ClaimPickByIdRequest, ClaimPutawayByIdRequest,
     ConfirmCycleCountRequest, ConfirmExpectedReceiptRequest, ConfirmInventoryRelocationRequest,
     ConfirmLicensePlatePutawayRequest, ConfirmPickContentRequest, ConfirmPutawayRequest,
-    CycleCountClaimHeartbeatResponse, CycleCountClaimReleaseReason, CycleCountClaimResponse,
-    CycleCountConfirmationResponse, ExpectedReceiptConfirmationResponse,
-    ExpectedReceiptDisposition, ExpectedReceiptExceptionReason, ExpectedReceiptQuarantineReason,
-    ExpectedReceivingLoadStatus, ExpectedReceivingSessionResponse,
-    HeartbeatInventoryRelocationClaimRequest, HeartbeatPutawayClaimRequest, IdempotencyKey,
-    InventoryRelocationClaimHeartbeatResponse, InventoryRelocationClaimReleaseReason,
-    InventoryRelocationClaimResponse, InventoryRelocationClaimWork,
-    InventoryRelocationConfirmationResponse, InventoryRelocationWorkflow,
-    LicensePlatePutawayConfirmationResponse, PickClaimHeartbeatResponse, PickClaimReleaseReason,
-    PickClaimResponse, PickContentConfirmationResponse,
-    PickShortageDetails as ApiPickShortageDetails, PickShortageReason as ApiPickShortageReason,
-    PickShortageStatus as ApiPickShortageStatus, PutawayClaimHeartbeatResponse,
-    PutawayClaimReleaseReason, PutawayClaimResponse, PutawayClaimSourceLocation, PutawayClaimWork,
-    PutawayConfirmationResponse, PutawayWorkflow as ApiPutawayWorkflow,
-    ReleaseCycleCountClaimRequest, ReleaseInventoryRelocationClaimRequest, ReleasePickClaimRequest,
-    ReleasePutawayClaimRequest, ReportPickShortageOutcome as ApiReportPickShortageOutcome,
-    ReportPickShortageRequest, ReportPickShortageResponse,
+    ConfirmUnexpectedReceiptRequest, CycleCountClaimHeartbeatResponse,
+    CycleCountClaimReleaseReason, CycleCountClaimResponse, CycleCountConfirmationResponse,
+    ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
+    ExpectedReceiptExceptionReason, ExpectedReceiptQuarantineReason, ExpectedReceivingLoadStatus,
+    ExpectedReceivingSessionResponse, HeartbeatInventoryRelocationClaimRequest,
+    HeartbeatPutawayClaimRequest, IdempotencyKey, InventoryRelocationClaimHeartbeatResponse,
+    InventoryRelocationClaimReleaseReason, InventoryRelocationClaimResponse,
+    InventoryRelocationClaimWork, InventoryRelocationConfirmationResponse,
+    InventoryRelocationWorkflow, LicensePlatePutawayConfirmationResponse,
+    PickClaimHeartbeatResponse, PickClaimReleaseReason, PickClaimResponse,
+    PickContentConfirmationResponse, PickShortageDetails as ApiPickShortageDetails,
+    PickShortageReason as ApiPickShortageReason, PickShortageStatus as ApiPickShortageStatus,
+    PutawayClaimHeartbeatResponse, PutawayClaimReleaseReason, PutawayClaimResponse,
+    PutawayClaimSourceLocation, PutawayClaimWork, PutawayConfirmationResponse,
+    PutawayWorkflow as ApiPutawayWorkflow, ReleaseCycleCountClaimRequest,
+    ReleaseInventoryRelocationClaimRequest, ReleasePickClaimRequest, ReleasePutawayClaimRequest,
+    ReportPickShortageOutcome as ApiReportPickShortageOutcome, ReportPickShortageRequest,
+    ReportPickShortageResponse, UnexpectedReceiptConfirmationResponse,
+    UnexpectedReceiptReason as ApiUnexpectedReceiptReason,
 };
 
 use crate::cycle_count::CycleCountClaim;
 use crate::expected_receiving::{
-    ConfirmationMode, ConfirmationResult, DockBarcode, ExpectedReceiptCommand,
+    ConfirmationMode, ConfirmationResult, DockBarcode, ExceptionNote, ExpectedReceiptCommand,
     ExpectedReceiptLine as DomainExpectedReceiptLine, ExpectedReceiptLineInput, Expiration,
-    FacilityId, InventoryOwnerId, ItemBarcode, ItemId, LoadId, LoadLineId, LocationId,
-    NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason, ReceiptQuarantineReason,
-    ReceivingDock, ReceivingLoadStatus, ReceivingSession, ReceivingSessionInput, StockDimension,
+    FacilityId, InventoryOwnerId, ItemBarcode, ItemId, LicensePlateBarcode, LoadId, LoadLineId,
+    LocationId, NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason,
+    ReceiptQuarantineReason, ReceivingCommandIntent, ReceivingDock, ReceivingLoadStatus,
+    ReceivingSession, ReceivingSessionInput, StockDimension, UnexpectedReceiptCommand,
+    UnexpectedReceiptReason, UnexpectedReceiptResult,
 };
 use crate::picking::{
     PickClaim, PickClaimContent, PickContentState, PickReleaseReason, PickShortageOutcome,
@@ -95,6 +99,7 @@ pub enum ResponseKind {
     ReplenishmentRelease,
     OutboundCartonMovement,
     ExpectedReceiptConfirmation,
+    UnexpectedReceiptConfirmation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +175,8 @@ pub enum WireResponseError {
     ExpectedReceivingLoadMismatch { expected: i64, actual: i64 },
     #[error("the warehouse service returned an invalid expected receipt confirmation")]
     InvalidExpectedReceiptConfirmation,
+    #[error("the warehouse service returned an invalid unexpected receipt confirmation")]
+    InvalidUnexpectedReceiptConfirmation,
     #[error("the warehouse service returned an invalid pick-shortage result")]
     InvalidPickShortageResponse,
     #[error("the warehouse service returned an invalid replenishment result")]
@@ -531,12 +538,24 @@ pub fn build_durable_request(
                     field: "confirmation intent",
                 });
             }
-            let confirmation = map_expected_receipt_command(&intent.command);
-            let (path, body) = build_expected_receipt_confirmation_parts(
-                intent.load_line_id.get(),
-                &confirmation,
-            )?;
-            (path, body, ResponseKind::ExpectedReceiptConfirmation)
+            match intent.as_ref() {
+                ReceivingCommandIntent::Expected(intent) => {
+                    let confirmation = map_expected_receipt_command(&intent.command);
+                    let (path, body) = build_expected_receipt_confirmation_parts(
+                        intent.load_line_id.get(),
+                        &confirmation,
+                    )?;
+                    (path, body, ResponseKind::ExpectedReceiptConfirmation)
+                }
+                ReceivingCommandIntent::Unexpected(intent) => (
+                    format!(
+                        "{API_PREFIX}/expected-receiving/loads/{}/unexpected-receipts",
+                        intent.load_id.get()
+                    ),
+                    serde_json::to_vec(&map_unexpected_receipt_command(&intent.command))?,
+                    ResponseKind::UnexpectedReceiptConfirmation,
+                ),
+            }
         }
     };
     let body_sha256 = Sha256::digest(&body).into();
@@ -678,7 +697,191 @@ pub fn decode_command_response(
             let response = decode_expected_receipt_confirmation_response_from_body(status, body)?;
             Ok(CommandOutcome::ExpectedReceipt(response))
         }
+        ResponseKind::UnexpectedReceiptConfirmation => Ok(CommandOutcome::UnexpectedReceipt(
+            Box::new(decode_unexpected_receipt_confirmation(status, body)?),
+        )),
     }
+}
+
+fn map_unexpected_receipt_command(
+    command: &UnexpectedReceiptCommand,
+) -> ConfirmUnexpectedReceiptRequest {
+    ConfirmUnexpectedReceiptRequest {
+        item_barcode: command.item_barcode.as_str().to_owned(),
+        receiving_location_barcode: command.receiving_location_barcode.as_str().to_owned(),
+        quantity: command.quantity.get(),
+        license_plate_barcode: command
+            .license_plate_barcode
+            .as_ref()
+            .map(|value| value.as_str().to_owned()),
+        lot: command.lot.as_ref().map(|value| value.as_str().to_owned()),
+        serial: command
+            .serial
+            .as_ref()
+            .map(|value| value.as_str().to_owned()),
+        expiration: command
+            .expiration
+            .as_ref()
+            .map(|value| value.as_str().to_owned()),
+        reason: map_unexpected_receipt_reason(command.reason),
+        note: command.note.as_ref().map(|value| value.as_str().to_owned()),
+    }
+}
+
+const fn map_unexpected_receipt_reason(
+    reason: UnexpectedReceiptReason,
+) -> ApiUnexpectedReceiptReason {
+    match reason {
+        UnexpectedReceiptReason::Excess => ApiUnexpectedReceiptReason::Excess,
+        UnexpectedReceiptReason::UnexpectedItem => ApiUnexpectedReceiptReason::UnexpectedItem,
+        UnexpectedReceiptReason::BlindReceipt => ApiUnexpectedReceiptReason::BlindReceipt,
+        UnexpectedReceiptReason::MisShipped => ApiUnexpectedReceiptReason::MisShipped,
+        UnexpectedReceiptReason::Other => ApiUnexpectedReceiptReason::Other,
+    }
+}
+
+const fn map_api_unexpected_receipt_reason(
+    reason: ApiUnexpectedReceiptReason,
+) -> UnexpectedReceiptReason {
+    match reason {
+        ApiUnexpectedReceiptReason::Excess => UnexpectedReceiptReason::Excess,
+        ApiUnexpectedReceiptReason::UnexpectedItem => UnexpectedReceiptReason::UnexpectedItem,
+        ApiUnexpectedReceiptReason::BlindReceipt => UnexpectedReceiptReason::BlindReceipt,
+        ApiUnexpectedReceiptReason::MisShipped => UnexpectedReceiptReason::MisShipped,
+        ApiUnexpectedReceiptReason::Other => UnexpectedReceiptReason::Other,
+    }
+}
+
+fn decode_unexpected_receipt_confirmation(
+    status: u16,
+    body: &[u8],
+) -> Result<UnexpectedReceiptResult, WireResponseError> {
+    if !(200..300).contains(&status) {
+        return Err(WireResponseError::UnsuccessfulStatus(status));
+    }
+    let response = serde_json::from_slice::<UnexpectedReceiptConfirmationResponse>(body)?;
+    let text_is_valid = valid_response_text(&response.uom, MAX_EXPECTED_RECEIVING_DIMENSION_LENGTH)
+        && valid_response_text(
+            &response.observed_item_barcode,
+            MAX_EXPECTED_RECEIVING_BARCODE_LENGTH,
+        )
+        && valid_response_text(
+            &response.observed_receiving_location_barcode,
+            MAX_EXPECTED_RECEIVING_BARCODE_LENGTH,
+        )
+        && response
+            .license_plate_barcode
+            .as_deref()
+            .is_none_or(|value| valid_response_text(value, MAX_EXPECTED_RECEIVING_BARCODE_LENGTH))
+        && response.lot.as_deref().is_none_or(|value| {
+            valid_response_text(value, MAX_EXPECTED_RECEIVING_DIMENSION_LENGTH)
+        })
+        && response.serial.as_deref().is_none_or(|value| {
+            valid_response_text(value, MAX_EXPECTED_RECEIVING_DIMENSION_LENGTH)
+        })
+        && response
+            .note
+            .as_deref()
+            .is_none_or(|value| valid_response_text(value, MAX_EXPECTED_RECEIVING_NOTE_LENGTH));
+    if response.unexpected_receipt_id <= 0
+        || response.inventory_transaction_id <= 0
+        || response.inventory_balance_id <= 0
+        || response.item_batch_id <= 0
+        || response.inventory_hold_id <= 0
+        || response.confirmed_by_user_id <= 0
+        || response.license_plate_id.is_some_and(|id| id <= 0)
+        || response.license_plate_id.is_some() != response.license_plate_barcode.is_some()
+        || response.inventory_status
+            != wareboxes_api_contract::v1::InventoryBalanceStatus::Quarantine
+        || !matches!(
+            response.load_status,
+            ExpectedReceivingLoadStatus::Arrived
+                | ExpectedReceivingLoadStatus::Receiving
+                | ExpectedReceivingLoadStatus::Received
+        )
+        || DateTime::parse_from_rfc3339(&response.confirmed_at).is_err()
+        || response
+            .expiration
+            .as_deref()
+            .is_some_and(|value| DateTime::parse_from_rfc3339(value).is_err())
+        || response.reason == ApiUnexpectedReceiptReason::Other && response.note.is_none()
+        || !text_is_valid
+    {
+        return Err(WireResponseError::InvalidUnexpectedReceiptConfirmation);
+    }
+    Ok(UnexpectedReceiptResult {
+        unexpected_receipt_id: response.unexpected_receipt_id,
+        load_id: response
+            .load_id
+            .try_into()
+            .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?,
+        inventory_owner_id: response
+            .inventory_owner_id
+            .try_into()
+            .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?,
+        facility_id: response
+            .facility_id
+            .try_into()
+            .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?,
+        item_id: response
+            .item_id
+            .try_into()
+            .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?,
+        uom: StockDimension::new(response.uom)
+            .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?,
+        quantity: response
+            .quantity
+            .try_into()
+            .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?,
+        receiving_location_id: response
+            .receiving_location_id
+            .try_into()
+            .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?,
+        observed_item_barcode: ItemBarcode::new(response.observed_item_barcode)
+            .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?,
+        observed_receiving_location_barcode: DockBarcode::new(
+            response.observed_receiving_location_barcode,
+        )
+        .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?,
+        inventory_transaction_id: response.inventory_transaction_id,
+        inventory_balance_id: response.inventory_balance_id,
+        item_batch_id: response.item_batch_id,
+        license_plate_id: response.license_plate_id,
+        license_plate_barcode: response
+            .license_plate_barcode
+            .map(LicensePlateBarcode::new)
+            .transpose()
+            .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?,
+        lot: response
+            .lot
+            .map(StockDimension::new)
+            .transpose()
+            .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?,
+        serial: response
+            .serial
+            .map(StockDimension::new)
+            .transpose()
+            .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?,
+        expiration: response
+            .expiration
+            .map(Expiration::new)
+            .transpose()
+            .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?,
+        inventory_hold_id: response.inventory_hold_id,
+        reason: map_api_unexpected_receipt_reason(response.reason),
+        note: response
+            .note
+            .map(ExceptionNote::new)
+            .transpose()
+            .map_err(|_| WireResponseError::InvalidUnexpectedReceiptConfirmation)?,
+        load_status: match response.load_status {
+            ExpectedReceivingLoadStatus::Arrived => ReceivingLoadStatus::Arrived,
+            ExpectedReceivingLoadStatus::Receiving => ReceivingLoadStatus::Receiving,
+            ExpectedReceivingLoadStatus::Received => ReceivingLoadStatus::Received,
+        },
+        confirmed_by_user_id: response.confirmed_by_user_id,
+        confirmed_at: response.confirmed_at,
+    })
 }
 
 pub fn decode_claim_response(body: &[u8]) -> Result<Option<PutawayClaim>, WireResponseError> {
@@ -1291,9 +1494,7 @@ fn map_receiving_session(
     let status = match response.status {
         ExpectedReceivingLoadStatus::Arrived => ReceivingLoadStatus::Arrived,
         ExpectedReceivingLoadStatus::Receiving => ReceivingLoadStatus::Receiving,
-        ExpectedReceivingLoadStatus::Received => {
-            return Err(WireResponseError::InvalidExpectedReceivingSession);
-        }
+        ExpectedReceivingLoadStatus::Received => ReceivingLoadStatus::Received,
     };
     let lines = response
         .lines
@@ -1665,11 +1866,7 @@ fn validate_expected_receiving_session(
         || response.inventory_owner_id <= 0
         || response.facility_id <= 0
         || response.receiving_location.location_id <= 0
-        || !matches!(
-            response.status,
-            ExpectedReceivingLoadStatus::Arrived | ExpectedReceivingLoadStatus::Receiving
-        )
-        || response.lines.is_empty()
+        || (response.status != ExpectedReceivingLoadStatus::Received && response.lines.is_empty())
         || !valid_response_text(
             &response.receiving_location.barcode,
             MAX_EXPECTED_RECEIVING_BARCODE_LENGTH,
@@ -2810,7 +3007,7 @@ mod tests {
             schema_version: 1,
             command_id: "receipt-confirmation-1".into(),
             idempotency_key: "expected-receiving:55:1".into(),
-            command: RfCommand::ExpectedReceipt(Box::new(intent)),
+            command: RfCommand::ExpectedReceipt(Box::new(intent.into())),
         })
         .unwrap();
 
@@ -2994,6 +3191,123 @@ mod tests {
                 &serde_json::to_vec(&invalid).unwrap()
             ),
             Err(WireResponseError::InvalidExpectedReceiptConfirmation)
+        ));
+    }
+
+    #[test]
+    fn unexpected_receipt_durable_wire_contract_is_exact_and_strict() {
+        let intent = crate::expected_receiving::UnexpectedReceiptIntent {
+            schema_version: 1,
+            load_id: LoadId::try_from(11).unwrap(),
+            command: UnexpectedReceiptCommand {
+                item_barcode: ItemBarcode::new("CASE-NEW").unwrap(),
+                receiving_location_barcode: DockBarcode::new("DOCK-04").unwrap(),
+                quantity: PositiveQuantity::try_from(3).unwrap(),
+                license_plate_barcode: Some(LicensePlateBarcode::new("LP-NEW-1").unwrap()),
+                lot: Some(StockDimension::new("LOT-NEW").unwrap()),
+                serial: None,
+                expiration: Some(Expiration::new("2027-08-26T00:00:00Z").unwrap()),
+                reason: UnexpectedReceiptReason::UnexpectedItem,
+                note: None,
+            },
+            recovery: Box::new(
+                crate::expected_receiving::UnexpectedReceiptRecoverySnapshot {
+                    load_barcode: crate::expected_receiving::LoadBarcode::new("LOAD-11").unwrap(),
+                    load_id: LoadId::try_from(11).unwrap(),
+                    inventory_owner_id: InventoryOwnerId::try_from(22).unwrap(),
+                    facility_id: FacilityId::try_from(33).unwrap(),
+                    reference_number: Some("ASN-11".into()),
+                    status: ReceivingLoadStatus::Received,
+                    dock: ReceivingDock::new(
+                        LocationId::try_from(44).unwrap(),
+                        DockBarcode::new("DOCK-04").unwrap(),
+                        Some("Inbound dock 4".into()),
+                    ),
+                    lines: Vec::new(),
+                },
+            ),
+        };
+        let request = build_durable_request(&DurableCommandDraft {
+            schema_version: 1,
+            command_id: "unexpected-receipt-1".into(),
+            idempotency_key: "unexpected-receipt:11:1".into(),
+            command: RfCommand::ExpectedReceipt(Box::new(ReceivingCommandIntent::Unexpected(
+                Box::new(intent),
+            ))),
+        })
+        .unwrap();
+
+        assert_eq!(
+            request.path,
+            "/api/v1/expected-receiving/loads/11/unexpected-receipts"
+        );
+        assert_eq!(
+            request.response_kind,
+            ResponseKind::UnexpectedReceiptConfirmation
+        );
+        assert!(request.verify_body());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&request.body).unwrap(),
+            json!({
+                "item_barcode": "CASE-NEW",
+                "receiving_location_barcode": "DOCK-04",
+                "quantity": 3,
+                "license_plate_barcode": "LP-NEW-1",
+                "lot": "LOT-NEW",
+                "serial": null,
+                "expiration": "2027-08-26T00:00:00Z",
+                "reason": "unexpected_item",
+                "note": null
+            })
+        );
+
+        let body = serde_json::to_vec(&json!({
+            "unexpected_receipt_id": 71,
+            "load_id": 11,
+            "inventory_owner_id": 22,
+            "facility_id": 33,
+            "item_id": 66,
+            "uom": "case",
+            "quantity": 3,
+            "receiving_location_id": 44,
+            "observed_item_barcode": "CASE-NEW",
+            "observed_receiving_location_barcode": "DOCK-04",
+            "inventory_transaction_id": 72,
+            "inventory_balance_id": 73,
+            "item_batch_id": 74,
+            "license_plate_id": 75,
+            "license_plate_barcode": "LP-NEW-1",
+            "lot": "LOT-NEW",
+            "serial": null,
+            "expiration": "2027-08-26T00:00:00Z",
+            "inventory_hold_id": 76,
+            "inventory_status": "quarantine",
+            "reason": "unexpected_item",
+            "note": null,
+            "load_status": "received",
+            "confirmed_by_user_id": 77,
+            "confirmed_at": "2026-08-09T18:00:00Z"
+        }))
+        .unwrap();
+        let CommandOutcome::UnexpectedReceipt(result) =
+            decode_command_response(ResponseKind::UnexpectedReceiptConfirmation, 200, &body)
+                .unwrap()
+        else {
+            panic!("unexpected receipt response must remain distinct");
+        };
+        assert_eq!(result.load_id.get(), 11);
+        assert_eq!(result.quantity.get(), 3);
+        assert_eq!(result.reason, UnexpectedReceiptReason::UnexpectedItem);
+
+        let mut invalid = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        invalid["inventory_status"] = json!("available");
+        assert!(matches!(
+            decode_command_response(
+                ResponseKind::UnexpectedReceiptConfirmation,
+                200,
+                &serde_json::to_vec(&invalid).unwrap(),
+            ),
+            Err(WireResponseError::InvalidUnexpectedReceiptConfirmation)
         ));
     }
 }

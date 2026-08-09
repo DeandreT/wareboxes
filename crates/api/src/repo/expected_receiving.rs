@@ -11,6 +11,7 @@ use crate::repo::access::ScopeBindings;
 pub enum ExpectedReceivingLoadStatus {
     Arrived,
     Receiving,
+    Received,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,9 +140,10 @@ pub async fn get_expected_receiving_session(
     let status = match load.try_get::<String, _>("status")?.as_str() {
         "arrived" => ExpectedReceivingLoadStatus::Arrived,
         "receiving" => ExpectedReceivingLoadStatus::Receiving,
+        "received" => ExpectedReceivingLoadStatus::Received,
         _ => {
             return Err(AppError::conflict(
-                "load must be arrived or receiving for expected receiving",
+                "load must be arrived, receiving, or received for receiving execution",
             ));
         }
     };
@@ -200,7 +202,7 @@ pub async fn get_expected_receiving_session(
     .fetch_all(&mut *tx)
     .await?;
 
-    if rows.is_empty() {
+    if rows.is_empty() && status != ExpectedReceivingLoadStatus::Received {
         return Err(AppError::conflict(
             "load has no open expected receiving lines",
         ));

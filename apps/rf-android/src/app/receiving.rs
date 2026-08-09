@@ -4,14 +4,15 @@ use lucide_icons::Icon;
 use crate::expected_receiving::{
     ActionBlockReason, ActionGuard, CommandAccess, CommandAccessBlock, ConfirmationMode,
     ContainerCapture, ExceptionNote, ExpectedReceiptLine, ExpectedReceivingReducer, FocusTarget,
-    LoadLineId, PositiveQuantity, ReceiptExceptionReason, ReceivingActivity,
+    LoadLineId, PositiveQuantity, ReceiptExceptionReason, ReceivingActivity, ReceivingLoadStatus,
     ReceivingOperatorError, ReceivingTransition, ReconciliationReason, ScannerTarget,
+    UnexpectedReceiptReason,
 };
 #[cfg(all(debug_assertions, not(target_os = "android")))]
 use crate::expected_receiving::{
     ExpectedReceiptLineInput, FacilityId, InventoryOwnerId, ItemBarcode, ItemId, LoadId,
     LoadResolutionFailure, LocationId, NonNegativeQuantity, ReceivingDock, ReceivingEffect,
-    ReceivingLoadStatus, ReceivingSession, ReceivingSessionInput, StockDimension,
+    ReceivingSession, ReceivingSessionInput, StockDimension,
 };
 use crate::workflow::{Activity, MovementKind, MovementOperation};
 
@@ -19,9 +20,12 @@ use super::RfApp;
 use super::SessionGate;
 use super::session::ReceivingCommandPhase;
 
+mod controls;
 mod saved;
 #[cfg(test)]
 mod tests;
+
+use controls::{exception_reason_label, unexpected_reason_label};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum WorkMode {
@@ -94,6 +98,7 @@ pub(super) struct ReceivingUiState {
     mode: ConfirmationMode,
     container: ContainerCapture,
     reason: Option<ReceiptExceptionReason>,
+    unexpected_reason: Option<UnexpectedReceiptReason>,
     focus: Option<FocusTarget>,
     selected_line_id: Option<LoadLineId>,
     viewport_width: Option<f32>,
@@ -110,6 +115,7 @@ struct ReceivingDraftSnapshot {
     container: ContainerCapture,
     license_plate_barcode: Option<String>,
     reason: Option<ReceiptExceptionReason>,
+    unexpected_reason: Option<UnexpectedReceiptReason>,
     note: Option<String>,
 }
 
@@ -122,6 +128,7 @@ impl Default for ReceivingUiState {
             mode: ConfirmationMode::Received,
             container: ContainerCapture::Loose,
             reason: None,
+            unexpected_reason: None,
             focus: None,
             selected_line_id: None,
             viewport_width: None,
@@ -139,6 +146,7 @@ impl ReceivingUiState {
         self.mode = ConfirmationMode::Received;
         self.container = ContainerCapture::Loose;
         self.reason = None;
+        self.unexpected_reason = None;
         self.focus = None;
         self.selected_line_id = None;
         self.viewport_width = None;
@@ -158,6 +166,7 @@ impl ReceivingUiState {
                 .map_or_else(String::new, |quantity| quantity.to_string());
             self.container = draft.container;
             self.reason = draft.reason;
+            self.unexpected_reason = draft.unexpected_reason;
             self.note_draft = draft.note.clone().unwrap_or_default();
             if selected_changed {
                 self.focus = None;
@@ -171,8 +180,11 @@ impl ReceivingUiState {
             && draft.quantity.is_some_and(|quantity| quantity > 0);
         let controls_match = self.mode == draft.mode
             && self.container == draft.container
-            && self.reason == draft.reason;
-        let note_matches = if draft.reason == Some(ReceiptExceptionReason::Other) {
+            && self.reason == draft.reason
+            && self.unexpected_reason == draft.unexpected_reason;
+        let note_required = draft.reason == Some(ReceiptExceptionReason::Other)
+            || draft.unexpected_reason == Some(UnexpectedReceiptReason::Other);
+        let note_matches = if note_required {
             ExceptionNote::new(self.note_draft.clone()).is_ok()
                 && draft.note.as_deref() == Some(self.note_draft.as_str())
         } else {
@@ -427,6 +439,10 @@ impl RfApp {
         self.receiving_session_summary(ui);
         self.receiving_disposition(ui);
 
+        if self.receiving_ui.mode == ConfirmationMode::Unexpected {
+            self.receiving_unexpected_evidence(ui);
+        }
+
         let target = self.receiving.focus_target();
         if target == FocusTarget::Scanner(ScannerTarget::ItemBarcode) {
             if self.receiving_ui.mode == ConfirmationMode::Missing {
@@ -450,6 +466,11 @@ impl RfApp {
             ) {
                 self.receiving_container_control(ui);
             }
+        } else if self.receiving_ui.mode == ConfirmationMode::Unexpected
+            && receiving_draft_snapshot(&self.receiving)
+                .is_some_and(|draft| draft.item_barcode.is_some())
+        {
+            self.receiving_container_control(ui);
         }
 
         match target {
@@ -471,6 +492,8 @@ impl RfApp {
                         | ConfirmationMode::Missing
                 ) {
                     self.receiving_exception(ui);
+                } else if self.receiving_ui.mode == ConfirmationMode::Unexpected {
+                    self.receiving_unexpected_reason(ui);
                 }
                 self.receiving_confirm(ui);
             }
@@ -514,50 +537,17 @@ impl RfApp {
         ui.separator();
     }
 
-    fn receiving_disposition(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("DISPOSITION").small().strong());
-        let width = (ui.available_width() - 8.0) / 2.0;
-        egui::Grid::new("receiving_disposition_grid")
-            .num_columns(2)
-            .spacing([8.0, 8.0])
-            .show(ui, |ui| {
-                for mode in [
-                    ConfirmationMode::Received,
-                    ConfirmationMode::Quarantined,
-                    ConfirmationMode::Rejected,
-                    ConfirmationMode::Missing,
-                ] {
-                    if ui
-                        .add_sized(
-                            [width, 50.0],
-                            egui::Button::selectable(
-                                self.receiving_ui.mode == mode,
-                                confirmation_mode_label(mode),
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.receiving_ui.mode = mode;
-                        self.receiving_ui.reason = None;
-                        self.receiving_ui.note_draft.clear();
-                        self.receiving_ui.focus = None;
-                        let transition = self.receiving.select_mode(mode);
-                        self.emit_receiving_transition(transition);
-                    }
-                    if matches!(
-                        mode,
-                        ConfirmationMode::Quarantined | ConfirmationMode::Missing
-                    ) {
-                        ui.end_row();
-                    }
-                }
-            });
-    }
-
     fn receiving_scan_control(&mut self, ui: &mut egui::Ui, target: ScannerTarget) {
         ui.add_space(4.0);
+        let prompt = if target == ScannerTarget::ItemBarcode
+            && self.receiving_ui.mode == ConfirmationMode::Unexpected
+        {
+            "Scan unexpected item"
+        } else {
+            scanner_prompt(target)
+        };
         ui.label(
-            egui::RichText::new(scanner_prompt(target))
+            egui::RichText::new(prompt)
                 .size(19.0)
                 .strong()
                 .color(Self::accent()),
@@ -679,153 +669,6 @@ impl RfApp {
                     }
                 });
             });
-    }
-
-    fn receiving_container_control(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("CONTAINER").small().strong());
-        let width = (ui.available_width() - 8.0) / 2.0;
-        ui.horizontal(|ui| {
-            for (capture, label) in [
-                (ContainerCapture::Loose, "Loose"),
-                (ContainerCapture::LicensePlate, "License plate"),
-            ] {
-                if ui
-                    .add_sized(
-                        [width, 48.0],
-                        egui::Button::selectable(self.receiving_ui.container == capture, label),
-                    )
-                    .clicked()
-                {
-                    self.receiving_ui.container = capture;
-                    self.receiving_ui.focus = None;
-                    let transition = self.receiving.set_container_capture(capture);
-                    self.emit_receiving_transition(transition);
-                }
-            }
-        });
-    }
-
-    fn receiving_quantity(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("QUANTITY").small().strong());
-        let response = ui.add_sized(
-            [ui.available_width(), 56.0],
-            egui::TextEdit::singleline(&mut self.receiving_ui.quantity_draft)
-                .id(egui::Id::new("receiving_quantity"))
-                .font(egui::TextStyle::Monospace)
-                .char_limit(10)
-                .hint_text("1"),
-        );
-        if self.receiving.focus_target() == FocusTarget::Quantity {
-            self.request_receiving_focus(&response, FocusTarget::Quantity);
-        }
-        if response.changed()
-            && let Ok(quantity) = self.receiving_ui.quantity_draft.parse::<i64>()
-        {
-            let transition = self.receiving.set_quantity(quantity);
-            self.emit_receiving_transition(transition);
-        }
-    }
-
-    fn receiving_exception(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("REASON").small().strong());
-        egui::ComboBox::from_id_salt("receiving_exception_reason")
-            .width(ui.available_width())
-            .selected_text(
-                self.receiving_ui
-                    .reason
-                    .map_or("Select a reason", exception_reason_label),
-            )
-            .show_ui(ui, |ui| {
-                let reasons: &[_] = if self.receiving_ui.mode == ConfirmationMode::Quarantined {
-                    &[
-                        ReceiptExceptionReason::Damaged,
-                        ReceiptExceptionReason::QualityRejected,
-                        ReceiptExceptionReason::CountDiscrepancy,
-                        ReceiptExceptionReason::WrongItem,
-                        ReceiptExceptionReason::Other,
-                    ]
-                } else {
-                    &[
-                        ReceiptExceptionReason::Damaged,
-                        ReceiptExceptionReason::QualityRejected,
-                        ReceiptExceptionReason::ShortShipment,
-                        ReceiptExceptionReason::CountDiscrepancy,
-                        ReceiptExceptionReason::WrongItem,
-                        ReceiptExceptionReason::Other,
-                    ]
-                };
-                for &reason in reasons {
-                    if ui
-                        .selectable_value(
-                            &mut self.receiving_ui.reason,
-                            Some(reason),
-                            exception_reason_label(reason),
-                        )
-                        .changed()
-                    {
-                        let transition = self.receiving.set_exception_reason(reason);
-                        self.emit_receiving_transition(transition);
-                        if reason != ReceiptExceptionReason::Other {
-                            self.receiving_ui.note_draft.clear();
-                        }
-                        self.receiving_ui.focus = None;
-                    }
-                }
-            });
-
-        if self.receiving_ui.reason == Some(ReceiptExceptionReason::Other) {
-            ui.label(egui::RichText::new("NOTE").small().strong());
-            let response = ui.add_sized(
-                [ui.available_width(), 56.0],
-                egui::TextEdit::singleline(&mut self.receiving_ui.note_draft)
-                    .id(egui::Id::new("receiving_exception_note"))
-                    .char_limit(1_000)
-                    .hint_text("Required detail"),
-            );
-            if self.receiving.focus_target() == FocusTarget::ExceptionNote {
-                self.request_receiving_focus(&response, FocusTarget::ExceptionNote);
-            }
-            if response.changed() {
-                let value = (!self.receiving_ui.note_draft.is_empty())
-                    .then_some(self.receiving_ui.note_draft.as_str());
-                let transition = self.receiving.set_exception_note(value);
-                self.emit_receiving_transition(transition);
-            }
-        }
-    }
-
-    fn receiving_confirm(&mut self, ui: &mut egui::Ui) {
-        let access = self.receiving_command_access();
-        let guard = self.receiving.confirmation_guard(access);
-        let displayed_values_match = receiving_draft_snapshot(&self.receiving)
-            .is_some_and(|draft| self.receiving_ui.displayed_confirmation_matches(&draft));
-        let enabled = guard == ActionGuard::Allowed && displayed_values_match;
-        let label = match self.receiving_ui.mode {
-            ConfirmationMode::Received => "Confirm receipt",
-            ConfirmationMode::Quarantined => "Receive into quarantine",
-            ConfirmationMode::Rejected => "Confirm rejection",
-            ConfirmationMode::Missing => "Record missing",
-        };
-        if ui
-            .add_enabled(
-                enabled,
-                egui::Button::new(egui::RichText::new(label).strong())
-                    .fill(Self::primary_fill(enabled))
-                    .min_size(egui::vec2(ui.available_width(), 58.0)),
-            )
-            .on_disabled_hover_text(action_guard_message(guard))
-            .clicked()
-        {
-            let transition = self.receiving.begin_confirmation(access);
-            self.emit_receiving_transition(transition);
-        }
-        if let ActionGuard::Blocked(reason) = guard {
-            ui.label(
-                egui::RichText::new(action_block_message(reason))
-                    .small()
-                    .color(egui::Color32::from_rgb(166, 177, 173)),
-            );
-        }
     }
 
     fn receiving_confirmation_pending(&mut self, ui: &mut egui::Ui) {
@@ -1030,6 +873,7 @@ impl RfApp {
             }
             "receiving-active" => self.load_receiving_preview(ReceivingPreview::Active),
             "receiving-quarantine" => self.load_receiving_preview(ReceivingPreview::Quarantine),
+            "receiving-unexpected" => self.load_receiving_preview(ReceivingPreview::Unexpected),
             "receiving-error" => self.load_receiving_preview(ReceivingPreview::Error),
             "receiving-recovery" => self.load_receiving_preview(ReceivingPreview::Recovery),
             "receiving-reconcile" => self.load_receiving_preview(ReceivingPreview::Reconcile),
@@ -1065,13 +909,26 @@ impl RfApp {
             }
             ReceivingPreview::Active
             | ReceivingPreview::Quarantine
+            | ReceivingPreview::Unexpected
             | ReceivingPreview::Recovery
             | ReceivingPreview::Reconcile => {
                 let Some(session) = debug_receiving_session() else {
                     return;
                 };
                 self.receiving.load_resolved(resolution_id, session);
-                self.receiving.scan_item("CASE-100");
+                if preview == ReceivingPreview::Unexpected {
+                    self.receiving.select_mode(ConfirmationMode::Unexpected);
+                    self.receiving.scan_item("UNEXPECTED-CASE-200");
+                    self.receiving.scan_dock("DOCK-04");
+                    self.receiving
+                        .set_container_capture(ContainerCapture::LicensePlate);
+                    self.receiving.scan_license_plate("QA-UNEXPECTED-200");
+                    self.receiving.set_quantity(3);
+                    self.receiving
+                        .set_unexpected_reason(UnexpectedReceiptReason::UnexpectedItem);
+                } else {
+                    self.receiving.scan_item("CASE-100");
+                }
                 if preview == ReceivingPreview::Quarantine {
                     self.receiving.select_mode(ConfirmationMode::Quarantined);
                     self.receiving.scan_dock("DOCK-04");
@@ -1111,6 +968,7 @@ impl RfApp {
 enum ReceivingPreview {
     Active,
     Quarantine,
+    Unexpected,
     Error,
     Recovery,
     Reconcile,
@@ -1134,6 +992,7 @@ fn receiving_draft_snapshot(reducer: &ExpectedReceivingReducer) -> Option<Receiv
                 .license_plate_barcode
                 .map(|barcode| barcode.as_str().to_owned()),
             reason: draft.exception_reason,
+            unexpected_reason: draft.unexpected_reason,
             note: draft.exception_note.map(str::to_owned),
         })
 }
@@ -1173,6 +1032,7 @@ const fn confirmation_mode_label(mode: ConfirmationMode) -> &'static str {
     match mode {
         ConfirmationMode::Received => "Received",
         ConfirmationMode::Quarantined => "Quarantine",
+        ConfirmationMode::Unexpected => "Unexpected",
         ConfirmationMode::Rejected => "Rejected",
         ConfirmationMode::Missing => "Missing",
     }
@@ -1193,17 +1053,6 @@ const fn scanner_hint(target: ScannerTarget) -> &'static str {
         ScannerTarget::ItemBarcode => "ITEM BARCODE",
         ScannerTarget::DockBarcode => "DOCK BARCODE",
         ScannerTarget::LicensePlateBarcode => "LICENSE PLATE",
-    }
-}
-
-const fn exception_reason_label(reason: ReceiptExceptionReason) -> &'static str {
-    match reason {
-        ReceiptExceptionReason::Damaged => "Damaged",
-        ReceiptExceptionReason::QualityRejected => "Quality rejected",
-        ReceiptExceptionReason::ShortShipment => "Short shipment",
-        ReceiptExceptionReason::CountDiscrepancy => "Count discrepancy",
-        ReceiptExceptionReason::WrongItem => "Wrong item",
-        ReceiptExceptionReason::Other => "Other",
     }
 }
 

@@ -2,7 +2,10 @@ use eframe::egui;
 
 use crate::expected_receiving::{ConfirmationMode, ExpectedReceiptLine};
 
-use super::{RfApp, confirmation_mode_label, exception_reason_label, receiving_draft_snapshot};
+use super::{
+    RfApp, confirmation_mode_label, exception_reason_label, receiving_draft_snapshot,
+    unexpected_reason_label,
+};
 
 impl RfApp {
     pub(super) fn receiving_saved_draft(&self, ui: &mut egui::Ui) {
@@ -50,7 +53,7 @@ impl RfApp {
                     ui.monospace(item);
                 });
                 match draft.mode {
-                    ConfirmationMode::Received => {
+                    ConfirmationMode::Received | ConfirmationMode::Unexpected => {
                         ui.horizontal_wrapped(|ui| {
                             if let Some(dock) = draft.dock_barcode.as_deref() {
                                 ui.monospace(format!("Dock {dock}"));
@@ -63,6 +66,15 @@ impl RfApp {
                                 ui.label("Loose");
                             }
                         });
+                        if let Some(reason) = draft.unexpected_reason {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(unexpected_reason_label(reason));
+                                if let Some(note) = draft.note.as_deref() {
+                                    ui.separator();
+                                    ui.label(note);
+                                }
+                            });
+                        }
                     }
                     ConfirmationMode::Quarantined => {
                         ui.horizontal_wrapped(|ui| {

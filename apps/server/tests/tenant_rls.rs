@@ -387,6 +387,10 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         ),
         ("order_activity", "order_activity_tenant_isolation"),
         ("load_activity", "load_activity_tenant_isolation"),
+        (
+            "unexpected_receipts",
+            "unexpected_receipts_tenant_isolation",
+        ),
         ("work_tasks", "work_tasks_tenant_isolation"),
         ("work_task_progress", "work_task_progress_tenant_isolation"),
         ("putaway_tasks", "putaway_tasks_tenant_isolation"),

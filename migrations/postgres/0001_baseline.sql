@@ -31457,6 +31457,304 @@ GRANT USAGE ON SEQUENCE public.shipment_cancellations_id_seq TO wareboxes_app;
 REVOKE ALL ON FUNCTION public.validate_shipment_cancellation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_shipment_cancellation_mutation() FROM PUBLIC;
 
+-- Unexpected inbound stock is retained as quarantined inventory without changing
+-- the immutable expectation carried by load_lines.
+CREATE TABLE public.unexpected_receipts (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    load_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    quantity bigint NOT NULL CHECK (quantity > 0),
+    receiving_location_id bigint NOT NULL,
+    observed_item_barcode text NOT NULL,
+    observed_receiving_location_barcode text NOT NULL,
+    license_plate_id bigint,
+    license_plate_barcode text,
+    item_batch_id bigint NOT NULL,
+    lot text,
+    serial text,
+    expiration timestamptz,
+    reason_code text NOT NULL CHECK (
+        reason_code IN ('excess','unexpected_item','blind_receipt','mis_shipped','other')
+    ),
+    note text,
+    inventory_transaction_id bigint NOT NULL,
+    inventory_balance_id bigint NOT NULL,
+    inventory_hold_id bigint NOT NULL,
+    confirmed_by_user_id bigint NOT NULL,
+    confirmed_at timestamptz NOT NULL,
+    CONSTRAINT unexpected_receipts_uom_check CHECK (uom IN ('each','case')),
+    CONSTRAINT unexpected_receipts_item_barcode_check CHECK (
+        observed_item_barcode = btrim(observed_item_barcode)
+        AND char_length(observed_item_barcode) BETWEEN 1 AND 200
+    ),
+    CONSTRAINT unexpected_receipts_location_barcode_check CHECK (
+        observed_receiving_location_barcode = btrim(observed_receiving_location_barcode)
+        AND char_length(observed_receiving_location_barcode) BETWEEN 1 AND 200
+    ),
+    CONSTRAINT unexpected_receipts_license_plate_shape_check CHECK (
+        (license_plate_id IS NULL AND license_plate_barcode IS NULL)
+        OR (license_plate_id IS NOT NULL AND license_plate_barcode IS NOT NULL
+            AND license_plate_barcode = btrim(license_plate_barcode)
+            AND char_length(license_plate_barcode) BETWEEN 1 AND 200)
+    ),
+    CONSTRAINT unexpected_receipts_note_check CHECK (
+        note IS NULL OR (note = btrim(note) AND char_length(note) BETWEEN 1 AND 1000)
+    ),
+    CONSTRAINT unexpected_receipts_other_note_check CHECK (
+        reason_code <> 'other' OR note IS NOT NULL
+    ),
+    CONSTRAINT unexpected_receipts_tenant_id_inventory_owner_id_id_key
+        UNIQUE (tenant_id, inventory_owner_id, id),
+    CONSTRAINT unexpected_receipts_transaction_unique
+        UNIQUE (tenant_id, inventory_transaction_id),
+    CONSTRAINT unexpected_receipts_hold_unique
+        UNIQUE (tenant_id, inventory_hold_id),
+    CONSTRAINT unexpected_receipts_batch_unique
+        UNIQUE (tenant_id, item_batch_id),
+    CONSTRAINT unexpected_receipts_owner_facility_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id)
+        REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id),
+    CONSTRAINT unexpected_receipts_load_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, load_id)
+        REFERENCES public.loads(tenant_id, inventory_owner_id, id),
+    CONSTRAINT unexpected_receipts_item_fkey
+        FOREIGN KEY (tenant_id, item_id) REFERENCES public.items(tenant_id, id),
+    CONSTRAINT unexpected_receipts_location_fkey
+        FOREIGN KEY (tenant_id, facility_id, receiving_location_id)
+        REFERENCES public.locations(tenant_id, facility_id, id),
+    CONSTRAINT unexpected_receipts_license_plate_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id)
+        REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT unexpected_receipts_batch_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id)
+        REFERENCES public.item_batches(tenant_id, inventory_owner_id, id),
+    CONSTRAINT unexpected_receipts_transaction_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, inventory_transaction_id)
+        REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id),
+    CONSTRAINT unexpected_receipts_balance_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, inventory_balance_id)
+        REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT unexpected_receipts_hold_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, inventory_hold_id)
+        REFERENCES public.inventory_holds(tenant_id, inventory_owner_id, id),
+    CONSTRAINT unexpected_receipts_actor_fkey
+        FOREIGN KEY (tenant_id, confirmed_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id)
+);
+ALTER TABLE public.unexpected_receipts FORCE ROW LEVEL SECURITY;
+CREATE INDEX unexpected_receipts_load_history_idx
+ON public.unexpected_receipts(tenant_id, load_id, confirmed_at, id);
+
+CREATE FUNCTION public.validate_unexpected_receipt() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    expected_hold_reason text;
+BEGIN
+    expected_hold_reason := CASE
+        WHEN NEW.reason_code = 'mis_shipped' THEN 'customer_request'
+        ELSE 'inventory_discrepancy'
+    END;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.loads load
+        INNER JOIN public.locations location
+          ON location.tenant_id = load.tenant_id
+         AND location.facility_id = load.facility_id
+         AND location.id = load.dock_door_location_id
+        WHERE load.tenant_id = NEW.tenant_id
+          AND load.inventory_owner_id = NEW.inventory_owner_id
+          AND load.facility_id = NEW.facility_id
+          AND load.id = NEW.load_id
+          AND load.type = 'inbound'
+          AND load.status IN ('arrived','receiving','received')
+          AND load.deleted IS NULL
+          AND location.id = NEW.receiving_location_id
+          AND location.barcode = NEW.observed_receiving_location_barcode
+          AND location.deleted IS NULL
+          AND location.active
+          AND location.receivable
+        FOR SHARE OF load, location
+    ) THEN
+        RAISE EXCEPTION 'unexpected receipt load and receiving dock are not executable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.items item
+        INNER JOIN public.barcodes barcode
+          ON barcode.tenant_id = item.tenant_id
+         AND barcode.item_id = item.id
+        WHERE item.tenant_id = NEW.tenant_id
+          AND item.id = NEW.item_id
+          AND item.packaging_unit = NEW.uom
+          AND item.deleted IS NULL
+          AND barcode.deleted IS NULL
+          AND lower(barcode.name) = lower(NEW.observed_item_barcode)
+        FOR SHARE OF item, barcode
+    ) THEN
+        RAISE EXCEPTION 'unexpected receipt item barcode is not active'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF (NEW.reason_code = 'excess' AND NOT EXISTS (
+            SELECT 1 FROM public.load_lines line
+            WHERE line.tenant_id = NEW.tenant_id
+              AND line.load_id = NEW.load_id
+              AND line.item_id = NEW.item_id
+              AND line.deleted IS NULL
+        )) OR (NEW.reason_code = 'unexpected_item' AND EXISTS (
+            SELECT 1 FROM public.load_lines line
+            WHERE line.tenant_id = NEW.tenant_id
+              AND line.load_id = NEW.load_id
+              AND line.item_id = NEW.item_id
+              AND line.deleted IS NULL
+        ))
+    THEN
+        RAISE EXCEPTION 'unexpected receipt reason does not match the load expectation'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.license_plate_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM public.license_plates plate
+        WHERE plate.tenant_id = NEW.tenant_id
+          AND plate.inventory_owner_id = NEW.inventory_owner_id
+          AND plate.facility_id = NEW.facility_id
+          AND plate.id = NEW.license_plate_id
+          AND plate.location_id = NEW.receiving_location_id
+          AND plate.barcode = NEW.license_plate_barcode
+          AND plate.deleted IS NULL
+        FOR SHARE
+    ) THEN
+        RAISE EXCEPTION 'unexpected receipt license plate evidence does not reconcile'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM public.item_batches batch
+        WHERE batch.tenant_id = NEW.tenant_id
+          AND batch.inventory_owner_id = NEW.inventory_owner_id
+          AND batch.id = NEW.item_batch_id
+          AND batch.item_id = NEW.item_id
+          AND batch.uom = NEW.uom
+          AND batch.load_id = NEW.load_id
+          AND batch.lot IS NOT DISTINCT FROM NEW.lot
+          AND batch.serial IS NOT DISTINCT FROM NEW.serial
+          AND batch.expiration IS NOT DISTINCT FROM NEW.expiration
+        FOR SHARE
+    ) OR NOT EXISTS (
+        SELECT 1 FROM public.inventory_balances balance
+        WHERE balance.tenant_id = NEW.tenant_id
+          AND balance.inventory_owner_id = NEW.inventory_owner_id
+          AND balance.facility_id = NEW.facility_id
+          AND balance.id = NEW.inventory_balance_id
+          AND balance.location_id = NEW.receiving_location_id
+          AND balance.license_plate_id IS NOT DISTINCT FROM NEW.license_plate_id
+          AND balance.item_batch_id = NEW.item_batch_id
+          AND balance.item_id = NEW.item_id
+          AND balance.uom = NEW.uom
+          AND balance.status = 'quarantine'
+          AND balance.deleted IS NULL
+          AND balance.qty_on_hand >= NEW.quantity
+          AND balance.qty_held >= NEW.quantity
+        FOR SHARE
+    ) OR NOT EXISTS (
+        SELECT 1 FROM public.inventory_holds hold
+        WHERE hold.tenant_id = NEW.tenant_id
+          AND hold.inventory_owner_id = NEW.inventory_owner_id
+          AND hold.facility_id = NEW.facility_id
+          AND hold.id = NEW.inventory_hold_id
+          AND hold.inventory_balance_id = NEW.inventory_balance_id
+          AND hold.location_id = NEW.receiving_location_id
+          AND hold.license_plate_id IS NOT DISTINCT FROM NEW.license_plate_id
+          AND hold.item_batch_id = NEW.item_batch_id
+          AND hold.item_id = NEW.item_id
+          AND hold.uom = NEW.uom
+          AND hold.inventory_status = 'quarantine'
+          AND hold.qty = NEW.quantity
+          AND hold.reason_code = expected_hold_reason
+          AND hold.note IS NOT DISTINCT FROM NEW.note
+          AND hold.reference_type = 'unexpected_receipt'
+          AND hold.reference_id = NEW.id
+          AND hold.status = 'active'
+          AND hold.created_by = NEW.confirmed_by_user_id
+          AND hold.created = NEW.confirmed_at
+        FOR SHARE
+    ) THEN
+        RAISE EXCEPTION 'unexpected receipt inventory and hold evidence do not reconcile'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM public.inventory_transactions txn
+        WHERE txn.tenant_id = NEW.tenant_id
+          AND txn.inventory_owner_id = NEW.inventory_owner_id
+          AND txn.id = NEW.inventory_transaction_id
+          AND txn.transaction_type = 'receive'
+          AND txn.reason = NEW.reason_code
+          AND txn.reference_type = 'unexpected_receipt'
+          AND txn.reference_id = NEW.id
+          AND txn.operation = 'inbound.confirm_unexpected_receipt.v1'
+          AND txn.actor_user_id = NEW.confirmed_by_user_id
+          AND txn.created = NEW.confirmed_at
+    ) OR (SELECT COUNT(*) FROM public.inventory_entries entry
+          WHERE entry.tenant_id = NEW.tenant_id
+            AND entry.inventory_owner_id = NEW.inventory_owner_id
+            AND entry.facility_id = NEW.facility_id
+            AND entry.transaction_id = NEW.inventory_transaction_id) <> 1
+       OR NOT EXISTS (
+        SELECT 1 FROM public.inventory_entries entry
+        WHERE entry.tenant_id = NEW.tenant_id
+          AND entry.inventory_owner_id = NEW.inventory_owner_id
+          AND entry.facility_id = NEW.facility_id
+          AND entry.transaction_id = NEW.inventory_transaction_id
+          AND entry.location_id = NEW.receiving_location_id
+          AND entry.license_plate_id IS NOT DISTINCT FROM NEW.license_plate_id
+          AND entry.item_batch_id = NEW.item_batch_id
+          AND entry.status = 'quarantine'
+          AND entry.quantity_delta = NEW.quantity
+    ) THEN
+        RAISE EXCEPTION 'unexpected receipt journal evidence does not reconcile'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.reject_unexpected_receipt_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    RAISE EXCEPTION 'unexpected receipts are immutable' USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER unexpected_receipts_validate
+BEFORE INSERT ON public.unexpected_receipts
+FOR EACH ROW EXECUTE FUNCTION public.validate_unexpected_receipt();
+CREATE TRIGGER unexpected_receipts_are_immutable
+BEFORE UPDATE OR DELETE ON public.unexpected_receipts
+FOR EACH ROW EXECUTE FUNCTION public.reject_unexpected_receipt_mutation();
+
+ALTER TABLE public.unexpected_receipts ENABLE ROW LEVEL SECURITY;
+CREATE POLICY unexpected_receipts_tenant_isolation
+ON public.unexpected_receipts
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT,INSERT ON public.unexpected_receipts TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.unexpected_receipts_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_unexpected_receipt() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_unexpected_receipt_mutation() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

@@ -15,6 +15,7 @@ fn draft(reason: Option<ReceiptExceptionReason>, note: Option<&str>) -> Receivin
         container: ContainerCapture::Loose,
         license_plate_barcode: None,
         reason,
+        unexpected_reason: None,
         note: note.map(str::to_owned),
     }
 }

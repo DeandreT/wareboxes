@@ -118,6 +118,7 @@ impl ConfirmationRecoverySnapshot {
                 expiration: expiration.clone(),
                 exception_reason: None,
                 exception_note: None,
+                unexpected_reason: None,
             },
             ExpectedReceiptCommand::Quarantined {
                 item_barcode,
@@ -146,6 +147,7 @@ impl ConfirmationRecoverySnapshot {
                 expiration: expiration.clone(),
                 exception_reason: Some(reason.as_exception()),
                 exception_note: note.clone(),
+                unexpected_reason: None,
             },
             ExpectedReceiptCommand::Rejected {
                 item_barcode,

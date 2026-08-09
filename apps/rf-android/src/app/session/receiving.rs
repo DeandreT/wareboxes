@@ -270,7 +270,7 @@ impl RfApp {
     fn persist_receiving_confirmation(
         &mut self,
         confirmation_id: ConfirmationId,
-        intent: crate::expected_receiving::ConfirmationIntent,
+        intent: crate::expected_receiving::ReceivingCommandIntent,
     ) {
         let Some(scope) = self.execution_scope.as_ref() else {
             let transition = self

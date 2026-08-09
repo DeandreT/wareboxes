@@ -46,6 +46,7 @@ impl ExpectedReceivingReducer {
             container_capture: draft.container_capture,
             license_plate_barcode: draft.license_plate_barcode.as_ref(),
             exception_reason: draft.exception_reason,
+            unexpected_reason: draft.unexpected_reason,
             exception_note: draft.exception_note.as_ref().map(ExceptionNote::as_str),
         })
     }
@@ -205,6 +206,12 @@ impl ExpectedReceivingReducer {
         let Some(active) = self.active_mut() else {
             return ReceivingTransition::Blocked(ActionBlockReason::NoActiveSession);
         };
+        if active.draft.mode == ConfirmationMode::Unexpected {
+            active.draft.selected_line_id = None;
+            active.draft.item_barcode = Some(barcode);
+            self.operator_error = None;
+            return ReceivingTransition::Applied;
+        }
         let matching = active
             .session
             .lines()
@@ -257,6 +264,16 @@ impl ExpectedReceivingReducer {
         active.draft.mode = mode;
         active.draft.exception_reason = None;
         active.draft.exception_note = None;
+        active.draft.unexpected_reason = None;
+        if mode == ConfirmationMode::Unexpected {
+            active.draft.selected_line_id = None;
+            active.draft.item_barcode = None;
+            active.draft.dock_barcode = None;
+            active.draft.quantity = Some(PositiveQuantity(1));
+            active.draft.lot = None;
+            active.draft.serial = None;
+            active.draft.expiration = None;
+        }
         self.operator_error = None;
         ReceivingTransition::Applied
     }
@@ -269,12 +286,16 @@ impl ExpectedReceivingReducer {
         let Some(active) = self.active_mut() else {
             return ReceivingTransition::Blocked(ActionBlockReason::NoActiveSession);
         };
-        if active.draft.selected_line_id.is_none() {
+        if active.draft.mode != ConfirmationMode::Unexpected
+            && active.draft.selected_line_id.is_none()
+        {
             return ReceivingTransition::Blocked(ActionBlockReason::NoSelectedLine);
         }
         if !matches!(
             active.draft.mode,
-            ConfirmationMode::Received | ConfirmationMode::Quarantined
+            ConfirmationMode::Received
+                | ConfirmationMode::Quarantined
+                | ConfirmationMode::Unexpected
         ) {
             return ReceivingTransition::Blocked(ActionBlockReason::WorkflowBusy);
         }
@@ -294,15 +315,17 @@ impl ExpectedReceivingReducer {
         let Some(active) = self.active_mut() else {
             return ReceivingTransition::Blocked(ActionBlockReason::NoActiveSession);
         };
-        let Some(line) = active
-            .draft
-            .selected_line_id
-            .and_then(|line_id| active.session.line(line_id))
-        else {
-            return ReceivingTransition::Blocked(ActionBlockReason::NoSelectedLine);
-        };
-        if quantity.get() > line.remaining().get() {
-            return self.set_operator_error(ReceivingOperatorError::QuantityExceedsRemaining);
+        if active.draft.mode != ConfirmationMode::Unexpected {
+            let Some(line) = active
+                .draft
+                .selected_line_id
+                .and_then(|line_id| active.session.line(line_id))
+            else {
+                return ReceivingTransition::Blocked(ActionBlockReason::NoSelectedLine);
+            };
+            if quantity.get() > line.remaining().get() {
+                return self.set_operator_error(ReceivingOperatorError::QuantityExceedsRemaining);
+            }
         }
         active.draft.quantity = Some(quantity);
         self.operator_error = None;
@@ -315,7 +338,9 @@ impl ExpectedReceivingReducer {
         };
         if !matches!(
             active.draft.mode,
-            ConfirmationMode::Received | ConfirmationMode::Quarantined
+            ConfirmationMode::Received
+                | ConfirmationMode::Quarantined
+                | ConfirmationMode::Unexpected
         ) {
             return ReceivingTransition::Blocked(ActionBlockReason::WorkflowBusy);
         }
@@ -336,7 +361,9 @@ impl ExpectedReceivingReducer {
         };
         if !matches!(
             active.draft.mode,
-            ConfirmationMode::Received | ConfirmationMode::Quarantined
+            ConfirmationMode::Received
+                | ConfirmationMode::Quarantined
+                | ConfirmationMode::Unexpected
         ) || active.draft.container_capture != ContainerCapture::LicensePlate
         {
             return ReceivingTransition::Blocked(ActionBlockReason::WorkflowBusy);
@@ -364,11 +391,15 @@ impl ExpectedReceivingReducer {
         let Some(active) = self.active_mut() else {
             return ReceivingTransition::Blocked(ActionBlockReason::NoActiveSession);
         };
-        let expected = active
-            .draft
-            .selected_line_id
-            .and_then(|line_id| active.session.line(line_id))
-            .and_then(ExpectedReceiptLine::expiration);
+        let expected = (active.draft.mode != ConfirmationMode::Unexpected)
+            .then(|| {
+                active
+                    .draft
+                    .selected_line_id
+                    .and_then(|line_id| active.session.line(line_id))
+                    .and_then(ExpectedReceiptLine::expiration)
+            })
+            .flatten();
         if expected.is_some() && expected != parsed.as_ref() {
             return self.set_operator_error(ReceivingOperatorError::DimensionDoesNotMatchExpected);
         }
@@ -383,6 +414,20 @@ impl ExpectedReceivingReducer {
         };
         active.draft.exception_reason = Some(reason);
         if reason != ReceiptExceptionReason::Other {
+            active.draft.exception_note = None;
+        }
+        ReceivingTransition::Applied
+    }
+
+    pub fn set_unexpected_reason(
+        &mut self,
+        reason: UnexpectedReceiptReason,
+    ) -> ReceivingTransition {
+        let Some(active) = self.active_mut() else {
+            return ReceivingTransition::Blocked(ActionBlockReason::NoActiveSession);
+        };
+        active.draft.unexpected_reason = Some(reason);
+        if reason != UnexpectedReceiptReason::Other {
             active.draft.exception_note = None;
         }
         ReceivingTransition::Applied
@@ -449,8 +494,9 @@ impl ExpectedReceivingReducer {
     /// The returned correlation ID must be used for the eventual durable command outcome.
     pub fn restore_pending_confirmation(
         &mut self,
-        intent: ConfirmationIntent,
+        intent: impl Into<ReceivingCommandIntent>,
     ) -> Result<ConfirmationId, ReconciliationReason> {
+        let intent = intent.into();
         if !matches!(self.state, State::AwaitingLoad) || !intent.is_current_and_valid() {
             let reason = ReconciliationReason::CommandIntegrityFailure;
             self.reconcile(reason);
@@ -504,8 +550,9 @@ impl ExpectedReceivingReducer {
     pub fn confirmation_succeeded(
         &mut self,
         confirmation_id: ConfirmationId,
-        result: ConfirmationResult,
+        result: impl Into<ReceivingCommandResult>,
     ) -> ReceivingTransition {
+        let result = result.into();
         let State::ConfirmationPending {
             active,
             confirmation_id: expected,
@@ -519,6 +566,38 @@ impl ExpectedReceivingReducer {
         }
         let mut active = active.clone();
         let intent = intent.clone();
+        if let (
+            ReceivingCommandIntent::Unexpected(intent),
+            ReceivingCommandResult::Unexpected(result),
+        ) = (&intent, &result)
+        {
+            if result.load_id != intent.load_id
+                || result.inventory_owner_id != intent.recovery.inventory_owner_id
+                || result.facility_id != intent.recovery.facility_id
+                || result.receiving_location_id != intent.recovery.dock.location_id()
+                || result.observed_item_barcode != intent.command.item_barcode
+                || result.observed_receiving_location_barcode
+                    != intent.command.receiving_location_barcode
+                || result.quantity != intent.command.quantity
+                || result.license_plate_barcode != intent.command.license_plate_barcode
+                || result.lot != intent.command.lot
+                || result.serial != intent.command.serial
+                || result.expiration != intent.command.expiration
+                || result.reason != intent.command.reason
+                || result.note != intent.command.note
+            {
+                return self.reconcile(ReconciliationReason::ConfirmationIdentityMismatch);
+            }
+            active.draft = ConfirmationDraft::default();
+            self.state = State::Active(active);
+            self.operator_error = None;
+            return ReceivingTransition::Applied;
+        }
+        let (ReceivingCommandIntent::Expected(intent), ReceivingCommandResult::Expected(result)) =
+            (intent, result)
+        else {
+            return self.reconcile(ReconciliationReason::ConfirmationDispositionMismatch);
+        };
         if result.load_id != intent.load_id || result.load_line_id != intent.load_line_id {
             return self.reconcile(ReconciliationReason::ConfirmationIdentityMismatch);
         }
@@ -655,6 +734,21 @@ impl ExpectedReceivingReducer {
         })
     }
 
+    pub fn finish_received_load(&mut self) -> ReceivingTransition {
+        let State::Active(active) = &self.state else {
+            return ReceivingTransition::Blocked(ActionBlockReason::WorkflowBusy);
+        };
+        if active.session.status() != ReceivingLoadStatus::Received
+            || !active.session.lines().is_empty()
+        {
+            return ReceivingTransition::Blocked(ActionBlockReason::WorkflowBusy);
+        }
+        self.state = State::AwaitingLoad;
+        self.operator_error = None;
+        self.last_confirmation = None;
+        ReceivingTransition::Applied
+    }
+
     pub fn require_reconciliation(&mut self, reason: ReconciliationReason) -> ReceivingTransition {
         self.reconcile(reason)
     }
@@ -669,10 +763,14 @@ impl ExpectedReceivingReducer {
         let Some(active) = self.active_mut() else {
             return ReceivingTransition::Blocked(ActionBlockReason::NoActiveSession);
         };
-        let line = active
-            .draft
-            .selected_line_id
-            .and_then(|line_id| active.session.line(line_id));
+        let line = (active.draft.mode != ConfirmationMode::Unexpected)
+            .then(|| {
+                active
+                    .draft
+                    .selected_line_id
+                    .and_then(|line_id| active.session.line(line_id))
+            })
+            .flatten();
         let expected = match field {
             DimensionField::Lot => line.and_then(ExpectedReceiptLine::lot),
             DimensionField::Serial => line.and_then(ExpectedReceiptLine::serial),

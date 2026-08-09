@@ -9,6 +9,7 @@ use super::{
 pub enum ConfirmationMode {
     Received,
     Quarantined,
+    Unexpected,
     Rejected,
     Missing,
 }
@@ -37,6 +38,16 @@ pub enum ReceiptQuarantineReason {
     QualityInspection,
     CountDiscrepancy,
     WrongItem,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnexpectedReceiptReason {
+    Excess,
+    UnexpectedItem,
+    BlindReceipt,
+    MisShipped,
     Other,
 }
 

@@ -140,7 +140,7 @@ fn prepare_received(
     else {
         panic!("ready receipt should produce a durable intent");
     };
-    (confirmation_id, *intent)
+    (confirmation_id, intent.as_expected().unwrap().clone())
 }
 
 fn partial_result(receive_quantity: i64) -> ConfirmationResult {
@@ -390,7 +390,7 @@ fn received_flow_has_explicit_focus_and_exact_serializable_intent() {
     };
     assert!(intent.is_current_and_valid());
     assert_eq!(
-        serde_json::to_value(&intent).unwrap(),
+        serde_json::to_value(intent.as_expected().unwrap()).unwrap(),
         json!({
             "schema_version": 2,
             "load_id": 10,
@@ -501,7 +501,7 @@ fn rejected_intent_requires_reason_and_other_note() {
         panic!("complete rejection should persist");
     };
     assert_eq!(
-        intent.command,
+        intent.as_expected().unwrap().command,
         ExpectedReceiptCommand::Rejected {
             item_barcode: ItemBarcode::new("ITEM-1").unwrap(),
             quantity: positive(2),
@@ -541,7 +541,7 @@ fn quarantined_intent_requires_physical_scans_and_a_quarantine_reason() {
         panic!("complete quarantine receipt should persist");
     };
     assert_eq!(
-        intent.command,
+        intent.as_expected().unwrap().command,
         ExpectedReceiptCommand::Quarantined {
             item_barcode: ItemBarcode::new("ITEM-1").unwrap(),
             receiving_location_barcode: DockBarcode::new("DOCK-1").unwrap(),
@@ -572,7 +572,7 @@ fn missing_intent_can_select_a_line_without_claiming_an_item_scan() {
         panic!("missing confirmation should persist");
     };
     assert_eq!(
-        intent.command,
+        intent.as_expected().unwrap().command,
         ExpectedReceiptCommand::Missing {
             quantity: positive(4),
             reason: ReceiptExceptionReason::ShortShipment,
@@ -679,6 +679,7 @@ fn draft_view_exposes_the_exact_scans_and_controls_for_pending_work() {
             container_capture: ContainerCapture::Loose,
             license_plate_barcode: None,
             exception_reason: None,
+            unexpected_reason: None,
             exception_note: None,
         })
     );
@@ -702,6 +703,7 @@ fn draft_view_exposes_the_exact_scans_and_controls_for_pending_work() {
             container_capture: ContainerCapture::LicensePlate,
             license_plate_barcode: Some(&expected_license_plate),
             exception_reason: None,
+            unexpected_reason: None,
             exception_note: None,
         })
     );
@@ -1151,4 +1153,137 @@ fn durable_intent_validation_rejects_unknown_schema_and_incomplete_other_reason(
     let mut unknown_field = serde_json::to_value(valid).unwrap();
     unknown_field["tenant_id"] = json!(99);
     assert!(serde_json::from_value::<ConfirmationIntent>(unknown_field).is_err());
+}
+
+fn received_session() -> ReceivingSession {
+    ReceivingSession::try_new(ReceivingSessionInput {
+        load_id: load_id(10),
+        inventory_owner_id: owner_id(20),
+        facility_id: facility_id(30),
+        reference_number: Some("ASN-10".into()),
+        status: ReceivingLoadStatus::Received,
+        dock: ReceivingDock::new(
+            location_id(90),
+            DockBarcode::new("DOCK-1").unwrap(),
+            Some("Receiving Dock 1".into()),
+        ),
+        lines: Vec::new(),
+    })
+    .unwrap()
+}
+
+fn unexpected_result(item_barcode: &str) -> UnexpectedReceiptResult {
+    UnexpectedReceiptResult {
+        unexpected_receipt_id: 501,
+        load_id: load_id(10),
+        inventory_owner_id: owner_id(20),
+        facility_id: facility_id(30),
+        item_id: item_id(1_501),
+        uom: StockDimension::new("case").unwrap(),
+        quantity: positive(3),
+        receiving_location_id: location_id(90),
+        observed_item_barcode: ItemBarcode::new(item_barcode).unwrap(),
+        observed_receiving_location_barcode: DockBarcode::new("DOCK-1").unwrap(),
+        inventory_transaction_id: 502,
+        inventory_balance_id: 503,
+        item_batch_id: 504,
+        license_plate_id: Some(505),
+        license_plate_barcode: Some(LicensePlateBarcode::new("LP-UNEXPECTED-1").unwrap()),
+        lot: Some(StockDimension::new("LOT-NEW").unwrap()),
+        serial: None,
+        expiration: Some(Expiration::new("2027-08-26T00:00:00Z").unwrap()),
+        inventory_hold_id: 506,
+        reason: UnexpectedReceiptReason::BlindReceipt,
+        note: None,
+        load_status: ReceivingLoadStatus::Received,
+        confirmed_by_user_id: 507,
+        confirmed_at: "2026-08-09T18:00:00Z".into(),
+    }
+}
+
+#[test]
+fn received_load_supports_durable_unexpected_stock_and_exact_recovery() {
+    let mut reducer = ExpectedReceivingReducer::default();
+    resolve(&mut reducer, received_session());
+    assert_eq!(
+        reducer.select_mode(ConfirmationMode::Unexpected),
+        ReceivingTransition::Applied
+    );
+    assert_eq!(
+        reducer.focus_target(),
+        FocusTarget::Scanner(ScannerTarget::ItemBarcode)
+    );
+    reducer.scan_item("ITEM-UNEXPECTED");
+    reducer.scan_dock("DOCK-1");
+    reducer.set_container_capture(ContainerCapture::LicensePlate);
+    reducer.scan_license_plate("LP-UNEXPECTED-1");
+    reducer.set_quantity(3);
+    reducer.set_lot(Some("LOT-NEW"));
+    reducer.set_expiration(Some("2027-08-26T00:00:00Z"));
+    reducer.set_unexpected_reason(UnexpectedReceiptReason::BlindReceipt);
+
+    let ReceivingTransition::Effect(ReceivingEffect::PersistConfirmation {
+        confirmation_id,
+        intent,
+    }) = reducer.begin_confirmation(CommandAccess::Allowed)
+    else {
+        panic!("unexpected stock should create a durable command");
+    };
+    let ReceivingCommandIntent::Unexpected(unexpected) = intent.as_ref() else {
+        panic!("unexpected stock must not use the expected-line contract");
+    };
+    assert_eq!(unexpected.command.quantity, positive(3));
+    assert_eq!(unexpected.recovery.status, ReceivingLoadStatus::Received);
+
+    let payload = serde_json::to_vec(intent.as_ref()).unwrap();
+    let restored: ReceivingCommandIntent = serde_json::from_slice(&payload).unwrap();
+    let mut restarted = ExpectedReceivingReducer::default();
+    let restored_id = restarted
+        .restore_pending_confirmation(restored.clone())
+        .unwrap();
+    assert_eq!(restored, *intent);
+    assert_eq!(restarted.activity(), ReceivingActivity::ConfirmationPending);
+    assert_eq!(
+        restarted.confirmation_succeeded(
+            restored_id,
+            ReceivingCommandResult::Unexpected(Box::new(unexpected_result("ITEM-UNEXPECTED"))),
+        ),
+        ReceivingTransition::Applied
+    );
+    assert_eq!(restarted.activity(), ReceivingActivity::Active);
+    assert!(restarted.selected_line().is_none());
+
+    assert_eq!(
+        reducer.confirmation_succeeded(
+            confirmation_id,
+            ReceivingCommandResult::Unexpected(Box::new(unexpected_result("WRONG-ITEM"))),
+        ),
+        ReceivingTransition::ReconciliationRequired(
+            ReconciliationReason::ConfirmationIdentityMismatch
+        )
+    );
+}
+
+#[test]
+fn unexpected_other_reason_requires_a_note_and_received_load_can_be_finished() {
+    let mut reducer = ExpectedReceivingReducer::default();
+    resolve(&mut reducer, received_session());
+    reducer.select_mode(ConfirmationMode::Unexpected);
+    reducer.scan_item("ITEM-UNEXPECTED");
+    reducer.scan_dock("DOCK-1");
+    reducer.set_unexpected_reason(UnexpectedReceiptReason::Other);
+    assert_eq!(
+        reducer.confirmation_guard(CommandAccess::Allowed),
+        ActionGuard::Blocked(ActionBlockReason::ExceptionNoteRequired)
+    );
+    reducer.set_exception_note(Some("Carrier delivered an unlisted case"));
+    assert_eq!(
+        reducer.confirmation_guard(CommandAccess::Allowed),
+        ActionGuard::Allowed
+    );
+
+    let mut reducer = ExpectedReceivingReducer::default();
+    resolve(&mut reducer, received_session());
+    assert_eq!(reducer.finish_received_load(), ReceivingTransition::Applied);
+    assert_eq!(reducer.activity(), ReceivingActivity::AwaitingLoad);
 }

@@ -51,10 +51,12 @@ pub use cycle_count::{
 };
 pub use error::{ErrorReason, ErrorResponse, FieldViolation};
 pub use expected_receiving::{
-    ConfirmExpectedReceiptRequest, ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
+    ConfirmExpectedReceiptRequest, ConfirmUnexpectedReceiptRequest,
+    ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
     ExpectedReceiptExceptionReason, ExpectedReceiptLine, ExpectedReceiptLineStatus,
     ExpectedReceiptQuarantineReason, ExpectedReceivingLoadStatus, ExpectedReceivingLocation,
-    ExpectedReceivingSessionResponse,
+    ExpectedReceivingSessionResponse, UnexpectedReceiptConfirmationResponse,
+    UnexpectedReceiptReason,
 };
 pub use facility_shipping_origin::{
     ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,

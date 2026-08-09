@@ -1427,7 +1427,18 @@ impl RfApp {
                 &response.body,
             ) {
                 Ok(crate::workflow::CommandOutcome::ExpectedReceipt(result)) => {
-                    self.apply_receiving_success(scope, record_id, result);
+                    self.apply_receiving_success(
+                        scope,
+                        record_id,
+                        crate::expected_receiving::ReceivingCommandResult::Expected(result),
+                    );
+                }
+                Ok(crate::workflow::CommandOutcome::UnexpectedReceipt(result)) => {
+                    self.apply_receiving_success(
+                        scope,
+                        record_id,
+                        crate::expected_receiving::ReceivingCommandResult::Unexpected(result),
+                    );
                 }
                 Ok(outcome) => {
                     let is_cycle_count = matches!(
@@ -1636,7 +1647,7 @@ impl RfApp {
         &mut self,
         scope: &ExecutionScope,
         record_id: i64,
-        result: crate::expected_receiving::ConfirmationResult,
+        result: crate::expected_receiving::ReceivingCommandResult,
     ) {
         let Some(confirmation_id) = self.receiving_command.as_ref().and_then(|runtime| {
             (runtime.record_id == record_id).then_some(runtime.confirmation_id)

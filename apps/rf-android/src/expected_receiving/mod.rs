@@ -6,6 +6,7 @@
 mod command;
 mod recovery;
 mod reducer;
+mod unexpected;
 mod validation;
 
 use std::collections::HashSet;
@@ -15,10 +16,14 @@ use serde::{Deserialize, Serialize};
 
 pub use command::{
     ConfirmationMode, ContainerCapture, ExpectedReceiptCommand, ReceiptExceptionReason,
-    ReceiptQuarantineReason,
+    ReceiptQuarantineReason, UnexpectedReceiptReason,
 };
 pub use recovery::{
     ConfirmationIntent, ConfirmationRecoverySnapshot, ConfirmationRecoverySnapshotInput,
+};
+pub use unexpected::{
+    ReceivingCommandIntent, ReceivingCommandResult, UnexpectedReceiptCommand,
+    UnexpectedReceiptIntent, UnexpectedReceiptRecoverySnapshot, UnexpectedReceiptResult,
 };
 pub use validation::ReceivingValidationError;
 
@@ -340,6 +345,7 @@ fn validated_text(
 pub enum ReceivingLoadStatus {
     Arrived,
     Receiving,
+    Received,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -559,7 +565,7 @@ pub struct ReceivingSession {
 
 impl ReceivingSession {
     pub fn try_new(input: ReceivingSessionInput) -> Result<Self, ReceivingValidationError> {
-        if input.lines.is_empty() {
+        if input.lines.is_empty() && input.status != ReceivingLoadStatus::Received {
             return Err(ReceivingValidationError::MissingOpenLines);
         }
         let mut line_ids = HashSet::new();
@@ -634,6 +640,7 @@ pub struct ConfirmationDraftView<'a> {
     pub container_capture: ContainerCapture,
     pub license_plate_barcode: Option<&'a LicensePlateBarcode>,
     pub exception_reason: Option<ReceiptExceptionReason>,
+    pub unexpected_reason: Option<UnexpectedReceiptReason>,
     pub exception_note: Option<&'a str>,
 }
 
@@ -651,6 +658,7 @@ struct ConfirmationDraft {
     expiration: Option<Expiration>,
     exception_reason: Option<ReceiptExceptionReason>,
     exception_note: Option<ExceptionNote>,
+    unexpected_reason: Option<UnexpectedReceiptReason>,
 }
 
 impl Default for ConfirmationDraft {
@@ -668,6 +676,7 @@ impl Default for ConfirmationDraft {
             expiration: None,
             exception_reason: None,
             exception_note: None,
+            unexpected_reason: None,
         }
     }
 }
@@ -696,7 +705,7 @@ pub enum ReceivingEffect {
     },
     PersistConfirmation {
         confirmation_id: ConfirmationId,
-        intent: Box<ConfirmationIntent>,
+        intent: Box<ReceivingCommandIntent>,
     },
     RefreshSession {
         refresh_id: RefreshId,
@@ -890,7 +899,7 @@ enum State {
     ConfirmationPending {
         active: ActiveSession,
         confirmation_id: ConfirmationId,
-        intent: ConfirmationIntent,
+        intent: ReceivingCommandIntent,
     },
     Refreshing {
         active: ActiveSession,
@@ -959,13 +968,16 @@ fn select_line(active: &mut ActiveSession, line_id: LoadLineId, barcode: Option<
 
 fn focus_for_draft(active: &ActiveSession) -> FocusTarget {
     let draft = &active.draft;
-    if draft.selected_line_id.is_none()
-        || (draft.mode != ConfirmationMode::Missing && draft.item_barcode.is_none())
-    {
+    if draft.mode != ConfirmationMode::Unexpected && draft.selected_line_id.is_none() {
+        return FocusTarget::Scanner(ScannerTarget::ItemBarcode);
+    }
+    if draft.mode != ConfirmationMode::Missing && draft.item_barcode.is_none() {
         return FocusTarget::Scanner(ScannerTarget::ItemBarcode);
     }
     match draft.mode {
-        ConfirmationMode::Received | ConfirmationMode::Quarantined => {
+        ConfirmationMode::Received
+        | ConfirmationMode::Quarantined
+        | ConfirmationMode::Unexpected => {
             if draft.dock_barcode.is_none() {
                 return FocusTarget::Scanner(ScannerTarget::DockBarcode);
             }
@@ -991,25 +1003,39 @@ fn focus_for_draft(active: &ActiveSession) -> FocusTarget {
             return FocusTarget::ExceptionNote;
         }
     }
+    if draft.mode == ConfirmationMode::Unexpected {
+        let Some(reason) = draft.unexpected_reason else {
+            return FocusTarget::ExceptionReason;
+        };
+        if reason == UnexpectedReceiptReason::Other && draft.exception_note.is_none() {
+            return FocusTarget::ExceptionNote;
+        }
+    }
     FocusTarget::ConfirmAction
 }
 
 fn guard_for_draft(active: &ActiveSession) -> ActionGuard {
     let draft = &active.draft;
-    let Some(line_id) = draft.selected_line_id else {
-        return ActionGuard::Blocked(ActionBlockReason::NoSelectedLine);
-    };
-    let Some(line) = active.session.line(line_id) else {
-        return ActionGuard::Blocked(ActionBlockReason::NoSelectedLine);
-    };
-    let Some(quantity) = draft.quantity else {
+    if draft.mode != ConfirmationMode::Unexpected {
+        let Some(line_id) = draft.selected_line_id else {
+            return ActionGuard::Blocked(ActionBlockReason::NoSelectedLine);
+        };
+        let Some(line) = active.session.line(line_id) else {
+            return ActionGuard::Blocked(ActionBlockReason::NoSelectedLine);
+        };
+        let Some(quantity) = draft.quantity else {
+            return ActionGuard::Blocked(ActionBlockReason::QuantityRequired);
+        };
+        if quantity.get() > line.remaining().get() {
+            return ActionGuard::Blocked(ActionBlockReason::QuantityExceedsRemaining);
+        }
+    } else if draft.quantity.is_none() {
         return ActionGuard::Blocked(ActionBlockReason::QuantityRequired);
-    };
-    if quantity.get() > line.remaining().get() {
-        return ActionGuard::Blocked(ActionBlockReason::QuantityExceedsRemaining);
     }
     match draft.mode {
-        ConfirmationMode::Received | ConfirmationMode::Quarantined => {
+        ConfirmationMode::Received
+        | ConfirmationMode::Quarantined
+        | ConfirmationMode::Unexpected => {
             if draft.item_barcode.is_none() {
                 return ActionGuard::Blocked(ActionBlockReason::ItemScanRequired);
             }
@@ -1049,12 +1075,25 @@ fn guard_for_draft(active: &ActiveSession) -> ActionGuard {
     {
         return ActionGuard::Blocked(ActionBlockReason::ExceptionNoteRequired);
     }
+    if draft.mode == ConfirmationMode::Unexpected {
+        let Some(reason) = draft.unexpected_reason else {
+            return ActionGuard::Blocked(ActionBlockReason::ExceptionReasonRequired);
+        };
+        if reason == UnexpectedReceiptReason::Other && draft.exception_note.is_none() {
+            return ActionGuard::Blocked(ActionBlockReason::ExceptionNoteRequired);
+        }
+    }
     ActionGuard::Allowed
 }
 
-fn intent_for_draft(active: &ActiveSession) -> Option<ConfirmationIntent> {
+fn intent_for_draft(active: &ActiveSession) -> Option<ReceivingCommandIntent> {
     if guard_for_draft(active) != ActionGuard::Allowed {
         return None;
+    }
+    if active.draft.mode == ConfirmationMode::Unexpected {
+        return UnexpectedReceiptIntent::capture(active)
+            .map(Box::new)
+            .map(ReceivingCommandIntent::Unexpected);
     }
     let draft = &active.draft;
     let load_line_id = draft.selected_line_id?;
@@ -1091,9 +1130,13 @@ fn intent_for_draft(active: &ActiveSession) -> Option<ConfirmationIntent> {
             reason: draft.exception_reason?,
             note: draft.exception_note.clone(),
         },
+        ConfirmationMode::Unexpected => return None,
     };
     let recovery = ConfirmationRecoverySnapshot::capture(active, load_line_id)?;
-    ConfirmationIntent::try_new(recovery, command).ok()
+    ConfirmationIntent::try_new(recovery, command)
+        .ok()
+        .map(Box::new)
+        .map(ReceivingCommandIntent::Expected)
 }
 
 fn validate_result_quantities(

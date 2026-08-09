@@ -73,6 +73,63 @@ pub enum ExpectedReceiptQuarantineReason {
     Other,
 }
 
+/// Why physically present stock is not part of an expected receipt line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnexpectedReceiptReason {
+    Excess,
+    UnexpectedItem,
+    BlindReceipt,
+    MisShipped,
+    Other,
+}
+
+/// Scanner evidence for stock that is physically present but not expected by the load.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmUnexpectedReceiptRequest {
+    pub item_barcode: String,
+    pub receiving_location_barcode: String,
+    pub quantity: i64,
+    pub license_plate_barcode: Option<String>,
+    pub lot: Option<String>,
+    pub serial: Option<String>,
+    pub expiration: Option<String>,
+    pub reason: UnexpectedReceiptReason,
+    pub note: Option<String>,
+}
+
+/// Result of receiving unexpected stock into quarantine with an exact hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnexpectedReceiptConfirmationResponse {
+    pub unexpected_receipt_id: i64,
+    pub load_id: i64,
+    pub inventory_owner_id: i64,
+    pub facility_id: i64,
+    pub item_id: i64,
+    pub uom: String,
+    pub quantity: i64,
+    pub receiving_location_id: i64,
+    pub observed_item_barcode: String,
+    pub observed_receiving_location_barcode: String,
+    pub inventory_transaction_id: i64,
+    pub inventory_balance_id: i64,
+    pub item_batch_id: i64,
+    pub license_plate_id: Option<i64>,
+    pub license_plate_barcode: Option<String>,
+    pub lot: Option<String>,
+    pub serial: Option<String>,
+    pub expiration: Option<String>,
+    pub inventory_hold_id: i64,
+    pub inventory_status: InventoryBalanceStatus,
+    pub reason: UnexpectedReceiptReason,
+    pub note: Option<String>,
+    pub load_status: ExpectedReceivingLoadStatus,
+    pub confirmed_by_user_id: i64,
+    pub confirmed_at: String,
+}
+
 /// Typed reason for rejecting or marking expected inventory missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -385,6 +442,106 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ConfirmExpectedReceiptRequest>(value).unwrap(),
             request
+        );
+    }
+
+    #[test]
+    fn unexpected_receipt_has_an_exact_scanner_contract() {
+        let request = ConfirmUnexpectedReceiptRequest {
+            item_barcode: "CASE-66".into(),
+            receiving_location_barcode: "DOCK-04".into(),
+            quantity: 3,
+            license_plate_barcode: Some("LP-EXCESS-66".into()),
+            lot: Some("LOT-08".into()),
+            serial: None,
+            expiration: Some("2027-08-26T00:00:00+00:00".into()),
+            reason: UnexpectedReceiptReason::Excess,
+            note: Some("Three cases above the ASN quantity".into()),
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "item_barcode": "CASE-66",
+                "receiving_location_barcode": "DOCK-04",
+                "quantity": 3,
+                "license_plate_barcode": "LP-EXCESS-66",
+                "lot": "LOT-08",
+                "serial": null,
+                "expiration": "2027-08-26T00:00:00+00:00",
+                "reason": "excess",
+                "note": "Three cases above the ASN quantity"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ConfirmUnexpectedReceiptRequest>(value).unwrap(),
+            request
+        );
+    }
+
+    #[test]
+    fn unexpected_receipt_response_has_an_exact_recovery_contract() {
+        let response = UnexpectedReceiptConfirmationResponse {
+            unexpected_receipt_id: 71,
+            load_id: 11,
+            inventory_owner_id: 22,
+            facility_id: 33,
+            item_id: 66,
+            uom: "case".into(),
+            quantity: 3,
+            receiving_location_id: 44,
+            observed_item_barcode: "CASE-66".into(),
+            observed_receiving_location_barcode: "DOCK-04".into(),
+            inventory_transaction_id: 72,
+            inventory_balance_id: 73,
+            item_batch_id: 74,
+            license_plate_id: Some(75),
+            license_plate_barcode: Some("LP-EXCESS-66".into()),
+            lot: Some("LOT-08".into()),
+            serial: None,
+            expiration: Some("2027-08-26T00:00:00+00:00".into()),
+            inventory_hold_id: 76,
+            inventory_status: InventoryBalanceStatus::Quarantine,
+            reason: UnexpectedReceiptReason::Excess,
+            note: Some("Three cases above the ASN quantity".into()),
+            load_status: ExpectedReceivingLoadStatus::Received,
+            confirmed_by_user_id: 77,
+            confirmed_at: "2026-08-09T18:00:00+00:00".into(),
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "unexpected_receipt_id": 71,
+                "load_id": 11,
+                "inventory_owner_id": 22,
+                "facility_id": 33,
+                "item_id": 66,
+                "uom": "case",
+                "quantity": 3,
+                "receiving_location_id": 44,
+                "observed_item_barcode": "CASE-66",
+                "observed_receiving_location_barcode": "DOCK-04",
+                "inventory_transaction_id": 72,
+                "inventory_balance_id": 73,
+                "item_batch_id": 74,
+                "license_plate_id": 75,
+                "license_plate_barcode": "LP-EXCESS-66",
+                "lot": "LOT-08",
+                "serial": null,
+                "expiration": "2027-08-26T00:00:00+00:00",
+                "inventory_hold_id": 76,
+                "inventory_status": "quarantine",
+                "reason": "excess",
+                "note": "Three cases above the ASN quantity",
+                "load_status": "received",
+                "confirmed_by_user_id": 77,
+                "confirmed_at": "2026-08-09T18:00:00+00:00"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<UnexpectedReceiptConfirmationResponse>(value).unwrap(),
+            response
         );
     }
 

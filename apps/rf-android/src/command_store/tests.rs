@@ -3,8 +3,8 @@ use crate::expected_receiving::{
     ConfirmationIntent, ConfirmationRecoverySnapshot, ConfirmationRecoverySnapshotInput,
     DockBarcode, ExpectedReceiptCommand, ExpectedReceiptLine, ExpectedReceiptLineInput, FacilityId,
     InventoryOwnerId, ItemBarcode, ItemId, LoadBarcode, LoadId, LoadLineId, LocationId,
-    NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason, ReceivingDock,
-    ReceivingLoadStatus, StockDimension,
+    NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason, ReceivingCommandIntent,
+    ReceivingDock, ReceivingLoadStatus, StockDimension,
 };
 use crate::picking::{
     PickShortageCommand, PickShortageOutcome, PickShortageReason, PickingCommand,
@@ -142,7 +142,7 @@ fn expected_receipt_draft(command_id: &str, key: &str) -> DurableCommandDraft {
         schema_version: 1,
         command_id: command_id.into(),
         idempotency_key: key.into(),
-        command: RfCommand::ExpectedReceipt(Box::new(
+        command: RfCommand::ExpectedReceipt(Box::new(ReceivingCommandIntent::Expected(Box::new(
             ConfirmationIntent::try_new(
                 recovery,
                 ExpectedReceiptCommand::Missing {
@@ -152,7 +152,7 @@ fn expected_receipt_draft(command_id: &str, key: &str) -> DurableCommandDraft {
                 },
             )
             .unwrap(),
-        )),
+        )))),
     }
 }
 
