@@ -1,6 +1,11 @@
 mod common;
 #[path = "api_v1_order_cancellations/processing_cancellation.rs"]
 mod processing_cancellation;
+#[allow(dead_code)]
+#[path = "api_v1_pick_reversals/support.rs"]
+mod reversal_support;
+#[path = "api_v1_order_cancellations/reversed_cancellation.rs"]
+mod reversed_cancellation;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};

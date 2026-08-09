@@ -3444,6 +3444,10 @@ DECLARE
     content_count BIGINT;
     cancelled_content_count BIGINT;
     release_count BIGINT;
+    confirmation_count BIGINT;
+    reversed_confirmation_count BIGINT;
+    container_count BIGINT;
+    released_container_count BIGINT;
 BEGIN
     SELECT EXISTS (
         SELECT 1
@@ -3537,6 +3541,31 @@ BEGIN
       AND release.inventory_owner_id = NEW.inventory_owner_id
       AND release.order_id = NEW.order_id;
 
+    SELECT COUNT(*), COUNT(*) FILTER (
+               WHERE EXISTS (
+                   SELECT 1 FROM public.pick_reversals reversal
+                   WHERE reversal.tenant_id = confirmation.tenant_id
+                     AND reversal.inventory_owner_id = confirmation.inventory_owner_id
+                     AND reversal.pick_confirmation_id = confirmation.id
+               )
+           )
+    INTO confirmation_count, reversed_confirmation_count
+    FROM public.pick_confirmations confirmation
+    WHERE confirmation.tenant_id = NEW.tenant_id
+      AND confirmation.inventory_owner_id = NEW.inventory_owner_id
+      AND confirmation.order_id = NEW.order_id;
+
+    SELECT COUNT(*), COUNT(*) FILTER (
+               WHERE container.released_at = NEW.occurred_at
+                 AND container.released_by_user_id = NEW.actor_user_id
+                 AND container.release_order_cancellation_id = NEW.id
+           )
+    INTO container_count, released_container_count
+    FROM public.outbound_order_containers container
+    WHERE container.tenant_id = NEW.tenant_id
+      AND container.inventory_owner_id = NEW.inventory_owner_id
+      AND container.order_id = NEW.order_id;
+
     IF NOT order_matches
        OR active_hold_count <> 0
        OR active_reservation_count <> 0
@@ -3559,11 +3588,10 @@ BEGIN
            OR content_count <> NEW.cancelled_pick_content_count
            OR cancelled_content_count <> content_count
            OR content_count <> task_count
-           OR EXISTS (
-               SELECT 1 FROM public.pick_confirmations confirmation
-               WHERE confirmation.tenant_id = NEW.tenant_id
-                 AND confirmation.order_id = NEW.order_id
-           )
+           OR confirmation_count <> reversed_confirmation_count
+           OR reversed_confirmation_count <> NEW.reversed_pick_confirmation_count
+           OR container_count <> released_container_count
+           OR released_container_count <> NEW.released_outbound_container_count
            OR EXISTS (
                SELECT 1 FROM public.pick_shortages shortage
                WHERE shortage.tenant_id = NEW.tenant_id
@@ -3574,17 +3602,14 @@ BEGIN
                WHERE session.tenant_id = NEW.tenant_id
                  AND session.order_id = NEW.order_id
            )
-           OR EXISTS (
-               SELECT 1 FROM public.outbound_order_containers container
-               WHERE container.tenant_id = NEW.tenant_id
-                 AND container.order_id = NEW.order_id
-           )
         THEN
-            RAISE EXCEPTION 'processing order cancellation requires untouched terminal pick work'
+            RAISE EXCEPTION 'processing order cancellation requires untouched or restored terminal pick work'
                 USING ERRCODE = '23514';
         END IF;
     ELSIF NEW.cancelled_pick_task_count <> 0
           OR NEW.cancelled_pick_content_count <> 0
+          OR NEW.reversed_pick_confirmation_count <> 0
+          OR NEW.released_outbound_container_count <> 0
           OR task_count <> 0
           OR content_count <> 0
           OR release_count <> 0
@@ -3635,6 +3660,77 @@ CREATE FUNCTION public.reject_packing_ledger_mutation() RETURNS trigger
 BEGIN
     RAISE EXCEPTION '% is immutable', TG_TABLE_NAME
         USING ERRCODE = '55000';
+END;
+$$;
+
+
+--
+-- Name: guard_outbound_order_container_mutation(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.guard_outbound_order_container_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'outbound container assignments cannot be deleted'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.order_release_id IS DISTINCT FROM OLD.order_release_id
+       OR NEW.order_id IS DISTINCT FROM OLD.order_id
+       OR NEW.destination_location_id IS DISTINCT FROM OLD.destination_location_id
+       OR NEW.license_plate_id IS DISTINCT FROM OLD.license_plate_id
+       OR NEW.created_by_user_id IS DISTINCT FROM OLD.created_by_user_id
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+       OR OLD.released_at IS NOT NULL
+       OR NEW.released_at IS NULL
+       OR NEW.released_by_user_id IS NULL
+       OR NEW.release_order_cancellation_id IS NULL
+       OR NOT EXISTS (
+           SELECT 1 FROM public.order_cancellations cancellation
+           WHERE cancellation.tenant_id = NEW.tenant_id
+             AND cancellation.inventory_owner_id = NEW.inventory_owner_id
+             AND cancellation.order_id = NEW.order_id
+             AND cancellation.id = NEW.release_order_cancellation_id
+             AND cancellation.actor_user_id = NEW.released_by_user_id
+             AND cancellation.occurred_at = NEW.released_at
+             AND cancellation.previous_status = 'processing'
+       )
+       OR EXISTS (
+           SELECT 1 FROM public.pick_confirmations confirmation
+           WHERE confirmation.tenant_id = NEW.tenant_id
+             AND confirmation.inventory_owner_id = NEW.inventory_owner_id
+             AND confirmation.facility_id = NEW.facility_id
+             AND confirmation.order_release_id = NEW.order_release_id
+             AND confirmation.order_id = NEW.order_id
+             AND confirmation.destination_license_plate_id = NEW.license_plate_id
+             AND NOT EXISTS (
+                 SELECT 1 FROM public.pick_reversals reversal
+                 WHERE reversal.tenant_id = confirmation.tenant_id
+                   AND reversal.inventory_owner_id = confirmation.inventory_owner_id
+                   AND reversal.pick_confirmation_id = confirmation.id
+             )
+       )
+       OR EXISTS (
+           SELECT 1 FROM public.inventory_balances balance
+           WHERE balance.tenant_id = NEW.tenant_id
+             AND balance.inventory_owner_id = NEW.inventory_owner_id
+             AND balance.facility_id = NEW.facility_id
+             AND balance.license_plate_id = NEW.license_plate_id
+             AND balance.deleted IS NULL
+             AND (balance.qty_on_hand <> 0 OR balance.qty_reserved <> 0
+                  OR balance.qty_held <> 0)
+       )
+    THEN
+        RAISE EXCEPTION 'outbound container release does not match a restored cancelled order'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
 END;
 $$;
 
@@ -3747,6 +3843,14 @@ CREATE FUNCTION public.validate_outbound_order_container() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
+    IF NEW.released_at IS NOT NULL
+       OR NEW.released_by_user_id IS NOT NULL
+       OR NEW.release_order_cancellation_id IS NOT NULL
+    THEN
+        RAISE EXCEPTION 'outbound container assignments must begin active'
+            USING ERRCODE = '23514';
+    END IF;
+
     PERFORM 1
     FROM public.license_plates plate
     WHERE plate.tenant_id = NEW.tenant_id
@@ -11471,6 +11575,8 @@ CREATE TABLE public.order_cancellations (
     released_quantity bigint NOT NULL,
     cancelled_pick_task_count bigint NOT NULL,
     cancelled_pick_content_count bigint NOT NULL,
+    reversed_pick_confirmation_count bigint NOT NULL,
+    released_outbound_container_count bigint NOT NULL,
     CONSTRAINT order_cancellations_affected_facilities_check CHECK ((array_position(affected_facility_ids, NULL::bigint) IS NULL) AND (0 < ALL (affected_facility_ids))),
     CONSTRAINT order_cancellations_note_check CHECK (((note IS NULL) OR ((note = btrim(note)) AND (note <> ''::text) AND (char_length(note) <= 1000)))),
     CONSTRAINT order_cancellations_other_note_check CHECK (((reason <> 'other'::text) OR (note IS NOT NULL))),
@@ -11482,6 +11588,8 @@ CREATE TABLE public.order_cancellations (
     CONSTRAINT order_cancellations_released_reservation_count_check CHECK (released_reservation_count >= 0),
     CONSTRAINT order_cancellations_cancelled_pick_task_count_check CHECK (cancelled_pick_task_count >= 0),
     CONSTRAINT order_cancellations_cancelled_pick_content_count_check CHECK (cancelled_pick_content_count >= 0),
+    CONSTRAINT order_cancellations_reversed_pick_confirmation_count_check CHECK (reversed_pick_confirmation_count >= 0),
+    CONSTRAINT order_cancellations_released_outbound_container_count_check CHECK (released_outbound_container_count >= 0),
     CONSTRAINT order_cancellations_revision_check CHECK ((expected_revision > 0) AND (resulting_revision = (expected_revision + 1)))
 );
 
@@ -11900,7 +12008,16 @@ CREATE TABLE public.outbound_order_containers (
     destination_location_id bigint NOT NULL,
     license_plate_id bigint NOT NULL,
     created_by_user_id bigint NOT NULL,
-    created_at timestamp with time zone NOT NULL
+    created_at timestamp with time zone NOT NULL,
+    released_at timestamp with time zone,
+    released_by_user_id bigint,
+    release_order_cancellation_id bigint,
+    CONSTRAINT outbound_order_containers_release_check CHECK (
+        ((released_at IS NULL) AND (released_by_user_id IS NULL)
+         AND (release_order_cancellation_id IS NULL))
+        OR ((released_at IS NOT NULL) AND (released_by_user_id IS NOT NULL)
+            AND (release_order_cancellation_id IS NOT NULL))
+    )
 );
 
 ALTER TABLE ONLY public.outbound_order_containers FORCE ROW LEVEL SECURITY;
@@ -14945,10 +15062,6 @@ ALTER TABLE ONLY public.outbound_order_containers
     ADD CONSTRAINT outbound_order_containers_scope_id_key UNIQUE (tenant_id, inventory_owner_id, facility_id, order_release_id, order_id, id);
 
 
-ALTER TABLE ONLY public.outbound_order_containers
-    ADD CONSTRAINT outbound_order_containers_license_plate_key UNIQUE (tenant_id, inventory_owner_id, facility_id, license_plate_id);
-
-
 --
 -- Name: permissions permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
@@ -16503,6 +16616,8 @@ CREATE INDEX outbox_events_tenant_terminal_idx ON public.outbox_events USING btr
 
 CREATE INDEX outbound_order_containers_order_idx ON public.outbound_order_containers USING btree (tenant_id, inventory_owner_id, order_id, id);
 
+CREATE UNIQUE INDEX outbound_order_containers_active_license_plate_key ON public.outbound_order_containers USING btree (tenant_id, inventory_owner_id, facility_id, license_plate_id) WHERE (released_at IS NULL);
+
 
 --
 -- Name: packing_sessions_state_idx; Type: INDEX; Schema: public; Owner: -
@@ -17115,10 +17230,10 @@ CREATE CONSTRAINT TRIGGER orders_require_cancellation_evidence AFTER UPDATE OF s
 
 
 --
--- Name: outbound_order_containers outbound_order_containers_are_immutable; Type: TRIGGER; Schema: public; Owner: -
+-- Name: outbound_order_containers outbound_order_containers_guard_mutation; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER outbound_order_containers_are_immutable BEFORE DELETE OR UPDATE ON public.outbound_order_containers FOR EACH ROW EXECUTE FUNCTION public.reject_packing_ledger_mutation();
+CREATE TRIGGER outbound_order_containers_guard_mutation BEFORE DELETE OR UPDATE ON public.outbound_order_containers FOR EACH ROW EXECUTE FUNCTION public.guard_outbound_order_container_mutation();
 
 
 CREATE TRIGGER outbound_order_containers_validate BEFORE INSERT ON public.outbound_order_containers FOR EACH ROW EXECUTE FUNCTION public.validate_outbound_order_container();
@@ -19631,6 +19746,9 @@ ALTER TABLE ONLY public.order_cancellations
 ALTER TABLE ONLY public.order_cancellations
     ADD CONSTRAINT order_cancellations_tenant_owner_order_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id) REFERENCES public.orders(tenant_id, inventory_owner_id, id);
 
+ALTER TABLE ONLY public.order_cancellations
+    ADD CONSTRAINT order_cancellations_scope_id_key UNIQUE (tenant_id, inventory_owner_id, order_id, id);
+
 
 --
 -- Name: order_holds order_holds_tenant_id_created_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
@@ -19969,6 +20087,12 @@ ALTER TABLE ONLY public.outbound_order_containers
     ADD CONSTRAINT outbound_order_containers_license_plate_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id) REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id);
 ALTER TABLE ONLY public.outbound_order_containers
     ADD CONSTRAINT outbound_order_containers_created_by_fkey FOREIGN KEY (tenant_id, created_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+ALTER TABLE ONLY public.outbound_order_containers
+    ADD CONSTRAINT outbound_order_containers_released_by_fkey FOREIGN KEY (tenant_id, released_by_user_id) REFERENCES public.tenant_memberships(tenant_id, user_id);
+
+ALTER TABLE ONLY public.outbound_order_containers
+    ADD CONSTRAINT outbound_order_containers_cancellation_fkey FOREIGN KEY (tenant_id, inventory_owner_id, order_id, release_order_cancellation_id) REFERENCES public.order_cancellations(tenant_id, inventory_owner_id, order_id, id);
 
 ALTER TABLE ONLY public.packing_sessions
     ADD CONSTRAINT packing_sessions_release_fkey FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_id, order_release_id) REFERENCES public.order_releases(tenant_id, inventory_owner_id, facility_id, order_id, id);
@@ -22683,6 +22807,8 @@ REVOKE ALL ON FUNCTION public.enforce_load_execution_barcode_immutable() FROM PU
 
 REVOKE ALL ON FUNCTION public.guard_inventory_balance_commitments() FROM PUBLIC;
 
+REVOKE ALL ON FUNCTION public.guard_outbound_order_container_mutation() FROM PUBLIC;
+
 
 --
 -- Name: FUNCTION guard_license_plate_putaway_task_mutation(); Type: ACL; Schema: public; Owner: -
@@ -23789,6 +23915,7 @@ GRANT SELECT,USAGE ON SEQUENCE public.outbox_events_id_seq TO wareboxes_app;
 --
 
 GRANT SELECT,INSERT ON TABLE public.outbound_order_containers TO wareboxes_app;
+GRANT UPDATE (released_at, released_by_user_id, release_order_cancellation_id) ON TABLE public.outbound_order_containers TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.outbound_order_containers_id_seq TO wareboxes_app;
 
 

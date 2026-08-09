@@ -201,8 +201,16 @@ fn cancellation_success_message(
 ) -> String {
     let released = format_quantity(result.released_quantity);
     if result.cancelled_pick_task_count > 0 {
+        let restored = if result.reversed_pick_confirmation_count > 0 {
+            format!(
+                ", {} reversed picks reconciled",
+                result.reversed_pick_confirmation_count
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "Order {order_key} cancelled. {released} units and {} pending picks released; revision {}.",
+            "Order {order_key} cancelled. {released} units and {} pending picks released{restored}; revision {}.",
             result.cancelled_pick_task_count,
             result.revision.get()
         )

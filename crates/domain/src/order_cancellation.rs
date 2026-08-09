@@ -114,11 +114,17 @@ pub struct OrderCancellationDetails {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderCancellationExecution {
     Unreleased,
-    ReleasedUnclaimed { pending_pick_tasks: u32 },
+    ReleasedUnclaimed {
+        pending_pick_tasks: u32,
+    },
+    ReleasedRestored {
+        pending_pick_tasks: u32,
+        reversed_pick_confirmations: u32,
+    },
     Started,
 }
 
-/// Applies a cancellation only while no warehouse movement has begun.
+/// Applies a cancellation before movement or after every movement was physically reversed.
 pub const fn cancel_order_before_physical_execution(
     status: OrderStatus,
     execution: OrderCancellationExecution,
@@ -131,6 +137,15 @@ pub const fn cancel_order_before_physical_execution(
             OrderStatus::Processing,
             OrderCancellationExecution::ReleasedUnclaimed { pending_pick_tasks },
         ) if pending_pick_tasks > 0 => Ok(OrderStatus::Cancelled),
+        (
+            OrderStatus::Processing,
+            OrderCancellationExecution::ReleasedRestored {
+                pending_pick_tasks,
+                reversed_pick_confirmations,
+            },
+        ) if pending_pick_tasks > 0 && reversed_pick_confirmations > 0 => {
+            Ok(OrderStatus::Cancelled)
+        }
         (OrderStatus::Processing, OrderCancellationExecution::Started) => {
             Err(OrderCancellationTransitionError::PhysicalExecutionStarted)
         }
@@ -269,6 +284,26 @@ mod tests {
                 OrderStatus::Processing,
                 OrderCancellationExecution::ReleasedUnclaimed {
                     pending_pick_tasks: 0
+                }
+            ),
+            Err(OrderCancellationTransitionError::InvalidReleaseWork)
+        );
+        assert_eq!(
+            cancel_order_before_physical_execution(
+                OrderStatus::Processing,
+                OrderCancellationExecution::ReleasedRestored {
+                    pending_pick_tasks: 2,
+                    reversed_pick_confirmations: 2,
+                }
+            ),
+            Ok(OrderStatus::Cancelled)
+        );
+        assert_eq!(
+            cancel_order_before_physical_execution(
+                OrderStatus::Processing,
+                OrderCancellationExecution::ReleasedRestored {
+                    pending_pick_tasks: 2,
+                    reversed_pick_confirmations: 0,
                 }
             ),
             Err(OrderCancellationTransitionError::InvalidReleaseWork)

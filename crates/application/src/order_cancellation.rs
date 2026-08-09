@@ -71,6 +71,8 @@ pub struct CancelOrderResult {
     pub released_quantity: i64,
     pub cancelled_pick_task_count: i64,
     pub cancelled_pick_content_count: i64,
+    pub reversed_pick_confirmation_count: i64,
+    pub released_outbound_container_count: i64,
 }
 
 #[cfg(test)]
@@ -131,6 +133,8 @@ mod tests {
             released_quantity: 12,
             cancelled_pick_task_count: 2,
             cancelled_pick_content_count: 2,
+            reversed_pick_confirmation_count: 1,
+            released_outbound_container_count: 1,
         };
 
         let encoded = serde_json::to_value(&result).unwrap();
@@ -139,6 +143,8 @@ mod tests {
         assert_eq!(encoded["status"], "cancelled");
         assert_eq!(encoded["released_quantity"], 12);
         assert_eq!(encoded["cancelled_pick_task_count"], 2);
+        assert_eq!(encoded["reversed_pick_confirmation_count"], 1);
+        assert_eq!(encoded["released_outbound_container_count"], 1);
         assert_eq!(
             serde_json::from_value::<CancelOrderResult>(encoded).unwrap(),
             result

@@ -31,6 +31,8 @@ struct LockedOrder {
 struct CancelledPickWork {
     task_count: i64,
     content_count: i64,
+    reversed_confirmation_count: i64,
+    outbound_container_ids: Vec<i64>,
 }
 
 pub async fn cancel_order(
@@ -132,6 +134,22 @@ pub async fn cancel_order(
         commitments.released_quantity,
         cancelled_pick_work.task_count,
         cancelled_pick_work.content_count,
+        cancelled_pick_work.reversed_confirmation_count,
+        count_to_i64(
+            cancelled_pick_work.outbound_container_ids.len(),
+            "released outbound container count overflow",
+        )?,
+        occurred_at,
+    )
+    .await?;
+    release_outbound_containers_tx(
+        &mut tx,
+        access.tenant_id,
+        order.inventory_owner_id,
+        context.actor_id.get(),
+        command.order_id(),
+        cancellation_id,
+        &cancelled_pick_work.outbound_container_ids,
         occurred_at,
     )
     .await?;
@@ -160,6 +178,11 @@ pub async fn cancel_order(
         released_quantity: commitments.released_quantity,
         cancelled_pick_task_count: cancelled_pick_work.task_count,
         cancelled_pick_content_count: cancelled_pick_work.content_count,
+        reversed_pick_confirmation_count: cancelled_pick_work.reversed_confirmation_count,
+        released_outbound_container_count: count_to_i64(
+            cancelled_pick_work.outbound_container_ids.len(),
+            "released outbound container count overflow",
+        )?,
     };
     enqueue_order_cancelled_event_tx(
         &mut tx,
@@ -233,16 +256,6 @@ async fn cancel_pending_pick_work_tx(
                 .try_get::<Option<Timestamp>, _>("completed_at")?
                 .is_none();
     }
-    let execution = if tasks_are_unclaimed {
-        OrderCancellationExecution::ReleasedUnclaimed {
-            pending_pick_tasks: task_count,
-        }
-    } else {
-        OrderCancellationExecution::Started
-    };
-    cancel_order_before_physical_execution(order_status, execution)
-        .map_err(|error| AppError::conflict(error.to_string()))?;
-
     let content_rows = sqlx::query(
         r#"
         SELECT content.id, content.task_id, content.state, content.completed_at
@@ -263,32 +276,121 @@ async fn cancel_pending_pick_work_tx(
                 .try_get::<Option<Timestamp>, _>("completed_at")?
                 .is_none();
     }
-    let physical_evidence_exists: bool = sqlx::query_scalar(
+    let evidence = sqlx::query(
         r#"
-        SELECT EXISTS (
-            SELECT 1 FROM pick_confirmations
-            WHERE tenant_id = $1 AND order_id = $2
-        ) OR EXISTS (
-            SELECT 1 FROM pick_shortages
-            WHERE tenant_id = $1 AND order_id = $2
-        ) OR EXISTS (
-            SELECT 1 FROM packing_sessions
-            WHERE tenant_id = $1 AND order_id = $2
-        ) OR EXISTS (
-            SELECT 1 FROM outbound_order_containers
-            WHERE tenant_id = $1 AND order_id = $2
-        )
+        SELECT
+            (SELECT COUNT(*) FROM pick_confirmations confirmation
+             WHERE confirmation.tenant_id = $1 AND confirmation.order_id = $2)
+                AS confirmation_count,
+            (SELECT COUNT(*) FROM pick_confirmations confirmation
+             WHERE confirmation.tenant_id = $1 AND confirmation.order_id = $2
+               AND EXISTS (
+                   SELECT 1 FROM pick_reversals reversal
+                   WHERE reversal.tenant_id = confirmation.tenant_id
+                     AND reversal.inventory_owner_id = confirmation.inventory_owner_id
+                     AND reversal.pick_confirmation_id = confirmation.id
+               )) AS reversed_confirmation_count,
+            EXISTS (
+                SELECT 1 FROM pick_shortages shortage
+                WHERE shortage.tenant_id = $1 AND shortage.order_id = $2
+            ) AS has_shortage,
+            EXISTS (
+                SELECT 1 FROM packing_sessions session
+                WHERE session.tenant_id = $1 AND session.order_id = $2
+            ) AS has_packing
         "#,
     )
     .bind(tenant_id.get())
     .bind(order_id.get())
     .fetch_one(&mut **tx)
     .await?;
-    if !content_is_pending || physical_evidence_exists {
+    let confirmation_count: i64 = evidence.try_get("confirmation_count")?;
+    let reversed_confirmation_count: i64 = evidence.try_get("reversed_confirmation_count")?;
+    let has_unreversed_confirmation = confirmation_count != reversed_confirmation_count;
+    let has_shortage: bool = evidence.try_get("has_shortage")?;
+    let has_packing: bool = evidence.try_get("has_packing")?;
+
+    let container_rows = sqlx::query(
+        r#"
+        SELECT id, inventory_owner_id, facility_id, license_plate_id
+        FROM outbound_order_containers
+        WHERE tenant_id = $1 AND order_id = $2 AND released_at IS NULL
+        ORDER BY id
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(order_id.get())
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut container_ids = Vec::with_capacity(container_rows.len());
+    let mut container_plate_ids = Vec::<i64>::with_capacity(container_rows.len());
+    for row in &container_rows {
+        let owner_id: i64 = row.try_get("inventory_owner_id")?;
+        let facility_id: i64 = row.try_get("facility_id")?;
+        if !scope.includes_inventory_owner(owner_id) || !scope.includes_facility(facility_id) {
+            return Err(AppError::not_found("order"));
+        }
+        container_ids.push(row.try_get("id")?);
+        container_plate_ids.push(row.try_get("license_plate_id")?);
+    }
+    let container_has_inventory: bool = if container_plate_ids.is_empty() {
+        false
+    } else {
+        sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM inventory_balances balance
+                WHERE balance.tenant_id = $1
+                  AND balance.license_plate_id = ANY($2)
+                  AND balance.deleted IS NULL
+                  AND (balance.qty_on_hand <> 0 OR balance.qty_reserved <> 0
+                       OR balance.qty_held <> 0)
+            ) OR EXISTS (
+                SELECT 1 FROM inventory_allocations allocation
+                INNER JOIN inventory_balances balance
+                  ON balance.tenant_id = allocation.tenant_id
+                 AND balance.inventory_owner_id = allocation.inventory_owner_id
+                 AND balance.id = allocation.inventory_balance_id
+                WHERE allocation.tenant_id = $1
+                  AND balance.license_plate_id = ANY($2)
+                  AND allocation.status = 'allocated'
+                  AND allocation.deleted IS NULL
+            )
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(&container_plate_ids)
+        .fetch_one(&mut **tx)
+        .await?
+    };
+    if !content_is_pending
+        || has_unreversed_confirmation
+        || has_shortage
+        || has_packing
+        || container_has_inventory
+        || (reversed_confirmation_count == 0 && !container_ids.is_empty())
+    {
         return Err(AppError::conflict(
             "order physical fulfillment execution has started",
         ));
     }
+
+    let execution = if !tasks_are_unclaimed {
+        OrderCancellationExecution::Started
+    } else if reversed_confirmation_count > 0 {
+        OrderCancellationExecution::ReleasedRestored {
+            pending_pick_tasks: task_count,
+            reversed_pick_confirmations: u32::try_from(reversed_confirmation_count)
+                .map_err(|_| AppError::internal("reversed pick confirmation count overflow"))?,
+        }
+    } else {
+        OrderCancellationExecution::ReleasedUnclaimed {
+            pending_pick_tasks: task_count,
+        }
+    };
+    cancel_order_before_physical_execution(order_status, execution)
+        .map_err(|error| AppError::conflict(error.to_string()))?;
 
     let content_ids = content_rows
         .iter()
@@ -347,7 +449,51 @@ async fn cancel_pending_pick_work_tx(
             .map_err(|_| AppError::internal("pending pick task count overflow"))?,
         content_count: i64::try_from(content_ids.len())
             .map_err(|_| AppError::internal("pending pick content count overflow"))?,
+        reversed_confirmation_count,
+        outbound_container_ids: container_ids,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn release_outbound_containers_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    inventory_owner_id: InventoryOwnerId,
+    actor_user_id: i64,
+    order_id: OrderId,
+    cancellation_id: OrderCancellationId,
+    container_ids: &[i64],
+    occurred_at: Timestamp,
+) -> AppResult<()> {
+    if container_ids.is_empty() {
+        return Ok(());
+    }
+    let updated = sqlx::query(
+        r#"
+        UPDATE outbound_order_containers
+        SET released_at = $1, released_by_user_id = $2,
+            release_order_cancellation_id = $3
+        WHERE tenant_id = $4 AND inventory_owner_id = $5 AND order_id = $6
+          AND id = ANY($7) AND released_at IS NULL
+        "#,
+    )
+    .bind(occurred_at)
+    .bind(actor_user_id)
+    .bind(cancellation_id.get())
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id.get())
+    .bind(order_id.get())
+    .bind(container_ids)
+    .execute(&mut **tx)
+    .await?;
+    let expected = u64::try_from(container_ids.len())
+        .map_err(|_| AppError::internal("released outbound container count overflow"))?;
+    if updated.rows_affected() != expected {
+        return Err(AppError::conflict(
+            "outbound container assignments changed during cancellation",
+        ));
+    }
+    Ok(())
 }
 
 async fn lock_order_tx(
@@ -527,6 +673,8 @@ async fn insert_cancellation_tx(
     released_quantity: i64,
     cancelled_pick_task_count: i64,
     cancelled_pick_content_count: i64,
+    reversed_pick_confirmation_count: i64,
+    released_outbound_container_count: i64,
     occurred_at: Timestamp,
 ) -> AppResult<OrderCancellationId> {
     let id: i64 = sqlx::query_scalar(
@@ -536,10 +684,11 @@ async fn insert_cancellation_tx(
             reason, note, previous_status, expected_revision, resulting_revision,
             affected_facility_ids, released_hold_count, released_reservation_count,
             released_allocation_count, released_quantity,
-            cancelled_pick_task_count, cancelled_pick_content_count
+            cancelled_pick_task_count, cancelled_pick_content_count,
+            reversed_pick_confirmation_count, released_outbound_container_count
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                $16, $17)
+                $16, $17, $18, $19)
         RETURNING id
         "#,
     )
@@ -560,6 +709,8 @@ async fn insert_cancellation_tx(
     .bind(released_quantity)
     .bind(cancelled_pick_task_count)
     .bind(cancelled_pick_content_count)
+    .bind(reversed_pick_confirmation_count)
+    .bind(released_outbound_container_count)
     .fetch_one(&mut **tx)
     .await?;
     OrderCancellationId::new(id).map_err(|error| AppError::internal(error.to_string()))
@@ -599,6 +750,8 @@ async fn enqueue_order_cancelled_event_tx(
         "released_quantity": result.released_quantity,
         "cancelled_pick_task_count": result.cancelled_pick_task_count,
         "cancelled_pick_content_count": result.cancelled_pick_content_count,
+        "reversed_pick_confirmation_count": result.reversed_pick_confirmation_count,
+        "released_outbound_container_count": result.released_outbound_container_count,
     });
     outbox::enqueue(
         tx,

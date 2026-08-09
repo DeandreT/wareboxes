@@ -205,6 +205,7 @@ async fn bind_outbound_container_tx(
         FROM outbound_order_containers
         WHERE tenant_id = $1 AND inventory_owner_id = $2
           AND facility_id = $3 AND license_plate_id = $4
+          AND released_at IS NULL
         "#,
     )
     .bind(tenant_id.get())

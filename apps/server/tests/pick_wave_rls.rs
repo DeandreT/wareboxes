@@ -203,6 +203,19 @@ async fn typed_outbound_tables_expose_only_required_runtime_privileges() {
             "unexpected privileges for {sequence_name}",
         );
     }
+
+    let container_columns: (bool, bool, bool, bool) = sqlx::query_as(
+        r#"
+        SELECT has_column_privilege(current_user, 'outbound_order_containers', 'released_at', 'UPDATE'),
+               has_column_privilege(current_user, 'outbound_order_containers', 'released_by_user_id', 'UPDATE'),
+               has_column_privilege(current_user, 'outbound_order_containers', 'release_order_cancellation_id', 'UPDATE'),
+               has_column_privilege(current_user, 'outbound_order_containers', 'order_id', 'UPDATE')
+        "#,
+    )
+    .fetch_one(&fixture.db)
+    .await
+    .unwrap();
+    assert_eq!(container_columns, (true, true, true, false));
 }
 
 fn assert_sqlstate(error: sqlx::Error, expected: &str) {

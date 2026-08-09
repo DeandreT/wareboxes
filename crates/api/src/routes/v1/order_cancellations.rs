@@ -65,6 +65,8 @@ fn response(result: CancelOrderResult) -> V1Result<CancelOrderResponse> {
         released_quantity: result.released_quantity,
         cancelled_pick_task_count: result.cancelled_pick_task_count,
         cancelled_pick_content_count: result.cancelled_pick_content_count,
+        reversed_pick_confirmation_count: result.reversed_pick_confirmation_count,
+        released_outbound_container_count: result.released_outbound_container_count,
     })
 }
 
