@@ -53,7 +53,8 @@ pub use error::{ErrorReason, ErrorResponse, FieldViolation};
 pub use expected_receiving::{
     ConfirmExpectedReceiptRequest, ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
     ExpectedReceiptExceptionReason, ExpectedReceiptLine, ExpectedReceiptLineStatus,
-    ExpectedReceivingLoadStatus, ExpectedReceivingLocation, ExpectedReceivingSessionResponse,
+    ExpectedReceiptQuarantineReason, ExpectedReceivingLoadStatus, ExpectedReceivingLocation,
+    ExpectedReceivingSessionResponse,
 };
 pub use facility_shipping_origin::{
     ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,

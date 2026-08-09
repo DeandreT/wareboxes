@@ -4,10 +4,12 @@ use chrono::{DateTime, Utc};
 use wareboxes_api_contract::v1::{
     ConfirmExpectedReceiptRequest, ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
     ExpectedReceiptExceptionReason, ExpectedReceiptLine, ExpectedReceiptLineStatus,
-    ExpectedReceivingLoadStatus, ExpectedReceivingLocation, ExpectedReceivingSessionResponse,
+    ExpectedReceiptQuarantineReason, ExpectedReceivingLoadStatus, ExpectedReceivingLocation,
+    ExpectedReceivingSessionResponse, InventoryBalanceStatus,
 };
 use wareboxes_core::models::{
-    InboundReceiptExceptionReason, LoadLineStatus, LoadStatus, ReceiveExpectedInventoryResult,
+    InboundReceiptExceptionReason, InboundReceiptQuarantineReason, InventoryStatus, LoadLineStatus,
+    LoadStatus, ReceiveExpectedInventoryResult,
 };
 
 use super::error::{V1Error, V1Result};
@@ -113,6 +115,31 @@ fn map_confirmation(body: &ConfirmExpectedReceiptRequest) -> V1Result<MappedConf
             disposition: ExpectedReceiptDisposition::Received,
             quantity: *quantity,
         },
+        ConfirmExpectedReceiptRequest::Quarantined {
+            item_barcode,
+            receiving_location_barcode,
+            quantity,
+            license_plate_barcode,
+            lot,
+            serial,
+            expiration,
+            reason,
+            note,
+        } => MappedConfirmation {
+            command: repo::inbound_receipt::ConfirmExpectedReceiptCommand::Quarantined {
+                item_barcode,
+                receiving_location_barcode,
+                quantity: *quantity,
+                license_plate_barcode: license_plate_barcode.as_deref(),
+                lot: lot.as_deref(),
+                serial: serial.as_deref(),
+                expiration: parse_timestamp(expiration.as_deref(), "expiration")?,
+                reason: map_quarantine_reason(*reason),
+                note: note.as_deref(),
+            },
+            disposition: ExpectedReceiptDisposition::Quarantined,
+            quantity: *quantity,
+        },
         ConfirmExpectedReceiptRequest::Rejected {
             item_barcode,
             quantity,
@@ -158,6 +185,8 @@ fn map_confirmation_result(
         inventory_balance_id: result.inventory_balance_id,
         item_batch_id: result.item_batch_id,
         license_plate_id: result.license_plate_id,
+        inventory_hold_id: result.inventory_hold_id,
+        inventory_status: result.inventory_status.map(map_inventory_status),
         line_status: map_line_status(result.line_status),
         load_status: map_load_status(result.load_status)?,
         cumulative_received_quantity: result.cumulative_received_qty,
@@ -194,6 +223,36 @@ fn validate_confirmation(body: &ConfirmExpectedReceiptRequest) -> V1Result<()> {
             validate_optional_text(serial.as_deref(), "serial", MAX_DIMENSION_LENGTH)?;
             *quantity
         }
+        ConfirmExpectedReceiptRequest::Quarantined {
+            item_barcode,
+            receiving_location_barcode,
+            quantity,
+            license_plate_barcode,
+            lot,
+            serial,
+            reason,
+            note,
+            ..
+        } => {
+            validate_required_text(item_barcode, "item_barcode", MAX_BARCODE_LENGTH)?;
+            validate_required_text(
+                receiving_location_barcode,
+                "receiving_location_barcode",
+                MAX_BARCODE_LENGTH,
+            )?;
+            validate_optional_text(
+                license_plate_barcode.as_deref(),
+                "license_plate_barcode",
+                MAX_BARCODE_LENGTH,
+            )?;
+            validate_optional_text(lot.as_deref(), "lot", MAX_DIMENSION_LENGTH)?;
+            validate_optional_text(serial.as_deref(), "serial", MAX_DIMENSION_LENGTH)?;
+            validate_optional_text(note.as_deref(), "note", MAX_NOTE_LENGTH)?;
+            if *reason == ExpectedReceiptQuarantineReason::Other && note.is_none() {
+                return Err(invalid("note is required when quarantine reason is other"));
+            }
+            *quantity
+        }
         ConfirmExpectedReceiptRequest::Rejected {
             item_barcode,
             quantity,
@@ -214,6 +273,31 @@ fn validate_confirmation(body: &ConfirmExpectedReceiptRequest) -> V1Result<()> {
         }
     };
     require_positive(quantity, "quantity")
+}
+
+fn map_quarantine_reason(
+    reason: ExpectedReceiptQuarantineReason,
+) -> InboundReceiptQuarantineReason {
+    match reason {
+        ExpectedReceiptQuarantineReason::Damaged => InboundReceiptQuarantineReason::Damaged,
+        ExpectedReceiptQuarantineReason::QualityInspection => {
+            InboundReceiptQuarantineReason::QualityInspection
+        }
+        ExpectedReceiptQuarantineReason::CountDiscrepancy => {
+            InboundReceiptQuarantineReason::CountDiscrepancy
+        }
+        ExpectedReceiptQuarantineReason::WrongItem => InboundReceiptQuarantineReason::WrongItem,
+        ExpectedReceiptQuarantineReason::Other => InboundReceiptQuarantineReason::Other,
+    }
+}
+
+fn map_inventory_status(status: InventoryStatus) -> InventoryBalanceStatus {
+    match status {
+        InventoryStatus::Available => InventoryBalanceStatus::Available,
+        InventoryStatus::Hold => InventoryBalanceStatus::Hold,
+        InventoryStatus::Damaged => InventoryBalanceStatus::Damaged,
+        InventoryStatus::Quarantine => InventoryBalanceStatus::Quarantine,
+    }
 }
 
 fn validate_exception(reason: ExpectedReceiptExceptionReason, note: Option<&str>) -> V1Result<()> {

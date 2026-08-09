@@ -272,7 +272,10 @@ impl ExpectedReceivingReducer {
         if active.draft.selected_line_id.is_none() {
             return ReceivingTransition::Blocked(ActionBlockReason::NoSelectedLine);
         }
-        if active.draft.mode != ConfirmationMode::Received {
+        if !matches!(
+            active.draft.mode,
+            ConfirmationMode::Received | ConfirmationMode::Quarantined
+        ) {
             return ReceivingTransition::Blocked(ActionBlockReason::WorkflowBusy);
         }
         if barcode != *active.session.dock().barcode() {
@@ -310,7 +313,10 @@ impl ExpectedReceivingReducer {
         let Some(active) = self.active_mut() else {
             return ReceivingTransition::Blocked(ActionBlockReason::NoActiveSession);
         };
-        if active.draft.mode != ConfirmationMode::Received {
+        if !matches!(
+            active.draft.mode,
+            ConfirmationMode::Received | ConfirmationMode::Quarantined
+        ) {
             return ReceivingTransition::Blocked(ActionBlockReason::WorkflowBusy);
         }
         active.draft.container_capture = capture;
@@ -328,8 +334,10 @@ impl ExpectedReceivingReducer {
         let Some(active) = self.active_mut() else {
             return ReceivingTransition::Blocked(ActionBlockReason::NoActiveSession);
         };
-        if active.draft.mode != ConfirmationMode::Received
-            || active.draft.container_capture != ContainerCapture::LicensePlate
+        if !matches!(
+            active.draft.mode,
+            ConfirmationMode::Received | ConfirmationMode::Quarantined
+        ) || active.draft.container_capture != ContainerCapture::LicensePlate
         {
             return ReceivingTransition::Blocked(ActionBlockReason::WorkflowBusy);
         }
@@ -432,7 +440,7 @@ impl ExpectedReceivingReducer {
         self.operator_error = None;
         ReceivingTransition::Effect(ReceivingEffect::PersistConfirmation {
             confirmation_id,
-            intent,
+            intent: Box::new(intent),
         })
     }
 

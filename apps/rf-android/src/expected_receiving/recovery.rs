@@ -119,6 +119,34 @@ impl ConfirmationRecoverySnapshot {
                 exception_reason: None,
                 exception_note: None,
             },
+            ExpectedReceiptCommand::Quarantined {
+                item_barcode,
+                receiving_location_barcode,
+                quantity,
+                license_plate_barcode,
+                lot,
+                serial,
+                expiration,
+                reason,
+                note,
+            } => ConfirmationDraft {
+                mode: ConfirmationMode::Quarantined,
+                selected_line_id: Some(line.load_line_id()),
+                item_barcode: Some(item_barcode.clone()),
+                dock_barcode: Some(receiving_location_barcode.clone()),
+                quantity: Some(*quantity),
+                container_capture: if license_plate_barcode.is_some() {
+                    ContainerCapture::LicensePlate
+                } else {
+                    ContainerCapture::Loose
+                },
+                license_plate_barcode: license_plate_barcode.clone(),
+                lot: lot.clone(),
+                serial: serial.clone(),
+                expiration: expiration.clone(),
+                exception_reason: Some(reason.as_exception()),
+                exception_note: note.clone(),
+            },
             ExpectedReceiptCommand::Rejected {
                 item_barcode,
                 quantity,
@@ -244,6 +272,26 @@ impl ConfirmationIntent {
                     || !matches_expected(line.lot(), lot.as_ref())
                     || !matches_expected(line.serial(), serial.as_ref())
                     || !matches_expected(line.expiration(), expiration.as_ref())
+                {
+                    return Some(ReconciliationReason::CommandIntegrityFailure);
+                }
+            }
+            ExpectedReceiptCommand::Quarantined {
+                item_barcode,
+                receiving_location_barcode,
+                lot,
+                serial,
+                expiration,
+                reason,
+                note,
+                ..
+            } => {
+                if !line.accepts(item_barcode)
+                    || receiving_location_barcode != self.recovery.dock().barcode()
+                    || !matches_expected(line.lot(), lot.as_ref())
+                    || !matches_expected(line.serial(), serial.as_ref())
+                    || !matches_expected(line.expiration(), expiration.as_ref())
+                    || (*reason == ReceiptQuarantineReason::Other && note.is_none())
                 {
                     return Some(ReconciliationReason::CommandIntegrityFailure);
                 }

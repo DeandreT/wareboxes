@@ -444,7 +444,10 @@ impl RfApp {
 
         if let Some(line) = self.receiving.selected_line() {
             Self::selected_line_band(ui, line);
-            if self.receiving_ui.mode == ConfirmationMode::Received {
+            if matches!(
+                self.receiving_ui.mode,
+                ConfirmationMode::Received | ConfirmationMode::Quarantined
+            ) {
                 self.receiving_container_control(ui);
             }
         }
@@ -463,7 +466,9 @@ impl RfApp {
                 self.receiving_quantity(ui);
                 if matches!(
                     self.receiving_ui.mode,
-                    ConfirmationMode::Rejected | ConfirmationMode::Missing
+                    ConfirmationMode::Quarantined
+                        | ConfirmationMode::Rejected
+                        | ConfirmationMode::Missing
                 ) {
                     self.receiving_exception(ui);
                 }
@@ -511,32 +516,42 @@ impl RfApp {
 
     fn receiving_disposition(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("DISPOSITION").small().strong());
-        let width = (ui.available_width() - 16.0) / 3.0;
-        ui.horizontal(|ui| {
-            for mode in [
-                ConfirmationMode::Received,
-                ConfirmationMode::Rejected,
-                ConfirmationMode::Missing,
-            ] {
-                if ui
-                    .add_sized(
-                        [width, 50.0],
-                        egui::Button::selectable(
-                            self.receiving_ui.mode == mode,
-                            confirmation_mode_label(mode),
-                        ),
-                    )
-                    .clicked()
-                {
-                    self.receiving_ui.mode = mode;
-                    self.receiving_ui.reason = None;
-                    self.receiving_ui.note_draft.clear();
-                    self.receiving_ui.focus = None;
-                    let transition = self.receiving.select_mode(mode);
-                    self.emit_receiving_transition(transition);
+        let width = (ui.available_width() - 8.0) / 2.0;
+        egui::Grid::new("receiving_disposition_grid")
+            .num_columns(2)
+            .spacing([8.0, 8.0])
+            .show(ui, |ui| {
+                for mode in [
+                    ConfirmationMode::Received,
+                    ConfirmationMode::Quarantined,
+                    ConfirmationMode::Rejected,
+                    ConfirmationMode::Missing,
+                ] {
+                    if ui
+                        .add_sized(
+                            [width, 50.0],
+                            egui::Button::selectable(
+                                self.receiving_ui.mode == mode,
+                                confirmation_mode_label(mode),
+                            ),
+                        )
+                        .clicked()
+                    {
+                        self.receiving_ui.mode = mode;
+                        self.receiving_ui.reason = None;
+                        self.receiving_ui.note_draft.clear();
+                        self.receiving_ui.focus = None;
+                        let transition = self.receiving.select_mode(mode);
+                        self.emit_receiving_transition(transition);
+                    }
+                    if matches!(
+                        mode,
+                        ConfirmationMode::Quarantined | ConfirmationMode::Missing
+                    ) {
+                        ui.end_row();
+                    }
                 }
-            }
-        });
+            });
     }
 
     fn receiving_scan_control(&mut self, ui: &mut egui::Ui, target: ScannerTarget) {
@@ -721,14 +736,25 @@ impl RfApp {
                     .map_or("Select a reason", exception_reason_label),
             )
             .show_ui(ui, |ui| {
-                for reason in [
-                    ReceiptExceptionReason::Damaged,
-                    ReceiptExceptionReason::QualityRejected,
-                    ReceiptExceptionReason::ShortShipment,
-                    ReceiptExceptionReason::CountDiscrepancy,
-                    ReceiptExceptionReason::WrongItem,
-                    ReceiptExceptionReason::Other,
-                ] {
+                let reasons: &[_] = if self.receiving_ui.mode == ConfirmationMode::Quarantined {
+                    &[
+                        ReceiptExceptionReason::Damaged,
+                        ReceiptExceptionReason::QualityRejected,
+                        ReceiptExceptionReason::CountDiscrepancy,
+                        ReceiptExceptionReason::WrongItem,
+                        ReceiptExceptionReason::Other,
+                    ]
+                } else {
+                    &[
+                        ReceiptExceptionReason::Damaged,
+                        ReceiptExceptionReason::QualityRejected,
+                        ReceiptExceptionReason::ShortShipment,
+                        ReceiptExceptionReason::CountDiscrepancy,
+                        ReceiptExceptionReason::WrongItem,
+                        ReceiptExceptionReason::Other,
+                    ]
+                };
+                for &reason in reasons {
                     if ui
                         .selectable_value(
                             &mut self.receiving_ui.reason,
@@ -776,6 +802,7 @@ impl RfApp {
         let enabled = guard == ActionGuard::Allowed && displayed_values_match;
         let label = match self.receiving_ui.mode {
             ConfirmationMode::Received => "Confirm receipt",
+            ConfirmationMode::Quarantined => "Receive into quarantine",
             ConfirmationMode::Rejected => "Confirm rejection",
             ConfirmationMode::Missing => "Record missing",
         };
@@ -1002,6 +1029,7 @@ impl RfApp {
                 self.open_debug_relocation_preview(MovementKind::LicensePlate)
             }
             "receiving-active" => self.load_receiving_preview(ReceivingPreview::Active),
+            "receiving-quarantine" => self.load_receiving_preview(ReceivingPreview::Quarantine),
             "receiving-error" => self.load_receiving_preview(ReceivingPreview::Error),
             "receiving-recovery" => self.load_receiving_preview(ReceivingPreview::Recovery),
             "receiving-reconcile" => self.load_receiving_preview(ReceivingPreview::Reconcile),
@@ -1035,13 +1063,25 @@ impl RfApp {
                 self.receiving
                     .load_resolution_failed(resolution_id, LoadResolutionFailure::Retryable);
             }
-            ReceivingPreview::Active | ReceivingPreview::Recovery | ReceivingPreview::Reconcile => {
+            ReceivingPreview::Active
+            | ReceivingPreview::Quarantine
+            | ReceivingPreview::Recovery
+            | ReceivingPreview::Reconcile => {
                 let Some(session) = debug_receiving_session() else {
                     return;
                 };
                 self.receiving.load_resolved(resolution_id, session);
                 self.receiving.scan_item("CASE-100");
-                if preview == ReceivingPreview::Recovery {
+                if preview == ReceivingPreview::Quarantine {
+                    self.receiving.select_mode(ConfirmationMode::Quarantined);
+                    self.receiving.scan_dock("DOCK-04");
+                    self.receiving
+                        .set_container_capture(ContainerCapture::LicensePlate);
+                    self.receiving.scan_license_plate("QA-LP-100");
+                    self.receiving.set_quantity(2);
+                    self.receiving
+                        .set_exception_reason(ReceiptExceptionReason::Damaged);
+                } else if preview == ReceivingPreview::Recovery {
                     self.receiving.scan_dock("DOCK-04");
                     self.receiving.set_quantity(4);
                     self.receiving_ui.quantity_draft = "4".into();
@@ -1070,6 +1110,7 @@ impl RfApp {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReceivingPreview {
     Active,
+    Quarantine,
     Error,
     Recovery,
     Reconcile,
@@ -1131,6 +1172,7 @@ fn activity_status(activity: Activity) -> (&'static str, egui::Color32) {
 const fn confirmation_mode_label(mode: ConfirmationMode) -> &'static str {
     match mode {
         ConfirmationMode::Received => "Received",
+        ConfirmationMode::Quarantined => "Quarantine",
         ConfirmationMode::Rejected => "Rejected",
         ConfirmationMode::Missing => "Missing",
     }

@@ -10,21 +10,21 @@ use wareboxes_api_contract::v1::{
     ConfirmLicensePlatePutawayRequest, ConfirmPickContentRequest, ConfirmPutawayRequest,
     CycleCountClaimHeartbeatResponse, CycleCountClaimReleaseReason, CycleCountClaimResponse,
     CycleCountConfirmationResponse, ExpectedReceiptConfirmationResponse,
-    ExpectedReceiptDisposition, ExpectedReceiptExceptionReason, ExpectedReceivingLoadStatus,
-    ExpectedReceivingSessionResponse, HeartbeatInventoryRelocationClaimRequest,
-    HeartbeatPutawayClaimRequest, IdempotencyKey, InventoryRelocationClaimHeartbeatResponse,
-    InventoryRelocationClaimReleaseReason, InventoryRelocationClaimResponse,
-    InventoryRelocationClaimWork, InventoryRelocationConfirmationResponse,
-    InventoryRelocationWorkflow, LicensePlatePutawayConfirmationResponse,
-    PickClaimHeartbeatResponse, PickClaimReleaseReason, PickClaimResponse,
-    PickContentConfirmationResponse, PickShortageDetails as ApiPickShortageDetails,
-    PickShortageReason as ApiPickShortageReason, PickShortageStatus as ApiPickShortageStatus,
-    PutawayClaimHeartbeatResponse, PutawayClaimReleaseReason, PutawayClaimResponse,
-    PutawayClaimSourceLocation, PutawayClaimWork, PutawayConfirmationResponse,
-    PutawayWorkflow as ApiPutawayWorkflow, ReleaseCycleCountClaimRequest,
-    ReleaseInventoryRelocationClaimRequest, ReleasePickClaimRequest, ReleasePutawayClaimRequest,
-    ReportPickShortageOutcome as ApiReportPickShortageOutcome, ReportPickShortageRequest,
-    ReportPickShortageResponse,
+    ExpectedReceiptDisposition, ExpectedReceiptExceptionReason, ExpectedReceiptQuarantineReason,
+    ExpectedReceivingLoadStatus, ExpectedReceivingSessionResponse,
+    HeartbeatInventoryRelocationClaimRequest, HeartbeatPutawayClaimRequest, IdempotencyKey,
+    InventoryRelocationClaimHeartbeatResponse, InventoryRelocationClaimReleaseReason,
+    InventoryRelocationClaimResponse, InventoryRelocationClaimWork,
+    InventoryRelocationConfirmationResponse, InventoryRelocationWorkflow,
+    LicensePlatePutawayConfirmationResponse, PickClaimHeartbeatResponse, PickClaimReleaseReason,
+    PickClaimResponse, PickContentConfirmationResponse,
+    PickShortageDetails as ApiPickShortageDetails, PickShortageReason as ApiPickShortageReason,
+    PickShortageStatus as ApiPickShortageStatus, PutawayClaimHeartbeatResponse,
+    PutawayClaimReleaseReason, PutawayClaimResponse, PutawayClaimSourceLocation, PutawayClaimWork,
+    PutawayConfirmationResponse, PutawayWorkflow as ApiPutawayWorkflow,
+    ReleaseCycleCountClaimRequest, ReleaseInventoryRelocationClaimRequest, ReleasePickClaimRequest,
+    ReleasePutawayClaimRequest, ReportPickShortageOutcome as ApiReportPickShortageOutcome,
+    ReportPickShortageRequest, ReportPickShortageResponse,
 };
 
 use crate::cycle_count::CycleCountClaim;
@@ -32,8 +32,8 @@ use crate::expected_receiving::{
     ConfirmationMode, ConfirmationResult, DockBarcode, ExpectedReceiptCommand,
     ExpectedReceiptLine as DomainExpectedReceiptLine, ExpectedReceiptLineInput, Expiration,
     FacilityId, InventoryOwnerId, ItemBarcode, ItemId, LoadId, LoadLineId, LocationId,
-    NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason, ReceivingDock,
-    ReceivingLoadStatus, ReceivingSession, ReceivingSessionInput, StockDimension,
+    NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason, ReceiptQuarantineReason,
+    ReceivingDock, ReceivingLoadStatus, ReceivingSession, ReceivingSessionInput, StockDimension,
 };
 use crate::picking::{
     PickClaim, PickClaimContent, PickContentState, PickReleaseReason, PickShortageOutcome,
@@ -1422,6 +1422,60 @@ fn validate_expected_receipt_confirmation(
             }
             *quantity
         }
+        ConfirmExpectedReceiptRequest::Quarantined {
+            item_barcode,
+            receiving_location_barcode,
+            quantity,
+            license_plate_barcode,
+            lot,
+            serial,
+            expiration,
+            reason,
+            note,
+        } => {
+            validate_expected_receiving_text(
+                item_barcode,
+                "item barcode",
+                MAX_EXPECTED_RECEIVING_BARCODE_LENGTH,
+            )?;
+            validate_expected_receiving_text(
+                receiving_location_barcode,
+                "receiving location barcode",
+                MAX_EXPECTED_RECEIVING_BARCODE_LENGTH,
+            )?;
+            validate_optional_expected_receiving_text(
+                license_plate_barcode.as_deref(),
+                "license plate barcode",
+                MAX_EXPECTED_RECEIVING_BARCODE_LENGTH,
+            )?;
+            validate_optional_expected_receiving_text(
+                lot.as_deref(),
+                "lot",
+                MAX_EXPECTED_RECEIVING_DIMENSION_LENGTH,
+            )?;
+            validate_optional_expected_receiving_text(
+                serial.as_deref(),
+                "serial",
+                MAX_EXPECTED_RECEIVING_DIMENSION_LENGTH,
+            )?;
+            validate_optional_expected_receiving_text(
+                note.as_deref(),
+                "note",
+                MAX_EXPECTED_RECEIVING_NOTE_LENGTH,
+            )?;
+            if expiration
+                .as_deref()
+                .is_some_and(|value| DateTime::parse_from_rfc3339(value).is_err())
+            {
+                return Err(WireRequestError::InvalidExpectedReceiptField {
+                    field: "expiration",
+                });
+            }
+            if *reason == ExpectedReceiptQuarantineReason::Other && note.is_none() {
+                return Err(WireRequestError::ExpectedReceiptNoteRequired);
+            }
+            *quantity
+        }
         ConfirmExpectedReceiptRequest::Rejected {
             item_barcode,
             quantity,
@@ -1490,6 +1544,29 @@ fn map_expected_receipt_command(command: &ExpectedReceiptCommand) -> ConfirmExpe
             serial: serial.as_ref().map(|value| value.as_str().to_owned()),
             expiration: expiration.as_ref().map(|value| value.as_str().to_owned()),
         },
+        ExpectedReceiptCommand::Quarantined {
+            item_barcode,
+            receiving_location_barcode,
+            quantity,
+            license_plate_barcode,
+            lot,
+            serial,
+            expiration,
+            reason,
+            note,
+        } => ConfirmExpectedReceiptRequest::Quarantined {
+            item_barcode: item_barcode.as_str().to_owned(),
+            receiving_location_barcode: receiving_location_barcode.as_str().to_owned(),
+            quantity: quantity.get(),
+            license_plate_barcode: license_plate_barcode
+                .as_ref()
+                .map(|barcode| barcode.as_str().to_owned()),
+            lot: lot.as_ref().map(|value| value.as_str().to_owned()),
+            serial: serial.as_ref().map(|value| value.as_str().to_owned()),
+            expiration: expiration.as_ref().map(|value| value.as_str().to_owned()),
+            reason: map_expected_receipt_quarantine_reason(*reason),
+            note: note.as_ref().map(|value| value.as_str().to_owned()),
+        },
         ExpectedReceiptCommand::Rejected {
             item_barcode,
             quantity,
@@ -1513,6 +1590,22 @@ fn map_expected_receipt_command(command: &ExpectedReceiptCommand) -> ConfirmExpe
     }
 }
 
+const fn map_expected_receipt_quarantine_reason(
+    reason: ReceiptQuarantineReason,
+) -> ExpectedReceiptQuarantineReason {
+    match reason {
+        ReceiptQuarantineReason::Damaged => ExpectedReceiptQuarantineReason::Damaged,
+        ReceiptQuarantineReason::QualityInspection => {
+            ExpectedReceiptQuarantineReason::QualityInspection
+        }
+        ReceiptQuarantineReason::CountDiscrepancy => {
+            ExpectedReceiptQuarantineReason::CountDiscrepancy
+        }
+        ReceiptQuarantineReason::WrongItem => ExpectedReceiptQuarantineReason::WrongItem,
+        ReceiptQuarantineReason::Other => ExpectedReceiptQuarantineReason::Other,
+    }
+}
+
 const fn map_expected_receipt_exception_reason(
     reason: ReceiptExceptionReason,
 ) -> ExpectedReceiptExceptionReason {
@@ -1533,6 +1626,7 @@ const fn map_expected_receipt_disposition(
 ) -> ConfirmationMode {
     match disposition {
         ExpectedReceiptDisposition::Received => ConfirmationMode::Received,
+        ExpectedReceiptDisposition::Quarantined => ConfirmationMode::Quarantined,
         ExpectedReceiptDisposition::Rejected => ConfirmationMode::Rejected,
         ExpectedReceiptDisposition::Missing => ConfirmationMode::Missing,
     }
@@ -1623,15 +1717,27 @@ fn validate_expected_receipt_confirmation_response(
         response.inventory_balance_id,
         response.item_batch_id,
         response.license_plate_id,
+        response.inventory_hold_id,
     ];
     let inventory_shape_is_valid = match response.disposition {
         ExpectedReceiptDisposition::Received => {
             response.inventory_transaction_id.is_some()
                 && response.inventory_balance_id.is_some()
                 && response.item_batch_id.is_some()
+                && response.inventory_hold_id.is_none()
+                && response.inventory_status
+                    == Some(wareboxes_api_contract::v1::InventoryBalanceStatus::Available)
+        }
+        ExpectedReceiptDisposition::Quarantined => {
+            response.inventory_transaction_id.is_some()
+                && response.inventory_balance_id.is_some()
+                && response.item_batch_id.is_some()
+                && response.inventory_hold_id.is_some()
+                && response.inventory_status
+                    == Some(wareboxes_api_contract::v1::InventoryBalanceStatus::Quarantine)
         }
         ExpectedReceiptDisposition::Rejected | ExpectedReceiptDisposition::Missing => {
-            optional_ids.iter().all(Option::is_none)
+            optional_ids.iter().all(Option::is_none) && response.inventory_status.is_none()
         }
     };
     let completion_is_valid = if response.receive_completed {
@@ -2819,6 +2925,8 @@ mod tests {
             "inventory_balance_id": 88,
             "item_batch_id": 99,
             "license_plate_id": 111,
+            "inventory_hold_id": null,
+            "inventory_status": "available",
             "line_status": "partial",
             "load_status": "receiving",
             "cumulative_received_quantity": 4,
@@ -2838,6 +2946,32 @@ mod tests {
                 expected: 56,
                 actual: 55
             })
+        ));
+
+        let mut quarantined = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        quarantined["disposition"] = json!("quarantined");
+        quarantined["inventory_status"] = json!("quarantine");
+        quarantined["inventory_hold_id"] = json!(112);
+        quarantined["cumulative_received_quantity"] = json!(0);
+        quarantined["cumulative_rejected_quantity"] = json!(5);
+        let quarantined = serde_json::to_vec(&quarantined).unwrap();
+        assert_eq!(
+            decode_expected_receipt_confirmation_response(55, 200, &quarantined)
+                .unwrap()
+                .disposition,
+            ExpectedReceiptDisposition::Quarantined
+        );
+
+        let mut invalid_quarantine =
+            serde_json::from_slice::<serde_json::Value>(&quarantined).unwrap();
+        invalid_quarantine["inventory_hold_id"] = json!(null);
+        assert!(matches!(
+            decode_expected_receipt_confirmation_response(
+                55,
+                200,
+                &serde_json::to_vec(&invalid_quarantine).unwrap()
+            ),
+            Err(WireResponseError::InvalidExpectedReceiptConfirmation)
         ));
 
         let mut invalid = serde_json::from_slice::<serde_json::Value>(&body).unwrap();

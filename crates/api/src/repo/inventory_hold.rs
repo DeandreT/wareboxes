@@ -340,6 +340,110 @@ async fn enqueue_hold_event(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn insert_hold_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    actor_user_id: i64,
+    now: Timestamp,
+    balance: &LockedBalance,
+    command: PlaceInventoryHoldCommand<'_>,
+) -> AppResult<i64> {
+    let hold_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO inventory_holds (
+            tenant_id, inventory_owner_id, created, modified, created_by,
+            inventory_balance_id, facility_id, location_id, license_plate_id,
+            item_batch_id, item_id, uom, inventory_status, qty, reason_code,
+            note, reference_type, reference_id, status
+        )
+        VALUES (
+            $1, $2, $3, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+            $14, $15, $16, $17, 'active'
+        )
+        RETURNING id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(balance.inventory_owner_id)
+    .bind(now)
+    .bind(actor_user_id)
+    .bind(command.inventory_balance_id)
+    .bind(balance.facility_id)
+    .bind(balance.location_id)
+    .bind(balance.license_plate_id)
+    .bind(balance.item_batch_id)
+    .bind(balance.item_id)
+    .bind(&balance.uom)
+    .bind(&balance.inventory_status)
+    .bind(command.qty)
+    .bind(command.reason.as_str())
+    .bind(command.note)
+    .bind(command.reference_type)
+    .bind(command.reference_id)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    let payload = serde_json::json!({
+        "hold_id": hold_id,
+        "inventory_balance_id": command.inventory_balance_id,
+        "inventory_owner_id": balance.inventory_owner_id,
+        "facility_id": balance.facility_id,
+        "location_id": balance.location_id,
+        "license_plate_id": balance.license_plate_id,
+        "item_batch_id": balance.item_batch_id,
+        "item_id": balance.item_id,
+        "uom": balance.uom,
+        "inventory_status": balance.inventory_status,
+        "quantity": command.qty,
+        "reason": command.reason.as_str(),
+        "note": command.note,
+        "reference_type": command.reference_type,
+        "reference_id": command.reference_id,
+    });
+    enqueue_hold_event(
+        tx,
+        hold_id,
+        balance.inventory_owner_id,
+        balance.facility_id,
+        InventoryHoldEventContext {
+            tenant_id,
+            actor_user_id,
+            transition: "placed",
+            aggregate_sequence: 1,
+            occurred_at: now,
+        },
+        &payload,
+    )
+    .await?;
+    Ok(hold_id)
+}
+
+pub(crate) async fn place_composed_inventory_hold_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    actor_user_id: i64,
+    now: Timestamp,
+    command: &PlaceInventoryHoldCommand<'_>,
+) -> AppResult<i64> {
+    let command = validate_place_command(command)?;
+    let balance = lock_balance(tx, tenant_id, command.inventory_balance_id).await?;
+    if balance.deleted.is_some() {
+        return Err(AppError::conflict("inventory balance is not active"));
+    }
+    let available = balance
+        .qty_on_hand
+        .checked_sub(balance.qty_reserved)
+        .and_then(|quantity| quantity.checked_sub(balance.qty_held))
+        .ok_or_else(|| AppError::internal("inventory commitments are out of range"))?;
+    if command.qty > available {
+        return Err(AppError::conflict(
+            "insufficient uncommitted inventory to hold",
+        ));
+    }
+    insert_hold_tx(tx, tenant_id, actor_user_id, now, &balance, command).await
+}
+
 pub async fn get_inventory_holds_in_scope(
     db: &Db,
     access: &TenantAccess,
@@ -453,71 +557,13 @@ pub async fn place_inventory_hold(
         ));
     }
 
-    let hold_id: i64 = sqlx::query_scalar(
-        r#"
-        INSERT INTO inventory_holds (
-            tenant_id, inventory_owner_id, created, modified, created_by,
-            inventory_balance_id, facility_id, location_id, license_plate_id,
-            item_batch_id, item_id, uom, inventory_status, qty, reason_code,
-            note, reference_type, reference_id, status
-        )
-        VALUES (
-            $1, $2, $3, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-            $14, $15, $16, $17, 'active'
-        )
-        RETURNING id
-        "#,
-    )
-    .bind(access.tenant_id.get())
-    .bind(balance.inventory_owner_id)
-    .bind(now)
-    .bind(context.actor_id.get())
-    .bind(command.inventory_balance_id)
-    .bind(balance.facility_id)
-    .bind(balance.location_id)
-    .bind(balance.license_plate_id)
-    .bind(balance.item_batch_id)
-    .bind(balance.item_id)
-    .bind(&balance.uom)
-    .bind(&balance.inventory_status)
-    .bind(command.qty)
-    .bind(command.reason.as_str())
-    .bind(command.note)
-    .bind(command.reference_type)
-    .bind(command.reference_id)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    let payload = serde_json::json!({
-        "hold_id": hold_id,
-        "inventory_balance_id": command.inventory_balance_id,
-        "inventory_owner_id": balance.inventory_owner_id,
-        "facility_id": balance.facility_id,
-        "location_id": balance.location_id,
-        "license_plate_id": balance.license_plate_id,
-        "item_batch_id": balance.item_batch_id,
-        "item_id": balance.item_id,
-        "uom": balance.uom,
-        "inventory_status": balance.inventory_status,
-        "quantity": command.qty,
-        "reason": command.reason.as_str(),
-        "note": command.note,
-        "reference_type": command.reference_type,
-        "reference_id": command.reference_id,
-    });
-    enqueue_hold_event(
+    let hold_id = insert_hold_tx(
         &mut tx,
-        hold_id,
-        balance.inventory_owner_id,
-        balance.facility_id,
-        InventoryHoldEventContext {
-            tenant_id: access.tenant_id,
-            actor_user_id: context.actor_id.get(),
-            transition: "placed",
-            aggregate_sequence: 1,
-            occurred_at: now,
-        },
-        &payload,
+        access.tenant_id,
+        context.actor_id.get(),
+        now,
+        &balance,
+        command,
     )
     .await?;
 

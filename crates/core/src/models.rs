@@ -1007,6 +1007,37 @@ pub enum InboundReceiptExceptionReason {
     Other,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundReceiptQuarantineReason {
+    Damaged,
+    QualityInspection,
+    CountDiscrepancy,
+    WrongItem,
+    Other,
+}
+
+impl InboundReceiptQuarantineReason {
+    pub fn exception_reason(self) -> InboundReceiptExceptionReason {
+        match self {
+            Self::Damaged => InboundReceiptExceptionReason::Damaged,
+            Self::QualityInspection => InboundReceiptExceptionReason::QualityRejected,
+            Self::CountDiscrepancy => InboundReceiptExceptionReason::CountDiscrepancy,
+            Self::WrongItem => InboundReceiptExceptionReason::WrongItem,
+            Self::Other => InboundReceiptExceptionReason::Other,
+        }
+    }
+
+    pub fn hold_reason(self) -> InventoryHoldReason {
+        match self {
+            Self::Damaged => InventoryHoldReason::DamageSuspected,
+            Self::QualityInspection => InventoryHoldReason::QualityInspection,
+            Self::CountDiscrepancy | Self::WrongItem => InventoryHoldReason::InventoryDiscrepancy,
+            Self::Other => InventoryHoldReason::Other,
+        }
+    }
+}
+
 impl InboundReceiptExceptionReason {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -1028,6 +1059,8 @@ pub struct ReceiveExpectedInventoryResult {
     pub inventory_balance_id: Option<i64>,
     pub item_batch_id: Option<i64>,
     pub license_plate_id: Option<i64>,
+    pub inventory_hold_id: Option<i64>,
+    pub inventory_status: Option<InventoryStatus>,
     pub load_status: LoadStatus,
     pub line_status: LoadLineStatus,
     pub cumulative_received_qty: i64,

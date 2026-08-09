@@ -1,0 +1,520 @@
+mod common;
+
+use axum::body::{to_bytes, Body};
+use axum::http::{header, Method, Request, StatusCode};
+use common::*;
+use serde_json::{json, Value};
+use tower::ServiceExt;
+use wareboxes_api::auth::TENANT_ID_HEADER;
+use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
+use wareboxes_api::{routes, state::AppState};
+use wareboxes_api_contract::v1::{
+    ErrorReason, ErrorResponse, ExpectedReceiptConfirmationResponse, ExpectedReceiptDisposition,
+    ExpectedReceiptLineStatus, ExpectedReceivingLoadStatus, InventoryBalanceStatus,
+    InventoryStatusTransitionResponse, ReleaseInventoryHoldResponse,
+};
+
+fn command_request(
+    token: &str,
+    tenant_id: TenantId,
+    load_line_id: i64,
+    key: &str,
+    body: &Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/api/v1/expected-receiving/lines/{load_line_id}/confirmations"
+        ))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .header(IDEMPOTENCY_KEY_HEADER, key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn mutation_request(
+    token: &str,
+    tenant_id: TenantId,
+    path: String,
+    key: &str,
+    body: &Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .header(IDEMPOTENCY_KEY_HEADER, key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn response_json<T: serde::de::DeserializeOwned>(response: axum::response::Response) -> T {
+    let body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn assert_error(response: axum::response::Response, status: StatusCode, reason: ErrorReason) {
+    assert_eq!(response.status(), status);
+    assert_eq!(
+        response_json::<ErrorResponse>(response).await.reason,
+        reason
+    );
+}
+
+struct Setup {
+    tenant_id: TenantId,
+    operator_id: i64,
+    line_id: i64,
+}
+
+async fn setup(fixture: &Fixture, email: &str) -> Setup {
+    let operator = fixture.wms_user(email).await;
+    let tenant_id = tenant_for_user(&fixture.db, operator.id).await;
+    let facility_id = fixture.facility(tenant_id, "Inbound Quarantine DC").await;
+    let inventory_owner_id = fixture
+        .inventory_owner(tenant_id, "Inbound Quarantine Owner")
+        .await;
+    fixture
+        .assign_owner_to_facility(tenant_id, inventory_owner_id, facility_id)
+        .await;
+    let dock_id = wareboxes_persistence_postgres::locations::add_location(
+        &fixture.db,
+        tenant_id,
+        facility_id,
+        None,
+        Some("QA-DOCK-01"),
+        Some("QA receiving dock"),
+        "dock",
+        true,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    let item_id = fixture
+        .item(tenant_id, "Inbound quarantine case", "case")
+        .await;
+    repo::items::add_barcode(
+        &fixture.db,
+        tenant_id,
+        item_id,
+        "QA-CASE-01",
+        "code128",
+        None,
+    )
+    .await
+    .unwrap();
+    let load_id = repo::loads::add_load_with_execution_barcode(
+        &fixture.db,
+        tenant_id,
+        operator.id,
+        facility_id,
+        inventory_owner_id,
+        "QA-LOAD-01",
+        LoadType::Inbound,
+        Some("ASN-QA-01"),
+        None,
+        None,
+        None,
+        None,
+        Some(dock_id),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let line_id = repo::loads::add_line(
+        &fixture.db,
+        tenant_id,
+        operator.id,
+        load_id,
+        item_id,
+        None,
+        4,
+        Some("LOT-QA-01"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    sqlx::query("UPDATE loads SET status = 'arrived' WHERE tenant_id = $1 AND id = $2")
+        .bind(tenant_id.get())
+        .bind(load_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    Setup {
+        tenant_id,
+        operator_id: operator.id,
+        line_id,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+struct Effects {
+    received_qty: i64,
+    rejected_qty: i64,
+    missing_qty: i64,
+    line_status: String,
+    load_status: String,
+    transaction_count: i64,
+    entry_count: i64,
+    balance_count: i64,
+    hold_count: i64,
+    held_qty: i64,
+    command_count: i64,
+    receipt_event_count: i64,
+    hold_event_count: i64,
+}
+
+async fn effects(fixture: &Fixture, tenant_id: TenantId, line_id: i64) -> Effects {
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let row = sqlx::query_as(
+        r#"
+        SELECT line.received_qty, line.rejected_qty, line.missing_qty,
+               line.status AS line_status, load.status AS load_status,
+               (SELECT COUNT(*) FROM inventory_transactions) AS transaction_count,
+               (SELECT COUNT(*) FROM inventory_entries) AS entry_count,
+               (SELECT COUNT(*) FROM inventory_balances WHERE deleted IS NULL) AS balance_count,
+               (SELECT COUNT(*) FROM inventory_holds) AS hold_count,
+               (SELECT COALESCE(SUM(qty_held), 0)::BIGINT
+                  FROM inventory_balances WHERE deleted IS NULL) AS held_qty,
+               (SELECT COUNT(*) FROM command_idempotency_records) AS command_count,
+               (SELECT COUNT(*) FROM outbox_events
+                 WHERE event_type = 'inbound.expected_receipt.confirmed') AS receipt_event_count,
+               (SELECT COUNT(*) FROM outbox_events
+                 WHERE event_type = 'inventory.hold.placed') AS hold_event_count
+        FROM load_lines line
+        INNER JOIN loads load
+          ON load.tenant_id = line.tenant_id AND load.id = line.load_id
+        WHERE line.tenant_id = $1 AND line.id = $2
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(line_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    row
+}
+
+fn quarantined_body(quantity: i64) -> Value {
+    json!({
+        "disposition": "quarantined",
+        "item_barcode": "QA-CASE-01",
+        "receiving_location_barcode": "QA-DOCK-01",
+        "quantity": quantity,
+        "license_plate_barcode": "QA-LP-01",
+        "lot": "LOT-QA-01",
+        "serial": null,
+        "expiration": null,
+        "reason": "damaged",
+        "note": "Outer case was crushed"
+    })
+}
+
+#[tokio::test]
+async fn quarantined_receipt_conserves_physical_stock_and_replays_exactly() {
+    let fixture = Fixture::new().await;
+    let setup = setup(&fixture, "expected-quarantine-success@test.local").await;
+    let token = auth::create_session(&fixture.db, setup.operator_id)
+        .await
+        .unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let before = effects(&fixture, setup.tenant_id, setup.line_id).await;
+
+    let response = app
+        .clone()
+        .oneshot(command_request(
+            &token,
+            setup.tenant_id,
+            setup.line_id,
+            "quarantine-success",
+            &quarantined_body(2),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: ExpectedReceiptConfirmationResponse = response_json(response).await;
+    assert_eq!(result.disposition, ExpectedReceiptDisposition::Quarantined);
+    assert_eq!(result.quantity, 2);
+    assert_eq!(
+        result.inventory_status,
+        Some(InventoryBalanceStatus::Quarantine)
+    );
+    assert_eq!(result.line_status, ExpectedReceiptLineStatus::Partial);
+    assert_eq!(result.load_status, ExpectedReceivingLoadStatus::Receiving);
+    assert_eq!(result.cumulative_received_quantity, 0);
+    assert_eq!(result.cumulative_rejected_quantity, 2);
+    assert_eq!(result.remaining_quantity, 2);
+    let balance_id = result.inventory_balance_id.unwrap();
+    let hold_id = result.inventory_hold_id.unwrap();
+
+    let after = effects(&fixture, setup.tenant_id, setup.line_id).await;
+    assert_eq!(after.received_qty, 0);
+    assert_eq!(after.rejected_qty, 2);
+    assert_eq!(after.missing_qty, 0);
+    assert_eq!(after.line_status, "partial");
+    assert_eq!(after.load_status, "receiving");
+    assert_eq!(after.transaction_count, before.transaction_count + 1);
+    assert_eq!(after.entry_count, before.entry_count + 1);
+    assert_eq!(after.balance_count, before.balance_count + 1);
+    assert_eq!(after.hold_count, before.hold_count + 1);
+    assert_eq!(after.held_qty, before.held_qty + 2);
+    assert_eq!(after.command_count, before.command_count + 1);
+    assert_eq!(after.receipt_event_count, before.receipt_event_count + 1);
+    assert_eq!(after.hold_event_count, before.hold_event_count + 1);
+
+    let mut tx = tenant_tx(&fixture.db, setup.tenant_id).await;
+    let balance: (String, i64, i64, i64) = sqlx::query_as(
+        "SELECT status, qty_on_hand, qty_reserved, qty_held FROM inventory_balances WHERE id = $1",
+    )
+    .bind(balance_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(balance, ("quarantine".into(), 2, 0, 2));
+    let hold: (String, i64, String, Option<String>, Option<i64>) = sqlx::query_as(
+        "SELECT status, qty, reason_code, reference_type, reference_id FROM inventory_holds WHERE id = $1",
+    )
+    .bind(hold_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(
+        hold,
+        (
+            "active".into(),
+            2,
+            "damage_suspected".into(),
+            Some("expected_receipt_line".into()),
+            Some(setup.line_id)
+        )
+    );
+    let entry: (String, i64) = sqlx::query_as(
+        "SELECT status, quantity_delta FROM inventory_entries WHERE transaction_id = $1",
+    )
+    .bind(result.inventory_transaction_id.unwrap())
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(entry, ("quarantine".into(), 2));
+    tx.rollback().await.unwrap();
+
+    let replay = app
+        .clone()
+        .oneshot(command_request(
+            &token,
+            setup.tenant_id,
+            setup.line_id,
+            "quarantine-success",
+            &quarantined_body(2),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(
+        response_json::<ExpectedReceiptConfirmationResponse>(replay).await,
+        result
+    );
+    assert_eq!(
+        effects(&fixture, setup.tenant_id, setup.line_id).await,
+        after
+    );
+
+    assert_error(
+        app.clone()
+            .oneshot(command_request(
+                &token,
+                setup.tenant_id,
+                setup.line_id,
+                "quarantine-success",
+                &quarantined_body(1),
+            ))
+            .await
+            .unwrap(),
+        StatusCode::CONFLICT,
+        ErrorReason::IdempotencyKeyReused,
+    )
+    .await;
+
+    let release = app
+        .clone()
+        .oneshot(mutation_request(
+            &token,
+            setup.tenant_id,
+            format!("/api/v1/inventory/holds/{hold_id}/releases"),
+            "release-receipt-hold",
+            &json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(release.status(), StatusCode::OK);
+    assert_eq!(
+        response_json::<ReleaseInventoryHoldResponse>(release)
+            .await
+            .released_quantity,
+        2
+    );
+
+    let transition = app
+        .oneshot(mutation_request(
+            &token,
+            setup.tenant_id,
+            format!("/api/v1/inventory/balances/{balance_id}/status-transitions"),
+            "release-receipt-quarantine",
+            &json!({
+                "quantity": 2,
+                "to_status": "available",
+                "reason": "inspection_passed",
+                "note": "Inbound inspection passed",
+                "reference_type": "expected_receipt_line",
+                "reference_id": setup.line_id
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(transition.status(), StatusCode::OK);
+    let transition: InventoryStatusTransitionResponse = response_json(transition).await;
+    assert_eq!(transition.from_status, InventoryBalanceStatus::Quarantine);
+    assert_eq!(transition.to_status, InventoryBalanceStatus::Available);
+    assert_eq!(transition.quantity, 2);
+}
+
+#[tokio::test]
+async fn quarantined_receipt_rejects_invalid_identity_quantity_and_reason_without_effects() {
+    let fixture = Fixture::new().await;
+    let setup = setup(&fixture, "expected-quarantine-invalid@test.local").await;
+    let token = auth::create_session(&fixture.db, setup.operator_id)
+        .await
+        .unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let before = effects(&fixture, setup.tenant_id, setup.line_id).await;
+
+    let mut wrong_item = quarantined_body(1);
+    wrong_item["item_barcode"] = json!("WRONG-ITEM");
+    assert_error(
+        app.clone()
+            .oneshot(command_request(
+                &token,
+                setup.tenant_id,
+                setup.line_id,
+                "quarantine-wrong-item",
+                &wrong_item,
+            ))
+            .await
+            .unwrap(),
+        StatusCode::CONFLICT,
+        ErrorReason::Conflict,
+    )
+    .await;
+
+    let mut other_without_note = quarantined_body(1);
+    other_without_note["reason"] = json!("other");
+    other_without_note["note"] = Value::Null;
+    assert_error(
+        app.clone()
+            .oneshot(command_request(
+                &token,
+                setup.tenant_id,
+                setup.line_id,
+                "quarantine-other-no-note",
+                &other_without_note,
+            ))
+            .await
+            .unwrap(),
+        StatusCode::BAD_REQUEST,
+        ErrorReason::InvalidRequest,
+    )
+    .await;
+
+    assert_error(
+        app.clone()
+            .oneshot(command_request(
+                &token,
+                setup.tenant_id,
+                setup.line_id,
+                "quarantine-over-quantity",
+                &quarantined_body(5),
+            ))
+            .await
+            .unwrap(),
+        StatusCode::CONFLICT,
+        ErrorReason::Conflict,
+    )
+    .await;
+    assert_eq!(
+        effects(&fixture, setup.tenant_id, setup.line_id).await,
+        before
+    );
+}
+
+#[tokio::test]
+async fn quarantined_receipt_replay_is_concealed_after_scope_revocation() {
+    let fixture = Fixture::new().await;
+    let setup = setup(&fixture, "expected-quarantine-scope@test.local").await;
+    let token = auth::create_session(&fixture.db, setup.operator_id)
+        .await
+        .unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let response = app
+        .clone()
+        .oneshot(command_request(
+            &token,
+            setup.tenant_id,
+            setup.line_id,
+            "quarantine-scope",
+            &quarantined_body(1),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let after = effects(&fixture, setup.tenant_id, setup.line_id).await;
+
+    assert!(repo::tenants::update_user_access_scope(
+        &fixture.db,
+        setup.tenant_id,
+        &wareboxes_core::dto::UpdateUserAccessScope {
+            user_id: setup.operator_id,
+            all_facilities: false,
+            facility_ids: vec![],
+            all_inventory_owners: false,
+            inventory_owner_ids: vec![],
+        },
+    )
+    .await
+    .unwrap());
+    for (key, body) in [
+        ("quarantine-scope", quarantined_body(1)),
+        ("quarantine-scope", quarantined_body(2)),
+        ("quarantine-new-after-scope", quarantined_body(1)),
+    ] {
+        assert_error(
+            app.clone()
+                .oneshot(command_request(
+                    &token,
+                    setup.tenant_id,
+                    setup.line_id,
+                    key,
+                    &body,
+                ))
+                .await
+                .unwrap(),
+            StatusCode::NOT_FOUND,
+            ErrorReason::NotFound,
+        )
+        .await;
+    }
+    assert_eq!(
+        effects(&fixture, setup.tenant_id, setup.line_id).await,
+        after
+    );
+}

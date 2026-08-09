@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::InventoryBalanceStatus;
+
 /// Inbound load states visible to an expected-receiving scanner session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -55,8 +57,20 @@ pub struct ExpectedReceivingSessionResponse {
 #[serde(rename_all = "snake_case")]
 pub enum ExpectedReceiptDisposition {
     Received,
+    Quarantined,
     Rejected,
     Missing,
+}
+
+/// Typed reason for receiving a physically present expected unit into quarantine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpectedReceiptQuarantineReason {
+    Damaged,
+    QualityInspection,
+    CountDiscrepancy,
+    WrongItem,
+    Other,
 }
 
 /// Typed reason for rejecting or marking expected inventory missing.
@@ -83,6 +97,17 @@ pub enum ConfirmExpectedReceiptRequest {
         lot: Option<String>,
         serial: Option<String>,
         expiration: Option<String>,
+    },
+    Quarantined {
+        item_barcode: String,
+        receiving_location_barcode: String,
+        quantity: i64,
+        license_plate_barcode: Option<String>,
+        lot: Option<String>,
+        serial: Option<String>,
+        expiration: Option<String>,
+        reason: ExpectedReceiptQuarantineReason,
+        note: Option<String>,
     },
     Rejected {
         item_barcode: String,
@@ -120,6 +145,8 @@ pub struct ExpectedReceiptConfirmationResponse {
     pub inventory_balance_id: Option<i64>,
     pub item_batch_id: Option<i64>,
     pub license_plate_id: Option<i64>,
+    pub inventory_hold_id: Option<i64>,
+    pub inventory_status: Option<InventoryBalanceStatus>,
     pub line_status: ExpectedReceiptLineStatus,
     pub load_status: ExpectedReceivingLoadStatus,
     pub cumulative_received_quantity: i64,
@@ -326,6 +353,42 @@ mod tests {
     }
 
     #[test]
+    fn quarantined_confirmation_request_has_an_exact_contract() {
+        let request = ConfirmExpectedReceiptRequest::Quarantined {
+            item_barcode: "CASE-66".into(),
+            receiving_location_barcode: "DOCK-04".into(),
+            quantity: 2,
+            license_plate_barcode: Some("LP-QA-66".into()),
+            lot: Some("LOT-07".into()),
+            serial: None,
+            expiration: Some("2027-07-26T00:00:00+00:00".into()),
+            reason: ExpectedReceiptQuarantineReason::Damaged,
+            note: Some("Outer case was crushed".into()),
+        };
+        let value = serde_json::to_value(&request).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "disposition": "quarantined",
+                "item_barcode": "CASE-66",
+                "receiving_location_barcode": "DOCK-04",
+                "quantity": 2,
+                "license_plate_barcode": "LP-QA-66",
+                "lot": "LOT-07",
+                "serial": null,
+                "expiration": "2027-07-26T00:00:00+00:00",
+                "reason": "damaged",
+                "note": "Outer case was crushed"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ConfirmExpectedReceiptRequest>(value).unwrap(),
+            request
+        );
+    }
+
+    #[test]
     fn missing_confirmation_request_has_an_exact_contract() {
         let request = ConfirmExpectedReceiptRequest::Missing {
             quantity: 3,
@@ -403,6 +466,8 @@ mod tests {
             inventory_balance_id: Some(88),
             item_batch_id: Some(99),
             license_plate_id: Some(111),
+            inventory_hold_id: None,
+            inventory_status: Some(InventoryBalanceStatus::Available),
             line_status: ExpectedReceiptLineStatus::Partial,
             load_status: ExpectedReceivingLoadStatus::Receiving,
             cumulative_received_quantity: 4,
@@ -424,6 +489,8 @@ mod tests {
                 "inventory_balance_id": 88,
                 "item_batch_id": 99,
                 "license_plate_id": 111,
+                "inventory_hold_id": null,
+                "inventory_status": "available",
                 "line_status": "partial",
                 "load_status": "receiving",
                 "cumulative_received_quantity": 4,

@@ -64,6 +64,29 @@ impl RfApp {
                             }
                         });
                     }
+                    ConfirmationMode::Quarantined => {
+                        ui.horizontal_wrapped(|ui| {
+                            if let Some(dock) = draft.dock_barcode.as_deref() {
+                                ui.monospace(format!("Dock {dock}"));
+                            }
+                            if let Some(license_plate) = draft.license_plate_barcode.as_deref() {
+                                ui.separator();
+                                ui.monospace(format!("LP {license_plate}"));
+                            } else {
+                                ui.separator();
+                                ui.label("Loose");
+                            }
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            if let Some(reason) = draft.reason {
+                                ui.label(exception_reason_label(reason));
+                            }
+                            if let Some(note) = draft.note.as_deref() {
+                                ui.separator();
+                                ui.label(note);
+                            }
+                        });
+                    }
                     ConfirmationMode::Rejected | ConfirmationMode::Missing => {
                         ui.horizontal_wrapped(|ui| {
                             if let Some(reason) = draft.reason {

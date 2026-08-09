@@ -140,7 +140,7 @@ fn prepare_received(
     else {
         panic!("ready receipt should produce a durable intent");
     };
-    (confirmation_id, intent)
+    (confirmation_id, *intent)
 }
 
 fn partial_result(receive_quantity: i64) -> ConfirmationResult {
@@ -437,7 +437,7 @@ fn received_flow_has_explicit_focus_and_exact_serializable_intent() {
     );
     assert_eq!(
         serde_json::from_slice::<ConfirmationIntent>(&intent.canonical_payload().unwrap()).unwrap(),
-        intent
+        *intent
     );
     assert_eq!(
         reducer.focus_target(),
@@ -512,6 +512,51 @@ fn rejected_intent_requires_reason_and_other_note() {
 }
 
 #[test]
+fn quarantined_intent_requires_physical_scans_and_a_quarantine_reason() {
+    let mut reducer = ExpectedReceivingReducer::default();
+    resolve(
+        &mut reducer,
+        session(vec![line(100, "ITEM-1", 10, 0, 0, 0)]),
+    );
+    reducer.scan_item("ITEM-1");
+    reducer.select_mode(ConfirmationMode::Quarantined);
+    assert_eq!(
+        reducer.focus_target(),
+        FocusTarget::Scanner(ScannerTarget::DockBarcode)
+    );
+    reducer.scan_dock("DOCK-1");
+    reducer.set_container_capture(ContainerCapture::LicensePlate);
+    reducer.scan_license_plate("QA-LP-1");
+    reducer.set_quantity(2);
+    reducer.set_exception_reason(ReceiptExceptionReason::ShortShipment);
+    assert_eq!(
+        reducer.confirmation_guard(CommandAccess::Allowed),
+        ActionGuard::Blocked(ActionBlockReason::ExceptionReasonRequired)
+    );
+    reducer.set_exception_reason(ReceiptExceptionReason::Damaged);
+
+    let ReceivingTransition::Effect(ReceivingEffect::PersistConfirmation { intent, .. }) =
+        reducer.begin_confirmation(CommandAccess::Allowed)
+    else {
+        panic!("complete quarantine receipt should persist");
+    };
+    assert_eq!(
+        intent.command,
+        ExpectedReceiptCommand::Quarantined {
+            item_barcode: ItemBarcode::new("ITEM-1").unwrap(),
+            receiving_location_barcode: DockBarcode::new("DOCK-1").unwrap(),
+            quantity: positive(2),
+            license_plate_barcode: Some(LicensePlateBarcode::new("QA-LP-1").unwrap()),
+            lot: Some(StockDimension::new("LOT-1").unwrap()),
+            serial: None,
+            expiration: Some(Expiration::new("2027-07-26T00:00:00Z").unwrap()),
+            reason: ReceiptQuarantineReason::Damaged,
+            note: None,
+        }
+    );
+}
+
+#[test]
 fn missing_intent_can_select_a_line_without_claiming_an_item_scan() {
     let mut reducer = ExpectedReceivingReducer::default();
     resolve(&mut reducer, session(vec![line(100, "ITEM-1", 4, 0, 0, 0)]));
@@ -561,7 +606,7 @@ fn definitive_rejection_restores_the_exact_operator_draft() {
     else {
         panic!("corrected retry should remain available");
     };
-    assert_eq!(retried_intent, first_intent);
+    assert_eq!(*retried_intent, first_intent);
 }
 
 #[test]
@@ -583,7 +628,7 @@ fn durable_intent_round_trip_restores_pending_work_and_exact_draft() {
     };
     let durable_payload = intent.canonical_payload().unwrap();
     let recovered: ConfirmationIntent = serde_json::from_slice(&durable_payload).unwrap();
-    assert_eq!(recovered, intent);
+    assert_eq!(recovered, *intent);
 
     let mut restarted = ExpectedReceivingReducer::default();
     let confirmation_id = restarted
@@ -612,7 +657,7 @@ fn durable_intent_round_trip_restores_pending_work_and_exact_draft() {
     else {
         panic!("restored rejected command should retain its exact draft");
     };
-    assert_eq!(retried, recovered);
+    assert_eq!(*retried, recovered);
 }
 
 #[test]
@@ -750,7 +795,7 @@ fn exception_intents_restore_their_exact_rejected_and_missing_drafts() {
         else {
             panic!("restored exception command should retain its exact draft");
         };
-        assert_eq!(retried, intent);
+        assert_eq!(*retried, intent);
     }
 }
 

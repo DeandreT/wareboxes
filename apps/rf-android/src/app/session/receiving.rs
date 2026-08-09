@@ -21,7 +21,7 @@ impl RfApp {
                 ReceivingEffect::PersistConfirmation {
                     confirmation_id,
                     intent,
-                } => self.persist_receiving_confirmation(confirmation_id, intent),
+                } => self.persist_receiving_confirmation(confirmation_id, *intent),
                 ReceivingEffect::RefreshSession {
                     refresh_id,
                     load_id,

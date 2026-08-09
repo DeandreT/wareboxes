@@ -4,8 +4,9 @@ use serde::Serialize;
 use sqlx::Row;
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::{
-    InboundReceiptExceptionReason, InventoryStatus, InventoryTransactionType, LoadLineStatus,
-    LoadStatus, LoadType, ReceiveExpectedInventoryResult, TenantAccess, Timestamp,
+    InboundReceiptExceptionReason, InboundReceiptQuarantineReason, InventoryStatus,
+    InventoryTransactionType, LoadLineStatus, LoadStatus, LoadType, ReceiveExpectedInventoryResult,
+    TenantAccess, Timestamp,
 };
 use wareboxes_domain::{OwnerFacilityScope, TenantId};
 
@@ -13,7 +14,7 @@ use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, ScopeBindings};
 use crate::repo::inventory_journal::{self, JournalCommand, JournalEntry};
-use crate::repo::{inventory, license_plates};
+use crate::repo::{inventory, inventory_hold, license_plates};
 use wareboxes_application::idempotency::{command_request_hash, PreparedCommand};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
@@ -48,6 +49,17 @@ pub enum ConfirmExpectedReceiptCommand<'a> {
         serial: Option<&'a str>,
         expiration: Option<Timestamp>,
     },
+    Quarantined {
+        item_barcode: &'a str,
+        receiving_location_barcode: &'a str,
+        quantity: i64,
+        license_plate_barcode: Option<&'a str>,
+        lot: Option<&'a str>,
+        serial: Option<&'a str>,
+        expiration: Option<Timestamp>,
+        reason: InboundReceiptQuarantineReason,
+        note: Option<&'a str>,
+    },
     Rejected {
         item_barcode: &'a str,
         quantity: i64,
@@ -74,6 +86,25 @@ struct ValidatedReceipt<'a> {
     expiration: Option<Timestamp>,
     exception_reason: Option<InboundReceiptExceptionReason>,
     exception_note: Option<&'a str>,
+    quarantine_reason: Option<InboundReceiptQuarantineReason>,
+}
+
+impl ValidatedReceipt<'_> {
+    fn physical_quantity(self) -> i64 {
+        if self.quarantine_reason.is_some() {
+            self.rejected_qty
+        } else {
+            self.received_qty
+        }
+    }
+
+    fn inventory_status(self) -> Option<InventoryStatus> {
+        (self.physical_quantity() > 0).then_some(if self.quarantine_reason.is_some() {
+            InventoryStatus::Quarantine
+        } else {
+            InventoryStatus::Available
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -193,6 +224,7 @@ fn validate_command<'a>(
         expiration: command.expiration,
         exception_reason: command.exception_reason,
         exception_note,
+        quarantine_reason: None,
     })
 }
 
@@ -232,6 +264,52 @@ fn validate_scanner_command<'a>(
                     expiration: *expiration,
                     exception_reason: None,
                     exception_note: None,
+                    quarantine_reason: None,
+                },
+                item_barcode: Some(required_text(item_barcode, "item barcode", 200)?),
+                receiving_location_barcode: Some(required_text(
+                    receiving_location_barcode,
+                    "receiving location barcode",
+                    200,
+                )?),
+            })
+        }
+        ConfirmExpectedReceiptCommand::Quarantined {
+            item_barcode,
+            receiving_location_barcode,
+            quantity,
+            license_plate_barcode,
+            lot,
+            serial,
+            expiration,
+            reason,
+            note,
+        } => {
+            require_positive_quantity(*quantity)?;
+            let note = validated_optional_text(*note, "exception note", 1_000)?;
+            if *reason == InboundReceiptQuarantineReason::Other && note.is_none() {
+                return Err(AppError::bad_request(
+                    "exception note is required when the quarantine reason is other",
+                ));
+            }
+            Ok(ValidatedScannerReceipt {
+                receipt: ValidatedReceipt {
+                    receiving_location_id: None,
+                    received_qty: 0,
+                    rejected_qty: *quantity,
+                    missing_qty: 0,
+                    license_plate_id: None,
+                    license_plate_barcode: validated_optional_text(
+                        *license_plate_barcode,
+                        "license plate barcode",
+                        200,
+                    )?,
+                    lot: validated_optional_text(*lot, "lot", 200)?,
+                    serial: validated_optional_text(*serial, "serial", 200)?,
+                    expiration: *expiration,
+                    exception_reason: Some(reason.exception_reason()),
+                    exception_note: note,
+                    quarantine_reason: Some(*reason),
                 },
                 item_barcode: Some(required_text(item_barcode, "item barcode", 200)?),
                 receiving_location_barcode: Some(required_text(
@@ -263,6 +341,7 @@ fn validate_scanner_command<'a>(
                     expiration: None,
                     exception_reason: Some(*reason),
                     exception_note: note,
+                    quarantine_reason: None,
                 },
                 item_barcode: Some(required_text(item_barcode, "item barcode", 200)?),
                 receiving_location_barcode: None,
@@ -289,6 +368,7 @@ fn validate_scanner_command<'a>(
                     expiration: None,
                     exception_reason: Some(*reason),
                     exception_note: note,
+                    quarantine_reason: None,
                 },
                 item_barcode: None,
                 receiving_location_barcode: None,
@@ -465,6 +545,8 @@ async fn enqueue_receipt_event(
         "item_batch_id": result.item_batch_id,
         "inventory_balance_id": result.inventory_balance_id,
         "license_plate_id": result.license_plate_id,
+        "inventory_hold_id": result.inventory_hold_id,
+        "inventory_status": result.inventory_status.as_ref().map(InventoryStatus::as_str),
         "inventory_owner_id": owner_facility.inventory_owner_id,
         "facility_id": owner_facility.facility_id,
         "receiving_location_id": receipt.receiving_location_id,
@@ -501,7 +583,9 @@ async fn enqueue_receipt_event(
 }
 
 fn receipt_disposition(receipt: &ValidatedReceipt<'_>) -> &'static str {
-    if receipt.received_qty > 0 {
+    if receipt.quarantine_reason.is_some() {
+        "quarantined"
+    } else if receipt.received_qty > 0 {
         "received"
     } else if receipt.rejected_qty > 0 {
         "rejected"
@@ -733,8 +817,11 @@ async fn execute_expected_receipt(
     let mut item_batch_id = None;
     let mut inventory_balance_id = None;
     let mut resolved_license_plate_id = None;
+    let mut inventory_hold_id = None;
+    let physical_quantity = receipt.physical_quantity();
+    let inventory_status = receipt.inventory_status();
 
-    if receipt.received_qty > 0 {
+    if physical_quantity > 0 {
         let receiving_location_id = receipt
             .receiving_location_id
             .ok_or_else(|| AppError::internal("validated receipt is missing its location"))?;
@@ -844,6 +931,8 @@ async fn execute_expected_receipt(
         )
         .await?;
         inventory_transaction_id = Some(transaction_id);
+        let status = inventory_status
+            .ok_or_else(|| AppError::internal("physical receipt is missing inventory status"))?;
 
         if let Some(license_plate_id) = resolved_license_plate_id {
             let balance_id = sqlx::query_scalar(
@@ -852,7 +941,7 @@ async fn execute_expected_receipt(
                     (tenant_id, inventory_owner_id, created, modified, facility_id,
                      location_id, license_plate_id, item_batch_id, item_id, uom,
                      status, qty_on_hand, qty_reserved)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'available', $11, 0)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 0)
                 ON CONFLICT (
                     tenant_id, inventory_owner_id, location_id, license_plate_id,
                     item_batch_id, uom, status
@@ -874,7 +963,8 @@ async fn execute_expected_receipt(
             .bind(batch_id)
             .bind(item_id)
             .bind(&uom)
-            .bind(receipt.received_qty)
+            .bind(status.as_str())
+            .bind(physical_quantity)
             .fetch_one(&mut *tx)
             .await?;
             inventory_balance_id = Some(balance_id);
@@ -885,7 +975,7 @@ async fn execute_expected_receipt(
                     (tenant_id, inventory_owner_id, created, modified, facility_id,
                      location_id, license_plate_id, item_batch_id, item_id, uom,
                      status, qty_on_hand, qty_reserved)
-                VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, 'available', $10, 0)
+                VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, $10, $11, 0)
                 ON CONFLICT (
                     tenant_id, inventory_owner_id, location_id, item_batch_id,
                     uom, status
@@ -906,7 +996,8 @@ async fn execute_expected_receipt(
             .bind(batch_id)
             .bind(item_id)
             .bind(&uom)
-            .bind(receipt.received_qty)
+            .bind(status.as_str())
+            .bind(physical_quantity)
             .fetch_one(&mut *tx)
             .await?;
             inventory_balance_id = Some(balance_id);
@@ -921,11 +1012,33 @@ async fn execute_expected_receipt(
                 location_id: receiving_location_id,
                 license_plate_id: resolved_license_plate_id,
                 item_batch_id: batch_id,
-                status: InventoryStatus::Available,
-                quantity_delta: receipt.received_qty,
+                status,
+                quantity_delta: physical_quantity,
             },
         )
         .await?;
+
+        if let Some(quarantine_reason) = receipt.quarantine_reason {
+            inventory_hold_id = Some(
+                inventory_hold::place_composed_inventory_hold_tx(
+                    &mut tx,
+                    access.tenant_id,
+                    context.actor_id.get(),
+                    now,
+                    &inventory_hold::PlaceInventoryHoldCommand {
+                        inventory_balance_id: inventory_balance_id.ok_or_else(|| {
+                            AppError::internal("physical receipt is missing inventory balance")
+                        })?,
+                        qty: physical_quantity,
+                        reason: quarantine_reason.hold_reason(),
+                        note: receipt.exception_note,
+                        reference_type: Some("expected_receipt_line"),
+                        reference_id: Some(load_line_id),
+                    },
+                )
+                .await?,
+            );
+        }
     }
 
     sqlx::query(
@@ -1003,6 +1116,8 @@ async fn execute_expected_receipt(
         "license_plate_id": resolved_license_plate_id,
         "item_batch_id": item_batch_id,
         "inventory_balance_id": inventory_balance_id,
+        "inventory_hold_id": inventory_hold_id,
+        "inventory_status": inventory_status.as_ref().map(InventoryStatus::as_str),
         "received_qty": receipt.received_qty,
         "rejected_qty": receipt.rejected_qty,
         "missing_qty": receipt.missing_qty,
@@ -1033,6 +1148,8 @@ async fn execute_expected_receipt(
         item_batch_id,
         inventory_balance_id,
         license_plate_id: resolved_license_plate_id,
+        inventory_hold_id,
+        inventory_status,
         load_status: next_load_status,
         line_status,
         cumulative_received_qty,

@@ -3,6 +3,7 @@
 //! This module owns no networking or storage. It emits typed effects that the
 //! application must resolve through its durable command and transport layers.
 
+mod command;
 mod recovery;
 mod reducer;
 mod validation;
@@ -12,6 +13,10 @@ use std::collections::HashSet;
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 
+pub use command::{
+    ConfirmationMode, ContainerCapture, ExpectedReceiptCommand, ReceiptExceptionReason,
+    ReceiptQuarantineReason,
+};
 pub use recovery::{
     ConfirmationIntent, ConfirmationRecoverySnapshot, ConfirmationRecoverySnapshotInput,
 };
@@ -620,75 +625,6 @@ impl ReceivingSession {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfirmationMode {
-    Received,
-    Rejected,
-    Missing,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContainerCapture {
-    Loose,
-    LicensePlate,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReceiptExceptionReason {
-    Damaged,
-    QualityRejected,
-    ShortShipment,
-    CountDiscrepancy,
-    WrongItem,
-    Other,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "disposition", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ExpectedReceiptCommand {
-    Received {
-        item_barcode: ItemBarcode,
-        receiving_location_barcode: DockBarcode,
-        quantity: PositiveQuantity,
-        license_plate_barcode: Option<LicensePlateBarcode>,
-        lot: Option<StockDimension>,
-        serial: Option<StockDimension>,
-        expiration: Option<Expiration>,
-    },
-    Rejected {
-        item_barcode: ItemBarcode,
-        quantity: PositiveQuantity,
-        reason: ReceiptExceptionReason,
-        note: Option<ExceptionNote>,
-    },
-    Missing {
-        quantity: PositiveQuantity,
-        reason: ReceiptExceptionReason,
-        note: Option<ExceptionNote>,
-    },
-}
-
-impl ExpectedReceiptCommand {
-    #[must_use]
-    pub const fn disposition(&self) -> ConfirmationMode {
-        match self {
-            Self::Received { .. } => ConfirmationMode::Received,
-            Self::Rejected { .. } => ConfirmationMode::Rejected,
-            Self::Missing { .. } => ConfirmationMode::Missing,
-        }
-    }
-
-    #[must_use]
-    pub const fn quantity(&self) -> PositiveQuantity {
-        match self {
-            Self::Received { quantity, .. }
-            | Self::Rejected { quantity, .. }
-            | Self::Missing { quantity, .. } => *quantity,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfirmationDraftView<'a> {
     pub mode: ConfirmationMode,
     pub selected_line_id: Option<LoadLineId>,
@@ -760,7 +696,7 @@ pub enum ReceivingEffect {
     },
     PersistConfirmation {
         confirmation_id: ConfirmationId,
-        intent: ConfirmationIntent,
+        intent: Box<ConfirmationIntent>,
     },
     RefreshSession {
         refresh_id: RefreshId,
@@ -1029,7 +965,7 @@ fn focus_for_draft(active: &ActiveSession) -> FocusTarget {
         return FocusTarget::Scanner(ScannerTarget::ItemBarcode);
     }
     match draft.mode {
-        ConfirmationMode::Received => {
+        ConfirmationMode::Received | ConfirmationMode::Quarantined => {
             if draft.dock_barcode.is_none() {
                 return FocusTarget::Scanner(ScannerTarget::DockBarcode);
             }
@@ -1046,7 +982,7 @@ fn focus_for_draft(active: &ActiveSession) -> FocusTarget {
     }
     if matches!(
         draft.mode,
-        ConfirmationMode::Rejected | ConfirmationMode::Missing
+        ConfirmationMode::Quarantined | ConfirmationMode::Rejected | ConfirmationMode::Missing
     ) {
         let Some(reason) = draft.exception_reason else {
             return FocusTarget::ExceptionReason;
@@ -1073,7 +1009,7 @@ fn guard_for_draft(active: &ActiveSession) -> ActionGuard {
         return ActionGuard::Blocked(ActionBlockReason::QuantityExceedsRemaining);
     }
     match draft.mode {
-        ConfirmationMode::Received => {
+        ConfirmationMode::Received | ConfirmationMode::Quarantined => {
             if draft.item_barcode.is_none() {
                 return ActionGuard::Blocked(ActionBlockReason::ItemScanRequired);
             }
@@ -1100,6 +1036,14 @@ fn guard_for_draft(active: &ActiveSession) -> ActionGuard {
             }
         }
     }
+    if draft.mode == ConfirmationMode::Quarantined
+        && draft
+            .exception_reason
+            .and_then(ReceiptQuarantineReason::from_exception)
+            .is_none()
+    {
+        return ActionGuard::Blocked(ActionBlockReason::ExceptionReasonRequired);
+    }
     if draft.exception_reason == Some(ReceiptExceptionReason::Other)
         && draft.exception_note.is_none()
     {
@@ -1124,6 +1068,17 @@ fn intent_for_draft(active: &ActiveSession) -> Option<ConfirmationIntent> {
             lot: draft.lot.clone(),
             serial: draft.serial.clone(),
             expiration: draft.expiration.clone(),
+        },
+        ConfirmationMode::Quarantined => ExpectedReceiptCommand::Quarantined {
+            item_barcode: draft.item_barcode.clone()?,
+            receiving_location_barcode: draft.dock_barcode.clone()?,
+            quantity,
+            license_plate_barcode: draft.license_plate_barcode.clone(),
+            lot: draft.lot.clone(),
+            serial: draft.serial.clone(),
+            expiration: draft.expiration.clone(),
+            reason: ReceiptQuarantineReason::from_exception(draft.exception_reason?)?,
+            note: draft.exception_note.clone(),
         },
         ConfirmationMode::Rejected => ExpectedReceiptCommand::Rejected {
             item_barcode: draft.item_barcode.clone()?,
