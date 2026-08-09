@@ -5654,7 +5654,6 @@ dependencies = [
  "console_error_panic_hook",
  "gloo-net",
  "leptos",
- "leptos_meta",
  "leptos_router",
  "lucide-leptos",
  "serde",

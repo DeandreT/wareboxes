@@ -1,5 +1,4 @@
 use leptos::prelude::*;
-use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::{
     components::{Route, Router, Routes, A},
     StaticSegment,
@@ -196,11 +195,27 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                     content="width=device-width, initial-scale=1, viewport-fit=cover"
                 />
                 <meta name="theme-color" content="#171b1d"/>
+                <title>"Wareboxes"</title>
                 <link rel="icon" href="/favicon.svg"/>
+                <link rel="stylesheet" href="/pkg/wareboxes-web.css"/>
+                <link rel="stylesheet" href="/holds.css"/>
+                <link rel="stylesheet" href="/presentation.css"/>
+                <link rel="stylesheet" href="/workspace-layout.css"/>
+                <link rel="stylesheet" href="/disposition.css"/>
+                <link rel="stylesheet" href="/inventory-integrity.css"/>
+                <link rel="stylesheet" href="/inventory-rollups.css"/>
+                <link rel="stylesheet" href="/fulfillment.css"/>
+                <link rel="stylesheet" href="/pick-shortages.css"/>
+                <link rel="stylesheet" href="/order-allocation.css"/>
+                <link rel="stylesheet" href="/packing.css"/>
+                <link rel="stylesheet" href="/shipping.css"/>
+                <link rel="stylesheet" href="/outbound-loads.css"/>
+                <link rel="stylesheet" href="/replenishment.css"/>
+                <link rel="stylesheet" href="/catalog.css"/>
+                <link rel="stylesheet" href="/administration.css"/>
                 <script src="/presentation-init.js"></script>
                 <AutoReload options=options.clone()/>
                 <HydrationScripts options/>
-                <MetaTags/>
             </head>
             <body>
                 <App/>
@@ -211,7 +226,6 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 
 #[component]
 pub fn App() -> impl IntoView {
-    provide_meta_context();
     provide_display_preferences();
     let initial_session = initial_web_session();
     let initial_workspace = initial_web_workspace();
@@ -235,23 +249,6 @@ pub fn App() -> impl IntoView {
             type="application/json"
             inner_html=workspace_bootstrap
         ></script>
-        <Stylesheet id="wareboxes-web" href="/pkg/wareboxes-web.css"/>
-        <Stylesheet id="wareboxes-holds" href="/holds.css"/>
-        <Stylesheet id="wareboxes-presentation" href="/presentation.css"/>
-        <Stylesheet id="wareboxes-workspace-layout" href="/workspace-layout.css"/>
-        <Stylesheet id="wareboxes-disposition" href="/disposition.css"/>
-        <Stylesheet id="wareboxes-inventory-integrity" href="/inventory-integrity.css"/>
-        <Stylesheet id="wareboxes-inventory-rollups" href="/inventory-rollups.css"/>
-        <Stylesheet id="wareboxes-fulfillment" href="/fulfillment.css"/>
-        <Stylesheet id="wareboxes-pick-shortages" href="/pick-shortages.css"/>
-        <Stylesheet id="wareboxes-order-allocation" href="/order-allocation.css"/>
-        <Stylesheet id="wareboxes-packing" href="/packing.css"/>
-        <Stylesheet id="wareboxes-shipping" href="/shipping.css"/>
-        <Stylesheet id="wareboxes-outbound-loads" href="/outbound-loads.css"/>
-        <Stylesheet id="wareboxes-replenishment" href="/replenishment.css"/>
-        <Stylesheet id="wareboxes-catalog" href="/catalog.css"/>
-        <Stylesheet id="wareboxes-administration" href="/administration.css"/>
-        <Title text="Wareboxes"/>
         <ToastProvider>
             <Router>
                 <Routes fallback=|| view! { <NotFoundPage/> }.into_any()>
