@@ -97,6 +97,11 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
             "outbound_qa_completions_tenant_isolation",
             false,
         ),
+        (
+            "outbound_qa_cancellations",
+            "outbound_qa_cancellations_tenant_isolation",
+            false,
+        ),
     ] {
         let rls: (bool, bool) = sqlx::query_as(
             "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = $1::regclass",
@@ -160,7 +165,7 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
     .unwrap();
     assert_eq!(policy_columns, (true, false));
 
-    let session_columns: (bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+    let session_columns: (bool, bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         r#"
         SELECT has_column_privilege('wareboxes_app','outbound_qa_sessions','state','UPDATE'),
                has_column_privilege('wareboxes_app','outbound_qa_sessions','revision','UPDATE'),
@@ -173,7 +178,11 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
                has_column_privilege(
                    'wareboxes_app','outbound_qa_sessions','expected_carton_count','UPDATE'),
                has_column_privilege(
-                   'wareboxes_app','outbound_qa_sessions','policy_revision','UPDATE')
+                   'wareboxes_app','outbound_qa_sessions','policy_revision','UPDATE'),
+               has_column_privilege(
+                   'wareboxes_app','outbound_qa_sessions','cancelled_by_user_id','UPDATE'),
+               has_column_privilege(
+                   'wareboxes_app','outbound_qa_sessions','cancelled_at','UPDATE')
         "#,
     )
     .fetch_one(&admin)
@@ -181,7 +190,7 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
     .unwrap();
     assert_eq!(
         session_columns,
-        (true, true, true, true, true, false, false)
+        (true, true, true, true, true, false, false, true, true)
     );
 
     for sequence_name in [
@@ -200,6 +209,7 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
         "outbound_qa_sessions_id_seq",
         "outbound_qa_carton_verifications_id_seq",
         "outbound_qa_completions_id_seq",
+        "outbound_qa_cancellations_id_seq",
     ] {
         let privileges: SequencePrivileges = sqlx::query_as(
             r#"

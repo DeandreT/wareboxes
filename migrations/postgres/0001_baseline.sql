@@ -30274,6 +30274,7 @@ BEGIN
               AND qa.inventory_owner_id = NEW.inventory_owner_id
               AND qa.facility_id = NEW.facility_id
               AND qa.packing_session_id = NEW.packing_session_id
+              AND qa.state <> 'cancelled'
        )
        OR EXISTS (
             SELECT 1 FROM public.shipments shipment
@@ -30530,6 +30531,367 @@ REVOKE ALL ON FUNCTION public.validate_carton_reopening() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_carton_reopening_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_carton_reopening_evidence() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_carton_reopening_mutation() FROM PUBLIC;
+
+-- A cancelled outbound QA attempt remains immutable while allowing corrected
+-- cartons to return to packing and begin a fresh numbered QA attempt.
+ALTER TABLE public.outbound_qa_sessions
+    ADD COLUMN attempt bigint NOT NULL DEFAULT 1,
+    ADD COLUMN cancelled_by_user_id bigint,
+    ADD COLUMN cancelled_at timestamp with time zone;
+ALTER TABLE public.outbound_qa_sessions
+    DROP CONSTRAINT outbound_qa_sessions_state_check,
+    DROP CONSTRAINT outbound_qa_sessions_state_fields_check,
+    DROP CONSTRAINT outbound_qa_sessions_policy_key;
+ALTER TABLE public.outbound_qa_sessions
+    ADD CONSTRAINT outbound_qa_sessions_state_check
+        CHECK (state IN ('open', 'passed', 'cancelled')),
+    ADD CONSTRAINT outbound_qa_sessions_attempt_check CHECK (attempt > 0),
+    ADD CONSTRAINT outbound_qa_sessions_state_fields_check CHECK (
+        (state = 'open'
+         AND passed_by_user_id IS NULL AND passed_at IS NULL
+         AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL)
+        OR (state = 'passed'
+            AND passed_by_user_id IS NOT NULL AND passed_at IS NOT NULL
+            AND passed_at >= started_at
+            AND verified_carton_count = expected_carton_count
+            AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL)
+        OR (state = 'cancelled'
+            AND cancelled_by_user_id IS NOT NULL AND cancelled_at IS NOT NULL
+            AND cancelled_at >= started_at
+            AND ((passed_by_user_id IS NULL AND passed_at IS NULL)
+                 OR (passed_by_user_id IS NOT NULL AND passed_at IS NOT NULL
+                     AND passed_at >= started_at
+                     AND verified_carton_count = expected_carton_count)))),
+    ADD CONSTRAINT outbound_qa_sessions_policy_attempt_key
+        UNIQUE (tenant_id, inventory_owner_id, facility_id,
+                packing_session_id, policy_id, attempt),
+    ADD CONSTRAINT outbound_qa_sessions_cancelled_by_fkey
+        FOREIGN KEY (tenant_id, cancelled_by_user_id)
+        REFERENCES public.tenant_memberships (tenant_id, user_id);
+CREATE UNIQUE INDEX outbound_qa_sessions_active_policy_idx
+ON public.outbound_qa_sessions
+    (tenant_id, inventory_owner_id, facility_id, packing_session_id, policy_id)
+WHERE state <> 'cancelled';
+
+CREATE TABLE public.outbound_qa_cancellations (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    outbound_qa_session_id bigint NOT NULL,
+    packing_session_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    policy_id bigint NOT NULL,
+    attempt bigint NOT NULL,
+    previous_state text NOT NULL,
+    expected_session_revision bigint NOT NULL,
+    resulting_session_revision bigint NOT NULL,
+    verified_carton_count bigint NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    cancelled_by_user_id bigint NOT NULL,
+    cancelled_at timestamp with time zone NOT NULL,
+    CONSTRAINT outbound_qa_cancellations_attempt_check CHECK (attempt > 0),
+    CONSTRAINT outbound_qa_cancellations_state_check
+        CHECK (previous_state IN ('open', 'passed')),
+    CONSTRAINT outbound_qa_cancellations_revision_check CHECK (
+        expected_session_revision > 0
+        AND resulting_session_revision = expected_session_revision + 1),
+    CONSTRAINT outbound_qa_cancellations_count_check CHECK (verified_carton_count >= 0),
+    CONSTRAINT outbound_qa_cancellations_reason_check CHECK (
+        reason_code IN ('packing_correction', 'quality_issue', 'policy_error',
+                        'operator_error', 'other')),
+    CONSTRAINT outbound_qa_cancellations_note_check CHECK (
+        note IS NULL OR (note = btrim(note) AND note <> ''
+                         AND char_length(note) <= 500)),
+    CONSTRAINT outbound_qa_cancellations_other_note_check CHECK (
+        reason_code <> 'other' OR note IS NOT NULL),
+    CONSTRAINT outbound_qa_cancellations_scope_id_key UNIQUE (
+        tenant_id, inventory_owner_id, facility_id,
+        packing_session_id, outbound_qa_session_id, id),
+    CONSTRAINT outbound_qa_cancellations_session_key UNIQUE (
+        tenant_id, inventory_owner_id, facility_id,
+        packing_session_id, outbound_qa_session_id),
+    CONSTRAINT outbound_qa_cancellations_session_fkey FOREIGN KEY (
+        tenant_id, inventory_owner_id, facility_id,
+        packing_session_id, outbound_qa_session_id)
+        REFERENCES public.outbound_qa_sessions (
+            tenant_id, inventory_owner_id, facility_id, packing_session_id, id),
+    CONSTRAINT outbound_qa_cancellations_policy_fkey FOREIGN KEY (
+        tenant_id, inventory_owner_id, facility_id, policy_id)
+        REFERENCES public.outbound_qa_policies (
+            tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT outbound_qa_cancellations_actor_fkey FOREIGN KEY (
+        tenant_id, cancelled_by_user_id)
+        REFERENCES public.tenant_memberships (tenant_id, user_id)
+);
+ALTER TABLE public.outbound_qa_cancellations FORCE ROW LEVEL SECURITY;
+CREATE INDEX outbound_qa_cancellations_order_idx
+ON public.outbound_qa_cancellations (tenant_id, order_id, id);
+
+CREATE OR REPLACE FUNCTION public.validate_outbound_qa_session() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE valid boolean;
+DECLARE expected_attempt bigint;
+BEGIN
+    SELECT policy.requirement = 'scan_every_carton'
+           AND policy.revision = NEW.policy_revision
+           AND policy.effective_to IS NULL
+           AND packing.state = 'ready_to_manifest'
+           AND packing.revision = NEW.expected_order_revision
+           AND packing.closed_carton_count = NEW.expected_carton_count
+           AND orders.status = 'awaiting shipment'
+           AND orders.revision = NEW.expected_order_revision
+    INTO valid
+    FROM public.outbound_qa_policies policy
+    JOIN public.packing_sessions packing
+      ON packing.tenant_id = policy.tenant_id
+     AND packing.inventory_owner_id = policy.inventory_owner_id
+     AND packing.facility_id = policy.facility_id
+     AND packing.id = NEW.packing_session_id
+     AND packing.order_id = NEW.order_id
+    JOIN public.orders orders
+      ON orders.tenant_id = packing.tenant_id
+     AND orders.inventory_owner_id = packing.inventory_owner_id
+     AND orders.id = packing.order_id AND orders.deleted IS NULL
+    WHERE policy.tenant_id = NEW.tenant_id
+      AND policy.inventory_owner_id = NEW.inventory_owner_id
+      AND policy.facility_id = NEW.facility_id
+      AND policy.id = NEW.policy_id
+    FOR SHARE OF policy, packing, orders;
+
+    SELECT COALESCE(MAX(session.attempt), 0) + 1 INTO expected_attempt
+    FROM public.outbound_qa_sessions session
+    WHERE session.tenant_id = NEW.tenant_id
+      AND session.inventory_owner_id = NEW.inventory_owner_id
+      AND session.facility_id = NEW.facility_id
+      AND session.packing_session_id = NEW.packing_session_id
+      AND session.policy_id = NEW.policy_id;
+
+    IF valid IS DISTINCT FROM TRUE OR NEW.state <> 'open' OR NEW.revision <> 1
+       OR NEW.verified_carton_count <> 0 OR NEW.attempt <> expected_attempt
+       OR NEW.cancelled_by_user_id IS NOT NULL OR NEW.cancelled_at IS NOT NULL
+       OR EXISTS (
+           SELECT 1 FROM public.outbound_qa_sessions session
+           WHERE session.tenant_id = NEW.tenant_id
+             AND session.inventory_owner_id = NEW.inventory_owner_id
+             AND session.facility_id = NEW.facility_id
+             AND session.packing_session_id = NEW.packing_session_id
+             AND session.policy_id = NEW.policy_id
+             AND session.state <> 'cancelled')
+    THEN
+        RAISE EXCEPTION 'outbound QA session is not executable' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_outbound_qa_cancellation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE source record;
+BEGIN
+    SELECT session.state, session.revision, session.attempt,
+           session.policy_id, session.verified_carton_count,
+           session.started_at, session.passed_at,
+           packing.state AS packing_state,
+           orders.status AS order_status
+    INTO source
+    FROM public.outbound_qa_sessions session
+    JOIN public.packing_sessions packing
+      ON packing.tenant_id = session.tenant_id
+     AND packing.inventory_owner_id = session.inventory_owner_id
+     AND packing.facility_id = session.facility_id
+     AND packing.id = session.packing_session_id
+     AND packing.order_id = session.order_id
+    JOIN public.orders orders
+      ON orders.tenant_id = session.tenant_id
+     AND orders.inventory_owner_id = session.inventory_owner_id
+     AND orders.id = session.order_id AND orders.deleted IS NULL
+    WHERE session.tenant_id = NEW.tenant_id
+      AND session.inventory_owner_id = NEW.inventory_owner_id
+      AND session.facility_id = NEW.facility_id
+      AND session.packing_session_id = NEW.packing_session_id
+      AND session.order_id = NEW.order_id
+      AND session.id = NEW.outbound_qa_session_id
+    FOR SHARE OF session, packing, orders;
+
+    IF NOT FOUND OR source.state NOT IN ('open', 'passed')
+       OR source.revision <> NEW.expected_session_revision
+       OR NEW.resulting_session_revision <> source.revision + 1
+       OR NEW.previous_state <> source.state
+       OR NEW.attempt <> source.attempt
+       OR NEW.policy_id <> source.policy_id
+       OR NEW.verified_carton_count <> source.verified_carton_count
+       OR source.packing_state <> 'ready_to_manifest'
+       OR source.order_status <> 'awaiting shipment'
+       OR NEW.cancelled_at < source.started_at
+       OR (source.passed_at IS NOT NULL AND NEW.cancelled_at < source.passed_at)
+       OR EXISTS (
+           SELECT 1 FROM public.shipments shipment
+           WHERE shipment.tenant_id = NEW.tenant_id
+             AND shipment.inventory_owner_id = NEW.inventory_owner_id
+             AND shipment.facility_id = NEW.facility_id
+             AND shipment.packing_session_id = NEW.packing_session_id)
+    THEN
+        RAISE EXCEPTION 'outbound QA cancellation is not executable' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.guard_outbound_qa_session_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' OR OLD.state = 'cancelled'
+       OR ROW(NEW.id, NEW.tenant_id, NEW.inventory_owner_id, NEW.facility_id,
+              NEW.packing_session_id, NEW.order_id, NEW.policy_id, NEW.policy_revision,
+              NEW.attempt, NEW.expected_order_revision, NEW.expected_carton_count,
+              NEW.started_by_user_id, NEW.started_at)
+          IS DISTINCT FROM
+          ROW(OLD.id, OLD.tenant_id, OLD.inventory_owner_id, OLD.facility_id,
+              OLD.packing_session_id, OLD.order_id, OLD.policy_id, OLD.policy_revision,
+              OLD.attempt, OLD.expected_order_revision, OLD.expected_carton_count,
+              OLD.started_by_user_id, OLD.started_at)
+       OR NEW.revision <> OLD.revision + 1
+    THEN
+        RAISE EXCEPTION 'outbound QA session mutation is invalid' USING ERRCODE = '55000';
+    END IF;
+    IF NEW.state = 'open' AND OLD.state = 'open' THEN
+        IF NEW.verified_carton_count <> OLD.verified_carton_count + 1
+           OR NEW.cancelled_by_user_id IS NOT NULL OR NEW.cancelled_at IS NOT NULL
+           OR NOT EXISTS (
+               SELECT 1 FROM public.outbound_qa_carton_verifications verification
+               WHERE verification.tenant_id = OLD.tenant_id
+                 AND verification.outbound_qa_session_id = OLD.id
+                 AND verification.expected_session_revision = OLD.revision
+                 AND verification.resulting_session_revision = NEW.revision)
+        THEN
+            RAISE EXCEPTION 'outbound QA carton progress lacks evidence' USING ERRCODE = '23514';
+        END IF;
+    ELSIF NEW.state = 'passed' AND OLD.state = 'open' THEN
+        IF NEW.verified_carton_count <> OLD.verified_carton_count
+           OR NEW.verified_carton_count <> NEW.expected_carton_count
+           OR NEW.passed_by_user_id IS NULL OR NEW.passed_at IS NULL
+           OR NEW.cancelled_by_user_id IS NOT NULL OR NEW.cancelled_at IS NOT NULL
+           OR NOT EXISTS (
+               SELECT 1 FROM public.outbound_qa_completions completion
+               WHERE completion.tenant_id = OLD.tenant_id
+                 AND completion.outbound_qa_session_id = OLD.id
+                 AND completion.expected_session_revision = OLD.revision
+                 AND completion.resulting_session_revision = NEW.revision
+                 AND completion.completed_by_user_id = NEW.passed_by_user_id
+                 AND completion.completed_at = NEW.passed_at)
+        THEN
+            RAISE EXCEPTION 'outbound QA completion lacks evidence' USING ERRCODE = '23514';
+        END IF;
+    ELSIF NEW.state = 'cancelled' AND OLD.state IN ('open', 'passed') THEN
+        IF NEW.verified_carton_count <> OLD.verified_carton_count
+           OR NEW.passed_by_user_id IS DISTINCT FROM OLD.passed_by_user_id
+           OR NEW.passed_at IS DISTINCT FROM OLD.passed_at
+           OR NEW.cancelled_by_user_id IS NULL OR NEW.cancelled_at IS NULL
+           OR NOT EXISTS (
+               SELECT 1 FROM public.outbound_qa_cancellations cancellation
+               WHERE cancellation.tenant_id = OLD.tenant_id
+                 AND cancellation.outbound_qa_session_id = OLD.id
+                 AND cancellation.previous_state = OLD.state
+                 AND cancellation.expected_session_revision = OLD.revision
+                 AND cancellation.resulting_session_revision = NEW.revision
+                 AND cancellation.cancelled_by_user_id = NEW.cancelled_by_user_id
+                 AND cancellation.cancelled_at = NEW.cancelled_at)
+        THEN
+            RAISE EXCEPTION 'outbound QA cancellation lacks evidence' USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'outbound QA session transition is invalid' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.require_outbound_qa_session_consistency() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE session_id_value bigint;
+DECLARE session_row public.outbound_qa_sessions%ROWTYPE;
+DECLARE verification_count bigint;
+BEGIN
+    IF TG_TABLE_NAME = 'outbound_qa_sessions' THEN
+        session_id_value := NEW.id;
+    ELSE
+        session_id_value := NEW.outbound_qa_session_id;
+    END IF;
+    SELECT * INTO session_row FROM public.outbound_qa_sessions
+    WHERE tenant_id = NEW.tenant_id AND id = session_id_value;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'outbound QA session is missing' USING ERRCODE = '23514';
+    END IF;
+    SELECT COUNT(*)::bigint INTO verification_count
+    FROM public.outbound_qa_carton_verifications
+    WHERE tenant_id = session_row.tenant_id
+      AND outbound_qa_session_id = session_row.id;
+    IF verification_count <> session_row.verified_carton_count
+       OR verification_count > session_row.expected_carton_count
+       OR (session_row.state = 'passed' AND (
+           verification_count <> session_row.expected_carton_count OR NOT EXISTS (
+               SELECT 1 FROM public.outbound_qa_completions completion
+               WHERE completion.tenant_id = session_row.tenant_id
+                 AND completion.outbound_qa_session_id = session_row.id
+                 AND completion.resulting_session_revision = session_row.revision
+                 AND completion.carton_count = session_row.expected_carton_count)))
+       OR (session_row.state = 'cancelled' AND NOT EXISTS (
+           SELECT 1 FROM public.outbound_qa_cancellations cancellation
+           WHERE cancellation.tenant_id = session_row.tenant_id
+             AND cancellation.outbound_qa_session_id = session_row.id
+             AND cancellation.resulting_session_revision = session_row.revision
+             AND cancellation.attempt = session_row.attempt
+             AND cancellation.verified_carton_count = verification_count
+             AND cancellation.cancelled_by_user_id = session_row.cancelled_by_user_id
+             AND cancellation.cancelled_at = session_row.cancelled_at))
+    THEN
+        RAISE EXCEPTION 'outbound QA session evidence does not reconcile' USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.reject_outbound_qa_cancellation_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    RAISE EXCEPTION 'outbound QA cancellations are immutable' USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER outbound_qa_cancellations_validate
+BEFORE INSERT ON public.outbound_qa_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.validate_outbound_qa_cancellation();
+CREATE TRIGGER outbound_qa_cancellations_are_immutable
+BEFORE UPDATE OR DELETE ON public.outbound_qa_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.reject_outbound_qa_cancellation_mutation();
+CREATE CONSTRAINT TRIGGER outbound_qa_cancellations_require_consistency
+AFTER INSERT ON public.outbound_qa_cancellations DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_outbound_qa_session_consistency();
+
+ALTER TABLE public.outbound_qa_cancellations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY outbound_qa_cancellations_tenant_isolation
+ON public.outbound_qa_cancellations
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT, INSERT ON public.outbound_qa_cancellations TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.outbound_qa_cancellations_id_seq TO wareboxes_app;
+GRANT UPDATE (state, revision, cancelled_by_user_id, cancelled_at)
+ON public.outbound_qa_sessions TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_outbound_qa_cancellation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_outbound_qa_cancellation_mutation() FROM PUBLIC;
 
 -- PostgreSQL database dump complete
 --

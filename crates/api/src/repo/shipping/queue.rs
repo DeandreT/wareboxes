@@ -133,12 +133,14 @@ pub async fn shipping_queue(
                qa_policy.configured_at AS qa_configured_at,
                qa_session.id AS qa_session_id,
                qa_session.policy_revision AS qa_session_policy_revision,
+               qa_session.attempt AS qa_session_attempt,
                qa_session.state AS qa_session_state,
                qa_session.revision AS qa_session_revision,
                qa_session.expected_carton_count AS qa_expected_carton_count,
                qa_session.verified_carton_count AS qa_verified_carton_count,
                qa_session.started_at AS qa_started_at,
                qa_session.passed_at AS qa_passed_at,
+               qa_session.cancelled_at AS qa_cancelled_at,
                shipment.id AS shipment_id,
                shipment.state AS shipment_state,
                shipment.revision AS shipment_revision,
@@ -183,6 +185,7 @@ pub async fn shipping_queue(
          AND qa_session.facility_id = session.facility_id
          AND qa_session.packing_session_id = session.id
          AND qa_session.policy_id = qa_policy.id
+         AND qa_session.state <> 'cancelled'
         LEFT JOIN shipments shipment
           ON shipment.tenant_id = session.tenant_id
          AND shipment.inventory_owner_id = session.inventory_owner_id
@@ -376,12 +379,14 @@ fn entry_from_row(row: sqlx::postgres::PgRow) -> AppResult<ShippingQueueEntry> {
                     "qa_session_policy_revision",
                 )?)
                 .map_err(|error| AppError::internal(error.to_string()))?,
+                attempt: required(&row, "qa_session_attempt")?,
                 status,
                 revision: OutboundQaSessionRevision::new(required(&row, "qa_session_revision")?)
                     .map_err(|error| AppError::internal(error.to_string()))?,
                 progress,
                 started_at: required(&row, "qa_started_at")?,
                 passed_at,
+                cancelled_at: row.try_get("qa_cancelled_at")?,
             })
         })
         .transpose()?;

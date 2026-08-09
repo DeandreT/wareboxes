@@ -183,6 +183,10 @@ pub fn router() -> Router<AppState> {
             post(outbound_qa::complete),
         )
         .route(
+            "/outbound-qa-sessions/{session_id}/cancellations",
+            post(outbound_qa::cancel),
+        )
+        .route(
             "/outbound-loads",
             get(outbound_loads::list).post(outbound_loads::plan),
         )

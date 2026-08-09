@@ -4,6 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use super::Revision;
 
 const MAX_SCAN_LENGTH: usize = 200;
+const MAX_CANCELLATION_NOTE_LENGTH: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -17,6 +18,17 @@ pub enum OutboundQaRequirement {
 pub enum OutboundQaSessionStatus {
     Open,
     Passed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboundQaCancellationReason {
+    PackingCorrection,
+    QualityIssue,
+    PolicyError,
+    OperatorError,
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +97,49 @@ pub struct CompleteOutboundQaRequest {
     pub expected_revision: Revision,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CancelOutboundQaRequest {
+    pub expected_revision: Revision,
+    pub reason: OutboundQaCancellationReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CancelOutboundQaRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            expected_revision: Revision,
+            reason: OutboundQaCancellationReason,
+            #[serde(default)]
+            note: Option<String>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.note.as_ref().is_some_and(|note| {
+            note.is_empty()
+                || note.trim() != note
+                || note.chars().count() > MAX_CANCELLATION_NOTE_LENGTH
+                || note.chars().any(char::is_control)
+        }) {
+            return Err(D::Error::custom("outbound QA cancellation note is invalid"));
+        }
+        if raw.reason == OutboundQaCancellationReason::Other && raw.note.is_none() {
+            return Err(D::Error::custom(
+                "outbound QA cancellation reason Other requires a note",
+            ));
+        }
+        Ok(Self {
+            expected_revision: raw.expected_revision,
+            reason: raw.reason,
+            note: raw.note,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutboundQaProgressResponse {
@@ -98,11 +153,24 @@ pub struct OutboundQaSessionSummaryResponse {
     pub session_id: i64,
     pub policy_id: i64,
     pub policy_revision: Revision,
+    pub attempt: i64,
     pub status: OutboundQaSessionStatus,
     pub revision: Revision,
     pub progress: OutboundQaProgressResponse,
     pub started_at: String,
     pub passed_at: Option<String>,
+    pub cancelled_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutboundQaCancellationResponse {
+    pub cancellation_id: i64,
+    pub previous_status: OutboundQaSessionStatus,
+    pub reason: OutboundQaCancellationReason,
+    pub note: Option<String>,
+    pub cancelled_by: i64,
+    pub cancelled_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +197,7 @@ pub struct OutboundQaSessionResponse {
     pub facility_id: i64,
     pub policy_id: i64,
     pub policy_revision: Revision,
+    pub attempt: i64,
     pub status: OutboundQaSessionStatus,
     pub revision: Revision,
     pub progress: OutboundQaProgressResponse,
@@ -136,6 +205,7 @@ pub struct OutboundQaSessionResponse {
     pub started_at: String,
     pub passed_by: Option<i64>,
     pub passed_at: Option<String>,
+    pub cancellation: Option<OutboundQaCancellationResponse>,
     pub verifications: Vec<OutboundQaCartonResponse>,
 }
 
@@ -171,5 +241,16 @@ mod tests {
             }))
             .is_err()
         );
+        assert!(serde_json::from_value::<CancelOutboundQaRequest>(json!({
+            "expected_revision": 2,
+            "reason": "other"
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<CancelOutboundQaRequest>(json!({
+            "expected_revision": 2,
+            "reason": "packing_correction",
+            "unknown": true
+        }))
+        .is_err());
     }
 }

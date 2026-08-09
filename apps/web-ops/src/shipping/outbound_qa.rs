@@ -1,9 +1,9 @@
 use leptos::{html, prelude::*};
 use wareboxes_api_contract::v1::{
-    CompleteOutboundQaRequest, ConfigureOutboundQaPolicyRequest, OutboundQaPolicyResponse,
-    OutboundQaRequirement, OutboundQaSessionResponse, OutboundQaSessionStatus,
-    OutboundQaSessionSummaryResponse, ShippingQueueEntryResponse, StartOutboundQaRequest,
-    VerifyOutboundQaCartonRequest,
+    CancelOutboundQaRequest, CompleteOutboundQaRequest, ConfigureOutboundQaPolicyRequest,
+    OutboundQaCancellationReason, OutboundQaPolicyResponse, OutboundQaRequirement,
+    OutboundQaSessionResponse, OutboundQaSessionStatus, OutboundQaSessionSummaryResponse,
+    ShippingQueueEntryResponse, StartOutboundQaRequest, VerifyOutboundQaCartonRequest,
 };
 
 use crate::api;
@@ -28,6 +28,11 @@ enum PendingQaCommand {
     Complete {
         session_id: i64,
         request: CompleteOutboundQaRequest,
+        idempotency_key: String,
+    },
+    Cancel {
+        session_id: i64,
+        request: CancelOutboundQaRequest,
         idempotency_key: String,
     },
 }
@@ -84,9 +89,14 @@ pub(super) fn OutboundQaReadiness(
             }),
     );
     let scan_value = RwSignal::new(String::new());
+    let cancel_open = RwSignal::new(false);
+    let cancel_reason = RwSignal::new(OutboundQaCancellationReason::PackingCorrection);
+    let cancel_note = RwSignal::new(String::new());
+    let cancel_error = RwSignal::<Option<String>>::new(None);
     let retry = RwSignal::<Option<PendingQaCommand>>::new(None);
     let status = RwSignal::<Option<(bool, String)>>::new(None);
     let scan_input = NodeRef::<html::Input>::new();
+    let cancel_reason_input = NodeRef::<html::Select>::new();
     let blocked = Signal::derive(move || pending.get() || retry.get().is_some());
 
     #[cfg(target_arch = "wasm32")]
@@ -110,6 +120,15 @@ pub(super) fn OutboundQaReadiness(
 
     #[cfg(target_arch = "wasm32")]
     Effect::new(move |_| {
+        if cancel_open.get() {
+            if let Some(input) = cancel_reason_input.get() {
+                let _ = input.focus();
+            }
+        }
+    });
+
+    #[cfg(target_arch = "wasm32")]
+    Effect::new(move |_| {
         if qa_required(current_policy.get().as_ref())
             && qa_session_open(current_session.get().as_ref())
         {
@@ -128,6 +147,7 @@ pub(super) fn OutboundQaReadiness(
         let replay = command.clone();
         leptos::task::spawn_local(async move {
             let result = execute(command).await;
+            let was_cancel = matches!(&replay, PendingQaCommand::Cancel { .. });
             pending.set(false);
             match result {
                 Ok(QaCommandResult::Policy(policy)) => {
@@ -141,23 +161,35 @@ pub(super) fn OutboundQaReadiness(
                 Ok(QaCommandResult::Session(session)) => {
                     retry.set(None);
                     scan_value.set(String::new());
+                    cancel_error.set(None);
+                    cancel_open.set(false);
                     status.set(Some((
                         false,
-                        if session.status == OutboundQaSessionStatus::Passed {
-                            "Every carton passed outbound QA.".to_owned()
-                        } else {
-                            format!(
+                        match session.status {
+                            OutboundQaSessionStatus::Passed => {
+                                "Every carton passed outbound QA.".to_owned()
+                            }
+                            OutboundQaSessionStatus::Cancelled => {
+                                "Outbound QA cancelled. Packing recovery is available.".to_owned()
+                            }
+                            OutboundQaSessionStatus::Open => format!(
                                 "{} of {} cartons verified.",
                                 session.progress.verified_carton_count,
                                 session.progress.expected_carton_count,
-                            )
+                            ),
                         },
                     )));
-                    current_session.set(Some(session_summary(&session)));
+                    current_session.set(
+                        (session.status != OutboundQaSessionStatus::Cancelled)
+                            .then(|| session_summary(&session)),
+                    );
                     on_session.run(session);
                 }
                 Err(error) if error.unauthorized => on_unauthorized.run(()),
                 Err(error) if error.ambiguous_outcome => {
+                    if was_cancel {
+                        cancel_open.set(false);
+                    }
                     retry.set(Some(replay));
                     status.set(Some((
                         true,
@@ -166,6 +198,9 @@ pub(super) fn OutboundQaReadiness(
                 }
                 Err(error) => {
                     retry.set(None);
+                    if was_cancel {
+                        cancel_error.set(Some(error.message.clone()));
+                    }
                     status.set(Some((true, error.message)));
                     on_refresh.run(());
                 }
@@ -221,6 +256,28 @@ pub(super) fn OutboundQaReadiness(
                 idempotency_key: api::new_idempotency_key(),
             });
         }
+    });
+    let cancel = Callback::new(move |_| {
+        let Some(session) = current_session.get_untracked() else {
+            return;
+        };
+        let note = cancel_note.get_untracked().trim().to_owned();
+        if cancel_reason.get_untracked() == OutboundQaCancellationReason::Other && note.is_empty() {
+            cancel_error.set(Some(
+                "A note is required when the cancellation reason is Other.".to_owned(),
+            ));
+            return;
+        }
+        cancel_error.set(None);
+        dispatch.run(PendingQaCommand::Cancel {
+            session_id: session.session_id,
+            request: CancelOutboundQaRequest {
+                expected_revision: session.revision,
+                reason: cancel_reason.get_untracked(),
+                note: (!note.is_empty()).then_some(note),
+            },
+            idempotency_key: api::new_idempotency_key(),
+        });
     });
     let retry_exact = Callback::new(move |_| {
         if let Some(command) = retry.get_untracked() {
@@ -312,6 +369,31 @@ pub(super) fn OutboundQaReadiness(
                     {move || if current_policy.get().is_some() { "Change policy" } else { "Set policy" }}
                 </button>
             </Show>
+            <Show when=move || {
+                can_configure
+                    && current_session.get().is_some_and(|session| {
+                        matches!(
+                            session.status,
+                            OutboundQaSessionStatus::Open | OutboundQaSessionStatus::Passed
+                        )
+                    })
+            }>
+                <button
+                    type="button"
+                    class="button secondary-action shipping-qa-cancel"
+                    disabled=move || blocked.get()
+                    on:click=move |_| {
+                        cancel_reason.set(OutboundQaCancellationReason::PackingCorrection);
+                        cancel_note.set(String::new());
+                        cancel_error.set(None);
+                        status.set(None);
+                        cancel_open.set(true);
+                    }
+                >
+                    <Icon icon=UiIcon::Reverse/>
+                    "Cancel QA"
+                </button>
+            </Show>
             <Show when=move || status.get().is_some()>
                 <p class:error=move || status.get().is_some_and(|status| status.0) role=move || status.get().is_some_and(|status| status.0).then_some("alert")>
                     {move || status.get().map(|status| status.1).unwrap_or_default()}
@@ -319,6 +401,85 @@ pub(super) fn OutboundQaReadiness(
             </Show>
             <Show when=move || retry.get().is_some()>
                 <button type="button" class="button secondary-action" disabled=move || pending.get() on:click=move |_| retry_exact.run(())>"Retry exact command"</button>
+            </Show>
+            <Show when=move || cancel_open.get()>
+                <div class="shipping-qa-dialog-backdrop">
+                    <section
+                        class="shipping-qa-dialog"
+                        role="alertdialog"
+                        aria-modal="true"
+                        aria-labelledby="shipping-qa-cancel-title"
+                    >
+                        <header>
+                            <div>
+                                <span class="eyebrow">"Supervisor recovery"</span>
+                                <h2 id="shipping-qa-cancel-title">"Cancel outbound QA"</h2>
+                            </div>
+                            <button
+                                type="button"
+                                class="icon-button"
+                                aria-label="Close QA cancellation"
+                                disabled=move || pending.get()
+                                on:click=move |_| cancel_open.set(false)
+                            ><Icon icon=UiIcon::Close/></button>
+                        </header>
+                        <p>
+                            "Verified cartons remain in immutable history. Cancelling this attempt permits carton recovery or a fresh QA attempt before shipment creation."
+                        </p>
+                        <label>
+                            <span>"Reason"</span>
+                            <select
+                                node_ref=cancel_reason_input
+                                prop:value=move || cancellation_reason_wire(cancel_reason.get())
+                                on:change=move |event| {
+                                    cancel_reason.set(cancellation_reason_from_wire(
+                                        &event_target_value(&event),
+                                    ));
+                                    cancel_error.set(None);
+                                }
+                                disabled=move || pending.get()
+                            >
+                                <option value="packing_correction">"Packing correction"</option>
+                                <option value="quality_issue">"Quality issue"</option>
+                                <option value="policy_error">"Policy error"</option>
+                                <option value="operator_error">"Operator error"</option>
+                                <option value="other">"Other"</option>
+                            </select>
+                        </label>
+                        <label>
+                            <span>"Note"</span>
+                            <textarea
+                                maxlength="500"
+                                placeholder="Required for Other"
+                                prop:value=move || cancel_note.get()
+                                on:input=move |event| {
+                                    cancel_note.set(event_target_value(&event));
+                                    cancel_error.set(None);
+                                }
+                                disabled=move || pending.get()
+                            ></textarea>
+                        </label>
+                        <Show when=move || cancel_error.get().is_some()>
+                            <p class="error" role="alert">
+                                {move || cancel_error.get().unwrap_or_default()}
+                            </p>
+                        </Show>
+                        <footer>
+                            <button
+                                type="button"
+                                class="button secondary-action"
+                                disabled=move || pending.get()
+                                on:click=move |_| cancel_open.set(false)
+                            >"Keep QA active"</button>
+                            <button
+                                type="button"
+                                class="button danger-action"
+                                disabled=move || pending.get()
+                                on:click=move |_| cancel.run(())
+                            ><Icon icon=UiIcon::Reverse/>"Cancel QA attempt"</button>
+                        </footer>
+                    </section>
+                </div>
             </Show>
         </div>
     }
@@ -329,11 +490,16 @@ fn session_summary(session: &OutboundQaSessionResponse) -> OutboundQaSessionSumm
         session_id: session.session_id,
         policy_id: session.policy_id,
         policy_revision: session.policy_revision,
+        attempt: session.attempt,
         status: session.status,
         revision: session.revision,
         progress: session.progress,
         started_at: session.started_at.clone(),
         passed_at: session.passed_at.clone(),
+        cancelled_at: session
+            .cancellation
+            .as_ref()
+            .map(|cancellation| cancellation.cancelled_at.clone()),
     }
 }
 
@@ -437,6 +603,17 @@ async fn execute(command: PendingQaCommand) -> Result<QaCommandResult, api::ApiE
         )
         .await
         .map(QaCommandResult::Session),
+        PendingQaCommand::Cancel {
+            session_id,
+            request,
+            idempotency_key,
+        } => api::internal_post_idempotent(
+            &format!("/api/v1/outbound-qa-sessions/{session_id}/cancellations"),
+            &request,
+            &idempotency_key,
+        )
+        .await
+        .map(QaCommandResult::Session),
     }
 }
 
@@ -453,6 +630,27 @@ fn qa_pending_label(command: &PendingQaCommand) -> &'static str {
         PendingQaCommand::Start { .. } => "Starting outbound QA...",
         PendingQaCommand::Verify { .. } => "Verifying carton...",
         PendingQaCommand::Complete { .. } => "Passing outbound QA...",
+        PendingQaCommand::Cancel { .. } => "Cancelling outbound QA...",
+    }
+}
+
+const fn cancellation_reason_wire(reason: OutboundQaCancellationReason) -> &'static str {
+    match reason {
+        OutboundQaCancellationReason::PackingCorrection => "packing_correction",
+        OutboundQaCancellationReason::QualityIssue => "quality_issue",
+        OutboundQaCancellationReason::PolicyError => "policy_error",
+        OutboundQaCancellationReason::OperatorError => "operator_error",
+        OutboundQaCancellationReason::Other => "other",
+    }
+}
+
+fn cancellation_reason_from_wire(value: &str) -> OutboundQaCancellationReason {
+    match value {
+        "quality_issue" => OutboundQaCancellationReason::QualityIssue,
+        "policy_error" => OutboundQaCancellationReason::PolicyError,
+        "operator_error" => OutboundQaCancellationReason::OperatorError,
+        "other" => OutboundQaCancellationReason::Other,
+        _ => OutboundQaCancellationReason::PackingCorrection,
     }
 }
 
@@ -494,6 +692,7 @@ mod tests {
                 session_id: 7,
                 policy_id: 5,
                 policy_revision: Revision::new(1).unwrap(),
+                attempt: 1,
                 status,
                 revision: Revision::new(4).unwrap(),
                 progress: OutboundQaProgressResponse {
@@ -506,6 +705,8 @@ mod tests {
                 },
                 started_at: "2026-08-08T00:00:00Z".into(),
                 passed_at: (status == OutboundQaSessionStatus::Passed)
+                    .then(|| "2026-08-08T00:01:00Z".into()),
+                cancelled_at: (status == OutboundQaSessionStatus::Cancelled)
                     .then(|| "2026-08-08T00:01:00Z".into()),
             }),
             shipment: None,
@@ -527,6 +728,16 @@ mod tests {
             Some(OutboundQaRequirement::ScanEveryCarton),
             Some(OutboundQaSessionStatus::Passed)
         )));
+        assert!(!outbound_qa_ready(&entry(
+            Some(OutboundQaRequirement::ScanEveryCarton),
+            Some(OutboundQaSessionStatus::Cancelled)
+        )));
+        assert_eq!(
+            cancellation_reason_from_wire(cancellation_reason_wire(
+                OutboundQaCancellationReason::PolicyError
+            )),
+            OutboundQaCancellationReason::PolicyError
+        );
     }
 
     #[test]
@@ -539,6 +750,7 @@ mod tests {
             facility_id: 3,
             policy_id: 5,
             policy_revision: Revision::new(1).unwrap(),
+            attempt: 1,
             status: OutboundQaSessionStatus::Open,
             revision: Revision::new(3).unwrap(),
             progress: OutboundQaProgressResponse {
@@ -549,6 +761,7 @@ mod tests {
             started_at: "2026-08-08T00:00:00Z".into(),
             passed_by: None,
             passed_at: None,
+            cancellation: None,
             verifications: Vec::new(),
         };
 

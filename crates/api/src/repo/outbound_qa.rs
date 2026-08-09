@@ -4,16 +4,18 @@ mod policy;
 mod session;
 
 pub use policy::configure_policy;
-pub use session::{complete, get_session, start, verify_carton};
+pub use session::{cancel, complete, get_session, start, verify_carton};
 
 use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_application::outbound_qa::{
-    OutboundQaCartonVerificationReadModel, OutboundQaSessionReadModel,
+    OutboundQaCancellationReadModel, OutboundQaCartonVerificationReadModel,
+    OutboundQaSessionReadModel,
 };
 use wareboxes_application::outbox::NewOutboxEvent;
 use wareboxes_domain::{
-    CartonId, FacilityId, InventoryOwnerId, LicensePlateId, OrderId,
+    CartonId, FacilityId, InventoryOwnerId, LicensePlateId, OrderId, OutboundQaCancellationDetails,
+    OutboundQaCancellationId, OutboundQaCancellationNote, OutboundQaCancellationReason,
     OutboundQaCartonVerificationId, OutboundQaPolicyId, OutboundQaPolicyRevision,
     OutboundQaProgress, OutboundQaRequirement, OutboundQaScanValue, OutboundQaSessionId,
     OutboundQaSessionRevision, OutboundQaSessionStatus, PackSessionId, TenantId, Timestamp, UserId,
@@ -116,11 +118,26 @@ pub(crate) async fn load_session_tx(
 ) -> AppResult<OutboundQaSessionReadModel> {
     let row = sqlx::query(
         r#"
-        SELECT id, packing_session_id, order_id, inventory_owner_id, facility_id,
-               policy_id, policy_revision, state, revision, expected_carton_count,
-               verified_carton_count, started_by_user_id, started_at,
-               passed_by_user_id, passed_at
-        FROM outbound_qa_sessions WHERE tenant_id=$1 AND id=$2
+        SELECT session.id, session.packing_session_id, session.order_id,
+               session.inventory_owner_id, session.facility_id,
+               session.policy_id, session.policy_revision, session.attempt,
+               session.state, session.revision, session.expected_carton_count,
+               session.verified_carton_count, session.started_by_user_id,
+               session.started_at, session.passed_by_user_id, session.passed_at,
+               cancellation.id AS cancellation_id,
+               cancellation.previous_state AS cancellation_previous_state,
+               cancellation.reason_code AS cancellation_reason_code,
+               cancellation.note AS cancellation_note,
+               cancellation.cancelled_by_user_id,
+               cancellation.cancelled_at
+        FROM outbound_qa_sessions session
+        LEFT JOIN outbound_qa_cancellations cancellation
+          ON cancellation.tenant_id=session.tenant_id
+         AND cancellation.inventory_owner_id=session.inventory_owner_id
+         AND cancellation.facility_id=session.facility_id
+         AND cancellation.packing_session_id=session.packing_session_id
+         AND cancellation.outbound_qa_session_id=session.id
+        WHERE session.tenant_id=$1 AND session.id=$2
         "#,
     )
     .bind(tenant_id.get())
@@ -168,6 +185,30 @@ pub(crate) async fn load_session_tx(
             "outbound QA verification projection is inconsistent",
         ));
     }
+    let cancellation_id: Option<i64> = row.try_get("cancellation_id")?;
+    let cancellation = cancellation_id
+        .map(|cancellation_id| {
+            let previous_state: String = required_text(&row, "cancellation_previous_state")?;
+            let reason: String = required_text(&row, "cancellation_reason_code")?;
+            let note = row
+                .try_get::<Option<String>, _>("cancellation_note")?
+                .map(OutboundQaCancellationNote::new)
+                .transpose()
+                .map_err(|error| AppError::internal(error.to_string()))?;
+            Ok::<_, AppError>(OutboundQaCancellationReadModel {
+                cancellation_id: positive(cancellation_id, OutboundQaCancellationId::new)?,
+                previous_status: OutboundQaSessionStatus::parse(&previous_state).ok_or_else(
+                    || AppError::internal("outbound QA cancellation has invalid previous state"),
+                )?,
+                details: OutboundQaCancellationDetails::new(cancellation_reason(&reason)?, note)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                cancelled_by: positive(required_i64(&row, "cancelled_by_user_id")?, UserId::new)?,
+                cancelled_at: row
+                    .try_get::<Option<Timestamp>, _>("cancelled_at")?
+                    .ok_or_else(|| AppError::internal("outbound QA cancellation has no time"))?,
+            })
+        })
+        .transpose()?;
     Ok(OutboundQaSessionReadModel {
         session_id: positive(row.try_get("id")?, OutboundQaSessionId::new)?,
         packing_session_id: positive(row.try_get("packing_session_id")?, PackSessionId::new)?,
@@ -177,6 +218,7 @@ pub(crate) async fn load_session_tx(
         policy_id: positive(row.try_get("policy_id")?, OutboundQaPolicyId::new)?,
         policy_revision: OutboundQaPolicyRevision::new(row.try_get("policy_revision")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
+        attempt: row.try_get("attempt")?,
         status: OutboundQaSessionStatus::parse(&state)
             .ok_or_else(|| AppError::internal("outbound QA session has an invalid status"))?,
         revision: OutboundQaSessionRevision::new(row.try_get("revision")?)
@@ -190,8 +232,32 @@ pub(crate) async fn load_session_tx(
             .map(|id| positive(id, UserId::new))
             .transpose()?,
         passed_at: row.try_get("passed_at")?,
+        cancellation,
         verifications,
     })
+}
+
+fn required_text(row: &sqlx::postgres::PgRow, column: &str) -> AppResult<String> {
+    row.try_get::<Option<String>, _>(column)?
+        .ok_or_else(|| AppError::internal(format!("outbound QA session has no {column}")))
+}
+
+fn required_i64(row: &sqlx::postgres::PgRow, column: &str) -> AppResult<i64> {
+    row.try_get::<Option<i64>, _>(column)?
+        .ok_or_else(|| AppError::internal(format!("outbound QA session has no {column}")))
+}
+
+fn cancellation_reason(value: &str) -> AppResult<OutboundQaCancellationReason> {
+    match value {
+        "packing_correction" => Ok(OutboundQaCancellationReason::PackingCorrection),
+        "quality_issue" => Ok(OutboundQaCancellationReason::QualityIssue),
+        "policy_error" => Ok(OutboundQaCancellationReason::PolicyError),
+        "operator_error" => Ok(OutboundQaCancellationReason::OperatorError),
+        "other" => Ok(OutboundQaCancellationReason::Other),
+        _ => Err(AppError::internal(
+            "outbound QA cancellation has invalid reason",
+        )),
+    }
 }
 
 pub(crate) fn require_scope(

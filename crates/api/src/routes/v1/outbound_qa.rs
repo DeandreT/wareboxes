@@ -1,19 +1,23 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use wareboxes_api_contract::v1::{
-    CompleteOutboundQaRequest, ConfigureOutboundQaPolicyRequest, OutboundQaCartonResponse,
-    OutboundQaPolicyResponse, OutboundQaProgressResponse, OutboundQaRequirement as ApiRequirement,
-    OutboundQaSessionResponse, OutboundQaSessionStatus as ApiSessionStatus, Revision,
-    StartOutboundQaRequest, VerifyOutboundQaCartonRequest,
+    CancelOutboundQaRequest, CompleteOutboundQaRequest, ConfigureOutboundQaPolicyRequest,
+    OutboundQaCancellationReason as ApiCancellationReason, OutboundQaCancellationResponse,
+    OutboundQaCartonResponse, OutboundQaPolicyResponse, OutboundQaProgressResponse,
+    OutboundQaRequirement as ApiRequirement, OutboundQaSessionResponse,
+    OutboundQaSessionStatus as ApiSessionStatus, Revision, StartOutboundQaRequest,
+    VerifyOutboundQaCartonRequest,
 };
 use wareboxes_application::outbound_qa::{
-    CompleteOutboundQaCommand, ConfigureOutboundQaPolicyCommand, OutboundQaPolicyReadModel,
-    OutboundQaSessionReadModel, StartOutboundQaCommand, VerifyOutboundQaCartonCommand,
+    CancelOutboundQaCommand, CompleteOutboundQaCommand, ConfigureOutboundQaPolicyCommand,
+    OutboundQaPolicyReadModel, OutboundQaSessionReadModel, StartOutboundQaCommand,
+    VerifyOutboundQaCartonCommand,
 };
 use wareboxes_domain::{
-    FacilityId, InventoryOwnerId, OrderRevision, OutboundQaPolicyRevision, OutboundQaRequirement,
-    OutboundQaScanValue, OutboundQaSessionId, OutboundQaSessionRevision, OutboundQaSessionStatus,
-    PackSessionId,
+    FacilityId, InventoryOwnerId, OrderRevision, OutboundQaCancellationDetails,
+    OutboundQaCancellationNote, OutboundQaCancellationReason, OutboundQaPolicyRevision,
+    OutboundQaRequirement, OutboundQaScanValue, OutboundQaSessionId, OutboundQaSessionRevision,
+    OutboundQaSessionStatus, PackSessionId,
 };
 
 use super::error::{V1Error, V1Result};
@@ -116,6 +120,31 @@ pub async fn complete(
     Ok(Json(session_response(result)?))
 }
 
+pub async fn cancel(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(session_id): Path<i64>,
+    Json(body): Json<CancelOutboundQaRequest>,
+) -> V1Result<Json<OutboundQaSessionResponse>> {
+    user.require_permission(&state.db, "wms_supervisor").await?;
+    let note = body
+        .note
+        .map(OutboundQaCancellationNote::new)
+        .transpose()
+        .map_err(invalid)?;
+    let command = CancelOutboundQaCommand {
+        session_id: OutboundQaSessionId::new(session_id).map_err(invalid)?,
+        expected_revision: OutboundQaSessionRevision::new(body.expected_revision.get())
+            .map_err(invalid)?,
+        details: OutboundQaCancellationDetails::new(map_cancellation_reason(body.reason), note)
+            .map_err(invalid)?,
+    };
+    let context = user.command_context(&idempotency_key);
+    let result = repo::outbound_qa::cancel(&state.db, &user.tenant, &context, &command).await?;
+    Ok(Json(session_response(result)?))
+}
+
 fn policy_response(model: OutboundQaPolicyReadModel) -> V1Result<OutboundQaPolicyResponse> {
     Ok(OutboundQaPolicyResponse {
         policy_id: model.policy_id.get(),
@@ -142,7 +171,9 @@ pub(crate) fn session_response(
         status: match model.status {
             OutboundQaSessionStatus::Open => ApiSessionStatus::Open,
             OutboundQaSessionStatus::Passed => ApiSessionStatus::Passed,
+            OutboundQaSessionStatus::Cancelled => ApiSessionStatus::Cancelled,
         },
+        attempt: model.attempt,
         revision: Revision::new(model.revision.get()).map_err(invalid)?,
         progress: OutboundQaProgressResponse {
             expected_carton_count: model.progress.expected_carton_count(),
@@ -152,6 +183,23 @@ pub(crate) fn session_response(
         started_at: model.started_at.to_rfc3339(),
         passed_by: model.passed_by.map(|user| user.get()),
         passed_at: model.passed_at.map(|time| time.to_rfc3339()),
+        cancellation: model
+            .cancellation
+            .map(|cancellation| OutboundQaCancellationResponse {
+                cancellation_id: cancellation.cancellation_id.get(),
+                previous_status: match cancellation.previous_status {
+                    OutboundQaSessionStatus::Open => ApiSessionStatus::Open,
+                    OutboundQaSessionStatus::Passed => ApiSessionStatus::Passed,
+                    OutboundQaSessionStatus::Cancelled => ApiSessionStatus::Cancelled,
+                },
+                reason: api_cancellation_reason(cancellation.details.reason()),
+                note: cancellation
+                    .details
+                    .note()
+                    .map(|note| note.as_str().to_owned()),
+                cancelled_by: cancellation.cancelled_by.get(),
+                cancelled_at: cancellation.cancelled_at.to_rfc3339(),
+            }),
         verifications: model
             .verifications
             .into_iter()
@@ -184,6 +232,26 @@ const fn api_requirement(requirement: OutboundQaRequirement) -> ApiRequirement {
     }
 }
 
+const fn map_cancellation_reason(reason: ApiCancellationReason) -> OutboundQaCancellationReason {
+    match reason {
+        ApiCancellationReason::PackingCorrection => OutboundQaCancellationReason::PackingCorrection,
+        ApiCancellationReason::QualityIssue => OutboundQaCancellationReason::QualityIssue,
+        ApiCancellationReason::PolicyError => OutboundQaCancellationReason::PolicyError,
+        ApiCancellationReason::OperatorError => OutboundQaCancellationReason::OperatorError,
+        ApiCancellationReason::Other => OutboundQaCancellationReason::Other,
+    }
+}
+
+const fn api_cancellation_reason(reason: OutboundQaCancellationReason) -> ApiCancellationReason {
+    match reason {
+        OutboundQaCancellationReason::PackingCorrection => ApiCancellationReason::PackingCorrection,
+        OutboundQaCancellationReason::QualityIssue => ApiCancellationReason::QualityIssue,
+        OutboundQaCancellationReason::PolicyError => ApiCancellationReason::PolicyError,
+        OutboundQaCancellationReason::OperatorError => ApiCancellationReason::OperatorError,
+        OutboundQaCancellationReason::Other => ApiCancellationReason::Other,
+    }
+}
+
 fn invalid(error: impl std::fmt::Display) -> V1Error {
     AppError::bad_request(error.to_string()).into()
 }
@@ -197,6 +265,10 @@ mod tests {
         assert_eq!(
             api_requirement(map_requirement(ApiRequirement::ScanEveryCarton)),
             ApiRequirement::ScanEveryCarton
+        );
+        assert_eq!(
+            api_cancellation_reason(map_cancellation_reason(ApiCancellationReason::QualityIssue)),
+            ApiCancellationReason::QualityIssue
         );
     }
 }

@@ -1,18 +1,19 @@
 use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_application::outbound_qa::{
-    CompleteOutboundQaCommand, CompleteOutboundQaResult, OutboundQaSessionReadModel,
-    StartOutboundQaCommand, StartOutboundQaResult, VerifyOutboundQaCartonCommand,
-    VerifyOutboundQaCartonResult, COMPLETE_OUTBOUND_QA_OPERATION, START_OUTBOUND_QA_OPERATION,
+    CancelOutboundQaCommand, CancelOutboundQaResult, CompleteOutboundQaCommand,
+    CompleteOutboundQaResult, OutboundQaSessionReadModel, StartOutboundQaCommand,
+    StartOutboundQaResult, VerifyOutboundQaCartonCommand, VerifyOutboundQaCartonResult,
+    CANCEL_OUTBOUND_QA_OPERATION, COMPLETE_OUTBOUND_QA_OPERATION, START_OUTBOUND_QA_OPERATION,
     VERIFY_OUTBOUND_QA_CARTON_OPERATION,
 };
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    begin_outbound_qa, complete_outbound_qa, record_outbound_qa_carton, CartonId, FacilityId,
-    InventoryOwnerId, LicensePlateId, OrderId, OutboundQaCartonVerificationId, OutboundQaProgress,
-    OutboundQaScanValue, OutboundQaSessionId, OutboundQaSessionRevision, OutboundQaSessionStatus,
-    PackSessionId, TenantId,
+    begin_outbound_qa, cancel_outbound_qa, complete_outbound_qa, record_outbound_qa_carton,
+    CartonId, FacilityId, InventoryOwnerId, LicensePlateId, OrderId, OutboundQaCancellationId,
+    OutboundQaCartonVerificationId, OutboundQaProgress, OutboundQaScanValue, OutboundQaSessionId,
+    OutboundQaSessionRevision, OutboundQaSessionStatus, PackSessionId, TenantId,
 };
 use wareboxes_persistence_postgres::db::{
     begin_tenant_transaction, bind_tenant_context, now_iso, Db,
@@ -46,6 +47,7 @@ struct LockedSession {
     order_id: OrderId,
     status: OutboundQaSessionStatus,
     revision: OutboundQaSessionRevision,
+    attempt: i64,
     progress: OutboundQaProgress,
 }
 
@@ -139,10 +141,12 @@ pub async fn start(
     .ok_or_else(|| AppError::conflict("outbound QA is not required at this scope"))?;
     let (status, progress) = begin_outbound_qa(policy.requirement, carton_count)
         .map_err(|error| AppError::conflict(error.to_string()))?;
-    let existing: bool = sqlx::query_scalar(
+    let attempt_row = sqlx::query(
         r#"
-        SELECT EXISTS (SELECT 1 FROM outbound_qa_sessions
-        WHERE tenant_id=$1 AND packing_session_id=$2 AND policy_id=$3)
+        SELECT COALESCE(MAX(attempt),0)::bigint + 1 AS next_attempt,
+               COALESCE(BOOL_OR(state <> 'cancelled'),false) AS active_exists
+        FROM outbound_qa_sessions
+        WHERE tenant_id=$1 AND packing_session_id=$2 AND policy_id=$3
         "#,
     )
     .bind(access.tenant_id.get())
@@ -150,19 +154,20 @@ pub async fn start(
     .bind(policy.policy_id.get())
     .fetch_one(&mut *tx)
     .await?;
-    if existing {
+    if attempt_row.try_get::<bool, _>("active_exists")? {
         return Err(AppError::conflict(
-            "outbound QA session already exists for this policy",
+            "an active outbound QA session already exists for this policy",
         ));
     }
+    let attempt: i64 = attempt_row.try_get("next_attempt")?;
     let started_at = now_iso();
     let session_id_raw: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO outbound_qa_sessions (
             tenant_id,inventory_owner_id,facility_id,packing_session_id,order_id,
-            policy_id,policy_revision,state,revision,expected_order_revision,
+            policy_id,policy_revision,attempt,state,revision,expected_order_revision,
             expected_carton_count,verified_carton_count,started_by_user_id,started_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1,$9,$10,0,$11,$12)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10,$11,0,$12,$13)
         RETURNING id
         "#,
     )
@@ -173,6 +178,7 @@ pub async fn start(
     .bind(hint.order_id.get())
     .bind(policy.policy_id.get())
     .bind(policy.revision.get())
+    .bind(attempt)
     .bind(status.as_str())
     .bind(command.expected_order_revision.get())
     .bind(progress.expected_carton_count())
@@ -208,6 +214,7 @@ pub async fn start(
             "order_id": hint.order_id,
             "policy_id": policy.policy_id,
             "policy_revision": policy.revision,
+            "attempt": attempt,
             "expected_carton_count": carton_count,
             "started_at": started_at,
         }),
@@ -215,6 +222,187 @@ pub async fn start(
     )
     .await?;
     let result = load_session_tx(&mut tx, access.tenant_id, session_id.get()).await?;
+    Ok(prepared.commit(tx, result).await?)
+}
+
+pub async fn cancel(
+    db: &Db,
+    access: &TenantAccess,
+    context: &CommandContext,
+    command: &CancelOutboundQaCommand,
+) -> AppResult<CancelOutboundQaResult> {
+    context.require_actor(access.tenant_id, access.user_id)?;
+    let prepared = PreparedCommand::new_v1(context, CANCEL_OUTBOUND_QA_OPERATION, command)?;
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    let scope = lock_current_scope_tx(&mut tx, access.tenant_id, context.actor_id.get()).await?;
+    require_permission_tx(
+        &mut tx,
+        access.tenant_id,
+        context.actor_id.get(),
+        "wms_supervisor",
+    )
+    .await?;
+    require_stored_visible_before_replay_tx(&mut tx, &prepared, &scope).await?;
+    if let Some(result) = prepared.replayed::<CancelOutboundQaResult>(&mut tx).await? {
+        tx.commit().await?;
+        return Ok(result);
+    }
+    let hint = hint_for_session_tx(&mut tx, access.tenant_id, command.session_id).await?;
+    require_scope(
+        &scope,
+        hint.owner_id.get(),
+        hint.facility_id.get(),
+        "outbound QA session",
+    )?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!(
+            "shipment-order:{}:{}",
+            access.tenant_id, hint.order_id
+        ))
+        .execute(&mut *tx)
+        .await?;
+    let order_ready: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT packing.id FROM orders order_header
+        JOIN packing_sessions packing
+          ON packing.tenant_id=order_header.tenant_id
+         AND packing.inventory_owner_id=order_header.inventory_owner_id
+         AND packing.order_id=order_header.id
+        WHERE order_header.tenant_id=$1 AND order_header.inventory_owner_id=$2
+          AND order_header.id=$3 AND order_header.status='awaiting shipment'
+          AND order_header.deleted IS NULL AND packing.state='ready_to_manifest'
+        FOR SHARE OF order_header,packing
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(hint.owner_id.get())
+    .bind(hint.order_id.get())
+    .fetch_optional(&mut *tx)
+    .await?;
+    if order_ready.is_none() {
+        return Err(AppError::conflict(
+            "outbound QA can only be cancelled before shipment creation",
+        ));
+    }
+    let shipment_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM shipments WHERE tenant_id=$1 AND order_id=$2)",
+    )
+    .bind(access.tenant_id.get())
+    .bind(hint.order_id.get())
+    .fetch_one(&mut *tx)
+    .await?;
+    if shipment_exists {
+        return Err(AppError::conflict(
+            "outbound QA cannot be cancelled after shipment creation",
+        ));
+    }
+    let session = lock_session_tx(&mut tx, access.tenant_id, command.session_id, &scope).await?;
+    if session.revision != command.expected_revision {
+        return Err(AppError::conflict("outbound QA session revision is stale"));
+    }
+    let status = cancel_outbound_qa(session.status)
+        .map_err(|error| AppError::conflict(error.to_string()))?;
+    let next_revision = session
+        .revision
+        .checked_next()
+        .ok_or_else(|| AppError::internal("outbound QA session revision overflow"))?;
+    let cancelled_at = now_iso();
+    let cancellation_id_raw: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO outbound_qa_cancellations (
+            tenant_id,inventory_owner_id,facility_id,outbound_qa_session_id,
+            packing_session_id,order_id,policy_id,attempt,previous_state,
+            expected_session_revision,resulting_session_revision,verified_carton_count,
+            reason_code,note,cancelled_by_user_id,cancelled_at)
+        SELECT $1,$2,$3,$4,$5,$6,policy_id,attempt,$7,$8,$9,$10,$11,$12,$13,$14
+        FROM outbound_qa_sessions
+        WHERE tenant_id=$1 AND id=$4
+        RETURNING id
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(session.owner_id.get())
+    .bind(session.facility_id.get())
+    .bind(session.id.get())
+    .bind(session.packing_session_id.get())
+    .bind(session.order_id.get())
+    .bind(session.status.as_str())
+    .bind(session.revision.get())
+    .bind(next_revision.get())
+    .bind(session.progress.verified_carton_count())
+    .bind(cancellation_reason_wire(command.details.reason()))
+    .bind(command.details.note().map(|note| note.as_str()))
+    .bind(context.actor_id.get())
+    .bind(cancelled_at)
+    .fetch_one(&mut *tx)
+    .await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE outbound_qa_sessions
+        SET state=$1,revision=$2,cancelled_by_user_id=$3,cancelled_at=$4
+        WHERE tenant_id=$5 AND id=$6 AND state=$7 AND revision=$8
+        "#,
+    )
+    .bind(status.as_str())
+    .bind(next_revision.get())
+    .bind(context.actor_id.get())
+    .bind(cancelled_at)
+    .bind(access.tenant_id.get())
+    .bind(session.id.get())
+    .bind(session.status.as_str())
+    .bind(session.revision.get())
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::conflict("outbound QA session changed"));
+    }
+    let cancellation_id = OutboundQaCancellationId::new(cancellation_id_raw)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    insert_order_activity_tx(
+        &mut tx,
+        access.tenant_id,
+        session.owner_id,
+        session.order_id.get(),
+        Some(context.actor_id.get()),
+        &format!(
+            "cancelled outbound QA attempt {} after {} of {} carton(s)",
+            session.attempt,
+            session.progress.verified_carton_count(),
+            session.progress.expected_carton_count(),
+        ),
+    )
+    .await?;
+    enqueue_event_tx(
+        &mut tx,
+        access.tenant_id,
+        session.owner_id,
+        session.facility_id,
+        context.actor_id.get(),
+        &format!("order:{}", session.order_id),
+        "order",
+        session.order_id.get(),
+        "outbound.qa.cancelled",
+        &format!("qa:{}:cancelled", session.id),
+        &serde_json::json!({
+            "cancellation_id": cancellation_id,
+            "session_id": session.id,
+            "packing_session_id": session.packing_session_id,
+            "order_id": session.order_id,
+            "attempt": session.attempt,
+            "previous_status": session.status,
+            "status": status,
+            "verified_carton_count": session.progress.verified_carton_count(),
+            "expected_carton_count": session.progress.expected_carton_count(),
+            "session_revision": next_revision,
+            "reason": cancellation_reason_wire(command.details.reason()),
+            "note": command.details.note().map(|note| note.as_str()),
+            "cancelled_at": cancelled_at,
+        }),
+        cancelled_at,
+    )
+    .await?;
+    let result = load_session_tx(&mut tx, access.tenant_id, session.id.get()).await?;
     Ok(prepared.commit(tx, result).await?)
 }
 
@@ -520,7 +708,7 @@ async fn lock_session_tx(
     let row = sqlx::query(
         r#"
         SELECT id,inventory_owner_id,facility_id,packing_session_id,order_id,
-               state,revision,expected_carton_count,verified_carton_count
+               state,revision,attempt,expected_carton_count,verified_carton_count
         FROM outbound_qa_sessions
         WHERE tenant_id=$1 AND id=$2
           AND ($3 OR facility_id=ANY($4))
@@ -553,12 +741,26 @@ async fn lock_session_tx(
             .ok_or_else(|| AppError::internal("outbound QA session has invalid status"))?,
         revision: OutboundQaSessionRevision::new(row.try_get("revision")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
+        attempt: row.try_get("attempt")?,
         progress: OutboundQaProgress::new(
             row.try_get("expected_carton_count")?,
             row.try_get("verified_carton_count")?,
         )
         .map_err(|error| AppError::internal(error.to_string()))?,
     })
+}
+
+const fn cancellation_reason_wire(
+    reason: wareboxes_domain::OutboundQaCancellationReason,
+) -> &'static str {
+    use wareboxes_domain::OutboundQaCancellationReason;
+    match reason {
+        OutboundQaCancellationReason::PackingCorrection => "packing_correction",
+        OutboundQaCancellationReason::QualityIssue => "quality_issue",
+        OutboundQaCancellationReason::PolicyError => "policy_error",
+        OutboundQaCancellationReason::OperatorError => "operator_error",
+        OutboundQaCancellationReason::Other => "other",
+    }
 }
 
 async fn lock_carton_by_scan_tx(

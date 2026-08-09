@@ -342,7 +342,8 @@ async fn require_no_downstream_execution_tx(
     let exists: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS (SELECT 1 FROM outbound_qa_sessions
-                       WHERE tenant_id=$1 AND packing_session_id=$2)
+                       WHERE tenant_id=$1 AND packing_session_id=$2
+                         AND state <> 'cancelled')
             OR EXISTS (SELECT 1 FROM shipments
                        WHERE tenant_id=$1 AND packing_session_id=$2)
         "#,

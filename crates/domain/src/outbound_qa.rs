@@ -4,6 +4,7 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub const MAX_OUTBOUND_QA_SCAN_VALUE_LENGTH: usize = 200;
+pub const MAX_OUTBOUND_QA_CANCELLATION_NOTE_LENGTH: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -40,6 +41,7 @@ impl fmt::Display for OutboundQaRequirement {
 pub enum OutboundQaSessionStatus {
     Open,
     Passed,
+    Cancelled,
 }
 
 impl OutboundQaSessionStatus {
@@ -47,6 +49,7 @@ impl OutboundQaSessionStatus {
         match self {
             Self::Open => "open",
             Self::Passed => "passed",
+            Self::Cancelled => "cancelled",
         }
     }
 
@@ -54,8 +57,73 @@ impl OutboundQaSessionStatus {
         match value {
             "open" => Some(Self::Open),
             "passed" => Some(Self::Passed),
+            "cancelled" => Some(Self::Cancelled),
             _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboundQaCancellationReason {
+    PackingCorrection,
+    QualityIssue,
+    PolicyError,
+    OperatorError,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OutboundQaCancellationNote(String);
+
+impl OutboundQaCancellationNote {
+    pub fn new(value: impl Into<String>) -> Result<Self, OutboundQaError> {
+        let value = value.into();
+        if value.trim() != value {
+            return Err(OutboundQaError::UntrimmedCancellationNote);
+        }
+        if value.is_empty() {
+            return Err(OutboundQaError::EmptyCancellationNote);
+        }
+        if value.chars().count() > MAX_OUTBOUND_QA_CANCELLATION_NOTE_LENGTH {
+            return Err(OutboundQaError::CancellationNoteTooLong);
+        }
+        if value.chars().any(char::is_control) {
+            return Err(OutboundQaError::InvalidCancellationNoteCharacter);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutboundQaCancellationDetails {
+    reason: OutboundQaCancellationReason,
+    note: Option<OutboundQaCancellationNote>,
+}
+
+impl OutboundQaCancellationDetails {
+    pub fn new(
+        reason: OutboundQaCancellationReason,
+        note: Option<OutboundQaCancellationNote>,
+    ) -> Result<Self, OutboundQaError> {
+        if reason == OutboundQaCancellationReason::Other && note.is_none() {
+            return Err(OutboundQaError::CancellationNoteRequired);
+        }
+        Ok(Self { reason, note })
+    }
+
+    pub const fn reason(&self) -> OutboundQaCancellationReason {
+        self.reason
+    }
+
+    pub fn note(&self) -> Option<&OutboundQaCancellationNote> {
+        self.note.as_ref()
     }
 }
 
@@ -237,18 +305,45 @@ pub fn complete_outbound_qa(
     Ok(OutboundQaSessionStatus::Passed)
 }
 
+pub const fn cancel_outbound_qa(
+    status: OutboundQaSessionStatus,
+) -> Result<OutboundQaSessionStatus, OutboundQaError> {
+    match status {
+        OutboundQaSessionStatus::Open | OutboundQaSessionStatus::Passed => {
+            Ok(OutboundQaSessionStatus::Cancelled)
+        }
+        OutboundQaSessionStatus::Cancelled => {
+            Err(OutboundQaError::SessionNotCancellable { status })
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum OutboundQaError {
     #[error("outbound QA revision must be positive, got {value}")]
     InvalidRevision { value: i64 },
     #[error("outbound QA scan value is invalid")]
     InvalidScanValue,
+    #[error("outbound QA cancellation note cannot be empty")]
+    EmptyCancellationNote,
+    #[error("outbound QA cancellation note must be trimmed")]
+    UntrimmedCancellationNote,
+    #[error(
+        "outbound QA cancellation note cannot exceed {MAX_OUTBOUND_QA_CANCELLATION_NOTE_LENGTH} characters"
+    )]
+    CancellationNoteTooLong,
+    #[error("outbound QA cancellation note cannot contain control characters")]
+    InvalidCancellationNoteCharacter,
+    #[error("outbound QA cancellation reason Other requires a note")]
+    CancellationNoteRequired,
     #[error("outbound QA progress is invalid: expected {expected}, verified {verified}")]
     InvalidProgress { expected: i64, verified: i64 },
     #[error("outbound QA is not required")]
     NotRequired,
     #[error("outbound QA session is not open: {status:?}")]
     SessionNotOpen { status: OutboundQaSessionStatus },
+    #[error("outbound QA session cannot be cancelled from {status:?}")]
+    SessionNotCancellable { status: OutboundQaSessionStatus },
     #[error("carton was already verified")]
     CartonAlreadyVerified,
     #[error("all cartons are already verified")]
@@ -281,5 +376,32 @@ mod tests {
             begin_outbound_qa(OutboundQaRequirement::NotRequired, 1),
             Err(OutboundQaError::NotRequired)
         );
+    }
+
+    #[test]
+    fn open_or_passed_qa_can_be_cancelled_with_valid_evidence() {
+        assert_eq!(
+            cancel_outbound_qa(OutboundQaSessionStatus::Open),
+            Ok(OutboundQaSessionStatus::Cancelled)
+        );
+        assert_eq!(
+            cancel_outbound_qa(OutboundQaSessionStatus::Passed),
+            Ok(OutboundQaSessionStatus::Cancelled)
+        );
+        assert_eq!(
+            cancel_outbound_qa(OutboundQaSessionStatus::Cancelled),
+            Err(OutboundQaError::SessionNotCancellable {
+                status: OutboundQaSessionStatus::Cancelled,
+            })
+        );
+        assert_eq!(
+            OutboundQaCancellationDetails::new(OutboundQaCancellationReason::Other, None),
+            Err(OutboundQaError::CancellationNoteRequired)
+        );
+        assert!(OutboundQaCancellationDetails::new(
+            OutboundQaCancellationReason::PackingCorrection,
+            None,
+        )
+        .is_ok());
     }
 }

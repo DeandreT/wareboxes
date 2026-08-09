@@ -143,7 +143,8 @@ pub use outbound_load::{
     StartOutboundLoadLoadingResponse, UnloadOutboundCartonRequest, UnstageOutboundCartonRequest,
 };
 pub use outbound_qa::{
-    CompleteOutboundQaRequest, ConfigureOutboundQaPolicyRequest, OutboundQaCartonResponse,
+    CancelOutboundQaRequest, CompleteOutboundQaRequest, ConfigureOutboundQaPolicyRequest,
+    OutboundQaCancellationReason, OutboundQaCancellationResponse, OutboundQaCartonResponse,
     OutboundQaPolicyResponse, OutboundQaProgressResponse, OutboundQaRequirement,
     OutboundQaSessionResponse, OutboundQaSessionStatus, OutboundQaSessionSummaryResponse,
     StartOutboundQaRequest, VerifyOutboundQaCartonRequest,

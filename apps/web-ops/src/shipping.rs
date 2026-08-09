@@ -261,31 +261,39 @@ pub(crate) fn ShippingWorkspace(
             session_id: session.session_id,
             policy_id: session.policy_id,
             policy_revision: session.policy_revision,
+            attempt: session.attempt,
             status: session.status,
             revision: session.revision,
             progress: session.progress,
-            started_at: session.started_at,
-            passed_at: session.passed_at,
+            started_at: session.started_at.clone(),
+            passed_at: session.passed_at.clone(),
+            cancelled_at: session
+                .cancellation
+                .as_ref()
+                .map(|cancellation| cancellation.cancelled_at.clone()),
         };
         queue.entries.update(|entries| {
             if let Some(entry) = entries
                 .iter_mut()
                 .find(|entry| entry.order_id == session.order_id)
             {
-                entry.outbound_qa_session = Some(summary);
+                entry.outbound_qa_session =
+                    (session.status != OutboundQaSessionStatus::Cancelled).then_some(summary);
             }
         });
         signals.error.set(false);
-        signals
-            .message
-            .set(if session.status == OutboundQaSessionStatus::Passed {
+        signals.message.set(match session.status {
+            OutboundQaSessionStatus::Passed => {
                 "Outbound QA passed. The shipment can be created.".to_owned()
-            } else {
-                format!(
-                    "Outbound QA: {} of {} cartons verified.",
-                    session.progress.verified_carton_count, session.progress.expected_carton_count,
-                )
-            });
+            }
+            OutboundQaSessionStatus::Cancelled => {
+                "Outbound QA cancelled. Packing recovery is available.".to_owned()
+            }
+            OutboundQaSessionStatus::Open => format!(
+                "Outbound QA: {} of {} cartons verified.",
+                session.progress.verified_carton_count, session.progress.expected_carton_count,
+            ),
+        });
     });
     let refresh_after_qa = Callback::new(move |_| request_queue(queue, signals, false));
 

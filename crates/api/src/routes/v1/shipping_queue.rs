@@ -112,9 +112,11 @@ fn map_entry(entry: repo::shipping::ShippingQueueEntry) -> AppResult<ShippingQue
                 policy_id: session.policy_id.get(),
                 policy_revision: Revision::new(session.policy_revision.get())
                     .map_err(|error| AppError::internal(error.to_string()))?,
+                attempt: session.attempt,
                 status: match session.status {
                     wareboxes_domain::OutboundQaSessionStatus::Open => ApiQaStatus::Open,
                     wareboxes_domain::OutboundQaSessionStatus::Passed => ApiQaStatus::Passed,
+                    wareboxes_domain::OutboundQaSessionStatus::Cancelled => ApiQaStatus::Cancelled,
                 },
                 revision: Revision::new(session.revision.get())
                     .map_err(|error| AppError::internal(error.to_string()))?,
@@ -124,6 +126,7 @@ fn map_entry(entry: repo::shipping::ShippingQueueEntry) -> AppResult<ShippingQue
                 },
                 started_at: session.started_at.to_rfc3339(),
                 passed_at: session.passed_at.map(|value| value.to_rfc3339()),
+                cancelled_at: session.cancelled_at.map(|value| value.to_rfc3339()),
             })
         })
         .transpose()?;

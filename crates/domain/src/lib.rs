@@ -80,9 +80,11 @@ pub use outbound_load::{
     MAX_OUTBOUND_LOAD_TRAILER_NUMBER_LENGTH,
 };
 pub use outbound_qa::{
-    begin_outbound_qa, complete_outbound_qa, record_outbound_qa_carton, OutboundQaError,
-    OutboundQaPolicyRevision, OutboundQaProgress, OutboundQaRequirement, OutboundQaScanValue,
-    OutboundQaSessionRevision, OutboundQaSessionStatus, MAX_OUTBOUND_QA_SCAN_VALUE_LENGTH,
+    begin_outbound_qa, cancel_outbound_qa, complete_outbound_qa, record_outbound_qa_carton,
+    OutboundQaCancellationDetails, OutboundQaCancellationNote, OutboundQaCancellationReason,
+    OutboundQaError, OutboundQaPolicyRevision, OutboundQaProgress, OutboundQaRequirement,
+    OutboundQaScanValue, OutboundQaSessionRevision, OutboundQaSessionStatus,
+    MAX_OUTBOUND_QA_CANCELLATION_NOTE_LENGTH, MAX_OUTBOUND_QA_SCAN_VALUE_LENGTH,
 };
 pub use packing::{
     abandon_empty_packing, begin_packing, complete_packing, continue_packing, open_carton,
@@ -234,6 +236,7 @@ positive_id!(CartonContentRemovalId, "carton content removal ID");
 positive_id!(CartonReopeningId, "carton reopening ID");
 positive_id!(OutboundQaPolicyId, "outbound QA policy ID");
 positive_id!(OutboundQaSessionId, "outbound QA session ID");
+positive_id!(OutboundQaCancellationId, "outbound QA cancellation ID");
 positive_id!(
     OutboundQaCartonVerificationId,
     "outbound QA carton verification ID"
