@@ -1,9 +1,11 @@
 use axum::extract::{Query, State};
 use axum::Json;
 use wareboxes_api_contract::v1::{
-    OpaqueCursor, Revision, ShipmentStatus as ApiShipmentStatus, ShippingQueueEntryResponse,
-    ShippingQueuePage as ApiShippingQueuePage, ShippingQueuePageRequest,
-    ShippingQueueShipmentResponse,
+    OpaqueCursor, OutboundQaPolicyResponse, OutboundQaProgressResponse,
+    OutboundQaRequirement as ApiQaRequirement, OutboundQaSessionStatus as ApiQaStatus,
+    OutboundQaSessionSummaryResponse, Revision, ShipmentStatus as ApiShipmentStatus,
+    ShippingQueueEntryResponse, ShippingQueuePage as ApiShippingQueuePage,
+    ShippingQueuePageRequest, ShippingQueueShipmentResponse,
 };
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{OrderId, ShipmentStatus};
@@ -80,6 +82,51 @@ fn map_entry(entry: repo::shipping::ShippingQueueEntry) -> AppResult<ShippingQue
             })
         })
         .transpose()?;
+    let outbound_qa_policy = entry
+        .outbound_qa_policy
+        .map(|policy| {
+            Ok::<_, AppError>(OutboundQaPolicyResponse {
+                policy_id: policy.policy_id.get(),
+                inventory_owner_id: policy.inventory_owner_id.get(),
+                facility_id: policy.facility_id.get(),
+                requirement: match policy.requirement {
+                    wareboxes_domain::OutboundQaRequirement::NotRequired => {
+                        ApiQaRequirement::NotRequired
+                    }
+                    wareboxes_domain::OutboundQaRequirement::ScanEveryCarton => {
+                        ApiQaRequirement::ScanEveryCarton
+                    }
+                },
+                revision: Revision::new(policy.revision.get())
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                configured_by: policy.configured_by.get(),
+                configured_at: policy.configured_at.to_rfc3339(),
+            })
+        })
+        .transpose()?;
+    let outbound_qa_session = entry
+        .outbound_qa_session
+        .map(|session| {
+            Ok::<_, AppError>(OutboundQaSessionSummaryResponse {
+                session_id: session.session_id.get(),
+                policy_id: session.policy_id.get(),
+                policy_revision: Revision::new(session.policy_revision.get())
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                status: match session.status {
+                    wareboxes_domain::OutboundQaSessionStatus::Open => ApiQaStatus::Open,
+                    wareboxes_domain::OutboundQaSessionStatus::Passed => ApiQaStatus::Passed,
+                },
+                revision: Revision::new(session.revision.get())
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                progress: OutboundQaProgressResponse {
+                    expected_carton_count: session.progress.expected_carton_count(),
+                    verified_carton_count: session.progress.verified_carton_count(),
+                },
+                started_at: session.started_at.to_rfc3339(),
+                passed_at: session.passed_at.map(|value| value.to_rfc3339()),
+            })
+        })
+        .transpose()?;
     Ok(ShippingQueueEntryResponse {
         order_id: entry.order_id.get(),
         order_key: entry.order_key,
@@ -96,6 +143,8 @@ fn map_entry(entry: repo::shipping::ShippingQueueEntry) -> AppResult<ShippingQue
         ship_by: entry.ship_by.map(|value| value.to_rfc3339()),
         origin_ready: entry.origin_ready,
         destination_ready: entry.destination_ready,
+        outbound_qa_policy,
+        outbound_qa_session,
         shipment,
     })
 }

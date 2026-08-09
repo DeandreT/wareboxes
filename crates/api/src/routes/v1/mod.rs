@@ -16,6 +16,7 @@ mod order_holds;
 mod order_releases;
 mod orders;
 pub(crate) mod outbound_loads;
+mod outbound_qa;
 pub(crate) mod packing;
 mod pick_shortages;
 mod picking;
@@ -160,6 +161,20 @@ pub fn router() -> Router<AppState> {
             post(shipping::confirm_departure),
         )
         .route("/shipping-queue", get(shipping_queue::queue))
+        .route("/outbound-qa-policies", post(outbound_qa::configure_policy))
+        .route(
+            "/packing-sessions/{session_id}/outbound-qa-sessions",
+            post(outbound_qa::start),
+        )
+        .route("/outbound-qa-sessions/{session_id}", get(outbound_qa::get))
+        .route(
+            "/outbound-qa-sessions/{session_id}/carton-verifications",
+            post(outbound_qa::verify_carton),
+        )
+        .route(
+            "/outbound-qa-sessions/{session_id}/completions",
+            post(outbound_qa::complete),
+        )
         .route(
             "/outbound-loads",
             get(outbound_loads::list).post(outbound_loads::plan),

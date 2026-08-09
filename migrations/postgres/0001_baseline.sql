@@ -26848,6 +26848,615 @@ REVOKE ALL ON FUNCTION public.validate_shipment_document_line() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_shipment_document_carton() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_shipment_document_consistency() FROM PUBLIC;
 
+-- Policy-driven outbound QA is an inventory-neutral verification boundary between
+-- completed packing and immutable shipment creation.
+CREATE TABLE public.outbound_qa_policies (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    requirement text NOT NULL,
+    revision bigint NOT NULL,
+    supersedes_policy_id bigint,
+    effective_from timestamp with time zone NOT NULL,
+    effective_to timestamp with time zone,
+    configured_by_user_id bigint NOT NULL,
+    configured_at timestamp with time zone NOT NULL,
+    CONSTRAINT outbound_qa_policies_requirement_check CHECK (
+        requirement IN ('not_required', 'scan_every_carton')),
+    CONSTRAINT outbound_qa_policies_revision_check CHECK (revision > 0),
+    CONSTRAINT outbound_qa_policies_effective_check CHECK (
+        effective_from = configured_at AND
+        (effective_to IS NULL OR effective_to >= effective_from)),
+    CONSTRAINT outbound_qa_policies_initial_check CHECK (
+        (revision = 1 AND supersedes_policy_id IS NULL)
+        OR (revision > 1 AND supersedes_policy_id IS NOT NULL))
+);
+ALTER TABLE public.outbound_qa_policies FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE public.outbound_qa_sessions (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    packing_session_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    policy_id bigint NOT NULL,
+    policy_revision bigint NOT NULL,
+    state text NOT NULL DEFAULT 'open',
+    revision bigint NOT NULL DEFAULT 1,
+    expected_order_revision bigint NOT NULL,
+    expected_carton_count bigint NOT NULL,
+    verified_carton_count bigint NOT NULL DEFAULT 0,
+    started_by_user_id bigint NOT NULL,
+    started_at timestamp with time zone NOT NULL,
+    passed_by_user_id bigint,
+    passed_at timestamp with time zone,
+    CONSTRAINT outbound_qa_sessions_state_check CHECK (state IN ('open', 'passed')),
+    CONSTRAINT outbound_qa_sessions_revision_check CHECK (revision > 0),
+    CONSTRAINT outbound_qa_sessions_counts_check CHECK (
+        expected_carton_count > 0 AND verified_carton_count >= 0
+        AND verified_carton_count <= expected_carton_count),
+    CONSTRAINT outbound_qa_sessions_state_fields_check CHECK (
+        (state = 'open' AND passed_by_user_id IS NULL AND passed_at IS NULL)
+        OR (state = 'passed' AND passed_by_user_id IS NOT NULL AND passed_at IS NOT NULL
+            AND passed_at >= started_at AND verified_carton_count = expected_carton_count))
+);
+ALTER TABLE public.outbound_qa_sessions FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE public.outbound_qa_carton_verifications (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    outbound_qa_session_id bigint NOT NULL,
+    packing_session_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    carton_id bigint NOT NULL,
+    license_plate_id bigint NOT NULL,
+    sequence bigint NOT NULL,
+    carton_barcode text NOT NULL,
+    content_count bigint NOT NULL,
+    packed_qty bigint NOT NULL,
+    expected_session_revision bigint NOT NULL,
+    resulting_session_revision bigint NOT NULL,
+    verified_by_user_id bigint NOT NULL,
+    verified_at timestamp with time zone NOT NULL,
+    CONSTRAINT outbound_qa_carton_verifications_sequence_check CHECK (sequence > 0),
+    CONSTRAINT outbound_qa_carton_verifications_barcode_check CHECK (
+        carton_barcode = btrim(carton_barcode) AND carton_barcode <> ''
+        AND char_length(carton_barcode) <= 200),
+    CONSTRAINT outbound_qa_carton_verifications_counts_check CHECK (
+        content_count > 0 AND packed_qty > 0),
+    CONSTRAINT outbound_qa_carton_verifications_revision_check CHECK (
+        expected_session_revision > 0
+        AND resulting_session_revision = expected_session_revision + 1)
+);
+ALTER TABLE public.outbound_qa_carton_verifications FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE public.outbound_qa_completions (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    outbound_qa_session_id bigint NOT NULL,
+    packing_session_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    expected_session_revision bigint NOT NULL,
+    resulting_session_revision bigint NOT NULL,
+    carton_count bigint NOT NULL,
+    completed_by_user_id bigint NOT NULL,
+    completed_at timestamp with time zone NOT NULL,
+    CONSTRAINT outbound_qa_completions_carton_count_check CHECK (carton_count > 0),
+    CONSTRAINT outbound_qa_completions_revision_check CHECK (
+        expected_session_revision > 0
+        AND resulting_session_revision = expected_session_revision + 1)
+);
+ALTER TABLE public.outbound_qa_completions FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE public.outbound_qa_policies
+    ADD CONSTRAINT outbound_qa_policies_scope_id_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, id);
+ALTER TABLE public.outbound_qa_sessions
+    ADD CONSTRAINT outbound_qa_sessions_scope_id_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, packing_session_id, id);
+ALTER TABLE public.outbound_qa_sessions
+    ADD CONSTRAINT outbound_qa_sessions_policy_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, packing_session_id, policy_id);
+ALTER TABLE public.outbound_qa_carton_verifications
+    ADD CONSTRAINT outbound_qa_carton_verifications_scope_id_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, outbound_qa_session_id, id);
+ALTER TABLE public.outbound_qa_carton_verifications
+    ADD CONSTRAINT outbound_qa_carton_verifications_carton_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, outbound_qa_session_id, carton_id);
+ALTER TABLE public.outbound_qa_carton_verifications
+    ADD CONSTRAINT outbound_qa_carton_verifications_revision_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, outbound_qa_session_id,
+            resulting_session_revision);
+ALTER TABLE public.outbound_qa_completions
+    ADD CONSTRAINT outbound_qa_completions_scope_id_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, outbound_qa_session_id, id);
+ALTER TABLE public.outbound_qa_completions
+    ADD CONSTRAINT outbound_qa_completions_session_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, outbound_qa_session_id);
+
+CREATE UNIQUE INDEX outbound_qa_policies_active_scope_idx
+ON public.outbound_qa_policies (tenant_id, inventory_owner_id, facility_id)
+WHERE effective_to IS NULL;
+CREATE INDEX outbound_qa_sessions_packing_idx
+ON public.outbound_qa_sessions
+    (tenant_id, inventory_owner_id, facility_id, packing_session_id, policy_id, state);
+CREATE INDEX outbound_qa_verifications_session_idx
+ON public.outbound_qa_carton_verifications
+    (tenant_id, outbound_qa_session_id, sequence, id);
+
+ALTER TABLE public.outbound_qa_policies
+    ADD CONSTRAINT outbound_qa_policies_owner_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id)
+    REFERENCES public.inventory_owners (tenant_id, id);
+ALTER TABLE public.outbound_qa_policies
+    ADD CONSTRAINT outbound_qa_policies_facility_fkey
+    FOREIGN KEY (tenant_id, facility_id)
+    REFERENCES public.facilities (tenant_id, id);
+ALTER TABLE public.outbound_qa_policies
+    ADD CONSTRAINT outbound_qa_policies_owner_facility_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id)
+    REFERENCES public.inventory_owner_facilities (tenant_id, inventory_owner_id, facility_id);
+ALTER TABLE public.outbound_qa_policies
+    ADD CONSTRAINT outbound_qa_policies_predecessor_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, supersedes_policy_id)
+    REFERENCES public.outbound_qa_policies (tenant_id, inventory_owner_id, facility_id, id);
+ALTER TABLE public.outbound_qa_policies
+    ADD CONSTRAINT outbound_qa_policies_actor_fkey
+    FOREIGN KEY (tenant_id, configured_by_user_id)
+    REFERENCES public.tenant_memberships (tenant_id, user_id);
+
+ALTER TABLE public.outbound_qa_sessions
+    ADD CONSTRAINT outbound_qa_sessions_packing_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, order_id, packing_session_id)
+    REFERENCES public.packing_sessions
+        (tenant_id, inventory_owner_id, facility_id, order_id, id);
+ALTER TABLE public.outbound_qa_sessions
+    ADD CONSTRAINT outbound_qa_sessions_policy_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, policy_id)
+    REFERENCES public.outbound_qa_policies (tenant_id, inventory_owner_id, facility_id, id);
+ALTER TABLE public.outbound_qa_sessions
+    ADD CONSTRAINT outbound_qa_sessions_actor_fkey
+    FOREIGN KEY (tenant_id, started_by_user_id)
+    REFERENCES public.tenant_memberships (tenant_id, user_id);
+ALTER TABLE public.outbound_qa_sessions
+    ADD CONSTRAINT outbound_qa_sessions_passed_by_fkey
+    FOREIGN KEY (tenant_id, passed_by_user_id)
+    REFERENCES public.tenant_memberships (tenant_id, user_id);
+
+ALTER TABLE public.outbound_qa_carton_verifications
+    ADD CONSTRAINT outbound_qa_carton_verifications_session_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, packing_session_id,
+                 outbound_qa_session_id)
+    REFERENCES public.outbound_qa_sessions
+        (tenant_id, inventory_owner_id, facility_id, packing_session_id, id);
+ALTER TABLE public.outbound_qa_carton_verifications
+    ADD CONSTRAINT outbound_qa_carton_verifications_carton_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, packing_session_id, carton_id)
+    REFERENCES public.cartons (tenant_id, inventory_owner_id, facility_id, packing_session_id, id);
+ALTER TABLE public.outbound_qa_carton_verifications
+    ADD CONSTRAINT outbound_qa_carton_verifications_actor_fkey
+    FOREIGN KEY (tenant_id, verified_by_user_id)
+    REFERENCES public.tenant_memberships (tenant_id, user_id);
+
+ALTER TABLE public.outbound_qa_completions
+    ADD CONSTRAINT outbound_qa_completions_session_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, packing_session_id,
+                 outbound_qa_session_id)
+    REFERENCES public.outbound_qa_sessions
+        (tenant_id, inventory_owner_id, facility_id, packing_session_id, id);
+ALTER TABLE public.outbound_qa_completions
+    ADD CONSTRAINT outbound_qa_completions_actor_fkey
+    FOREIGN KEY (tenant_id, completed_by_user_id)
+    REFERENCES public.tenant_memberships (tenant_id, user_id);
+
+CREATE FUNCTION public.validate_outbound_qa_policy() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    predecessor public.outbound_qa_policies%ROWTYPE;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM public.inventory_owner_facilities owner_facility
+        JOIN public.inventory_owners owner
+          ON owner.tenant_id = owner_facility.tenant_id
+         AND owner.id = owner_facility.inventory_owner_id AND owner.deleted IS NULL
+        JOIN public.facilities facility
+          ON facility.tenant_id = owner_facility.tenant_id
+         AND facility.id = owner_facility.facility_id AND facility.deleted IS NULL
+        WHERE owner_facility.tenant_id = NEW.tenant_id
+          AND owner_facility.inventory_owner_id = NEW.inventory_owner_id
+          AND owner_facility.facility_id = NEW.facility_id
+    ) THEN
+        RAISE EXCEPTION 'outbound QA policy scope is not active' USING ERRCODE = '55000';
+    END IF;
+    IF NEW.supersedes_policy_id IS NULL THEN
+        IF NEW.revision <> 1 OR EXISTS (
+            SELECT 1 FROM public.outbound_qa_policies policy
+            WHERE policy.tenant_id = NEW.tenant_id
+              AND policy.inventory_owner_id = NEW.inventory_owner_id
+              AND policy.facility_id = NEW.facility_id)
+        THEN
+            RAISE EXCEPTION 'initial outbound QA policy version is invalid' USING ERRCODE = '55000';
+        END IF;
+    ELSE
+        SELECT * INTO predecessor FROM public.outbound_qa_policies
+        WHERE tenant_id = NEW.tenant_id
+          AND inventory_owner_id = NEW.inventory_owner_id
+          AND facility_id = NEW.facility_id
+          AND id = NEW.supersedes_policy_id
+        FOR SHARE;
+        IF NOT FOUND OR predecessor.revision + 1 <> NEW.revision
+           OR predecessor.effective_to IS DISTINCT FROM NEW.effective_from
+        THEN
+            RAISE EXCEPTION 'outbound QA policy predecessor is invalid' USING ERRCODE = '55000';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_outbound_qa_policy_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'outbound QA policy history is immutable' USING ERRCODE = '55000';
+    END IF;
+    IF OLD.effective_to IS NOT NULL OR NEW.effective_to IS NULL
+       OR ROW(NEW.id, NEW.tenant_id, NEW.inventory_owner_id, NEW.facility_id,
+              NEW.requirement, NEW.revision, NEW.supersedes_policy_id,
+              NEW.effective_from, NEW.configured_by_user_id, NEW.configured_at)
+          IS DISTINCT FROM
+          ROW(OLD.id, OLD.tenant_id, OLD.inventory_owner_id, OLD.facility_id,
+              OLD.requirement, OLD.revision, OLD.supersedes_policy_id,
+              OLD.effective_from, OLD.configured_by_user_id, OLD.configured_at)
+    THEN
+        RAISE EXCEPTION 'outbound QA policy history is immutable' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_outbound_qa_session() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE valid boolean;
+BEGIN
+    SELECT policy.requirement = 'scan_every_carton'
+           AND policy.revision = NEW.policy_revision
+           AND policy.effective_to IS NULL
+           AND packing.state = 'ready_to_manifest'
+           AND packing.revision = NEW.expected_order_revision
+           AND packing.closed_carton_count = NEW.expected_carton_count
+           AND orders.status = 'awaiting shipment'
+           AND orders.revision = NEW.expected_order_revision
+    INTO valid
+    FROM public.outbound_qa_policies policy
+    JOIN public.packing_sessions packing
+      ON packing.tenant_id = policy.tenant_id
+     AND packing.inventory_owner_id = policy.inventory_owner_id
+     AND packing.facility_id = policy.facility_id
+     AND packing.id = NEW.packing_session_id
+     AND packing.order_id = NEW.order_id
+    JOIN public.orders orders
+      ON orders.tenant_id = packing.tenant_id
+     AND orders.inventory_owner_id = packing.inventory_owner_id
+     AND orders.id = packing.order_id AND orders.deleted IS NULL
+    WHERE policy.tenant_id = NEW.tenant_id
+      AND policy.inventory_owner_id = NEW.inventory_owner_id
+      AND policy.facility_id = NEW.facility_id
+      AND policy.id = NEW.policy_id
+    FOR SHARE OF policy, packing, orders;
+    IF valid IS DISTINCT FROM TRUE OR NEW.state <> 'open' OR NEW.revision <> 1
+       OR NEW.verified_carton_count <> 0
+    THEN
+        RAISE EXCEPTION 'outbound QA session is not executable' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_outbound_qa_session_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' OR OLD.state = 'passed'
+       OR ROW(NEW.id, NEW.tenant_id, NEW.inventory_owner_id, NEW.facility_id,
+              NEW.packing_session_id, NEW.order_id, NEW.policy_id, NEW.policy_revision,
+              NEW.expected_order_revision, NEW.expected_carton_count,
+              NEW.started_by_user_id, NEW.started_at)
+          IS DISTINCT FROM
+          ROW(OLD.id, OLD.tenant_id, OLD.inventory_owner_id, OLD.facility_id,
+              OLD.packing_session_id, OLD.order_id, OLD.policy_id, OLD.policy_revision,
+              OLD.expected_order_revision, OLD.expected_carton_count,
+              OLD.started_by_user_id, OLD.started_at)
+       OR NEW.revision <> OLD.revision + 1
+    THEN
+        RAISE EXCEPTION 'outbound QA session mutation is invalid' USING ERRCODE = '55000';
+    END IF;
+    IF NEW.state = 'open' THEN
+        IF NEW.verified_carton_count <> OLD.verified_carton_count + 1
+           OR NOT EXISTS (
+               SELECT 1 FROM public.outbound_qa_carton_verifications verification
+               WHERE verification.tenant_id = OLD.tenant_id
+                 AND verification.outbound_qa_session_id = OLD.id
+                 AND verification.expected_session_revision = OLD.revision
+                 AND verification.resulting_session_revision = NEW.revision)
+        THEN
+            RAISE EXCEPTION 'outbound QA carton progress lacks evidence' USING ERRCODE = '23514';
+        END IF;
+    ELSIF NEW.state = 'passed' THEN
+        IF NEW.verified_carton_count <> OLD.verified_carton_count
+           OR NEW.verified_carton_count <> NEW.expected_carton_count
+           OR NEW.passed_by_user_id IS NULL OR NEW.passed_at IS NULL
+           OR NOT EXISTS (
+               SELECT 1 FROM public.outbound_qa_completions completion
+               WHERE completion.tenant_id = OLD.tenant_id
+                 AND completion.outbound_qa_session_id = OLD.id
+                 AND completion.expected_session_revision = OLD.revision
+                 AND completion.resulting_session_revision = NEW.revision
+                 AND completion.completed_by_user_id = NEW.passed_by_user_id
+                 AND completion.completed_at = NEW.passed_at)
+        THEN
+            RAISE EXCEPTION 'outbound QA completion lacks evidence' USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'outbound QA session transition is invalid' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_outbound_qa_carton_verification() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE source record;
+BEGIN
+    SELECT session.state, session.revision, session.expected_carton_count,
+           carton.license_plate_id, plate.barcode,
+           (SELECT COUNT(*)::bigint FROM public.cartons preceding
+            WHERE preceding.tenant_id = carton.tenant_id
+              AND preceding.packing_session_id = carton.packing_session_id
+              AND preceding.state = 'closed' AND preceding.id <= carton.id) AS sequence,
+           (SELECT COUNT(*)::bigint FROM public.carton_contents content
+            WHERE content.tenant_id = carton.tenant_id
+              AND content.inventory_owner_id = carton.inventory_owner_id
+              AND content.facility_id = carton.facility_id
+              AND content.packing_session_id = carton.packing_session_id
+              AND content.carton_id = carton.id) AS content_count,
+           (SELECT COALESCE(SUM(content.packed_qty), 0)::bigint
+            FROM public.carton_contents content
+            WHERE content.tenant_id = carton.tenant_id
+              AND content.inventory_owner_id = carton.inventory_owner_id
+              AND content.facility_id = carton.facility_id
+              AND content.packing_session_id = carton.packing_session_id
+              AND content.carton_id = carton.id) AS packed_qty
+    INTO source
+    FROM public.outbound_qa_sessions session
+    JOIN public.cartons carton
+      ON carton.tenant_id = session.tenant_id
+     AND carton.inventory_owner_id = session.inventory_owner_id
+     AND carton.facility_id = session.facility_id
+     AND carton.packing_session_id = session.packing_session_id
+     AND carton.id = NEW.carton_id AND carton.state = 'closed'
+    JOIN public.license_plates plate
+      ON plate.tenant_id = carton.tenant_id
+     AND plate.inventory_owner_id = carton.inventory_owner_id
+     AND plate.facility_id = carton.facility_id
+     AND plate.id = carton.license_plate_id AND plate.deleted IS NULL
+    WHERE session.tenant_id = NEW.tenant_id
+      AND session.inventory_owner_id = NEW.inventory_owner_id
+      AND session.facility_id = NEW.facility_id
+      AND session.id = NEW.outbound_qa_session_id
+      AND session.packing_session_id = NEW.packing_session_id
+      AND session.order_id = NEW.order_id
+    FOR SHARE OF session, carton, plate;
+    IF NOT FOUND OR source.state <> 'open'
+       OR source.revision <> NEW.expected_session_revision
+       OR NEW.resulting_session_revision <> source.revision + 1
+       OR NEW.license_plate_id <> source.license_plate_id
+       OR NEW.carton_barcode <> source.barcode
+       OR NEW.sequence <> source.sequence
+       OR NEW.content_count <> source.content_count
+       OR NEW.packed_qty <> source.packed_qty
+    THEN
+        RAISE EXCEPTION 'outbound QA carton verification does not match packed carton'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_outbound_qa_completion() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE session_row public.outbound_qa_sessions%ROWTYPE;
+BEGIN
+    SELECT * INTO session_row FROM public.outbound_qa_sessions
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND facility_id = NEW.facility_id
+      AND packing_session_id = NEW.packing_session_id
+      AND id = NEW.outbound_qa_session_id
+    FOR SHARE;
+    IF NOT FOUND OR session_row.order_id <> NEW.order_id OR session_row.state <> 'open'
+       OR session_row.revision <> NEW.expected_session_revision
+       OR NEW.resulting_session_revision <> session_row.revision + 1
+       OR session_row.expected_carton_count <> NEW.carton_count
+       OR session_row.verified_carton_count <> NEW.carton_count
+    THEN
+        RAISE EXCEPTION 'outbound QA completion is not ready' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.reject_outbound_qa_evidence_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    RAISE EXCEPTION 'outbound QA evidence is immutable' USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE FUNCTION public.require_outbound_qa_session_consistency() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE session_id_value bigint;
+DECLARE session_row public.outbound_qa_sessions%ROWTYPE;
+DECLARE verification_count bigint;
+BEGIN
+    IF TG_TABLE_NAME = 'outbound_qa_sessions' THEN
+        session_id_value := NEW.id;
+    ELSE
+        session_id_value := NEW.outbound_qa_session_id;
+    END IF;
+    SELECT * INTO session_row FROM public.outbound_qa_sessions
+    WHERE tenant_id = NEW.tenant_id AND id = session_id_value;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'outbound QA session is missing' USING ERRCODE = '23514';
+    END IF;
+    SELECT COUNT(*)::bigint INTO verification_count
+    FROM public.outbound_qa_carton_verifications
+    WHERE tenant_id = session_row.tenant_id
+      AND outbound_qa_session_id = session_row.id;
+    IF verification_count <> session_row.verified_carton_count
+       OR verification_count > session_row.expected_carton_count
+       OR (session_row.state = 'passed' AND (
+           verification_count <> session_row.expected_carton_count OR NOT EXISTS (
+               SELECT 1 FROM public.outbound_qa_completions completion
+               WHERE completion.tenant_id = session_row.tenant_id
+                 AND completion.outbound_qa_session_id = session_row.id
+                 AND completion.resulting_session_revision = session_row.revision
+                 AND completion.carton_count = session_row.expected_carton_count)))
+    THEN
+        RAISE EXCEPTION 'outbound QA session evidence does not reconcile' USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.require_outbound_qa_before_shipment() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE policy_row public.outbound_qa_policies%ROWTYPE;
+BEGIN
+    SELECT * INTO policy_row FROM public.outbound_qa_policies
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND facility_id = NEW.facility_id
+      AND effective_to IS NULL;
+    IF FOUND AND policy_row.requirement = 'scan_every_carton'
+       AND NOT EXISTS (
+           SELECT 1 FROM public.outbound_qa_sessions session
+           WHERE session.tenant_id = NEW.tenant_id
+             AND session.inventory_owner_id = NEW.inventory_owner_id
+             AND session.facility_id = NEW.facility_id
+             AND session.packing_session_id = NEW.packing_session_id
+             AND session.order_id = NEW.order_id
+             AND session.policy_id = policy_row.id
+             AND session.policy_revision = policy_row.revision
+             AND session.state = 'passed'
+             AND session.verified_carton_count = NEW.carton_count)
+    THEN
+        RAISE EXCEPTION 'outbound QA must pass before shipment creation' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER outbound_qa_policies_validate
+BEFORE INSERT ON public.outbound_qa_policies
+FOR EACH ROW EXECUTE FUNCTION public.validate_outbound_qa_policy();
+CREATE TRIGGER outbound_qa_policies_guard
+BEFORE DELETE OR UPDATE ON public.outbound_qa_policies
+FOR EACH ROW EXECUTE FUNCTION public.guard_outbound_qa_policy_mutation();
+CREATE TRIGGER outbound_qa_sessions_validate
+BEFORE INSERT ON public.outbound_qa_sessions
+FOR EACH ROW EXECUTE FUNCTION public.validate_outbound_qa_session();
+CREATE TRIGGER outbound_qa_sessions_guard
+BEFORE DELETE OR UPDATE ON public.outbound_qa_sessions
+FOR EACH ROW EXECUTE FUNCTION public.guard_outbound_qa_session_mutation();
+CREATE CONSTRAINT TRIGGER outbound_qa_sessions_require_consistency
+AFTER INSERT OR UPDATE ON public.outbound_qa_sessions DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_outbound_qa_session_consistency();
+CREATE TRIGGER outbound_qa_carton_verifications_validate
+BEFORE INSERT ON public.outbound_qa_carton_verifications
+FOR EACH ROW EXECUTE FUNCTION public.validate_outbound_qa_carton_verification();
+CREATE TRIGGER outbound_qa_carton_verifications_are_immutable
+BEFORE DELETE OR UPDATE ON public.outbound_qa_carton_verifications
+FOR EACH ROW EXECUTE FUNCTION public.reject_outbound_qa_evidence_mutation();
+CREATE CONSTRAINT TRIGGER outbound_qa_carton_verifications_require_consistency
+AFTER INSERT ON public.outbound_qa_carton_verifications DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_outbound_qa_session_consistency();
+CREATE TRIGGER outbound_qa_completions_validate
+BEFORE INSERT ON public.outbound_qa_completions
+FOR EACH ROW EXECUTE FUNCTION public.validate_outbound_qa_completion();
+CREATE TRIGGER outbound_qa_completions_are_immutable
+BEFORE DELETE OR UPDATE ON public.outbound_qa_completions
+FOR EACH ROW EXECUTE FUNCTION public.reject_outbound_qa_evidence_mutation();
+CREATE CONSTRAINT TRIGGER outbound_qa_completions_require_consistency
+AFTER INSERT ON public.outbound_qa_completions DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_outbound_qa_session_consistency();
+CREATE TRIGGER shipments_require_outbound_qa
+BEFORE INSERT ON public.shipments
+FOR EACH ROW EXECUTE FUNCTION public.require_outbound_qa_before_shipment();
+
+ALTER TABLE public.outbound_qa_policies ENABLE ROW LEVEL SECURITY;
+CREATE POLICY outbound_qa_policies_tenant_isolation ON public.outbound_qa_policies
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+ALTER TABLE public.outbound_qa_sessions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY outbound_qa_sessions_tenant_isolation ON public.outbound_qa_sessions
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+ALTER TABLE public.outbound_qa_carton_verifications ENABLE ROW LEVEL SECURITY;
+CREATE POLICY outbound_qa_carton_verifications_tenant_isolation
+ON public.outbound_qa_carton_verifications
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+ALTER TABLE public.outbound_qa_completions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY outbound_qa_completions_tenant_isolation ON public.outbound_qa_completions
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT, INSERT ON public.outbound_qa_policies TO wareboxes_app;
+GRANT UPDATE (effective_to) ON public.outbound_qa_policies TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.outbound_qa_policies_id_seq TO wareboxes_app;
+GRANT SELECT, INSERT ON public.outbound_qa_sessions TO wareboxes_app;
+GRANT UPDATE (state, revision, verified_carton_count, passed_by_user_id, passed_at)
+ON public.outbound_qa_sessions TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.outbound_qa_sessions_id_seq TO wareboxes_app;
+GRANT SELECT, INSERT ON public.outbound_qa_carton_verifications TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.outbound_qa_carton_verifications_id_seq TO wareboxes_app;
+GRANT SELECT, INSERT ON public.outbound_qa_completions TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.outbound_qa_completions_id_seq TO wareboxes_app;
+
+REVOKE ALL ON FUNCTION public.validate_outbound_qa_policy() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_outbound_qa_policy_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_outbound_qa_session() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_outbound_qa_session_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_outbound_qa_carton_verification() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_outbound_qa_completion() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_outbound_qa_evidence_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_outbound_qa_session_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_outbound_qa_before_shipment() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

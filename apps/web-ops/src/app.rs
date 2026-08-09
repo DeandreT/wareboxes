@@ -752,6 +752,7 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                     initial_queue=data.shipping_queue.unwrap_or_else(|| ShippingQueuePage::new(Vec::new(), None))
                     access=data.access
                     can_configure_origins=has_permission(&session, "admin")
+                    can_configure_qa=has_permission(&session, "wms_supervisor")
                     on_unauthorized=session_expired_callback()
                 />
             }

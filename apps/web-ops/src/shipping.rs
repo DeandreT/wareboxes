@@ -1,13 +1,16 @@
 mod display;
 mod documents;
+mod outbound_qa;
+mod queue;
 mod request_state;
 
 use leptos::{html, prelude::*};
 use wareboxes_api_contract::v1::{
     ConfigureFacilityShippingOriginResponse, ConfirmShipmentDepartureRequest,
     CreateShipmentRequest, CreateShipmentResponse, ManualCartonTrackingRequest, OpaqueCursor,
-    RecordManualManifestRequest, RecordManualManifestResponse, ShipmentResponse, ShipmentStatus,
-    ShippingQueueEntryResponse, ShippingQueuePage,
+    OutboundQaPolicyResponse, OutboundQaSessionResponse, OutboundQaSessionStatus,
+    OutboundQaSessionSummaryResponse, RecordManualManifestRequest, RecordManualManifestResponse,
+    ShipmentResponse, ShipmentStatus, ShippingQueueEntryResponse, ShippingQueuePage,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 
@@ -21,6 +24,8 @@ use display::{
     shipment_status_label,
 };
 use documents::ShipmentDocumentsPanel;
+use outbound_qa::{outbound_qa_ready, OutboundQaReadiness};
+use queue::ShippingQueue;
 use request_state::{
     queue_refresh_action, queue_response_is_current, shipment_request_is_current,
     QueueRefreshAction, ShipmentRequestToken, ShipmentVersion,
@@ -101,6 +106,7 @@ pub(crate) fn ShippingWorkspace(
     initial_queue: ShippingQueuePage,
     access: AccessScopeWorkspace,
     can_configure_origins: bool,
+    can_configure_qa: bool,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     let facilities = StoredValue::new(access.facilities);
@@ -191,6 +197,13 @@ pub(crate) fn ShippingWorkspace(
             set_error(signals, "The order has an incomplete ship-to address.");
             return;
         }
+        if !outbound_qa_ready(&entry) {
+            set_error(
+                signals,
+                "Outbound QA must pass before the shipment can be created.",
+            );
+            return;
+        }
         dispatch_command(
             PendingShippingCommand::Create {
                 order_id: entry.order_id,
@@ -228,6 +241,53 @@ pub(crate) fn ShippingWorkspace(
                 .message
                 .set("Facility origin is ready. Create the shipment.".to_owned());
         });
+    let on_qa_policy = Callback::new(move |policy: OutboundQaPolicyResponse| {
+        queue.entries.update(|entries| {
+            if let Some(entry) = entries.iter_mut().find(|entry| {
+                entry.inventory_owner_id == policy.inventory_owner_id
+                    && entry.facility_id == policy.facility_id
+            }) {
+                entry.outbound_qa_policy = Some(policy.clone());
+                entry.outbound_qa_session = None;
+            }
+        });
+        signals.error.set(false);
+        signals
+            .message
+            .set("Outbound QA policy updated.".to_owned());
+    });
+    let on_qa_session = Callback::new(move |session: OutboundQaSessionResponse| {
+        let summary = OutboundQaSessionSummaryResponse {
+            session_id: session.session_id,
+            policy_id: session.policy_id,
+            policy_revision: session.policy_revision,
+            status: session.status,
+            revision: session.revision,
+            progress: session.progress,
+            started_at: session.started_at,
+            passed_at: session.passed_at,
+        };
+        queue.entries.update(|entries| {
+            if let Some(entry) = entries
+                .iter_mut()
+                .find(|entry| entry.order_id == session.order_id)
+            {
+                entry.outbound_qa_session = Some(summary);
+            }
+        });
+        signals.error.set(false);
+        signals
+            .message
+            .set(if session.status == OutboundQaSessionStatus::Passed {
+                "Outbound QA passed. The shipment can be created.".to_owned()
+            } else {
+                format!(
+                    "Outbound QA: {} of {} cartons verified.",
+                    session.progress.verified_carton_count, session.progress.expected_carton_count,
+                )
+            });
+    });
+    let refresh_after_qa = Callback::new(move |_| request_queue(queue, signals, false));
 
     view! {
         <section class="shipping-workspace">
@@ -283,6 +343,7 @@ pub(crate) fn ShippingWorkspace(
                     signals
                     scan_input
                     can_configure_origins
+                    can_configure_qa
                     on_clear=clear_selection
                     on_create=create
                     on_manifest=manifest
@@ -290,6 +351,9 @@ pub(crate) fn ShippingWorkspace(
                     on_depart=depart
                     on_retry=retry
                     on_configure_origin=Callback::new(move |_| origin_dialog_open.set(true))
+                    on_qa_policy
+                    on_qa_session
+                    on_refresh_qa=refresh_after_qa
                 />
             </div>
         </section>
@@ -306,100 +370,13 @@ pub(crate) fn ShippingWorkspace(
 }
 
 #[component]
-fn ShippingQueue(
-    queue: QueueSignals,
-    selected_order_id: RwSignal<Option<i64>>,
-    on_select: Callback<i64>,
-    on_load_more: Callback<()>,
-) -> impl IntoView {
-    view! {
-        <aside class="shipping-queue" aria-label="Shipping queue">
-            <header>
-                <div>
-                    <h2>"Ready orders"</h2>
-                    <span>{move || format!("{} visible", queue.entries.get().len())}</span>
-                </div>
-                <Show when=move || queue.pending.get()>
-                    <span class="status pending">"Refreshing"</span>
-                </Show>
-            </header>
-            <Show when=move || queue.error.get().is_some()>
-                <p class="shipping-queue-error" role="alert">{move || queue.error.get().unwrap_or_default()}</p>
-            </Show>
-            <div class="shipping-queue-list">
-                <For
-                    each=move || queue.entries.get()
-                    key=|entry| (
-                        entry.order_id,
-                        entry.order_revision.get(),
-                        entry.facility_revision.get(),
-                        entry.shipment.as_ref().map_or(0, |shipment| shipment.revision.get()),
-                    )
-                    children=move |entry| {
-                        let order_id = entry.order_id;
-                        let state = entry.shipment.as_ref().map_or_else(
-                            || "Ready".to_owned(),
-                            |shipment| match shipment.status {
-                                ShipmentStatus::AwaitingManifest => "Needs manifest".to_owned(),
-                                ShipmentStatus::Manifested => "Ready to depart".to_owned(),
-                                ShipmentStatus::PartiallyDeparted => format!(
-                                    "{} / {} departed",
-                                    shipment.departed_carton_count,
-                                    shipment.carton_count,
-                                ),
-                                ShipmentStatus::Departed => "Departed".to_owned(),
-                            },
-                        );
-                        let blocker = if !entry.origin_ready {
-                            Some("Origin missing")
-                        } else if !entry.destination_ready {
-                            Some("Ship-to incomplete")
-                        } else {
-                            None
-                        };
-                        view! {
-                            <button
-                                type="button"
-                                class="shipping-queue-row"
-                                class:selected=move || selected_order_id.get() == Some(order_id)
-                                on:click=move |_| on_select.run(order_id)
-                            >
-                                <span class="shipping-queue-primary">
-                                    <strong>{entry.order_key}</strong>
-                                    <small>{format!("{} · {}", entry.inventory_owner_name, entry.facility_name)}</small>
-                                </span>
-                                <span class="shipping-queue-state">
-                                    <span class="status">{state}</span>
-                                    {entry.rush.then(|| view! { <span class="status danger">"Rush"</span> })}
-                                    {blocker.map(|label| view! { <span class="status warning">{label}</span> })}
-                                </span>
-                            </button>
-                        }
-                    }
-                />
-                <Show when=move || queue.entries.get().is_empty() && !queue.pending.get()>
-                    <p class="shipping-empty">"No packed orders are ready in this scope."</p>
-                </Show>
-            </div>
-            <Show when=move || queue.next_cursor.get().is_some()>
-                <button
-                    type="button"
-                    class="button secondary-action shipping-load-more"
-                    disabled=move || queue.pending.get()
-                    on:click=move |_| on_load_more.run(())
-                >"Load more"</button>
-            </Show>
-        </aside>
-    }
-}
-
-#[component]
 #[allow(clippy::too_many_arguments)]
 fn ShippingDetail(
     queue: QueueSignals,
     signals: ShippingSignals,
     scan_input: NodeRef<html::Input>,
     can_configure_origins: bool,
+    can_configure_qa: bool,
     on_clear: Callback<()>,
     on_create: Callback<()>,
     on_manifest: Callback<()>,
@@ -407,6 +384,9 @@ fn ShippingDetail(
     on_depart: Callback<()>,
     on_retry: Callback<()>,
     on_configure_origin: Callback<()>,
+    on_qa_policy: Callback<OutboundQaPolicyResponse>,
+    on_qa_session: Callback<OutboundQaSessionResponse>,
+    on_refresh_qa: Callback<()>,
 ) -> impl IntoView {
     view! {
         <main class="shipping-detail">
@@ -432,7 +412,12 @@ fn ShippingDetail(
                         .ship_by
                         .as_deref()
                         .map_or_else(|| "Not set".into(), compact_timestamp);
-                    let readiness_entry = entry.clone();
+                    let readiness_order_id = entry.order_id;
+                    let readiness_fallback = entry.clone();
+                    let readiness_entry = Signal::derive(move || {
+                        queue_entry(queue, readiness_order_id)
+                            .unwrap_or_else(|| readiness_fallback.clone())
+                    });
                     view! {
                     <header class="shipping-order-header">
                         <div>
@@ -450,11 +435,16 @@ fn ShippingDetail(
                         when=move || signals.shipment.get().is_some()
                         fallback=move || view! {
                             <ShipmentReadiness
-                                entry=readiness_entry.clone()
+                                entry=readiness_entry
                                 can_configure_origins
+                                can_configure_qa
                                 pending=signals.pending
                                 on_create
                                 on_configure_origin
+                                on_qa_policy
+                                on_qa_session
+                                on_refresh_qa
+                                on_unauthorized=signals.on_unauthorized
                             />
                         }
                     >
@@ -499,26 +489,43 @@ fn CommandStatus(signals: ShippingSignals, on_retry: Callback<()>) -> impl IntoV
 
 #[component]
 fn ShipmentReadiness(
-    entry: ShippingQueueEntryResponse,
+    entry: Signal<ShippingQueueEntryResponse>,
     can_configure_origins: bool,
+    can_configure_qa: bool,
     pending: RwSignal<bool>,
     on_create: Callback<()>,
     on_configure_origin: Callback<()>,
+    on_qa_policy: Callback<OutboundQaPolicyResponse>,
+    on_qa_session: Callback<OutboundQaSessionResponse>,
+    on_refresh_qa: Callback<()>,
+    on_unauthorized: Callback<()>,
 ) -> impl IntoView {
-    let ready = entry.origin_ready && entry.destination_ready;
+    let ready = Signal::derive(move || {
+        entry
+            .with(|entry| entry.origin_ready && entry.destination_ready && outbound_qa_ready(entry))
+    });
     view! {
         <section class="shipping-readiness">
-            <header><h3>"Shipment readiness"</h3><span class=if ready { "status success" } else { "status warning" }>{if ready { "Ready" } else { "Blocked" }}</span></header>
+            <header><h3>"Shipment readiness"</h3><span class=move || if ready.get() { "status success" } else { "status warning" }>{move || if ready.get() { "Ready" } else { "Blocked" }}</span></header>
             <div class="shipping-readiness-grid">
-                <div><span>"Packing"</span><strong>"Complete"</strong><small>{format!("Session {}", entry.packing_session_id)}</small></div>
-                <div><span>"Facility origin"</span><strong>{if entry.origin_ready { "Complete" } else { "Missing" }}</strong><small>{format!("Revision {}", entry.facility_revision.get())}</small></div>
-                <div><span>"Ship-to"</span><strong>{if entry.destination_ready { "Complete" } else { "Incomplete" }}</strong><small>"Order snapshot"</small></div>
+                <div><span>"Packing"</span><strong>"Complete"</strong><small>{move || format!("Session {}", entry.get().packing_session_id)}</small></div>
+                <div><span>"Facility origin"</span><strong>{move || if entry.get().origin_ready { "Complete" } else { "Missing" }}</strong><small>{move || format!("Revision {}", entry.get().facility_revision.get())}</small></div>
+                <div><span>"Ship-to"</span><strong>{move || if entry.get().destination_ready { "Complete" } else { "Incomplete" }}</strong><small>"Order snapshot"</small></div>
+                <OutboundQaReadiness
+                    entry
+                    can_configure=can_configure_qa
+                    pending
+                    on_policy=on_qa_policy
+                    on_session=on_qa_session
+                    on_refresh=on_refresh_qa
+                    on_unauthorized
+                />
             </div>
             <div class="shipping-readiness-actions">
-                {(!entry.origin_ready && can_configure_origins).then(|| view! {
+                <Show when=move || !entry.get().origin_ready && can_configure_origins>
                     <button type="button" class="button secondary-action" disabled=move || pending.get() on:click=move |_| on_configure_origin.run(())>"Configure origin"</button>
-                })}
-                <button type="button" class="button primary-action" disabled=move || pending.get() || !ready on:click=move |_| on_create.run(())>"Create shipment"</button>
+                </Show>
+                <button type="button" class="button primary-action" disabled=move || pending.get() || !ready.get() on:click=move |_| on_create.run(())>"Create shipment"</button>
             </div>
         </section>
     }

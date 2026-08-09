@@ -1,7 +1,10 @@
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
-use super::{CursorPage, OpaqueCursor, PageLimit, Revision, ShipmentStatus};
+use super::{
+    CursorPage, OpaqueCursor, OutboundQaPolicyResponse, OutboundQaSessionSummaryResponse,
+    PageLimit, Revision, ShipmentStatus,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -78,6 +81,8 @@ pub struct ShippingQueueEntryResponse {
     pub ship_by: Option<String>,
     pub origin_ready: bool,
     pub destination_ready: bool,
+    pub outbound_qa_policy: Option<OutboundQaPolicyResponse>,
+    pub outbound_qa_session: Option<OutboundQaSessionSummaryResponse>,
     pub shipment: Option<ShippingQueueShipmentResponse>,
 }
 
@@ -122,6 +127,8 @@ mod tests {
                 ship_by: Some("2026-08-09T04:00:00Z".into()),
                 origin_ready: true,
                 destination_ready: true,
+                outbound_qa_policy: None,
+                outbound_qa_session: None,
                 shipment: Some(ShippingQueueShipmentResponse {
                     shipment_id: 8,
                     status: ShipmentStatus::AwaitingManifest,

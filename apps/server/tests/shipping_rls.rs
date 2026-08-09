@@ -77,6 +77,26 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
             "pick_short_ship_dispositions_tenant_isolation",
             false,
         ),
+        (
+            "outbound_qa_policies",
+            "outbound_qa_policies_tenant_isolation",
+            false,
+        ),
+        (
+            "outbound_qa_sessions",
+            "outbound_qa_sessions_tenant_isolation",
+            false,
+        ),
+        (
+            "outbound_qa_carton_verifications",
+            "outbound_qa_carton_verifications_tenant_isolation",
+            false,
+        ),
+        (
+            "outbound_qa_completions",
+            "outbound_qa_completions_tenant_isolation",
+            false,
+        ),
     ] {
         let rls: (bool, bool) = sqlx::query_as(
             "SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = $1::regclass",
@@ -127,6 +147,43 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
         );
     }
 
+    let policy_columns: (bool, bool) = sqlx::query_as(
+        r#"
+        SELECT has_column_privilege(
+                   'wareboxes_app','outbound_qa_policies','effective_to','UPDATE'),
+               has_column_privilege(
+                   'wareboxes_app','outbound_qa_policies','requirement','UPDATE')
+        "#,
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(policy_columns, (true, false));
+
+    let session_columns: (bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        r#"
+        SELECT has_column_privilege('wareboxes_app','outbound_qa_sessions','state','UPDATE'),
+               has_column_privilege('wareboxes_app','outbound_qa_sessions','revision','UPDATE'),
+               has_column_privilege(
+                   'wareboxes_app','outbound_qa_sessions','verified_carton_count','UPDATE'),
+               has_column_privilege(
+                   'wareboxes_app','outbound_qa_sessions','passed_by_user_id','UPDATE'),
+               has_column_privilege(
+                   'wareboxes_app','outbound_qa_sessions','passed_at','UPDATE'),
+               has_column_privilege(
+                   'wareboxes_app','outbound_qa_sessions','expected_carton_count','UPDATE'),
+               has_column_privilege(
+                   'wareboxes_app','outbound_qa_sessions','policy_revision','UPDATE')
+        "#,
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(
+        session_columns,
+        (true, true, true, true, true, false, false)
+    );
+
     for sequence_name in [
         "shipments_id_seq",
         "shipment_address_snapshots_id_seq",
@@ -139,6 +196,10 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
         "shipment_document_lines_id_seq",
         "shipment_document_cartons_id_seq",
         "pick_short_ship_dispositions_id_seq",
+        "outbound_qa_policies_id_seq",
+        "outbound_qa_sessions_id_seq",
+        "outbound_qa_carton_verifications_id_seq",
+        "outbound_qa_completions_id_seq",
     ] {
         let privileges: SequencePrivileges = sqlx::query_as(
             r#"

@@ -1,8 +1,13 @@
 use sqlx::Row;
+use wareboxes_application::outbound_qa::{
+    OutboundQaPolicyReadModel, OutboundQaSessionSummaryReadModel,
+};
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    FacilityRevision, OrderId, OrderRevision, PackSessionId, ShipmentId, ShipmentRevision,
-    ShipmentStatus, Timestamp,
+    FacilityId, FacilityRevision, InventoryOwnerId, OrderId, OrderRevision, OutboundQaPolicyId,
+    OutboundQaPolicyRevision, OutboundQaProgress, OutboundQaRequirement, OutboundQaSessionId,
+    OutboundQaSessionRevision, OutboundQaSessionStatus, PackSessionId, ShipmentId,
+    ShipmentRevision, ShipmentStatus, Timestamp, UserId,
 };
 use wareboxes_persistence_postgres::db::{begin_tenant_transaction, Db};
 
@@ -49,6 +54,8 @@ pub struct ShippingQueueEntry {
     pub ship_by: Option<Timestamp>,
     pub origin_ready: bool,
     pub destination_ready: bool,
+    pub outbound_qa_policy: Option<OutboundQaPolicyReadModel>,
+    pub outbound_qa_session: Option<OutboundQaSessionSummaryReadModel>,
     pub shipment: Option<ShippingQueueShipment>,
 }
 
@@ -119,6 +126,19 @@ pub async fn shipping_queue(
                    AND NULLIF(btrim(destination.postal_code), '') IS NOT NULL
                    AND NULLIF(btrim(destination.country), '') IS NOT NULL
                ) AS destination_ready,
+               qa_policy.id AS qa_policy_id,
+               qa_policy.requirement AS qa_requirement,
+               qa_policy.revision AS qa_policy_revision,
+               qa_policy.configured_by_user_id AS qa_configured_by_user_id,
+               qa_policy.configured_at AS qa_configured_at,
+               qa_session.id AS qa_session_id,
+               qa_session.policy_revision AS qa_session_policy_revision,
+               qa_session.state AS qa_session_state,
+               qa_session.revision AS qa_session_revision,
+               qa_session.expected_carton_count AS qa_expected_carton_count,
+               qa_session.verified_carton_count AS qa_verified_carton_count,
+               qa_session.started_at AS qa_started_at,
+               qa_session.passed_at AS qa_passed_at,
                shipment.id AS shipment_id,
                shipment.state AS shipment_state,
                shipment.revision AS shipment_revision,
@@ -152,6 +172,17 @@ pub async fn shipping_queue(
           ON destination.tenant_id = order_header.tenant_id
          AND destination.id = order_header.address_id
          AND destination.deleted IS NULL
+        LEFT JOIN outbound_qa_policies qa_policy
+          ON qa_policy.tenant_id = session.tenant_id
+         AND qa_policy.inventory_owner_id = session.inventory_owner_id
+         AND qa_policy.facility_id = session.facility_id
+         AND qa_policy.effective_to IS NULL
+        LEFT JOIN outbound_qa_sessions qa_session
+          ON qa_session.tenant_id = session.tenant_id
+         AND qa_session.inventory_owner_id = session.inventory_owner_id
+         AND qa_session.facility_id = session.facility_id
+         AND qa_session.packing_session_id = session.id
+         AND qa_session.policy_id = qa_policy.id
         LEFT JOIN shipments shipment
           ON shipment.tenant_id = session.tenant_id
          AND shipment.inventory_owner_id = session.inventory_owner_id
@@ -290,15 +321,86 @@ fn entry_from_row(row: sqlx::postgres::PgRow) -> AppResult<ShippingQueueEntry> {
             "shipping queue order and packing revision are inconsistent",
         ));
     }
+    let owner_id = required_positive(&row, "inventory_owner_id")?;
+    let facility_id = required_positive(&row, "facility_id")?;
+    let qa_policy_id: Option<i64> = row.try_get("qa_policy_id")?;
+    let outbound_qa_policy = qa_policy_id
+        .map(|policy_id| {
+            let requirement: String = required(&row, "qa_requirement")?;
+            Ok::<OutboundQaPolicyReadModel, AppError>(OutboundQaPolicyReadModel {
+                policy_id: OutboundQaPolicyId::new(policy_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                inventory_owner_id: InventoryOwnerId::new(owner_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                facility_id: FacilityId::new(facility_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                requirement: OutboundQaRequirement::parse(&requirement).ok_or_else(|| {
+                    AppError::internal("shipping queue has invalid outbound QA requirement")
+                })?,
+                revision: OutboundQaPolicyRevision::new(required(&row, "qa_policy_revision")?)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                configured_by: UserId::new(required(&row, "qa_configured_by_user_id")?)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                configured_at: required(&row, "qa_configured_at")?,
+            })
+        })
+        .transpose()?;
+    let qa_session_id: Option<i64> = row.try_get("qa_session_id")?;
+    let outbound_qa_session = qa_session_id
+        .map(|session_id| {
+            let status_text: String = required(&row, "qa_session_state")?;
+            let status = OutboundQaSessionStatus::parse(&status_text)
+                .ok_or_else(|| AppError::internal("shipping queue has invalid QA status"))?;
+            let expected = required(&row, "qa_expected_carton_count")?;
+            let verified = required(&row, "qa_verified_carton_count")?;
+            let progress = OutboundQaProgress::new(expected, verified)
+                .map_err(|error| AppError::internal(error.to_string()))?;
+            let passed_at: Option<Timestamp> = row.try_get("qa_passed_at")?;
+            if expected <= 0
+                || (status == OutboundQaSessionStatus::Passed)
+                    != (progress.is_complete() && passed_at.is_some())
+            {
+                return Err(AppError::internal(
+                    "shipping queue outbound QA state is inconsistent",
+                ));
+            }
+            Ok(OutboundQaSessionSummaryReadModel {
+                session_id: OutboundQaSessionId::new(session_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                policy_id: OutboundQaPolicyId::new(qa_policy_id.ok_or_else(|| {
+                    AppError::internal("shipping queue QA session has no policy")
+                })?)
+                .map_err(|error| AppError::internal(error.to_string()))?,
+                policy_revision: OutboundQaPolicyRevision::new(required(
+                    &row,
+                    "qa_session_policy_revision",
+                )?)
+                .map_err(|error| AppError::internal(error.to_string()))?,
+                status,
+                revision: OutboundQaSessionRevision::new(required(&row, "qa_session_revision")?)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                progress,
+                started_at: required(&row, "qa_started_at")?,
+                passed_at,
+            })
+        })
+        .transpose()?;
+    if let (Some(policy), Some(session)) = (&outbound_qa_policy, &outbound_qa_session) {
+        if session.policy_id != policy.policy_id || session.policy_revision != policy.revision {
+            return Err(AppError::internal(
+                "shipping queue outbound QA policy snapshot is inconsistent",
+            ));
+        }
+    }
 
     Ok(ShippingQueueEntry {
         order_id: OrderId::new(row.try_get("order_id")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
         order_key: row.try_get("order_key")?,
         order_revision,
-        inventory_owner_id: required_positive(&row, "inventory_owner_id")?,
+        inventory_owner_id: owner_id,
         inventory_owner_name: row.try_get("inventory_owner_name")?,
-        facility_id: required_positive(&row, "facility_id")?,
+        facility_id,
         facility_name: row.try_get("facility_name")?,
         facility_revision: FacilityRevision::new(row.try_get("facility_revision")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
@@ -308,6 +410,8 @@ fn entry_from_row(row: sqlx::postgres::PgRow) -> AppResult<ShippingQueueEntry> {
         ship_by: row.try_get("ship_by")?,
         origin_ready: row.try_get("origin_ready")?,
         destination_ready: row.try_get("destination_ready")?,
+        outbound_qa_policy,
+        outbound_qa_session,
         shipment,
     })
 }

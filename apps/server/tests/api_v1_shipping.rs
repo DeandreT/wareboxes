@@ -1,6 +1,8 @@
 mod common;
 #[path = "api_v1_shipping/documents.rs"]
 mod documents;
+#[path = "api_v1_shipping/outbound_qa.rs"]
+mod outbound_qa;
 #[path = "api_v1_shipping/partial_departure.rs"]
 mod partial_departure;
 #[path = "api_v1_shipping/queue.rs"]

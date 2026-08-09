@@ -342,6 +342,10 @@
 
 .shipping-readiness-grid {
   display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.shipping-readiness-grid:has(.shipping-qa-cell.active) {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
@@ -354,6 +358,103 @@
 
 .shipping-readiness-grid > div:last-child {
   border-right: 0;
+}
+
+.shipping-readiness-grid > .shipping-qa-cell.active {
+  grid-column: 1 / -1;
+  grid-template-columns: 105px 100px minmax(100px, 1fr) auto;
+  align-items: center;
+  border-top: 1px solid var(--line);
+  border-right: 0;
+}
+
+.shipping-qa-cell .button {
+  min-height: 27px;
+  margin: 2px 0 0;
+  padding: 3px 7px;
+  font-size: 9px;
+}
+
+.shipping-readiness .primary-action:disabled {
+  border-color: var(--line-strong);
+  background: var(--muted-badge);
+  color: var(--muted-badge-ink);
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.shipping-qa-cell > p {
+  grid-column: 1 / -1;
+  margin: 2px 0 0;
+  color: var(--ink-soft);
+  font-size: 9px;
+}
+
+.shipping-qa-cell > p.error {
+  color: var(--danger-ink);
+}
+
+.shipping-qa-configure {
+  justify-self: start;
+}
+
+.shipping-qa-policy-editor,
+.shipping-qa-scan {
+  display: flex;
+  min-width: 0;
+  align-items: end;
+  gap: 6px;
+}
+
+.shipping-qa-policy-editor label {
+  display: grid;
+  min-width: 170px;
+  gap: 2px;
+}
+
+.shipping-qa-policy-editor select,
+.shipping-qa-scan input {
+  min-width: 0;
+  height: var(--control-height);
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--control-ink);
+  font-size: 10px;
+}
+
+.shipping-qa-policy-editor select {
+  padding: 0 7px;
+}
+
+.shipping-qa-scan {
+  grid-column: 1 / -1;
+}
+
+.shipping-qa-scan label {
+  position: relative;
+  display: flex;
+  min-width: 220px;
+  flex: 1 1 320px;
+  align-items: center;
+}
+
+.shipping-qa-scan .ui-icon {
+  position: absolute;
+  left: 8px;
+  color: var(--ink-soft);
+}
+
+.shipping-qa-scan input {
+  width: 100%;
+  padding: 0 7px 0 30px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.shipping-qa-policy-editor select:focus,
+.shipping-qa-scan input:focus {
+  border-color: var(--blue);
+  outline: 3px solid rgb(39 102 176 / 18%);
 }
 
 .shipping-readiness-grid span,

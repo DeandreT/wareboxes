@@ -7,6 +7,7 @@ mod order_amendment;
 mod order_cancellation;
 mod order_release;
 mod outbound_load;
+mod outbound_qa;
 mod packing;
 mod picking;
 mod replenishment;
@@ -59,6 +60,11 @@ pub use outbound_load::{
     MAX_OUTBOUND_LOAD_CANCELLATION_NOTE_LENGTH, MAX_OUTBOUND_LOAD_REFERENCE_LENGTH,
     MAX_OUTBOUND_LOAD_SCAN_VALUE_LENGTH, MAX_OUTBOUND_LOAD_SEAL_NUMBER_LENGTH,
     MAX_OUTBOUND_LOAD_TRAILER_NUMBER_LENGTH,
+};
+pub use outbound_qa::{
+    begin_outbound_qa, complete_outbound_qa, record_outbound_qa_carton, OutboundQaError,
+    OutboundQaPolicyRevision, OutboundQaProgress, OutboundQaRequirement, OutboundQaScanValue,
+    OutboundQaSessionRevision, OutboundQaSessionStatus, MAX_OUTBOUND_QA_SCAN_VALUE_LENGTH,
 };
 pub use packing::{
     begin_packing, complete_packing, continue_packing, open_carton, CartonDimensions,
@@ -189,6 +195,12 @@ positive_id!(ReplenishmentConfirmationId, "replenishment confirmation ID");
 positive_id!(PackSessionId, "pack session ID");
 positive_id!(CartonId, "carton ID");
 positive_id!(CartonContentId, "carton content ID");
+positive_id!(OutboundQaPolicyId, "outbound QA policy ID");
+positive_id!(OutboundQaSessionId, "outbound QA session ID");
+positive_id!(
+    OutboundQaCartonVerificationId,
+    "outbound QA carton verification ID"
+);
 positive_id!(ShipmentId, "shipment ID");
 positive_id!(ShipmentDocumentId, "shipment document ID");
 positive_id!(OutboundLoadId, "outbound load ID");

@@ -101,6 +101,14 @@ pub async fn create_shipment(
     if existing {
         return Err(AppError::conflict("order already has a shipment"));
     }
+    crate::repo::outbound_qa::require_current_qa_passed_tx(
+        &mut tx,
+        access.tenant_id,
+        order.inventory_owner_id,
+        positive(session.facility_id, wareboxes_domain::FacilityId::new)?,
+        command.packing_session_id,
+    )
+    .await?;
 
     let cartons =
         lock_carton_snapshots_tx(&mut tx, access.tenant_id, command.packing_session_id.get())

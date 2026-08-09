@@ -19,6 +19,7 @@ mod order_cancellation;
 mod order_hold;
 mod order_release;
 mod outbound_load;
+mod outbound_qa;
 mod packing;
 mod picking;
 mod putaway;
@@ -121,6 +122,12 @@ pub use outbound_load::{
     PlanOutboundLoadResponse, PlanOutboundLoadShipmentRequest, ReleaseOutboundLoadRequest,
     ReleaseOutboundLoadResponse, StageOutboundCartonRequest, StartOutboundLoadLoadingRequest,
     StartOutboundLoadLoadingResponse, UnloadOutboundCartonRequest, UnstageOutboundCartonRequest,
+};
+pub use outbound_qa::{
+    CompleteOutboundQaRequest, ConfigureOutboundQaPolicyRequest, OutboundQaCartonResponse,
+    OutboundQaPolicyResponse, OutboundQaProgressResponse, OutboundQaRequirement,
+    OutboundQaSessionResponse, OutboundQaSessionStatus, OutboundQaSessionSummaryResponse,
+    StartOutboundQaRequest, VerifyOutboundQaCartonRequest,
 };
 pub use packing::{
     CartonDimensions, CartonMeasurements, CloseCartonRequest, CloseCartonResponse,
