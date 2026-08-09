@@ -2,15 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
-    CartonContentId, CartonId, CartonMeasurements, FacilityId, InventoryAllocationId,
-    InventoryBalanceId, InventoryOwnerId, ItemBatchId, LicensePlateId, LocationId, OrderId,
-    OrderLineId, OrderRevision, OrderStatus, PackQuantity, PackScanValue, PackSessionId,
-    PackSessionStatus, PackingProgress, Timestamp, UserId,
+    CartonContentId, CartonContentRemovalId, CartonId, CartonMeasurements, FacilityId,
+    InventoryAllocationId, InventoryBalanceId, InventoryOwnerId, ItemBatchId, LicensePlateId,
+    LocationId, OrderId, OrderLineId, OrderRevision, OrderStatus, PackContentRemovalDetails,
+    PackQuantity, PackScanValue, PackSessionId, PackSessionStatus, PackingProgress, Timestamp,
+    UserId,
 };
 
 pub const OPEN_PACK_SESSION_OPERATION: &str = "packing.session.open.v1";
 pub const CREATE_CARTON_OPERATION: &str = "packing.carton.create.v1";
 pub const PACK_PICKED_ALLOCATION_OPERATION: &str = "packing.content.confirm.v1";
+pub const REMOVE_PACKED_CONTENT_OPERATION: &str = "packing.content.remove.v1";
 pub const CLOSE_CARTON_OPERATION: &str = "packing.carton.close.v1";
 pub const VOID_CARTON_OPERATION: &str = "packing.carton.void.v1";
 
@@ -47,6 +49,11 @@ pub enum PackAllocationDisposition {
 pub struct PackableAllocation {
     pub inventory_allocation_id: InventoryAllocationId,
     pub order_line_id: OrderLineId,
+    pub picked_tote_location_id: LocationId,
+    pub picked_tote_location_barcode: PackScanValue,
+    pub picked_tote_location_name: Option<String>,
+    pub picked_tote_license_plate_id: LicensePlateId,
+    pub picked_tote_license_plate_barcode: PackScanValue,
     pub inventory_balance_id: InventoryBalanceId,
     pub source_location_id: LocationId,
     pub source_location_barcode: PackScanValue,
@@ -177,6 +184,50 @@ pub struct PackPickedAllocationResult {
     pub uom: String,
     pub packed_by: UserId,
     pub packed_at: Timestamp,
+    pub revision: OrderRevision,
+    pub progress: PackingProgress,
+}
+
+/// Returns one active content row from an open carton to its original picked tote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovePackedContentCommand {
+    pub session_id: PackSessionId,
+    pub carton_id: CartonId,
+    pub content_id: CartonContentId,
+    pub carton_barcode: PackScanValue,
+    pub item_barcode: PackScanValue,
+    pub lot_scan: Option<PackScanValue>,
+    pub serial_scan: Option<PackScanValue>,
+    pub destination_license_plate_barcode: PackScanValue,
+    pub details: PackContentRemovalDetails,
+    pub expected_revision: OrderRevision,
+}
+
+/// Replay-stable inventory and workflow evidence for one pack reversal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovePackedContentResult {
+    pub removal_id: CartonContentRemovalId,
+    pub content_id: CartonContentId,
+    pub session_id: PackSessionId,
+    pub carton_id: CartonId,
+    pub order_id: OrderId,
+    pub order_line_id: OrderLineId,
+    pub inventory_transaction_id: i64,
+    pub source_inventory_allocation_id: InventoryAllocationId,
+    pub destination_inventory_allocation_id: InventoryAllocationId,
+    pub source_inventory_balance_id: InventoryBalanceId,
+    pub destination_inventory_balance_id: InventoryBalanceId,
+    pub source_location_id: LocationId,
+    pub destination_location_id: LocationId,
+    pub source_license_plate_id: LicensePlateId,
+    pub destination_license_plate_id: LicensePlateId,
+    pub item_batch_id: ItemBatchId,
+    pub item_id: i64,
+    pub quantity: PackQuantity,
+    pub uom: String,
+    pub details: PackContentRemovalDetails,
+    pub removed_by: UserId,
+    pub removed_at: Timestamp,
     pub revision: OrderRevision,
     pub progress: PackingProgress,
 }

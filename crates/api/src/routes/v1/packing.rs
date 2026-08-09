@@ -5,23 +5,26 @@ use wareboxes_api_contract::v1::{
     CloseCartonRequest, CloseCartonResponse, CreateCartonRequest, CreateCartonResponse,
     DimensionMillimeters as ApiDimensionMillimeters, OpaqueCursor, OpenPackSessionRequest,
     OpenPackSessionResponse, PackAllocationDispositionResponse, PackCartonLifecycleResponse,
-    PackCartonResponse, PackPickedAllocationRequest, PackPickedAllocationResponse,
-    PackSessionResponse, PackSessionStatus as ApiSessionStatus, PackableAllocationResponse,
-    PackingOrderStatus, PackingProgressResponse, PackingQueueEntryResponse,
-    PackingQueueOrderStatus, PackingQueuePage as ApiPackingQueuePage, PackingQueuePageRequest,
-    PackingQueueSessionResponse, Revision, VoidCartonRequest, VoidCartonResponse,
-    WeightGrams as ApiWeightGrams,
+    PackCartonResponse, PackContentRemovalReason as ApiPackContentRemovalReason,
+    PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
+    PackSessionStatus as ApiSessionStatus, PackableAllocationResponse, PackingOrderStatus,
+    PackingProgressResponse, PackingQueueEntryResponse, PackingQueueOrderStatus,
+    PackingQueuePage as ApiPackingQueuePage, PackingQueuePageRequest, PackingQueueSessionResponse,
+    RemovePackedContentRequest, RemovePackedContentResponse, Revision, VoidCartonRequest,
+    VoidCartonResponse, WeightGrams as ApiWeightGrams,
 };
 use wareboxes_application::packing::{
     CloseCartonCommand, CloseCartonResult, CreateCartonCommand, CreateCartonResult,
     OpenPackSessionCommand, OpenPackSessionResult, PackAllocationDisposition, PackCarton,
     PackCartonLifecycle, PackPickedAllocationCommand, PackPickedAllocationResult, PackSessionQuery,
-    PackSessionReadModel, PackableAllocation, VoidCartonCommand, VoidCartonResult,
+    PackSessionReadModel, PackableAllocation, RemovePackedContentCommand,
+    RemovePackedContentResult, VoidCartonCommand, VoidCartonResult,
 };
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    CartonDimensions, CartonId, CartonMeasurements, DimensionMillimeters, FacilityId,
-    InventoryAllocationId, LocationId, OrderId, OrderRevision, OrderStatus, PackScanValue,
+    CartonContentId, CartonDimensions, CartonId, CartonMeasurements, DimensionMillimeters,
+    FacilityId, InventoryAllocationId, LocationId, OrderId, OrderRevision, OrderStatus,
+    PackContentRemovalDetails, PackContentRemovalNote, PackContentRemovalReason, PackScanValue,
     PackSessionId, PackSessionStatus, PackingProgress, WeightGrams, MAX_PACK_SCAN_VALUE_LENGTH,
 };
 
@@ -153,6 +156,21 @@ pub async fn pack_content(
     Ok(Json(map_packed_allocation(result)?))
 }
 
+pub async fn remove_content(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path((session_id, carton_id, content_id)): Path<(i64, i64, i64)>,
+    Json(body): Json<RemovePackedContentRequest>,
+) -> V1Result<Json<RemovePackedContentResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let command = remove_content_command(session_id, carton_id, content_id, body)?;
+    let context = user.command_context(&idempotency_key);
+    let result =
+        repo::packing::remove_packed_content(&state.db, &user.tenant, &context, &command).await?;
+    Ok(Json(map_removed_content(result)?))
+}
+
 pub async fn close_carton(
     State(state): State<AppState>,
     user: CurrentTenant,
@@ -237,6 +255,44 @@ fn close_carton_command(
         carton_id: carton_id_value(carton_id)?,
         carton_barcode: scan(body.carton_barcode, "carton barcode")?,
         measurements: measurements_from_api(body.measurements)?,
+        expected_revision: order_revision(body.expected_revision)?,
+    })
+}
+
+fn remove_content_command(
+    session_id: i64,
+    carton_id: i64,
+    content_id: i64,
+    body: RemovePackedContentRequest,
+) -> V1Result<RemovePackedContentCommand> {
+    let reason = match body.reason {
+        ApiPackContentRemovalReason::WrongCarton => PackContentRemovalReason::WrongCarton,
+        ApiPackContentRemovalReason::WrongItem => PackContentRemovalReason::WrongItem,
+        ApiPackContentRemovalReason::QualityIssue => PackContentRemovalReason::QualityIssue,
+        ApiPackContentRemovalReason::DamagedCarton => PackContentRemovalReason::DamagedCarton,
+        ApiPackContentRemovalReason::Other => PackContentRemovalReason::Other,
+    };
+    let note = body
+        .note
+        .map(PackContentRemovalNote::new)
+        .transpose()
+        .map_err(domain_validation)?;
+    Ok(RemovePackedContentCommand {
+        session_id: session_id_value(session_id)?,
+        carton_id: carton_id_value(carton_id)?,
+        content_id: CartonContentId::new(content_id).map_err(domain_validation)?,
+        carton_barcode: scan(body.carton_barcode, "carton barcode")?,
+        item_barcode: scan(body.item_barcode, "item barcode")?,
+        lot_scan: body.lot_scan.map(|value| scan(value, "lot")).transpose()?,
+        serial_scan: body
+            .serial_scan
+            .map(|value| scan(value, "serial"))
+            .transpose()?,
+        destination_license_plate_barcode: scan(
+            body.destination_license_plate_barcode,
+            "destination license plate barcode",
+        )?,
+        details: PackContentRemovalDetails::new(reason, note).map_err(domain_validation)?,
         expected_revision: order_revision(body.expected_revision)?,
     })
 }
@@ -460,6 +516,43 @@ fn map_packed_allocation(
     })
 }
 
+fn map_removed_content(result: RemovePackedContentResult) -> V1Result<RemovePackedContentResponse> {
+    let reason = match result.details.reason() {
+        PackContentRemovalReason::WrongCarton => ApiPackContentRemovalReason::WrongCarton,
+        PackContentRemovalReason::WrongItem => ApiPackContentRemovalReason::WrongItem,
+        PackContentRemovalReason::QualityIssue => ApiPackContentRemovalReason::QualityIssue,
+        PackContentRemovalReason::DamagedCarton => ApiPackContentRemovalReason::DamagedCarton,
+        PackContentRemovalReason::Other => ApiPackContentRemovalReason::Other,
+    };
+    Ok(RemovePackedContentResponse {
+        removal_id: result.removal_id.get(),
+        content_id: result.content_id.get(),
+        session_id: result.session_id.get(),
+        carton_id: result.carton_id.get(),
+        order_id: result.order_id.get(),
+        order_line_id: result.order_line_id.get(),
+        inventory_transaction_id: result.inventory_transaction_id,
+        source_inventory_allocation_id: result.source_inventory_allocation_id.get(),
+        destination_inventory_allocation_id: result.destination_inventory_allocation_id.get(),
+        source_inventory_balance_id: result.source_inventory_balance_id.get(),
+        destination_inventory_balance_id: result.destination_inventory_balance_id.get(),
+        source_location_id: result.source_location_id.get(),
+        destination_location_id: result.destination_location_id.get(),
+        source_license_plate_id: result.source_license_plate_id.get(),
+        destination_license_plate_id: result.destination_license_plate_id.get(),
+        item_batch_id: result.item_batch_id.get(),
+        item_id: result.item_id,
+        quantity: result.quantity.get(),
+        uom: result.uom,
+        reason,
+        note: result.details.note().map(|note| note.as_str().to_owned()),
+        removed_by: result.removed_by.get(),
+        removed_at: result.removed_at.to_rfc3339(),
+        revision: revision(result.revision)?,
+        progress: map_progress(result.progress),
+    })
+}
+
 fn map_closed_carton(result: CloseCartonResult) -> V1Result<CloseCartonResponse> {
     let order_status = match result.order_status {
         OrderStatus::Packing => PackingOrderStatus::Packing,
@@ -530,6 +623,13 @@ fn map_allocation(allocation: PackableAllocation) -> PackableAllocationResponse 
     PackableAllocationResponse {
         inventory_allocation_id: allocation.inventory_allocation_id.get(),
         order_line_id: allocation.order_line_id.get(),
+        picked_tote_location_id: allocation.picked_tote_location_id.get(),
+        picked_tote_location_barcode: allocation.picked_tote_location_barcode.into_inner(),
+        picked_tote_location_name: allocation.picked_tote_location_name,
+        picked_tote_license_plate_id: allocation.picked_tote_license_plate_id.get(),
+        picked_tote_license_plate_barcode: allocation
+            .picked_tote_license_plate_barcode
+            .into_inner(),
         inventory_balance_id: allocation.inventory_balance_id.get(),
         source_location_id: allocation.source_location_id.get(),
         source_location_barcode: allocation.source_location_barcode.into_inner(),
@@ -810,6 +910,60 @@ mod tests {
                 carton_barcode: "CARTON-1".into(),
                 expected_revision: revision_value(5),
             }
+        )
+        .is_err());
+
+        let removed = remove_content_command(
+            10,
+            11,
+            13,
+            RemovePackedContentRequest {
+                carton_barcode: "CARTON-1".into(),
+                item_barcode: "SKU-1".into(),
+                lot_scan: Some("LOT-1".into()),
+                serial_scan: Some("SERIAL-1".into()),
+                destination_license_plate_barcode: "TOTE-1".into(),
+                reason: ApiPackContentRemovalReason::WrongCarton,
+                note: None,
+                expected_revision: revision_value(6),
+            },
+        )
+        .unwrap();
+        assert_eq!(removed.content_id.get(), 13);
+        assert_eq!(
+            removed.details.reason(),
+            PackContentRemovalReason::WrongCarton
+        );
+        assert!(remove_content_command(
+            10,
+            11,
+            13,
+            RemovePackedContentRequest {
+                carton_barcode: "CARTON-1".into(),
+                item_barcode: "SKU-1".into(),
+                lot_scan: None,
+                serial_scan: None,
+                destination_license_plate_barcode: "TOTE-1".into(),
+                reason: ApiPackContentRemovalReason::Other,
+                note: None,
+                expected_revision: revision_value(6),
+            },
+        )
+        .is_err());
+        assert!(remove_content_command(
+            10,
+            11,
+            0,
+            RemovePackedContentRequest {
+                carton_barcode: "CARTON-1".into(),
+                item_barcode: "SKU-1".into(),
+                lot_scan: None,
+                serial_scan: None,
+                destination_license_plate_barcode: "TOTE-1".into(),
+                reason: ApiPackContentRemovalReason::WrongItem,
+                note: None,
+                expected_revision: revision_value(6),
+            },
         )
         .is_err());
     }

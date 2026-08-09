@@ -426,6 +426,14 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'carton_contents_tenant_isolation'
                 ),
                 (
+                    'packing_allocation_positions',
+                    'packing_allocation_positions_tenant_isolation'
+                ),
+                (
+                    'carton_content_removals',
+                    'carton_content_removals_tenant_isolation'
+                ),
+                (
                     'outbound_qa_policies',
                     'outbound_qa_policies_tenant_isolation'
                 ),

@@ -599,9 +599,18 @@ async fn lock_carton_by_scan_tx(
         r#"
         SELECT COUNT(*)::bigint AS content_count,
                COALESCE(SUM(packed_qty),0)::bigint AS packed_qty
-        FROM carton_contents
-        WHERE tenant_id=$1 AND inventory_owner_id=$2 AND facility_id=$3
-          AND packing_session_id=$4 AND carton_id=$5
+        FROM carton_contents content
+        INNER JOIN packing_allocation_positions position
+          ON position.tenant_id=content.tenant_id
+         AND position.inventory_owner_id=content.inventory_owner_id
+         AND position.facility_id=content.facility_id
+         AND position.packing_session_id=content.packing_session_id
+         AND position.packing_session_allocation_id=content.packing_session_allocation_id
+         AND position.current_carton_content_id=content.id
+         AND position.state='packed'
+        WHERE content.tenant_id=$1 AND content.inventory_owner_id=$2
+          AND content.facility_id=$3 AND content.packing_session_id=$4
+          AND content.carton_id=$5
         "#,
     )
     .bind(tenant_id.get())

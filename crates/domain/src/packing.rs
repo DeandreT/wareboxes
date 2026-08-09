@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::OrderStatus;
 
 pub const MAX_PACK_SCAN_VALUE_LENGTH: usize = 200;
+pub const MAX_PACK_CONTENT_REMOVAL_NOTE_LENGTH: usize = 500;
 
 /// Lifecycle of an order's pack-station session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -41,6 +42,87 @@ impl CartonStatus {
             Self::Open => Ok(Self::Voided),
         }
     }
+}
+
+/// Operator-selected reason for returning packed stock to its picked tote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackContentRemovalReason {
+    WrongCarton,
+    WrongItem,
+    QualityIssue,
+    DamagedCarton,
+    Other,
+}
+
+/// Optional bounded audit note attached to one pack reversal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PackContentRemovalNote(String);
+
+impl PackContentRemovalNote {
+    pub fn new(value: impl Into<String>) -> Result<Self, PackingError> {
+        let value = value.into();
+        if value.trim() != value {
+            return Err(PackingError::UntrimmedRemovalNote);
+        }
+        if value.is_empty() {
+            return Err(PackingError::EmptyRemovalNote);
+        }
+        if value.chars().count() > MAX_PACK_CONTENT_REMOVAL_NOTE_LENGTH {
+            return Err(PackingError::RemovalNoteTooLong);
+        }
+        if value.chars().any(char::is_control) {
+            return Err(PackingError::InvalidRemovalNoteCharacter);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Validated reason and note captured for an immutable pack reversal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackContentRemovalDetails {
+    reason: PackContentRemovalReason,
+    note: Option<PackContentRemovalNote>,
+}
+
+impl PackContentRemovalDetails {
+    pub fn new(
+        reason: PackContentRemovalReason,
+        note: Option<PackContentRemovalNote>,
+    ) -> Result<Self, PackingError> {
+        if reason == PackContentRemovalReason::Other && note.is_none() {
+            return Err(PackingError::RemovalNoteRequired);
+        }
+        Ok(Self { reason, note })
+    }
+
+    pub const fn reason(&self) -> PackContentRemovalReason {
+        self.reason
+    }
+
+    pub fn note(&self) -> Option<&PackContentRemovalNote> {
+        self.note.as_ref()
+    }
+}
+
+/// Removes one active content row from an open carton.
+pub const fn remove_packed_content(
+    status: CartonStatus,
+    active_content_count: i64,
+) -> Result<i64, PackingError> {
+    if !matches!(status, CartonStatus::Open) {
+        return Err(PackingError::CartonNotOpen);
+    }
+    if active_content_count <= 0 {
+        return Err(PackingError::CartonContentMissing);
+    }
+    Ok(active_content_count - 1)
 }
 
 /// Prevents creating another carton while the station has an unfinished carton.
@@ -448,6 +530,20 @@ pub enum PackingError {
     CartonNotOpen,
     #[error("a nonempty carton cannot be voided")]
     NonemptyCarton,
+    #[error("carton has no active packed content to remove")]
+    CartonContentMissing,
+    #[error("pack-content removal note cannot be empty")]
+    EmptyRemovalNote,
+    #[error("pack-content removal note must be trimmed")]
+    UntrimmedRemovalNote,
+    #[error(
+        "pack-content removal note cannot exceed {MAX_PACK_CONTENT_REMOVAL_NOTE_LENGTH} characters"
+    )]
+    RemovalNoteTooLong,
+    #[error("pack-content removal note cannot contain control characters")]
+    InvalidRemovalNoteCharacter,
+    #[error("pack-content removal reason Other requires a note")]
+    RemovalNoteRequired,
     #[error("only an awaiting-packing order can start packing, got {status}")]
     OrderNotAwaitingPacking { status: OrderStatus },
     #[error("only a packing order can be changed at a pack station, got {status}")]
@@ -531,6 +627,34 @@ mod tests {
         assert_eq!(
             CartonStatus::Closed.void(0),
             Err(PackingError::CartonNotOpen)
+        );
+    }
+
+    #[test]
+    fn content_removal_requires_an_open_nonempty_carton() {
+        assert_eq!(remove_packed_content(CartonStatus::Open, 2), Ok(1));
+        assert_eq!(
+            remove_packed_content(CartonStatus::Open, 0),
+            Err(PackingError::CartonContentMissing)
+        );
+        assert_eq!(
+            remove_packed_content(CartonStatus::Closed, 1),
+            Err(PackingError::CartonNotOpen)
+        );
+    }
+
+    #[test]
+    fn content_removal_details_require_a_bounded_other_note() {
+        assert!(
+            PackContentRemovalDetails::new(PackContentRemovalReason::WrongCarton, None,).is_ok()
+        );
+        assert_eq!(
+            PackContentRemovalDetails::new(PackContentRemovalReason::Other, None),
+            Err(PackingError::RemovalNoteRequired)
+        );
+        let note = PackContentRemovalNote::new("operator verified tote").unwrap();
+        assert!(
+            PackContentRemovalDetails::new(PackContentRemovalReason::Other, Some(note)).is_ok()
         );
     }
 

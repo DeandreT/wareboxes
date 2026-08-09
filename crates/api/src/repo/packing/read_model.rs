@@ -151,7 +151,7 @@ async fn load_cartons_tx(
                carton.created_at, carton.closed_by_user_id, carton.closed_at,
                carton.voided_by_user_id, carton.voided_at,
                carton.weight_g, carton.length_mm, carton.width_mm, carton.height_mm,
-               COUNT(content.id) AS content_count
+               COUNT(position.current_carton_content_id) AS content_count
         FROM cartons carton
         INNER JOIN license_plates plate
           ON plate.tenant_id = carton.tenant_id
@@ -160,6 +160,14 @@ async fn load_cartons_tx(
          AND plate.id = carton.license_plate_id
         LEFT JOIN carton_contents content
           ON content.tenant_id = carton.tenant_id AND content.carton_id = carton.id
+        LEFT JOIN packing_allocation_positions position
+          ON position.tenant_id=content.tenant_id
+         AND position.inventory_owner_id=content.inventory_owner_id
+         AND position.facility_id=content.facility_id
+         AND position.packing_session_id=content.packing_session_id
+         AND position.packing_session_allocation_id=content.packing_session_allocation_id
+         AND position.current_carton_content_id=content.id
+         AND position.state='packed'
         WHERE carton.tenant_id = $1 AND carton.packing_session_id = $2
         GROUP BY carton.id, plate.barcode
         ORDER BY carton.id
@@ -215,11 +223,19 @@ async fn load_allocations_tx(
 ) -> AppResult<Vec<PackableAllocation>> {
     let rows = sqlx::query(
         r#"
-        SELECT snapshot.source_inventory_allocation_id, snapshot.order_item_id,
-               snapshot.source_inventory_balance_id, snapshot.source_location_id,
+        SELECT position.current_inventory_allocation_id AS source_inventory_allocation_id,
+               snapshot.order_item_id,
+               snapshot.source_location_id AS picked_tote_location_id,
+               picked_location.barcode AS picked_tote_location_barcode,
+               picked_location.name AS picked_tote_location_name,
+               snapshot.source_license_plate_id AS picked_tote_license_plate_id,
+               picked_plate.barcode AS picked_tote_license_plate_barcode,
+               position.current_inventory_balance_id AS source_inventory_balance_id,
+               position.current_location_id AS source_location_id,
                location.barcode AS source_location_barcode,
                location.name AS source_location_name,
-               snapshot.source_license_plate_id, plate.barcode AS plate_barcode,
+               position.current_license_plate_id AS source_license_plate_id,
+               plate.barcode AS plate_barcode,
                snapshot.item_batch_id, snapshot.item_id, item.description,
                snapshot.uom, batch.lot, batch.serial, batch.expiration,
                snapshot.planned_qty, content.id AS content_id,
@@ -232,15 +248,30 @@ async fn load_allocations_tx(
                    ORDER BY barcode.name
                ) AS item_barcodes
         FROM packing_session_allocations snapshot
+        INNER JOIN packing_allocation_positions position
+          ON position.tenant_id=snapshot.tenant_id
+         AND position.inventory_owner_id=snapshot.inventory_owner_id
+         AND position.facility_id=snapshot.facility_id
+         AND position.packing_session_id=snapshot.packing_session_id
+         AND position.packing_session_allocation_id=snapshot.id
         INNER JOIN locations location
           ON location.tenant_id = snapshot.tenant_id
          AND location.facility_id = snapshot.facility_id
-         AND location.id = snapshot.source_location_id
+         AND location.id = position.current_location_id
+        INNER JOIN locations picked_location
+          ON picked_location.tenant_id = snapshot.tenant_id
+         AND picked_location.facility_id = snapshot.facility_id
+         AND picked_location.id = snapshot.source_location_id
         INNER JOIN license_plates plate
           ON plate.tenant_id = snapshot.tenant_id
          AND plate.inventory_owner_id = snapshot.inventory_owner_id
          AND plate.facility_id = snapshot.facility_id
-         AND plate.id = snapshot.source_license_plate_id
+         AND plate.id = position.current_license_plate_id
+        INNER JOIN license_plates picked_plate
+          ON picked_plate.tenant_id = snapshot.tenant_id
+         AND picked_plate.inventory_owner_id = snapshot.inventory_owner_id
+         AND picked_plate.facility_id = snapshot.facility_id
+         AND picked_plate.id = snapshot.source_license_plate_id
         INNER JOIN item_batches batch
           ON batch.tenant_id = snapshot.tenant_id
          AND batch.inventory_owner_id = snapshot.inventory_owner_id
@@ -249,7 +280,7 @@ async fn load_allocations_tx(
           ON item.tenant_id = snapshot.tenant_id AND item.id = snapshot.item_id
         LEFT JOIN carton_contents content
           ON content.tenant_id = snapshot.tenant_id
-         AND content.packing_session_allocation_id = snapshot.id
+         AND content.id = position.current_carton_content_id
         WHERE snapshot.tenant_id = $1 AND snapshot.packing_session_id = $2
         ORDER BY snapshot.sequence, snapshot.id
         "#,
@@ -277,6 +308,17 @@ fn map_allocation(row: sqlx::postgres::PgRow) -> AppResult<PackableAllocation> {
             InventoryAllocationId::new,
         )?,
         order_line_id: positive(row.try_get("order_item_id")?, OrderLineId::new)?,
+        picked_tote_location_id: positive(
+            row.try_get("picked_tote_location_id")?,
+            LocationId::new,
+        )?,
+        picked_tote_location_barcode: scan(row.try_get("picked_tote_location_barcode")?)?,
+        picked_tote_location_name: row.try_get("picked_tote_location_name")?,
+        picked_tote_license_plate_id: positive(
+            row.try_get("picked_tote_license_plate_id")?,
+            LicensePlateId::new,
+        )?,
+        picked_tote_license_plate_barcode: scan(row.try_get("picked_tote_license_plate_barcode")?)?,
         inventory_balance_id: positive(
             row.try_get("source_inventory_balance_id")?,
             InventoryBalanceId::new,

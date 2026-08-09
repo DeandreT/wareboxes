@@ -85,9 +85,11 @@ pub use outbound_qa::{
     OutboundQaSessionRevision, OutboundQaSessionStatus, MAX_OUTBOUND_QA_SCAN_VALUE_LENGTH,
 };
 pub use packing::{
-    begin_packing, complete_packing, continue_packing, open_carton, CartonDimensions,
-    CartonMeasurements, CartonStatus, DimensionMillimeters, PackQuantity, PackScanValue,
-    PackSessionStatus, PackingError, PackingProgress, WeightGrams, MAX_PACK_SCAN_VALUE_LENGTH,
+    begin_packing, complete_packing, continue_packing, open_carton, remove_packed_content,
+    CartonDimensions, CartonMeasurements, CartonStatus, DimensionMillimeters,
+    PackContentRemovalDetails, PackContentRemovalNote, PackContentRemovalReason, PackQuantity,
+    PackScanValue, PackSessionStatus, PackingError, PackingProgress, WeightGrams,
+    MAX_PACK_CONTENT_REMOVAL_NOTE_LENGTH, MAX_PACK_SCAN_VALUE_LENGTH,
 };
 pub use pick_wave::{
     cancel_pick_wave, release_pick_wave, validate_pick_wave_plan, PickWaveCancellationNote,
@@ -225,6 +227,7 @@ positive_id!(ReplenishmentConfirmationId, "replenishment confirmation ID");
 positive_id!(PackSessionId, "pack session ID");
 positive_id!(CartonId, "carton ID");
 positive_id!(CartonContentId, "carton content ID");
+positive_id!(CartonContentRemovalId, "carton content removal ID");
 positive_id!(OutboundQaPolicyId, "outbound QA policy ID");
 positive_id!(OutboundQaSessionId, "outbound QA session ID");
 positive_id!(

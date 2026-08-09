@@ -358,8 +358,9 @@ async fn lock_carton_snapshots_tx(
         r#"
         SELECT carton.id, carton.license_plate_id, plate.barcode,
                ROW_NUMBER() OVER (ORDER BY carton.id)::BIGINT AS sequence,
-               COUNT(content.id)::BIGINT AS content_count,
-               COALESCE(SUM(content.packed_qty), 0)::BIGINT AS packed_qty,
+               COUNT(position.current_carton_content_id)::BIGINT AS content_count,
+               COALESCE(SUM(content.packed_qty) FILTER
+                   (WHERE position.current_carton_content_id IS NOT NULL), 0)::BIGINT AS packed_qty,
                carton.weight_g, carton.length_mm, carton.width_mm, carton.height_mm
         FROM cartons carton
         INNER JOIN license_plates plate
@@ -373,6 +374,14 @@ async fn lock_carton_snapshots_tx(
          AND content.facility_id = carton.facility_id
          AND content.packing_session_id = carton.packing_session_id
          AND content.carton_id = carton.id
+        LEFT JOIN packing_allocation_positions position
+          ON position.tenant_id=content.tenant_id
+         AND position.inventory_owner_id=content.inventory_owner_id
+         AND position.facility_id=content.facility_id
+         AND position.packing_session_id=content.packing_session_id
+         AND position.packing_session_allocation_id=content.packing_session_allocation_id
+         AND position.current_carton_content_id=content.id
+         AND position.state='packed'
         WHERE carton.tenant_id = $1 AND carton.packing_session_id = $2
           AND carton.state = 'closed' AND plate.deleted IS NULL
           AND plate.barcode IS NOT NULL

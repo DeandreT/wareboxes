@@ -521,6 +521,7 @@ pub(super) async fn position_for_carton_tx(
          AND plate.inventory_owner_id = carton.inventory_owner_id
          AND plate.id = carton.license_plate_id
         WHERE position.tenant_id = $1 AND position.carton_id = $2
+          AND position.state <> 'unpacked'
         ORDER BY position.id
         "#,
     )

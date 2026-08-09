@@ -4,12 +4,14 @@ mod carton;
 mod content;
 mod queue;
 mod read_model;
+mod removal;
 mod session;
 
 pub use carton::{close_carton, create_carton, void_carton};
 pub use content::pack_picked_allocation;
 pub use queue::{packing_queue, PackingQueueCursor, PackingQueueEntry, PackingQueuePage};
 pub use read_model::{packing_session, packing_session_for_order};
+pub use removal::remove_packed_content;
 pub use session::open_session;
 
 use sqlx::Row;

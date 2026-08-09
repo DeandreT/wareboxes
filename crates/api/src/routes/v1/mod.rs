@@ -280,6 +280,10 @@ pub fn router() -> Router<AppState> {
             post(packing::pack_content),
         )
         .route(
+            "/packing-sessions/{session_id}/cartons/{carton_id}/contents/{content_id}/removals",
+            post(packing::remove_content),
+        )
+        .route(
             "/packing-sessions/{session_id}/cartons/{carton_id}/closures",
             post(packing::close_carton),
         )

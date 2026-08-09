@@ -609,7 +609,8 @@ async fn load_document_lines_tx(
                    AS item_description,
                demand.original_qty, demand.accepted_short_qty,
                demand.accepted_substitute_qty, demand.effective_qty,
-               COALESCE(SUM(content.packed_qty), 0)::bigint AS packed_qty
+               COALESCE(SUM(content.packed_qty) FILTER
+                   (WHERE position.current_carton_content_id IS NOT NULL), 0)::bigint AS packed_qty
         FROM outbound_effective_demand demand
         INNER JOIN order_items item
           ON item.tenant_id = demand.tenant_id
@@ -622,6 +623,14 @@ async fn load_document_lines_tx(
          AND content.inventory_owner_id = demand.inventory_owner_id
          AND content.order_id = demand.order_id AND content.order_item_id = demand.order_item_id
          AND content.packing_session_id = $4
+        LEFT JOIN packing_allocation_positions position
+          ON position.tenant_id=content.tenant_id
+         AND position.inventory_owner_id=content.inventory_owner_id
+         AND position.facility_id=content.facility_id
+         AND position.packing_session_id=content.packing_session_id
+         AND position.packing_session_allocation_id=content.packing_session_allocation_id
+         AND position.current_carton_content_id=content.id
+         AND position.state='packed'
         WHERE demand.tenant_id = $1 AND demand.inventory_owner_id = $2 AND demand.order_id = $3
         GROUP BY item.id, item.line_number, item.line_key, item.item_id, item.uom,
                  catalog.description, demand.original_qty, demand.accepted_short_qty,

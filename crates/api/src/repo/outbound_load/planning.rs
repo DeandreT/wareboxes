@@ -482,6 +482,7 @@ async fn lock_cartons_tx(
          AND shipment_carton.facility_id=position.facility_id
          AND shipment_carton.carton_id=position.carton_id
         WHERE position.tenant_id=$1 AND shipment_carton.id=ANY($2)
+          AND position.state='packed'
         ORDER BY position.id
         FOR UPDATE OF position
         "#,
@@ -507,6 +508,7 @@ async fn lock_cartons_tx(
          AND position.inventory_owner_id=shipment_carton.inventory_owner_id
          AND position.facility_id=shipment_carton.facility_id
          AND position.carton_id=shipment_carton.carton_id
+         AND position.state='packed'
         WHERE shipment_carton.tenant_id=$1 AND shipment_carton.shipment_id=ANY($2)
         GROUP BY shipment_carton.id
         ORDER BY shipment_carton.id

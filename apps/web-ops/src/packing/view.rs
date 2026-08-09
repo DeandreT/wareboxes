@@ -10,6 +10,7 @@ use wareboxes_core::models::Location;
 use crate::components::{Icon, UiIcon};
 use crate::view_model::format_quantity;
 
+use super::removal::PendingContentRemoval;
 use super::{
     CartonMeasurementSignals, IdentityScanStage, PackingLocation, PackingQueueSignals,
     PackingSignals, PendingItemIdentity,
@@ -167,6 +168,7 @@ pub(super) fn PackingActive(
     on_change_source: Callback<()>,
     on_close: Callback<()>,
     on_void: Callback<()>,
+    on_remove: Callback<PendingContentRemoval>,
     on_next_order: Callback<()>,
 ) -> impl IntoView {
     let order_id = current.order_id;
@@ -202,6 +204,12 @@ pub(super) fn PackingActive(
         .unwrap_or_else(|| current.station_location_barcode.clone());
     let station_title = station_name.clone();
     let allocations = current.allocations.clone();
+    let session_id = current.session_id;
+    let expected_revision = current.revision;
+    let removable_carton_id = open_carton.as_ref().map(|carton| carton.carton_id);
+    let removable_carton_barcode = open_carton
+        .as_ref()
+        .map(|carton| carton.carton_barcode.clone());
     let cartons = current.cartons.clone();
     let active_carton_for_form = StoredValue::new(open_carton.clone());
     let has_active_carton = active_carton_for_form.get_value().is_some();
@@ -308,10 +316,28 @@ pub(super) fn PackingActive(
                                 {allocations
                                     .into_iter()
                                     .map(|allocation| {
-                                        let packed = matches!(
-                                            allocation.disposition,
-                                            PackAllocationDispositionResponse::Packed { .. }
-                                        );
+                                        let packed = matches!(&allocation.disposition, PackAllocationDispositionResponse::Packed { .. });
+                                        let removable_content = match &allocation.disposition {
+                                            PackAllocationDispositionResponse::Packed { content_id, carton_id, .. }
+                                                if Some(*carton_id) == removable_carton_id => {
+                                                    removable_carton_barcode.clone().map(|carton_barcode| PendingContentRemoval {
+                                                        session_id,
+                                                        order_id,
+                                                        carton_id: *carton_id,
+                                                        carton_barcode,
+                                                        content_id: *content_id,
+                                                        item_barcodes: allocation.item_barcodes.clone(),
+                                                        item_description: allocation.item_description.clone(),
+                                                        lot: allocation.lot.clone(),
+                                                        serial: allocation.serial.clone(),
+                                                        destination_tote_barcode: allocation.picked_tote_license_plate_barcode.clone(),
+                                                        quantity: allocation.quantity,
+                                                        uom: allocation.uom.clone(),
+                                                        expected_revision,
+                                                    })
+                                                }
+                                            _ => None,
+                                        };
                                         let trace = allocation.lot.clone().or(allocation.serial.clone())
                                             .unwrap_or_else(|| "-".to_owned());
                                         let item = allocation.item_barcodes.first().cloned()
@@ -326,7 +352,23 @@ pub(super) fn PackingActive(
                                                 <td>{trace}</td>
                                                 <td>{allocation.uom}</td>
                                                 <td class="numeric strong">{format_quantity(allocation.quantity)}</td>
-                                                <td><span class=if packed { "status shipped" } else { "status open" }>{if packed { "Packed" } else { "Ready" }}</span></td>
+                                                <td>
+                                                    <div class="packing-item-state">
+                                                        <span class=if packed { "status shipped" } else { "status open" }>{if packed { "Packed" } else { "Ready" }}</span>
+                                                        {removable_content.map(|selection| view! {
+                                                            <button
+                                                                type="button"
+                                                                class="icon-button packing-remove-content"
+                                                                title="Return content to picked tote"
+                                                                aria-label="Return packed content to picked tote"
+                                                                disabled=move || signals.blocked()
+                                                                on:click=move |_| on_remove.run(selection.clone())
+                                                            >
+                                                                <Icon icon=UiIcon::Reverse/>
+                                                            </button>
+                                                        })}
+                                                    </div>
+                                                </td>
                                             </tr>
                                         }
                                     })
@@ -646,18 +688,18 @@ fn source_summaries(session: &PackSessionResponse) -> Vec<SourceSummary> {
         );
         if let Some(existing) = summaries
             .iter_mut()
-            .find(|source| source.barcode == allocation.license_plate_barcode)
+            .find(|source| source.barcode == allocation.picked_tote_license_plate_barcode)
         {
             existing.allocation_count += 1;
             existing.quantity += allocation.quantity;
             existing.packed_count += i64::from(packed);
         } else {
             summaries.push(SourceSummary {
-                barcode: allocation.license_plate_barcode.clone(),
+                barcode: allocation.picked_tote_license_plate_barcode.clone(),
                 location: allocation
-                    .source_location_name
+                    .picked_tote_location_name
                     .clone()
-                    .unwrap_or_else(|| allocation.source_location_barcode.clone()),
+                    .unwrap_or_else(|| allocation.picked_tote_location_barcode.clone()),
                 allocation_count: 1,
                 quantity: allocation.quantity,
                 packed_count: i64::from(packed),

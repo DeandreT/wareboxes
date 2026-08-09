@@ -236,6 +236,34 @@ pub struct PackPickedAllocationRequest {
     pub expected_revision: Revision,
 }
 
+/// Audit reason for reversing one active pack confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackContentRemovalReason {
+    WrongCarton,
+    WrongItem,
+    QualityIssue,
+    DamagedCarton,
+    Other,
+}
+
+/// Returns one active carton content row to the tote captured by the pack session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemovePackedContentRequest {
+    pub carton_barcode: String,
+    pub item_barcode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lot_scan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_scan: Option<String>,
+    pub destination_license_plate_barcode: String,
+    pub reason: PackContentRemovalReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub expected_revision: Revision,
+}
+
 /// Closes one nonempty carton at the aggregate revision observed by the station.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -301,6 +329,11 @@ pub enum PackAllocationDispositionResponse {
 pub struct PackableAllocationResponse {
     pub inventory_allocation_id: i64,
     pub order_line_id: i64,
+    pub picked_tote_location_id: i64,
+    pub picked_tote_location_barcode: String,
+    pub picked_tote_location_name: Option<String>,
+    pub picked_tote_license_plate_id: i64,
+    pub picked_tote_license_plate_barcode: String,
     pub inventory_balance_id: i64,
     pub source_location_id: i64,
     pub source_location_barcode: String,
@@ -379,6 +412,36 @@ pub struct PackPickedAllocationResponse {
     pub uom: String,
     pub packed_by: i64,
     pub packed_at: String,
+    pub revision: Revision,
+    pub progress: PackingProgressResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemovePackedContentResponse {
+    pub removal_id: i64,
+    pub content_id: i64,
+    pub session_id: i64,
+    pub carton_id: i64,
+    pub order_id: i64,
+    pub order_line_id: i64,
+    pub inventory_transaction_id: i64,
+    pub source_inventory_allocation_id: i64,
+    pub destination_inventory_allocation_id: i64,
+    pub source_inventory_balance_id: i64,
+    pub destination_inventory_balance_id: i64,
+    pub source_location_id: i64,
+    pub destination_location_id: i64,
+    pub source_license_plate_id: i64,
+    pub destination_license_plate_id: i64,
+    pub item_batch_id: i64,
+    pub item_id: i64,
+    pub quantity: i64,
+    pub uom: String,
+    pub reason: PackContentRemovalReason,
+    pub note: Option<String>,
+    pub removed_by: i64,
+    pub removed_at: String,
     pub revision: Revision,
     pub progress: PackingProgressResponse,
 }
@@ -580,6 +643,40 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn content_removal_is_strict_scanned_revisioned_and_quantity_free() {
+        let request = serde_json::from_value::<RemovePackedContentRequest>(json!({
+            "carton_barcode": "CARTON-1",
+            "item_barcode": "SKU-1",
+            "lot_scan": "LOT-1",
+            "serial_scan": "SERIAL-1",
+            "destination_license_plate_barcode": "TOTE-1",
+            "reason": "other",
+            "note": "Operator verified the return tote",
+            "expected_revision": 7
+        }))
+        .unwrap();
+        assert_eq!(request.reason, PackContentRemovalReason::Other);
+        assert_eq!(request.destination_license_plate_barcode, "TOTE-1");
+        assert!(serde_json::from_value::<RemovePackedContentRequest>(json!({
+            "carton_barcode": "CARTON-1",
+            "item_barcode": "SKU-1",
+            "destination_license_plate_barcode": "TOTE-1",
+            "reason": "wrong_carton",
+            "expected_revision": 7,
+            "quantity": 2
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<RemovePackedContentRequest>(json!({
+            "carton_barcode": "CARTON-1",
+            "item_barcode": "SKU-1",
+            "destination_license_plate_barcode": "TOTE-1",
+            "reason": "wrong_carton",
+            "expected_revision": 0
+        }))
+        .is_err());
     }
 
     #[test]

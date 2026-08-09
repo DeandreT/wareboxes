@@ -213,6 +213,18 @@ pub async fn pack_picked_allocation(
         packed_at,
     )
     .await?;
+    update_allocation_position_packed_tx(
+        &mut tx,
+        access.tenant_id,
+        target.snapshot_id,
+        content_id,
+        destination_allocation_id,
+        destination_balance_id,
+        session.packing_location_id,
+        carton.license_plate_id,
+        packed_at,
+    )
+    .await?;
     let progress = update_progress_tx(
         &mut tx,
         access.tenant_id,
@@ -344,10 +356,11 @@ async fn source_plate_hint_tx(
 ) -> AppResult<i64> {
     sqlx::query_scalar(
         r#"
-        SELECT source_license_plate_id
-        FROM packing_session_allocations
-        WHERE tenant_id = $1 AND packing_session_id = $2
-          AND source_inventory_allocation_id = $3
+        SELECT position.current_license_plate_id
+        FROM packing_allocation_positions position
+        WHERE position.tenant_id = $1 AND position.packing_session_id = $2
+          AND position.current_inventory_allocation_id = $3
+          AND position.state = 'available'
         "#,
     )
     .bind(tenant_id.get())
@@ -367,9 +380,12 @@ async fn lock_target_tx(
         r#"
         SELECT snapshot.id, snapshot.order_item_id, snapshot.reservation_id,
                snapshot.outbound_order_container_id, snapshot.pick_confirmation_id,
-               snapshot.source_inventory_allocation_id,
-               snapshot.source_inventory_balance_id, snapshot.source_location_id,
-               snapshot.source_license_plate_id, plate.barcode,
+               position.current_inventory_allocation_id AS source_inventory_allocation_id,
+               position.current_inventory_balance_id AS source_inventory_balance_id,
+               position.current_location_id AS source_location_id,
+               position.current_license_plate_id AS source_license_plate_id,
+               position.state AS position_state,
+               position.current_carton_content_id, plate.barcode,
                plate.location_id AS plate_location_id, plate.deleted AS plate_deleted,
                snapshot.item_batch_id, snapshot.item_id, snapshot.uom,
                snapshot.inventory_status, snapshot.planned_qty,
@@ -391,18 +407,23 @@ async fn lock_target_tx(
                balance.item_batch_id AS balance_batch_id,
                balance.item_id AS balance_item_id, balance.uom AS balance_uom,
                balance.status AS balance_status, balance.qty_on_hand,
-               balance.qty_reserved, balance.deleted AS balance_deleted,
-               content.id AS existing_content_id
+               balance.qty_reserved, balance.deleted AS balance_deleted
         FROM packing_session_allocations snapshot
+        INNER JOIN packing_allocation_positions position
+          ON position.tenant_id = snapshot.tenant_id
+         AND position.inventory_owner_id = snapshot.inventory_owner_id
+         AND position.facility_id = snapshot.facility_id
+         AND position.packing_session_id = snapshot.packing_session_id
+         AND position.packing_session_allocation_id = snapshot.id
         INNER JOIN license_plates plate
           ON plate.tenant_id = snapshot.tenant_id
          AND plate.inventory_owner_id = snapshot.inventory_owner_id
          AND plate.facility_id = snapshot.facility_id
-         AND plate.id = snapshot.source_license_plate_id
+         AND plate.id = position.current_license_plate_id
         INNER JOIN inventory_allocations allocation
           ON allocation.tenant_id = snapshot.tenant_id
          AND allocation.inventory_owner_id = snapshot.inventory_owner_id
-         AND allocation.id = snapshot.source_inventory_allocation_id
+         AND allocation.id = position.current_inventory_allocation_id
         INNER JOIN item_batches batch
           ON batch.tenant_id = snapshot.tenant_id
          AND batch.inventory_owner_id = snapshot.inventory_owner_id
@@ -411,13 +432,10 @@ async fn lock_target_tx(
           ON balance.tenant_id = snapshot.tenant_id
          AND balance.inventory_owner_id = snapshot.inventory_owner_id
          AND balance.facility_id = snapshot.facility_id
-         AND balance.id = snapshot.source_inventory_balance_id
-        LEFT JOIN carton_contents content
-          ON content.tenant_id = snapshot.tenant_id
-         AND content.packing_session_allocation_id = snapshot.id
+         AND balance.id = position.current_inventory_balance_id
         WHERE snapshot.tenant_id = $1 AND snapshot.packing_session_id = $2
-          AND snapshot.source_inventory_allocation_id = $3
-        FOR UPDATE OF allocation, balance
+          AND position.current_inventory_allocation_id = $3
+        FOR UPDATE OF position, allocation, balance
         "#,
     )
     .bind(tenant_id.get())
@@ -426,9 +444,10 @@ async fn lock_target_tx(
     .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| AppError::not_found("packable allocation"))?;
-    if row
-        .try_get::<Option<i64>, _>("existing_content_id")?
-        .is_some()
+    if row.try_get::<String, _>("position_state")? != "available"
+        || row
+            .try_get::<Option<i64>, _>("current_carton_content_id")?
+            .is_some()
     {
         return Err(AppError::conflict("picked allocation is already packed"));
     }
@@ -498,6 +517,47 @@ async fn lock_target_tx(
         ));
     }
     Ok(target)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_allocation_position_packed_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    snapshot_id: i64,
+    content_id: CartonContentId,
+    allocation_id: InventoryAllocationId,
+    balance_id: InventoryBalanceId,
+    location_id: i64,
+    license_plate_id: LicensePlateId,
+    packed_at: Timestamp,
+) -> AppResult<()> {
+    let updated = sqlx::query(
+        r#"
+        UPDATE packing_allocation_positions
+        SET state='packed', current_carton_content_id=$1,
+            current_inventory_allocation_id=$2, current_inventory_balance_id=$3,
+            current_location_id=$4, current_license_plate_id=$5,
+            revision=revision+1, positioned_at=$6
+        WHERE tenant_id=$7 AND packing_session_allocation_id=$8
+          AND state='available' AND current_carton_content_id IS NULL
+        "#,
+    )
+    .bind(content_id.get())
+    .bind(allocation_id.get())
+    .bind(balance_id.get())
+    .bind(location_id)
+    .bind(license_plate_id.get())
+    .bind(packed_at)
+    .bind(tenant_id.get())
+    .bind(snapshot_id)
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::conflict(
+            "packing allocation position changed concurrently",
+        ));
+    }
+    Ok(())
 }
 
 async fn validate_scans_tx(

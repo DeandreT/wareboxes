@@ -4,7 +4,8 @@ use wareboxes_api_contract::v1::{
     CartonDimensions, CartonMeasurements, CloseCartonRequest, CreateCartonRequest,
     DimensionMillimeters, OpaqueCursor, OpenPackSessionRequest, PackAllocationDispositionResponse,
     PackCartonLifecycleResponse, PackPickedAllocationRequest, PackSessionResponse,
-    PackingQueueEntryResponse, PackingQueuePage, VoidCartonRequest, WeightGrams,
+    PackingQueueEntryResponse, PackingQueuePage, RemovePackedContentRequest, VoidCartonRequest,
+    WeightGrams,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 use wareboxes_core::models::Location;
@@ -14,68 +15,18 @@ use crate::components::{Icon, UiIcon};
 use crate::toast::{use_toast_bus, ToastBus};
 use crate::view_model::format_quantity;
 
+mod commands;
 mod identity;
+mod removal;
 mod view;
 
+use self::commands::{execute_command, PackingCommandResult, PendingPackingCommand};
 use self::identity::{advance_item_identity, matching_item_candidates, start_item_identity};
+use self::removal::{PackingRemovalDialog, PendingContentRemoval};
 use self::view::{
     facility_label, packing_locations, packing_progress_label, selected_location, station_label,
     PackingActive, PackingIdle,
 };
-
-#[derive(Clone, Debug)]
-enum PendingPackingCommand {
-    Open {
-        order_id: i64,
-        request: OpenPackSessionRequest,
-        idempotency_key: String,
-    },
-    CreateCarton {
-        session_id: i64,
-        request: CreateCartonRequest,
-        idempotency_key: String,
-    },
-    PackAllocation {
-        session_id: i64,
-        carton_id: i64,
-        request: PackPickedAllocationRequest,
-        idempotency_key: String,
-    },
-    CloseCarton {
-        session_id: i64,
-        carton_id: i64,
-        request: CloseCartonRequest,
-        idempotency_key: String,
-    },
-    VoidCarton {
-        session_id: i64,
-        carton_id: i64,
-        request: VoidCartonRequest,
-        idempotency_key: String,
-    },
-}
-
-enum PackingCommandResult {
-    Opened(Box<PackSessionResponse>),
-    Created {
-        order_id: i64,
-        carton_barcode: String,
-    },
-    Packed {
-        order_id: i64,
-        quantity: i64,
-        uom: String,
-    },
-    Closed {
-        order_id: i64,
-        carton_barcode: String,
-        ready: bool,
-    },
-    Voided {
-        order_id: i64,
-        carton_barcode: String,
-    },
-}
 
 #[derive(Clone, Copy)]
 struct PackingSignals {
@@ -88,6 +39,7 @@ struct PackingSignals {
     scan: RwSignal<String>,
     source_plate: RwSignal<Option<String>>,
     item_identity: RwSignal<Option<PendingItemIdentity>>,
+    removal: RwSignal<Option<PendingContentRemoval>>,
     completed_order_ids: RwSignal<Vec<i64>>,
     focus_epoch: RwSignal<u64>,
     measurements: CartonMeasurementSignals,
@@ -107,7 +59,10 @@ struct PackingQueueSignals {
 
 impl PackingSignals {
     fn blocked(self) -> bool {
-        self.pending.get() || self.retry.get().is_some() || self.refresh_order_id.get().is_some()
+        self.pending.get()
+            || self.retry.get().is_some()
+            || self.refresh_order_id.get().is_some()
+            || self.removal.get().is_some()
     }
 
     fn refocus(self) {
@@ -196,6 +151,7 @@ pub(crate) fn PackingWorkspace(
     let scan = RwSignal::new(String::new());
     let source_plate = RwSignal::new(None::<String>);
     let item_identity = RwSignal::new(None::<PendingItemIdentity>);
+    let removal = RwSignal::new(None::<PendingContentRemoval>);
     let completed_order_ids = RwSignal::new(Vec::<i64>::new());
     let focus_epoch = RwSignal::new(0_u64);
     let measurements = CartonMeasurementSignals {
@@ -216,6 +172,7 @@ pub(crate) fn PackingWorkspace(
         scan,
         source_plate,
         item_identity,
+        removal,
         completed_order_ids,
         focus_epoch,
         measurements,
@@ -322,9 +279,48 @@ pub(crate) fn PackingWorkspace(
     });
     let close_carton = Callback::new(move |_| close_current_carton(signals));
     let void_carton = Callback::new(move |_| void_current_carton(signals));
+    let start_removal = Callback::new(move |selection: PendingContentRemoval| {
+        if signals.blocked() {
+            return;
+        }
+        signals.scan.set(String::new());
+        signals.item_identity.set(None);
+        signals.error.set(false);
+        signals
+            .message
+            .set("Scan the carton content and original tote to reverse packing.".to_owned());
+        signals.removal.set(Some(selection));
+    });
+    let cancel_removal = Callback::new(move |_| {
+        if signals.pending.get_untracked() || signals.retry.get_untracked().is_some() {
+            return;
+        }
+        signals.removal.set(None);
+        signals.error.set(false);
+        signals
+            .message
+            .set("Continue packing the order.".to_owned());
+        signals.refocus();
+    });
+    let submit_removal = Callback::new(move |request: RemovePackedContentRequest| {
+        let Some(selection) = signals.removal.get_untracked() else {
+            return;
+        };
+        dispatch_command(
+            PendingPackingCommand::RemoveContent {
+                session_id: selection.session_id,
+                carton_id: selection.carton_id,
+                content_id: selection.content_id,
+                request,
+                idempotency_key: api::new_idempotency_key(),
+            },
+            signals,
+        );
+    });
     let change_source = Callback::new(move |_| {
         source_plate.set(None);
         item_identity.set(None);
+        removal.set(None);
         scan.set(String::new());
         error.set(false);
         message.set("Scan a source tote.".to_owned());
@@ -407,7 +403,21 @@ pub(crate) fn PackingWorkspace(
                         on_change_source=change_source
                         on_close=close_carton
                         on_void=void_carton
+                        on_remove=start_removal
                         on_next_order=next_order
+                    />
+                })}
+            </Show>
+            <Show when=move || removal.get().is_some()>
+                {move || removal.get().map(|selection| view! {
+                    <PackingRemovalDialog
+                        selection
+                        pending=Signal::derive(move || pending.get())
+                        retrying=Signal::derive(move || retry.get().is_some())
+                        command_error=Signal::derive(move || error.get().then(|| message.get()))
+                        on_cancel=cancel_removal
+                        on_submit=submit_removal
+                        on_retry=retry_command
                     />
                 })}
             </Show>
@@ -430,6 +440,7 @@ fn packing_queue_is_idle(signals: PackingSignals) -> bool {
         && signals.scan.get_untracked().trim().is_empty()
         && signals.source_plate.get_untracked().is_none()
         && signals.item_identity.get_untracked().is_none()
+        && signals.removal.get_untracked().is_none()
 }
 
 fn request_packing_queue(queue: PackingQueueSignals, signals: PackingSignals, append: bool) {
@@ -833,77 +844,6 @@ fn dispatch_command(command: PendingPackingCommand, signals: PackingSignals) {
     });
 }
 
-impl PendingPackingCommand {
-    const fn pending_message(&self) -> &'static str {
-        match self {
-            Self::Open { .. } => "Opening pack session...",
-            Self::CreateCarton { .. } => "Opening carton...",
-            Self::PackAllocation { .. } => "Confirming packed item...",
-            Self::CloseCarton { .. } => "Closing carton...",
-            Self::VoidCarton { .. } => "Voiding empty carton...",
-        }
-    }
-}
-
-async fn execute_command(
-    command: &PendingPackingCommand,
-) -> Result<PackingCommandResult, api::ApiError> {
-    match command {
-        PendingPackingCommand::Open {
-            order_id,
-            request,
-            idempotency_key,
-        } => api::open_pack_session(*order_id, request, idempotency_key)
-            .await
-            .map(|response| PackingCommandResult::Opened(Box::new(response.session))),
-        PendingPackingCommand::CreateCarton {
-            session_id,
-            request,
-            idempotency_key,
-        } => api::create_pack_carton(*session_id, request, idempotency_key)
-            .await
-            .map(|response| PackingCommandResult::Created {
-                order_id: response.order_id,
-                carton_barcode: response.carton.carton_barcode,
-            }),
-        PendingPackingCommand::PackAllocation {
-            session_id,
-            carton_id,
-            request,
-            idempotency_key,
-        } => api::pack_allocation(*session_id, *carton_id, request, idempotency_key)
-            .await
-            .map(|response| PackingCommandResult::Packed {
-                order_id: response.order_id,
-                quantity: response.quantity,
-                uom: response.uom,
-            }),
-        PendingPackingCommand::CloseCarton {
-            session_id,
-            carton_id,
-            request,
-            idempotency_key,
-        } => api::close_pack_carton(*session_id, *carton_id, request, idempotency_key)
-            .await
-            .map(|response| PackingCommandResult::Closed {
-                order_id: response.order_id,
-                carton_barcode: request.carton_barcode.clone(),
-                ready: response.ready_to_manifest,
-            }),
-        PendingPackingCommand::VoidCarton {
-            session_id,
-            carton_id,
-            request,
-            idempotency_key,
-        } => api::void_pack_carton(*session_id, *carton_id, request, idempotency_key)
-            .await
-            .map(|response| PackingCommandResult::Voided {
-                order_id: response.order_id,
-                carton_barcode: request.carton_barcode.clone(),
-            }),
-    }
-}
-
 fn apply_command_result(result: PackingCommandResult, signals: PackingSignals) {
     signals.pending.set(false);
     signals.retry.set(None);
@@ -944,6 +884,26 @@ fn apply_command_result(result: PackingCommandResult, signals: PackingSignals) {
             signals
                 .message
                 .set(format!("Packed {} {uom}.", format_quantity(quantity)));
+            refresh_session(order_id, signals);
+        }
+        PackingCommandResult::Removed {
+            order_id,
+            quantity,
+            uom,
+            destination_tote_barcode,
+        } => {
+            signals.removal.set(None);
+            signals
+                .source_plate
+                .set(Some(destination_tote_barcode.clone()));
+            signals.message.set(format!(
+                "Returned {} {uom} to tote {destination_tote_barcode}. Scan the item to repack it.",
+                format_quantity(quantity)
+            ));
+            signals.toasts.success(format!(
+                "Returned {} {uom} to tote {destination_tote_barcode}.",
+                format_quantity(quantity)
+            ));
             refresh_session(order_id, signals);
         }
         PackingCommandResult::Closed {

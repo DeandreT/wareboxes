@@ -15,7 +15,8 @@ use wareboxes_api_contract::v1::{
     PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
     PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
     ReallocatePickShortageResponse, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
-    ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse, ReplenishmentPolicyPage,
+    ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
+    RemovePackedContentRequest, RemovePackedContentResponse, ReplenishmentPolicyPage,
     ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
     RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
     ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
@@ -87,7 +88,8 @@ mod browser {
         PlanOrderAllocationResponse, PlanReplenishmentRequest, PlanReplenishmentResponse,
         ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleaseInventoryHoldRequest,
         ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
-        ReleaseOrderRequest, ReleaseOrderResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
+        ReleaseOrderRequest, ReleaseOrderResponse, RemovePackedContentRequest,
+        RemovePackedContentResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
         ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
         RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
         ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
@@ -271,6 +273,23 @@ mod browser {
     ) -> Result<CloseCartonResponse, ApiError> {
         post(
             &format!("/api/v1/packing-sessions/{session_id}/cartons/{carton_id}/closures"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn remove_pack_content(
+        session_id: i64,
+        carton_id: i64,
+        content_id: i64,
+        request: &RemovePackedContentRequest,
+        idempotency_key: &str,
+    ) -> Result<RemovePackedContentResponse, ApiError> {
+        post(
+            &format!(
+                "/api/v1/packing-sessions/{session_id}/cartons/{carton_id}/contents/{content_id}/removals"
+            ),
             request,
             idempotency_key,
         )
@@ -807,6 +826,17 @@ pub async fn close_pack_carton(
     _request: &CloseCartonRequest,
     _idempotency_key: &str,
 ) -> Result<CloseCartonResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn remove_pack_content(
+    _session_id: i64,
+    _carton_id: i64,
+    _content_id: i64,
+    _request: &RemovePackedContentRequest,
+    _idempotency_key: &str,
+) -> Result<RemovePackedContentResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

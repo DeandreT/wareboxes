@@ -152,12 +152,13 @@ pub use packing::{
     CartonDimensions, CartonMeasurements, CloseCartonRequest, CloseCartonResponse,
     CreateCartonRequest, CreateCartonResponse, DimensionMillimeters, OpenPackSessionRequest,
     OpenPackSessionResponse, PackAllocationDispositionResponse, PackCartonLifecycleResponse,
-    PackCartonResponse, PackPickedAllocationRequest, PackPickedAllocationResponse,
-    PackSessionResponse, PackSessionStatus, PackableAllocationResponse, PackingMeasurementError,
-    PackingOrderStatus, PackingProgressResponse, PackingQueueEntryResponse, PackingQueueFacilityId,
+    PackCartonResponse, PackContentRemovalReason, PackPickedAllocationRequest,
+    PackPickedAllocationResponse, PackSessionResponse, PackSessionStatus,
+    PackableAllocationResponse, PackingMeasurementError, PackingOrderStatus,
+    PackingProgressResponse, PackingQueueEntryResponse, PackingQueueFacilityId,
     PackingQueueFacilityIdError, PackingQueueOrderStatus, PackingQueuePage,
-    PackingQueuePageRequest, PackingQueueSessionResponse, VoidCartonRequest, VoidCartonResponse,
-    WeightGrams,
+    PackingQueuePageRequest, PackingQueueSessionResponse, RemovePackedContentRequest,
+    RemovePackedContentResponse, VoidCartonRequest, VoidCartonResponse, WeightGrams,
 };
 pub use pick_wave::{
     CancelPickWaveRequest, PickWaveCancellationReason, PickWaveOrderResponse, PickWavePage,

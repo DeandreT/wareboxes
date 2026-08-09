@@ -1,4 +1,7 @@
 mod common;
+mod api_v1_packing {
+    mod removal;
+}
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
@@ -1909,12 +1912,14 @@ async fn controlled_stock_requires_exact_lot_serial_and_packing_station_scans() 
 async fn packing_ledgers_are_forced_rls_and_minimally_granted() {
     let fixture = Fixture::new().await;
     let admin = admin_db_for(&fixture.db).await;
-    for (table, can_update) in [
-        ("outbound_order_containers", false),
-        ("packing_sessions", true),
-        ("packing_session_allocations", false),
-        ("cartons", true),
-        ("carton_contents", false),
+    for (table, can_insert, can_update) in [
+        ("outbound_order_containers", true, false),
+        ("packing_sessions", true, true),
+        ("packing_session_allocations", true, false),
+        ("cartons", true, true),
+        ("carton_contents", true, false),
+        ("packing_allocation_positions", false, false),
+        ("carton_content_removals", true, false),
     ] {
         let privileges: (bool, bool, bool, bool) = sqlx::query_as(
             r#"
@@ -1928,7 +1933,7 @@ async fn packing_ledgers_are_forced_rls_and_minimally_granted() {
         .fetch_one(&admin)
         .await
         .unwrap();
-        assert_eq!(privileges, (true, true, can_update, false), "{table}");
+        assert_eq!(privileges, (true, can_insert, can_update, false), "{table}");
         let forced_rls: bool =
             sqlx::query_scalar("SELECT relforcerowsecurity FROM pg_class WHERE oid = $1::regclass")
                 .bind(table)
@@ -1937,12 +1942,39 @@ async fn packing_ledgers_are_forced_rls_and_minimally_granted() {
                 .unwrap();
         assert!(forced_rls, "{table}");
     }
+    for column in [
+        "state",
+        "current_carton_content_id",
+        "current_inventory_allocation_id",
+        "current_inventory_balance_id",
+        "current_location_id",
+        "current_license_plate_id",
+        "revision",
+        "positioned_at",
+    ] {
+        let can_update: bool = sqlx::query_scalar(
+            "SELECT has_column_privilege('wareboxes_app', 'packing_allocation_positions', $1, 'UPDATE')",
+        )
+        .bind(column)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert!(can_update, "packing_allocation_positions.{column}");
+    }
+    let cannot_rewrite_identity: bool = sqlx::query_scalar(
+        "SELECT has_column_privilege('wareboxes_app', 'packing_allocation_positions', 'packing_session_allocation_id', 'UPDATE')",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert!(!cannot_rewrite_identity);
     for sequence in [
         "outbound_order_containers_id_seq",
         "packing_sessions_id_seq",
         "packing_session_allocations_id_seq",
         "cartons_id_seq",
         "carton_contents_id_seq",
+        "carton_content_removals_id_seq",
     ] {
         let usage: bool =
             sqlx::query_scalar("SELECT has_sequence_privilege('wareboxes_app', $1, 'USAGE')")

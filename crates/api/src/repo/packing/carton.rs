@@ -243,7 +243,16 @@ pub async fn close_carton(
         ));
     }
     let content_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM carton_contents WHERE tenant_id = $1 AND carton_id = $2",
+        r#"
+        SELECT COUNT(*)
+        FROM packing_allocation_positions position
+        INNER JOIN carton_contents content
+          ON content.tenant_id=position.tenant_id
+         AND content.inventory_owner_id=position.inventory_owner_id
+         AND content.id=position.current_carton_content_id
+        WHERE position.tenant_id=$1 AND content.carton_id=$2
+          AND position.state='packed'
+        "#,
     )
     .bind(access.tenant_id.get())
     .bind(command.carton_id.get())
@@ -408,7 +417,16 @@ pub async fn void_carton(
         ));
     }
     let content_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM carton_contents WHERE tenant_id = $1 AND carton_id = $2",
+        r#"
+        SELECT COUNT(*)
+        FROM packing_allocation_positions position
+        INNER JOIN carton_contents content
+          ON content.tenant_id=position.tenant_id
+         AND content.inventory_owner_id=position.inventory_owner_id
+         AND content.id=position.current_carton_content_id
+        WHERE position.tenant_id=$1 AND content.carton_id=$2
+          AND position.state='packed'
+        "#,
     )
     .bind(access.tenant_id.get())
     .bind(command.carton_id.get())

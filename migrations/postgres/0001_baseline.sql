@@ -4172,6 +4172,14 @@ BEGIN
 
     IF NEW.state = 'closed' AND NOT EXISTS (
         SELECT 1 FROM public.carton_contents content
+        INNER JOIN public.packing_allocation_positions position
+          ON position.tenant_id = content.tenant_id
+         AND position.inventory_owner_id = content.inventory_owner_id
+         AND position.facility_id = content.facility_id
+         AND position.packing_session_id = content.packing_session_id
+         AND position.packing_session_allocation_id = content.packing_session_allocation_id
+         AND position.current_carton_content_id = content.id
+         AND position.state = 'packed'
         WHERE content.tenant_id = NEW.tenant_id
           AND content.inventory_owner_id = NEW.inventory_owner_id
           AND content.packing_session_id = NEW.packing_session_id
@@ -4183,6 +4191,14 @@ BEGIN
 
     IF NEW.state = 'voided' AND EXISTS (
         SELECT 1 FROM public.carton_contents content
+        INNER JOIN public.packing_allocation_positions position
+          ON position.tenant_id = content.tenant_id
+         AND position.inventory_owner_id = content.inventory_owner_id
+         AND position.facility_id = content.facility_id
+         AND position.packing_session_id = content.packing_session_id
+         AND position.packing_session_allocation_id = content.packing_session_allocation_id
+         AND position.current_carton_content_id = content.id
+         AND position.state = 'packed'
         WHERE content.tenant_id = NEW.tenant_id
           AND content.inventory_owner_id = NEW.inventory_owner_id
           AND content.packing_session_id = NEW.packing_session_id
@@ -4207,6 +4223,12 @@ BEGIN
     IF NOT EXISTS (
         SELECT 1
         FROM public.packing_session_allocations snapshot
+        INNER JOIN public.packing_allocation_positions position
+          ON position.tenant_id = snapshot.tenant_id
+         AND position.inventory_owner_id = snapshot.inventory_owner_id
+         AND position.facility_id = snapshot.facility_id
+         AND position.packing_session_id = snapshot.packing_session_id
+         AND position.packing_session_allocation_id = snapshot.id
         INNER JOIN public.packing_sessions session
           ON session.tenant_id = snapshot.tenant_id
          AND session.inventory_owner_id = snapshot.inventory_owner_id
@@ -4221,7 +4243,7 @@ BEGIN
         INNER JOIN public.inventory_allocations source_allocation
           ON source_allocation.tenant_id = snapshot.tenant_id
          AND source_allocation.inventory_owner_id = snapshot.inventory_owner_id
-         AND source_allocation.id = snapshot.source_inventory_allocation_id
+         AND source_allocation.id = NEW.source_inventory_allocation_id
         INNER JOIN public.inventory_allocations destination_allocation
           ON destination_allocation.tenant_id = snapshot.tenant_id
          AND destination_allocation.inventory_owner_id = snapshot.inventory_owner_id
@@ -4229,7 +4251,7 @@ BEGIN
         INNER JOIN public.inventory_balances source_balance
           ON source_balance.tenant_id = snapshot.tenant_id
          AND source_balance.inventory_owner_id = snapshot.inventory_owner_id
-         AND source_balance.id = snapshot.source_inventory_balance_id
+         AND source_balance.id = NEW.source_inventory_balance_id
         INNER JOIN public.inventory_balances destination_balance
           ON destination_balance.tenant_id = snapshot.tenant_id
          AND destination_balance.inventory_owner_id = snapshot.inventory_owner_id
@@ -4249,8 +4271,6 @@ BEGIN
           AND snapshot.reservation_id = NEW.reservation_id
           AND snapshot.outbound_order_container_id = NEW.outbound_order_container_id
           AND snapshot.pick_confirmation_id = NEW.pick_confirmation_id
-          AND snapshot.source_inventory_allocation_id = NEW.source_inventory_allocation_id
-          AND snapshot.source_inventory_balance_id = NEW.source_inventory_balance_id
           AND snapshot.source_location_id = NEW.source_location_id
           AND snapshot.source_license_plate_id = NEW.source_license_plate_id
           AND snapshot.item_batch_id = NEW.item_batch_id
@@ -4258,6 +4278,12 @@ BEGIN
           AND snapshot.uom = NEW.uom
           AND snapshot.inventory_status = NEW.inventory_status
           AND snapshot.planned_qty = NEW.packed_qty
+          AND position.state = 'available'
+          AND position.current_carton_content_id IS NULL
+          AND position.current_inventory_allocation_id = NEW.source_inventory_allocation_id
+          AND position.current_inventory_balance_id = NEW.source_inventory_balance_id
+          AND position.current_location_id = NEW.source_location_id
+          AND position.current_license_plate_id = NEW.source_license_plate_id
           AND session.state = 'open'
           AND NEW.packed_at >= session.started_at
           AND carton.state = 'open'
@@ -4399,11 +4425,18 @@ BEGIN
     WHERE allocation.tenant_id = session_row.tenant_id
       AND allocation.packing_session_id = session_row.id;
 
-    SELECT COUNT(*), COALESCE(SUM(content.packed_qty), 0)::bigint
+    SELECT COUNT(*), COALESCE(SUM(allocation.planned_qty), 0)::bigint
     INTO packed_count, packed_qty
-    FROM public.carton_contents content
-    WHERE content.tenant_id = session_row.tenant_id
-      AND content.packing_session_id = session_row.id;
+    FROM public.packing_allocation_positions position
+    INNER JOIN public.packing_session_allocations allocation
+      ON allocation.tenant_id = position.tenant_id
+     AND allocation.inventory_owner_id = position.inventory_owner_id
+     AND allocation.facility_id = position.facility_id
+     AND allocation.packing_session_id = position.packing_session_id
+     AND allocation.id = position.packing_session_allocation_id
+    WHERE position.tenant_id = session_row.tenant_id
+      AND position.packing_session_id = session_row.id
+      AND position.state = 'packed';
 
     SELECT COUNT(*) FILTER (WHERE carton.state = 'open'),
            COUNT(*) FILTER (WHERE carton.state = 'closed')
@@ -4719,6 +4752,14 @@ BEGIN
           AND NEW.content_count = (
               SELECT COUNT(*)
               FROM public.carton_contents content
+              INNER JOIN public.packing_allocation_positions position
+                ON position.tenant_id=content.tenant_id
+               AND position.inventory_owner_id=content.inventory_owner_id
+               AND position.facility_id=content.facility_id
+               AND position.packing_session_id=content.packing_session_id
+               AND position.packing_session_allocation_id=content.packing_session_allocation_id
+               AND position.current_carton_content_id=content.id
+               AND position.state='packed'
               WHERE content.tenant_id = carton.tenant_id
                 AND content.inventory_owner_id = carton.inventory_owner_id
                 AND content.packing_session_id = carton.packing_session_id
@@ -4727,6 +4768,14 @@ BEGIN
           AND NEW.packed_qty = (
               SELECT COALESCE(SUM(content.packed_qty), 0)::bigint
               FROM public.carton_contents content
+              INNER JOIN public.packing_allocation_positions position
+                ON position.tenant_id=content.tenant_id
+               AND position.inventory_owner_id=content.inventory_owner_id
+               AND position.facility_id=content.facility_id
+               AND position.packing_session_id=content.packing_session_id
+               AND position.packing_session_allocation_id=content.packing_session_allocation_id
+               AND position.current_carton_content_id=content.id
+               AND position.state='packed'
               WHERE content.tenant_id = carton.tenant_id
                 AND content.inventory_owner_id = carton.inventory_owner_id
                 AND content.packing_session_id = carton.packing_session_id
@@ -5009,7 +5058,8 @@ BEGIN
             AND plate.inventory_owner_id = carton.inventory_owner_id
             AND plate.facility_id = carton.facility_id
             AND plate.id = carton.license_plate_id
-           WHERE position.state <> 'departed'
+           WHERE position.state <> 'unpacked'
+             AND (position.state <> 'departed'
               OR position.departure_inventory_transaction_id IS DISTINCT FROM confirmation_row.inventory_transaction_id
               OR position.departed_at IS DISTINCT FROM confirmation_row.confirmed_at
               OR allocation.status <> 'fulfilled'
@@ -5019,7 +5069,7 @@ BEGIN
               OR balance.qty_reserved <> 0
               OR balance.deleted IS DISTINCT FROM confirmation_row.confirmed_at
               OR plate.location_id IS NOT NULL
-              OR plate.deleted IS DISTINCT FROM confirmation_row.confirmed_at
+              OR plate.deleted IS DISTINCT FROM confirmation_row.confirmed_at)
        )
        OR EXISTS (
            WITH expected AS (
@@ -5066,6 +5116,7 @@ BEGIN
                  ON batch.tenant_id = position.tenant_id
                 AND batch.inventory_owner_id = position.inventory_owner_id
                 AND batch.id = position.item_batch_id
+               WHERE position.state <> 'unpacked'
                GROUP BY position.facility_id, source_balance.location_id,
                         source_balance.license_plate_id,
                         position.item_batch_id, position.item_id, position.uom,
@@ -5253,6 +5304,14 @@ BEGIN
              AND demand.effective_qty <> (
                  SELECT COALESCE(SUM(content.packed_qty), 0)::BIGINT
                  FROM public.carton_contents content
+                 INNER JOIN public.packing_allocation_positions position
+                   ON position.tenant_id=content.tenant_id
+                  AND position.inventory_owner_id=content.inventory_owner_id
+                  AND position.facility_id=content.facility_id
+                  AND position.packing_session_id=content.packing_session_id
+                  AND position.packing_session_allocation_id=content.packing_session_allocation_id
+                  AND position.current_carton_content_id=content.id
+                  AND position.state='packed'
                  WHERE content.tenant_id = shipment_row.tenant_id
                    AND content.inventory_owner_id = shipment_row.inventory_owner_id
                    AND content.facility_id = shipment_row.facility_id
@@ -5270,6 +5329,14 @@ BEGIN
              AND reservation.qty <> (
                  SELECT COALESCE(SUM(content.packed_qty), 0)::BIGINT
                  FROM public.carton_contents content
+                 INNER JOIN public.packing_allocation_positions position
+                   ON position.tenant_id=content.tenant_id
+                  AND position.inventory_owner_id=content.inventory_owner_id
+                  AND position.facility_id=content.facility_id
+                  AND position.packing_session_id=content.packing_session_id
+                  AND position.packing_session_allocation_id=content.packing_session_allocation_id
+                  AND position.current_carton_content_id=content.id
+                  AND position.state='packed'
                  WHERE content.tenant_id = reservation.tenant_id
                    AND content.inventory_owner_id = reservation.inventory_owner_id
                    AND content.facility_id = reservation.facility_id
@@ -5492,6 +5559,7 @@ BEGIN
            WHERE position.tenant_id = shipment_row.tenant_id
              AND position.inventory_owner_id = shipment_row.inventory_owner_id
              AND position.facility_id = shipment_row.facility_id
+             AND position.state <> 'unpacked'
              AND position.carton_id IN (
                  SELECT shipment_carton.carton_id
                  FROM public.shipment_cartons shipment_carton
@@ -5557,6 +5625,7 @@ BEGIN
                WHERE position.tenant_id = shipment_row.tenant_id
                  AND position.inventory_owner_id = shipment_row.inventory_owner_id
                  AND position.facility_id = shipment_row.facility_id
+                 AND position.state <> 'unpacked'
                  AND content.packing_session_id = shipment_row.packing_session_id
                  AND position.carton_id IN (
                      SELECT shipment_carton.carton_id
@@ -8738,6 +8807,14 @@ BEGIN
      AND content.packing_session_id = shipment.packing_session_id
      AND content.order_release_id = shipment.order_release_id
      AND content.order_id = shipment.order_id
+    INNER JOIN public.packing_allocation_positions position
+      ON position.tenant_id = content.tenant_id
+     AND position.inventory_owner_id = content.inventory_owner_id
+     AND position.facility_id = content.facility_id
+     AND position.packing_session_id = content.packing_session_id
+     AND position.packing_session_allocation_id = content.packing_session_allocation_id
+     AND position.state = 'packed'
+     AND position.current_carton_content_id = content.id
     WHERE shipment.tenant_id = NEW.tenant_id
       AND shipment.inventory_owner_id = NEW.inventory_owner_id
       AND shipment.facility_id = NEW.facility_id
@@ -25599,8 +25676,8 @@ BEGIN
         RAISE EXCEPTION 'packed inventory position identity is immutable'
             USING ERRCODE = '55000';
     END IF;
-    IF OLD.state = 'departed' THEN
-        RAISE EXCEPTION 'departed packed inventory positions are immutable'
+    IF OLD.state IN ('departed', 'unpacked') THEN
+        RAISE EXCEPTION 'terminal packed inventory positions are immutable'
             USING ERRCODE = '55000';
     END IF;
     IF NEW.revision <> OLD.revision + 1 OR NEW.positioned_at < OLD.positioned_at THEN
@@ -25614,7 +25691,15 @@ BEGIN
       AND content.inventory_owner_id = OLD.inventory_owner_id
       AND content.id = OLD.carton_content_id;
 
-    IF OLD.state = 'packed' AND NEW.state = 'staged' THEN
+    IF OLD.state = 'packed' AND NEW.state = 'unpacked' THEN
+        IF OLD.outbound_load_id IS NOT NULL
+           OR NEW.carton_content_removal_id IS NULL
+           OR NEW.unpacked_at IS NULL
+        THEN
+            RAISE EXCEPTION 'only unloaded packed content can be unpacked'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF OLD.state = 'packed' AND NEW.state = 'staged' THEN
         IF OLD.current_location_id <> original_location_id
            OR NEW.outbound_load_id IS NULL
            OR NEW.outbound_load_carton_id IS NULL
@@ -25671,6 +25756,29 @@ CREATE FUNCTION public.require_packed_inventory_position_evidence() RETURNS trig
 DECLARE
     expected_kind TEXT;
 BEGIN
+    IF NEW.state = 'unpacked' THEN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM public.carton_content_removals removal
+            WHERE removal.tenant_id = NEW.tenant_id
+              AND removal.inventory_owner_id = NEW.inventory_owner_id
+              AND removal.facility_id = NEW.facility_id
+              AND removal.id = NEW.carton_content_removal_id
+              AND removal.carton_id = NEW.carton_id
+              AND removal.carton_content_id = NEW.carton_content_id
+              AND removal.source_inventory_allocation_id = OLD.current_inventory_allocation_id
+              AND removal.source_inventory_balance_id = OLD.current_inventory_balance_id
+              AND removal.source_location_id = OLD.current_location_id
+              AND removal.source_license_plate_id = OLD.current_license_plate_id
+              AND removal.expected_packed_position_revision = OLD.revision
+              AND removal.resulting_packed_position_revision = NEW.revision
+              AND removal.removed_at = NEW.unpacked_at
+        ) THEN
+            RAISE EXCEPTION 'unpacked position lacks exact removal evidence'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NULL;
+    END IF;
     IF NEW.state = 'departed' THEN
         IF NOT EXISTS (
             SELECT 1
@@ -26003,6 +26111,7 @@ BEGIN
                WHERE position.tenant_id = NEW.tenant_id
                  AND position.inventory_owner_id = NEW.inventory_owner_id
                  AND position.carton_id = NEW.carton_id
+                 AND position.state <> 'unpacked'
            )
     INTO matches
     FROM public.outbound_loads load
@@ -26297,6 +26406,7 @@ BEGIN
               WHERE position.tenant_id = carton.tenant_id
                 AND position.inventory_owner_id = carton.inventory_owner_id
                 AND position.carton_id = carton.carton_id
+                AND position.state <> 'unpacked'
                 AND ((load_row.state <> 'cancelled' AND position.revision <> carton.revision)
                      OR (carton.state = 'planned' AND position.state <> 'packed')
                      OR (carton.state <> 'planned' AND position.state <> carton.state)
@@ -29401,6 +29511,529 @@ LEFT JOIN (
  AND substitution.order_id=order_line.order_id
  AND substitution.order_item_id=order_line.id
 WHERE order_line.deleted IS NULL;
+
+-- Reversible open-carton packing with immutable attempt and removal evidence.
+
+ALTER TABLE ONLY public.carton_contents
+    DROP CONSTRAINT carton_contents_session_allocation_key;
+ALTER TABLE ONLY public.carton_contents
+    ADD CONSTRAINT carton_contents_owner_id_key
+    UNIQUE (tenant_id, inventory_owner_id, id);
+CREATE INDEX carton_contents_session_allocation_history_idx
+ON public.carton_contents
+    (tenant_id, inventory_owner_id, packing_session_id,
+     packing_session_allocation_id, packed_at, id);
+
+CREATE TABLE public.packing_allocation_positions (
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    packing_session_id bigint NOT NULL,
+    packing_session_allocation_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    state text DEFAULT 'available' NOT NULL,
+    current_carton_content_id bigint,
+    current_inventory_allocation_id bigint NOT NULL,
+    current_inventory_balance_id bigint NOT NULL,
+    current_location_id bigint NOT NULL,
+    current_license_plate_id bigint NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
+    positioned_at timestamp with time zone NOT NULL,
+    CONSTRAINT packing_allocation_positions_pkey
+        PRIMARY KEY (tenant_id, packing_session_allocation_id),
+    CONSTRAINT packing_allocation_positions_scope_key UNIQUE
+        (tenant_id, inventory_owner_id, facility_id, packing_session_id,
+         packing_session_allocation_id),
+    CONSTRAINT packing_allocation_positions_state_check CHECK (
+        (state='available' AND current_carton_content_id IS NULL)
+        OR (state='packed' AND current_carton_content_id IS NOT NULL)
+    ),
+    CONSTRAINT packing_allocation_positions_revision_check CHECK (revision > 0),
+    CONSTRAINT packing_allocation_positions_snapshot_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id, packing_session_id,
+         packing_session_allocation_id)
+        REFERENCES public.packing_session_allocations
+        (tenant_id, inventory_owner_id, facility_id, packing_session_id, id),
+    CONSTRAINT packing_allocation_positions_order_item_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, order_id, order_item_id)
+        REFERENCES public.order_items
+        (tenant_id, inventory_owner_id, order_id, id),
+    CONSTRAINT packing_allocation_positions_allocation_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id, current_inventory_allocation_id)
+        REFERENCES public.inventory_allocations
+        (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT packing_allocation_positions_balance_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id, current_inventory_balance_id)
+        REFERENCES public.inventory_balances
+        (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT packing_allocation_positions_location_fkey FOREIGN KEY
+        (tenant_id, facility_id, current_location_id)
+        REFERENCES public.locations(tenant_id, facility_id, id),
+    CONSTRAINT packing_allocation_positions_plate_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id, current_license_plate_id)
+        REFERENCES public.license_plates
+        (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT packing_allocation_positions_content_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, current_carton_content_id)
+        REFERENCES public.carton_contents
+        (tenant_id, inventory_owner_id, id)
+        DEFERRABLE INITIALLY DEFERRED
+);
+ALTER TABLE public.packing_allocation_positions FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE public.carton_content_removals (
+    id bigint GENERATED ALWAYS AS IDENTITY
+        (SEQUENCE NAME public.carton_content_removals_id_seq) PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    packing_session_id bigint NOT NULL,
+    carton_id bigint NOT NULL,
+    carton_content_id bigint NOT NULL,
+    packing_session_allocation_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    inventory_transaction_id bigint NOT NULL,
+    source_inventory_allocation_id bigint NOT NULL,
+    destination_inventory_allocation_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    destination_inventory_balance_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    source_license_plate_id bigint NOT NULL,
+    destination_license_plate_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    inventory_status text NOT NULL,
+    removed_qty bigint NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    expected_position_revision bigint NOT NULL,
+    resulting_position_revision bigint NOT NULL,
+    expected_packed_position_revision bigint NOT NULL,
+    resulting_packed_position_revision bigint NOT NULL,
+    expected_order_revision bigint NOT NULL,
+    resulting_order_revision bigint NOT NULL,
+    removed_by_user_id bigint NOT NULL,
+    removed_at timestamp with time zone NOT NULL,
+    CONSTRAINT carton_content_removals_scope_id_key UNIQUE
+        (tenant_id, inventory_owner_id, facility_id, packing_session_id, id),
+    CONSTRAINT carton_content_removals_carton_id_key UNIQUE
+        (tenant_id, inventory_owner_id, facility_id, carton_id, id),
+    CONSTRAINT carton_content_removals_content_key UNIQUE
+        (tenant_id, inventory_owner_id, carton_content_id),
+    CONSTRAINT carton_content_removals_transaction_key UNIQUE
+        (tenant_id, inventory_owner_id, inventory_transaction_id),
+    CONSTRAINT carton_content_removals_allocations_check CHECK
+        (source_inventory_allocation_id<>destination_inventory_allocation_id),
+    CONSTRAINT carton_content_removals_balances_check CHECK
+        (source_inventory_balance_id<>destination_inventory_balance_id),
+    CONSTRAINT carton_content_removals_plates_check CHECK
+        (source_license_plate_id<>destination_license_plate_id),
+    CONSTRAINT carton_content_removals_qty_check CHECK (removed_qty>0),
+    CONSTRAINT carton_content_removals_status_check CHECK
+        (inventory_status='available'),
+    CONSTRAINT carton_content_removals_uom_check CHECK
+        (uom=btrim(uom) AND uom<>''),
+    CONSTRAINT carton_content_removals_reason_check CHECK
+        (reason_code IN ('wrong_carton','wrong_item','quality_issue','damaged_carton','other')),
+    CONSTRAINT carton_content_removals_note_check CHECK
+        (note IS NULL OR (note=btrim(note) AND note<>'' AND char_length(note)<=500)),
+    CONSTRAINT carton_content_removals_other_note_check CHECK
+        (reason_code<>'other' OR note IS NOT NULL),
+    CONSTRAINT carton_content_removals_position_revision_check CHECK
+        (expected_position_revision>0
+         AND resulting_position_revision=expected_position_revision+1),
+    CONSTRAINT carton_content_removals_packed_position_revision_check CHECK
+        (expected_packed_position_revision>0
+         AND resulting_packed_position_revision=expected_packed_position_revision+1),
+    CONSTRAINT carton_content_removals_order_revision_check CHECK
+        (expected_order_revision>0
+         AND resulting_order_revision=expected_order_revision+1),
+    CONSTRAINT carton_content_removals_position_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id, packing_session_id,
+         packing_session_allocation_id)
+        REFERENCES public.packing_allocation_positions
+        (tenant_id, inventory_owner_id, facility_id, packing_session_id,
+         packing_session_allocation_id),
+    CONSTRAINT carton_content_removals_content_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id, carton_id, carton_content_id)
+        REFERENCES public.carton_contents
+        (tenant_id, inventory_owner_id, facility_id, carton_id, id),
+    CONSTRAINT carton_content_removals_source_allocation_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id, source_inventory_allocation_id)
+        REFERENCES public.inventory_allocations
+        (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT carton_content_removals_destination_allocation_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id, destination_inventory_allocation_id)
+        REFERENCES public.inventory_allocations
+        (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT carton_content_removals_source_balance_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id)
+        REFERENCES public.inventory_balances
+        (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT carton_content_removals_destination_balance_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id, destination_inventory_balance_id)
+        REFERENCES public.inventory_balances
+        (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT carton_content_removals_source_location_fkey FOREIGN KEY
+        (tenant_id, facility_id, source_location_id)
+        REFERENCES public.locations(tenant_id, facility_id, id),
+    CONSTRAINT carton_content_removals_destination_location_fkey FOREIGN KEY
+        (tenant_id, facility_id, destination_location_id)
+        REFERENCES public.locations(tenant_id, facility_id, id),
+    CONSTRAINT carton_content_removals_source_plate_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id, source_license_plate_id)
+        REFERENCES public.license_plates
+        (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT carton_content_removals_destination_plate_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id, destination_license_plate_id)
+        REFERENCES public.license_plates
+        (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT carton_content_removals_item_batch_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, item_batch_id)
+        REFERENCES public.item_batches(tenant_id, inventory_owner_id, id),
+    CONSTRAINT carton_content_removals_item_fkey FOREIGN KEY
+        (tenant_id, item_id) REFERENCES public.items(tenant_id, id),
+    CONSTRAINT carton_content_removals_transaction_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, inventory_transaction_id)
+        REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id),
+    CONSTRAINT carton_content_removals_actor_fkey FOREIGN KEY
+        (tenant_id, removed_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id)
+);
+ALTER TABLE public.carton_content_removals FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE public.packed_inventory_positions
+    ADD COLUMN carton_content_removal_id bigint,
+    ADD COLUMN unpacked_at timestamp with time zone;
+ALTER TABLE public.packed_inventory_positions
+    DROP CONSTRAINT packed_inventory_positions_state_check,
+    DROP CONSTRAINT packed_inventory_positions_fields_check;
+ALTER TABLE public.packed_inventory_positions
+    ADD CONSTRAINT packed_inventory_positions_state_check CHECK
+        (state IN ('packed','staged','loaded','departed','unpacked')),
+    ADD CONSTRAINT packed_inventory_positions_fields_check CHECK (
+        (state='packed'
+         AND outbound_load_id IS NULL AND outbound_load_carton_id IS NULL
+         AND load_sequence IS NULL
+         AND current_inventory_allocation_id IS NOT NULL
+         AND current_inventory_balance_id IS NOT NULL
+         AND current_location_id IS NOT NULL AND current_license_plate_id IS NOT NULL
+         AND departure_inventory_transaction_id IS NULL AND departed_at IS NULL
+         AND carton_content_removal_id IS NULL AND unpacked_at IS NULL)
+        OR (state='staged'
+         AND outbound_load_id IS NOT NULL AND outbound_load_carton_id IS NOT NULL
+         AND load_sequence IS NOT NULL
+         AND current_inventory_allocation_id IS NOT NULL
+         AND current_inventory_balance_id IS NOT NULL
+         AND current_location_id IS NOT NULL AND current_license_plate_id IS NOT NULL
+         AND departure_inventory_transaction_id IS NULL AND departed_at IS NULL
+         AND carton_content_removal_id IS NULL AND unpacked_at IS NULL)
+        OR (state='loaded'
+         AND outbound_load_id IS NOT NULL AND outbound_load_carton_id IS NOT NULL
+         AND load_sequence IS NOT NULL
+         AND current_inventory_allocation_id IS NOT NULL
+         AND current_inventory_balance_id IS NOT NULL
+         AND current_location_id IS NOT NULL AND current_license_plate_id IS NOT NULL
+         AND departure_inventory_transaction_id IS NULL AND departed_at IS NULL
+         AND carton_content_removal_id IS NULL AND unpacked_at IS NULL)
+        OR (state='departed'
+         AND ((outbound_load_id IS NULL AND outbound_load_carton_id IS NULL AND load_sequence IS NULL)
+              OR (outbound_load_id IS NOT NULL AND outbound_load_carton_id IS NOT NULL AND load_sequence IS NOT NULL))
+         AND current_inventory_allocation_id IS NULL
+         AND current_inventory_balance_id IS NULL
+         AND current_location_id IS NULL AND current_license_plate_id IS NULL
+         AND departure_inventory_transaction_id IS NOT NULL AND departed_at IS NOT NULL
+         AND carton_content_removal_id IS NULL AND unpacked_at IS NULL)
+        OR (state='unpacked'
+         AND outbound_load_id IS NULL AND outbound_load_carton_id IS NULL
+         AND load_sequence IS NULL
+         AND current_inventory_allocation_id IS NULL
+         AND current_inventory_balance_id IS NULL
+         AND current_location_id IS NULL AND current_license_plate_id IS NULL
+         AND departure_inventory_transaction_id IS NULL AND departed_at IS NULL
+         AND carton_content_removal_id IS NOT NULL AND unpacked_at IS NOT NULL)
+    );
+ALTER TABLE public.packed_inventory_positions
+    ADD CONSTRAINT packed_inventory_positions_removal_fkey FOREIGN KEY
+        (tenant_id, inventory_owner_id, facility_id,
+         carton_id, carton_content_removal_id)
+        REFERENCES public.carton_content_removals
+        (tenant_id, inventory_owner_id, facility_id, carton_id, id)
+        DEFERRABLE INITIALLY DEFERRED;
+
+CREATE INDEX packing_allocation_positions_session_state_idx
+ON public.packing_allocation_positions
+    (tenant_id, packing_session_id, state, packing_session_allocation_id);
+CREATE INDEX carton_content_removals_session_idx
+ON public.carton_content_removals
+    (tenant_id, packing_session_id, removed_at, id);
+
+CREATE FUNCTION public.initialize_packing_allocation_position() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+    INSERT INTO public.packing_allocation_positions (
+        tenant_id,inventory_owner_id,facility_id,packing_session_id,
+        packing_session_allocation_id,order_id,order_item_id,reservation_id,
+        state,current_inventory_allocation_id,current_inventory_balance_id,
+        current_location_id,current_license_plate_id,revision,positioned_at
+    ) VALUES (
+        NEW.tenant_id,NEW.inventory_owner_id,NEW.facility_id,NEW.packing_session_id,
+        NEW.id,NEW.order_id,NEW.order_item_id,NEW.reservation_id,'available',
+        NEW.source_inventory_allocation_id,NEW.source_inventory_balance_id,
+        NEW.source_location_id,NEW.source_license_plate_id,1,
+        (SELECT started_at FROM public.packing_sessions
+         WHERE tenant_id=NEW.tenant_id AND id=NEW.packing_session_id)
+    );
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_packing_allocation_position_mutation() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        RAISE EXCEPTION 'packing allocation positions cannot be deleted'
+            USING ERRCODE='55000';
+    END IF;
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.packing_session_id IS DISTINCT FROM OLD.packing_session_id
+       OR NEW.packing_session_allocation_id IS DISTINCT FROM OLD.packing_session_allocation_id
+       OR NEW.order_id IS DISTINCT FROM OLD.order_id
+       OR NEW.order_item_id IS DISTINCT FROM OLD.order_item_id
+       OR NEW.reservation_id IS DISTINCT FROM OLD.reservation_id
+       OR NEW.revision<>OLD.revision+1 OR NEW.positioned_at<OLD.positioned_at
+    THEN
+        RAISE EXCEPTION 'packing allocation position identity or revision changed'
+            USING ERRCODE='55000';
+    END IF;
+    IF NOT ((OLD.state='available' AND NEW.state='packed')
+            OR (OLD.state='packed' AND NEW.state='available'))
+    THEN
+        RAISE EXCEPTION 'invalid packing allocation position transition'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.require_packing_allocation_position_evidence() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+    IF NEW.state='packed' THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.carton_contents content
+            JOIN public.packed_inventory_positions packed
+              ON packed.tenant_id=content.tenant_id
+             AND packed.inventory_owner_id=content.inventory_owner_id
+             AND packed.carton_content_id=content.id
+             AND packed.state='packed'
+            WHERE content.tenant_id=NEW.tenant_id
+              AND content.inventory_owner_id=NEW.inventory_owner_id
+              AND content.id=NEW.current_carton_content_id
+              AND content.packing_session_allocation_id=NEW.packing_session_allocation_id
+              AND content.destination_inventory_allocation_id=NEW.current_inventory_allocation_id
+              AND content.destination_inventory_balance_id=NEW.current_inventory_balance_id
+              AND content.destination_location_id=NEW.current_location_id
+              AND content.destination_license_plate_id=NEW.current_license_plate_id
+              AND content.packed_at=NEW.positioned_at)
+        THEN
+            RAISE EXCEPTION 'packed allocation position lacks exact content evidence'
+                USING ERRCODE='23514';
+        END IF;
+    ELSIF NOT EXISTS (
+        SELECT 1 FROM public.carton_content_removals removal
+        WHERE removal.tenant_id=NEW.tenant_id
+          AND removal.inventory_owner_id=NEW.inventory_owner_id
+          AND removal.facility_id=NEW.facility_id
+          AND removal.packing_session_id=NEW.packing_session_id
+          AND removal.packing_session_allocation_id=NEW.packing_session_allocation_id
+          AND removal.carton_content_id=OLD.current_carton_content_id
+          AND removal.source_inventory_allocation_id=OLD.current_inventory_allocation_id
+          AND removal.source_inventory_balance_id=OLD.current_inventory_balance_id
+          AND removal.source_location_id=OLD.current_location_id
+          AND removal.source_license_plate_id=OLD.current_license_plate_id
+          AND removal.destination_inventory_allocation_id=NEW.current_inventory_allocation_id
+          AND removal.destination_inventory_balance_id=NEW.current_inventory_balance_id
+          AND removal.destination_location_id=NEW.current_location_id
+          AND removal.destination_license_plate_id=NEW.current_license_plate_id
+          AND removal.expected_position_revision=OLD.revision
+          AND removal.resulting_position_revision=NEW.revision
+          AND removal.removed_at=NEW.positioned_at)
+    THEN
+        RAISE EXCEPTION 'available packing allocation position lacks removal evidence'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.reject_carton_content_removal_mutation() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+    RAISE EXCEPTION 'carton content removal evidence is immutable'
+        USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION public.validate_carton_content_removal() RETURNS trigger
+LANGUAGE plpgsql SET search_path TO 'pg_catalog','public' AS $$
+DECLARE valid boolean;
+BEGIN
+    SELECT session.state='open' AND carton.state='open'
+           AND content.packing_session_id=NEW.packing_session_id
+           AND content.packing_session_allocation_id=NEW.packing_session_allocation_id
+           AND content.order_id=NEW.order_id AND content.order_item_id=NEW.order_item_id
+           AND content.reservation_id=NEW.reservation_id
+           AND content.item_batch_id=NEW.item_batch_id AND content.item_id=NEW.item_id
+           AND content.uom=NEW.uom AND content.inventory_status=NEW.inventory_status
+           AND content.packed_qty=NEW.removed_qty
+           AND position.state='available' AND position.current_carton_content_id IS NULL
+           AND position.current_inventory_allocation_id=NEW.destination_inventory_allocation_id
+           AND position.current_inventory_balance_id=NEW.destination_inventory_balance_id
+           AND position.current_location_id=NEW.destination_location_id
+           AND position.current_license_plate_id=NEW.destination_license_plate_id
+           AND position.revision=NEW.resulting_position_revision
+           AND position.positioned_at=NEW.removed_at
+           AND packed.state='unpacked' AND packed.carton_content_removal_id=NEW.id
+           AND packed.revision=NEW.resulting_packed_position_revision
+           AND packed.unpacked_at=NEW.removed_at
+           AND source_allocation.status='fulfilled'
+           AND source_allocation.deleted=NEW.removed_at
+           AND source_allocation.execution_stage='packed'
+           AND destination_allocation.status='allocated'
+           AND destination_allocation.deleted IS NULL
+           AND destination_allocation.execution_stage='staged'
+           AND destination_allocation.reservation_id=NEW.reservation_id
+           AND destination_allocation.inventory_balance_id=NEW.destination_inventory_balance_id
+           AND destination_allocation.location_id=NEW.destination_location_id
+           AND destination_allocation.license_plate_id=NEW.destination_license_plate_id
+           AND destination_allocation.item_batch_id=NEW.item_batch_id
+           AND destination_allocation.item_id=NEW.item_id
+           AND destination_allocation.uom=NEW.uom
+           AND destination_allocation.inventory_status=NEW.inventory_status
+           AND destination_allocation.qty=NEW.removed_qty
+           AND transaction.transaction_type='move'
+           AND transaction.operation='packing.content.remove.v1'
+           AND transaction.reference_type='carton_content'
+           AND transaction.reference_id=NEW.carton_content_id
+           AND transaction.actor_user_id=NEW.removed_by_user_id
+    INTO valid
+    FROM public.carton_contents content
+    JOIN public.packing_sessions session
+      ON session.tenant_id=content.tenant_id AND session.id=content.packing_session_id
+    JOIN public.cartons carton
+      ON carton.tenant_id=content.tenant_id AND carton.id=content.carton_id
+    JOIN public.packing_allocation_positions position
+      ON position.tenant_id=content.tenant_id
+     AND position.packing_session_allocation_id=content.packing_session_allocation_id
+    JOIN public.packed_inventory_positions packed
+      ON packed.tenant_id=content.tenant_id AND packed.carton_content_id=content.id
+    JOIN public.inventory_allocations source_allocation
+      ON source_allocation.tenant_id=NEW.tenant_id
+     AND source_allocation.id=NEW.source_inventory_allocation_id
+    JOIN public.inventory_allocations destination_allocation
+      ON destination_allocation.tenant_id=NEW.tenant_id
+     AND destination_allocation.id=NEW.destination_inventory_allocation_id
+    JOIN public.inventory_transactions transaction
+      ON transaction.tenant_id=NEW.tenant_id
+     AND transaction.inventory_owner_id=NEW.inventory_owner_id
+     AND transaction.id=NEW.inventory_transaction_id
+    WHERE content.tenant_id=NEW.tenant_id
+      AND content.inventory_owner_id=NEW.inventory_owner_id
+      AND content.facility_id=NEW.facility_id
+      AND content.carton_id=NEW.carton_id AND content.id=NEW.carton_content_id;
+    IF valid IS DISTINCT FROM TRUE
+       OR (SELECT COUNT(*) FROM public.inventory_entries entry
+           WHERE entry.tenant_id=NEW.tenant_id
+             AND entry.inventory_owner_id=NEW.inventory_owner_id
+             AND entry.transaction_id=NEW.inventory_transaction_id)<>2
+       OR NOT EXISTS (
+           SELECT 1 FROM public.inventory_entries entry
+           WHERE entry.tenant_id=NEW.tenant_id
+             AND entry.inventory_owner_id=NEW.inventory_owner_id
+             AND entry.transaction_id=NEW.inventory_transaction_id
+             AND entry.facility_id=NEW.facility_id
+             AND entry.location_id=NEW.source_location_id
+             AND entry.license_plate_id=NEW.source_license_plate_id
+             AND entry.item_batch_id=NEW.item_batch_id
+             AND entry.status=NEW.inventory_status
+             AND entry.quantity_delta=-NEW.removed_qty)
+       OR NOT EXISTS (
+           SELECT 1 FROM public.inventory_entries entry
+           WHERE entry.tenant_id=NEW.tenant_id
+             AND entry.inventory_owner_id=NEW.inventory_owner_id
+             AND entry.transaction_id=NEW.inventory_transaction_id
+             AND entry.facility_id=NEW.facility_id
+             AND entry.location_id=NEW.destination_location_id
+             AND entry.license_plate_id=NEW.destination_license_plate_id
+             AND entry.item_batch_id=NEW.item_batch_id
+             AND entry.status=NEW.inventory_status
+             AND entry.quantity_delta=NEW.removed_qty)
+    THEN
+        RAISE EXCEPTION 'carton content removal does not reconcile'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER packing_session_allocations_initialize_position
+AFTER INSERT ON public.packing_session_allocations
+FOR EACH ROW EXECUTE FUNCTION public.initialize_packing_allocation_position();
+CREATE TRIGGER packing_allocation_positions_guard
+BEFORE UPDATE OR DELETE ON public.packing_allocation_positions
+FOR EACH ROW EXECUTE FUNCTION public.guard_packing_allocation_position_mutation();
+CREATE CONSTRAINT TRIGGER packing_allocation_positions_require_evidence
+AFTER UPDATE ON public.packing_allocation_positions DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_packing_allocation_position_evidence();
+CREATE CONSTRAINT TRIGGER packing_allocation_positions_validate_session
+AFTER INSERT OR UPDATE ON public.packing_allocation_positions DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.validate_packing_session_consistency();
+CREATE TRIGGER carton_content_removals_validate
+BEFORE INSERT ON public.carton_content_removals
+FOR EACH ROW EXECUTE FUNCTION public.validate_carton_content_removal();
+CREATE CONSTRAINT TRIGGER carton_content_removals_validate_session
+AFTER INSERT ON public.carton_content_removals DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.validate_packing_session_consistency();
+CREATE TRIGGER carton_content_removals_immutable
+BEFORE UPDATE OR DELETE ON public.carton_content_removals
+FOR EACH ROW EXECUTE FUNCTION public.reject_carton_content_removal_mutation();
+
+ALTER TABLE public.packing_allocation_positions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY packing_allocation_positions_tenant_isolation
+ON public.packing_allocation_positions
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.carton_content_removals ENABLE ROW LEVEL SECURITY;
+CREATE POLICY carton_content_removals_tenant_isolation
+ON public.carton_content_removals
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+GRANT SELECT ON public.packing_allocation_positions TO wareboxes_app;
+GRANT UPDATE (
+    state,current_carton_content_id,current_inventory_allocation_id,
+    current_inventory_balance_id,current_location_id,current_license_plate_id,
+    revision,positioned_at
+) ON public.packing_allocation_positions TO wareboxes_app;
+GRANT SELECT,INSERT ON public.carton_content_removals TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.carton_content_removals_id_seq TO wareboxes_app;
+GRANT UPDATE (state,current_inventory_allocation_id,current_inventory_balance_id,
+              current_location_id,current_license_plate_id,revision,positioned_at,
+              carton_content_removal_id,unpacked_at)
+ON public.packed_inventory_positions TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.initialize_packing_allocation_position() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_packing_allocation_position_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_packing_allocation_position_evidence() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_carton_content_removal() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_carton_content_removal_mutation() FROM PUBLIC;
 
 -- PostgreSQL database dump complete
 --

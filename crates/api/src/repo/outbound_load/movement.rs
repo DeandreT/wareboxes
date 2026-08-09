@@ -416,6 +416,7 @@ async fn lock_positions_and_inventory_tx(
         SELECT id,reservation_id,current_inventory_allocation_id,current_inventory_balance_id
         FROM packed_inventory_positions
         WHERE tenant_id=$1 AND inventory_owner_id=$2 AND carton_id=$3
+          AND state<>'unpacked'
         ORDER BY id
         "#,
     )
@@ -451,6 +452,7 @@ async fn lock_positions_and_inventory_tx(
                current_license_plate_id,revision,state
         FROM packed_inventory_positions
         WHERE tenant_id=$1 AND inventory_owner_id=$2 AND carton_id=$3
+          AND state<>'unpacked'
         ORDER BY id FOR UPDATE
         "#,
     )
