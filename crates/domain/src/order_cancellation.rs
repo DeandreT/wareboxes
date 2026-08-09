@@ -2,6 +2,8 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 
+use crate::OrderStatus;
+
 /// Maximum operator note length, measured in Unicode scalar values.
 pub const MAX_CANCELLATION_NOTE_LENGTH: usize = 1_000;
 
@@ -108,6 +110,45 @@ pub struct OrderCancellationDetails {
     note: Option<CancellationNote>,
 }
 
+/// Physical-execution boundary observed while the order is locked for cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderCancellationExecution {
+    Unreleased,
+    ReleasedUnclaimed { pending_pick_tasks: u32 },
+    Started,
+}
+
+/// Applies a cancellation only while no warehouse movement has begun.
+pub const fn cancel_order_before_physical_execution(
+    status: OrderStatus,
+    execution: OrderCancellationExecution,
+) -> Result<OrderStatus, OrderCancellationTransitionError> {
+    match (status, execution) {
+        (OrderStatus::Open | OrderStatus::Held, OrderCancellationExecution::Unreleased) => {
+            Ok(OrderStatus::Cancelled)
+        }
+        (
+            OrderStatus::Processing,
+            OrderCancellationExecution::ReleasedUnclaimed { pending_pick_tasks },
+        ) if pending_pick_tasks > 0 => Ok(OrderStatus::Cancelled),
+        (OrderStatus::Processing, OrderCancellationExecution::Started) => {
+            Err(OrderCancellationTransitionError::PhysicalExecutionStarted)
+        }
+        (OrderStatus::Processing, _) => Err(OrderCancellationTransitionError::InvalidReleaseWork),
+        _ => Err(OrderCancellationTransitionError::OrderNotCancellable { status }),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum OrderCancellationTransitionError {
+    #[error("order {status} cannot be cancelled")]
+    OrderNotCancellable { status: OrderStatus },
+    #[error("released order does not have a complete pending pick set")]
+    InvalidReleaseWork,
+    #[error("physical fulfillment execution has started")]
+    PhysicalExecutionStarted,
+}
+
 impl OrderCancellationDetails {
     pub fn new(
         reason: OrderCancellationReason,
@@ -195,6 +236,42 @@ mod tests {
         .is_ok());
         assert!(
             OrderCancellationDetails::new(OrderCancellationReason::ClientRequest, None).is_ok()
+        );
+    }
+
+    #[test]
+    fn cancellation_stops_at_the_physical_execution_boundary() {
+        assert_eq!(
+            cancel_order_before_physical_execution(
+                OrderStatus::Open,
+                OrderCancellationExecution::Unreleased
+            ),
+            Ok(OrderStatus::Cancelled)
+        );
+        assert_eq!(
+            cancel_order_before_physical_execution(
+                OrderStatus::Processing,
+                OrderCancellationExecution::ReleasedUnclaimed {
+                    pending_pick_tasks: 2
+                }
+            ),
+            Ok(OrderStatus::Cancelled)
+        );
+        assert_eq!(
+            cancel_order_before_physical_execution(
+                OrderStatus::Processing,
+                OrderCancellationExecution::Started
+            ),
+            Err(OrderCancellationTransitionError::PhysicalExecutionStarted)
+        );
+        assert_eq!(
+            cancel_order_before_physical_execution(
+                OrderStatus::Processing,
+                OrderCancellationExecution::ReleasedUnclaimed {
+                    pending_pick_tasks: 0
+                }
+            ),
+            Err(OrderCancellationTransitionError::InvalidReleaseWork)
         );
     }
 }

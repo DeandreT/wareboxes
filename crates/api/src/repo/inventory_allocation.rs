@@ -426,6 +426,7 @@ pub(crate) async fn cancel_order_commitments_tx(
     actor_user_id: i64,
     order_id: i64,
     scope: &ScopeBindings,
+    occurred_at: Timestamp,
 ) -> AppResult<CancelledOrderCommitments> {
     let reservation_rows = sqlx::query(
         r#"
@@ -532,7 +533,6 @@ pub(crate) async fn cancel_order_commitments_tx(
         .await?;
     }
 
-    let now = now_iso();
     let mut released_quantity = 0_i64;
     let mut released_by_reservation = HashMap::<i64, i64>::new();
     for (reservation_id, allocation) in &allocations {
@@ -548,7 +548,7 @@ pub(crate) async fn cancel_order_commitments_tx(
             WHERE tenant_id = $2 AND id = $3 AND status = 'allocated'
             "#,
         )
-        .bind(now)
+        .bind(occurred_at)
         .bind(tenant_id.get())
         .bind(allocation.id)
         .execute(&mut **tx)
@@ -583,7 +583,7 @@ pub(crate) async fn cancel_order_commitments_tx(
                 actor_user_id,
                 transition: "released",
                 aggregate_sequence: 2,
-                occurred_at: now,
+                occurred_at,
             },
             &payload,
         )
@@ -602,7 +602,7 @@ pub(crate) async fn cancel_order_commitments_tx(
             WHERE tenant_id = $2 AND id = $3 AND status = 'active'
             "#,
         )
-        .bind(now)
+        .bind(occurred_at)
         .bind(tenant_id.get())
         .bind(reservation_id)
         .execute(&mut **tx)
@@ -633,7 +633,7 @@ pub(crate) async fn cancel_order_commitments_tx(
                 actor_user_id,
                 transition: "cancelled",
                 aggregate_sequence: 2,
-                occurred_at: now,
+                occurred_at,
             },
             &payload,
         )

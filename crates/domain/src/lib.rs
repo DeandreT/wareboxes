@@ -41,8 +41,9 @@ pub use order_amendment::{
     amend_fulfillment_order, FulfillmentOrderHeader, OrderAmendmentError, OrderAmendmentTransition,
 };
 pub use order_cancellation::{
-    CancellationNote, OrderCancellationDetails, OrderCancellationError, OrderCancellationReason,
-    MAX_CANCELLATION_NOTE_LENGTH,
+    cancel_order_before_physical_execution, CancellationNote, OrderCancellationDetails,
+    OrderCancellationError, OrderCancellationExecution, OrderCancellationReason,
+    OrderCancellationTransitionError, MAX_CANCELLATION_NOTE_LENGTH,
 };
 pub use order_release::{release_order, OrderReleaseError};
 pub use outbound_load::{

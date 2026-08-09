@@ -69,6 +69,8 @@ pub struct CancelOrderResult {
     pub released_reservation_count: i64,
     pub released_allocation_count: i64,
     pub released_quantity: i64,
+    pub cancelled_pick_task_count: i64,
+    pub cancelled_pick_content_count: i64,
 }
 
 #[cfg(test)]
@@ -127,6 +129,8 @@ mod tests {
             released_reservation_count: 3,
             released_allocation_count: 2,
             released_quantity: 12,
+            cancelled_pick_task_count: 2,
+            cancelled_pick_content_count: 2,
         };
 
         let encoded = serde_json::to_value(&result).unwrap();
@@ -134,6 +138,7 @@ mod tests {
         assert_eq!(encoded["previous_status"], "held");
         assert_eq!(encoded["status"], "cancelled");
         assert_eq!(encoded["released_quantity"], 12);
+        assert_eq!(encoded["cancelled_pick_task_count"], 2);
         assert_eq!(
             serde_json::from_value::<CancelOrderResult>(encoded).unwrap(),
             result

@@ -63,6 +63,8 @@ fn response(result: CancelOrderResult) -> V1Result<CancelOrderResponse> {
         released_reservation_count: result.released_reservation_count,
         released_allocation_count: result.released_allocation_count,
         released_quantity: result.released_quantity,
+        cancelled_pick_task_count: result.cancelled_pick_task_count,
+        cancelled_pick_content_count: result.cancelled_pick_content_count,
     })
 }
 
@@ -93,6 +95,7 @@ fn status(status: OrderStatus) -> V1Result<OrderCancellationStatus> {
         OrderStatus::Cancelled => Ok(OrderCancellationStatus::Cancelled),
         OrderStatus::Held => Ok(OrderCancellationStatus::Held),
         OrderStatus::Open => Ok(OrderCancellationStatus::Open),
+        OrderStatus::Processing => Ok(OrderCancellationStatus::Processing),
         _ => Err(V1Error::internal(
             "order cancellation produced an invalid workflow status",
         )),

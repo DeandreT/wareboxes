@@ -3409,6 +3409,210 @@ $$;
 
 
 --
+-- Name: require_order_cancellation_execution(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.require_order_cancellation_execution() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    order_matches BOOLEAN;
+    active_hold_count BIGINT;
+    active_reservation_count BIGINT;
+    active_allocation_count BIGINT;
+    released_hold_count BIGINT;
+    released_reservation_count BIGINT;
+    released_allocation_count BIGINT;
+    released_quantity BIGINT;
+    affected_facility_ids BIGINT[];
+    task_count BIGINT;
+    cancelled_task_count BIGINT;
+    content_count BIGINT;
+    cancelled_content_count BIGINT;
+    release_count BIGINT;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.orders order_header
+        WHERE order_header.tenant_id = NEW.tenant_id
+          AND order_header.inventory_owner_id = NEW.inventory_owner_id
+          AND order_header.id = NEW.order_id
+          AND order_header.deleted IS NULL
+          AND order_header.status = 'cancelled'
+          AND order_header.revision = NEW.resulting_revision
+    ) INTO order_matches;
+
+    SELECT COUNT(*) FILTER (WHERE hold.released_at IS NULL),
+           COUNT(*) FILTER (WHERE hold.released_at = NEW.occurred_at)
+    INTO active_hold_count, released_hold_count
+    FROM public.order_holds hold
+    WHERE hold.tenant_id = NEW.tenant_id
+      AND hold.inventory_owner_id = NEW.inventory_owner_id
+      AND hold.order_id = NEW.order_id;
+
+    SELECT COUNT(*) FILTER (
+               WHERE reservation.deleted IS NULL AND reservation.status = 'active'
+           ),
+           COUNT(*) FILTER (
+               WHERE reservation.deleted = NEW.occurred_at
+                 AND reservation.status = 'cancelled'
+           ),
+           COALESCE(
+               array_agg(DISTINCT reservation.facility_id ORDER BY reservation.facility_id)
+                   FILTER (
+                       WHERE reservation.deleted = NEW.occurred_at
+                         AND reservation.status = 'cancelled'
+                   ),
+               '{}'::BIGINT[]
+           )
+    INTO active_reservation_count, released_reservation_count, affected_facility_ids
+    FROM public.inventory_reservations reservation
+    WHERE reservation.tenant_id = NEW.tenant_id
+      AND reservation.inventory_owner_id = NEW.inventory_owner_id
+      AND reservation.order_id = NEW.order_id;
+
+    SELECT COUNT(*) FILTER (
+               WHERE allocation.deleted IS NULL AND allocation.status = 'allocated'
+           ),
+           COUNT(*) FILTER (
+               WHERE allocation.deleted = NEW.occurred_at
+                 AND allocation.status = 'released'
+           ),
+           COALESCE(SUM(allocation.qty) FILTER (
+               WHERE allocation.deleted = NEW.occurred_at
+                 AND allocation.status = 'released'
+           ), 0)::BIGINT
+    INTO active_allocation_count, released_allocation_count, released_quantity
+    FROM public.inventory_allocations allocation
+    INNER JOIN public.inventory_reservations reservation
+      ON reservation.tenant_id = allocation.tenant_id
+     AND reservation.inventory_owner_id = allocation.inventory_owner_id
+     AND reservation.id = allocation.reservation_id
+    WHERE allocation.tenant_id = NEW.tenant_id
+      AND allocation.inventory_owner_id = NEW.inventory_owner_id
+      AND reservation.order_id = NEW.order_id;
+
+    SELECT COUNT(*),
+           COUNT(*) FILTER (
+               WHERE task.status = 'cancelled'
+                 AND task.assigned_user_id IS NULL
+                 AND task.claimed_at IS NULL
+                 AND task.lease_expires_at IS NULL
+                 AND task.completed_at = NEW.occurred_at
+           )
+    INTO task_count, cancelled_task_count
+    FROM public.pick_tasks task
+    WHERE task.tenant_id = NEW.tenant_id
+      AND task.inventory_owner_id = NEW.inventory_owner_id
+      AND task.order_id = NEW.order_id;
+
+    SELECT COUNT(*),
+           COUNT(*) FILTER (
+               WHERE content.state = 'cancelled'
+                 AND content.completed_at = NEW.occurred_at
+           )
+    INTO content_count, cancelled_content_count
+    FROM public.pick_task_contents content
+    WHERE content.tenant_id = NEW.tenant_id
+      AND content.inventory_owner_id = NEW.inventory_owner_id
+      AND content.order_id = NEW.order_id;
+
+    SELECT COUNT(*) INTO release_count
+    FROM public.order_releases release
+    WHERE release.tenant_id = NEW.tenant_id
+      AND release.inventory_owner_id = NEW.inventory_owner_id
+      AND release.order_id = NEW.order_id;
+
+    IF NOT order_matches
+       OR active_hold_count <> 0
+       OR active_reservation_count <> 0
+       OR active_allocation_count <> 0
+       OR released_hold_count <> NEW.released_hold_count
+       OR released_reservation_count <> NEW.released_reservation_count
+       OR released_allocation_count <> NEW.released_allocation_count
+       OR released_quantity <> NEW.released_quantity
+       OR affected_facility_ids IS DISTINCT FROM NEW.affected_facility_ids
+    THEN
+        RAISE EXCEPTION 'order cancellation does not match released order commitments'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.previous_status = 'processing' THEN
+        IF release_count <> 1
+           OR task_count = 0
+           OR task_count <> NEW.cancelled_pick_task_count
+           OR cancelled_task_count <> task_count
+           OR content_count <> NEW.cancelled_pick_content_count
+           OR cancelled_content_count <> content_count
+           OR content_count <> task_count
+           OR EXISTS (
+               SELECT 1 FROM public.pick_confirmations confirmation
+               WHERE confirmation.tenant_id = NEW.tenant_id
+                 AND confirmation.order_id = NEW.order_id
+           )
+           OR EXISTS (
+               SELECT 1 FROM public.pick_shortages shortage
+               WHERE shortage.tenant_id = NEW.tenant_id
+                 AND shortage.order_id = NEW.order_id
+           )
+           OR EXISTS (
+               SELECT 1 FROM public.packing_sessions session
+               WHERE session.tenant_id = NEW.tenant_id
+                 AND session.order_id = NEW.order_id
+           )
+           OR EXISTS (
+               SELECT 1 FROM public.outbound_order_containers container
+               WHERE container.tenant_id = NEW.tenant_id
+                 AND container.order_id = NEW.order_id
+           )
+        THEN
+            RAISE EXCEPTION 'processing order cancellation requires untouched terminal pick work'
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF NEW.cancelled_pick_task_count <> 0
+          OR NEW.cancelled_pick_content_count <> 0
+          OR task_count <> 0
+          OR content_count <> 0
+          OR release_count <> 0
+    THEN
+        RAISE EXCEPTION 'unreleased order cancellation cannot contain pick work'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+CREATE FUNCTION public.require_cancelled_order_evidence() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+    IF NEW.status = 'cancelled'
+       AND OLD.status IS DISTINCT FROM 'cancelled'
+       AND NOT EXISTS (
+           SELECT 1
+           FROM public.order_cancellations cancellation
+           WHERE cancellation.tenant_id = NEW.tenant_id
+             AND cancellation.inventory_owner_id = NEW.inventory_owner_id
+             AND cancellation.order_id = NEW.id
+             AND cancellation.previous_status = OLD.status
+             AND cancellation.expected_revision = OLD.revision
+             AND cancellation.resulting_revision = NEW.revision
+       )
+    THEN
+        RAISE EXCEPTION 'cancelled order requires immutable cancellation evidence'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+--
 -- Name: reject_packing_ledger_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5309,7 +5513,7 @@ BEGIN
             USING ERRCODE = '55000';
     END IF;
 
-    IF OLD.status IN ('completed', 'shorted') THEN
+    IF OLD.status IN ('completed', 'shorted', 'cancelled') THEN
         RAISE EXCEPTION 'terminal pick tasks are immutable'
             USING ERRCODE = '55000';
     END IF;
@@ -5321,6 +5525,19 @@ BEGIN
            OR NEW.last_release_note IS DISTINCT FROM OLD.last_release_note
         THEN
             RAISE EXCEPTION 'claiming pick work cannot change release history'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF OLD.status = 'open' AND NEW.status = 'cancelled' THEN
+        IF NEW.assigned_user_id IS NOT NULL
+           OR NEW.claimed_at IS NOT NULL
+           OR NEW.lease_expires_at IS NOT NULL
+           OR NEW.completed_at IS NULL
+           OR NEW.release_count IS DISTINCT FROM OLD.release_count
+           OR NEW.last_released_at IS DISTINCT FROM OLD.last_released_at
+           OR NEW.last_release_reason IS DISTINCT FROM OLD.last_release_reason
+           OR NEW.last_release_note IS DISTINCT FROM OLD.last_release_note
+        THEN
+            RAISE EXCEPTION 'cancelling pick work requires an untouched open task'
                 USING ERRCODE = '55000';
         END IF;
     ELSIF OLD.status = 'in_progress' AND NEW.status = 'open' THEN
@@ -5402,7 +5619,7 @@ BEGIN
     END IF;
 
     IF OLD.state <> 'pending'
-       OR NEW.state NOT IN ('completed', 'shorted')
+       OR NEW.state NOT IN ('completed', 'shorted', 'cancelled')
        OR OLD.completed_at IS NOT NULL
        OR NEW.completed_at IS NULL
     THEN
@@ -6008,6 +6225,18 @@ BEGIN
     THEN
         RAISE EXCEPTION 'shorted pick content requires an immutable shortage report'
             USING ERRCODE = '23514';
+    ELSIF NEW.state = 'cancelled'
+       AND NOT EXISTS (
+           SELECT 1 FROM public.order_cancellations cancellation
+           WHERE cancellation.tenant_id = NEW.tenant_id
+             AND cancellation.inventory_owner_id = NEW.inventory_owner_id
+             AND cancellation.order_id = NEW.order_id
+             AND cancellation.previous_status = 'processing'
+             AND cancellation.occurred_at = NEW.completed_at
+       )
+    THEN
+        RAISE EXCEPTION 'cancelled pick content requires immutable order cancellation evidence'
+            USING ERRCODE = '23514';
     END IF;
 
     RETURN NEW;
@@ -6045,6 +6274,27 @@ BEGIN
        )
     THEN
         RAISE EXCEPTION 'shorted pick task requires shorted content'
+            USING ERRCODE = '23514';
+    ELSIF NEW.status = 'cancelled'
+       AND (
+           NOT EXISTS (
+               SELECT 1 FROM public.pick_task_contents content
+               WHERE content.tenant_id = NEW.tenant_id
+                 AND content.task_id = NEW.id
+                 AND content.state = 'cancelled'
+                 AND content.completed_at = NEW.completed_at
+           )
+           OR NOT EXISTS (
+               SELECT 1 FROM public.order_cancellations cancellation
+               WHERE cancellation.tenant_id = NEW.tenant_id
+                 AND cancellation.inventory_owner_id = NEW.inventory_owner_id
+                 AND cancellation.order_id = NEW.order_id
+                 AND cancellation.previous_status = 'processing'
+                 AND cancellation.occurred_at = NEW.completed_at
+           )
+       )
+    THEN
+        RAISE EXCEPTION 'cancelled pick task requires content and order cancellation evidence'
             USING ERRCODE = '23514';
     END IF;
 
@@ -10787,15 +11037,19 @@ CREATE TABLE public.order_cancellations (
     released_reservation_count bigint NOT NULL,
     released_allocation_count bigint NOT NULL,
     released_quantity bigint NOT NULL,
+    cancelled_pick_task_count bigint NOT NULL,
+    cancelled_pick_content_count bigint NOT NULL,
     CONSTRAINT order_cancellations_affected_facilities_check CHECK ((array_position(affected_facility_ids, NULL::bigint) IS NULL) AND (0 < ALL (affected_facility_ids))),
     CONSTRAINT order_cancellations_note_check CHECK (((note IS NULL) OR ((note = btrim(note)) AND (note <> ''::text) AND (char_length(note) <= 1000)))),
     CONSTRAINT order_cancellations_other_note_check CHECK (((reason <> 'other'::text) OR (note IS NOT NULL))),
-    CONSTRAINT order_cancellations_previous_status_check CHECK ((previous_status = ANY (ARRAY['open'::text, 'held'::text]))),
+    CONSTRAINT order_cancellations_previous_status_check CHECK ((previous_status = ANY (ARRAY['open'::text, 'held'::text, 'processing'::text]))),
     CONSTRAINT order_cancellations_reason_check CHECK ((reason = ANY (ARRAY['client_request'::text, 'duplicate_order'::text, 'data_correction'::text, 'inventory_unavailable'::text, 'fulfillment_exception'::text, 'other'::text]))),
     CONSTRAINT order_cancellations_released_allocation_count_check CHECK (released_allocation_count >= 0),
     CONSTRAINT order_cancellations_released_hold_count_check CHECK (released_hold_count >= 0),
     CONSTRAINT order_cancellations_released_quantity_check CHECK (released_quantity >= 0),
     CONSTRAINT order_cancellations_released_reservation_count_check CHECK (released_reservation_count >= 0),
+    CONSTRAINT order_cancellations_cancelled_pick_task_count_check CHECK (cancelled_pick_task_count >= 0),
+    CONSTRAINT order_cancellations_cancelled_pick_content_count_check CHECK (cancelled_pick_content_count >= 0),
     CONSTRAINT order_cancellations_revision_check CHECK ((expected_revision > 0) AND (resulting_revision = (expected_revision + 1)))
 );
 
@@ -11834,14 +12088,14 @@ CREATE TABLE public.pick_tasks (
     last_release_note text,
     release_count bigint DEFAULT 0 NOT NULL,
     completed_at timestamp with time zone,
-    CONSTRAINT pick_tasks_claim_state_check CHECK ((((status = 'open'::text) AND (assigned_user_id IS NULL) AND (claimed_at IS NULL) AND (lease_expires_at IS NULL) AND (completed_at IS NULL)) OR ((status = 'in_progress'::text) AND (assigned_user_id IS NOT NULL) AND (claimed_at IS NOT NULL) AND (lease_expires_at IS NOT NULL) AND (lease_expires_at > claimed_at) AND (completed_at IS NULL)) OR ((status = ANY (ARRAY['completed'::text, 'shorted'::text])) AND (assigned_user_id IS NOT NULL) AND (claimed_at IS NOT NULL) AND (lease_expires_at IS NULL) AND (completed_at IS NOT NULL) AND (completed_at >= claimed_at)))),
+    CONSTRAINT pick_tasks_claim_state_check CHECK ((((status = 'open'::text) AND (assigned_user_id IS NULL) AND (claimed_at IS NULL) AND (lease_expires_at IS NULL) AND (completed_at IS NULL)) OR ((status = 'in_progress'::text) AND (assigned_user_id IS NOT NULL) AND (claimed_at IS NOT NULL) AND (lease_expires_at IS NOT NULL) AND (lease_expires_at > claimed_at) AND (completed_at IS NULL)) OR ((status = ANY (ARRAY['completed'::text, 'shorted'::text])) AND (assigned_user_id IS NOT NULL) AND (claimed_at IS NOT NULL) AND (lease_expires_at IS NULL) AND (completed_at IS NOT NULL) AND (completed_at >= claimed_at)) OR ((status = 'cancelled'::text) AND (assigned_user_id IS NULL) AND (claimed_at IS NULL) AND (lease_expires_at IS NULL) AND (completed_at IS NOT NULL)))),
     CONSTRAINT pick_tasks_last_release_check CHECK ((((last_released_at IS NULL) AND (last_release_reason IS NULL) AND (last_release_note IS NULL) AND (release_count = 0)) OR ((last_released_at IS NOT NULL) AND (last_release_reason IS NOT NULL) AND (release_count > 0)))),
     CONSTRAINT pick_tasks_last_release_note_check CHECK (((last_release_note IS NULL) OR ((last_release_note = btrim(last_release_note)) AND (last_release_note <> ''::text) AND (char_length(last_release_note) <= 500)))),
     CONSTRAINT pick_tasks_last_release_reason_check CHECK (((last_release_reason IS NULL) OR (last_release_reason = ANY (ARRAY['work_interrupted'::text, 'equipment_unavailable'::text, 'source_blocked'::text, 'inventory_discrepancy'::text, 'safety_issue'::text, 'lease_expired'::text, 'scope_revoked'::text, 'other'::text])))),
     CONSTRAINT pick_tasks_other_release_note_check CHECK (((last_release_reason <> 'other'::text) OR (last_release_note IS NOT NULL))),
     CONSTRAINT pick_tasks_priority_check CHECK (priority >= 0),
     CONSTRAINT pick_tasks_release_count_check CHECK (release_count >= 0),
-    CONSTRAINT pick_tasks_status_check CHECK ((status = ANY (ARRAY['open'::text, 'in_progress'::text, 'completed'::text, 'shorted'::text]))),
+    CONSTRAINT pick_tasks_status_check CHECK ((status = ANY (ARRAY['open'::text, 'in_progress'::text, 'completed'::text, 'shorted'::text, 'cancelled'::text]))),
     CONSTRAINT pick_tasks_timeout_check CHECK (task_timeout_seconds > 0)
 );
 
@@ -11888,10 +12142,10 @@ CREATE TABLE public.pick_task_contents (
     travel_sequence bigint NOT NULL,
     state text DEFAULT 'pending'::text NOT NULL,
     completed_at timestamp with time zone,
-    CONSTRAINT pick_task_contents_completion_check CHECK ((((state = 'pending'::text) AND (completed_at IS NULL)) OR ((state = ANY (ARRAY['completed'::text, 'shorted'::text])) AND (completed_at IS NOT NULL)))),
+    CONSTRAINT pick_task_contents_completion_check CHECK ((((state = 'pending'::text) AND (completed_at IS NULL)) OR ((state = ANY (ARRAY['completed'::text, 'shorted'::text, 'cancelled'::text])) AND (completed_at IS NOT NULL)))),
     CONSTRAINT pick_task_contents_inventory_status_check CHECK (inventory_status = 'available'::text),
     CONSTRAINT pick_task_contents_planned_qty_check CHECK (planned_qty > 0),
-    CONSTRAINT pick_task_contents_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'completed'::text, 'shorted'::text]))),
+    CONSTRAINT pick_task_contents_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'completed'::text, 'shorted'::text, 'cancelled'::text]))),
     CONSTRAINT pick_task_contents_travel_sequence_check CHECK (travel_sequence > 0),
     CONSTRAINT pick_task_contents_uom_check CHECK ((uom = btrim(uom)) AND (uom <> ''::text))
 );
@@ -16345,6 +16599,12 @@ CREATE TRIGGER order_allocation_run_lines_are_immutable BEFORE DELETE OR UPDATE 
 --
 
 CREATE TRIGGER order_cancellations_are_immutable BEFORE DELETE OR UPDATE ON public.order_cancellations FOR EACH ROW EXECUTE FUNCTION public.reject_order_cancellation_mutation();
+
+
+CREATE CONSTRAINT TRIGGER order_cancellations_require_execution AFTER INSERT ON public.order_cancellations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_order_cancellation_execution();
+
+
+CREATE CONSTRAINT TRIGGER orders_require_cancellation_evidence AFTER UPDATE OF status, revision ON public.orders DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_cancelled_order_evidence();
 
 
 --
@@ -21927,6 +22187,12 @@ REVOKE ALL ON FUNCTION public.reject_order_allocation_run_mutation() FROM PUBLIC
 --
 
 REVOKE ALL ON FUNCTION public.reject_order_cancellation_mutation() FROM PUBLIC;
+
+
+REVOKE ALL ON FUNCTION public.require_order_cancellation_execution() FROM PUBLIC;
+
+
+REVOKE ALL ON FUNCTION public.require_cancelled_order_evidence() FROM PUBLIC;
 
 
 --

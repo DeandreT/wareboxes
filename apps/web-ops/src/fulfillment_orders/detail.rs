@@ -520,6 +520,7 @@ pub(super) fn OrderDetailPanel(
                             order_id
                             order_key=cancellation_order_key.get_value()
                             revision=order.revision
+                            processing=matches!(order.status, OrderStatus::Processing)
                             on_close=Callback::new(move |_| cancel_open.set(false))
                             on_refreshed
                             on_unauthorized
@@ -833,7 +834,10 @@ pub(super) fn OrderDetailPanel(
 }
 
 fn can_cancel_order(status: OrderStatus) -> bool {
-    matches!(status, OrderStatus::Open | OrderStatus::Held)
+    matches!(
+        status,
+        OrderStatus::Open | OrderStatus::Held | OrderStatus::Processing
+    )
 }
 
 fn can_place_order_hold(status: OrderStatus) -> bool {
@@ -886,7 +890,7 @@ mod tests {
     fn cancellation_is_not_offered_for_terminal_orders() {
         assert!(can_cancel_order(OrderStatus::Open));
         assert!(can_cancel_order(OrderStatus::Held));
-        assert!(!can_cancel_order(OrderStatus::Processing));
+        assert!(can_cancel_order(OrderStatus::Processing));
         assert!(!can_cancel_order(OrderStatus::AwaitingShipment));
         assert!(!can_cancel_order(OrderStatus::AwaitingPacking));
         assert!(!can_cancel_order(OrderStatus::Packing));

@@ -30,6 +30,7 @@ pub enum OrderCancellationStatus {
     Cancelled,
     Held,
     Open,
+    Processing,
 }
 
 /// Replay-stable result of one committed cancellation.
@@ -48,6 +49,8 @@ pub struct CancelOrderResponse {
     pub released_reservation_count: i64,
     pub released_allocation_count: i64,
     pub released_quantity: i64,
+    pub cancelled_pick_task_count: i64,
+    pub cancelled_pick_content_count: i64,
 }
 
 #[cfg(test)]
@@ -103,6 +106,8 @@ mod tests {
             released_reservation_count: 3,
             released_allocation_count: 2,
             released_quantity: 12,
+            cancelled_pick_task_count: 2,
+            cancelled_pick_content_count: 2,
         };
 
         let encoded = serde_json::to_value(&response).unwrap();
@@ -120,7 +125,9 @@ mod tests {
                 "released_hold_count": 2,
                 "released_reservation_count": 3,
                 "released_allocation_count": 2,
-                "released_quantity": 12
+                "released_quantity": 12,
+                "cancelled_pick_task_count": 2,
+                "cancelled_pick_content_count": 2
             })
         );
         assert_eq!(

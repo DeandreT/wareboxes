@@ -1,4 +1,6 @@
 mod common;
+#[path = "api_v1_order_cancellations/processing_cancellation.rs"]
+mod processing_cancellation;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
@@ -265,6 +267,8 @@ async fn open_cancellation_is_strict_replay_safe_audited_and_creates_no_recovery
     assert_eq!(first.released_reservation_count, 0);
     assert_eq!(first.released_allocation_count, 0);
     assert_eq!(first.released_quantity, 0);
+    assert_eq!(first.cancelled_pick_task_count, 0);
+    assert_eq!(first.cancelled_pick_content_count, 0);
 
     let replay = cancel(
         &app,
@@ -525,6 +529,8 @@ async fn held_cancellation_atomically_releases_holds_allocations_and_reservation
     assert_eq!(response.released_reservation_count, 1);
     assert_eq!(response.released_allocation_count, 1);
     assert_eq!(response.released_quantity, 5);
+    assert_eq!(response.cancelled_pick_task_count, 0);
+    assert_eq!(response.cancelled_pick_content_count, 0);
 
     let replay = cancel(
         &app,

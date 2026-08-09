@@ -9,7 +9,8 @@ use wareboxes_application::outbox::NewOutboxEvent;
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    InventoryOwnerId, OrderCancellationId, OrderId, OrderRevision, OrderStatus, TenantId, Timestamp,
+    cancel_order_before_physical_execution, InventoryOwnerId, OrderCancellationExecution,
+    OrderCancellationId, OrderId, OrderRevision, OrderStatus, TenantId, Timestamp,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
@@ -24,6 +25,12 @@ struct LockedOrder {
     inventory_owner_id: InventoryOwnerId,
     status: OrderStatus,
     revision: OrderRevision,
+}
+
+#[derive(Debug, Default)]
+struct CancelledPickWork {
+    task_count: i64,
+    content_count: i64,
 }
 
 pub async fn cancel_order(
@@ -60,11 +67,16 @@ pub async fn cancel_order(
             order.revision.get()
         )));
     }
-    if !matches!(order.status, OrderStatus::Open | OrderStatus::Held) {
-        return Err(AppError::conflict(
-            "only open or held orders can be cancelled before physical execution",
-        ));
-    }
+    let occurred_at = now_iso();
+    let cancelled_pick_work = cancel_pending_pick_work_tx(
+        &mut tx,
+        access.tenant_id,
+        command.order_id(),
+        order.status,
+        &scope,
+        occurred_at,
+    )
+    .await?;
 
     let commitments = inventory_allocation::cancel_order_commitments_tx(
         &mut tx,
@@ -72,9 +84,9 @@ pub async fn cancel_order(
         context.actor_id.get(),
         command.order_id().get(),
         &scope,
+        occurred_at,
     )
     .await?;
-    let occurred_at = now_iso();
     let released_hold_count = release_active_holds_tx(
         &mut tx,
         access.tenant_id,
@@ -118,6 +130,8 @@ pub async fn cancel_order(
         released_reservation_count,
         released_allocation_count,
         commitments.released_quantity,
+        cancelled_pick_work.task_count,
+        cancelled_pick_work.content_count,
         occurred_at,
     )
     .await?;
@@ -144,6 +158,8 @@ pub async fn cancel_order(
         released_reservation_count,
         released_allocation_count,
         released_quantity: commitments.released_quantity,
+        cancelled_pick_task_count: cancelled_pick_work.task_count,
+        cancelled_pick_content_count: cancelled_pick_work.content_count,
     };
     enqueue_order_cancelled_event_tx(
         &mut tx,
@@ -157,6 +173,181 @@ pub async fn cancel_order(
     .await?;
 
     Ok(prepared.commit(tx, result).await?)
+}
+
+async fn cancel_pending_pick_work_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    order_id: OrderId,
+    order_status: OrderStatus,
+    scope: &ScopeBindings,
+    occurred_at: Timestamp,
+) -> AppResult<CancelledPickWork> {
+    let task_rows = sqlx::query(
+        r#"
+        SELECT id, inventory_owner_id, facility_id, status,
+               assigned_user_id, claimed_at, lease_expires_at, completed_at
+        FROM pick_tasks
+        WHERE tenant_id = $1 AND order_id = $2
+        ORDER BY id
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(order_id.get())
+    .fetch_all(&mut **tx)
+    .await?;
+
+    for row in &task_rows {
+        let owner_id: i64 = row.try_get("inventory_owner_id")?;
+        let facility_id: i64 = row.try_get("facility_id")?;
+        if !scope.includes_inventory_owner(owner_id) || !scope.includes_facility(facility_id) {
+            return Err(AppError::not_found("order"));
+        }
+    }
+
+    if matches!(order_status, OrderStatus::Open | OrderStatus::Held) {
+        cancel_order_before_physical_execution(
+            order_status,
+            if task_rows.is_empty() {
+                OrderCancellationExecution::Unreleased
+            } else {
+                OrderCancellationExecution::Started
+            },
+        )
+        .map_err(|error| AppError::conflict(error.to_string()))?;
+        return Ok(CancelledPickWork::default());
+    }
+
+    let task_count = u32::try_from(task_rows.len())
+        .map_err(|_| AppError::internal("pending pick task count overflow"))?;
+    let mut tasks_are_unclaimed = !task_rows.is_empty();
+    for row in &task_rows {
+        tasks_are_unclaimed &= row.try_get::<String, _>("status")? == "open"
+            && row.try_get::<Option<i64>, _>("assigned_user_id")?.is_none()
+            && row.try_get::<Option<Timestamp>, _>("claimed_at")?.is_none()
+            && row
+                .try_get::<Option<Timestamp>, _>("lease_expires_at")?
+                .is_none()
+            && row
+                .try_get::<Option<Timestamp>, _>("completed_at")?
+                .is_none();
+    }
+    let execution = if tasks_are_unclaimed {
+        OrderCancellationExecution::ReleasedUnclaimed {
+            pending_pick_tasks: task_count,
+        }
+    } else {
+        OrderCancellationExecution::Started
+    };
+    cancel_order_before_physical_execution(order_status, execution)
+        .map_err(|error| AppError::conflict(error.to_string()))?;
+
+    let content_rows = sqlx::query(
+        r#"
+        SELECT content.id, content.task_id, content.state, content.completed_at
+        FROM pick_task_contents content
+        WHERE content.tenant_id = $1 AND content.order_id = $2
+        ORDER BY content.id
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(order_id.get())
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut content_is_pending = content_rows.len() == task_rows.len();
+    for row in &content_rows {
+        content_is_pending &= row.try_get::<String, _>("state")? == "pending"
+            && row
+                .try_get::<Option<Timestamp>, _>("completed_at")?
+                .is_none();
+    }
+    let physical_evidence_exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM pick_confirmations
+            WHERE tenant_id = $1 AND order_id = $2
+        ) OR EXISTS (
+            SELECT 1 FROM pick_shortages
+            WHERE tenant_id = $1 AND order_id = $2
+        ) OR EXISTS (
+            SELECT 1 FROM packing_sessions
+            WHERE tenant_id = $1 AND order_id = $2
+        ) OR EXISTS (
+            SELECT 1 FROM outbound_order_containers
+            WHERE tenant_id = $1 AND order_id = $2
+        )
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(order_id.get())
+    .fetch_one(&mut **tx)
+    .await?;
+    if !content_is_pending || physical_evidence_exists {
+        return Err(AppError::conflict(
+            "order physical fulfillment execution has started",
+        ));
+    }
+
+    let content_ids = content_rows
+        .iter()
+        .map(|row| row.try_get::<i64, _>("id"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let task_ids = task_rows
+        .iter()
+        .map(|row| row.try_get::<i64, _>("id"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let updated_contents = sqlx::query(
+        r#"
+        UPDATE pick_task_contents
+        SET state = 'cancelled', completed_at = $1
+        WHERE tenant_id = $2 AND id = ANY($3)
+          AND state = 'pending' AND completed_at IS NULL
+        "#,
+    )
+    .bind(occurred_at)
+    .bind(tenant_id.get())
+    .bind(&content_ids)
+    .execute(&mut **tx)
+    .await?;
+    let expected_content_count = u64::try_from(content_ids.len())
+        .map_err(|_| AppError::internal("pending pick content count overflow"))?;
+    if updated_contents.rows_affected() != expected_content_count {
+        return Err(AppError::conflict(
+            "pending pick contents changed during cancellation",
+        ));
+    }
+
+    let updated_tasks = sqlx::query(
+        r#"
+        UPDATE pick_tasks
+        SET status = 'cancelled', completed_at = $1
+        WHERE tenant_id = $2 AND id = ANY($3)
+          AND status = 'open' AND assigned_user_id IS NULL
+          AND claimed_at IS NULL AND lease_expires_at IS NULL
+          AND completed_at IS NULL
+        "#,
+    )
+    .bind(occurred_at)
+    .bind(tenant_id.get())
+    .bind(&task_ids)
+    .execute(&mut **tx)
+    .await?;
+    let expected_task_count = u64::try_from(task_ids.len())
+        .map_err(|_| AppError::internal("pending pick task count overflow"))?;
+    if updated_tasks.rows_affected() != expected_task_count {
+        return Err(AppError::conflict(
+            "pending pick tasks changed during cancellation",
+        ));
+    }
+
+    Ok(CancelledPickWork {
+        task_count: i64::try_from(task_ids.len())
+            .map_err(|_| AppError::internal("pending pick task count overflow"))?,
+        content_count: i64::try_from(content_ids.len())
+            .map_err(|_| AppError::internal("pending pick content count overflow"))?,
+    })
 }
 
 async fn lock_order_tx(
@@ -334,6 +525,8 @@ async fn insert_cancellation_tx(
     released_reservation_count: i64,
     released_allocation_count: i64,
     released_quantity: i64,
+    cancelled_pick_task_count: i64,
+    cancelled_pick_content_count: i64,
     occurred_at: Timestamp,
 ) -> AppResult<OrderCancellationId> {
     let id: i64 = sqlx::query_scalar(
@@ -342,9 +535,11 @@ async fn insert_cancellation_tx(
             tenant_id, inventory_owner_id, order_id, actor_user_id, occurred_at,
             reason, note, previous_status, expected_revision, resulting_revision,
             affected_facility_ids, released_hold_count, released_reservation_count,
-            released_allocation_count, released_quantity
+            released_allocation_count, released_quantity,
+            cancelled_pick_task_count, cancelled_pick_content_count
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                $16, $17)
         RETURNING id
         "#,
     )
@@ -363,6 +558,8 @@ async fn insert_cancellation_tx(
     .bind(released_reservation_count)
     .bind(released_allocation_count)
     .bind(released_quantity)
+    .bind(cancelled_pick_task_count)
+    .bind(cancelled_pick_content_count)
     .fetch_one(&mut **tx)
     .await?;
     OrderCancellationId::new(id).map_err(|error| AppError::internal(error.to_string()))
@@ -400,6 +597,8 @@ async fn enqueue_order_cancelled_event_tx(
         "released_reservation_count": result.released_reservation_count,
         "released_allocation_count": result.released_allocation_count,
         "released_quantity": result.released_quantity,
+        "cancelled_pick_task_count": result.cancelled_pick_task_count,
+        "cancelled_pick_content_count": result.cancelled_pick_content_count,
     });
     outbox::enqueue(
         tx,

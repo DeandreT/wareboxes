@@ -13,6 +13,7 @@ pub(super) fn OrderCancellationPanel(
     order_id: i64,
     order_key: String,
     revision: i64,
+    processing: bool,
     on_close: Callback<()>,
     on_refreshed: Callback<i64>,
     on_unauthorized: Callback<()>,
@@ -68,11 +69,7 @@ pub(super) fn OrderCancellationPanel(
                     retry_attempt.set(None);
                     pending.set(false);
                     let key = order_key.get_value();
-                    toasts.success(format!(
-                        "Order {key} cancelled. {} units released; revision {}.",
-                        format_quantity(result.released_quantity),
-                        result.revision.get()
-                    ));
+                    toasts.success(cancellation_success_message(&key, &result));
                     on_close.run(());
                     on_refreshed.run(order_id);
                 }
@@ -114,7 +111,7 @@ pub(super) fn OrderCancellationPanel(
                 </div>
             </div>
             <p id="cancel-order-warning" class="order-cancellation-warning">
-                "This permanently closes the order and releases its holds and inventory commitments."
+                {cancellation_warning(processing)}
             </p>
             <div class="order-cancellation-fields">
                 <label>
@@ -190,6 +187,33 @@ pub(super) fn OrderCancellationPanel(
     }
 }
 
+fn cancellation_warning(processing: bool) -> &'static str {
+    if processing {
+        "This permanently closes the released order and cancels every pending pick. Active or completed physical work must be resolved first."
+    } else {
+        "This permanently closes the order and releases its holds and inventory commitments."
+    }
+}
+
+fn cancellation_success_message(
+    order_key: &str,
+    result: &wareboxes_api_contract::v1::CancelOrderResponse,
+) -> String {
+    let released = format_quantity(result.released_quantity);
+    if result.cancelled_pick_task_count > 0 {
+        format!(
+            "Order {order_key} cancelled. {released} units and {} pending picks released; revision {}.",
+            result.cancelled_pick_task_count,
+            result.revision.get()
+        )
+    } else {
+        format!(
+            "Order {order_key} cancelled. {released} units released; revision {}.",
+            result.revision.get()
+        )
+    }
+}
+
 fn optional_note(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
@@ -227,5 +251,12 @@ mod tests {
             Some("Client request")
         );
         assert_eq!(optional_note("   "), None);
+    }
+
+    #[test]
+    fn released_order_warning_explains_the_physical_boundary() {
+        assert!(cancellation_warning(true).contains("cancels every pending pick"));
+        assert!(cancellation_warning(true).contains("physical work"));
+        assert!(!cancellation_warning(false).contains("pending pick"));
     }
 }
