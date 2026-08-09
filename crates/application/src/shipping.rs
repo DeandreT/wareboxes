@@ -3,14 +3,81 @@
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
     CarrierCode, CarrierManifestId, CarrierServiceCode, CartonId, CartonTrackingAssignment,
-    FacilityId, InventoryOwnerId, ManifestReference, OrderId, OrderRevision, OrderStatus,
-    PackSessionId, ShipmentId, ShipmentRevision, ShipmentScanValue, ShipmentStatus,
-    ShipmentTrackingAssignmentId, ShortShipDemandQuantities, Timestamp, TrackingNumber, UserId,
+    FacilityId, InventoryOwnerId, ManifestReference, OrderId, OrderLineId, OrderRevision,
+    OrderStatus, PackSessionId, ShipmentDocumentId, ShipmentDocumentType, ShipmentId,
+    ShipmentRevision, ShipmentScanValue, ShipmentStatus, ShipmentTrackingAssignmentId,
+    ShortShipDemandQuantities, Timestamp, TrackingNumber, UserId,
 };
 
 pub const CREATE_SHIPMENT_OPERATION: &str = "shipping.shipment.create.v1";
 pub const RECORD_MANUAL_MANIFEST_OPERATION: &str = "shipping.manifest.manual.record.v1";
 pub const CONFIRM_SHIPMENT_DEPARTURE_OPERATION: &str = "shipping.shipment.departure.confirm.v1";
+pub const GENERATE_PACKING_SLIP_OPERATION: &str = "shipping.document.packing_slip.generate.v1";
+
+/// Generates one immutable packing slip at the observed shipment revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeneratePackingSlipCommand {
+    pub shipment_id: ShipmentId,
+    pub expected_revision: ShipmentRevision,
+}
+
+/// Lists immutable documents belonging to one visible shipment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShipmentDocumentListQuery {
+    pub shipment_id: ShipmentId,
+}
+
+/// Reads one immutable document and its retained content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShipmentDocumentContentQuery {
+    pub document_id: ShipmentDocumentId,
+}
+
+/// One snapshotted order line represented by a shipment document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShipmentDocumentLineReadModel {
+    pub sequence: i64,
+    pub order_line_id: OrderLineId,
+    pub line_key: String,
+    pub item_id: wareboxes_domain::CatalogItemId,
+    pub item_description: String,
+    pub uom: String,
+    pub ordered_quantity: i64,
+    pub accepted_short_quantity: i64,
+    pub packed_quantity: i64,
+}
+
+/// Immutable metadata for one retained shipment document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShipmentDocumentReadModel {
+    pub document_id: ShipmentDocumentId,
+    pub shipment_id: ShipmentId,
+    pub order_id: OrderId,
+    pub document_type: ShipmentDocumentType,
+    pub file_name: String,
+    pub media_type: String,
+    pub content_length: i64,
+    pub content_sha256: String,
+    pub shipment_revision_at_generation: ShipmentRevision,
+    pub carton_count: i64,
+    pub line_count: i64,
+    pub demand: ShortShipDemandQuantities,
+    pub generated_by: UserId,
+    pub generated_at: Timestamp,
+}
+
+/// Authenticated download payload for one immutable shipment document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShipmentDocumentContentReadModel {
+    pub document: ShipmentDocumentReadModel,
+    pub content: String,
+}
+
+/// Replay-stable packing-slip generation result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeneratePackingSlipResult {
+    pub document: ShipmentDocumentReadModel,
+}
 
 /// Creates one shipment from a complete ready packing session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -2,6 +2,7 @@
 
 mod creation;
 mod departure;
+mod documents;
 mod manifest;
 mod queue;
 mod read_model;
@@ -9,6 +10,7 @@ mod read_model;
 pub use creation::create_shipment;
 pub use departure::confirm_departure;
 pub(crate) use departure::{depart_for_outbound_load_tx, OutboundLoadShipmentTarget};
+pub use documents::{generate_packing_slip, get_document_content, list_documents};
 pub use manifest::record_manual_manifest;
 pub use queue::{
     shipping_queue, ShippingQueueCursor, ShippingQueueEntry, ShippingQueuePage,

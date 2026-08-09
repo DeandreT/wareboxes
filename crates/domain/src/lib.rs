@@ -91,8 +91,8 @@ pub use replenishment::{
 pub use shipping::{
     confirm_shipment_departure, create_shipment, record_manual_manifest, CarrierCode,
     CarrierServiceCode, CartonTrackingAssignment, ManifestReference, ShipmentCartonIdentity,
-    ShipmentDepartureTransition, ShipmentRevision, ShipmentScanValue, ShipmentStatus,
-    ShippingError, ShippingTextField, TrackingNumber, MAX_CARRIER_CODE_LENGTH,
+    ShipmentDepartureTransition, ShipmentDocumentType, ShipmentRevision, ShipmentScanValue,
+    ShipmentStatus, ShippingError, ShippingTextField, TrackingNumber, MAX_CARRIER_CODE_LENGTH,
     MAX_CARRIER_SERVICE_CODE_LENGTH, MAX_MANIFEST_REFERENCE_LENGTH, MAX_SHIPMENT_SCAN_VALUE_LENGTH,
     MAX_TRACKING_NUMBER_LENGTH,
 };
@@ -190,6 +190,7 @@ positive_id!(PackSessionId, "pack session ID");
 positive_id!(CartonId, "carton ID");
 positive_id!(CartonContentId, "carton content ID");
 positive_id!(ShipmentId, "shipment ID");
+positive_id!(ShipmentDocumentId, "shipment document ID");
 positive_id!(OutboundLoadId, "outbound load ID");
 positive_id!(OutboundLoadShipmentId, "outbound load shipment ID");
 positive_id!(OutboundLoadCartonId, "outbound load carton ID");

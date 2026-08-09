@@ -1,21 +1,26 @@
+use axum::body::Body;
 use axum::extract::{Path, State};
+use axum::http::{header, HeaderValue, Response};
 use axum::Json;
 use wareboxes_api_contract::v1::{
     ConfirmShipmentDepartureRequest, ConfirmShipmentDepartureResponse, CreateShipmentRequest,
-    CreateShipmentResponse, ManualCarrierManifestResponse, RecordManualManifestRequest,
-    RecordManualManifestResponse, Revision, ShipmentCartonResponse, ShipmentCartonTrackingResponse,
-    ShipmentDemandResponse, ShipmentDepartureProgressResponse, ShipmentOrderStatus,
-    ShipmentResponse, ShipmentStatus as ApiShipmentStatus,
+    CreateShipmentResponse, GeneratePackingSlipRequest, GeneratePackingSlipResponse,
+    ManualCarrierManifestResponse, RecordManualManifestRequest, RecordManualManifestResponse,
+    Revision, ShipmentCartonResponse, ShipmentCartonTrackingResponse, ShipmentDemandResponse,
+    ShipmentDepartureProgressResponse, ShipmentDocumentListResponse, ShipmentDocumentResponse,
+    ShipmentDocumentType as ApiShipmentDocumentType, ShipmentOrderStatus, ShipmentResponse,
+    ShipmentStatus as ApiShipmentStatus,
 };
 use wareboxes_application::shipping::{
     ConfirmShipmentDepartureCommand, ConfirmShipmentDepartureResult, CreateShipmentCommand,
-    CreateShipmentResult, ManualCarrierManifestReadModel, RecordManualManifestCommand,
-    RecordManualManifestResult, ShipmentQuery, ShipmentReadModel,
+    CreateShipmentResult, GeneratePackingSlipCommand, ManualCarrierManifestReadModel,
+    RecordManualManifestCommand, RecordManualManifestResult, ShipmentDocumentContentQuery,
+    ShipmentDocumentListQuery, ShipmentDocumentReadModel, ShipmentQuery, ShipmentReadModel,
 };
 use wareboxes_domain::{
     CarrierCode, CarrierServiceCode, CartonId, CartonTrackingAssignment, ManifestReference,
-    OrderId, OrderRevision, OrderStatus, PackSessionId, ShipmentId, ShipmentRevision,
-    ShipmentScanValue, ShipmentStatus, TrackingNumber,
+    OrderId, OrderRevision, OrderStatus, PackSessionId, ShipmentDocumentId, ShipmentDocumentType,
+    ShipmentId, ShipmentRevision, ShipmentScanValue, ShipmentStatus, TrackingNumber,
 };
 
 use super::error::{V1Error, V1Result};
@@ -128,6 +133,82 @@ pub async fn confirm_departure(
     Ok(Json(map_departure(result)?))
 }
 
+pub async fn generate_packing_slip(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(shipment_id): Path<i64>,
+    Json(body): Json<GeneratePackingSlipRequest>,
+) -> V1Result<Json<GeneratePackingSlipResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let command = GeneratePackingSlipCommand {
+        shipment_id: positive(shipment_id, ShipmentId::new, "shipment ID")?,
+        expected_revision: shipment_revision(body.expected_shipment_revision)?,
+    };
+    let context = user.command_context(&idempotency_key);
+    let result =
+        repo::shipping::generate_packing_slip(&state.db, &user.tenant, &context, &command).await?;
+    Ok(Json(GeneratePackingSlipResponse {
+        document: map_document(result.document)?,
+    }))
+}
+
+pub async fn list_documents(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(shipment_id): Path<i64>,
+) -> V1Result<Json<ShipmentDocumentListResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let documents = repo::shipping::list_documents(
+        &state.db,
+        &user.tenant,
+        ShipmentDocumentListQuery {
+            shipment_id: positive(shipment_id, ShipmentId::new, "shipment ID")?,
+        },
+    )
+    .await?;
+    Ok(Json(ShipmentDocumentListResponse {
+        documents: documents
+            .into_iter()
+            .map(map_document)
+            .collect::<V1Result<Vec<_>>>()?,
+    }))
+}
+
+pub async fn download_document(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(document_id): Path<i64>,
+) -> V1Result<Response<Body>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let result = repo::shipping::get_document_content(
+        &state.db,
+        &user.tenant,
+        ShipmentDocumentContentQuery {
+            document_id: positive(document_id, ShipmentDocumentId::new, "shipment document ID")?,
+        },
+    )
+    .await?;
+    let disposition = format!("attachment; filename=\"{}\"", result.document.file_name);
+    let mut response = Response::new(Body::from(result.content));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&result.document.media_type)
+            .map_err(|_| V1Error::internal("shipment document media type is invalid"))?,
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&disposition)
+            .map_err(|_| V1Error::internal("shipment document file name is invalid"))?,
+    );
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&result.document.content_length.to_string())
+            .map_err(|_| V1Error::internal("shipment document length is invalid"))?,
+    );
+    Ok(response)
+}
+
 fn map_create(result: CreateShipmentResult) -> V1Result<CreateShipmentResponse> {
     Ok(CreateShipmentResponse {
         shipment: map_shipment(result.shipment)?,
@@ -237,6 +318,27 @@ fn map_departure(
         demand: map_demand(result.demand),
         departed_by: result.departed_by.get(),
         departed_at: result.departed_at.to_rfc3339(),
+    })
+}
+
+fn map_document(document: ShipmentDocumentReadModel) -> V1Result<ShipmentDocumentResponse> {
+    Ok(ShipmentDocumentResponse {
+        document_id: document.document_id.get(),
+        shipment_id: document.shipment_id.get(),
+        order_id: document.order_id.get(),
+        document_type: match document.document_type {
+            ShipmentDocumentType::PackingSlip => ApiShipmentDocumentType::PackingSlip,
+        },
+        file_name: document.file_name,
+        media_type: document.media_type,
+        content_length: document.content_length,
+        content_sha256: document.content_sha256,
+        shipment_revision_at_generation: revision(document.shipment_revision_at_generation.get())?,
+        carton_count: document.carton_count,
+        line_count: document.line_count,
+        demand: map_demand(document.demand),
+        generated_by: document.generated_by.get(),
+        generated_at: document.generated_at.to_rfc3339(),
     })
 }
 

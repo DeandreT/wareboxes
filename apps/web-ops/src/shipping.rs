@@ -1,4 +1,5 @@
 mod display;
+mod documents;
 mod request_state;
 
 use leptos::{html, prelude::*};
@@ -19,6 +20,7 @@ use display::{
     compact_timestamp, departure_action_label, dimensions_label, optional_text,
     shipment_status_label,
 };
+use documents::ShipmentDocumentsPanel;
 use request_state::{
     queue_refresh_action, queue_response_is_current, shipment_request_is_current,
     QueueRefreshAction, ShipmentRequestToken, ShipmentVersion,
@@ -537,6 +539,8 @@ fn ShipmentExecution(
         .iter()
         .map(|carton| carton.packed_quantity)
         .sum::<i64>();
+    let shipment_id = shipment.shipment_id;
+    let shipment_revision = shipment.revision;
     view! {
         <div class="shipping-execution">
             <section class="shipping-cartons">
@@ -571,6 +575,11 @@ fn ShipmentExecution(
                         </tbody>
                     </table>
                 </div>
+                <ShipmentDocumentsPanel
+                    shipment_id
+                    shipment_revision
+                    on_unauthorized=signals.on_unauthorized
+                />
             </section>
             <aside class="shipping-command-panel">
                 {match shipment.status {

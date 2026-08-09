@@ -13,6 +13,34 @@ pub const MAX_MANIFEST_REFERENCE_LENGTH: usize = 200;
 pub const MAX_TRACKING_NUMBER_LENGTH: usize = 200;
 pub const MAX_SHIPMENT_SCAN_VALUE_LENGTH: usize = 200;
 
+/// Immutable document kinds generated from shipment execution snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShipmentDocumentType {
+    PackingSlip,
+}
+
+impl ShipmentDocumentType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PackingSlip => "packing_slip",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "packing_slip" => Some(Self::PackingSlip),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for ShipmentDocumentType {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Lifecycle of one parcel shipment, including incremental carton departure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -442,6 +470,11 @@ mod tests {
         let revision = ShipmentRevision::new(2).unwrap();
         assert_eq!(revision.checked_next().map(ShipmentRevision::get), Some(3));
         assert!(serde_json::from_str::<ShipmentRevision>("0").is_err());
+        assert_eq!(
+            ShipmentDocumentType::parse("packing_slip"),
+            Some(ShipmentDocumentType::PackingSlip)
+        );
+        assert_eq!(ShipmentDocumentType::parse("label"), None);
     }
 
     #[test]

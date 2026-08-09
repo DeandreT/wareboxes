@@ -26337,6 +26337,317 @@ REVOKE ALL ON FUNCTION public.validate_outbound_load_cancellation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_outbound_load_cancellation_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_assigned_shipment_direct_departure() FROM PUBLIC;
 
+-- Immutable shipment documents generated from shipment execution snapshots.
+CREATE TABLE public.shipment_documents (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    shipment_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    document_type text NOT NULL,
+    file_name text NOT NULL,
+    media_type text NOT NULL,
+    renderer_version bigint NOT NULL,
+    shipment_revision_at_generation bigint NOT NULL,
+    carton_count bigint NOT NULL,
+    line_count bigint NOT NULL,
+    ordered_qty bigint NOT NULL,
+    accepted_short_qty bigint NOT NULL,
+    packed_qty bigint NOT NULL,
+    content text NOT NULL,
+    content_length bigint NOT NULL,
+    content_sha256 bytea NOT NULL,
+    generated_by_user_id bigint NOT NULL,
+    generated_at timestamp with time zone NOT NULL,
+    CONSTRAINT shipment_documents_type_check CHECK (document_type = 'packing_slip'),
+    CONSTRAINT shipment_documents_file_name_check CHECK (
+        file_name = btrim(file_name) AND file_name <> '' AND char_length(file_name) <= 240),
+    CONSTRAINT shipment_documents_media_type_check CHECK (media_type = 'text/html; charset=utf-8'),
+    CONSTRAINT shipment_documents_renderer_check CHECK (renderer_version = 1),
+    CONSTRAINT shipment_documents_revision_check CHECK (shipment_revision_at_generation > 0),
+    CONSTRAINT shipment_documents_counts_check CHECK (carton_count > 0 AND line_count > 0),
+    CONSTRAINT shipment_documents_quantity_check CHECK (
+        ordered_qty > 0 AND accepted_short_qty >= 0 AND packed_qty > 0
+        AND ordered_qty = packed_qty + accepted_short_qty),
+    CONSTRAINT shipment_documents_content_check CHECK (
+        content_length = octet_length(content) AND content_length > 0 AND content_length <= 1048576
+        AND octet_length(content_sha256) = 32)
+);
+ALTER TABLE public.shipment_documents FORCE ROW LEVEL SECURITY;
+
+CREATE TABLE public.shipment_document_lines (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    shipment_document_id bigint NOT NULL,
+    shipment_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    sequence bigint NOT NULL,
+    line_key text NOT NULL,
+    item_id bigint NOT NULL,
+    item_description text NOT NULL,
+    uom text NOT NULL,
+    ordered_qty bigint NOT NULL,
+    accepted_short_qty bigint NOT NULL,
+    packed_qty bigint NOT NULL,
+    CONSTRAINT shipment_document_lines_sequence_check CHECK (sequence > 0),
+    CONSTRAINT shipment_document_lines_line_key_check CHECK (
+        line_key = btrim(line_key) AND line_key <> '' AND char_length(line_key) <= 200),
+    CONSTRAINT shipment_document_lines_description_check CHECK (
+        item_description = btrim(item_description) AND item_description <> ''),
+    CONSTRAINT shipment_document_lines_uom_check CHECK (
+        uom = btrim(uom) AND uom <> '' AND char_length(uom) <= 32),
+    CONSTRAINT shipment_document_lines_quantity_check CHECK (
+        ordered_qty > 0 AND accepted_short_qty >= 0 AND packed_qty > 0
+        AND ordered_qty = packed_qty + accepted_short_qty)
+);
+ALTER TABLE public.shipment_document_lines FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE public.shipment_documents
+    ADD CONSTRAINT shipment_documents_scope_id_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_id, id);
+ALTER TABLE public.shipment_documents
+    ADD CONSTRAINT shipment_documents_type_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_id, document_type);
+ALTER TABLE public.shipment_document_lines
+    ADD CONSTRAINT shipment_document_lines_scope_id_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_document_id, id);
+ALTER TABLE public.shipment_document_lines
+    ADD CONSTRAINT shipment_document_lines_item_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_document_id, order_item_id);
+ALTER TABLE public.shipment_document_lines
+    ADD CONSTRAINT shipment_document_lines_sequence_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_document_id, sequence);
+
+ALTER TABLE public.shipment_documents
+    ADD CONSTRAINT shipment_documents_shipment_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, shipment_id)
+    REFERENCES public.shipments (tenant_id, inventory_owner_id, facility_id, id);
+ALTER TABLE public.shipment_documents
+    ADD CONSTRAINT shipment_documents_order_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_id)
+    REFERENCES public.orders (tenant_id, inventory_owner_id, id);
+ALTER TABLE public.shipment_documents
+    ADD CONSTRAINT shipment_documents_actor_fkey
+    FOREIGN KEY (tenant_id, generated_by_user_id)
+    REFERENCES public.tenant_memberships (tenant_id, user_id);
+ALTER TABLE public.shipment_document_lines
+    ADD CONSTRAINT shipment_document_lines_document_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, shipment_id, shipment_document_id)
+    REFERENCES public.shipment_documents
+        (tenant_id, inventory_owner_id, facility_id, shipment_id, id);
+ALTER TABLE public.shipment_document_lines
+    ADD CONSTRAINT shipment_document_lines_order_item_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, order_id, order_item_id)
+    REFERENCES public.order_items (tenant_id, inventory_owner_id, order_id, id);
+ALTER TABLE public.shipment_document_lines
+    ADD CONSTRAINT shipment_document_lines_item_fkey
+    FOREIGN KEY (tenant_id, item_id) REFERENCES public.items (tenant_id, id);
+
+CREATE INDEX shipment_documents_shipment_idx
+ON public.shipment_documents (tenant_id, shipment_id, generated_at, id);
+CREATE INDEX shipment_document_lines_document_idx
+ON public.shipment_document_lines (tenant_id, shipment_document_id, sequence, id);
+
+CREATE FUNCTION public.reject_shipment_document_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    RAISE EXCEPTION 'shipment document evidence is immutable' USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE FUNCTION public.validate_shipment_document() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    shipment_row public.shipments%ROWTYPE;
+    demand_row record;
+    actual_carton_count bigint;
+BEGIN
+    SELECT * INTO shipment_row
+    FROM public.shipments
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND facility_id = NEW.facility_id
+      AND id = NEW.shipment_id
+    FOR SHARE;
+    IF NOT FOUND OR shipment_row.order_id <> NEW.order_id THEN
+        RAISE EXCEPTION 'shipment document scope does not match shipment' USING ERRCODE = '23514';
+    END IF;
+    IF shipment_row.revision <> NEW.shipment_revision_at_generation THEN
+        RAISE EXCEPTION 'shipment revision changed before document generation' USING ERRCODE = '55000';
+    END IF;
+    SELECT COUNT(*)::bigint INTO actual_carton_count
+    FROM public.shipment_cartons carton
+    WHERE carton.tenant_id = NEW.tenant_id AND carton.inventory_owner_id = NEW.inventory_owner_id
+      AND carton.facility_id = NEW.facility_id AND carton.shipment_id = NEW.shipment_id;
+    IF actual_carton_count <> NEW.carton_count OR actual_carton_count <> shipment_row.carton_count THEN
+        RAISE EXCEPTION 'shipment document carton count does not match shipment' USING ERRCODE = '23514';
+    END IF;
+    SELECT COALESCE(SUM(original_qty), 0)::bigint AS ordered_qty,
+           COALESCE(SUM(accepted_short_qty), 0)::bigint AS accepted_short_qty,
+           COALESCE(SUM(effective_qty), 0)::bigint AS packed_qty,
+           COUNT(*)::bigint AS line_count
+    INTO demand_row
+    FROM public.outbound_effective_demand demand
+    WHERE demand.tenant_id = NEW.tenant_id
+      AND demand.inventory_owner_id = NEW.inventory_owner_id
+      AND demand.order_id = NEW.order_id;
+    IF demand_row.ordered_qty <> NEW.ordered_qty
+       OR demand_row.accepted_short_qty <> NEW.accepted_short_qty
+       OR demand_row.packed_qty <> NEW.packed_qty
+       OR demand_row.line_count <> NEW.line_count
+       OR shipment_row.shipped_qty <> NEW.packed_qty
+    THEN
+        RAISE EXCEPTION 'shipment document demand does not match shipment' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_shipment_document_line() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    document_row public.shipment_documents%ROWTYPE;
+    source_row record;
+BEGIN
+    SELECT * INTO document_row
+    FROM public.shipment_documents
+    WHERE tenant_id = NEW.tenant_id AND inventory_owner_id = NEW.inventory_owner_id
+      AND facility_id = NEW.facility_id AND shipment_id = NEW.shipment_id
+      AND id = NEW.shipment_document_id;
+    IF NOT FOUND OR document_row.order_id <> NEW.order_id THEN
+        RAISE EXCEPTION 'shipment document line scope does not match document' USING ERRCODE = '23514';
+    END IF;
+    SELECT demand.original_qty, demand.accepted_short_qty, demand.effective_qty,
+           item.line_key, item.line_number, item.item_id, item.uom,
+           COALESCE(NULLIF(btrim(catalog.description), ''), 'Item ' || item.item_id::text)
+               AS item_description,
+           COALESCE(SUM(content.packed_qty), 0)::bigint AS packed_qty
+    INTO source_row
+    FROM public.outbound_effective_demand demand
+    INNER JOIN public.order_items item
+      ON item.tenant_id = demand.tenant_id
+     AND item.inventory_owner_id = demand.inventory_owner_id
+     AND item.order_id = demand.order_id AND item.id = demand.order_item_id
+    INNER JOIN public.items catalog
+      ON catalog.tenant_id = item.tenant_id AND catalog.id = item.item_id
+    LEFT JOIN public.carton_contents content
+      ON content.tenant_id = demand.tenant_id
+     AND content.inventory_owner_id = demand.inventory_owner_id
+     AND content.order_id = demand.order_id AND content.order_item_id = demand.order_item_id
+    WHERE demand.tenant_id = NEW.tenant_id
+      AND demand.inventory_owner_id = NEW.inventory_owner_id
+      AND demand.order_id = NEW.order_id AND demand.order_item_id = NEW.order_item_id
+    GROUP BY demand.original_qty, demand.accepted_short_qty, demand.effective_qty,
+             item.line_key, item.line_number, item.item_id, item.uom, catalog.description;
+    IF NOT FOUND
+       OR NEW.sequence <> source_row.line_number
+       OR NEW.line_key <> source_row.line_key
+       OR NEW.item_id <> source_row.item_id
+       OR NEW.item_description <> source_row.item_description
+       OR NEW.uom <> source_row.uom
+       OR NEW.ordered_qty <> source_row.original_qty
+       OR NEW.accepted_short_qty <> source_row.accepted_short_qty
+       OR NEW.packed_qty <> source_row.effective_qty
+       OR NEW.packed_qty <> source_row.packed_qty
+    THEN
+        RAISE EXCEPTION 'shipment document line does not match packed order demand' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.require_shipment_document_consistency() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    document_id_value bigint;
+    document_row public.shipment_documents%ROWTYPE;
+    line_count_value bigint;
+    ordered_qty_value bigint;
+    accepted_short_qty_value bigint;
+    packed_qty_value bigint;
+BEGIN
+    IF TG_TABLE_NAME = 'shipment_documents' THEN
+        document_id_value := NEW.id;
+    ELSE
+        document_id_value := NEW.shipment_document_id;
+    END IF;
+    SELECT * INTO document_row FROM public.shipment_documents
+    WHERE tenant_id = NEW.tenant_id AND id = document_id_value;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'shipment document is missing' USING ERRCODE = '23514';
+    END IF;
+    SELECT COUNT(*)::bigint, COALESCE(SUM(ordered_qty), 0)::bigint,
+           COALESCE(SUM(accepted_short_qty), 0)::bigint,
+           COALESCE(SUM(packed_qty), 0)::bigint
+    INTO line_count_value, ordered_qty_value, accepted_short_qty_value, packed_qty_value
+    FROM public.shipment_document_lines
+    WHERE tenant_id = document_row.tenant_id AND shipment_document_id = document_row.id;
+    IF line_count_value <> document_row.line_count
+       OR ordered_qty_value <> document_row.ordered_qty
+       OR accepted_short_qty_value <> document_row.accepted_short_qty
+       OR packed_qty_value <> document_row.packed_qty
+       OR EXISTS (
+           SELECT 1 FROM public.outbound_effective_demand demand
+           WHERE demand.tenant_id = document_row.tenant_id
+             AND demand.inventory_owner_id = document_row.inventory_owner_id
+             AND demand.order_id = document_row.order_id
+             AND NOT EXISTS (
+                 SELECT 1 FROM public.shipment_document_lines line
+                 WHERE line.tenant_id = document_row.tenant_id
+                   AND line.shipment_document_id = document_row.id
+                   AND line.order_item_id = demand.order_item_id))
+    THEN
+        RAISE EXCEPTION 'shipment document lines do not reconcile with header' USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER shipment_documents_validate BEFORE INSERT ON public.shipment_documents
+FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_document();
+CREATE TRIGGER shipment_documents_are_immutable BEFORE DELETE OR UPDATE ON public.shipment_documents
+FOR EACH ROW EXECUTE FUNCTION public.reject_shipment_document_mutation();
+CREATE CONSTRAINT TRIGGER shipment_documents_require_consistency
+AFTER INSERT ON public.shipment_documents DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_shipment_document_consistency();
+CREATE TRIGGER shipment_document_lines_validate BEFORE INSERT ON public.shipment_document_lines
+FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_document_line();
+CREATE TRIGGER shipment_document_lines_are_immutable BEFORE DELETE OR UPDATE ON public.shipment_document_lines
+FOR EACH ROW EXECUTE FUNCTION public.reject_shipment_document_mutation();
+CREATE CONSTRAINT TRIGGER shipment_document_lines_require_consistency
+AFTER INSERT ON public.shipment_document_lines DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_shipment_document_consistency();
+
+ALTER TABLE public.shipment_documents ENABLE ROW LEVEL SECURITY;
+CREATE POLICY shipment_documents_tenant_isolation ON public.shipment_documents
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+ALTER TABLE public.shipment_document_lines ENABLE ROW LEVEL SECURITY;
+CREATE POLICY shipment_document_lines_tenant_isolation ON public.shipment_document_lines
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT, INSERT ON public.shipment_documents TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.shipment_documents_id_seq TO wareboxes_app;
+GRANT SELECT, INSERT ON public.shipment_document_lines TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.shipment_document_lines_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.reject_shipment_document_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_shipment_document() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_shipment_document_line() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_shipment_document_consistency() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

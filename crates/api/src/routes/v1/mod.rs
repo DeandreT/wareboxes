@@ -136,6 +136,18 @@ pub fn router() -> Router<AppState> {
         .route("/orders/{order_id}/shipments", post(shipping::create))
         .route("/shipments/{shipment_id}", get(shipping::get))
         .route(
+            "/shipments/{shipment_id}/documents",
+            get(shipping::list_documents),
+        )
+        .route(
+            "/shipments/{shipment_id}/documents/packing-slips",
+            post(shipping::generate_packing_slip),
+        )
+        .route(
+            "/shipment-documents/{document_id}/content",
+            get(shipping::download_document),
+        )
+        .route(
             "/shipments/{shipment_id}/manifests",
             post(shipping::record_manifest),
         )

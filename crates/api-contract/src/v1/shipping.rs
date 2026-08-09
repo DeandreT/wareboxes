@@ -57,6 +57,54 @@ pub struct ConfirmShipmentDepartureRequest {
     pub expected_order_revision: Revision,
 }
 
+/// Generates the immutable packing slip for one shipment revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratePackingSlipRequest {
+    pub expected_shipment_revision: Revision,
+}
+
+/// Shipment document kinds exposed by the public API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShipmentDocumentType {
+    PackingSlip,
+}
+
+/// Immutable metadata for one retained shipment document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShipmentDocumentResponse {
+    pub document_id: i64,
+    pub shipment_id: i64,
+    pub order_id: i64,
+    pub document_type: ShipmentDocumentType,
+    pub file_name: String,
+    pub media_type: String,
+    pub content_length: i64,
+    pub content_sha256: String,
+    pub shipment_revision_at_generation: Revision,
+    pub carton_count: i64,
+    pub line_count: i64,
+    pub demand: ShipmentDemandResponse,
+    pub generated_by: i64,
+    pub generated_at: String,
+}
+
+/// Replay-stable packing-slip generation result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratePackingSlipResponse {
+    pub document: ShipmentDocumentResponse,
+}
+
+/// All retained shipment documents, ordered by generation time and identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShipmentDocumentListResponse {
+    pub documents: Vec<ShipmentDocumentResponse>,
+}
+
 /// One carrier tracking assignment persisted for a shipment carton.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -221,6 +269,20 @@ mod tests {
                 "force": true
             }))
             .is_err()
+        );
+        assert!(serde_json::from_value::<GeneratePackingSlipRequest>(json!({
+            "expected_shipment_revision": 2,
+            "shipment_id": 7
+        }))
+        .is_err());
+        assert_eq!(
+            serde_json::from_value::<GeneratePackingSlipRequest>(json!({
+                "expected_shipment_revision": 2
+            }))
+            .unwrap()
+            .expected_shipment_revision
+            .get(),
+            2
         );
     }
 
