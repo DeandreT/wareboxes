@@ -19,9 +19,9 @@ use wareboxes_api::request_context::{IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER};
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     CloseCartonResponse, ConfirmShipmentDepartureResponse, CreateCartonResponse,
-    CreateShipmentResponse, ErrorReason, ErrorResponse, OpenPackSessionResponse,
-    PackPickedAllocationResponse, PickClaimResponse, PickContentConfirmationResponse,
-    RecordManualManifestResponse, ShipmentResponse,
+    CreateShipmentResponse, ErrorReason, ErrorResponse, GenerateCartonLabelSetResponse,
+    OpenPackSessionResponse, PackPickedAllocationResponse, PickClaimResponse,
+    PickContentConfirmationResponse, RecordManualManifestResponse, ShipmentResponse,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 

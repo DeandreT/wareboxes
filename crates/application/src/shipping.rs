@@ -13,10 +13,19 @@ pub const CREATE_SHIPMENT_OPERATION: &str = "shipping.shipment.create.v1";
 pub const RECORD_MANUAL_MANIFEST_OPERATION: &str = "shipping.manifest.manual.record.v1";
 pub const CONFIRM_SHIPMENT_DEPARTURE_OPERATION: &str = "shipping.shipment.departure.confirm.v1";
 pub const GENERATE_PACKING_SLIP_OPERATION: &str = "shipping.document.packing_slip.generate.v1";
+pub const GENERATE_CARTON_LABEL_SET_OPERATION: &str =
+    "shipping.document.carton_label_set.generate.v1";
 
 /// Generates one immutable packing slip at the observed shipment revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneratePackingSlipCommand {
+    pub shipment_id: ShipmentId,
+    pub expected_revision: ShipmentRevision,
+}
+
+/// Generates one immutable printable label set from a manifested shipment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerateCartonLabelSetCommand {
     pub shipment_id: ShipmentId,
     pub expected_revision: ShipmentRevision,
 }
@@ -54,6 +63,10 @@ pub struct ShipmentDocumentReadModel {
     pub shipment_id: ShipmentId,
     pub order_id: OrderId,
     pub document_type: ShipmentDocumentType,
+    pub manifest_id: Option<CarrierManifestId>,
+    pub carrier_code: Option<CarrierCode>,
+    pub service_code: Option<CarrierServiceCode>,
+    pub manifest_reference: Option<ManifestReference>,
     pub file_name: String,
     pub media_type: String,
     pub content_length: i64,
@@ -76,6 +89,12 @@ pub struct ShipmentDocumentContentReadModel {
 /// Replay-stable packing-slip generation result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneratePackingSlipResult {
+    pub document: ShipmentDocumentReadModel,
+}
+
+/// Replay-stable carton-label-set generation result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerateCartonLabelSetResult {
     pub document: ShipmentDocumentReadModel,
 }
 

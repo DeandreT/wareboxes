@@ -307,6 +307,15 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "shipment_confirmation_cartons",
             "shipment_confirmation_cartons_tenant_isolation",
         ),
+        ("shipment_documents", "shipment_documents_tenant_isolation"),
+        (
+            "shipment_document_lines",
+            "shipment_document_lines_tenant_isolation",
+        ),
+        (
+            "shipment_document_cartons",
+            "shipment_document_cartons_tenant_isolation",
+        ),
         ("outbound_loads", "outbound_loads_tenant_isolation"),
         (
             "outbound_load_shipments",

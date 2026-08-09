@@ -2,16 +2,18 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_application::shipping::{
-    GeneratePackingSlipCommand, GeneratePackingSlipResult, ShipmentDocumentContentQuery,
-    ShipmentDocumentContentReadModel, ShipmentDocumentListQuery, ShipmentDocumentReadModel,
+    GenerateCartonLabelSetCommand, GenerateCartonLabelSetResult, GeneratePackingSlipCommand,
+    GeneratePackingSlipResult, ShipmentDocumentContentQuery, ShipmentDocumentContentReadModel,
+    ShipmentDocumentListQuery, ShipmentDocumentReadModel, GENERATE_CARTON_LABEL_SET_OPERATION,
     GENERATE_PACKING_SLIP_OPERATION,
 };
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    ActualPickQuantity, CatalogItemId, OrderId, OrderLineId, PickQuantity, ShipmentDocumentId,
-    ShipmentDocumentType, ShipmentId, ShipmentRevision, ShortShipDemandQuantities, TenantId,
-    Timestamp, UserId,
+    ActualPickQuantity, CarrierCode, CarrierManifestId, CarrierServiceCode, CatalogItemId,
+    ManifestReference, OrderId, OrderLineId, PickQuantity, ShipmentDocumentId,
+    ShipmentDocumentType, ShipmentId, ShipmentRevision, ShipmentStatus, ShortShipDemandQuantities,
+    TenantId, Timestamp, TrackingNumber, UserId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
@@ -24,7 +26,8 @@ use super::{
     enqueue_order_event_tx, lock_order_tx, lock_shipment_tx, order_hint_for_shipment_tx, positive,
 };
 
-const DOCUMENT_TYPE: ShipmentDocumentType = ShipmentDocumentType::PackingSlip;
+const PACKING_SLIP_TYPE: ShipmentDocumentType = ShipmentDocumentType::PackingSlip;
+const CARTON_LABEL_SET_TYPE: ShipmentDocumentType = ShipmentDocumentType::CartonLabelSet;
 const MEDIA_TYPE: &str = "text/html; charset=utf-8";
 const RENDERER_VERSION: i64 = 1;
 
@@ -58,10 +61,35 @@ struct DocumentLine {
 
 #[derive(Debug)]
 struct DocumentCarton {
+    shipment_carton_id: i64,
+    carton_id: i64,
+    license_plate_id: i64,
     sequence: i64,
     barcode: String,
     packed_quantity: i64,
     weight_grams: Option<i64>,
+    length_mm: Option<i64>,
+    width_mm: Option<i64>,
+    height_mm: Option<i64>,
+    tracking_assignment_id: Option<i64>,
+    tracking_number: Option<TrackingNumber>,
+}
+
+#[derive(Debug)]
+struct DocumentManifest {
+    manifest_id: CarrierManifestId,
+    carrier_code: CarrierCode,
+    service_code: Option<CarrierServiceCode>,
+    manifest_reference: ManifestReference,
+}
+
+struct NewDocument<'a> {
+    document_type: ShipmentDocumentType,
+    manifest: Option<&'a DocumentManifest>,
+    file_name: &'a str,
+    content: &'a str,
+    lines: &'a [DocumentLine],
+    cartons: &'a [DocumentCarton],
 }
 
 pub async fn generate_packing_slip(
@@ -108,7 +136,7 @@ pub async fn generate_packing_slip(
             "shipment-document:{}:{}:{}",
             access.tenant_id,
             command.shipment_id,
-            DOCUMENT_TYPE.as_str()
+            PACKING_SLIP_TYPE.as_str()
         ))
         .execute(&mut *tx)
         .await?;
@@ -117,7 +145,7 @@ pub async fn generate_packing_slip(
     )
     .bind(access.tenant_id.get())
     .bind(command.shipment_id.get())
-    .bind(DOCUMENT_TYPE.as_str())
+    .bind(PACKING_SLIP_TYPE.as_str())
     .fetch_one(&mut *tx)
     .await?;
     if existing {
@@ -135,7 +163,8 @@ pub async fn generate_packing_slip(
         shipment.packing_session_id.get(),
     )
     .await?;
-    let cartons = load_document_cartons_tx(&mut tx, access.tenant_id, command.shipment_id).await?;
+    let cartons =
+        load_document_cartons_tx(&mut tx, access.tenant_id, command.shipment_id, None).await?;
     if addresses.len() != 2 || lines.is_empty() || cartons.is_empty() {
         return Err(AppError::internal(
             "shipment snapshots are incomplete for packing-slip generation",
@@ -149,60 +178,22 @@ pub async fn generate_packing_slip(
         &cartons,
         shipment.demand,
     );
-    let content_length = i64::try_from(content.len())
-        .map_err(|_| AppError::internal("packing slip content is too large"))?;
-    let content_sha256 = Sha256::digest(content.as_bytes()).to_vec();
-    let content_sha256_hex = hex::encode(&content_sha256);
     let file_name = format!("packing-slip-shipment-{}.html", shipment.id.get());
     let generated_at = now_iso();
-    let line_count = i64::try_from(lines.len())
-        .map_err(|_| AppError::internal("packing slip has too many lines"))?;
-    let document_id_raw: i64 = sqlx::query_scalar(
-        r#"
-        INSERT INTO shipment_documents (
-            tenant_id, inventory_owner_id, facility_id, shipment_id, order_id,
-            document_type, file_name, media_type, renderer_version,
-            shipment_revision_at_generation, carton_count, line_count,
-            ordered_qty, accepted_short_qty, packed_qty, content, content_length,
-            content_sha256, generated_by_user_id, generated_at
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-            $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
-        ) RETURNING id
-        "#,
-    )
-    .bind(access.tenant_id.get())
-    .bind(shipment.inventory_owner_id.get())
-    .bind(shipment.facility_id.get())
-    .bind(shipment.id.get())
-    .bind(shipment.order_id.get())
-    .bind(DOCUMENT_TYPE.as_str())
-    .bind(&file_name)
-    .bind(MEDIA_TYPE)
-    .bind(RENDERER_VERSION)
-    .bind(shipment.revision.get())
-    .bind(shipment.carton_count)
-    .bind(line_count)
-    .bind(shipment.demand.ordered().get())
-    .bind(shipment.demand.accepted_short().get())
-    .bind(shipment.demand.effective().get())
-    .bind(&content)
-    .bind(content_length)
-    .bind(&content_sha256)
-    .bind(context.actor_id.get())
-    .bind(generated_at)
-    .fetch_one(&mut *tx)
-    .await?;
-    let document_id = positive(document_id_raw, ShipmentDocumentId::new)?;
-    insert_document_lines_tx(
+    let (document_id, content_sha256_hex, line_count) = insert_document_tx(
         &mut tx,
         access.tenant_id,
-        shipment.inventory_owner_id.get(),
-        shipment.facility_id.get(),
-        document_id,
-        shipment.id,
-        shipment.order_id,
-        &lines,
+        context.actor_id.get(),
+        &shipment,
+        NewDocument {
+            document_type: PACKING_SLIP_TYPE,
+            manifest: None,
+            file_name: &file_name,
+            content: &content,
+            lines: &lines,
+            cartons: &cartons,
+        },
+        generated_at,
     )
     .await?;
     insert_order_activity_tx(
@@ -228,7 +219,7 @@ pub async fn generate_packing_slip(
         &format!("shipment-document:{}:generated", document_id.get()),
         serde_json::json!({
             "document_id": document_id,
-            "document_type": DOCUMENT_TYPE,
+            "document_type": PACKING_SLIP_TYPE,
             "shipment_id": shipment.id,
             "order_id": shipment.order_id,
             "shipment_revision": shipment.revision,
@@ -248,6 +239,165 @@ pub async fn generate_packing_slip(
     let document = map_document_row(&document_row)?;
     Ok(prepared
         .commit(tx, GeneratePackingSlipResult { document })
+        .await?)
+}
+
+pub async fn generate_carton_label_set(
+    db: &Db,
+    access: &TenantAccess,
+    context: &CommandContext,
+    command: &GenerateCartonLabelSetCommand,
+) -> AppResult<GenerateCartonLabelSetResult> {
+    context.require_actor(access.tenant_id, access.user_id)?;
+    let prepared = PreparedCommand::new_v1(context, GENERATE_CARTON_LABEL_SET_OPERATION, command)?;
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    let scope = lock_current_scope_tx(&mut tx, access.tenant_id, context.actor_id.get()).await?;
+    require_permission_tx(&mut tx, access.tenant_id, context.actor_id.get(), "wms").await?;
+    if let Some(result) = prepared
+        .replayed::<GenerateCartonLabelSetResult>(&mut tx)
+        .await?
+    {
+        require_document_visible_tx(
+            &mut tx,
+            access.tenant_id,
+            result.document.document_id,
+            &scope,
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(result);
+    }
+
+    let order_id =
+        order_hint_for_shipment_tx(&mut tx, access.tenant_id, command.shipment_id).await?;
+    let order = lock_order_tx(&mut tx, access.tenant_id, order_id, &scope).await?;
+    let shipment = lock_shipment_tx(&mut tx, access.tenant_id, command.shipment_id, &scope).await?;
+    if shipment.order_id != order.id || shipment.inventory_owner_id != order.inventory_owner_id {
+        return Err(AppError::not_found("shipment"));
+    }
+    if shipment.revision != command.expected_revision {
+        return Err(AppError::conflict(
+            "shipment changed before carton-label generation",
+        ));
+    }
+    if !matches!(shipment.status, ShipmentStatus::Manifested) {
+        return Err(AppError::conflict(
+            "carton labels can only be generated before a manifested shipment departs",
+        ));
+    }
+    lock_document_key_tx(
+        &mut tx,
+        access.tenant_id,
+        shipment.id,
+        CARTON_LABEL_SET_TYPE,
+    )
+    .await?;
+    require_document_type_available_tx(
+        &mut tx,
+        access.tenant_id,
+        shipment.id,
+        CARTON_LABEL_SET_TYPE,
+        "shipment carton labels have already been generated",
+    )
+    .await?;
+
+    let manifest = load_document_manifest_tx(&mut tx, access.tenant_id, shipment.id).await?;
+    let addresses = load_addresses_tx(&mut tx, access.tenant_id, shipment.id).await?;
+    let lines = load_document_lines_tx(
+        &mut tx,
+        access.tenant_id,
+        shipment.inventory_owner_id.get(),
+        shipment.order_id,
+        shipment.packing_session_id.get(),
+    )
+    .await?;
+    let cartons = load_document_cartons_tx(
+        &mut tx,
+        access.tenant_id,
+        shipment.id,
+        Some(manifest.manifest_id),
+    )
+    .await?;
+    if addresses.len() != 2
+        || lines.is_empty()
+        || cartons.is_empty()
+        || cartons
+            .iter()
+            .any(|carton| carton.tracking_number.is_none())
+    {
+        return Err(AppError::internal(
+            "shipment snapshots are incomplete for carton-label generation",
+        ));
+    }
+    let content = render_carton_label_set(
+        shipment.id,
+        &order.order_key,
+        &addresses,
+        &cartons,
+        &manifest,
+    )?;
+    let file_name = format!("carton-labels-shipment-{}.html", shipment.id.get());
+    let generated_at = now_iso();
+    let (document_id, content_sha256_hex, line_count) = insert_document_tx(
+        &mut tx,
+        access.tenant_id,
+        context.actor_id.get(),
+        &shipment,
+        NewDocument {
+            document_type: CARTON_LABEL_SET_TYPE,
+            manifest: Some(&manifest),
+            file_name: &file_name,
+            content: &content,
+            lines: &lines,
+            cartons: &cartons,
+        },
+        generated_at,
+    )
+    .await?;
+    insert_order_activity_tx(
+        &mut tx,
+        access.tenant_id,
+        shipment.inventory_owner_id,
+        shipment.order_id.get(),
+        Some(context.actor_id.get()),
+        &format!(
+            "generated carton label set {document_id} for shipment {}",
+            shipment.id
+        ),
+    )
+    .await?;
+    enqueue_order_event_tx(
+        &mut tx,
+        access.tenant_id,
+        shipment.inventory_owner_id,
+        shipment.facility_id,
+        context.actor_id.get(),
+        shipment.order_id,
+        "shipping.carton_label_set_generated",
+        &format!("shipment-document:{}:generated", document_id.get()),
+        serde_json::json!({
+            "document_id": document_id,
+            "document_type": CARTON_LABEL_SET_TYPE,
+            "shipment_id": shipment.id,
+            "order_id": shipment.order_id,
+            "manifest_id": manifest.manifest_id,
+            "carrier_code": manifest.carrier_code,
+            "service_code": manifest.service_code,
+            "shipment_revision": shipment.revision,
+            "carton_count": shipment.carton_count,
+            "line_count": line_count,
+            "content_sha256": content_sha256_hex,
+            "generated_at": generated_at,
+        }),
+        generated_at,
+    )
+    .await?;
+    let document_row =
+        load_visible_document_row_tx(&mut tx, access.tenant_id, document_id, &scope).await?;
+    let document = map_document_row(&document_row)?;
+    Ok(prepared
+        .commit(tx, GenerateCartonLabelSetResult { document })
         .await?)
 }
 
@@ -360,6 +510,29 @@ fn map_document_row(row: &sqlx::postgres::PgRow) -> AppResult<ShipmentDocumentRe
         order_id: positive(row.try_get("order_id")?, OrderId::new)?,
         document_type: ShipmentDocumentType::parse(&document_type_text)
             .ok_or_else(|| AppError::internal("shipment document has an invalid type"))?,
+        manifest_id: row
+            .try_get::<Option<i64>, _>("carrier_manifest_id")?
+            .map(|value| positive(value, CarrierManifestId::new))
+            .transpose()?,
+        carrier_code: row
+            .try_get::<Option<String>, _>("carrier_code")?
+            .map(|value| {
+                CarrierCode::new(value).map_err(|error| AppError::internal(error.to_string()))
+            })
+            .transpose()?,
+        service_code: row
+            .try_get::<Option<String>, _>("service_code")?
+            .map(|value| {
+                CarrierServiceCode::new(value)
+                    .map_err(|error| AppError::internal(error.to_string()))
+            })
+            .transpose()?,
+        manifest_reference: row
+            .try_get::<Option<String>, _>("manifest_reference")?
+            .map(|value| {
+                ManifestReference::new(value).map_err(|error| AppError::internal(error.to_string()))
+            })
+            .transpose()?,
         file_name: row.try_get("file_name")?,
         media_type: row.try_get("media_type")?,
         content_length: row.try_get("content_length")?,
@@ -485,24 +658,212 @@ async fn load_document_cartons_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,
     shipment_id: ShipmentId,
+    manifest_id: Option<CarrierManifestId>,
 ) -> AppResult<Vec<DocumentCarton>> {
     let rows = sqlx::query(
-        "SELECT sequence, carton_barcode, packed_qty, weight_g FROM shipment_cartons WHERE tenant_id = $1 AND shipment_id = $2 ORDER BY sequence, id",
+        r#"
+        SELECT carton.id AS shipment_carton_id, carton.carton_id,
+               carton.license_plate_id, carton.sequence, carton.carton_barcode,
+               carton.packed_qty, carton.weight_g, carton.length_mm,
+               carton.width_mm, carton.height_mm,
+               package.id AS tracking_assignment_id, package.tracking_number
+        FROM shipment_cartons carton
+        LEFT JOIN shipment_manifest_packages package
+          ON package.tenant_id = carton.tenant_id
+         AND package.inventory_owner_id = carton.inventory_owner_id
+         AND package.facility_id = carton.facility_id
+         AND package.shipment_id = carton.shipment_id
+         AND package.shipment_carton_id = carton.id
+         AND package.manifest_id = $3
+        WHERE carton.tenant_id = $1 AND carton.shipment_id = $2
+        ORDER BY carton.sequence, carton.id
+        "#,
     )
     .bind(tenant_id.get())
     .bind(shipment_id.get())
+    .bind(manifest_id.map(|value| value.get()))
     .fetch_all(&mut **tx)
     .await?;
     rows.into_iter()
         .map(|row| {
             Ok(DocumentCarton {
+                shipment_carton_id: row.try_get("shipment_carton_id")?,
+                carton_id: row.try_get("carton_id")?,
+                license_plate_id: row.try_get("license_plate_id")?,
                 sequence: row.try_get("sequence")?,
                 barcode: row.try_get("carton_barcode")?,
                 packed_quantity: row.try_get("packed_qty")?,
                 weight_grams: row.try_get("weight_g")?,
+                length_mm: row.try_get("length_mm")?,
+                width_mm: row.try_get("width_mm")?,
+                height_mm: row.try_get("height_mm")?,
+                tracking_assignment_id: row.try_get("tracking_assignment_id")?,
+                tracking_number: row
+                    .try_get::<Option<String>, _>("tracking_number")?
+                    .map(|value| {
+                        TrackingNumber::new(value)
+                            .map_err(|error| AppError::internal(error.to_string()))
+                    })
+                    .transpose()?,
             })
         })
         .collect()
+}
+
+async fn load_document_manifest_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    shipment_id: ShipmentId,
+) -> AppResult<DocumentManifest> {
+    let row = sqlx::query(
+        r#"SELECT id, carrier, service, manifest_number
+           FROM shipment_manifests
+           WHERE tenant_id = $1 AND shipment_id = $2"#,
+    )
+    .bind(tenant_id.get())
+    .bind(shipment_id.get())
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::conflict("shipment has no carrier manifest"))?;
+    Ok(DocumentManifest {
+        manifest_id: positive(row.try_get("id")?, CarrierManifestId::new)?,
+        carrier_code: CarrierCode::new(row.try_get::<String, _>("carrier")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        service_code: row
+            .try_get::<Option<String>, _>("service")?
+            .map(|value| {
+                CarrierServiceCode::new(value)
+                    .map_err(|error| AppError::internal(error.to_string()))
+            })
+            .transpose()?,
+        manifest_reference: ManifestReference::new(row.try_get::<String, _>("manifest_number")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+    })
+}
+
+async fn lock_document_key_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    shipment_id: ShipmentId,
+    document_type: ShipmentDocumentType,
+) -> AppResult<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "shipment-document:{tenant_id}:{shipment_id}:{document_type}"
+        ))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn require_document_type_available_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    shipment_id: ShipmentId,
+    document_type: ShipmentDocumentType,
+    conflict_message: &'static str,
+) -> AppResult<()> {
+    let existing: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM shipment_documents WHERE tenant_id = $1 AND shipment_id = $2 AND document_type = $3)",
+    )
+    .bind(tenant_id.get())
+    .bind(shipment_id.get())
+    .bind(document_type.as_str())
+    .fetch_one(&mut **tx)
+    .await?;
+    if existing {
+        return Err(AppError::conflict(conflict_message));
+    }
+    Ok(())
+}
+
+async fn insert_document_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    actor_id: i64,
+    shipment: &super::LockedShipment,
+    document: NewDocument<'_>,
+    generated_at: Timestamp,
+) -> AppResult<(ShipmentDocumentId, String, i64)> {
+    let content_length = i64::try_from(document.content.len())
+        .map_err(|_| AppError::internal("shipment document content is too large"))?;
+    let content_sha256 = Sha256::digest(document.content.as_bytes()).to_vec();
+    let content_sha256_hex = hex::encode(&content_sha256);
+    let line_count = i64::try_from(document.lines.len())
+        .map_err(|_| AppError::internal("shipment document has too many lines"))?;
+    let document_id_raw: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO shipment_documents (
+            tenant_id, inventory_owner_id, facility_id, shipment_id, order_id,
+            document_type, carrier_manifest_id, carrier_code, service_code,
+            manifest_reference, file_name, media_type, renderer_version,
+            shipment_revision_at_generation, carton_count, line_count,
+            ordered_qty, accepted_short_qty, packed_qty, content, content_length,
+            content_sha256, generated_by_user_id, generated_at
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+            $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
+        ) RETURNING id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(shipment.inventory_owner_id.get())
+    .bind(shipment.facility_id.get())
+    .bind(shipment.id.get())
+    .bind(shipment.order_id.get())
+    .bind(document.document_type.as_str())
+    .bind(document.manifest.map(|value| value.manifest_id.get()))
+    .bind(document.manifest.map(|value| value.carrier_code.as_str()))
+    .bind(
+        document
+            .manifest
+            .and_then(|value| value.service_code.as_ref().map(|code| code.as_str())),
+    )
+    .bind(
+        document
+            .manifest
+            .map(|value| value.manifest_reference.as_str()),
+    )
+    .bind(document.file_name)
+    .bind(MEDIA_TYPE)
+    .bind(RENDERER_VERSION)
+    .bind(shipment.revision.get())
+    .bind(shipment.carton_count)
+    .bind(line_count)
+    .bind(shipment.demand.ordered().get())
+    .bind(shipment.demand.accepted_short().get())
+    .bind(shipment.demand.effective().get())
+    .bind(document.content)
+    .bind(content_length)
+    .bind(&content_sha256)
+    .bind(actor_id)
+    .bind(generated_at)
+    .fetch_one(&mut **tx)
+    .await?;
+    let document_id = positive(document_id_raw, ShipmentDocumentId::new)?;
+    insert_document_lines_tx(
+        tx,
+        tenant_id,
+        shipment.inventory_owner_id.get(),
+        shipment.facility_id.get(),
+        document_id,
+        shipment.id,
+        shipment.order_id,
+        document.lines,
+    )
+    .await?;
+    insert_document_cartons_tx(
+        tx,
+        tenant_id,
+        shipment.inventory_owner_id.get(),
+        shipment.facility_id.get(),
+        document_id,
+        shipment.id,
+        shipment.order_id,
+        document.cartons,
+    )
+    .await?;
+    Ok((document_id, content_sha256_hex, line_count))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -539,6 +900,52 @@ async fn insert_document_lines_tx(
         .bind(line.ordered_quantity)
         .bind(line.accepted_short_quantity)
         .bind(line.packed_quantity)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_document_cartons_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    owner_id: i64,
+    facility_id: i64,
+    document_id: ShipmentDocumentId,
+    shipment_id: ShipmentId,
+    order_id: OrderId,
+    cartons: &[DocumentCarton],
+) -> AppResult<()> {
+    for carton in cartons {
+        sqlx::query(
+            r#"INSERT INTO shipment_document_cartons (
+                   tenant_id, inventory_owner_id, facility_id, shipment_document_id,
+                   shipment_id, order_id, shipment_carton_id, carton_id,
+                   license_plate_id, sequence, carton_barcode, packed_qty, weight_g,
+                   length_mm, width_mm, height_mm, tracking_assignment_id, tracking_number
+               ) VALUES (
+                   $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                   $13, $14, $15, $16, $17, $18)"#,
+        )
+        .bind(tenant_id.get())
+        .bind(owner_id)
+        .bind(facility_id)
+        .bind(document_id.get())
+        .bind(shipment_id.get())
+        .bind(order_id.get())
+        .bind(carton.shipment_carton_id)
+        .bind(carton.carton_id)
+        .bind(carton.license_plate_id)
+        .bind(carton.sequence)
+        .bind(&carton.barcode)
+        .bind(carton.packed_quantity)
+        .bind(carton.weight_grams)
+        .bind(carton.length_mm)
+        .bind(carton.width_mm)
+        .bind(carton.height_mm)
+        .bind(carton.tracking_assignment_id)
+        .bind(carton.tracking_number.as_ref().map(TrackingNumber::as_str))
         .execute(&mut **tx)
         .await?;
     }
@@ -611,6 +1018,116 @@ fn render_packing_slip(
     html.push_str(&demand.accepted_short().get().to_string());
     html.push_str("</td></tr></tbody></table></body></html>");
     html
+}
+
+fn render_carton_label_set(
+    shipment_id: ShipmentId,
+    order_key: &str,
+    addresses: &[AddressSnapshot],
+    cartons: &[DocumentCarton],
+    manifest: &DocumentManifest,
+) -> AppResult<String> {
+    let origin = addresses
+        .iter()
+        .find(|address| address.role == "origin")
+        .ok_or_else(|| AppError::internal("shipment origin snapshot is missing"))?;
+    let destination = addresses
+        .iter()
+        .find(|address| address.role == "destination")
+        .ok_or_else(|| AppError::internal("shipment destination snapshot is missing"))?;
+    let mut html = String::from(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Carton labels</title><style>@page{size:4in 6in;margin:0}*{box-sizing:border-box}body{margin:0;color:#000;background:#fff;font:12px Arial,sans-serif}.label{width:4in;height:6in;padding:.18in;display:grid;grid-template-rows:auto auto auto 1fr auto;gap:.08in;break-after:page;border:1px solid #000}.label:last-child{break-after:auto}.top{display:flex;justify-content:space-between;align-items:start;border-bottom:2px solid #000;padding-bottom:.06in}.carrier{font-size:22px;font-weight:800}.service,.carton{font-size:13px;font-weight:700}.addresses{display:grid;grid-template-columns:1fr 1fr;gap:.1in}.address{border:1px solid #000;padding:.06in;line-height:1.25}.address strong{display:block;font-size:9px;text-transform:uppercase;margin-bottom:2px}.barcode{display:grid;place-items:center;min-height:1.05in;overflow:hidden}.barcode svg{display:block;width:100%;height:.95in}.tracking{font-size:16px;font-weight:800;text-align:center}.meta{display:grid;grid-template-columns:1fr 1fr;gap:3px 12px;border-top:1px solid #000;padding-top:.05in}.meta span{font-size:9px;text-transform:uppercase}.meta strong{display:block;font-size:11px}@media screen{body{background:#ddd}.label{margin:12px auto;background:#fff}}@media print{.label{border:0}}</style></head><body>",
+    );
+    for carton in cartons {
+        let tracking = carton
+            .tracking_number
+            .as_ref()
+            .ok_or_else(|| AppError::internal("shipment carton tracking snapshot is missing"))?;
+        let tracking_svg = wareboxes_barcodes::svg("code128", tracking.as_str()).map_err(|_| {
+            AppError::conflict("tracking number cannot be encoded as a Code 128 label")
+        })?;
+        let carton_svg = wareboxes_barcodes::svg("code128", &carton.barcode).map_err(|_| {
+            AppError::conflict("carton barcode cannot be encoded as a Code 128 label")
+        })?;
+        html.push_str(
+            "<section class=\"label\"><header class=\"top\"><div><div class=\"carrier\">",
+        );
+        escape_html_into(manifest.carrier_code.as_str(), &mut html);
+        html.push_str("</div><div class=\"service\">");
+        escape_html_into(
+            manifest
+                .service_code
+                .as_ref()
+                .map_or("STANDARD", CarrierServiceCode::as_str),
+            &mut html,
+        );
+        html.push_str("</div></div><div class=\"carton\">Carton ");
+        html.push_str(&carton.sequence.to_string());
+        html.push_str(" of ");
+        html.push_str(&cartons.len().to_string());
+        html.push_str("</div></header><div class=\"addresses\">");
+        render_label_address("Ship from", origin, &mut html);
+        render_label_address("Ship to", destination, &mut html);
+        html.push_str("</div><div><div class=\"barcode\">");
+        html.push_str(&tracking_svg);
+        html.push_str("</div><div class=\"tracking\">");
+        escape_html_into(tracking.as_str(), &mut html);
+        html.push_str("</div></div><div class=\"barcode\">");
+        html.push_str(&carton_svg);
+        html.push_str("</div><footer class=\"meta\"><div><span>Order</span><strong>");
+        escape_html_into(order_key, &mut html);
+        html.push_str("</strong></div><div><span>Shipment</span><strong>");
+        html.push_str(&shipment_id.get().to_string());
+        html.push_str("</strong></div><div><span>Manifest</span><strong>");
+        escape_html_into(manifest.manifest_reference.as_str(), &mut html);
+        html.push_str("</strong></div><div><span>Weight / dimensions</span><strong>");
+        html.push_str(&label_measurements(carton));
+        html.push_str("</strong></div></footer></section>");
+    }
+    html.push_str("</body></html>");
+    Ok(html)
+}
+
+fn render_label_address(label: &str, address: &AddressSnapshot, html: &mut String) {
+    html.push_str("<div class=\"address\"><strong>");
+    html.push_str(label);
+    html.push_str("</strong>");
+    if let Some(name) = address.name.as_deref() {
+        escape_html_into(name, html);
+        html.push_str("<br>");
+    }
+    if let Some(company) = address.company.as_deref() {
+        escape_html_into(company, html);
+        html.push_str("<br>");
+    }
+    escape_html_into(&address.line1, html);
+    if let Some(line2) = address.line2.as_deref() {
+        html.push_str("<br>");
+        escape_html_into(line2, html);
+    }
+    html.push_str("<br>");
+    escape_html_into(&address.city, html);
+    if let Some(state) = address.state.as_deref() {
+        html.push_str(", ");
+        escape_html_into(state, html);
+    }
+    html.push(' ');
+    escape_html_into(&address.postal_code, html);
+    html.push_str("<br>");
+    escape_html_into(&address.country, html);
+    html.push_str("</div>");
+}
+
+fn label_measurements(carton: &DocumentCarton) -> String {
+    let weight = carton
+        .weight_grams
+        .map_or_else(|| "-".to_owned(), |value| format!("{value} g"));
+    match (carton.length_mm, carton.width_mm, carton.height_mm) {
+        (Some(length), Some(width), Some(height)) => {
+            format!("{weight} / {length}x{width}x{height} mm")
+        }
+        _ => weight,
+    }
 }
 
 fn render_address(label: &str, address: Option<&AddressSnapshot>, html: &mut String) {

@@ -4,18 +4,20 @@ use axum::http::{header, HeaderValue, Response};
 use axum::Json;
 use wareboxes_api_contract::v1::{
     ConfirmShipmentDepartureRequest, ConfirmShipmentDepartureResponse, CreateShipmentRequest,
-    CreateShipmentResponse, GeneratePackingSlipRequest, GeneratePackingSlipResponse,
-    ManualCarrierManifestResponse, RecordManualManifestRequest, RecordManualManifestResponse,
-    Revision, ShipmentCartonResponse, ShipmentCartonTrackingResponse, ShipmentDemandResponse,
-    ShipmentDepartureProgressResponse, ShipmentDocumentListResponse, ShipmentDocumentResponse,
+    CreateShipmentResponse, GenerateCartonLabelSetRequest, GenerateCartonLabelSetResponse,
+    GeneratePackingSlipRequest, GeneratePackingSlipResponse, ManualCarrierManifestResponse,
+    RecordManualManifestRequest, RecordManualManifestResponse, Revision, ShipmentCartonResponse,
+    ShipmentCartonTrackingResponse, ShipmentDemandResponse, ShipmentDepartureProgressResponse,
+    ShipmentDocumentListResponse, ShipmentDocumentResponse,
     ShipmentDocumentType as ApiShipmentDocumentType, ShipmentOrderStatus, ShipmentResponse,
     ShipmentStatus as ApiShipmentStatus,
 };
 use wareboxes_application::shipping::{
     ConfirmShipmentDepartureCommand, ConfirmShipmentDepartureResult, CreateShipmentCommand,
-    CreateShipmentResult, GeneratePackingSlipCommand, ManualCarrierManifestReadModel,
-    RecordManualManifestCommand, RecordManualManifestResult, ShipmentDocumentContentQuery,
-    ShipmentDocumentListQuery, ShipmentDocumentReadModel, ShipmentQuery, ShipmentReadModel,
+    CreateShipmentResult, GenerateCartonLabelSetCommand, GeneratePackingSlipCommand,
+    ManualCarrierManifestReadModel, RecordManualManifestCommand, RecordManualManifestResult,
+    ShipmentDocumentContentQuery, ShipmentDocumentListQuery, ShipmentDocumentReadModel,
+    ShipmentQuery, ShipmentReadModel,
 };
 use wareboxes_domain::{
     CarrierCode, CarrierServiceCode, CartonId, CartonTrackingAssignment, ManifestReference,
@@ -149,6 +151,27 @@ pub async fn generate_packing_slip(
     let result =
         repo::shipping::generate_packing_slip(&state.db, &user.tenant, &context, &command).await?;
     Ok(Json(GeneratePackingSlipResponse {
+        document: map_document(result.document)?,
+    }))
+}
+
+pub async fn generate_carton_label_set(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(shipment_id): Path<i64>,
+    Json(body): Json<GenerateCartonLabelSetRequest>,
+) -> V1Result<Json<GenerateCartonLabelSetResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let command = GenerateCartonLabelSetCommand {
+        shipment_id: positive(shipment_id, ShipmentId::new, "shipment ID")?,
+        expected_revision: shipment_revision(body.expected_shipment_revision)?,
+    };
+    let context = user.command_context(&idempotency_key);
+    let result =
+        repo::shipping::generate_carton_label_set(&state.db, &user.tenant, &context, &command)
+            .await?;
+    Ok(Json(GenerateCartonLabelSetResponse {
         document: map_document(result.document)?,
     }))
 }
@@ -328,7 +351,14 @@ fn map_document(document: ShipmentDocumentReadModel) -> V1Result<ShipmentDocumen
         order_id: document.order_id.get(),
         document_type: match document.document_type {
             ShipmentDocumentType::PackingSlip => ApiShipmentDocumentType::PackingSlip,
+            ShipmentDocumentType::CartonLabelSet => ApiShipmentDocumentType::CartonLabelSet,
         },
+        manifest_id: document.manifest_id.map(|value| value.get()),
+        carrier_code: document.carrier_code.map(|value| value.as_str().to_owned()),
+        service_code: document.service_code.map(|value| value.as_str().to_owned()),
+        manifest_reference: document
+            .manifest_reference
+            .map(|value| value.as_str().to_owned()),
         file_name: document.file_name,
         media_type: document.media_type,
         content_length: document.content_length,

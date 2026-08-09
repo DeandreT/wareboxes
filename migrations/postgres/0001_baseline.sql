@@ -26346,6 +26346,10 @@ CREATE TABLE public.shipment_documents (
     shipment_id bigint NOT NULL,
     order_id bigint NOT NULL,
     document_type text NOT NULL,
+    carrier_manifest_id bigint,
+    carrier_code text,
+    service_code text,
+    manifest_reference text,
     file_name text NOT NULL,
     media_type text NOT NULL,
     renderer_version bigint NOT NULL,
@@ -26360,7 +26364,24 @@ CREATE TABLE public.shipment_documents (
     content_sha256 bytea NOT NULL,
     generated_by_user_id bigint NOT NULL,
     generated_at timestamp with time zone NOT NULL,
-    CONSTRAINT shipment_documents_type_check CHECK (document_type = 'packing_slip'),
+    CONSTRAINT shipment_documents_type_check CHECK (
+        (document_type = 'packing_slip'
+         AND carrier_manifest_id IS NULL AND carrier_code IS NULL
+         AND service_code IS NULL AND manifest_reference IS NULL)
+        OR
+        (document_type = 'carton_label_set'
+         AND carrier_manifest_id IS NOT NULL AND carrier_code IS NOT NULL
+         AND manifest_reference IS NOT NULL)),
+    CONSTRAINT shipment_documents_carrier_check CHECK (
+        carrier_code IS NULL OR
+        (carrier_code = btrim(carrier_code) AND carrier_code <> '' AND char_length(carrier_code) <= 100)),
+    CONSTRAINT shipment_documents_service_check CHECK (
+        service_code IS NULL OR
+        (service_code = btrim(service_code) AND service_code <> '' AND char_length(service_code) <= 100)),
+    CONSTRAINT shipment_documents_manifest_reference_check CHECK (
+        manifest_reference IS NULL OR
+        (manifest_reference = btrim(manifest_reference) AND manifest_reference <> ''
+         AND char_length(manifest_reference) <= 200)),
     CONSTRAINT shipment_documents_file_name_check CHECK (
         file_name = btrim(file_name) AND file_name <> '' AND char_length(file_name) <= 240),
     CONSTRAINT shipment_documents_media_type_check CHECK (media_type = 'text/html; charset=utf-8'),
@@ -26371,7 +26392,7 @@ CREATE TABLE public.shipment_documents (
         ordered_qty > 0 AND accepted_short_qty >= 0 AND packed_qty > 0
         AND ordered_qty = packed_qty + accepted_short_qty),
     CONSTRAINT shipment_documents_content_check CHECK (
-        content_length = octet_length(content) AND content_length > 0 AND content_length <= 1048576
+        content_length = octet_length(content) AND content_length > 0 AND content_length <= 16777216
         AND octet_length(content_sha256) = 32)
 );
 ALTER TABLE public.shipment_documents FORCE ROW LEVEL SECURITY;
@@ -26406,6 +26427,43 @@ CREATE TABLE public.shipment_document_lines (
 );
 ALTER TABLE public.shipment_document_lines FORCE ROW LEVEL SECURITY;
 
+CREATE TABLE public.shipment_document_cartons (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    shipment_document_id bigint NOT NULL,
+    shipment_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    shipment_carton_id bigint NOT NULL,
+    carton_id bigint NOT NULL,
+    license_plate_id bigint NOT NULL,
+    sequence bigint NOT NULL,
+    carton_barcode text NOT NULL,
+    packed_qty bigint NOT NULL,
+    weight_g bigint,
+    length_mm bigint,
+    width_mm bigint,
+    height_mm bigint,
+    tracking_assignment_id bigint,
+    tracking_number text,
+    CONSTRAINT shipment_document_cartons_sequence_check CHECK (sequence > 0),
+    CONSTRAINT shipment_document_cartons_barcode_check CHECK (
+        carton_barcode = btrim(carton_barcode) AND carton_barcode <> ''
+        AND char_length(carton_barcode) <= 200),
+    CONSTRAINT shipment_document_cartons_quantity_check CHECK (packed_qty > 0),
+    CONSTRAINT shipment_document_cartons_weight_check CHECK (weight_g IS NULL OR weight_g > 0),
+    CONSTRAINT shipment_document_cartons_dimensions_check CHECK (
+        (length_mm IS NULL AND width_mm IS NULL AND height_mm IS NULL)
+        OR (length_mm > 0 AND width_mm > 0 AND height_mm > 0)),
+    CONSTRAINT shipment_document_cartons_tracking_check CHECK (
+        (tracking_assignment_id IS NULL AND tracking_number IS NULL)
+        OR
+        (tracking_assignment_id IS NOT NULL AND tracking_number = btrim(tracking_number)
+         AND tracking_number <> '' AND char_length(tracking_number) <= 200))
+);
+ALTER TABLE public.shipment_document_cartons FORCE ROW LEVEL SECURITY;
+
 ALTER TABLE public.shipment_documents
     ADD CONSTRAINT shipment_documents_scope_id_key
     UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_id, id);
@@ -26421,6 +26479,15 @@ ALTER TABLE public.shipment_document_lines
 ALTER TABLE public.shipment_document_lines
     ADD CONSTRAINT shipment_document_lines_sequence_key
     UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_document_id, sequence);
+ALTER TABLE public.shipment_document_cartons
+    ADD CONSTRAINT shipment_document_cartons_scope_id_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_document_id, id);
+ALTER TABLE public.shipment_document_cartons
+    ADD CONSTRAINT shipment_document_cartons_carton_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_document_id, shipment_carton_id);
+ALTER TABLE public.shipment_document_cartons
+    ADD CONSTRAINT shipment_document_cartons_sequence_key
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, shipment_document_id, sequence);
 
 ALTER TABLE public.shipment_documents
     ADD CONSTRAINT shipment_documents_shipment_fkey
@@ -26430,6 +26497,11 @@ ALTER TABLE public.shipment_documents
     ADD CONSTRAINT shipment_documents_order_fkey
     FOREIGN KEY (tenant_id, inventory_owner_id, order_id)
     REFERENCES public.orders (tenant_id, inventory_owner_id, id);
+ALTER TABLE public.shipment_documents
+    ADD CONSTRAINT shipment_documents_manifest_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, shipment_id, carrier_manifest_id)
+    REFERENCES public.shipment_manifests
+        (tenant_id, inventory_owner_id, facility_id, shipment_id, id);
 ALTER TABLE public.shipment_documents
     ADD CONSTRAINT shipment_documents_actor_fkey
     FOREIGN KEY (tenant_id, generated_by_user_id)
@@ -26446,11 +26518,23 @@ ALTER TABLE public.shipment_document_lines
 ALTER TABLE public.shipment_document_lines
     ADD CONSTRAINT shipment_document_lines_item_fkey
     FOREIGN KEY (tenant_id, item_id) REFERENCES public.items (tenant_id, id);
+ALTER TABLE public.shipment_document_cartons
+    ADD CONSTRAINT shipment_document_cartons_document_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, shipment_id, shipment_document_id)
+    REFERENCES public.shipment_documents
+        (tenant_id, inventory_owner_id, facility_id, shipment_id, id);
+ALTER TABLE public.shipment_document_cartons
+    ADD CONSTRAINT shipment_document_cartons_shipment_carton_fkey
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, shipment_id, shipment_carton_id)
+    REFERENCES public.shipment_cartons
+        (tenant_id, inventory_owner_id, facility_id, shipment_id, id);
 
 CREATE INDEX shipment_documents_shipment_idx
 ON public.shipment_documents (tenant_id, shipment_id, generated_at, id);
 CREATE INDEX shipment_document_lines_document_idx
 ON public.shipment_document_lines (tenant_id, shipment_document_id, sequence, id);
+CREATE INDEX shipment_document_cartons_document_idx
+ON public.shipment_document_cartons (tenant_id, shipment_document_id, sequence, id);
 
 CREATE FUNCTION public.reject_shipment_document_mutation() RETURNS trigger
     LANGUAGE plpgsql
@@ -26467,6 +26551,7 @@ CREATE FUNCTION public.validate_shipment_document() RETURNS trigger
 AS $$
 DECLARE
     shipment_row public.shipments%ROWTYPE;
+    manifest_row public.shipment_manifests%ROWTYPE;
     demand_row record;
     actual_carton_count bigint;
 BEGIN
@@ -26482,6 +26567,28 @@ BEGIN
     END IF;
     IF shipment_row.revision <> NEW.shipment_revision_at_generation THEN
         RAISE EXCEPTION 'shipment revision changed before document generation' USING ERRCODE = '55000';
+    END IF;
+    IF NEW.document_type = 'carton_label_set' THEN
+        IF shipment_row.state <> 'manifested' THEN
+            RAISE EXCEPTION 'carton labels require a manifested shipment before departure'
+                USING ERRCODE = '55000';
+        END IF;
+        SELECT * INTO manifest_row
+        FROM public.shipment_manifests
+        WHERE tenant_id = NEW.tenant_id
+          AND inventory_owner_id = NEW.inventory_owner_id
+          AND facility_id = NEW.facility_id
+          AND shipment_id = NEW.shipment_id
+          AND id = NEW.carrier_manifest_id;
+        IF NOT FOUND
+           OR manifest_row.resulting_revision <> NEW.shipment_revision_at_generation
+           OR manifest_row.carrier <> NEW.carrier_code
+           OR manifest_row.service IS DISTINCT FROM NEW.service_code
+           OR manifest_row.manifest_number <> NEW.manifest_reference
+        THEN
+            RAISE EXCEPTION 'carton-label document manifest does not match shipment'
+                USING ERRCODE = '23514';
+        END IF;
     END IF;
     SELECT COUNT(*)::bigint INTO actual_carton_count
     FROM public.shipment_cartons carton
@@ -26506,6 +26613,65 @@ BEGIN
        OR shipment_row.shipped_qty <> NEW.packed_qty
     THEN
         RAISE EXCEPTION 'shipment document demand does not match shipment' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_shipment_document_carton() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    document_row public.shipment_documents%ROWTYPE;
+    source_row record;
+BEGIN
+    SELECT * INTO document_row
+    FROM public.shipment_documents
+    WHERE tenant_id = NEW.tenant_id AND inventory_owner_id = NEW.inventory_owner_id
+      AND facility_id = NEW.facility_id AND shipment_id = NEW.shipment_id
+      AND id = NEW.shipment_document_id;
+    IF NOT FOUND OR document_row.order_id <> NEW.order_id THEN
+        RAISE EXCEPTION 'shipment document carton scope does not match document'
+            USING ERRCODE = '23514';
+    END IF;
+    SELECT carton.carton_id, carton.license_plate_id, carton.sequence,
+           carton.carton_barcode, carton.packed_qty, carton.weight_g,
+           carton.length_mm, carton.width_mm, carton.height_mm,
+           package.id AS tracking_assignment_id, package.tracking_number
+    INTO source_row
+    FROM public.shipment_cartons carton
+    LEFT JOIN public.shipment_manifest_packages package
+      ON package.tenant_id = carton.tenant_id
+     AND package.inventory_owner_id = carton.inventory_owner_id
+     AND package.facility_id = carton.facility_id
+     AND package.shipment_id = carton.shipment_id
+     AND package.shipment_carton_id = carton.id
+     AND package.manifest_id = document_row.carrier_manifest_id
+    WHERE carton.tenant_id = NEW.tenant_id
+      AND carton.inventory_owner_id = NEW.inventory_owner_id
+      AND carton.facility_id = NEW.facility_id
+      AND carton.shipment_id = NEW.shipment_id
+      AND carton.id = NEW.shipment_carton_id;
+    IF NOT FOUND
+       OR NEW.carton_id <> source_row.carton_id
+       OR NEW.license_plate_id <> source_row.license_plate_id
+       OR NEW.sequence <> source_row.sequence
+       OR NEW.carton_barcode <> source_row.carton_barcode
+       OR NEW.packed_qty <> source_row.packed_qty
+       OR NEW.weight_g IS DISTINCT FROM source_row.weight_g
+       OR NEW.length_mm IS DISTINCT FROM source_row.length_mm
+       OR NEW.width_mm IS DISTINCT FROM source_row.width_mm
+       OR NEW.height_mm IS DISTINCT FROM source_row.height_mm
+       OR (document_row.document_type = 'packing_slip'
+           AND (NEW.tracking_assignment_id IS NOT NULL OR NEW.tracking_number IS NOT NULL))
+       OR (document_row.document_type = 'carton_label_set'
+           AND (source_row.tracking_assignment_id IS NULL
+                OR NEW.tracking_assignment_id IS DISTINCT FROM source_row.tracking_assignment_id
+                OR NEW.tracking_number IS DISTINCT FROM source_row.tracking_number))
+    THEN
+        RAISE EXCEPTION 'shipment document carton does not match shipment evidence'
+            USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
 END;
@@ -26577,6 +26743,8 @@ DECLARE
     ordered_qty_value bigint;
     accepted_short_qty_value bigint;
     packed_qty_value bigint;
+    carton_count_value bigint;
+    carton_qty_value bigint;
 BEGIN
     IF TG_TABLE_NAME = 'shipment_documents' THEN
         document_id_value := NEW.id;
@@ -26594,10 +26762,16 @@ BEGIN
     INTO line_count_value, ordered_qty_value, accepted_short_qty_value, packed_qty_value
     FROM public.shipment_document_lines
     WHERE tenant_id = document_row.tenant_id AND shipment_document_id = document_row.id;
+    SELECT COUNT(*)::bigint, COALESCE(SUM(packed_qty), 0)::bigint
+    INTO carton_count_value, carton_qty_value
+    FROM public.shipment_document_cartons
+    WHERE tenant_id = document_row.tenant_id AND shipment_document_id = document_row.id;
     IF line_count_value <> document_row.line_count
        OR ordered_qty_value <> document_row.ordered_qty
        OR accepted_short_qty_value <> document_row.accepted_short_qty
        OR packed_qty_value <> document_row.packed_qty
+       OR carton_count_value <> document_row.carton_count
+       OR carton_qty_value <> document_row.packed_qty
        OR EXISTS (
            SELECT 1 FROM public.outbound_effective_demand demand
            WHERE demand.tenant_id = document_row.tenant_id
@@ -26608,8 +26782,20 @@ BEGIN
                  WHERE line.tenant_id = document_row.tenant_id
                    AND line.shipment_document_id = document_row.id
                    AND line.order_item_id = demand.order_item_id))
+       OR EXISTS (
+           SELECT 1 FROM public.shipment_cartons carton
+           WHERE carton.tenant_id = document_row.tenant_id
+             AND carton.inventory_owner_id = document_row.inventory_owner_id
+             AND carton.facility_id = document_row.facility_id
+             AND carton.shipment_id = document_row.shipment_id
+             AND NOT EXISTS (
+                 SELECT 1 FROM public.shipment_document_cartons evidence
+                 WHERE evidence.tenant_id = document_row.tenant_id
+                   AND evidence.shipment_document_id = document_row.id
+                   AND evidence.shipment_carton_id = carton.id))
     THEN
-        RAISE EXCEPTION 'shipment document lines do not reconcile with header' USING ERRCODE = '23514';
+        RAISE EXCEPTION 'shipment document evidence does not reconcile with header'
+            USING ERRCODE = '23514';
     END IF;
     RETURN NULL;
 END;
@@ -26629,6 +26815,13 @@ FOR EACH ROW EXECUTE FUNCTION public.reject_shipment_document_mutation();
 CREATE CONSTRAINT TRIGGER shipment_document_lines_require_consistency
 AFTER INSERT ON public.shipment_document_lines DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION public.require_shipment_document_consistency();
+CREATE TRIGGER shipment_document_cartons_validate BEFORE INSERT ON public.shipment_document_cartons
+FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_document_carton();
+CREATE TRIGGER shipment_document_cartons_are_immutable BEFORE DELETE OR UPDATE ON public.shipment_document_cartons
+FOR EACH ROW EXECUTE FUNCTION public.reject_shipment_document_mutation();
+CREATE CONSTRAINT TRIGGER shipment_document_cartons_require_consistency
+AFTER INSERT ON public.shipment_document_cartons DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_shipment_document_consistency();
 
 ALTER TABLE public.shipment_documents ENABLE ROW LEVEL SECURITY;
 CREATE POLICY shipment_documents_tenant_isolation ON public.shipment_documents
@@ -26638,14 +26831,21 @@ ALTER TABLE public.shipment_document_lines ENABLE ROW LEVEL SECURITY;
 CREATE POLICY shipment_document_lines_tenant_isolation ON public.shipment_document_lines
 USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
 WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+ALTER TABLE public.shipment_document_cartons ENABLE ROW LEVEL SECURITY;
+CREATE POLICY shipment_document_cartons_tenant_isolation ON public.shipment_document_cartons
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
 
 GRANT SELECT, INSERT ON public.shipment_documents TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.shipment_documents_id_seq TO wareboxes_app;
 GRANT SELECT, INSERT ON public.shipment_document_lines TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.shipment_document_lines_id_seq TO wareboxes_app;
+GRANT SELECT, INSERT ON public.shipment_document_cartons TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.shipment_document_cartons_id_seq TO wareboxes_app;
 REVOKE ALL ON FUNCTION public.reject_shipment_document_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_shipment_document() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_shipment_document_line() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_shipment_document_carton() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_shipment_document_consistency() FROM PUBLIC;
 
 -- PostgreSQL database dump complete

@@ -64,11 +64,19 @@ pub struct GeneratePackingSlipRequest {
     pub expected_shipment_revision: Revision,
 }
 
+/// Generates the immutable carton-label set for one manifested shipment revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenerateCartonLabelSetRequest {
+    pub expected_shipment_revision: Revision,
+}
+
 /// Shipment document kinds exposed by the public API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShipmentDocumentType {
     PackingSlip,
+    CartonLabelSet,
 }
 
 /// Immutable metadata for one retained shipment document.
@@ -79,6 +87,10 @@ pub struct ShipmentDocumentResponse {
     pub shipment_id: i64,
     pub order_id: i64,
     pub document_type: ShipmentDocumentType,
+    pub manifest_id: Option<i64>,
+    pub carrier_code: Option<String>,
+    pub service_code: Option<String>,
+    pub manifest_reference: Option<String>,
     pub file_name: String,
     pub media_type: String,
     pub content_length: i64,
@@ -95,6 +107,13 @@ pub struct ShipmentDocumentResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeneratePackingSlipResponse {
+    pub document: ShipmentDocumentResponse,
+}
+
+/// Replay-stable carton-label-set generation result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenerateCartonLabelSetResponse {
     pub document: ShipmentDocumentResponse,
 }
 
@@ -283,6 +302,13 @@ mod tests {
             .expected_shipment_revision
             .get(),
             2
+        );
+        assert!(
+            serde_json::from_value::<GenerateCartonLabelSetRequest>(json!({
+                "expected_shipment_revision": 2,
+                "format": "zpl"
+            }))
+            .is_err()
         );
     }
 

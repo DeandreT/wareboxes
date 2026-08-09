@@ -411,6 +411,19 @@
   justify-content: space-between;
 }
 
+.shipping-document-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.shipping-document-actions .button {
+  min-height: 26px;
+  padding: 3px 7px;
+}
+
 .shipping-documents-heading > div,
 .shipping-document-name {
   display: grid;

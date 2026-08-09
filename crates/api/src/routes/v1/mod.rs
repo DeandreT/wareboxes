@@ -144,6 +144,10 @@ pub fn router() -> Router<AppState> {
             post(shipping::generate_packing_slip),
         )
         .route(
+            "/shipments/{shipment_id}/documents/carton-label-sets",
+            post(shipping::generate_carton_label_set),
+        )
+        .route(
             "/shipment-documents/{document_id}/content",
             get(shipping::download_document),
         )

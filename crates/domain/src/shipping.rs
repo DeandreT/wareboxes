@@ -18,18 +18,21 @@ pub const MAX_SHIPMENT_SCAN_VALUE_LENGTH: usize = 200;
 #[serde(rename_all = "snake_case")]
 pub enum ShipmentDocumentType {
     PackingSlip,
+    CartonLabelSet,
 }
 
 impl ShipmentDocumentType {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::PackingSlip => "packing_slip",
+            Self::CartonLabelSet => "carton_label_set",
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "packing_slip" => Some(Self::PackingSlip),
+            "carton_label_set" => Some(Self::CartonLabelSet),
             _ => None,
         }
     }
@@ -475,6 +478,10 @@ mod tests {
             Some(ShipmentDocumentType::PackingSlip)
         );
         assert_eq!(ShipmentDocumentType::parse("label"), None);
+        assert_eq!(
+            ShipmentDocumentType::parse("carton_label_set"),
+            Some(ShipmentDocumentType::CartonLabelSet)
+        );
     }
 
     #[test]

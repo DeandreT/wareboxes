@@ -578,6 +578,7 @@ fn ShipmentExecution(
                 <ShipmentDocumentsPanel
                     shipment_id
                     shipment_revision
+                    shipment_status=shipment.status
                     on_unauthorized=signals.on_unauthorized
                 />
             </section>

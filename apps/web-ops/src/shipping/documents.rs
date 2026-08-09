@@ -1,21 +1,33 @@
 use leptos::prelude::*;
-use wareboxes_api_contract::v1::{GeneratePackingSlipRequest, Revision, ShipmentDocumentResponse};
+use wareboxes_api_contract::v1::{
+    GenerateCartonLabelSetRequest, GeneratePackingSlipRequest, Revision, ShipmentDocumentResponse,
+    ShipmentDocumentType, ShipmentStatus,
+};
 #[cfg(target_arch = "wasm32")]
-use wareboxes_api_contract::v1::{GeneratePackingSlipResponse, ShipmentDocumentListResponse};
+use wareboxes_api_contract::v1::{
+    GenerateCartonLabelSetResponse, GeneratePackingSlipResponse, ShipmentDocumentListResponse,
+};
 
 use crate::api;
 use crate::components::{Icon, UiIcon};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct PendingGeneration {
-    request: GeneratePackingSlipRequest,
-    idempotency_key: String,
+enum PendingGeneration {
+    PackingSlip {
+        request: GeneratePackingSlipRequest,
+        idempotency_key: String,
+    },
+    CartonLabelSet {
+        request: GenerateCartonLabelSetRequest,
+        idempotency_key: String,
+    },
 }
 
 #[component]
 pub(super) fn ShipmentDocumentsPanel(
     shipment_id: i64,
     shipment_revision: Revision,
+    shipment_status: ShipmentStatus,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     let documents = RwSignal::new(Vec::<ShipmentDocumentResponse>::new());
@@ -28,11 +40,27 @@ pub(super) fn ShipmentDocumentsPanel(
         refresh_documents(shipment_id, documents, loading, error, on_unauthorized)
     });
 
-    let generate = Callback::new(move |_| {
+    let generate_packing_slip = Callback::new(move |_| {
         dispatch_generation(
             shipment_id,
-            PendingGeneration {
+            PendingGeneration::PackingSlip {
                 request: GeneratePackingSlipRequest {
+                    expected_shipment_revision: shipment_revision,
+                },
+                idempotency_key: api::new_idempotency_key(),
+            },
+            documents,
+            loading,
+            error,
+            retry,
+            on_unauthorized,
+        );
+    });
+    let generate_carton_labels = Callback::new(move |_| {
+        dispatch_generation(
+            shipment_id,
+            PendingGeneration::CartonLabelSet {
+                request: GenerateCartonLabelSetRequest {
                     expected_shipment_revision: shipment_revision,
                 },
                 idempotency_key: api::new_idempotency_key(),
@@ -62,20 +90,31 @@ pub(super) fn ShipmentDocumentsPanel(
         <div class="shipping-documents" aria-label="Shipment documents">
             <div class="shipping-documents-heading">
                 <div><h3>"Documents"</h3><span>{move || document_count_label(documents.get().len())}</span></div>
-                <Show
-                    when=move || !loading.get() && documents.get().is_empty()
-                    fallback=move || loading.get().then(|| view! { <span class="status pending">"Working"</span> })
-                >
-                    <button
-                        type="button"
-                        class="button secondary-action"
-                        disabled=move || loading.get() || retry.get().is_some()
-                        on:click=move |_| generate.run(())
-                    >
-                        <Icon icon=UiIcon::Print/>
-                        "Generate packing slip"
-                    </button>
-                </Show>
+                <div class="shipping-document-actions">
+                    <Show when=move || loading.get()><span class="status pending">"Working"</span></Show>
+                    <Show when=move || !has_document(documents.get(), ShipmentDocumentType::PackingSlip)>
+                        <button
+                            type="button"
+                            class="button secondary-action"
+                            disabled=move || loading.get() || retry.get().is_some()
+                            on:click=move |_| generate_packing_slip.run(())
+                        >
+                            <Icon icon=UiIcon::Print/>
+                            "Packing slip"
+                        </button>
+                    </Show>
+                    <Show when=move || matches!(shipment_status, ShipmentStatus::Manifested) && !has_document(documents.get(), ShipmentDocumentType::CartonLabelSet)>
+                        <button
+                            type="button"
+                            class="button secondary-action"
+                            disabled=move || loading.get() || retry.get().is_some()
+                            on:click=move |_| generate_carton_labels.run(())
+                        >
+                            <Icon icon=UiIcon::Print/>
+                            "Carton labels"
+                        </button>
+                    </Show>
+                </div>
             </div>
             <Show when=move || error.get().is_some()>
                 <div class="shipping-documents-error" role="alert">
@@ -94,22 +133,19 @@ pub(super) fn ShipmentDocumentsPanel(
                     let href = document_download_path(document.document_id);
                     let file_name = document.file_name.clone();
                     let generated = compact_generated_at(&document.generated_at);
-                    let summary = format!(
-                        "{} cartons · {} lines · {} units",
-                        document.carton_count,
-                        document.line_count,
-                        document.demand.shipped_quantity,
-                    );
+                    let (name, summary) = document_display(&document);
+                    let download_label = format!("Download {name}");
+                    let download_title = download_label.clone();
                     view! {
                         <div class="shipping-document-row">
-                            <span class="shipping-document-name"><strong>"Packing slip"</strong><small>{summary}</small></span>
+                            <span class="shipping-document-name"><strong>{name}</strong><small>{summary}</small></span>
                             <span class="shipping-document-meta">{generated}</span>
                             <a
                                 class="icon-button"
                                 href=href
                                 download=file_name
-                                title="Download packing slip"
-                                aria-label="Download packing slip"
+                                title=download_title
+                                aria-label=download_label
                             ><Icon icon=UiIcon::Download/></a>
                         </div>
                     }
@@ -165,15 +201,35 @@ fn dispatch_generation(
     error.set(None);
     let retained = command.clone();
     leptos::task::spawn_local(async move {
-        let result = api::internal_post_idempotent::<_, GeneratePackingSlipResponse>(
-            &packing_slip_generation_path(shipment_id),
-            &command.request,
-            &command.idempotency_key,
-        )
-        .await;
+        let result = match &command {
+            PendingGeneration::PackingSlip {
+                request,
+                idempotency_key,
+            } => api::internal_post_idempotent::<_, GeneratePackingSlipResponse>(
+                &packing_slip_generation_path(shipment_id),
+                request,
+                idempotency_key,
+            )
+            .await
+            .map(|result| result.document),
+            PendingGeneration::CartonLabelSet {
+                request,
+                idempotency_key,
+            } => api::internal_post_idempotent::<_, GenerateCartonLabelSetResponse>(
+                &carton_label_generation_path(shipment_id),
+                request,
+                idempotency_key,
+            )
+            .await
+            .map(|result| result.document),
+        };
         match result {
-            Ok(result) => {
-                documents.set(vec![result.document]);
+            Ok(document) => {
+                documents.update(|current| {
+                    current.retain(|entry| entry.document_type != document.document_type);
+                    current.push(document);
+                    current.sort_by_key(|entry| entry.document_id);
+                });
                 retry.set(None);
             }
             Err(api_error) => {
@@ -215,6 +271,11 @@ fn packing_slip_generation_path(shipment_id: i64) -> String {
     format!("/api/v1/shipments/{shipment_id}/documents/packing-slips")
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+fn carton_label_generation_path(shipment_id: i64) -> String {
+    format!("/api/v1/shipments/{shipment_id}/documents/carton-label-sets")
+}
+
 fn document_download_path(document_id: i64) -> String {
     format!("/api/v1/shipment-documents/{document_id}/content")
 }
@@ -234,6 +295,39 @@ fn compact_generated_at(value: &str) -> String {
         .to_owned()
 }
 
+fn has_document(
+    documents: Vec<ShipmentDocumentResponse>,
+    document_type: ShipmentDocumentType,
+) -> bool {
+    documents
+        .iter()
+        .any(|document| document.document_type == document_type)
+}
+
+fn document_display(document: &ShipmentDocumentResponse) -> (&'static str, String) {
+    match document.document_type {
+        ShipmentDocumentType::PackingSlip => (
+            "Packing slip",
+            format!(
+                "{} cartons · {} lines · {} units",
+                document.carton_count, document.line_count, document.demand.shipped_quantity,
+            ),
+        ),
+        ShipmentDocumentType::CartonLabelSet => (
+            "Carton labels",
+            format!(
+                "{} labels · {}{}",
+                document.carton_count,
+                document.carrier_code.as_deref().unwrap_or("Carrier"),
+                document
+                    .service_code
+                    .as_deref()
+                    .map_or_else(String::new, |service| format!(" / {service}")),
+            ),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +338,10 @@ mod tests {
         assert_eq!(
             packing_slip_generation_path(7),
             "/api/v1/shipments/7/documents/packing-slips"
+        );
+        assert_eq!(
+            carton_label_generation_path(7),
+            "/api/v1/shipments/7/documents/carton-label-sets"
         );
         assert_eq!(
             document_download_path(9),
