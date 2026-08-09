@@ -192,6 +192,7 @@ pub async fn shipping_queue(
          AND shipment.facility_id = session.facility_id
          AND shipment.packing_session_id = session.id
          AND shipment.order_id = order_header.id
+         AND shipment.state <> 'cancelled'
         WHERE order_header.tenant_id = $1
           AND order_header.deleted IS NULL
           AND order_header.status = 'awaiting shipment'
@@ -294,6 +295,7 @@ fn entry_from_row(row: sqlx::postgres::PgRow) -> AppResult<ShippingQueueEntry> {
                         && shipment.departed_quantity < shipment.shipped_quantity
                 }
                 ShipmentStatus::Departed => false,
+                ShipmentStatus::Cancelled => false,
             };
             let expected_order_revision =
                 packing_revision.get().checked_add(1).and_then(|revision| {

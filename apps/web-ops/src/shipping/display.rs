@@ -11,6 +11,7 @@ pub(super) const fn shipment_status_label(status: ShipmentStatus) -> &'static st
         ShipmentStatus::Manifested => "Manifested",
         ShipmentStatus::PartiallyDeparted => "Partially departed",
         ShipmentStatus::Departed => "Departed",
+        ShipmentStatus::Cancelled => "Cancelled",
     }
 }
 

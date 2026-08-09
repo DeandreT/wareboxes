@@ -1,3 +1,5 @@
+#[path = "api_v1_shipping/cancellation.rs"]
+mod cancellation;
 mod common;
 #[path = "api_v1_shipping/documents.rs"]
 mod documents;

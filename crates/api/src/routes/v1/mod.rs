@@ -164,6 +164,10 @@ pub fn router() -> Router<AppState> {
             post(shipping::record_manifest),
         )
         .route(
+            "/shipments/{shipment_id}/cancellations",
+            post(shipping::cancel),
+        )
+        .route(
             "/shipments/{shipment_id}/departures",
             post(shipping::confirm_departure),
         )

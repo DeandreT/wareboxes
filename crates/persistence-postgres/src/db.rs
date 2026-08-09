@@ -474,6 +474,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'shipments_tenant_isolation'
                 ),
                 (
+                    'shipment_cancellations',
+                    'shipment_cancellations_tenant_isolation'
+                ),
+                (
                     'shipment_address_snapshots',
                     'shipment_address_snapshots_tenant_isolation'
                 ),

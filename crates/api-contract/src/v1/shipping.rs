@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::Revision;
 
@@ -10,14 +11,27 @@ pub enum ShipmentStatus {
     Manifested,
     PartiallyDeparted,
     Departed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShipmentCancellationReason {
+    PackingCorrection,
+    ShippingDataCorrection,
+    DuplicateShipment,
+    OperatorError,
+    Other,
 }
 
 /// Order state exposed by the parcel-shipment workflow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShipmentOrderStatus {
+    Packing,
     AwaitingShipment,
     Shipped,
+    Cancelled,
 }
 
 /// Creates one shipment from a ready packing session at the observed order revision.
@@ -55,6 +69,52 @@ pub struct ConfirmShipmentDepartureRequest {
     pub scanned_carton_barcodes: Vec<String>,
     pub expected_shipment_revision: Revision,
     pub expected_order_revision: Revision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CancelShipmentRequest {
+    pub expected_shipment_revision: Revision,
+    pub expected_order_revision: Revision,
+    pub reason: ShipmentCancellationReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CancelShipmentRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            expected_shipment_revision: Revision,
+            expected_order_revision: Revision,
+            reason: ShipmentCancellationReason,
+            #[serde(default)]
+            note: Option<String>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.note.as_ref().is_some_and(|note| {
+            note.is_empty()
+                || note.trim() != note
+                || note.chars().count() > 500
+                || note.chars().any(char::is_control)
+        }) {
+            return Err(D::Error::custom("shipment cancellation note is invalid"));
+        }
+        if raw.reason == ShipmentCancellationReason::Other && raw.note.is_none() {
+            return Err(D::Error::custom(
+                "shipment cancellation reason Other requires a note",
+            ));
+        }
+        Ok(Self {
+            expected_shipment_revision: raw.expected_shipment_revision,
+            expected_order_revision: raw.expected_order_revision,
+            reason: raw.reason,
+            note: raw.note,
+        })
+    }
 }
 
 /// Generates the immutable packing slip for one shipment revision.
@@ -164,6 +224,16 @@ pub struct ShipmentCartonResponse {
     pub departed_at: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShipmentCancellationResponse {
+    pub cancellation_id: i64,
+    pub reason: ShipmentCancellationReason,
+    pub note: Option<String>,
+    pub cancelled_by: i64,
+    pub cancelled_at: String,
+}
+
 /// Cumulative carton and quantity progress for physical departure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -191,6 +261,7 @@ pub struct ShipmentDemandResponse {
 #[serde(deny_unknown_fields)]
 pub struct ShipmentResponse {
     pub shipment_id: i64,
+    pub attempt: i64,
     pub packing_session_id: i64,
     pub order_id: i64,
     pub order_key: String,
@@ -204,6 +275,7 @@ pub struct ShipmentResponse {
     pub departure_progress: ShipmentDepartureProgressResponse,
     pub cartons: Vec<ShipmentCartonResponse>,
     pub manifest: Option<ManualCarrierManifestResponse>,
+    pub cancellation: Option<ShipmentCancellationResponse>,
     pub created_by: i64,
     pub created_at: String,
     pub departed_by: Option<i64>,
@@ -217,6 +289,13 @@ pub struct CreateShipmentResponse {
     pub shipment: ShipmentResponse,
     pub order_status: ShipmentOrderStatus,
     pub order_revision: Revision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelShipmentResponse {
+    pub shipment: ShipmentResponse,
+    pub packing_session_revision: Revision,
 }
 
 /// Replay-stable result of manually manifesting one shipment.
@@ -290,6 +369,28 @@ mod tests {
             }))
             .is_err()
         );
+        let cancel = serde_json::from_value::<CancelShipmentRequest>(json!({
+            "expected_shipment_revision": 1,
+            "expected_order_revision": 8,
+            "reason": "packing_correction",
+            "note": "Reclose carton"
+        }))
+        .unwrap();
+        assert_eq!(cancel.reason, ShipmentCancellationReason::PackingCorrection);
+        assert_eq!(cancel.expected_order_revision.get(), 8);
+        assert!(serde_json::from_value::<CancelShipmentRequest>(json!({
+            "expected_shipment_revision": 1,
+            "expected_order_revision": 8,
+            "reason": "other"
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<CancelShipmentRequest>(json!({
+            "expected_shipment_revision": 1,
+            "expected_order_revision": 8,
+            "reason": "operator_error",
+            "force": true
+        }))
+        .is_err());
         assert!(serde_json::from_value::<GeneratePackingSlipRequest>(json!({
             "expected_shipment_revision": 2,
             "shipment_id": 7

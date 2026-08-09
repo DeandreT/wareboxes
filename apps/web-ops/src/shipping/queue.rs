@@ -59,6 +59,7 @@ pub(super) fn ShippingQueue(
                                     shipment.carton_count,
                                 ),
                                 ShipmentStatus::Departed => "Departed".to_owned(),
+                                ShipmentStatus::Cancelled => "Cancelled".to_owned(),
                             },
                         );
                         let blocker = if !entry.origin_ready {

@@ -12,6 +12,7 @@ pub const MAX_CARRIER_SERVICE_CODE_LENGTH: usize = 100;
 pub const MAX_MANIFEST_REFERENCE_LENGTH: usize = 200;
 pub const MAX_TRACKING_NUMBER_LENGTH: usize = 200;
 pub const MAX_SHIPMENT_SCAN_VALUE_LENGTH: usize = 200;
+pub const MAX_SHIPMENT_CANCELLATION_NOTE_LENGTH: usize = 500;
 
 /// Immutable document kinds generated from shipment execution snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -52,6 +53,7 @@ pub enum ShipmentStatus {
     Manifested,
     PartiallyDeparted,
     Departed,
+    Cancelled,
 }
 
 impl ShipmentStatus {
@@ -61,6 +63,7 @@ impl ShipmentStatus {
             Self::Manifested => "manifested",
             Self::PartiallyDeparted => "partially departed",
             Self::Departed => "departed",
+            Self::Cancelled => "cancelled",
         }
     }
 
@@ -70,8 +73,68 @@ impl ShipmentStatus {
             "manifested" => Some(Self::Manifested),
             "partially departed" => Some(Self::PartiallyDeparted),
             "departed" => Some(Self::Departed),
+            "cancelled" => Some(Self::Cancelled),
             _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShipmentCancellationReason {
+    PackingCorrection,
+    ShippingDataCorrection,
+    DuplicateShipment,
+    OperatorError,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ShipmentCancellationNote(String);
+
+impl ShipmentCancellationNote {
+    pub fn new(value: impl Into<String>) -> Result<Self, ShippingError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.trim() != value
+            || value.chars().count() > MAX_SHIPMENT_CANCELLATION_NOTE_LENGTH
+            || value.chars().any(char::is_control)
+        {
+            return Err(ShippingError::InvalidCancellationNote);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShipmentCancellationDetails {
+    reason: ShipmentCancellationReason,
+    note: Option<ShipmentCancellationNote>,
+}
+
+impl ShipmentCancellationDetails {
+    pub fn new(
+        reason: ShipmentCancellationReason,
+        note: Option<ShipmentCancellationNote>,
+    ) -> Result<Self, ShippingError> {
+        if reason == ShipmentCancellationReason::Other && note.is_none() {
+            return Err(ShippingError::CancellationNoteRequired);
+        }
+        Ok(Self { reason, note })
+    }
+
+    pub const fn reason(&self) -> ShipmentCancellationReason {
+        self.reason
+    }
+
+    pub fn note(&self) -> Option<&ShipmentCancellationNote> {
+        self.note.as_ref()
     }
 }
 
@@ -342,6 +405,13 @@ pub fn record_manual_manifest(
     Ok(ShipmentStatus::Manifested)
 }
 
+pub const fn cancel_shipment(status: ShipmentStatus) -> Result<ShipmentStatus, ShippingError> {
+    match status {
+        ShipmentStatus::AwaitingManifest => Ok(ShipmentStatus::Cancelled),
+        _ => Err(ShippingError::ShipmentNotCancellable { status }),
+    }
+}
+
 /// Confirms physical departure using a nonempty, duplicate-free subset of remaining cartons.
 pub fn confirm_shipment_departure(
     shipment_status: ShipmentStatus,
@@ -442,6 +512,14 @@ pub enum ShippingError {
     DuplicateTrackingNumber,
     #[error("only a manifested or partially departed shipment can depart, got {status}")]
     ShipmentNotManifested { status: ShipmentStatus },
+    #[error("only an awaiting-manifest shipment can be cancelled, got {status}")]
+    ShipmentNotCancellable { status: ShipmentStatus },
+    #[error(
+        "shipment cancellation note must be nonblank, trimmed, control-free, and at most {MAX_SHIPMENT_CANCELLATION_NOTE_LENGTH} characters"
+    )]
+    InvalidCancellationNote,
+    #[error("shipment cancellation reason Other requires a note")]
+    CancellationNoteRequired,
     #[error("departure scans must identify a nonempty subset of remaining shipment cartons exactly once")]
     DepartureCartonSetMismatch,
 }
@@ -521,6 +599,29 @@ mod tests {
             ),
             Err(ShippingError::EmptyShipment)
         );
+    }
+
+    #[test]
+    fn only_unmanifested_shipments_can_be_cancelled_with_typed_evidence() {
+        assert_eq!(
+            cancel_shipment(ShipmentStatus::AwaitingManifest),
+            Ok(ShipmentStatus::Cancelled)
+        );
+        assert_eq!(
+            cancel_shipment(ShipmentStatus::Manifested),
+            Err(ShippingError::ShipmentNotCancellable {
+                status: ShipmentStatus::Manifested,
+            })
+        );
+        assert_eq!(
+            ShipmentCancellationDetails::new(ShipmentCancellationReason::Other, None),
+            Err(ShippingError::CancellationNoteRequired)
+        );
+        assert!(ShipmentCancellationDetails::new(
+            ShipmentCancellationReason::PackingCorrection,
+            Some(ShipmentCancellationNote::new("Carton correction").unwrap()),
+        )
+        .is_ok());
     }
 
     #[test]

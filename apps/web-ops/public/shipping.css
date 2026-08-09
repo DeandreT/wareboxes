@@ -561,6 +561,23 @@
   border-top: 1px solid var(--line);
 }
 
+.shipping-shipment-cancel {
+  width: 100%;
+  justify-content: center;
+  margin-top: 8px;
+}
+
+.shipping-shipment-cancel-dialog input {
+  width: 100%;
+  height: var(--control-height);
+  padding: 0 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--control-ink);
+  font: inherit;
+}
+
 .shipping-readiness-grid span,
 .shipping-readiness-grid small {
   color: var(--ink-soft);

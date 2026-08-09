@@ -28,6 +28,11 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
     for (table_name, policy_name, can_update) in [
         ("shipments", "shipments_tenant_isolation", true),
         (
+            "shipment_cancellations",
+            "shipment_cancellations_tenant_isolation",
+            false,
+        ),
+        (
             "shipment_address_snapshots",
             "shipment_address_snapshots_tenant_isolation",
             false,
@@ -195,6 +200,7 @@ async fn shipping_ledgers_are_forced_rls_and_minimally_granted() {
 
     for sequence_name in [
         "shipments_id_seq",
+        "shipment_cancellations_id_seq",
         "shipment_address_snapshots_id_seq",
         "shipment_cartons_id_seq",
         "shipment_manifests_id_seq",

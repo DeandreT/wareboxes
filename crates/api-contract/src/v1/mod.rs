@@ -217,13 +217,15 @@ pub use rf_session::{
     RfSessionTenant,
 };
 pub use shipping::{
-    ConfirmShipmentDepartureRequest, ConfirmShipmentDepartureResponse, CreateShipmentRequest,
-    CreateShipmentResponse, GenerateCartonLabelSetRequest, GenerateCartonLabelSetResponse,
-    GeneratePackingSlipRequest, GeneratePackingSlipResponse, ManualCarrierManifestResponse,
-    ManualCartonTrackingRequest, RecordManualManifestRequest, RecordManualManifestResponse,
-    ShipmentCartonResponse, ShipmentCartonTrackingResponse, ShipmentDemandResponse,
-    ShipmentDepartureProgressResponse, ShipmentDocumentListResponse, ShipmentDocumentResponse,
-    ShipmentDocumentType, ShipmentOrderStatus, ShipmentResponse, ShipmentStatus,
+    CancelShipmentRequest, CancelShipmentResponse, ConfirmShipmentDepartureRequest,
+    ConfirmShipmentDepartureResponse, CreateShipmentRequest, CreateShipmentResponse,
+    GenerateCartonLabelSetRequest, GenerateCartonLabelSetResponse, GeneratePackingSlipRequest,
+    GeneratePackingSlipResponse, ManualCarrierManifestResponse, ManualCartonTrackingRequest,
+    RecordManualManifestRequest, RecordManualManifestResponse, ShipmentCancellationReason,
+    ShipmentCancellationResponse, ShipmentCartonResponse, ShipmentCartonTrackingResponse,
+    ShipmentDemandResponse, ShipmentDepartureProgressResponse, ShipmentDocumentListResponse,
+    ShipmentDocumentResponse, ShipmentDocumentType, ShipmentOrderStatus, ShipmentResponse,
+    ShipmentStatus,
 };
 pub use shipping_queue::{
     ShippingQueueEntryResponse, ShippingQueueFacilityId, ShippingQueueFacilityIdError,

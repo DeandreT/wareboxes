@@ -4,14 +4,16 @@ use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
     CarrierCode, CarrierManifestId, CarrierServiceCode, CartonId, CartonTrackingAssignment,
     FacilityId, InventoryOwnerId, ManifestReference, OrderId, OrderLineId, OrderRevision,
-    OrderStatus, PackSessionId, ShipmentDocumentId, ShipmentDocumentType, ShipmentId,
-    ShipmentRevision, ShipmentScanValue, ShipmentStatus, ShipmentTrackingAssignmentId,
-    ShortShipDemandQuantities, Timestamp, TrackingNumber, UserId,
+    OrderStatus, PackSessionId, ShipmentCancellationDetails, ShipmentCancellationId,
+    ShipmentDocumentId, ShipmentDocumentType, ShipmentId, ShipmentRevision, ShipmentScanValue,
+    ShipmentStatus, ShipmentTrackingAssignmentId, ShortShipDemandQuantities, Timestamp,
+    TrackingNumber, UserId,
 };
 
 pub const CREATE_SHIPMENT_OPERATION: &str = "shipping.shipment.create.v1";
 pub const RECORD_MANUAL_MANIFEST_OPERATION: &str = "shipping.manifest.manual.record.v1";
 pub const CONFIRM_SHIPMENT_DEPARTURE_OPERATION: &str = "shipping.shipment.departure.confirm.v1";
+pub const CANCEL_SHIPMENT_OPERATION: &str = "shipping.shipment.cancel.v1";
 pub const GENERATE_PACKING_SLIP_OPERATION: &str = "shipping.document.packing_slip.generate.v1";
 pub const GENERATE_CARTON_LABEL_SET_OPERATION: &str =
     "shipping.document.carton_label_set.generate.v1";
@@ -149,6 +151,14 @@ pub struct ShipmentCartonReadModel {
     pub departed_at: Option<Timestamp>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShipmentCancellationReadModel {
+    pub cancellation_id: ShipmentCancellationId,
+    pub details: ShipmentCancellationDetails,
+    pub cancelled_by: UserId,
+    pub cancelled_at: Timestamp,
+}
+
 /// Cumulative physical departure progress for one shipment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShipmentDepartureProgress {
@@ -177,6 +187,7 @@ impl ShipmentDepartureProgress {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShipmentReadModel {
     pub shipment_id: ShipmentId,
+    pub attempt: i64,
     pub packing_session_id: PackSessionId,
     pub order_id: OrderId,
     pub order_key: String,
@@ -190,6 +201,7 @@ pub struct ShipmentReadModel {
     pub departure_progress: ShipmentDepartureProgress,
     pub cartons: Vec<ShipmentCartonReadModel>,
     pub manifest: Option<ManualCarrierManifestReadModel>,
+    pub cancellation: Option<ShipmentCancellationReadModel>,
     pub created_by: UserId,
     pub created_at: Timestamp,
     pub departed_by: Option<UserId>,
@@ -234,6 +246,7 @@ impl ShipmentReadModel {
             ShipmentStatus::AwaitingManifest => {
                 matches!(self.order_status, OrderStatus::AwaitingShipment)
                     && self.manifest.is_none()
+                    && self.cancellation.is_none()
                     && self.departed_by.is_none()
                     && self.departed_at.is_none()
                     && self.departure_progress.departed_carton_count == 0
@@ -244,6 +257,7 @@ impl ShipmentReadModel {
             ShipmentStatus::Manifested => {
                 matches!(self.order_status, OrderStatus::AwaitingShipment)
                     && self.manifest_covers_cartons()
+                    && self.cancellation.is_none()
                     && self.departed_by.is_none()
                     && self.departed_at.is_none()
                     && self.departure_progress.departed_carton_count == 0
@@ -251,6 +265,7 @@ impl ShipmentReadModel {
             ShipmentStatus::PartiallyDeparted => {
                 matches!(self.order_status, OrderStatus::AwaitingShipment)
                     && self.manifest_covers_cartons()
+                    && self.cancellation.is_none()
                     && self.departed_by.is_none()
                     && self.departed_at.is_none()
                     && self.departure_progress.departed_carton_count > 0
@@ -259,9 +274,20 @@ impl ShipmentReadModel {
             ShipmentStatus::Departed => {
                 matches!(self.order_status, OrderStatus::Shipped)
                     && self.manifest_covers_cartons()
+                    && self.cancellation.is_none()
                     && self.departed_by.is_some()
                     && self.departed_at.is_some()
                     && self.departure_progress.remaining_carton_count == 0
+            }
+            ShipmentStatus::Cancelled => {
+                self.manifest.is_none()
+                    && self.cancellation.is_some()
+                    && self.departed_by.is_none()
+                    && self.departed_at.is_none()
+                    && self.departure_progress.departed_carton_count == 0
+                    && self.cartons.iter().all(|carton| {
+                        carton.tracking_assignment_id.is_none() && carton.tracking_number.is_none()
+                    })
             }
         }
     }
@@ -319,6 +345,20 @@ pub struct RecordManualManifestResult {
     pub manifest: ManualCarrierManifestReadModel,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CancelShipmentCommand {
+    pub shipment_id: ShipmentId,
+    pub expected_shipment_revision: ShipmentRevision,
+    pub expected_order_revision: OrderRevision,
+    pub details: ShipmentCancellationDetails,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelShipmentResult {
+    pub shipment: ShipmentReadModel,
+    pub packing_session_revision: OrderRevision,
+}
+
 /// Confirms physical departure for a nonempty subset of remaining shipment cartons.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfirmShipmentDepartureCommand {
@@ -350,6 +390,7 @@ pub struct ConfirmShipmentDepartureResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wareboxes_domain::ShipmentCancellationReason;
 
     fn manifested_shipment(status: ShipmentStatus) -> ShipmentReadModel {
         let tracking_assignment_id = ShipmentTrackingAssignmentId::new(7).unwrap();
@@ -357,6 +398,7 @@ mod tests {
         let tracking_number = TrackingNumber::new("TRACK-8").unwrap();
         ShipmentReadModel {
             shipment_id: ShipmentId::new(1).unwrap(),
+            attempt: 1,
             packing_session_id: PackSessionId::new(2).unwrap(),
             order_id: OrderId::new(3).unwrap(),
             order_key: "SO-3".into(),
@@ -406,6 +448,7 @@ mod tests {
                 manifested_by: UserId::new(9).unwrap(),
                 manifested_at: "2026-08-08T20:00:00Z".parse().unwrap(),
             }),
+            cancellation: None,
             created_by: UserId::new(9).unwrap(),
             created_at: "2026-08-08T19:00:00Z".parse().unwrap(),
             departed_by: None,
@@ -461,6 +504,18 @@ mod tests {
             .expected_order_revision,
             order_revision
         );
+        let cancellation = CancelShipmentCommand {
+            shipment_id: ShipmentId::new(2).unwrap(),
+            expected_shipment_revision: shipment_revision,
+            expected_order_revision: order_revision,
+            details: ShipmentCancellationDetails::new(
+                ShipmentCancellationReason::PackingCorrection,
+                None,
+            )
+            .unwrap(),
+        };
+        assert_eq!(cancellation.expected_shipment_revision, shipment_revision);
+        assert_eq!(cancellation.expected_order_revision, order_revision);
     }
 
     #[test]
@@ -519,5 +574,30 @@ mod tests {
 
         departed.cartons[0].tracking_number = None;
         assert!(!departed.is_consistent());
+    }
+
+    #[test]
+    fn cancelled_attempt_requires_cancellation_evidence_but_not_a_live_order_state() {
+        let mut cancelled = manifested_shipment(ShipmentStatus::Cancelled);
+        cancelled.revision = ShipmentRevision::new(2).unwrap();
+        cancelled.order_status = OrderStatus::Packing;
+        cancelled.manifest = None;
+        for carton in &mut cancelled.cartons {
+            carton.tracking_assignment_id = None;
+            carton.tracking_number = None;
+        }
+        cancelled.cancellation = Some(ShipmentCancellationReadModel {
+            cancellation_id: ShipmentCancellationId::new(11).unwrap(),
+            details: ShipmentCancellationDetails::new(
+                ShipmentCancellationReason::PackingCorrection,
+                None,
+            )
+            .unwrap(),
+            cancelled_by: UserId::new(9).unwrap(),
+            cancelled_at: "2026-08-08T20:00:00Z".parse().unwrap(),
+        });
+        assert!(cancelled.is_consistent());
+        cancelled.cancellation = None;
+        assert!(!cancelled.is_consistent());
     }
 }

@@ -1,16 +1,19 @@
+mod cancellation;
 mod display;
 mod documents;
+mod execution;
 mod outbound_qa;
 mod queue;
 mod request_state;
 
 use leptos::{html, prelude::*};
 use wareboxes_api_contract::v1::{
-    ConfigureFacilityShippingOriginResponse, ConfirmShipmentDepartureRequest,
-    CreateShipmentRequest, CreateShipmentResponse, ManualCartonTrackingRequest, OpaqueCursor,
-    OutboundQaPolicyResponse, OutboundQaSessionResponse, OutboundQaSessionStatus,
-    OutboundQaSessionSummaryResponse, RecordManualManifestRequest, RecordManualManifestResponse,
-    ShipmentResponse, ShipmentStatus, ShippingQueueEntryResponse, ShippingQueuePage,
+    CancelShipmentRequest, CancelShipmentResponse, ConfigureFacilityShippingOriginResponse,
+    ConfirmShipmentDepartureRequest, CreateShipmentRequest, CreateShipmentResponse,
+    ManualCartonTrackingRequest, OpaqueCursor, OutboundQaPolicyResponse, OutboundQaSessionResponse,
+    OutboundQaSessionStatus, OutboundQaSessionSummaryResponse, RecordManualManifestRequest,
+    RecordManualManifestResponse, ShipmentResponse, ShipmentStatus, ShippingQueueEntryResponse,
+    ShippingQueuePage,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 
@@ -19,11 +22,8 @@ use crate::components::{Icon, UiIcon};
 use crate::facility_shipping_origin::FacilityShippingOriginDialog;
 use crate::toast::{use_toast_bus, ToastBus};
 
-use display::{
-    compact_timestamp, departure_action_label, dimensions_label, optional_text,
-    shipment_status_label,
-};
-use documents::ShipmentDocumentsPanel;
+use display::{compact_timestamp, departure_action_label, optional_text};
+use execution::ShipmentExecution;
 use outbound_qa::{outbound_qa_ready, OutboundQaReadiness};
 use queue::ShippingQueue;
 use request_state::{
@@ -51,6 +51,11 @@ enum PendingShippingCommand {
     Manifest {
         shipment_id: i64,
         request: RecordManualManifestRequest,
+        idempotency_key: String,
+    },
+    Cancel {
+        shipment_id: i64,
+        request: CancelShipmentRequest,
         idempotency_key: String,
     },
     Depart {
@@ -218,6 +223,17 @@ pub(crate) fn ShippingWorkspace(
         );
     });
     let manifest = Callback::new(move |_| submit_manifest(queue, signals));
+    let cancel_shipment = Callback::new(move |(shipment_id, request)| {
+        dispatch_command(
+            PendingShippingCommand::Cancel {
+                shipment_id,
+                request,
+                idempotency_key: api::new_idempotency_key(),
+            },
+            queue,
+            signals,
+        );
+    });
     let scan = Callback::new(move |_| submit_departure_scan(signals));
     let depart = Callback::new(move |_| submit_departure(queue, signals));
     let retry = Callback::new(move |_| {
@@ -355,6 +371,7 @@ pub(crate) fn ShippingWorkspace(
                     on_clear=clear_selection
                     on_create=create
                     on_manifest=manifest
+                    on_cancel_shipment=cancel_shipment
                     on_scan=scan
                     on_depart=depart
                     on_retry=retry
@@ -388,6 +405,7 @@ fn ShippingDetail(
     on_clear: Callback<()>,
     on_create: Callback<()>,
     on_manifest: Callback<()>,
+    on_cancel_shipment: Callback<(i64, CancelShipmentRequest)>,
     on_scan: Callback<()>,
     on_depart: Callback<()>,
     on_retry: Callback<()>,
@@ -462,8 +480,10 @@ fn ShippingDetail(
                                 signals
                                 scan_input
                                 on_manifest
+                                on_cancel=on_cancel_shipment
                                 on_scan
                                 on_depart
+                                can_cancel=can_configure_qa
                             />
                         })}
                     </Show>
@@ -536,84 +556,6 @@ fn ShipmentReadiness(
                 <button type="button" class="button primary-action" disabled=move || pending.get() || !ready.get() on:click=move |_| on_create.run(())>"Create shipment"</button>
             </div>
         </section>
-    }
-}
-
-#[component]
-fn ShipmentExecution(
-    shipment: ShipmentResponse,
-    signals: ShippingSignals,
-    scan_input: NodeRef<html::Input>,
-    on_manifest: Callback<()>,
-    on_scan: Callback<()>,
-    on_depart: Callback<()>,
-) -> impl IntoView {
-    let carton_count = shipment.cartons.len();
-    let packed_quantity = shipment
-        .cartons
-        .iter()
-        .map(|carton| carton.packed_quantity)
-        .sum::<i64>();
-    let shipment_id = shipment.shipment_id;
-    let shipment_revision = shipment.revision;
-    view! {
-        <div class="shipping-execution">
-            <section class="shipping-cartons">
-                <header>
-                    <div><h3>"Cartons"</h3><span>{format!("{carton_count} cartons · {packed_quantity} units")}</span></div>
-                    <span class="status success">{shipment_status_label(shipment.status)}</span>
-                </header>
-                <div class="table-scroll shipping-carton-scroll">
-                    <table class="data-table shipping-carton-table">
-                        <thead><tr><th>"#"</th><th>"Carton"</th><th>"Lines/qty"</th><th>"Weight"</th><th>"Dimensions"</th><th>"Tracking"</th><th>"Departure"</th></tr></thead>
-                        <tbody>
-                            {shipment.cartons.clone().into_iter().map(|carton| {
-                                let carton_barcode = carton.carton_barcode;
-                                let carton_title = carton_barcode.clone();
-                                let packed = format!("{} / {}", carton.content_count, carton.packed_quantity);
-                                let dimensions = dimensions_label(carton.length_mm, carton.width_mm, carton.height_mm);
-                                let dimensions_title = dimensions.clone();
-                                let tracking = carton.tracking_number.unwrap_or_else(|| "Unassigned".into());
-                                let tracking_title = tracking.clone();
-                                let departure = carton.departed_at.as_ref().map_or("Remaining", |_| "Departed");
-                                view! {
-                                <tr>
-                                    <td>{carton.sequence}</td>
-                                    <td class="mono" title=carton_title>{carton_barcode}</td>
-                                    <td>{packed}</td>
-                                    <td>{carton.weight_grams.map_or_else(|| "—".into(), |value| format!("{value} g"))}</td>
-                                    <td title=dimensions_title>{dimensions}</td>
-                                    <td class="mono" title=tracking_title>{tracking}</td>
-                                    <td><span class=if carton.departed_at.is_some() { "status success" } else { "status" }>{departure}</span></td>
-                                </tr>
-                            }}).collect_view()}
-                        </tbody>
-                    </table>
-                </div>
-                <ShipmentDocumentsPanel
-                    shipment_id
-                    shipment_revision
-                    shipment_status=shipment.status
-                    on_unauthorized=signals.on_unauthorized
-                />
-            </section>
-            <aside class="shipping-command-panel">
-                {match shipment.status {
-                    ShipmentStatus::AwaitingManifest => view! {
-                        <ManifestPanel signals on_manifest/>
-                    }.into_any(),
-                    ShipmentStatus::Manifested => view! {
-                        <DeparturePanel shipment signals scan_input on_scan on_depart/>
-                    }.into_any(),
-                    ShipmentStatus::PartiallyDeparted => view! {
-                        <DeparturePanel shipment signals scan_input on_scan on_depart/>
-                    }.into_any(),
-                    ShipmentStatus::Departed => view! {
-                        <div class="shipping-complete"><Icon icon=UiIcon::Shipping/><h3>"Shipment departed"</h3><p>"Inventory and the order are posted as shipped."</p></div>
-                    }.into_any(),
-                }}
-            </aside>
-        </div>
     }
 }
 
@@ -827,6 +769,17 @@ fn dispatch_command(
                 order_id: result.order_id,
                 shipment_id: result.shipment_id,
             }),
+            PendingShippingCommand::Cancel {
+                shipment_id,
+                request,
+                idempotency_key,
+            } => api::internal_post_idempotent::<_, CancelShipmentResponse>(
+                &format!("/api/v1/shipments/{shipment_id}/cancellations"),
+                request,
+                idempotency_key,
+            )
+            .await
+            .map(|result| CommandResult::Cancelled(Box::new(result))),
             PendingShippingCommand::Depart {
                 shipment_id,
                 request,
@@ -874,6 +827,23 @@ fn dispatch_command(
                 }
                 refresh_shipping_queue(queue, signals);
             }
+            Ok(CommandResult::Cancelled(result)) => {
+                invalidate_shipment_request(signals);
+                signals.shipment.set(None);
+                signals.retry.set(None);
+                signals.tracking.set(Vec::new());
+                signals.carrier.set(String::new());
+                signals.service.set(String::new());
+                signals.manifest_reference.set(String::new());
+                signals.scanned_cartons.set(Vec::new());
+                signals.error.set(false);
+                signals.message.set(format!(
+                    "Shipment attempt {} cancelled. Packing recovery or a new shipment attempt is available.",
+                    result.shipment.attempt
+                ));
+                signals.toasts.success("Shipment cancelled.");
+                refresh_shipping_queue(queue, signals);
+            }
             Err(error) if error.unauthorized => signals.on_unauthorized.run(()),
             Err(error) if error.ambiguous_outcome => {
                 signals.retry.set(Some(command));
@@ -897,6 +867,7 @@ enum CommandResult {
     Created(Box<CreateShipmentResponse>),
     Refresh { order_id: i64, shipment_id: i64 },
     Departed(wareboxes_api_contract::v1::ConfirmShipmentDepartureResponse),
+    Cancelled(Box<CancelShipmentResponse>),
 }
 
 fn load_shipment(order_id: i64, shipment_id: i64, signals: ShippingSignals) {
@@ -981,6 +952,7 @@ fn initialize_shipment(shipment: ShipmentResponse, signals: ShippingSignals) {
                 "Scan one or more remaining cartons for the next departure."
             }
             ShipmentStatus::Departed => "Shipment departure is complete.",
+            ShipmentStatus::Cancelled => "Shipment was cancelled before manifesting.",
         }
         .to_owned(),
     );
@@ -1189,6 +1161,7 @@ fn command_pending_label(command: &PendingShippingCommand) -> &'static str {
     match command {
         PendingShippingCommand::Create { .. } => "Creating shipment...",
         PendingShippingCommand::Manifest { .. } => "Recording carrier manifest...",
+        PendingShippingCommand::Cancel { .. } => "Cancelling shipment attempt...",
         PendingShippingCommand::Depart { .. } => "Confirming shipment departure...",
     }
 }

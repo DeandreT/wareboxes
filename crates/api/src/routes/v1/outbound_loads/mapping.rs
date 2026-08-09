@@ -352,6 +352,7 @@ const fn shipment_status(value: ShipmentStatus) -> ApiShipmentStatus {
         ShipmentStatus::Manifested => ApiShipmentStatus::Manifested,
         ShipmentStatus::PartiallyDeparted => ApiShipmentStatus::PartiallyDeparted,
         ShipmentStatus::Departed => ApiShipmentStatus::Departed,
+        ShipmentStatus::Cancelled => ApiShipmentStatus::Cancelled,
     }
 }
 fn order_status(value: OrderStatus) -> V1Result<ShipmentOrderStatus> {

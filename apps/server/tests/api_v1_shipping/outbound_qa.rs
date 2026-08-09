@@ -5,7 +5,7 @@ use wareboxes_api_contract::v1::{
     ReopenCartonResponse, ShippingQueuePage,
 };
 
-async fn grant_supervisor(fixture: &Fixture, tenant_id: TenantId, user_id: i64) {
+pub(super) async fn grant_supervisor(fixture: &Fixture, tenant_id: TenantId, user_id: i64) {
     let permission = match wareboxes_persistence_postgres::permissions::find_by_name(
         &fixture.db,
         tenant_id,

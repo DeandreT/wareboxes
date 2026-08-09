@@ -4516,6 +4516,7 @@ BEGIN
                    AND shipment.inventory_owner_id = session_row.inventory_owner_id
                    AND shipment.facility_id = session_row.facility_id
                    AND shipment.packing_session_id = session_row.id
+                   AND shipment.state <> 'cancelled'
              ))
             OR EXISTS (
                 SELECT 1 FROM public.shipments shipment
@@ -5229,6 +5230,7 @@ DECLARE
     confirmation_count bigint;
     confirmation_carton_count bigint;
     confirmation_shipped_qty bigint;
+    cancellation_count bigint;
     order_status text;
     order_revision bigint;
 BEGIN
@@ -5239,7 +5241,8 @@ BEGIN
         FROM public.shipments shipment
         WHERE shipment.tenant_id = NEW.tenant_id
           AND shipment.inventory_owner_id = NEW.inventory_owner_id
-          AND shipment.order_id = NEW.id;
+          AND shipment.order_id = NEW.id
+          AND shipment.state <> 'cancelled';
         IF NOT FOUND THEN
             RETURN NULL;
         END IF;
@@ -5308,11 +5311,54 @@ BEGIN
       AND carton.facility_id = shipment_row.facility_id
       AND carton.shipment_id = shipment_row.id;
 
+    SELECT COUNT(*) INTO cancellation_count
+    FROM public.shipment_cancellations cancellation
+    WHERE cancellation.tenant_id = shipment_row.tenant_id
+      AND cancellation.inventory_owner_id = shipment_row.inventory_owner_id
+      AND cancellation.facility_id = shipment_row.facility_id
+      AND cancellation.shipment_id = shipment_row.id;
+
     SELECT status, revision INTO order_status, order_revision
     FROM public.orders order_header
     WHERE order_header.tenant_id = shipment_row.tenant_id
       AND order_header.inventory_owner_id = shipment_row.inventory_owner_id
       AND order_header.id = shipment_row.order_id;
+
+    IF shipment_row.state = 'cancelled' THEN
+        IF address_count <> 2
+           OR carton_count <> shipment_row.carton_count
+           OR content_count <> shipment_row.content_count
+           OR packed_qty <> shipment_row.shipped_qty
+           OR manifest_count <> 0 OR package_count <> 0 OR confirmation_count <> 0
+           OR confirmation_carton_count <> 0 OR confirmation_shipped_qty <> 0
+           OR cancellation_count <> 1
+           OR shipment_row.departed_carton_count <> 0 OR shipment_row.departed_qty <> 0
+           OR NOT EXISTS (
+               SELECT 1 FROM public.shipment_address_snapshots snapshot
+               WHERE snapshot.tenant_id = shipment_row.tenant_id
+                 AND snapshot.shipment_id = shipment_row.id
+                 AND snapshot.address_role = 'origin')
+           OR NOT EXISTS (
+               SELECT 1 FROM public.shipment_address_snapshots snapshot
+               WHERE snapshot.tenant_id = shipment_row.tenant_id
+                 AND snapshot.shipment_id = shipment_row.id
+                 AND snapshot.address_role = 'destination')
+           OR NOT EXISTS (
+               SELECT 1 FROM public.shipment_cancellations cancellation
+               WHERE cancellation.tenant_id = shipment_row.tenant_id
+                 AND cancellation.inventory_owner_id = shipment_row.inventory_owner_id
+                 AND cancellation.facility_id = shipment_row.facility_id
+                 AND cancellation.shipment_id = shipment_row.id
+                 AND cancellation.attempt = shipment_row.attempt
+                 AND cancellation.resulting_shipment_revision = shipment_row.revision
+                 AND cancellation.cancelled_by_user_id = shipment_row.cancelled_by_user_id
+                 AND cancellation.cancelled_at = shipment_row.cancelled_at)
+        THEN
+            RAISE EXCEPTION 'cancelled shipment snapshot and evidence do not reconcile'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NULL;
+    END IF;
 
     IF address_count <> 2
        OR NOT EXISTS (
@@ -30282,6 +30328,7 @@ BEGIN
               AND shipment.inventory_owner_id = NEW.inventory_owner_id
               AND shipment.facility_id = NEW.facility_id
               AND shipment.packing_session_id = NEW.packing_session_id
+              AND shipment.state <> 'cancelled'
        )
     THEN
         RAISE EXCEPTION 'carton reopening does not match closed pre-downstream packing state'
@@ -30892,6 +30939,456 @@ GRANT UPDATE (state, revision, cancelled_by_user_id, cancelled_at)
 ON public.outbound_qa_sessions TO wareboxes_app;
 REVOKE ALL ON FUNCTION public.validate_outbound_qa_cancellation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_outbound_qa_cancellation_mutation() FROM PUBLIC;
+
+-- Unmanifested shipment attempts may be cancelled without deleting their
+-- immutable address/carton/document snapshots. Cancellation advances the
+-- packing-session revision to the order revision established by creation, so
+-- packing recovery and later shipment attempts resume from one shared revision.
+ALTER TABLE public.shipments
+    ADD COLUMN attempt bigint NOT NULL DEFAULT 1,
+    ADD COLUMN cancelled_by_user_id bigint,
+    ADD COLUMN cancelled_at timestamp with time zone;
+ALTER TABLE public.shipments
+    DROP CONSTRAINT shipments_state_check,
+    DROP CONSTRAINT shipments_state_fields_check,
+    DROP CONSTRAINT shipments_order_key;
+ALTER TABLE public.shipments
+    ADD CONSTRAINT shipments_attempt_check CHECK (attempt > 0),
+    ADD CONSTRAINT shipments_state_check CHECK (
+        state IN ('awaiting manifest','manifested','partially departed','departed','cancelled')),
+    ADD CONSTRAINT shipments_state_fields_check CHECK (
+        ((state = 'awaiting manifest') AND revision = 1
+            AND carrier IS NULL AND service IS NULL
+            AND manifested_at IS NULL AND departed_at IS NULL
+            AND departed_carton_count = 0 AND departed_qty = 0
+            AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL)
+        OR ((state = 'manifested') AND revision = 2
+            AND carrier IS NOT NULL AND manifested_at IS NOT NULL
+            AND manifested_at >= created_at AND departed_at IS NULL
+            AND departed_carton_count = 0 AND departed_qty = 0
+            AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL)
+        OR ((state = 'partially departed') AND revision >= 3
+            AND carrier IS NOT NULL AND manifested_at IS NOT NULL
+            AND manifested_at >= created_at AND departed_at IS NULL
+            AND departed_carton_count > 0 AND departed_carton_count < carton_count
+            AND departed_qty > 0 AND departed_qty < shipped_qty
+            AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL)
+        OR ((state = 'departed') AND revision >= 3
+            AND carrier IS NOT NULL AND manifested_at IS NOT NULL
+            AND manifested_at >= created_at AND departed_at IS NOT NULL
+            AND departed_at >= manifested_at
+            AND departed_carton_count = carton_count AND departed_qty = shipped_qty
+            AND cancelled_by_user_id IS NULL AND cancelled_at IS NULL)
+        OR ((state = 'cancelled') AND revision = 2
+            AND carrier IS NULL AND service IS NULL
+            AND manifested_at IS NULL AND departed_at IS NULL
+            AND departed_carton_count = 0 AND departed_qty = 0
+            AND cancelled_by_user_id IS NOT NULL AND cancelled_at IS NOT NULL
+            AND cancelled_at >= created_at)),
+    ADD CONSTRAINT shipments_order_attempt_key UNIQUE (
+        tenant_id, inventory_owner_id, order_id, attempt),
+    ADD CONSTRAINT shipments_cancelled_by_fkey FOREIGN KEY (
+        tenant_id, cancelled_by_user_id)
+        REFERENCES public.tenant_memberships (tenant_id, user_id);
+CREATE UNIQUE INDEX shipments_active_order_idx
+ON public.shipments (tenant_id, inventory_owner_id, order_id)
+WHERE state <> 'cancelled';
+
+ALTER TABLE public.shipment_cartons
+    DROP CONSTRAINT shipment_cartons_carton_key,
+    DROP CONSTRAINT shipment_cartons_license_plate_key;
+ALTER TABLE public.shipment_cartons
+    ADD CONSTRAINT shipment_cartons_attempt_carton_key UNIQUE (
+        tenant_id, inventory_owner_id, facility_id, shipment_id, carton_id),
+    ADD CONSTRAINT shipment_cartons_attempt_license_plate_key UNIQUE (
+        tenant_id, inventory_owner_id, facility_id, shipment_id, license_plate_id);
+
+CREATE TABLE public.shipment_cancellations (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    shipment_id bigint NOT NULL,
+    packing_session_id bigint NOT NULL,
+    order_release_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    attempt bigint NOT NULL,
+    expected_shipment_revision bigint NOT NULL,
+    resulting_shipment_revision bigint NOT NULL,
+    expected_order_revision bigint NOT NULL,
+    resulting_order_revision bigint NOT NULL,
+    expected_packing_revision bigint NOT NULL,
+    resulting_packing_revision bigint NOT NULL,
+    carton_count bigint NOT NULL,
+    content_count bigint NOT NULL,
+    packed_qty bigint NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    cancelled_by_user_id bigint NOT NULL,
+    cancelled_at timestamp with time zone NOT NULL,
+    CONSTRAINT shipment_cancellations_attempt_check CHECK (attempt > 0),
+    CONSTRAINT shipment_cancellations_revision_check CHECK (
+        expected_shipment_revision = 1
+        AND resulting_shipment_revision = expected_shipment_revision + 1
+        AND expected_order_revision > 0
+        AND resulting_order_revision = expected_order_revision
+        AND expected_packing_revision > 0
+        AND resulting_packing_revision = expected_packing_revision + 1
+        AND resulting_packing_revision = expected_order_revision),
+    CONSTRAINT shipment_cancellations_quantity_check CHECK (
+        carton_count > 0 AND content_count > 0 AND packed_qty > 0),
+    CONSTRAINT shipment_cancellations_reason_check CHECK (
+        reason_code IN ('packing_correction','shipping_data_correction',
+                        'duplicate_shipment','operator_error','other')),
+    CONSTRAINT shipment_cancellations_note_check CHECK (
+        note IS NULL OR (note = btrim(note) AND note <> ''
+                         AND char_length(note) <= 500
+                         AND note !~ '[[:cntrl:]]')),
+    CONSTRAINT shipment_cancellations_other_note_check CHECK (
+        reason_code <> 'other' OR note IS NOT NULL),
+    CONSTRAINT shipment_cancellations_scope_id_key UNIQUE (
+        tenant_id, inventory_owner_id, facility_id, shipment_id, id),
+    CONSTRAINT shipment_cancellations_shipment_key UNIQUE (
+        tenant_id, inventory_owner_id, facility_id, shipment_id),
+    CONSTRAINT shipment_cancellations_shipment_fkey FOREIGN KEY (
+        tenant_id, inventory_owner_id, facility_id,
+        packing_session_id, order_release_id, order_id, shipment_id)
+        REFERENCES public.shipments (
+            tenant_id, inventory_owner_id, facility_id,
+            packing_session_id, order_release_id, order_id, id),
+    CONSTRAINT shipment_cancellations_actor_fkey FOREIGN KEY (
+        tenant_id, cancelled_by_user_id)
+        REFERENCES public.tenant_memberships (tenant_id, user_id)
+);
+ALTER TABLE public.shipment_cancellations FORCE ROW LEVEL SECURITY;
+CREATE INDEX shipment_cancellations_order_idx
+ON public.shipment_cancellations (tenant_id, inventory_owner_id, order_id, id);
+
+CREATE OR REPLACE FUNCTION public.validate_shipment() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE expected_attempt bigint;
+BEGIN
+    SELECT COALESCE(MAX(shipment.attempt),0) + 1 INTO expected_attempt
+    FROM public.shipments shipment
+    WHERE shipment.tenant_id = NEW.tenant_id
+      AND shipment.inventory_owner_id = NEW.inventory_owner_id
+      AND shipment.order_id = NEW.order_id;
+
+    IF NEW.state <> 'awaiting manifest'
+       OR NEW.revision <> 1 OR NEW.attempt <> expected_attempt
+       OR NEW.carrier IS NOT NULL OR NEW.service IS NOT NULL
+       OR NEW.manifested_at IS NOT NULL OR NEW.departed_at IS NOT NULL
+       OR NEW.departed_carton_count <> 0 OR NEW.departed_qty <> 0
+       OR NEW.cancelled_by_user_id IS NOT NULL OR NEW.cancelled_at IS NOT NULL
+       OR EXISTS (
+            SELECT 1 FROM public.shipments shipment
+            WHERE shipment.tenant_id = NEW.tenant_id
+              AND shipment.inventory_owner_id = NEW.inventory_owner_id
+              AND shipment.order_id = NEW.order_id
+              AND shipment.state <> 'cancelled')
+       OR NOT EXISTS (
+            SELECT 1
+            FROM public.packing_sessions session
+            INNER JOIN public.orders order_header
+              ON order_header.tenant_id = session.tenant_id
+             AND order_header.inventory_owner_id = session.inventory_owner_id
+             AND order_header.id = session.order_id
+             AND order_header.deleted IS NULL
+            WHERE session.tenant_id = NEW.tenant_id
+              AND session.inventory_owner_id = NEW.inventory_owner_id
+              AND session.facility_id = NEW.facility_id
+              AND session.id = NEW.packing_session_id
+              AND session.order_release_id = NEW.order_release_id
+              AND session.order_id = NEW.order_id
+              AND session.state = 'ready_to_manifest'
+              AND session.closed_carton_count = NEW.carton_count
+              AND session.packed_allocation_count = NEW.content_count
+              AND session.packed_qty = NEW.shipped_qty
+              AND NEW.creation_expected_order_revision = session.revision
+              AND order_header.status = 'awaiting shipment'
+              AND order_header.revision = session.revision
+              AND NEW.creation_resulting_order_revision = session.revision + 1)
+    THEN
+        RAISE EXCEPTION 'shipment must snapshot one ready full-order packing session'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.guard_shipment_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.packing_session_id IS DISTINCT FROM OLD.packing_session_id
+       OR NEW.order_release_id IS DISTINCT FROM OLD.order_release_id
+       OR NEW.order_id IS DISTINCT FROM OLD.order_id
+       OR NEW.attempt IS DISTINCT FROM OLD.attempt
+       OR NEW.creation_expected_order_revision IS DISTINCT FROM OLD.creation_expected_order_revision
+       OR NEW.creation_resulting_order_revision IS DISTINCT FROM OLD.creation_resulting_order_revision
+       OR NEW.carton_count IS DISTINCT FROM OLD.carton_count
+       OR NEW.content_count IS DISTINCT FROM OLD.content_count
+       OR NEW.shipped_qty IS DISTINCT FROM OLD.shipped_qty
+       OR NEW.created_by_user_id IS DISTINCT FROM OLD.created_by_user_id
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+    THEN
+        RAISE EXCEPTION 'shipment identity and plan are immutable' USING ERRCODE = '55000';
+    END IF;
+
+    IF OLD.state = 'awaiting manifest' AND NEW.state = 'cancelled'
+       AND NEW.revision = OLD.revision + 1
+       AND NEW.carrier IS NULL AND NEW.service IS NULL
+       AND NEW.manifested_at IS NULL AND NEW.departed_at IS NULL
+       AND NEW.departed_carton_count = 0 AND NEW.departed_qty = 0
+       AND NEW.cancelled_by_user_id IS NOT NULL AND NEW.cancelled_at IS NOT NULL
+       AND EXISTS (
+           SELECT 1 FROM public.shipment_cancellations cancellation
+           WHERE cancellation.tenant_id = OLD.tenant_id
+             AND cancellation.inventory_owner_id = OLD.inventory_owner_id
+             AND cancellation.facility_id = OLD.facility_id
+             AND cancellation.shipment_id = OLD.id
+             AND cancellation.expected_shipment_revision = OLD.revision
+             AND cancellation.resulting_shipment_revision = NEW.revision
+             AND cancellation.cancelled_by_user_id = NEW.cancelled_by_user_id
+             AND cancellation.cancelled_at = NEW.cancelled_at)
+    THEN
+        RETURN NEW;
+    END IF;
+
+    IF NEW.cancelled_by_user_id IS NOT NULL OR NEW.cancelled_at IS NOT NULL THEN
+        RAISE EXCEPTION 'active shipment cannot contain cancellation evidence'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF OLD.state = 'awaiting manifest'
+       AND NEW.state = 'manifested'
+       AND NEW.revision = OLD.revision + 1
+       AND OLD.manifested_at IS NULL
+       AND NEW.manifested_at IS NOT NULL
+       AND NEW.manifested_at >= NEW.created_at
+       AND NEW.departed_at IS NULL
+       AND NEW.departed_carton_count = 0 AND NEW.departed_qty = 0
+       AND OLD.carrier IS NULL AND OLD.service IS NULL
+       AND NEW.carrier IS NOT NULL
+    THEN
+        RETURN NEW;
+    END IF;
+
+    IF OLD.state IN ('manifested','partially departed')
+       AND NEW.state IN ('partially departed','departed')
+       AND NEW.revision = OLD.revision + 1
+       AND NEW.carrier IS NOT DISTINCT FROM OLD.carrier
+       AND NEW.service IS NOT DISTINCT FROM OLD.service
+       AND NEW.manifested_at IS NOT DISTINCT FROM OLD.manifested_at
+       AND NEW.departed_carton_count > OLD.departed_carton_count
+       AND NEW.departed_qty > OLD.departed_qty
+       AND ((NEW.state = 'partially departed' AND NEW.departed_at IS NULL
+             AND NEW.departed_carton_count < NEW.carton_count
+             AND NEW.departed_qty < NEW.shipped_qty)
+            OR (NEW.state = 'departed' AND NEW.departed_at IS NOT NULL
+                AND NEW.departed_at >= NEW.manifested_at
+                AND NEW.departed_carton_count = NEW.carton_count
+                AND NEW.departed_qty = NEW.shipped_qty))
+    THEN
+        RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION 'invalid shipment state or revision transition' USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE FUNCTION public.validate_shipment_cancellation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE source record;
+BEGIN
+    SELECT shipment.state,shipment.revision,shipment.attempt,
+           shipment.creation_expected_order_revision,
+           shipment.creation_resulting_order_revision,
+           shipment.carton_count,shipment.content_count,shipment.shipped_qty,
+           shipment.created_at,session.state AS packing_state,
+           session.revision AS packing_revision,
+           order_header.status AS order_status,
+           order_header.revision AS order_revision
+    INTO source
+    FROM public.shipments shipment
+    INNER JOIN public.packing_sessions session
+      ON session.tenant_id=shipment.tenant_id
+     AND session.inventory_owner_id=shipment.inventory_owner_id
+     AND session.facility_id=shipment.facility_id
+     AND session.id=shipment.packing_session_id
+     AND session.order_release_id=shipment.order_release_id
+     AND session.order_id=shipment.order_id
+    INNER JOIN public.orders order_header
+      ON order_header.tenant_id=shipment.tenant_id
+     AND order_header.inventory_owner_id=shipment.inventory_owner_id
+     AND order_header.id=shipment.order_id AND order_header.deleted IS NULL
+    WHERE shipment.tenant_id=NEW.tenant_id
+      AND shipment.inventory_owner_id=NEW.inventory_owner_id
+      AND shipment.facility_id=NEW.facility_id
+      AND shipment.id=NEW.shipment_id
+      AND shipment.packing_session_id=NEW.packing_session_id
+      AND shipment.order_release_id=NEW.order_release_id
+      AND shipment.order_id=NEW.order_id
+    FOR SHARE OF shipment,session,order_header;
+
+    IF NOT FOUND OR source.state <> 'awaiting manifest'
+       OR source.revision <> NEW.expected_shipment_revision
+       OR NEW.resulting_shipment_revision <> source.revision + 1
+       OR source.attempt <> NEW.attempt
+       OR source.creation_expected_order_revision <> NEW.expected_packing_revision
+       OR source.creation_resulting_order_revision <> NEW.expected_order_revision
+       OR source.carton_count <> NEW.carton_count
+       OR source.content_count <> NEW.content_count
+       OR source.shipped_qty <> NEW.packed_qty
+       OR source.packing_state <> 'ready_to_manifest'
+       OR source.packing_revision <> NEW.expected_packing_revision
+       OR source.order_status <> 'awaiting shipment'
+       OR source.order_revision <> NEW.expected_order_revision
+       OR NEW.resulting_order_revision <> source.order_revision
+       OR NEW.resulting_packing_revision <> source.packing_revision + 1
+       OR NEW.resulting_packing_revision <> source.order_revision
+       OR NEW.cancelled_at < source.created_at
+       OR EXISTS (
+           SELECT 1 FROM public.shipment_manifests manifest
+           WHERE manifest.tenant_id=NEW.tenant_id AND manifest.shipment_id=NEW.shipment_id)
+       OR EXISTS (
+           SELECT 1 FROM public.outbound_load_shipments link
+           WHERE link.tenant_id=NEW.tenant_id AND link.shipment_id=NEW.shipment_id
+             AND link.closed_at IS NULL)
+    THEN
+        RAISE EXCEPTION 'shipment cancellation is not executable' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.guard_packing_session_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.order_release_id IS DISTINCT FROM OLD.order_release_id
+       OR NEW.order_id IS DISTINCT FROM OLD.order_id
+       OR NEW.packing_location_id IS DISTINCT FROM OLD.packing_location_id
+       OR NEW.expected_allocation_count IS DISTINCT FROM OLD.expected_allocation_count
+       OR NEW.expected_qty IS DISTINCT FROM OLD.expected_qty
+       OR NEW.started_by_user_id IS DISTINCT FROM OLD.started_by_user_id
+       OR NEW.started_at IS DISTINCT FROM OLD.started_at
+    THEN
+        RAISE EXCEPTION 'packing session identity and plan are immutable' USING ERRCODE = '55000';
+    END IF;
+    IF OLD.state = 'abandoned' THEN
+        RAISE EXCEPTION 'abandoned packing sessions are immutable' USING ERRCODE = '55000';
+    END IF;
+
+    IF OLD.state = 'ready_to_manifest' AND NEW.state = 'ready_to_manifest' THEN
+        IF NEW.revision <> OLD.revision + 1
+           OR ROW(NEW.packed_allocation_count,NEW.packed_qty,
+                  NEW.open_carton_count,NEW.closed_carton_count,
+                  NEW.ready_by_user_id,NEW.ready_at)
+              IS DISTINCT FROM
+              ROW(OLD.packed_allocation_count,OLD.packed_qty,
+                  OLD.open_carton_count,OLD.closed_carton_count,
+                  OLD.ready_by_user_id,OLD.ready_at)
+           OR NOT EXISTS (
+               SELECT 1 FROM public.shipment_cancellations cancellation
+               WHERE cancellation.tenant_id=OLD.tenant_id
+                 AND cancellation.inventory_owner_id=OLD.inventory_owner_id
+                 AND cancellation.facility_id=OLD.facility_id
+                 AND cancellation.packing_session_id=OLD.id
+                 AND cancellation.expected_packing_revision=OLD.revision
+                 AND cancellation.resulting_packing_revision=NEW.revision)
+        THEN
+            RAISE EXCEPTION 'invalid shipment-cancellation packing resynchronization'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF OLD.state = 'ready_to_manifest' AND NEW.state = 'open' THEN
+        IF NEW.revision <> OLD.revision + 1
+           OR NEW.ready_by_user_id IS NOT NULL OR NEW.ready_at IS NOT NULL
+           OR NEW.packed_allocation_count <> OLD.packed_allocation_count
+           OR NEW.packed_qty <> OLD.packed_qty
+           OR NEW.open_carton_count <> 1
+           OR NEW.closed_carton_count <> OLD.closed_carton_count - 1
+           OR NEW.abandonment_reason IS NOT NULL OR NEW.abandonment_note IS NOT NULL
+           OR NEW.abandoned_by_user_id IS NOT NULL OR NEW.abandoned_at IS NOT NULL
+        THEN
+            RAISE EXCEPTION 'invalid completed-session carton reopening transition'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF NEW.state = 'open' THEN
+        IF NEW.revision <> OLD.revision + 1
+           OR NEW.ready_by_user_id IS NOT NULL OR NEW.ready_at IS NOT NULL
+           OR NEW.abandonment_reason IS NOT NULL OR NEW.abandonment_note IS NOT NULL
+           OR NEW.abandoned_by_user_id IS NOT NULL OR NEW.abandoned_at IS NOT NULL
+        THEN
+            RAISE EXCEPTION 'open packing session updates must advance revision once'
+                USING ERRCODE = '55000';
+        END IF;
+    ELSIF NEW.state = 'ready_to_manifest' THEN
+        IF OLD.state <> 'open' OR NEW.revision <> OLD.revision + 1
+           OR NEW.ready_by_user_id IS NULL OR NEW.ready_at IS NULL
+           OR NEW.abandonment_reason IS NOT NULL OR NEW.abandonment_note IS NOT NULL
+           OR NEW.abandoned_by_user_id IS NOT NULL OR NEW.abandoned_at IS NOT NULL
+        THEN
+            RAISE EXCEPTION 'invalid packing session completion transition' USING ERRCODE = '55000';
+        END IF;
+    ELSIF NEW.state = 'abandoned' THEN
+        IF OLD.state <> 'open' OR NEW.revision <> OLD.revision + 1
+           OR NEW.ready_by_user_id IS NOT NULL OR NEW.ready_at IS NOT NULL
+           OR NEW.abandonment_reason IS NULL OR NEW.abandoned_by_user_id IS NULL
+           OR NEW.abandoned_at IS NULL OR NEW.abandoned_at < NEW.started_at
+           OR NEW.packed_allocation_count <> 0 OR NEW.packed_qty <> 0
+           OR NEW.open_carton_count <> 0 OR NEW.closed_carton_count <> 0
+        THEN
+            RAISE EXCEPTION 'invalid packing session abandonment transition' USING ERRCODE = '55000';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'invalid packing session state' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.reject_shipment_cancellation_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    RAISE EXCEPTION 'shipment cancellations are immutable' USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER shipment_cancellations_validate
+BEFORE INSERT ON public.shipment_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_cancellation();
+CREATE TRIGGER shipment_cancellations_are_immutable
+BEFORE UPDATE OR DELETE ON public.shipment_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.reject_shipment_cancellation_mutation();
+CREATE CONSTRAINT TRIGGER shipment_cancellations_validate_consistency
+AFTER INSERT ON public.shipment_cancellations DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.validate_shipment_consistency();
+
+ALTER TABLE public.shipment_cancellations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY shipment_cancellations_tenant_isolation
+ON public.shipment_cancellations
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT,INSERT ON public.shipment_cancellations TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.shipment_cancellations_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_shipment_cancellation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_shipment_cancellation_mutation() FROM PUBLIC;
 
 -- PostgreSQL database dump complete
 --

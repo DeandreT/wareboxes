@@ -3,25 +3,28 @@ use axum::extract::{Path, State};
 use axum::http::{header, HeaderValue, Response};
 use axum::Json;
 use wareboxes_api_contract::v1::{
-    ConfirmShipmentDepartureRequest, ConfirmShipmentDepartureResponse, CreateShipmentRequest,
-    CreateShipmentResponse, GenerateCartonLabelSetRequest, GenerateCartonLabelSetResponse,
-    GeneratePackingSlipRequest, GeneratePackingSlipResponse, ManualCarrierManifestResponse,
-    RecordManualManifestRequest, RecordManualManifestResponse, Revision, ShipmentCartonResponse,
-    ShipmentCartonTrackingResponse, ShipmentDemandResponse, ShipmentDepartureProgressResponse,
-    ShipmentDocumentListResponse, ShipmentDocumentResponse,
+    CancelShipmentRequest, CancelShipmentResponse, ConfirmShipmentDepartureRequest,
+    ConfirmShipmentDepartureResponse, CreateShipmentRequest, CreateShipmentResponse,
+    GenerateCartonLabelSetRequest, GenerateCartonLabelSetResponse, GeneratePackingSlipRequest,
+    GeneratePackingSlipResponse, ManualCarrierManifestResponse, RecordManualManifestRequest,
+    RecordManualManifestResponse, Revision,
+    ShipmentCancellationReason as ApiShipmentCancellationReason, ShipmentCancellationResponse,
+    ShipmentCartonResponse, ShipmentCartonTrackingResponse, ShipmentDemandResponse,
+    ShipmentDepartureProgressResponse, ShipmentDocumentListResponse, ShipmentDocumentResponse,
     ShipmentDocumentType as ApiShipmentDocumentType, ShipmentOrderStatus, ShipmentResponse,
     ShipmentStatus as ApiShipmentStatus,
 };
 use wareboxes_application::shipping::{
-    ConfirmShipmentDepartureCommand, ConfirmShipmentDepartureResult, CreateShipmentCommand,
-    CreateShipmentResult, GenerateCartonLabelSetCommand, GeneratePackingSlipCommand,
-    ManualCarrierManifestReadModel, RecordManualManifestCommand, RecordManualManifestResult,
-    ShipmentDocumentContentQuery, ShipmentDocumentListQuery, ShipmentDocumentReadModel,
-    ShipmentQuery, ShipmentReadModel,
+    CancelShipmentCommand, CancelShipmentResult, ConfirmShipmentDepartureCommand,
+    ConfirmShipmentDepartureResult, CreateShipmentCommand, CreateShipmentResult,
+    GenerateCartonLabelSetCommand, GeneratePackingSlipCommand, ManualCarrierManifestReadModel,
+    RecordManualManifestCommand, RecordManualManifestResult, ShipmentDocumentContentQuery,
+    ShipmentDocumentListQuery, ShipmentDocumentReadModel, ShipmentQuery, ShipmentReadModel,
 };
 use wareboxes_domain::{
     CarrierCode, CarrierServiceCode, CartonId, CartonTrackingAssignment, ManifestReference,
-    OrderId, OrderRevision, OrderStatus, PackSessionId, ShipmentDocumentId, ShipmentDocumentType,
+    OrderId, OrderRevision, OrderStatus, PackSessionId, ShipmentCancellationDetails,
+    ShipmentCancellationNote, ShipmentCancellationReason, ShipmentDocumentId, ShipmentDocumentType,
     ShipmentId, ShipmentRevision, ShipmentScanValue, ShipmentStatus, TrackingNumber,
 };
 
@@ -108,6 +111,32 @@ pub async fn record_manifest(
     let result =
         repo::shipping::record_manual_manifest(&state.db, &user.tenant, &context, &command).await?;
     Ok(Json(map_manifest_result(result)?))
+}
+
+pub async fn cancel(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(shipment_id): Path<i64>,
+    Json(body): Json<CancelShipmentRequest>,
+) -> V1Result<Json<CancelShipmentResponse>> {
+    user.require_permission(&state.db, "wms_supervisor").await?;
+    let note = body
+        .note
+        .map(ShipmentCancellationNote::new)
+        .transpose()
+        .map_err(domain_validation)?;
+    let command = CancelShipmentCommand {
+        shipment_id: positive(shipment_id, ShipmentId::new, "shipment ID")?,
+        expected_shipment_revision: shipment_revision(body.expected_shipment_revision)?,
+        expected_order_revision: order_revision(body.expected_order_revision)?,
+        details: ShipmentCancellationDetails::new(map_cancellation_reason(body.reason), note)
+            .map_err(domain_validation)?,
+    };
+    let context = user.command_context(&idempotency_key);
+    let result =
+        repo::shipping::cancel_shipment(&state.db, &user.tenant, &context, &command).await?;
+    map_cancellation(result).map(Json)
 }
 
 pub async fn confirm_departure(
@@ -243,6 +272,7 @@ fn map_create(result: CreateShipmentResult) -> V1Result<CreateShipmentResponse> 
 fn map_shipment(shipment: ShipmentReadModel) -> V1Result<ShipmentResponse> {
     Ok(ShipmentResponse {
         shipment_id: shipment.shipment_id.get(),
+        attempt: shipment.attempt,
         packing_session_id: shipment.packing_session_id.get(),
         order_id: shipment.order_id.get(),
         order_key: shipment.order_key,
@@ -284,10 +314,29 @@ fn map_shipment(shipment: ShipmentReadModel) -> V1Result<ShipmentResponse> {
             })
             .collect(),
         manifest: shipment.manifest.map(map_manifest),
+        cancellation: shipment
+            .cancellation
+            .map(|cancellation| ShipmentCancellationResponse {
+                cancellation_id: cancellation.cancellation_id.get(),
+                reason: api_cancellation_reason(cancellation.details.reason()),
+                note: cancellation
+                    .details
+                    .note()
+                    .map(|note| note.as_str().to_owned()),
+                cancelled_by: cancellation.cancelled_by.get(),
+                cancelled_at: cancellation.cancelled_at.to_rfc3339(),
+            }),
         created_by: shipment.created_by.get(),
         created_at: shipment.created_at.to_rfc3339(),
         departed_by: shipment.departed_by.map(|user_id| user_id.get()),
         departed_at: shipment.departed_at.map(|timestamp| timestamp.to_rfc3339()),
+    })
+}
+
+fn map_cancellation(result: CancelShipmentResult) -> V1Result<CancelShipmentResponse> {
+    Ok(CancelShipmentResponse {
+        shipment: map_shipment(result.shipment)?,
+        packing_session_revision: revision(result.packing_session_revision.get())?,
     })
 }
 
@@ -387,16 +436,55 @@ const fn map_shipment_status(status: ShipmentStatus) -> ApiShipmentStatus {
         ShipmentStatus::Manifested => ApiShipmentStatus::Manifested,
         ShipmentStatus::PartiallyDeparted => ApiShipmentStatus::PartiallyDeparted,
         ShipmentStatus::Departed => ApiShipmentStatus::Departed,
+        ShipmentStatus::Cancelled => ApiShipmentStatus::Cancelled,
     }
 }
 
 fn map_order_status(status: OrderStatus) -> V1Result<ShipmentOrderStatus> {
     match status {
+        OrderStatus::Packing => Ok(ShipmentOrderStatus::Packing),
         OrderStatus::AwaitingShipment => Ok(ShipmentOrderStatus::AwaitingShipment),
         OrderStatus::Shipped => Ok(ShipmentOrderStatus::Shipped),
+        OrderStatus::Cancelled => Ok(ShipmentOrderStatus::Cancelled),
         _ => Err(V1Error::internal(
             "shipping workflow produced an invalid order status",
         )),
+    }
+}
+
+const fn map_cancellation_reason(
+    reason: ApiShipmentCancellationReason,
+) -> ShipmentCancellationReason {
+    match reason {
+        ApiShipmentCancellationReason::PackingCorrection => {
+            ShipmentCancellationReason::PackingCorrection
+        }
+        ApiShipmentCancellationReason::ShippingDataCorrection => {
+            ShipmentCancellationReason::ShippingDataCorrection
+        }
+        ApiShipmentCancellationReason::DuplicateShipment => {
+            ShipmentCancellationReason::DuplicateShipment
+        }
+        ApiShipmentCancellationReason::OperatorError => ShipmentCancellationReason::OperatorError,
+        ApiShipmentCancellationReason::Other => ShipmentCancellationReason::Other,
+    }
+}
+
+const fn api_cancellation_reason(
+    reason: ShipmentCancellationReason,
+) -> ApiShipmentCancellationReason {
+    match reason {
+        ShipmentCancellationReason::PackingCorrection => {
+            ApiShipmentCancellationReason::PackingCorrection
+        }
+        ShipmentCancellationReason::ShippingDataCorrection => {
+            ApiShipmentCancellationReason::ShippingDataCorrection
+        }
+        ShipmentCancellationReason::DuplicateShipment => {
+            ApiShipmentCancellationReason::DuplicateShipment
+        }
+        ShipmentCancellationReason::OperatorError => ApiShipmentCancellationReason::OperatorError,
+        ShipmentCancellationReason::Other => ApiShipmentCancellationReason::Other,
     }
 }
 

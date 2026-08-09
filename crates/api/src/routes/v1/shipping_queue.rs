@@ -158,6 +158,7 @@ fn map_status(status: ShipmentStatus) -> ApiShipmentStatus {
         ShipmentStatus::Manifested => ApiShipmentStatus::Manifested,
         ShipmentStatus::PartiallyDeparted => ApiShipmentStatus::PartiallyDeparted,
         ShipmentStatus::Departed => ApiShipmentStatus::Departed,
+        ShipmentStatus::Cancelled => ApiShipmentStatus::Cancelled,
     }
 }
 

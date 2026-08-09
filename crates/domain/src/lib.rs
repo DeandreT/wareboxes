@@ -126,11 +126,13 @@ pub use replenishment::{
     MAX_REPLENISHMENT_SCAN_VALUE_LENGTH, MAX_REPLENISHMENT_UOM_LENGTH,
 };
 pub use shipping::{
-    confirm_shipment_departure, create_shipment, record_manual_manifest, CarrierCode,
-    CarrierServiceCode, CartonTrackingAssignment, ManifestReference, ShipmentCartonIdentity,
-    ShipmentDepartureTransition, ShipmentDocumentType, ShipmentRevision, ShipmentScanValue,
-    ShipmentStatus, ShippingError, ShippingTextField, TrackingNumber, MAX_CARRIER_CODE_LENGTH,
-    MAX_CARRIER_SERVICE_CODE_LENGTH, MAX_MANIFEST_REFERENCE_LENGTH, MAX_SHIPMENT_SCAN_VALUE_LENGTH,
+    cancel_shipment, confirm_shipment_departure, create_shipment, record_manual_manifest,
+    CarrierCode, CarrierServiceCode, CartonTrackingAssignment, ManifestReference,
+    ShipmentCancellationDetails, ShipmentCancellationNote, ShipmentCancellationReason,
+    ShipmentCartonIdentity, ShipmentDepartureTransition, ShipmentDocumentType, ShipmentRevision,
+    ShipmentScanValue, ShipmentStatus, ShippingError, ShippingTextField, TrackingNumber,
+    MAX_CARRIER_CODE_LENGTH, MAX_CARRIER_SERVICE_CODE_LENGTH, MAX_MANIFEST_REFERENCE_LENGTH,
+    MAX_SHIPMENT_CANCELLATION_NOTE_LENGTH, MAX_SHIPMENT_SCAN_VALUE_LENGTH,
     MAX_TRACKING_NUMBER_LENGTH,
 };
 pub use tenant::TenantStatus;
@@ -242,6 +244,7 @@ positive_id!(
     "outbound QA carton verification ID"
 );
 positive_id!(ShipmentId, "shipment ID");
+positive_id!(ShipmentCancellationId, "shipment cancellation ID");
 positive_id!(ShipmentDocumentId, "shipment document ID");
 positive_id!(OutboundLoadId, "outbound load ID");
 positive_id!(OutboundLoadShipmentId, "outbound load shipment ID");

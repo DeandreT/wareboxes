@@ -1,14 +1,15 @@
 use sqlx::Row;
 use wareboxes_application::shipping::{
-    ManualCarrierManifestReadModel, ShipmentCartonReadModel, ShipmentCartonTrackingReadModel,
-    ShipmentDepartureProgress, ShipmentQuery, ShipmentReadModel,
+    ManualCarrierManifestReadModel, ShipmentCancellationReadModel, ShipmentCartonReadModel,
+    ShipmentCartonTrackingReadModel, ShipmentDepartureProgress, ShipmentQuery, ShipmentReadModel,
 };
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     CarrierCode, CarrierManifestId, CarrierServiceCode, CartonId, FacilityId, InventoryOwnerId,
-    ManifestReference, OrderId, OrderRevision, OrderStatus, PackSessionId, ShipmentId,
-    ShipmentRevision, ShipmentScanValue, ShipmentStatus, ShipmentTrackingAssignmentId, TenantId,
-    Timestamp, TrackingNumber, UserId,
+    ManifestReference, OrderId, OrderRevision, OrderStatus, PackSessionId,
+    ShipmentCancellationDetails, ShipmentCancellationId, ShipmentCancellationNote,
+    ShipmentCancellationReason, ShipmentId, ShipmentRevision, ShipmentScanValue, ShipmentStatus,
+    ShipmentTrackingAssignmentId, TenantId, Timestamp, TrackingNumber, UserId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, Db};
 
@@ -39,7 +40,7 @@ pub(super) async fn load_shipment_tx(
 ) -> AppResult<ShipmentReadModel> {
     let row = sqlx::query(
         r#"
-        SELECT shipment.id, shipment.packing_session_id, shipment.order_id,
+        SELECT shipment.id, shipment.attempt, shipment.packing_session_id, shipment.order_id,
                order_header.order_key, order_header.status AS order_status,
                order_header.revision AS order_revision, shipment.inventory_owner_id,
                shipment.facility_id, shipment.state, shipment.revision,
@@ -47,7 +48,12 @@ pub(super) async fn load_shipment_tx(
                shipment.departed_carton_count, shipment.departed_qty,
                shipment.created_by_user_id, shipment.created_at,
                confirmation.confirmed_by_user_id AS departed_by_user_id,
-               shipment.departed_at
+               shipment.departed_at,
+               cancellation.id AS cancellation_id,
+               cancellation.reason_code AS cancellation_reason,
+               cancellation.note AS cancellation_note,
+               cancellation.cancelled_by_user_id,
+               cancellation.cancelled_at
         FROM shipments shipment
         INNER JOIN orders order_header
           ON order_header.tenant_id = shipment.tenant_id
@@ -60,6 +66,11 @@ pub(super) async fn load_shipment_tx(
          AND confirmation.shipment_id = shipment.id
          AND confirmation.resulting_shipment_state = 'departed'
          AND confirmation.confirmed_at = shipment.departed_at
+        LEFT JOIN shipment_cancellations cancellation
+          ON cancellation.tenant_id = shipment.tenant_id
+         AND cancellation.inventory_owner_id = shipment.inventory_owner_id
+         AND cancellation.facility_id = shipment.facility_id
+         AND cancellation.shipment_id = shipment.id
         WHERE shipment.tenant_id = $1 AND shipment.id = $2
           AND ($3 OR shipment.facility_id = ANY($4))
           AND ($5 OR shipment.inventory_owner_id = ANY($6))
@@ -88,6 +99,7 @@ pub(super) async fn load_shipment_tx(
     }
     let shipment = ShipmentReadModel {
         shipment_id: positive(row.try_get("id")?, ShipmentId::new)?,
+        attempt: row.try_get("attempt")?,
         packing_session_id: positive(row.try_get("packing_session_id")?, PackSessionId::new)?,
         order_id,
         order_key: row.try_get("order_key")?,
@@ -112,6 +124,7 @@ pub(super) async fn load_shipment_tx(
         },
         cartons,
         manifest,
+        cancellation: cancellation_from_row(&row)?,
         created_by: positive(row.try_get("created_by_user_id")?, UserId::new)?,
         created_at: row.try_get("created_at")?,
         departed_by: row
@@ -124,6 +137,39 @@ pub(super) async fn load_shipment_tx(
         return Err(AppError::internal("shipment read model is inconsistent"));
     }
     Ok(shipment)
+}
+
+fn cancellation_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> AppResult<Option<ShipmentCancellationReadModel>> {
+    let Some(id) = row.try_get::<Option<i64>, _>("cancellation_id")? else {
+        return Ok(None);
+    };
+    let reason = match row.try_get::<String, _>("cancellation_reason")?.as_str() {
+        "packing_correction" => ShipmentCancellationReason::PackingCorrection,
+        "shipping_data_correction" => ShipmentCancellationReason::ShippingDataCorrection,
+        "duplicate_shipment" => ShipmentCancellationReason::DuplicateShipment,
+        "operator_error" => ShipmentCancellationReason::OperatorError,
+        "other" => ShipmentCancellationReason::Other,
+        _ => {
+            return Err(AppError::internal(
+                "shipment cancellation reason is invalid",
+            ))
+        }
+    };
+    let note = row
+        .try_get::<Option<String>, _>("cancellation_note")?
+        .map(ShipmentCancellationNote::new)
+        .transpose()
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let details = ShipmentCancellationDetails::new(reason, note)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    Ok(Some(ShipmentCancellationReadModel {
+        cancellation_id: positive(id, ShipmentCancellationId::new)?,
+        details,
+        cancelled_by: positive(row.try_get("cancelled_by_user_id")?, UserId::new)?,
+        cancelled_at: row.try_get("cancelled_at")?,
+    }))
 }
 
 async fn load_cartons_tx(

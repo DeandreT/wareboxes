@@ -132,6 +132,11 @@ pub async fn generate_packing_slip(
             "shipment changed before packing-slip generation",
         ));
     }
+    if shipment.status == ShipmentStatus::Cancelled {
+        return Err(AppError::conflict(
+            "packing slips cannot be generated for a cancelled shipment attempt",
+        ));
+    }
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
             "shipment-document:{}:{}:{}",

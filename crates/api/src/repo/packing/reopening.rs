@@ -345,7 +345,8 @@ async fn require_no_downstream_execution_tx(
                        WHERE tenant_id=$1 AND packing_session_id=$2
                          AND state <> 'cancelled')
             OR EXISTS (SELECT 1 FROM shipments
-                       WHERE tenant_id=$1 AND packing_session_id=$2)
+                       WHERE tenant_id=$1 AND packing_session_id=$2
+                         AND state <> 'cancelled')
         "#,
     )
     .bind(tenant_id.get())

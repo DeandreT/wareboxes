@@ -92,15 +92,22 @@ pub async fn create_shipment(
         return Err(AppError::conflict("shipment creation revision is stale"));
     }
     let existing: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM shipments WHERE tenant_id = $1 AND order_id = $2)",
+        "SELECT EXISTS (SELECT 1 FROM shipments WHERE tenant_id = $1 AND order_id = $2 AND state <> 'cancelled')",
     )
     .bind(access.tenant_id.get())
     .bind(command.order_id.get())
     .fetch_one(&mut *tx)
     .await?;
     if existing {
-        return Err(AppError::conflict("order already has a shipment"));
+        return Err(AppError::conflict("order already has an active shipment"));
     }
+    let attempt: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(attempt),0)+1 FROM shipments WHERE tenant_id=$1 AND order_id=$2",
+    )
+    .bind(access.tenant_id.get())
+    .bind(command.order_id.get())
+    .fetch_one(&mut *tx)
+    .await?;
     crate::repo::outbound_qa::require_current_qa_passed_tx(
         &mut tx,
         access.tenant_id,
@@ -149,12 +156,12 @@ pub async fn create_shipment(
         r#"
         INSERT INTO shipments (
             tenant_id, inventory_owner_id, facility_id, packing_session_id,
-            order_release_id, order_id, state, revision,
+            order_release_id, order_id, attempt, state, revision,
             creation_expected_order_revision, creation_resulting_order_revision,
             carton_count, content_count, shipped_qty,
             created_by_user_id, created_at
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, 1, $8, $9, $10, $11, $12, $13, $14
+            $1, $2, $3, $4, $5, $6, $7, $8, 1, $9, $10, $11, $12, $13, $14, $15
         ) RETURNING id
         "#,
     )
@@ -164,6 +171,7 @@ pub async fn create_shipment(
     .bind(command.packing_session_id.get())
     .bind(session.order_release_id)
     .bind(command.order_id.get())
+    .bind(attempt)
     .bind(shipment_status.as_str())
     .bind(order.revision.get())
     .bind(resulting_revision.get())
@@ -246,6 +254,7 @@ pub async fn create_shipment(
         &format!("shipment:{}:created", shipment_id.get()),
         serde_json::json!({
             "shipment_id": shipment_id,
+            "attempt": attempt,
             "packing_session_id": command.packing_session_id,
             "order_id": order.id,
             "order_key": order.order_key,

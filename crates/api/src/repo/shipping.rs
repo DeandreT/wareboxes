@@ -1,5 +1,6 @@
 //! Full-order shipment creation, manifesting, and departure confirmation.
 
+mod cancellation;
 mod creation;
 mod departure;
 mod documents;
@@ -7,6 +8,7 @@ mod manifest;
 mod queue;
 mod read_model;
 
+pub use cancellation::cancel_shipment;
 pub use creation::create_shipment;
 pub use departure::confirm_departure;
 pub(crate) use departure::{depart_for_outbound_load_tx, OutboundLoadShipmentTarget};
@@ -46,6 +48,7 @@ struct LockedOrder {
 #[derive(Debug, Clone)]
 struct LockedShipment {
     id: ShipmentId,
+    attempt: i64,
     packing_session_id: PackSessionId,
     order_release_id: i64,
     order_id: OrderId,
@@ -53,7 +56,10 @@ struct LockedShipment {
     facility_id: FacilityId,
     status: ShipmentStatus,
     revision: ShipmentRevision,
+    creation_expected_order_revision: OrderRevision,
+    creation_resulting_order_revision: OrderRevision,
     carton_count: i64,
+    content_count: i64,
     shipped_qty: i64,
     departed_carton_count: i64,
     departed_qty: i64,
@@ -132,8 +138,9 @@ async fn lock_shipment_tx(
     let row = sqlx::query(
         r#"
         SELECT id, packing_session_id, order_release_id, order_id,
-               inventory_owner_id, facility_id, state, revision,
-               carton_count, shipped_qty, departed_carton_count, departed_qty
+               inventory_owner_id, facility_id, attempt, state, revision,
+               creation_expected_order_revision,creation_resulting_order_revision,
+               carton_count,content_count,shipped_qty,departed_carton_count,departed_qty
         FROM shipments
         WHERE tenant_id = $1 AND id = $2
           AND ($3 OR facility_id = ANY($4))
@@ -162,6 +169,7 @@ async fn lock_shipment_tx(
     }
     Ok(LockedShipment {
         id: positive(row.try_get("id")?, ShipmentId::new)?,
+        attempt: row.try_get("attempt")?,
         packing_session_id: positive(row.try_get("packing_session_id")?, PackSessionId::new)?,
         order_release_id: row.try_get("order_release_id")?,
         order_id,
@@ -170,7 +178,16 @@ async fn lock_shipment_tx(
         status: ShipmentStatus::parse(&status_text)
             .ok_or_else(|| AppError::internal("shipment has an invalid status"))?,
         revision: positive(row.try_get("revision")?, ShipmentRevision::new)?,
+        creation_expected_order_revision: positive(
+            row.try_get("creation_expected_order_revision")?,
+            OrderRevision::new,
+        )?,
+        creation_resulting_order_revision: positive(
+            row.try_get("creation_resulting_order_revision")?,
+            OrderRevision::new,
+        )?,
         carton_count: row.try_get("carton_count")?,
+        content_count: row.try_get("content_count")?,
         shipped_qty,
         departed_carton_count: row.try_get("departed_carton_count")?,
         departed_qty: row.try_get("departed_qty")?,
