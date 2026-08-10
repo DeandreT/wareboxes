@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wareboxes_domain::{
-    FacilityId, IntegrationInboxCorrectionId, IntegrationInboxProcessingAttemptId,
+    CatalogItemId, FacilityId, IntegrationInboxCorrectionId, IntegrationInboxProcessingAttemptId,
     IntegrationInboxProcessingId, IntegrationInboxProcessingRevision,
-    IntegrationInboxProcessingStatus, InventoryOwnerId, OrderId, OrderRevision,
+    IntegrationInboxProcessingStatus, IntegrationOrderItemMappingId,
+    IntegrationOrderItemMappingRevision, InventoryOwnerId, OrderId, OrderRevision,
     OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason, OutboxDeadLetterReplayId, Timestamp,
     UserId,
 };
@@ -221,6 +222,18 @@ pub struct InboundIntegrationDetailReadModel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundIntegrationProcessingAttemptMappingReadModel {
+    pub line_key: String,
+    pub mapping_id: IntegrationOrderItemMappingId,
+    pub mapping_revision: IntegrationOrderItemMappingRevision,
+    pub source_key: String,
+    pub external_item_key: String,
+    pub external_uom: String,
+    pub item_id: CatalogItemId,
+    pub requested_uom: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundIntegrationProcessingAttemptReadModel {
     pub attempt_id: IntegrationInboxProcessingAttemptId,
     pub attempt_number: i32,
@@ -236,6 +249,7 @@ pub struct InboundIntegrationProcessingAttemptReadModel {
     pub attempted_by: UserId,
     pub attempted_by_name: String,
     pub attempted_at: Timestamp,
+    pub applied_mappings: Vec<InboundIntegrationProcessingAttemptMappingReadModel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

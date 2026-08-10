@@ -1,15 +1,69 @@
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
-    FacilityId, IntegrationInboxCorrectionId, IntegrationInboxCorrectionReason,
-    IntegrationInboxProcessingAttemptId, IntegrationInboxProcessingId,
-    IntegrationInboxProcessingRevision, IntegrationInboxProcessingStatus, InventoryOwnerId,
-    OrderId, OrderRevision, TenantId, Timestamp, UserId,
+    ExternalItemKey, ExternalItemUom, FacilityId, IntegrationInboxCorrectionId,
+    IntegrationInboxCorrectionReason, IntegrationInboxProcessingAttemptId,
+    IntegrationInboxProcessingId, IntegrationInboxProcessingRevision,
+    IntegrationInboxProcessingStatus, InventoryOwnerId, OrderId, OrderKey, OrderLineKey,
+    OrderQuantity, OrderRevision, ShippingDestination, TenantId, Timestamp, UserId,
 };
 
 pub const STANDARD_ORDER_INTAKE_ADAPTER: &str = "wareboxes.fulfillment_order";
-pub const STANDARD_ORDER_INTAKE_MAPPING_VERSION: i32 = 1;
+pub const STANDARD_ORDER_INTAKE_MAPPING_VERSION: i32 = 2;
 pub const REPROCESS_INTEGRATION_ORDER_OPERATION: &str = "integration.order_intake.reprocess.v1";
 pub const CORRECT_INTEGRATION_ORDER_OPERATION: &str = "integration.order_intake.correct.v1";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationOrderEnvelopeLine {
+    pub line_key: OrderLineKey,
+    pub external_item_key: ExternalItemKey,
+    pub external_uom: ExternalItemUom,
+    pub quantity: OrderQuantity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationOrderEnvelope {
+    pub inventory_owner_id: InventoryOwnerId,
+    pub order_key: OrderKey,
+    pub rush: bool,
+    pub ship_by: Option<Timestamp>,
+    pub destination: ShippingDestination,
+    pub lines: Vec<IntegrationOrderEnvelopeLine>,
+}
+
+impl IntegrationOrderEnvelope {
+    pub fn new(
+        inventory_owner_id: InventoryOwnerId,
+        order_key: OrderKey,
+        rush: bool,
+        ship_by: Option<Timestamp>,
+        destination: ShippingDestination,
+        lines: Vec<IntegrationOrderEnvelopeLine>,
+    ) -> crate::ApplicationResult<Self> {
+        if lines.is_empty() {
+            return Err(crate::ApplicationError::InvalidRequest(
+                "integration order must contain at least one line".into(),
+            ));
+        }
+        let mut line_keys = std::collections::HashSet::with_capacity(lines.len());
+        if let Some(duplicate) = lines
+            .iter()
+            .map(|line| line.line_key.as_str())
+            .find(|line_key| !line_keys.insert(*line_key))
+        {
+            return Err(crate::ApplicationError::InvalidRequest(format!(
+                "integration order line key is duplicated: {duplicate}"
+            )));
+        }
+        Ok(Self {
+            inventory_owner_id,
+            order_key,
+            rush,
+            ship_by,
+            destination,
+            lines,
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CorrectIntegrationOrderCommand {
@@ -100,6 +154,7 @@ pub struct IntegrationOrderProcessingResult {
     pub status: IntegrationInboxProcessingStatus,
     pub revision: IntegrationInboxProcessingRevision,
     pub attempt_count: i32,
+    pub applied_mapping_count: i32,
     pub order_id: Option<OrderId>,
     pub order_revision: Option<OrderRevision>,
     pub error_code: Option<String>,

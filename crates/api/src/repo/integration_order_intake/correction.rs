@@ -146,6 +146,7 @@ pub(crate) async fn correct(
             input: processing_input,
             ids: outcome,
             failure: None,
+            applied_mappings: &[],
         },
     )
     .await?;
@@ -190,6 +191,7 @@ pub(crate) async fn quarantine_correction(
                 order_revision: None,
             },
             failure: Some(reason),
+            applied_mappings: &[],
         },
     )
     .await?;

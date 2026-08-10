@@ -95,6 +95,7 @@ pub use integration_mapping::{
 pub use integration_monitor::{
     DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse,
     InboundIntegrationDetailResponse, InboundIntegrationPage, InboundIntegrationPageRequest,
+    InboundIntegrationProcessingAttemptMappingResponse,
     InboundIntegrationProcessingAttemptResponse, InboundIntegrationProcessingResponse,
     InboundIntegrationReceiptResponse, InboundIntegrationSort, InboundPayloadPreviewEncoding,
     IntegrationSortDirection, OutboundDeliveryAttemptOutcome, OutboundDeliveryAttemptResponse,
@@ -105,6 +106,7 @@ pub use integration_monitor::{
 };
 pub use integration_order_intake::{
     CorrectIntegrationOrderRequest, CorrectIntegrationOrderResponse,
+    IntegrationOrderEnvelopeLineRequest, IntegrationOrderEnvelopeRequest,
     IntegrationOrderIntakeResponse, IntegrationOrderProcessingStatus,
     ReprocessIntegrationOrderRequest, ReprocessIntegrationOrderResponse,
 };

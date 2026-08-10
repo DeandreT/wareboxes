@@ -6,9 +6,9 @@ use axum::Json;
 use wareboxes_api_contract::v1::{
     DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse,
     InboundIntegrationDetailResponse, InboundIntegrationPage as ApiInboundPage,
-    InboundIntegrationPageRequest, InboundIntegrationProcessingAttemptResponse,
-    InboundIntegrationProcessingResponse, InboundIntegrationReceiptResponse,
-    InboundIntegrationSort as ApiInboundSort,
+    InboundIntegrationPageRequest, InboundIntegrationProcessingAttemptMappingResponse,
+    InboundIntegrationProcessingAttemptResponse, InboundIntegrationProcessingResponse,
+    InboundIntegrationReceiptResponse, InboundIntegrationSort as ApiInboundSort,
     InboundPayloadPreviewEncoding as ApiInboundPayloadPreviewEncoding,
     IntegrationOrderProcessingStatus, IntegrationSortDirection as ApiDirection, OpaqueCursor,
     OutboundDeliveryAttemptOutcome as ApiAttemptOutcome, OutboundDeliveryAttemptResponse,
@@ -399,6 +399,27 @@ fn map_inbound_processing(
                     attempted_by: attempt.attempted_by.get(),
                     attempted_by_name: attempt.attempted_by_name,
                     attempted_at: attempt.attempted_at.to_rfc3339(),
+                    applied_mappings: attempt
+                        .applied_mappings
+                        .into_iter()
+                        .map(|mapping| {
+                            Ok(InboundIntegrationProcessingAttemptMappingResponse {
+                                line_key: mapping.line_key,
+                                mapping_id: mapping.mapping_id.get(),
+                                mapping_revision: wareboxes_api_contract::v1::Revision::new(
+                                    mapping.mapping_revision.get(),
+                                )
+                                .map_err(|_| {
+                                    V1Error::internal("applied mapping revision is invalid")
+                                })?,
+                                source_key: mapping.source_key,
+                                external_item_key: mapping.external_item_key,
+                                external_uom: mapping.external_uom,
+                                item_id: mapping.item_id.get(),
+                                requested_uom: mapping.requested_uom,
+                            })
+                        })
+                        .collect::<V1Result<Vec<_>>>()?,
                 })
             })
             .collect::<V1Result<Vec<_>>>()?,

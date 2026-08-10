@@ -458,6 +458,31 @@
   padding: 4px 6px;
 }
 
+.integration-applied-mappings {
+  display: grid;
+  gap: 3px;
+  padding: 5px 6px;
+  border-top: 1px solid var(--line);
+  font-size: 9px;
+}
+
+.integration-applied-mappings > strong {
+  color: var(--ink-soft);
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.integration-applied-mappings > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.integration-applied-mappings > div > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .integration-failure {
   margin: 0;
   padding: 5px 6px;

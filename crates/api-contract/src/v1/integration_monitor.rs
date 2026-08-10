@@ -102,6 +102,19 @@ pub struct InboundIntegrationDetailResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct InboundIntegrationProcessingAttemptMappingResponse {
+    pub line_key: String,
+    pub mapping_id: i64,
+    pub mapping_revision: super::Revision,
+    pub source_key: String,
+    pub external_item_key: String,
+    pub external_uom: String,
+    pub item_id: i64,
+    pub requested_uom: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InboundIntegrationProcessingAttemptResponse {
     pub attempt_id: i64,
     pub attempt_number: i32,
@@ -117,6 +130,7 @@ pub struct InboundIntegrationProcessingAttemptResponse {
     pub attempted_by: i64,
     pub attempted_by_name: String,
     pub attempted_at: String,
+    pub applied_mappings: Vec<InboundIntegrationProcessingAttemptMappingResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

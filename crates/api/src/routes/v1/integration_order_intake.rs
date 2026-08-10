@@ -2,20 +2,25 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::Json;
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use wareboxes_api_contract::v1::{
     CorrectIntegrationOrderRequest, CorrectIntegrationOrderResponse, CreateFulfillmentOrderRequest,
-    IntegrationOrderIntakeResponse, IntegrationOrderProcessingStatus,
-    ReprocessIntegrationOrderRequest, ReprocessIntegrationOrderResponse, Revision,
+    IntegrationOrderEnvelopeRequest, IntegrationOrderIntakeResponse,
+    IntegrationOrderProcessingStatus, ReprocessIntegrationOrderRequest,
+    ReprocessIntegrationOrderResponse, Revision,
 };
 use wareboxes_application::integration::{
-    CorrectIntegrationOrderCommand, IntegrationInboxReceipt, IntegrationOrderProcessingResult,
-    NewIntegrationInboxReceipt, ReprocessIntegrationOrderCommand,
+    CorrectIntegrationOrderCommand, IntegrationInboxReceipt, IntegrationOrderEnvelope,
+    IntegrationOrderEnvelopeLine, IntegrationOrderProcessingResult, NewIntegrationInboxReceipt,
+    ReprocessIntegrationOrderCommand,
 };
 use wareboxes_application::{ApplicationError, CommandContext};
 use wareboxes_domain::{
-    IntegrationInboxCorrectionReason, IntegrationInboxProcessingRevision,
-    IntegrationInboxProcessingStatus, InventoryOwnerId,
+    ExternalItemKey, ExternalItemUom, IntegrationInboxCorrectionReason,
+    IntegrationInboxProcessingRevision, IntegrationInboxProcessingStatus, IntegrationSourceKey,
+    InventoryOwnerId, OrderKey, OrderLineKey, OrderQuantity, ShippingDestination,
+    ShippingRecipient,
 };
 use wareboxes_persistence_postgres::integration_inbox;
 
@@ -29,7 +34,6 @@ use crate::state::AppState;
 
 const PERMISSION: &str = "orders";
 const INVALID_PAYLOAD_CODE: &str = "invalid_payload";
-const OWNER_MISMATCH_CODE: &str = "inventory_owner_mismatch";
 const MAPPING_VALIDATION_CODE: &str = "mapping_validation_failed";
 const BUSINESS_REJECTION_CODE: &str = "business_rejected";
 
@@ -43,6 +47,8 @@ pub async fn receive_order(
 ) -> V1Result<(StatusCode, Json<IntegrationOrderIntakeResponse>)> {
     user.require_permission(&state.db, PERMISSION).await?;
     let inventory_owner_id = user.require_inventory_owner(inventory_owner_id)?;
+    let source_key = IntegrationSourceKey::new(source_key)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
     let content_type = json_content_type(&headers)?;
     let request_id = current_request_id_or_new();
     let received = integration_inbox::receive(
@@ -51,7 +57,7 @@ pub async fn receive_order(
             tenant_id: user.tenant.tenant_id,
             inventory_owner_id: Some(inventory_owner_id),
             facility_id: None,
-            source_key: &source_key,
+            source_key: source_key.as_str(),
             deduplication_key: idempotency_key.as_str(),
             content_type,
             raw_payload: &body,
@@ -222,7 +228,72 @@ async fn process_payload(
         reprocess,
     );
 
-    let request = match serde_json::from_slice::<CreateFulfillmentOrderRequest>(input_payload) {
+    if input.correction_id.is_some() {
+        let request = match serde_json::from_slice::<CreateFulfillmentOrderRequest>(input_payload) {
+            Ok(request) => request,
+            Err(_) => {
+                return repo::integration_order_intake::quarantine(
+                    &state.db,
+                    &user.tenant,
+                    context,
+                    processing_request,
+                    repo::integration_order_intake::QuarantineReason {
+                        code: INVALID_PAYLOAD_CODE,
+                        message: "corrected payload is not a valid fulfillment order v1 document",
+                    },
+                )
+                .await;
+            }
+        };
+        if request.inventory_owner_id != expected_owner_id.get() {
+            return Err(AppError::not_found("integration inbox receipt"));
+        }
+        let order = match orders::new_fulfillment_order(request) {
+            Ok(order) => order,
+            Err(_) => {
+                return repo::integration_order_intake::quarantine(
+                    &state.db,
+                    &user.tenant,
+                    context,
+                    processing_request,
+                    repo::integration_order_intake::QuarantineReason {
+                        code: MAPPING_VALIDATION_CODE,
+                        message: "corrected payload values do not satisfy the fulfillment order v1 contract",
+                    },
+                )
+                .await;
+            }
+        };
+        return match repo::integration_order_intake::process_internal(
+            &state.db,
+            &user.tenant,
+            context,
+            processing_request,
+            &order,
+        )
+        .await
+        {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                let Some(message) = quarantinable_message(&error) else {
+                    return Err(error);
+                };
+                repo::integration_order_intake::quarantine(
+                    &state.db,
+                    &user.tenant,
+                    context,
+                    processing_request,
+                    repo::integration_order_intake::QuarantineReason {
+                        code: BUSINESS_REJECTION_CODE,
+                        message: &message,
+                    },
+                )
+                .await
+            }
+        };
+    }
+
+    let request = match serde_json::from_slice::<IntegrationOrderEnvelopeRequest>(input_payload) {
         Ok(request) => request,
         Err(_) => {
             return repo::integration_order_intake::quarantine(
@@ -232,27 +303,14 @@ async fn process_payload(
                 processing_request,
                 repo::integration_order_intake::QuarantineReason {
                     code: INVALID_PAYLOAD_CODE,
-                    message: "payload is not a valid fulfillment order v1 JSON document",
+                    message: "payload is not a valid integration order envelope v1 JSON document",
                 },
             )
             .await;
         }
     };
-    if request.inventory_owner_id != expected_owner_id.get() {
-        return repo::integration_order_intake::quarantine(
-            &state.db,
-            &user.tenant,
-            context,
-            processing_request,
-            repo::integration_order_intake::QuarantineReason {
-                code: OWNER_MISMATCH_CODE,
-                message: "payload inventory owner does not match the intake endpoint scope",
-            },
-        )
-        .await;
-    }
-    let order = match orders::new_fulfillment_order(request) {
-        Ok(order) => order,
+    let envelope = match integration_order_envelope(request, expected_owner_id) {
+        Ok(envelope) => envelope,
         Err(_) => {
             return repo::integration_order_intake::quarantine(
                 &state.db,
@@ -261,39 +319,85 @@ async fn process_payload(
                 processing_request,
                 repo::integration_order_intake::QuarantineReason {
                     code: MAPPING_VALIDATION_CODE,
-                    message: "payload values do not satisfy the fulfillment order v1 mapping",
+                    message:
+                        "payload values do not satisfy the integration order envelope v1 contract",
                 },
             )
             .await;
         }
     };
-    match repo::integration_order_intake::process(
+    repo::integration_order_intake::process_external(
         &state.db,
         &user.tenant,
         context,
         processing_request,
-        &order,
+        &envelope,
     )
     .await
-    {
-        Ok(result) => Ok(result),
-        Err(error) => {
-            let Some(message) = quarantinable_message(&error) else {
-                return Err(error);
-            };
-            repo::integration_order_intake::quarantine(
-                &state.db,
-                &user.tenant,
-                context,
-                processing_request,
-                repo::integration_order_intake::QuarantineReason {
-                    code: BUSINESS_REJECTION_CODE,
-                    message: &message,
-                },
-            )
-            .await
-        }
-    }
+}
+
+fn integration_order_envelope(
+    request: IntegrationOrderEnvelopeRequest,
+    inventory_owner_id: InventoryOwnerId,
+) -> Result<IntegrationOrderEnvelope, AppError> {
+    let order_key = OrderKey::new(request.order_key)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let ship_by = request
+        .ship_by
+        .map(|value| {
+            if value.trim() != value || value.is_empty() {
+                return Err(AppError::bad_request(
+                    "ship_by must be a nonempty RFC3339 timestamp",
+                ));
+            }
+            DateTime::parse_from_rfc3339(&value)
+                .map(|timestamp| timestamp.with_timezone(&Utc))
+                .map_err(|_| AppError::bad_request("ship_by must be an RFC3339 timestamp"))
+        })
+        .transpose()?;
+    let destination = request.destination;
+    let recipient = ShippingRecipient::new(
+        destination.recipient_name,
+        destination.company,
+        destination.phone,
+        destination.email,
+    )
+    .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let destination = ShippingDestination::new(
+        recipient,
+        destination.line1,
+        destination.line2,
+        destination.city,
+        destination.region,
+        destination.postal_code,
+        destination.country,
+    )
+    .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let lines = request
+        .lines
+        .into_iter()
+        .map(|line| {
+            Ok(IntegrationOrderEnvelopeLine {
+                line_key: OrderLineKey::new(line.line_key)
+                    .map_err(|error| AppError::bad_request(error.to_string()))?,
+                external_item_key: ExternalItemKey::new(line.external_item_key)
+                    .map_err(|error| AppError::bad_request(error.to_string()))?,
+                external_uom: ExternalItemUom::new(line.external_uom)
+                    .map_err(|error| AppError::bad_request(error.to_string()))?,
+                quantity: OrderQuantity::new(line.quantity)
+                    .map_err(|error| AppError::bad_request(error.to_string()))?,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    IntegrationOrderEnvelope::new(
+        inventory_owner_id,
+        order_key,
+        request.rush,
+        ship_by,
+        destination,
+        lines,
+    )
+    .map_err(AppError::from)
 }
 
 fn quarantinable_message(error: &AppError) -> Option<String> {
@@ -365,6 +469,7 @@ fn response(result: IntegrationOrderProcessingResult) -> V1Result<IntegrationOrd
         revision: Revision::new(result.revision.get())
             .map_err(|_| V1Error::internal("integration processing revision is invalid"))?,
         attempt_count: result.attempt_count,
+        applied_mapping_count: result.applied_mapping_count,
         order_id: result.order_id.map(|id| id.get()),
         order_revision: result
             .order_revision

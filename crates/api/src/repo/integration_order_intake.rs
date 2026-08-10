@@ -5,20 +5,22 @@ mod correction;
 pub(crate) use correction::{correct, quarantine_correction, CorrectionInput};
 
 use sqlx::postgres::PgRow;
-use sqlx::Row;
+use sqlx::{Acquire, Row};
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_application::integration::{
-    IntegrationInboxReceipt, IntegrationOrderProcessingResult, ReprocessIntegrationOrderCommand,
-    REPROCESS_INTEGRATION_ORDER_OPERATION, STANDARD_ORDER_INTAKE_ADAPTER,
-    STANDARD_ORDER_INTAKE_MAPPING_VERSION,
+    IntegrationInboxReceipt, IntegrationOrderEnvelope, IntegrationOrderProcessingResult,
+    ReprocessIntegrationOrderCommand, REPROCESS_INTEGRATION_ORDER_OPERATION,
+    STANDARD_ORDER_INTAKE_ADAPTER, STANDARD_ORDER_INTAKE_MAPPING_VERSION,
 };
-use wareboxes_application::CommandContext;
+use wareboxes_application::{ApplicationError, CommandContext};
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
+    CatalogItemId, ExternalItemKey, ExternalItemUom, FulfillmentOrderDemandLine,
     IntegrationInboxCorrectionId, IntegrationInboxProcessingAttemptId,
     IntegrationInboxProcessingId, IntegrationInboxProcessingRevision,
-    IntegrationInboxProcessingStatus, InventoryOwnerId, NewFulfillmentOrder, OrderId,
-    OrderRevision, TenantId, UserId, MAX_INTEGRATION_PROCESSING_ERROR_CODE_LENGTH,
+    IntegrationInboxProcessingStatus, IntegrationOrderItemMappingId,
+    IntegrationOrderItemMappingRevision, InventoryOwnerId, NewFulfillmentOrder, OrderId,
+    OrderRevision, RequestedUom, TenantId, UserId, MAX_INTEGRATION_PROCESSING_ERROR_CODE_LENGTH,
     MAX_INTEGRATION_PROCESSING_ERROR_MESSAGE_LENGTH,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, Db};
@@ -99,6 +101,19 @@ pub(super) struct OutcomeWrite<'a> {
     input: ProcessingInput,
     ids: OutcomeIds,
     failure: Option<QuarantineReason<'a>>,
+    applied_mappings: &'a [AppliedMapping],
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct AppliedMapping {
+    line_key: String,
+    mapping_id: IntegrationOrderItemMappingId,
+    mapping_revision: IntegrationOrderItemMappingRevision,
+    source_key: String,
+    external_item_key: ExternalItemKey,
+    external_uom: ExternalItemUom,
+    item_id: CatalogItemId,
+    requested_uom: RequestedUom,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +168,7 @@ fn map_processing(row: &PgRow) -> AppResult<StoredProcessing> {
             revision: IntegrationInboxProcessingRevision::new(row.try_get("revision")?)
                 .map_err(AppError::internal)?,
             attempt_count: row.try_get("attempt_count")?,
+            applied_mapping_count: row.try_get("applied_mapping_count")?,
             order_id,
             order_revision,
             error_code: row.try_get("error_code")?,
@@ -174,7 +190,7 @@ const PROCESSING_SELECT: &str = r#"
            processing.error_message, processing.last_attempted_by_user_id,
            processing.last_attempted_at, processing.processed_at,
            processing.last_input_payload_sha256,processing.last_correction_id,
-           attempt.id AS processing_attempt_id
+           attempt.id AS processing_attempt_id,attempt.applied_mapping_count
     FROM integration_inbox_processings processing
     INNER JOIN integration_inbox_processing_attempts attempt
         ON attempt.tenant_id=processing.tenant_id
@@ -263,6 +279,49 @@ fn validate_failure(failure: &QuarantineReason<'_>) -> AppResult<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn insert_applied_mappings_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    access: &TenantAccess,
+    receipt: &IntegrationInboxReceipt,
+    processing_id: i64,
+    processing_attempt_id: i64,
+    attempt_number: i32,
+    mappings: &[AppliedMapping],
+) -> AppResult<()> {
+    let owner_id = receipt
+        .inventory_owner_id
+        .ok_or_else(|| AppError::internal("mapped order receipt lost owner scope"))?;
+    for mapping in mappings {
+        sqlx::query(
+            r#"
+            INSERT INTO integration_inbox_processing_attempt_mappings
+                (tenant_id,inventory_owner_id,processing_id,processing_attempt_id,
+                 receipt_id,attempt_number,line_key,mapping_id,mapping_revision,
+                 source_key,external_item_key,external_uom,item_id,requested_uom)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            "#,
+        )
+        .bind(access.tenant_id.get())
+        .bind(owner_id.get())
+        .bind(processing_id)
+        .bind(processing_attempt_id)
+        .bind(receipt.id)
+        .bind(attempt_number)
+        .bind(&mapping.line_key)
+        .bind(mapping.mapping_id.get())
+        .bind(mapping.mapping_revision.get())
+        .bind(&mapping.source_key)
+        .bind(mapping.external_item_key.as_str())
+        .bind(mapping.external_uom.as_str())
+        .bind(mapping.item_id.get())
+        .bind(mapping.requested_uom.as_str())
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 pub(super) async fn write_outcome_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     access: &TenantAccess,
@@ -275,6 +334,7 @@ pub(super) async fn write_outcome_tx(
         input,
         ids: outcome_ids,
         failure,
+        applied_mappings,
     } = outcome;
     if let Some(failure) = &failure {
         validate_failure(failure)?;
@@ -367,35 +427,50 @@ pub(super) async fn write_outcome_tx(
         .await?
     };
 
-    let attempt_id: i64 = sqlx::query_scalar(
-        r#"
+    let attempt_id: i64 =
+        sqlx::query_scalar(
+            r#"
         INSERT INTO integration_inbox_processing_attempts
             (tenant_id,inventory_owner_id,processing_id,receipt_id,
              attempt_number,previous_revision,resulting_revision,input_payload_sha256,
              correction_id,outcome,
              order_id,order_revision,error_code,error_message,
-             attempted_by_user_id,attempted_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+             attempted_by_user_id,attempted_at,applied_mapping_count)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
         RETURNING id
         "#,
+        )
+        .bind(access.tenant_id.get())
+        .bind(owner_id.get())
+        .bind(processing_id)
+        .bind(receipt.id)
+        .bind(attempt_count)
+        .bind(previous_revision)
+        .bind(revision)
+        .bind(input.payload_sha256.as_slice())
+        .bind(input.correction_id.map(IntegrationInboxCorrectionId::get))
+        .bind(status.as_str())
+        .bind(outcome_ids.order_id.map(OrderId::get))
+        .bind(outcome_ids.order_revision.map(OrderRevision::get))
+        .bind(error_code)
+        .bind(error_message)
+        .bind(actor_id.get())
+        .bind(attempted_at)
+        .bind(i32::try_from(applied_mappings.len()).map_err(|_| {
+            AppError::bad_request("integration order contains too many mapped lines")
+        })?)
+        .fetch_one(&mut **tx)
+        .await?;
+
+    insert_applied_mappings_tx(
+        tx,
+        access,
+        receipt,
+        processing_id,
+        attempt_id,
+        attempt_count,
+        applied_mappings,
     )
-    .bind(access.tenant_id.get())
-    .bind(owner_id.get())
-    .bind(processing_id)
-    .bind(receipt.id)
-    .bind(attempt_count)
-    .bind(previous_revision)
-    .bind(revision)
-    .bind(input.payload_sha256.as_slice())
-    .bind(input.correction_id.map(IntegrationInboxCorrectionId::get))
-    .bind(status.as_str())
-    .bind(outcome_ids.order_id.map(OrderId::get))
-    .bind(outcome_ids.order_revision.map(OrderRevision::get))
-    .bind(error_code)
-    .bind(error_message)
-    .bind(actor_id.get())
-    .bind(attempted_at)
-    .fetch_one(&mut **tx)
     .await?;
 
     Ok(IntegrationOrderProcessingResult {
@@ -412,6 +487,8 @@ pub(super) async fn write_outcome_tx(
         status,
         revision: IntegrationInboxProcessingRevision::new(revision).map_err(AppError::internal)?,
         attempt_count,
+        applied_mapping_count: i32::try_from(applied_mappings.len())
+            .map_err(|_| AppError::internal("applied mapping count overflow"))?,
         order_id: outcome_ids.order_id,
         order_revision: outcome_ids.order_revision,
         error_code: error_code.map(str::to_owned),
@@ -483,6 +560,7 @@ pub(crate) async fn quarantine(
                 order_revision: None,
             },
             failure: Some(reason),
+            applied_mappings: &[],
         },
     )
     .await?;
@@ -494,12 +572,154 @@ pub(crate) async fn quarantine(
     Ok(result)
 }
 
-pub(crate) async fn process(
+async fn resolve_order_mappings_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    access: &TenantAccess,
+    receipt: &IntegrationInboxReceipt,
+    envelope: &IntegrationOrderEnvelope,
+) -> AppResult<Result<Vec<AppliedMapping>, String>> {
+    let owner_id = receipt
+        .inventory_owner_id
+        .ok_or_else(|| AppError::internal("mapped order receipt lost owner scope"))?;
+    if envelope.inventory_owner_id != owner_id {
+        return Err(AppError::not_found("integration inbox receipt"));
+    }
+    let mut lock_keys = envelope
+        .lines
+        .iter()
+        .map(|line| {
+            super::integration_mapping::natural_lock_key(
+                access.tenant_id,
+                owner_id,
+                &receipt.source_key,
+                line.external_item_key.as_str(),
+                line.external_uom.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    lock_keys.sort_unstable();
+    lock_keys.dedup();
+    for key in lock_keys {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(key)
+            .execute(&mut **tx)
+            .await?;
+    }
+
+    let mut mappings = Vec::with_capacity(envelope.lines.len());
+    for line in &envelope.lines {
+        let row = sqlx::query(
+            r#"
+            SELECT mapping.id,mapping.revision,mapping.item_id,mapping.requested_uom
+            FROM integration_order_item_mappings mapping
+            JOIN inventory_owner_items owner_item
+              ON owner_item.tenant_id=mapping.tenant_id
+             AND owner_item.inventory_owner_id=mapping.inventory_owner_id
+             AND owner_item.item_id=mapping.item_id
+            JOIN items item
+              ON item.tenant_id=owner_item.tenant_id AND item.id=owner_item.item_id
+            WHERE mapping.tenant_id=$1 AND mapping.inventory_owner_id=$2
+              AND mapping.source_key=$3 AND mapping.external_item_key=$4
+              AND mapping.external_uom=$5 AND mapping.effective_to IS NULL
+              AND owner_item.deleted IS NULL AND item.deleted IS NULL
+              AND item.packaging_unit=mapping.requested_uom
+            FOR SHARE OF mapping,owner_item,item
+            "#,
+        )
+        .bind(access.tenant_id.get())
+        .bind(owner_id.get())
+        .bind(&receipt.source_key)
+        .bind(line.external_item_key.as_str())
+        .bind(line.external_uom.as_str())
+        .fetch_optional(&mut **tx)
+        .await?;
+        let Some(row) = row else {
+            return Ok(Err(format!(
+                "no active item mapping for line {} ({} / {})",
+                line.line_key, line.external_item_key, line.external_uom
+            )));
+        };
+        mappings.push(AppliedMapping {
+            line_key: line.line_key.as_str().to_owned(),
+            mapping_id: IntegrationOrderItemMappingId::new(row.try_get("id")?)
+                .map_err(|error| AppError::internal(error.to_string()))?,
+            mapping_revision: IntegrationOrderItemMappingRevision::new(row.try_get("revision")?)
+                .map_err(|error| AppError::internal(error.to_string()))?,
+            source_key: receipt.source_key.clone(),
+            external_item_key: line.external_item_key.clone(),
+            external_uom: line.external_uom.clone(),
+            item_id: CatalogItemId::new(row.try_get("item_id")?)
+                .map_err(|error| AppError::internal(error.to_string()))?,
+            requested_uom: RequestedUom::new(row.try_get::<String, _>("requested_uom")?)
+                .map_err(|error| AppError::internal(error.to_string()))?,
+        });
+    }
+    Ok(Ok(mappings))
+}
+
+fn mapped_order(
+    envelope: &IntegrationOrderEnvelope,
+    mappings: &[AppliedMapping],
+) -> AppResult<NewFulfillmentOrder> {
+    let lines = envelope
+        .lines
+        .iter()
+        .zip(mappings)
+        .map(|(line, mapping)| {
+            FulfillmentOrderDemandLine::new(
+                line.line_key.clone(),
+                mapping.item_id,
+                line.quantity,
+                mapping.requested_uom.clone(),
+            )
+        })
+        .collect();
+    NewFulfillmentOrder::new(
+        envelope.inventory_owner_id,
+        envelope.order_key.clone(),
+        envelope.rush,
+        envelope.ship_by,
+        envelope.destination.clone(),
+        lines,
+    )
+    .map_err(|error| AppError::bad_request(error.to_string()))
+}
+
+fn quarantinable_message(error: &AppError) -> Option<String> {
+    let message = match error.public_application_error() {
+        ApplicationError::NotFound(resource) => format!("not found: {resource}"),
+        ApplicationError::Validation(details) => details
+            .into_iter()
+            .map(|detail| format!("{}: {}", detail.field, detail.message))
+            .collect::<Vec<_>>()
+            .join("; "),
+        ApplicationError::Conflict(message) | ApplicationError::InvalidRequest(message) => message,
+        _ => return None,
+    };
+    let clean = message
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(MAX_INTEGRATION_PROCESSING_ERROR_MESSAGE_LENGTH)
+        .collect::<String>();
+    Some(if clean.trim().is_empty() {
+        "order intake was rejected by current business rules".into()
+    } else {
+        clean.trim().to_owned()
+    })
+}
+
+pub(crate) async fn process_external(
     db: &Db,
     access: &TenantAccess,
     context: &CommandContext,
     request: ProcessingRequest<'_>,
-    order: &NewFulfillmentOrder,
+    envelope: &IntegrationOrderEnvelope,
 ) -> AppResult<IntegrationOrderProcessingResult> {
     let prepared = request
         .reprocess
@@ -536,6 +756,128 @@ pub(crate) async fn process(
         ));
     }
 
+    let mappings =
+        match resolve_order_mappings_tx(&mut tx, access, request.receipt, envelope).await? {
+            Ok(mappings) => mappings,
+            Err(message) => {
+                let result = write_outcome_tx(
+                    &mut tx,
+                    access,
+                    OutcomeWrite {
+                        receipt: request.receipt,
+                        actor_id: context.actor_id,
+                        previous: previous.as_ref(),
+                        input: request.input,
+                        ids: OutcomeIds {
+                            order_id: None,
+                            order_revision: None,
+                        },
+                        failure: Some(QuarantineReason {
+                            code: "item_mapping_not_found",
+                            message: &message,
+                        }),
+                        applied_mappings: &[],
+                    },
+                )
+                .await?;
+                if let Some(prepared) = prepared {
+                    let completed = prepared.completed_result(&result, None)?;
+                    insert_result(&mut tx, &completed).await?;
+                }
+                tx.commit().await?;
+                return Ok(result);
+            }
+        };
+    let order = mapped_order(envelope, &mappings)?;
+    let mut savepoint = tx.begin().await?;
+    let creation = create_order_for_processing_tx(
+        &mut savepoint,
+        access,
+        context,
+        request.receipt,
+        request.expected_revision,
+        &order,
+    )
+    .await;
+    let (outcome_ids, failure_message) = match creation {
+        Ok(ids) => {
+            savepoint.commit().await?;
+            (ids, None)
+        }
+        Err(error) => {
+            savepoint.rollback().await?;
+            let Some(message) = quarantinable_message(&error) else {
+                return Err(error);
+            };
+            (
+                OutcomeIds {
+                    order_id: None,
+                    order_revision: None,
+                },
+                Some(message),
+            )
+        }
+    };
+    let result = write_outcome_tx(
+        &mut tx,
+        access,
+        OutcomeWrite {
+            receipt: request.receipt,
+            actor_id: context.actor_id,
+            previous: previous.as_ref(),
+            input: request.input,
+            ids: outcome_ids,
+            failure: failure_message.as_deref().map(|message| QuarantineReason {
+                code: "business_rejected",
+                message,
+            }),
+            applied_mappings: &mappings,
+        },
+    )
+    .await?;
+    if let Some(prepared) = prepared {
+        let completed = prepared.completed_result(&result, None)?;
+        insert_result(&mut tx, &completed).await?;
+    }
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(crate) async fn process_internal(
+    db: &Db,
+    access: &TenantAccess,
+    context: &CommandContext,
+    request: ProcessingRequest<'_>,
+    order: &NewFulfillmentOrder,
+) -> AppResult<IntegrationOrderProcessingResult> {
+    let prepared = request
+        .reprocess
+        .map(|command| {
+            PreparedCommand::new_v1(context, REPROCESS_INTEGRATION_ORDER_OPERATION, command)
+        })
+        .transpose()?;
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    lock_receipt_tx(&mut tx, access, context.actor_id, request.receipt).await?;
+    if let Some(prepared) = &prepared {
+        if let Some(result) = prepared
+            .replayed::<IntegrationOrderProcessingResult>(&mut tx)
+            .await?
+        {
+            tx.commit().await?;
+            return Ok(result);
+        }
+    }
+    let previous = current_processing_tx(&mut tx, access.tenant_id, request.receipt.id).await?;
+    validate_expected_revision(previous.as_ref(), request.expected_revision)?;
+    if previous
+        .as_ref()
+        .is_some_and(|value| value.result.status == IntegrationInboxProcessingStatus::Processed)
+    {
+        return Err(AppError::conflict(
+            "processed integration inbox receipt is terminal",
+        ));
+    }
     let outcome_ids = create_order_for_processing_tx(
         &mut tx,
         access,
@@ -555,6 +897,7 @@ pub(crate) async fn process(
             input: request.input,
             ids: outcome_ids,
             failure: None,
+            applied_mappings: &[],
         },
     )
     .await?;

@@ -28,6 +28,26 @@ use crate::repo::orders::next_outbox_sequence_tx;
 
 const PERMISSION: &str = "admin";
 
+pub(crate) fn natural_lock_key(
+    tenant_id: TenantId,
+    inventory_owner_id: InventoryOwnerId,
+    source_key: &str,
+    external_item_key: &str,
+    external_uom: &str,
+) -> String {
+    format!(
+        "integration-order-item-mapping:{}:{}:{}:{}:{}:{}:{}:{}",
+        tenant_id,
+        inventory_owner_id,
+        source_key.len(),
+        source_key,
+        external_item_key.len(),
+        external_item_key,
+        external_uom.len(),
+        external_uom,
+    )
+}
+
 fn internal(error: impl std::fmt::Display) -> AppError {
     AppError::internal(error.to_string())
 }
@@ -122,13 +142,12 @@ async fn lock_natural_key_tx(
     definition: &IntegrationOrderItemMappingDefinition,
 ) -> AppResult<()> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
-        .bind(format!(
-            "integration-order-item-mapping:{}:{}:{}:{}:{}",
+        .bind(natural_lock_key(
             definition.tenant_id,
             definition.inventory_owner_id,
-            definition.source_key,
-            definition.external_item_key,
-            definition.external_uom
+            definition.source_key.as_str(),
+            definition.external_item_key.as_str(),
+            definition.external_uom.as_str(),
         ))
         .execute(&mut **tx)
         .await?;

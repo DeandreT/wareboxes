@@ -11,7 +11,8 @@ use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     CorrectIntegrationOrderRequest, CreateFulfillmentOrderLineRequest,
     CreateFulfillmentOrderRequest, ErrorReason, ErrorResponse, FulfillmentOrderDestination,
-    InboundIntegrationDetailResponse, IntegrationOrderIntakeResponse,
+    InboundIntegrationDetailResponse, IntegrationOrderEnvelopeLineRequest,
+    IntegrationOrderEnvelopeRequest, IntegrationOrderIntakeResponse,
     IntegrationOrderProcessingStatus, ReprocessIntegrationOrderRequest, Revision,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
@@ -120,7 +121,7 @@ async fn link_item(fixture: &Fixture, tenant_id: TenantId, owner_id: i64, item_i
     tx.commit().await.unwrap();
 }
 
-fn order(owner_id: i64, item_id: i64, key: &str) -> CreateFulfillmentOrderRequest {
+fn internal_order(owner_id: i64, item_id: i64, key: &str) -> CreateFulfillmentOrderRequest {
     CreateFulfillmentOrderRequest {
         inventory_owner_id: owner_id,
         order_key: key.into(),
@@ -147,6 +148,62 @@ fn order(owner_id: i64, item_id: i64, key: &str) -> CreateFulfillmentOrderReques
     }
 }
 
+fn external_order(key: &str) -> IntegrationOrderEnvelopeRequest {
+    IntegrationOrderEnvelopeRequest {
+        order_key: key.into(),
+        rush: false,
+        ship_by: None,
+        destination: FulfillmentOrderDestination {
+            recipient_name: "Inbound Orders".into(),
+            company: Some("Northstar Retail".into()),
+            phone: None,
+            email: None,
+            line1: "125 Shipping Lane".into(),
+            line2: None,
+            city: "Reno".into(),
+            region: "NV".into(),
+            postal_code: "89502".into(),
+            country: "US".into(),
+        },
+        lines: vec![IntegrationOrderEnvelopeLineRequest {
+            line_key: "1".into(),
+            external_item_key: "CLIENT-CASE".into(),
+            external_uom: "CS".into(),
+            quantity: 4,
+        }],
+    }
+}
+
+async fn configure_mapping(
+    fixture: &Fixture,
+    tenant_id: TenantId,
+    user_id: i64,
+    owner_id: i64,
+    item_id: i64,
+    source_key: &str,
+) {
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    sqlx::query(
+        r#"
+        INSERT INTO integration_order_item_mappings
+            (tenant_id,inventory_owner_id,source_key,external_item_key,external_uom,
+             item_id,requested_uom,revision,effective_from,configured_by_user_id,configured_at)
+        SELECT $1,$2,$3,'CLIENT-CASE','CS',$4,'case',1,
+               clock.moment,$5,clock.moment
+        FROM (SELECT clock_timestamp() AS moment) clock
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(owner_id)
+    .bind(source_key)
+    .bind(item_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
 #[tokio::test]
 async fn retained_order_envelope_quarantines_recovers_and_replays_exactly() {
     init_tracing();
@@ -163,7 +220,7 @@ async fn retained_order_envelope_quarantines_recovers_and_replays_exactly() {
     let app = routes::app(AppState::new(fixture.db.clone()));
     let intake_uri =
         format!("/api/v1/integrations/order-intake/partner-api/inventory-owners/{owner_id}/orders");
-    let payload = order(owner_id, item_id, "INTAKE-100");
+    let payload = external_order("INTAKE-100");
 
     let quarantined_response = app
         .clone()
@@ -185,7 +242,11 @@ async fn retained_order_envelope_quarantines_recovers_and_replays_exactly() {
     );
     assert_eq!(quarantined.revision.get(), 1);
     assert_eq!(quarantined.attempt_count, 1);
-    assert_eq!(quarantined.error_code.as_deref(), Some("business_rejected"));
+    assert_eq!(
+        quarantined.error_code.as_deref(),
+        Some("item_mapping_not_found")
+    );
+    assert_eq!(quarantined.applied_mapping_count, 0);
     assert!(quarantined.order_id.is_none());
 
     let exact_replay = app
@@ -207,6 +268,15 @@ async fn retained_order_envelope_quarantines_recovers_and_replays_exactly() {
     );
 
     link_item(&fixture, tenant_id, owner_id, item_id).await;
+    configure_mapping(
+        &fixture,
+        tenant_id,
+        user.id,
+        owner_id,
+        item_id,
+        "partner-api",
+    )
+    .await;
     let reprocess_uri = format!(
         "/api/v1/integration-monitor/inbound/{}/reprocessings",
         quarantined.receipt_id
@@ -234,6 +304,7 @@ async fn retained_order_envelope_quarantines_recovers_and_replays_exactly() {
     );
     assert_eq!(processed.revision.get(), 2);
     assert_eq!(processed.attempt_count, 2);
+    assert_eq!(processed.applied_mapping_count, 1);
     assert!(processed.order_id.is_some());
     assert_eq!(processed.order_revision.unwrap().get(), 1);
     assert!(processed.error_code.is_none());
@@ -283,17 +354,27 @@ async fn retained_order_envelope_quarantines_recovers_and_replays_exactly() {
         processing.attempts[0].status,
         IntegrationOrderProcessingStatus::Processed
     );
+    assert_eq!(processing.attempts[0].applied_mappings.len(), 1);
+    let applied_mapping = &processing.attempts[0].applied_mappings[0];
+    assert_eq!(applied_mapping.line_key, "1");
+    assert_eq!(applied_mapping.external_item_key, "CLIENT-CASE");
+    assert_eq!(applied_mapping.external_uom, "CS");
+    assert_eq!(applied_mapping.item_id, item_id);
+    assert_eq!(applied_mapping.requested_uom, "case");
+    assert_eq!(applied_mapping.mapping_revision.get(), 1);
     assert_eq!(
         processing.attempts[1].status,
         IntegrationOrderProcessingStatus::Quarantined
     );
+    assert!(processing.attempts[1].applied_mappings.is_empty());
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
-    let counts: (i64, i64, i64, i64) = sqlx::query_as(
+    let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT (SELECT COUNT(*) FROM integration_inbox_receipts),
                (SELECT COUNT(*) FROM integration_inbox_processings),
                (SELECT COUNT(*) FROM integration_inbox_processing_attempts),
+               (SELECT COUNT(*) FROM integration_inbox_processing_attempt_mappings),
                (SELECT COUNT(*) FROM orders WHERE order_key='INTAKE-100')
         "#,
     )
@@ -301,7 +382,25 @@ async fn retained_order_envelope_quarantines_recovers_and_replays_exactly() {
     .await
     .unwrap();
     tx.rollback().await.unwrap();
-    assert_eq!(counts, (1, 1, 2, 1));
+    assert_eq!(counts, (1, 1, 2, 1, 1));
+
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let evidence: (String, String, i64, i64, String) = sqlx::query_as(
+        r#"
+        SELECT external_item_key,external_uom,mapping_revision,item_id,requested_uom
+        FROM integration_inbox_processing_attempt_mappings
+        WHERE processing_attempt_id=$1
+        "#,
+    )
+    .bind(processed.processing_attempt_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        evidence,
+        ("CLIENT-CASE".into(), "CS".into(), 1, item_id, "case".into())
+    );
 }
 
 #[tokio::test]
@@ -338,7 +437,8 @@ async fn intake_rejects_key_reuse_and_conceals_scoped_receipts() {
     let app = routes::app(AppState::new(fixture.db.clone()));
     let uri =
         format!("/api/v1/integrations/order-intake/source-a/inventory-owners/{owner_id}/orders");
-    let payload = order(owner_id, item_id, "INTAKE-SCOPE");
+    configure_mapping(&fixture, tenant_id, user.id, owner_id, item_id, "source-a").await;
+    let payload = external_order("INTAKE-SCOPE");
     let first = app
         .clone()
         .oneshot(request(
@@ -352,8 +452,9 @@ async fn intake_rejects_key_reuse_and_conceals_scoped_receipts() {
         .await
         .unwrap();
     let first: IntegrationOrderIntakeResponse = success(first, StatusCode::ACCEPTED).await;
+    assert_eq!(first.applied_mapping_count, 1);
 
-    let changed = order(owner_id, item_id, "INTAKE-CHANGED");
+    let changed = external_order("INTAKE-CHANGED");
     let conflict = app
         .clone()
         .oneshot(request(
@@ -382,7 +483,7 @@ async fn intake_rejects_key_reuse_and_conceals_scoped_receipts() {
             Method::POST,
             &denied_uri,
             Some("denied-message"),
-            &order(other_owner_id, item_id, "DENIED"),
+            &external_order("DENIED"),
         ))
         .await
         .unwrap();
@@ -411,6 +512,11 @@ async fn processing_ledgers_are_forced_rls_minimally_granted_and_immutable() {
     let owner_id = fixture
         .inventory_owner(tenant_id, "Integration Ledger Client")
         .await;
+    let item_id = fixture
+        .item(tenant_id, "Integration Ledger Item", "case")
+        .await;
+    link_item(&fixture, tenant_id, owner_id, item_id).await;
+    configure_mapping(&fixture, tenant_id, user.id, owner_id, item_id, "ledger").await;
     let token = auth::create_session(&fixture.db, user.id).await.unwrap();
     let app = routes::app(AppState::new(fixture.db.clone()));
     let uri =
@@ -433,6 +539,24 @@ async fn processing_ledgers_are_forced_rls_minimally_granted_and_immutable() {
         quarantined.status,
         IntegrationOrderProcessingStatus::Quarantined
     );
+    let mapped_uri =
+        format!("/api/v1/integrations/order-intake/ledger/inventory-owners/{owner_id}/orders");
+    let mapped: IntegrationOrderIntakeResponse = success(
+        routes::app(AppState::new(fixture.db.clone()))
+            .oneshot(request(
+                &token,
+                tenant_id,
+                Method::POST,
+                &mapped_uri,
+                Some("ledger-mapped-message"),
+                &external_order("INTAKE-LEDGER"),
+            ))
+            .await
+            .unwrap(),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    assert_eq!(mapped.applied_mapping_count, 1);
 
     let admin = admin_db_for(&fixture.db).await;
     for (table, policy, can_update) in [
@@ -444,6 +568,11 @@ async fn processing_ledgers_are_forced_rls_minimally_granted_and_immutable() {
         (
             "integration_inbox_processing_attempts",
             "integration_inbox_processing_attempts_tenant_isolation",
+            false,
+        ),
+        (
+            "integration_inbox_processing_attempt_mappings",
+            "integration_inbox_processing_attempt_mappings_tenant_isolation",
             false,
         ),
         (
@@ -493,6 +622,7 @@ async fn processing_ledgers_are_forced_rls_minimally_granted_and_immutable() {
     for sequence in [
         "integration_inbox_processings_id_seq",
         "integration_inbox_processing_attempts_id_seq",
+        "integration_inbox_processing_attempt_mappings_id_seq",
         "integration_inbox_processing_corrections_id_seq",
     ] {
         let privileges: (bool, bool, bool) = sqlx::query_as(
@@ -509,24 +639,25 @@ async fn processing_ledgers_are_forced_rls_minimally_granted_and_immutable() {
         assert_eq!(privileges, (true, false, false));
     }
 
-    let unbound: (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT COUNT(*) FROM integration_inbox_processings),(SELECT COUNT(*) FROM integration_inbox_processing_attempts)",
+    let unbound: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM integration_inbox_processings),(SELECT COUNT(*) FROM integration_inbox_processing_attempts),(SELECT COUNT(*) FROM integration_inbox_processing_attempt_mappings)",
     )
     .fetch_one(&fixture.db)
     .await
     .unwrap();
-    assert_eq!(unbound, (0, 0));
+    assert_eq!(unbound, (0, 0, 0));
     let mut other_tx = tenant_tx(&fixture.db, other_tenant_id).await;
-    let guessed: (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT COUNT(*) FROM integration_inbox_processings WHERE id=$1),(SELECT COUNT(*) FROM integration_inbox_processing_attempts WHERE id=$2)",
+    let guessed: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM integration_inbox_processings WHERE id=$1),(SELECT COUNT(*) FROM integration_inbox_processing_attempts WHERE id=$2),(SELECT COUNT(*) FROM integration_inbox_processing_attempt_mappings WHERE processing_attempt_id=$3)",
     )
     .bind(quarantined.processing_id)
     .bind(quarantined.processing_attempt_id)
+    .bind(mapped.processing_attempt_id)
     .fetch_one(&mut *other_tx)
     .await
     .unwrap();
     other_tx.rollback().await.unwrap();
-    assert_eq!(guessed, (0, 0));
+    assert_eq!(guessed, (0, 0, 0));
 
     let processing_tamper =
         sqlx::query("UPDATE integration_inbox_processings SET adapter_key='tampered' WHERE id=$1")
@@ -541,6 +672,13 @@ async fn processing_ledgers_are_forced_rls_minimally_granted_and_immutable() {
     .execute(&admin)
     .await;
     assert!(attempt_tamper.is_err());
+    let mapping_tamper = sqlx::query(
+        "UPDATE integration_inbox_processing_attempt_mappings SET external_item_key='tampered' WHERE processing_attempt_id=$1",
+    )
+    .bind(mapped.processing_attempt_id)
+    .execute(&admin)
+    .await;
+    assert!(mapping_tamper.is_err());
 }
 
 #[tokio::test]
@@ -587,7 +725,7 @@ async fn corrected_envelope_is_immutable_replayable_and_drives_later_reprocessin
     let correction_body = CorrectIntegrationOrderRequest {
         expected_revision: Revision::new(1).unwrap(),
         reason: "Corrected malformed partner envelope".into(),
-        order: order(owner_id, item_id, "INTAKE-CORRECTED"),
+        order: internal_order(owner_id, item_id, "INTAKE-CORRECTED"),
     };
     let invalid_reason = app
         .clone()
@@ -804,7 +942,7 @@ async fn concurrent_reprocess_with_stale_revision_has_one_winner() {
     let app = routes::app(AppState::new(fixture.db.clone()));
     let intake_uri =
         format!("/api/v1/integrations/order-intake/race/inventory-owners/{owner_id}/orders");
-    let payload = order(owner_id, item_id, "INTAKE-RACE");
+    let payload = external_order("INTAKE-RACE");
     let quarantined: IntegrationOrderIntakeResponse = success(
         app.clone()
             .oneshot(request(
@@ -821,6 +959,7 @@ async fn concurrent_reprocess_with_stale_revision_has_one_winner() {
     )
     .await;
     link_item(&fixture, tenant_id, owner_id, item_id).await;
+    configure_mapping(&fixture, tenant_id, user.id, owner_id, item_id, "race").await;
     let uri = format!(
         "/api/v1/integration-monitor/inbound/{}/reprocessings",
         quarantined.receipt_id
@@ -859,11 +998,13 @@ async fn concurrent_reprocess_with_stale_revision_has_one_winner() {
     };
     assert_eq!(winner.status, IntegrationOrderProcessingStatus::Processed);
     assert_eq!(winner.revision.get(), 2);
+    assert_eq!(winner.applied_mapping_count, 1);
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
-    let counts: (i64, i64, i64) = sqlx::query_as(
+    let counts: (i64, i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT (SELECT COUNT(*) FROM integration_inbox_processing_attempts WHERE receipt_id=$1),
+               (SELECT COUNT(*) FROM integration_inbox_processing_attempt_mappings WHERE receipt_id=$1),
                (SELECT COUNT(*) FROM orders WHERE order_key='INTAKE-RACE'),
                (SELECT COUNT(*) FROM command_idempotency_records WHERE operation='integration.order_intake.reprocess.v1')
         "#,
@@ -873,5 +1014,5 @@ async fn concurrent_reprocess_with_stale_revision_has_one_winner() {
     .await
     .unwrap();
     tx.rollback().await.unwrap();
-    assert_eq!(counts, (2, 1, 1));
+    assert_eq!(counts, (2, 1, 1, 1));
 }

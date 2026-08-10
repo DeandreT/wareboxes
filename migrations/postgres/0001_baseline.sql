@@ -34633,8 +34633,10 @@ BEGIN
 
     PERFORM pg_advisory_xact_lock(hashtextextended(
         'integration-order-item-mapping:' || NEW.tenant_id::text || ':' ||
-        NEW.inventory_owner_id::text || ':' || NEW.source_key || ':' ||
-        NEW.external_item_key || ':' || NEW.external_uom, 0));
+        NEW.inventory_owner_id::text || ':' || octet_length(NEW.source_key)::text || ':' ||
+        NEW.source_key || ':' || octet_length(NEW.external_item_key)::text || ':' ||
+        NEW.external_item_key || ':' || octet_length(NEW.external_uom)::text || ':' ||
+        NEW.external_uom, 0));
     SELECT item.packaging_unit INTO catalog_uom
     FROM public.inventory_owner_items owner_item
     JOIN public.items item ON item.tenant_id=owner_item.tenant_id
@@ -34786,6 +34788,7 @@ CREATE TABLE public.integration_inbox_processing_attempts (
     error_message text,
     attempted_by_user_id bigint NOT NULL,
     attempted_at timestamp with time zone NOT NULL,
+    applied_mapping_count integer NOT NULL,
     CONSTRAINT integration_inbox_processing_attempts_sequence_unique
         UNIQUE (tenant_id,processing_id,attempt_number),
     CONSTRAINT integration_inbox_processing_attempts_revision_unique
@@ -34793,6 +34796,8 @@ CREATE TABLE public.integration_inbox_processing_attempts (
     CONSTRAINT integration_inbox_processing_attempts_scope_id_unique
         UNIQUE (tenant_id,inventory_owner_id,id),
     CONSTRAINT integration_inbox_processing_attempts_number_check CHECK (attempt_number>0),
+    CONSTRAINT integration_inbox_processing_attempts_mapping_count_check
+        CHECK (applied_mapping_count>=0),
     CONSTRAINT integration_inbox_processing_attempts_revision_check CHECK (
         resulting_revision>0 AND
         ((previous_revision IS NULL AND resulting_revision=1 AND attempt_number=1)
@@ -34827,6 +34832,56 @@ CREATE TABLE public.integration_inbox_processing_attempts (
     CONSTRAINT integration_inbox_processing_attempts_actor_fkey
         FOREIGN KEY (tenant_id,attempted_by_user_id)
         REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.integration_inbox_processing_attempt_mappings (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    processing_id bigint NOT NULL,
+    processing_attempt_id bigint NOT NULL,
+    receipt_id bigint NOT NULL,
+    attempt_number integer NOT NULL,
+    line_key text NOT NULL,
+    mapping_id bigint NOT NULL,
+    mapping_revision bigint NOT NULL,
+    source_key text NOT NULL,
+    external_item_key text NOT NULL,
+    external_uom text NOT NULL,
+    item_id bigint NOT NULL,
+    requested_uom text NOT NULL,
+    CONSTRAINT integration_inbox_attempt_mappings_scope_id_unique
+        UNIQUE (tenant_id,inventory_owner_id,id),
+    CONSTRAINT integration_inbox_attempt_mappings_line_unique
+        UNIQUE (tenant_id,processing_attempt_id,line_key),
+    CONSTRAINT integration_inbox_attempt_mappings_line_check CHECK (
+        line_key=btrim(line_key) AND line_key<>'' AND char_length(line_key)<=200
+        AND line_key!~'[[:cntrl:]]'),
+    CONSTRAINT integration_inbox_attempt_mappings_revision_check CHECK (mapping_revision>0),
+    CONSTRAINT integration_inbox_attempt_mappings_identity_check CHECK (
+        source_key=btrim(source_key) AND source_key<>'' AND char_length(source_key)<=200
+        AND source_key!~'[[:cntrl:]]'
+        AND external_item_key=btrim(external_item_key) AND external_item_key<>''
+        AND char_length(external_item_key)<=200 AND external_item_key!~'[[:cntrl:]]'
+        AND external_uom=btrim(external_uom) AND external_uom<>''
+        AND char_length(external_uom)<=32 AND external_uom!~'[[:cntrl:]]'
+        AND requested_uom=btrim(requested_uom) AND requested_uom<>''
+        AND char_length(requested_uom)<=32 AND requested_uom!~'[[:cntrl:]]'),
+    CONSTRAINT integration_inbox_attempt_mappings_attempt_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,processing_attempt_id)
+        REFERENCES public.integration_inbox_processing_attempts(tenant_id,inventory_owner_id,id),
+    CONSTRAINT integration_inbox_attempt_mappings_processing_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,processing_id)
+        REFERENCES public.integration_inbox_processings(tenant_id,inventory_owner_id,id),
+    CONSTRAINT integration_inbox_attempt_mappings_receipt_fkey
+        FOREIGN KEY (tenant_id,receipt_id)
+        REFERENCES public.integration_inbox_receipts(tenant_id,id),
+    CONSTRAINT integration_inbox_attempt_mappings_mapping_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,mapping_id)
+        REFERENCES public.integration_order_item_mappings(tenant_id,inventory_owner_id,id),
+    CONSTRAINT integration_inbox_attempt_mappings_owner_item_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,item_id)
+        REFERENCES public.inventory_owner_items(tenant_id,inventory_owner_id,item_id)
 );
 
 CREATE TABLE public.integration_inbox_processing_corrections (
@@ -34970,6 +35025,60 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION public.validate_integration_inbox_processing_attempt_mapping() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    attempt public.integration_inbox_processing_attempts%ROWTYPE;
+    mapping public.integration_order_item_mappings%ROWTYPE;
+    receipt public.integration_inbox_receipts%ROWTYPE;
+    payload jsonb;
+BEGIN
+    SELECT * INTO attempt FROM public.integration_inbox_processing_attempts
+    WHERE tenant_id=NEW.tenant_id AND inventory_owner_id=NEW.inventory_owner_id
+      AND id=NEW.processing_attempt_id AND processing_id=NEW.processing_id
+      AND receipt_id=NEW.receipt_id AND attempt_number=NEW.attempt_number
+    FOR SHARE;
+    SELECT * INTO mapping FROM public.integration_order_item_mappings
+    WHERE tenant_id=NEW.tenant_id AND inventory_owner_id=NEW.inventory_owner_id
+      AND id=NEW.mapping_id
+    FOR SHARE;
+    SELECT * INTO receipt FROM public.integration_inbox_receipts
+    WHERE tenant_id=NEW.tenant_id AND inventory_owner_id=NEW.inventory_owner_id
+      AND id=NEW.receipt_id
+    FOR SHARE;
+    IF attempt.id IS NULL OR mapping.id IS NULL OR receipt.id IS NULL
+       OR attempt.correction_id IS NOT NULL
+       OR receipt.source_key<>NEW.source_key
+       OR mapping.revision<>NEW.mapping_revision
+       OR mapping.source_key<>NEW.source_key
+       OR mapping.external_item_key<>NEW.external_item_key
+       OR mapping.external_uom<>NEW.external_uom
+       OR mapping.item_id<>NEW.item_id
+       OR mapping.requested_uom<>NEW.requested_uom
+       OR mapping.effective_from>attempt.attempted_at
+       OR (mapping.effective_to IS NOT NULL AND mapping.effective_to<=attempt.attempted_at)
+    THEN
+        RAISE EXCEPTION 'integration processing attempt mapping snapshot is invalid'
+            USING ERRCODE='23514';
+    END IF;
+    payload:=convert_from(receipt.raw_payload,'UTF8')::jsonb;
+    IF jsonb_typeof(payload->'lines')<>'array'
+       OR attempt.applied_mapping_count<>jsonb_array_length(payload->'lines')
+       OR NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements(payload->'lines') line
+        WHERE line->>'line_key'=NEW.line_key
+          AND line->>'external_item_key'=NEW.external_item_key
+          AND line->>'external_uom'=NEW.external_uom)
+    THEN
+        RAISE EXCEPTION 'integration processing attempt mapping lacks matching source line'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE FUNCTION public.require_integration_inbox_processing_consistency() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path TO 'pg_catalog', 'public'
@@ -35015,8 +35124,37 @@ BEGIN
           AND processing.attempt_count=NEW.attempt_number
           AND processing.last_input_payload_sha256=NEW.input_payload_sha256
           AND processing.last_correction_id IS NOT DISTINCT FROM NEW.correction_id
+          AND NEW.applied_mapping_count=(
+              SELECT COUNT(*) FROM public.integration_inbox_processing_attempt_mappings mapping
+              WHERE mapping.tenant_id=NEW.tenant_id
+                AND mapping.processing_attempt_id=NEW.id)
     ) THEN
         RAISE EXCEPTION 'integration inbox processing attempt lacks exact current projection'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.require_integration_inbox_attempt_mapping_count() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM public.integration_inbox_processing_attempts attempt
+        WHERE attempt.tenant_id=NEW.tenant_id
+          AND attempt.inventory_owner_id=NEW.inventory_owner_id
+          AND attempt.id=NEW.processing_attempt_id
+          AND attempt.processing_id=NEW.processing_id
+          AND attempt.receipt_id=NEW.receipt_id
+          AND attempt.attempt_number=NEW.attempt_number
+          AND attempt.applied_mapping_count=(
+              SELECT COUNT(*) FROM public.integration_inbox_processing_attempt_mappings mapping
+              WHERE mapping.tenant_id=NEW.tenant_id
+                AND mapping.processing_attempt_id=NEW.processing_attempt_id)
+    ) THEN
+        RAISE EXCEPTION 'integration processing attempt mapping count is inconsistent'
             USING ERRCODE='23514';
     END IF;
     RETURN NULL;
@@ -35066,6 +35204,16 @@ EXECUTE FUNCTION public.require_integration_inbox_processing_consistency();
 CREATE TRIGGER integration_inbox_processing_attempts_are_immutable
 BEFORE UPDATE OR DELETE ON public.integration_inbox_processing_attempts
 FOR EACH ROW EXECUTE FUNCTION public.reject_integration_inbox_processing_attempt_mutation();
+CREATE TRIGGER integration_inbox_attempt_mappings_validate
+BEFORE INSERT ON public.integration_inbox_processing_attempt_mappings
+FOR EACH ROW EXECUTE FUNCTION public.validate_integration_inbox_processing_attempt_mapping();
+CREATE TRIGGER integration_inbox_attempt_mappings_are_immutable
+BEFORE UPDATE OR DELETE ON public.integration_inbox_processing_attempt_mappings
+FOR EACH ROW EXECUTE FUNCTION public.reject_integration_inbox_processing_attempt_mutation();
+CREATE CONSTRAINT TRIGGER integration_inbox_attempt_mappings_require_count
+AFTER INSERT ON public.integration_inbox_processing_attempt_mappings
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_integration_inbox_attempt_mapping_count();
 CREATE CONSTRAINT TRIGGER integration_inbox_processing_attempts_require_projection
 AFTER INSERT ON public.integration_inbox_processing_attempts
 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
@@ -35102,14 +35250,25 @@ ON public.integration_inbox_processing_corrections
 USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
 WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
 
+ALTER TABLE public.integration_inbox_processing_attempt_mappings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.integration_inbox_processing_attempt_mappings FORCE ROW LEVEL SECURITY;
+CREATE POLICY integration_inbox_processing_attempt_mappings_tenant_isolation
+ON public.integration_inbox_processing_attempt_mappings
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
 GRANT SELECT,INSERT,UPDATE ON public.integration_inbox_processings TO wareboxes_app;
 GRANT SELECT,INSERT ON public.integration_inbox_processing_attempts TO wareboxes_app;
+GRANT SELECT,INSERT ON public.integration_inbox_processing_attempt_mappings TO wareboxes_app;
 GRANT SELECT,INSERT ON public.integration_inbox_processing_corrections TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.integration_inbox_processings_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.integration_inbox_processing_attempts_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.integration_inbox_processing_attempt_mappings_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.integration_inbox_processing_corrections_id_seq TO wareboxes_app;
 REVOKE ALL ON FUNCTION public.guard_integration_inbox_processing_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_integration_inbox_processing_attempt_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_integration_inbox_processing_attempt_mapping() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_integration_inbox_attempt_mapping_count() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_integration_inbox_processing_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_integration_inbox_processing_correction() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_integration_inbox_processing_attempt_projection() FROM PUBLIC;

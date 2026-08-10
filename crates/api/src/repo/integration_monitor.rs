@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
 use sqlx::postgres::PgRow;
 use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_application::integration_monitor::{
     DiscardOutboxDeadLetterCommand, DiscardOutboxDeadLetterResult,
     InboundIntegrationDetailReadModel, InboundIntegrationPage, InboundIntegrationPayloadReadModel,
+    InboundIntegrationProcessingAttemptMappingReadModel,
     InboundIntegrationProcessingAttemptReadModel, InboundIntegrationProcessingReadModel,
     InboundIntegrationQuery, InboundIntegrationReceiptReadModel, InboundIntegrationSort,
     InboundPayloadPreviewEncoding, IntegrationSortDirection, OutboundDeliveryAttemptReadModel,
@@ -17,9 +20,10 @@ use wareboxes_application::outbox::DeliveryAttemptOutcome;
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    FacilityId, IntegrationInboxCorrectionId, IntegrationInboxProcessingAttemptId,
+    CatalogItemId, FacilityId, IntegrationInboxCorrectionId, IntegrationInboxProcessingAttemptId,
     IntegrationInboxProcessingId, IntegrationInboxProcessingRevision,
-    IntegrationInboxProcessingStatus, InventoryOwnerId, OrderId, OrderRevision,
+    IntegrationInboxProcessingStatus, IntegrationOrderItemMappingId,
+    IntegrationOrderItemMappingRevision, InventoryOwnerId, OrderId, OrderRevision,
     OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason, OutboxDeadLetterReplayId, Timestamp,
     UserId,
 };
@@ -107,7 +111,30 @@ fn map_inbound(row: &PgRow) -> AppResult<InboundIntegrationReceiptReadModel> {
     })
 }
 
-fn map_processing_attempt(row: &PgRow) -> AppResult<InboundIntegrationProcessingAttemptReadModel> {
+fn map_processing_attempt_mapping(
+    row: &PgRow,
+) -> AppResult<InboundIntegrationProcessingAttemptMappingReadModel> {
+    Ok(InboundIntegrationProcessingAttemptMappingReadModel {
+        line_key: row.try_get("line_key")?,
+        mapping_id: IntegrationOrderItemMappingId::new(row.try_get("mapping_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        mapping_revision: IntegrationOrderItemMappingRevision::new(
+            row.try_get("mapping_revision")?,
+        )
+        .map_err(|error| AppError::internal(error.to_string()))?,
+        source_key: row.try_get("source_key")?,
+        external_item_key: row.try_get("external_item_key")?,
+        external_uom: row.try_get("external_uom")?,
+        item_id: CatalogItemId::new(row.try_get("item_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        requested_uom: row.try_get("requested_uom")?,
+    })
+}
+
+fn map_processing_attempt(
+    row: &PgRow,
+    applied_mappings: Vec<InboundIntegrationProcessingAttemptMappingReadModel>,
+) -> AppResult<InboundIntegrationProcessingAttemptReadModel> {
     Ok(InboundIntegrationProcessingAttemptReadModel {
         attempt_id: IntegrationInboxProcessingAttemptId::new(row.try_get("attempt_id")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
@@ -144,6 +171,7 @@ fn map_processing_attempt(row: &PgRow) -> AppResult<InboundIntegrationProcessing
             .map_err(|error| AppError::internal(error.to_string()))?,
         attempted_by_name: row.try_get("attempted_by_name")?,
         attempted_at: row.try_get("attempted_at")?,
+        applied_mappings,
     })
 }
 
@@ -476,9 +504,36 @@ async fn inbound_processing_tx(
     .bind(processing_id.get())
     .fetch_all(&mut **tx)
     .await?;
+    let mapping_rows = sqlx::query(
+        r#"
+        SELECT processing_attempt_id,line_key,mapping_id,mapping_revision,source_key,
+               external_item_key,external_uom,item_id,requested_uom
+        FROM integration_inbox_processing_attempt_mappings
+        WHERE tenant_id=$1 AND processing_id=$2
+        ORDER BY attempt_number DESC,line_key,mapping_id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(processing_id.get())
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut mappings_by_attempt =
+        HashMap::<i64, Vec<InboundIntegrationProcessingAttemptMappingReadModel>>::new();
+    for mapping_row in &mapping_rows {
+        mappings_by_attempt
+            .entry(mapping_row.try_get("processing_attempt_id")?)
+            .or_default()
+            .push(map_processing_attempt_mapping(mapping_row)?);
+    }
     let attempts = attempt_rows
         .iter()
-        .map(map_processing_attempt)
+        .map(|attempt_row| {
+            let attempt_id = attempt_row.try_get("attempt_id")?;
+            map_processing_attempt(
+                attempt_row,
+                mappings_by_attempt.remove(&attempt_id).unwrap_or_default(),
+            )
+        })
         .collect::<AppResult<Vec<_>>>()?;
     Ok(Some(InboundIntegrationProcessingReadModel {
         processing_id,
