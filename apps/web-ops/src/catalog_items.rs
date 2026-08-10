@@ -2,7 +2,8 @@ use std::cmp::Ordering;
 
 use leptos::prelude::*;
 use wareboxes_core::dto::{
-    AddBarcode, AddItem, AddSku, BarcodeIdRequest, ItemIdRequest, ItemUpdate,
+    AddBarcode, AddItem, AddItemPackLink, AddSku, BarcodeIdRequest, ItemIdRequest,
+    ItemPackLinkIdRequest, ItemUpdate,
 };
 use wareboxes_core::models::Item;
 
@@ -16,6 +17,11 @@ use crate::toast::use_toast_bus;
 use crate::workspace_layout::{SplitPaneHandle, SplitPaneState};
 
 use super::{optional_text, CatalogStore};
+
+#[path = "catalog_items/pack.rs"]
+mod pack;
+
+use pack::{active_pack_links_for_item, pack_conversion_label};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ItemSort {
@@ -408,12 +414,32 @@ fn ItemDetail(store: CatalogStore, item: Item) -> impl IntoView {
     let barcode = RwSignal::new(String::new());
     let barcode_type = RwSignal::new("code128".to_owned());
     let barcode_notes = RwSignal::new(String::new());
+    let contained_item_id = RwSignal::new(String::new());
+    let contained_quantity = RwSignal::new("2".to_owned());
+    let pack_notes = RwSignal::new(String::new());
     let print_barcode_id = RwSignal::new(None::<i64>);
     let pending = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let item_id = item.id;
     let inactive = item.deleted.is_some();
     let toasts = use_toast_bus();
+    let pack_options = StoredValue::new(
+        store
+            .data
+            .get_untracked()
+            .items
+            .into_iter()
+            .filter(|candidate| candidate.id != item_id && candidate.deleted.is_none())
+            .map(|candidate| {
+                (
+                    candidate.id,
+                    candidate
+                        .description
+                        .unwrap_or_else(|| format!("Item #{}", candidate.id)),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
 
     let save = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
@@ -539,6 +565,59 @@ fn ItemDetail(store: CatalogStore, item: Item) -> impl IntoView {
         });
     };
 
+    let add_pack_conversion = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        if pending.get_untracked() {
+            return;
+        }
+        let Some(single_item_id) = contained_item_id
+            .get_untracked()
+            .parse::<i64>()
+            .ok()
+            .filter(|id| pack_options.with_value(|items| items.iter().any(|item| item.0 == *id)))
+        else {
+            error.set(Some("Select the contained item.".to_owned()));
+            return;
+        };
+        let Some(inner_qty) = contained_quantity
+            .get_untracked()
+            .parse::<i64>()
+            .ok()
+            .filter(|quantity| *quantity >= 2)
+        else {
+            error.set(Some(
+                "Contained quantity must be a whole number of at least 2.".to_owned(),
+            ));
+            return;
+        };
+        let request = AddItemPackLink {
+            master_item_id: item_id,
+            single_item_id,
+            inner_qty,
+            notes: optional_text(&pack_notes.get_untracked()),
+        };
+        pending.set(true);
+        error.set(None);
+        leptos::task::spawn_local(async move {
+            match api::internal_post::<_, i64>("/api/items/pack-links/add", &request).await {
+                Ok(id) => {
+                    contained_item_id.set(String::new());
+                    contained_quantity.set("2".to_owned());
+                    pack_notes.set(String::new());
+                    toasts.success(format!("Pack conversion #{id} added."));
+                    pending.set(false);
+                    store.refresh();
+                }
+                Err(api_error) if api_error.unauthorized => store.on_unauthorized.run(()),
+                Err(api_error) => {
+                    toasts.error(api_error.message.clone());
+                    error.set(Some(api_error.message));
+                    pending.set(false);
+                }
+            }
+        });
+    };
+
     view! {
         <div class="catalog-detail">
             <div class="catalog-editor-heading">
@@ -589,6 +668,72 @@ fn ItemDetail(store: CatalogStore, item: Item) -> impl IntoView {
             </form>
 
             <InlineError error/>
+
+            <section class="catalog-subsection">
+                <div class="catalog-subheading">
+                    <h3>"Pack conversions"</h3>
+                    <span>{move || active_pack_links_for_item(&store.data.get().item_pack_links, item_id).len()}</span>
+                </div>
+                <form class="inline-command pack-command" on:submit=add_pack_conversion>
+                    <label>
+                        <span class="sr-only">"Contained item"</span>
+                        <select required prop:value=move || contained_item_id.get() on:change=move |event| contained_item_id.set(event_target_value(&event))>
+                            <option value="">"Select item"</option>
+                            {pack_options.with_value(|items| items.iter().map(|(id, label)| view! { <option value=id.to_string()>{format!("{label} / #{id}")}</option> }).collect_view())}
+                        </select>
+                    </label>
+                    <label>
+                        <span class="sr-only">"Contained quantity"</span>
+                        <input type="number" min="2" step="1" aria-label="Contained quantity" prop:value=move || contained_quantity.get() on:input=move |event| contained_quantity.set(event_target_value(&event))/>
+                    </label>
+                    <label>
+                        <span class="sr-only">"Pack conversion notes"</span>
+                        <input type="text" placeholder="Notes (optional)" prop:value=move || pack_notes.get() on:input=move |event| pack_notes.set(event_target_value(&event))/>
+                    </label>
+                    <button class="button secondary-action compact" type="submit" disabled=move || pending.get() || inactive>"Add conversion"</button>
+                </form>
+                <div class="identifier-list pack-conversion-list">
+                    {move || {
+                        let data = store.data.get();
+                        let links = active_pack_links_for_item(&data.item_pack_links, item_id);
+                        if links.is_empty() {
+                            view! { <p class="catalog-empty">"No pack relationships defined."</p> }.into_any()
+                        } else {
+                            links.into_iter().map(|link| {
+                                let link_id = link.id;
+                                let (label, conversion) = pack_conversion_label(&link, &data.items, item_id);
+                                let remove = move |_| {
+                                    if pending.get_untracked() {
+                                        return;
+                                    }
+                                    pending.set(true);
+                                    error.set(None);
+                                    let request = ItemPackLinkIdRequest { item_pack_link_id: link_id };
+                                    leptos::task::spawn_local(async move {
+                                        handle_bool_command(
+                                            store,
+                                            "/api/items/pack-links/delete",
+                                            &request,
+                                            format!("Pack conversion #{link_id} removed."),
+                                            pending,
+                                            error,
+                                            toasts,
+                                        )
+                                        .await;
+                                    });
+                                };
+                                view! {
+                                    <div class="identifier-row pack-conversion-row">
+                                        <strong>{label}</strong>
+                                        <span>{conversion}</span>
+                                        <button class="button barcode-action danger-action" type="button" aria-label=format!("Remove pack conversion {link_id}") title="Remove pack conversion" disabled=move || pending.get() || inactive on:click=remove><Icon icon=UiIcon::Remove/></button>
+                                    </div>
+                                }
+                            }).collect_view().into_any()
+                        }
+                    }}
+                </div>
+            </section>
 
             <section class="catalog-subsection">
                 <div class="catalog-subheading">

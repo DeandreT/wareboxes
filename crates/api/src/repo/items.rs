@@ -199,6 +199,12 @@ pub async fn add_item_pack_link(
         return Err(AppError::bad_request("inner quantity must be at least 2"));
     }
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('item-pack-graph:' || $1::TEXT, 0))",
+    )
+    .bind(tenant_id.get())
+    .execute(&mut *tx)
+    .await?;
     let item_ids = [master_item_id, single_item_id];
     let active_items = sqlx::query_scalar::<_, i64>(
         r#"
@@ -217,6 +223,49 @@ pub async fn add_item_pack_link(
     .await?;
     if active_items.len() != 2 {
         return Err(AppError::bad_request("item not found"));
+    }
+    let existing: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+          SELECT 1 FROM item_pack_links
+          WHERE tenant_id=$1 AND master_item_id=$2 AND single_item_id=$3 AND deleted IS NULL
+        )
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(master_item_id)
+    .bind(single_item_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if existing {
+        return Err(AppError::conflict(
+            "an active pack conversion already exists for these items",
+        ));
+    }
+    let creates_cycle: bool = sqlx::query_scalar(
+        r#"
+        WITH RECURSIVE descendants(item_id) AS (
+          SELECT link.single_item_id
+          FROM item_pack_links link
+          WHERE link.tenant_id=$1 AND link.master_item_id=$2 AND link.deleted IS NULL
+          UNION
+          SELECT link.single_item_id
+          FROM item_pack_links link
+          JOIN descendants current ON current.item_id=link.master_item_id
+          WHERE link.tenant_id=$1 AND link.deleted IS NULL
+        )
+        SELECT EXISTS(SELECT 1 FROM descendants WHERE item_id=$3)
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(single_item_id)
+    .bind(master_item_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if creates_cycle {
+        return Err(AppError::conflict(
+            "pack conversion would create a circular item hierarchy",
+        ));
     }
     let id: i64 = sqlx::query_scalar(
         r#"

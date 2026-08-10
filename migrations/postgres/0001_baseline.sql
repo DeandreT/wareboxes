@@ -16450,7 +16450,7 @@ CREATE INDEX idx_item_batches_load_id ON public.item_batches USING btree (load_i
 -- Name: idx_item_pack_links_active_unique; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX idx_item_pack_links_active_unique ON public.item_pack_links USING btree (tenant_id, master_item_id, single_item_id, inner_qty) WHERE (deleted IS NULL);
+CREATE UNIQUE INDEX idx_item_pack_links_active_unique ON public.item_pack_links USING btree (tenant_id, master_item_id, single_item_id) WHERE (deleted IS NULL);
 
 
 --

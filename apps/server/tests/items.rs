@@ -85,3 +85,55 @@ async fn active_barcode_scanner_identity_is_unique_per_tenant() {
             .is_ok()
     );
 }
+
+#[tokio::test]
+async fn pack_conversions_reject_conflicting_quantities_and_cycles() {
+    let db = setup().await;
+    let user = auth::register_user(&db, "packs@test.com", "supersecret", None, None)
+        .await
+        .unwrap();
+    let tenant_id = tenant_for_user(&db, user.id).await;
+    let mut item_ids = Vec::new();
+    for description in ["Master case", "Inner pack", "Single unit"] {
+        item_ids.push(
+            repo::items::add_item(
+                &db,
+                tenant_id,
+                description,
+                None,
+                "case",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+    }
+
+    repo::items::add_item_pack_link(&db, tenant_id, item_ids[0], item_ids[1], 4, None)
+        .await
+        .unwrap();
+    let duplicate =
+        repo::items::add_item_pack_link(&db, tenant_id, item_ids[0], item_ids[1], 6, None)
+            .await
+            .unwrap_err();
+    assert!(matches!(
+        duplicate,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
+
+    repo::items::add_item_pack_link(&db, tenant_id, item_ids[1], item_ids[2], 3, None)
+        .await
+        .unwrap();
+    let cycle = repo::items::add_item_pack_link(&db, tenant_id, item_ids[2], item_ids[0], 2, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        cycle,
+        AppError::Application(ApplicationError::Conflict(_))
+    ));
+}

@@ -1,5 +1,7 @@
 use leptos::prelude::*;
-use wareboxes_core::models::{Facility, InventoryOwner, Item, LicensePlate, Location};
+use wareboxes_core::models::{
+    Facility, InventoryOwner, Item, ItemPackLink, LicensePlate, Location,
+};
 
 #[cfg(target_arch = "wasm32")]
 use crate::api;
@@ -30,6 +32,7 @@ use storage_zones::StorageZoneCatalog;
 #[derive(Clone, Default)]
 pub(crate) struct CatalogData {
     pub(crate) items: Vec<Item>,
+    pub(crate) item_pack_links: Vec<ItemPackLink>,
     pub(crate) locations: Vec<Location>,
     pub(crate) license_plates: Vec<LicensePlate>,
     pub(crate) facilities: Vec<Facility>,
@@ -271,6 +274,7 @@ fn refresh_catalog(store: CatalogStore) {
 async fn load_catalog() -> Result<CatalogData, api::ApiError> {
     Ok(CatalogData {
         items: api::internal_get("/api/items?show_deleted=true").await?,
+        item_pack_links: api::internal_get("/api/items/pack-links?show_deleted=false").await?,
         locations: api::internal_get("/api/locations?show_deleted=true").await?,
         license_plates: api::internal_get("/api/license-plates?show_deleted=true").await?,
         facilities: api::internal_get("/api/facilities?show_deleted=false").await?,
