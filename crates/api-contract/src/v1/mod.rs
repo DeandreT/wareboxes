@@ -15,6 +15,7 @@ mod inventory_recall;
 mod inventory_relocation;
 mod inventory_rollup;
 mod inventory_status_transition;
+mod item_storage_policy;
 mod item_substitution;
 mod license_plate_putaway;
 mod order;
@@ -122,6 +123,10 @@ pub use inventory_rollup::{
 pub use inventory_status_transition::{
     CreateInventoryStatusTransitionRequest, InventoryStatusTransitionReason,
     InventoryStatusTransitionResponse,
+};
+pub use item_storage_policy::{
+    ConfigureItemStoragePolicyRequest, ItemStoragePolicyPage, ItemStoragePolicyPageRequest,
+    ItemStoragePolicyResponse, ItemStoragePolicyStatus, RetireItemStoragePolicyRequest,
 };
 pub use item_substitution::{
     ConfigureItemSubstitutionPolicyRequest, ItemSubstitutionPolicyListRequest,

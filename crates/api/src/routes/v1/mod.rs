@@ -13,6 +13,7 @@ mod inventory_recalls;
 mod inventory_relocation;
 mod inventory_rollups;
 mod inventory_status_transitions;
+mod item_storage_policies;
 mod item_substitutions;
 mod license_plate_putaway;
 mod order_allocations;
@@ -118,6 +119,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/storage-zones/{storage_zone_id}/retirements",
             post(storage_zones::retire),
+        )
+        .route(
+            "/item-storage-policies",
+            get(item_storage_policies::list).post(item_storage_policies::configure),
+        )
+        .route(
+            "/item-storage-policies/{policy_id}/retirements",
+            post(item_storage_policies::retire),
         )
         .route(
             "/inventory/rollups/by-location",

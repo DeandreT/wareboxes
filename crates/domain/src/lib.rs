@@ -6,6 +6,7 @@ mod cycle_count;
 mod facility;
 mod inbound_inspection;
 mod inventory_recall;
+mod item_storage_policy;
 mod item_substitution;
 mod order;
 mod order_amendment;
@@ -56,6 +57,11 @@ pub use inventory_recall::{
     release_inventory_recall, InventoryRecallDetails, InventoryRecallError, InventoryRecallNote,
     InventoryRecallReason, InventoryRecallRevision, InventoryRecallStatus,
     MAX_INVENTORY_RECALL_NOTE_LENGTH,
+};
+pub use item_storage_policy::{
+    AllowedStorageZonePurposes, ItemStorageLocationCapacity, ItemStoragePolicyDefinition,
+    ItemStoragePolicyError, ItemStoragePolicyRevision, ItemStoragePolicyStatus,
+    ItemStoragePolicyUom, MAX_ITEM_STORAGE_POLICY_UOM_LENGTH,
 };
 pub use item_substitution::{
     substitute_pick_shortage, ItemSubstitutionDefinition, ItemSubstitutionDetails,
@@ -244,6 +250,7 @@ positive_id!(
 );
 positive_id!(ItemSubstitutionPolicyId, "item substitution policy ID");
 positive_id!(ItemSubstitutionId, "item substitution ID");
+positive_id!(ItemStoragePolicyId, "item storage policy ID");
 positive_id!(OrderReleaseId, "order release ID");
 positive_id!(PickWaveId, "pick wave ID");
 positive_id!(PickTaskId, "pick task ID");

@@ -20,6 +20,7 @@ mod inventory_locking;
 pub mod inventory_owners;
 pub mod inventory_recall;
 mod inventory_status_change;
+pub mod item_storage_policy;
 pub mod item_substitution;
 pub mod items;
 pub mod license_plates;

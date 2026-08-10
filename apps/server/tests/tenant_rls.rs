@@ -473,6 +473,14 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "storage_zone_locations_tenant_isolation",
         ),
         (
+            "item_storage_policies",
+            "item_storage_policies_tenant_isolation",
+        ),
+        (
+            "item_storage_policy_zone_purposes",
+            "item_storage_policy_zone_purposes_tenant_isolation",
+        ),
+        (
             "cycle_count_location_tasks",
             "cycle_count_location_tasks_tenant_isolation",
         ),

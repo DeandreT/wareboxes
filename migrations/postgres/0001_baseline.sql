@@ -33196,6 +33196,485 @@ REVOKE ALL ON FUNCTION public.reject_storage_zone_location_mutation() FROM PUBLI
 REVOKE ALL ON FUNCTION public.require_storage_zone_location_count() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_active_storage_zone_location_eligibility() FROM PUBLIC;
 
+-- Versioned owner/facility/item storage compatibility and per-location capacity.
+-- Policies apply only to locations in an active storage zone. Transient unzoned
+-- execution locations remain governed by their workflow-specific invariants.
+CREATE TABLE public.item_storage_policies (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    max_quantity_per_location bigint,
+    revision bigint NOT NULL,
+    supersedes_item_storage_policy_id bigint,
+    allowed_purpose_count bigint NOT NULL,
+    effective_from timestamptz NOT NULL,
+    effective_to timestamptz,
+    configured_by_user_id bigint NOT NULL,
+    configured_at timestamptz NOT NULL,
+    retired_by_user_id bigint,
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, item_id, uom, revision),
+    CHECK (uom = btrim(uom) AND uom <> '' AND char_length(uom) <= 32),
+    CHECK (max_quantity_per_location IS NULL OR max_quantity_per_location > 0),
+    CHECK (revision > 0 AND allowed_purpose_count > 0),
+    CHECK (configured_at = effective_from),
+    CHECK ((effective_to IS NULL AND retired_by_user_id IS NULL)
+           OR (effective_to > effective_from AND retired_by_user_id IS NOT NULL)),
+    FOREIGN KEY (tenant_id) REFERENCES public.tenants(id),
+    FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities(tenant_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id)
+        REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, item_id)
+        REFERENCES public.inventory_owner_items(tenant_id, inventory_owner_id, item_id),
+    FOREIGN KEY (tenant_id, configured_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id),
+    FOREIGN KEY (tenant_id, retired_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id,
+                 supersedes_item_storage_policy_id)
+        REFERENCES public.item_storage_policies(
+            tenant_id, inventory_owner_id, facility_id, id)
+);
+
+CREATE TABLE public.item_storage_policy_zone_purposes (
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    item_storage_policy_id bigint NOT NULL,
+    purpose text NOT NULL,
+    purpose_sequence bigint NOT NULL,
+    PRIMARY KEY (tenant_id, item_storage_policy_id, purpose),
+    UNIQUE (tenant_id, item_storage_policy_id, purpose_sequence),
+    CHECK (purpose IN (
+        'receiving','reserve','pick','staging','packing','shipping','quarantine','damage')),
+    CHECK (purpose_sequence > 0),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, item_storage_policy_id)
+        REFERENCES public.item_storage_policies(
+            tenant_id, inventory_owner_id, facility_id, id)
+);
+
+CREATE UNIQUE INDEX item_storage_policies_one_active_natural_key
+ON public.item_storage_policies(
+    tenant_id, inventory_owner_id, facility_id, item_id, uom)
+WHERE effective_to IS NULL;
+CREATE INDEX item_storage_policies_history_idx
+ON public.item_storage_policies(
+    tenant_id, inventory_owner_id, facility_id, item_id, uom, revision DESC);
+CREATE INDEX item_storage_policy_purpose_lookup_idx
+ON public.item_storage_policy_zone_purposes(
+    tenant_id, inventory_owner_id, facility_id, purpose, item_storage_policy_id);
+
+CREATE FUNCTION public.validate_item_storage_policy() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    predecessor public.item_storage_policies%ROWTYPE;
+    item_uom text;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':',
+        'item_storage_policy', NEW.tenant_id, NEW.inventory_owner_id,
+        NEW.facility_id, NEW.item_id, NEW.uom), 0));
+
+    SELECT item.packaging_unit INTO item_uom
+    FROM public.inventory_owner_items owner_item
+    JOIN public.items item
+      ON item.tenant_id = owner_item.tenant_id AND item.id = owner_item.item_id
+    JOIN public.inventory_owner_facilities assignment
+      ON assignment.tenant_id = owner_item.tenant_id
+     AND assignment.inventory_owner_id = owner_item.inventory_owner_id
+     AND assignment.facility_id = NEW.facility_id
+     AND assignment.deleted IS NULL
+    WHERE owner_item.tenant_id = NEW.tenant_id
+      AND owner_item.inventory_owner_id = NEW.inventory_owner_id
+      AND owner_item.item_id = NEW.item_id
+      AND owner_item.deleted IS NULL AND item.deleted IS NULL
+    FOR SHARE OF owner_item, item, assignment;
+    IF item_uom IS DISTINCT FROM NEW.uom THEN
+        RAISE EXCEPTION 'item storage policy owner, facility, item, or UOM is unavailable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.supersedes_item_storage_policy_id IS NULL THEN
+        IF NEW.revision <> 1 OR EXISTS (
+            SELECT 1 FROM public.item_storage_policies existing
+            WHERE existing.tenant_id = NEW.tenant_id
+              AND existing.inventory_owner_id = NEW.inventory_owner_id
+              AND existing.facility_id = NEW.facility_id
+              AND existing.item_id = NEW.item_id AND existing.uom = NEW.uom)
+        THEN
+            RAISE EXCEPTION 'initial item storage policy revision must be one'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    SELECT * INTO predecessor FROM public.item_storage_policies
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND facility_id = NEW.facility_id
+      AND item_id = NEW.item_id AND uom = NEW.uom
+      AND id = NEW.supersedes_item_storage_policy_id
+    FOR SHARE;
+    IF NOT FOUND
+       OR predecessor.effective_to IS NULL
+       OR NEW.revision <> predecessor.revision + 1
+       OR NEW.effective_from < predecessor.effective_to
+       OR EXISTS (
+           SELECT 1 FROM public.item_storage_policies newer
+           WHERE newer.tenant_id = NEW.tenant_id
+             AND newer.inventory_owner_id = NEW.inventory_owner_id
+             AND newer.facility_id = NEW.facility_id
+             AND newer.item_id = NEW.item_id AND newer.uom = NEW.uom
+             AND newer.revision > predecessor.revision)
+    THEN
+        RAISE EXCEPTION 'item storage policy successor does not match its closed predecessor'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_item_storage_policy_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'item storage policies are immutable' USING ERRCODE = '23514';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':',
+        'item_storage_policy', OLD.tenant_id, OLD.inventory_owner_id,
+        OLD.facility_id, OLD.item_id, OLD.uom), 0));
+    IF NEW.id <> OLD.id
+       OR NEW.tenant_id <> OLD.tenant_id
+       OR NEW.inventory_owner_id <> OLD.inventory_owner_id
+       OR NEW.facility_id <> OLD.facility_id
+       OR NEW.item_id <> OLD.item_id OR NEW.uom <> OLD.uom
+       OR NEW.max_quantity_per_location IS DISTINCT FROM OLD.max_quantity_per_location
+       OR NEW.revision <> OLD.revision
+       OR NEW.supersedes_item_storage_policy_id IS DISTINCT FROM OLD.supersedes_item_storage_policy_id
+       OR NEW.allowed_purpose_count <> OLD.allowed_purpose_count
+       OR NEW.effective_from <> OLD.effective_from
+       OR NEW.configured_by_user_id <> OLD.configured_by_user_id
+       OR NEW.configured_at <> OLD.configured_at
+       OR OLD.effective_to IS NOT NULL
+       OR NEW.effective_to IS NULL OR NEW.retired_by_user_id IS NULL
+       OR NEW.effective_to <= OLD.effective_from
+    THEN
+        RAISE EXCEPTION 'only active item storage policy retirement is allowed'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_item_storage_policy_purpose() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM public.item_storage_policies policy
+        WHERE policy.tenant_id = NEW.tenant_id
+          AND policy.inventory_owner_id = NEW.inventory_owner_id
+          AND policy.facility_id = NEW.facility_id
+          AND policy.id = NEW.item_storage_policy_id
+          AND policy.effective_to IS NULL)
+    THEN
+        RAISE EXCEPTION 'item storage policy purpose requires an active policy'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.reject_item_storage_policy_purpose_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'item storage policy purposes are immutable'
+        USING ERRCODE = '23514';
+END;
+$$;
+
+CREATE FUNCTION public.require_item_storage_policy_consistency() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    checked_tenant_id bigint;
+    checked_policy_id bigint;
+    policy public.item_storage_policies%ROWTYPE;
+BEGIN
+    IF TG_TABLE_NAME = 'item_storage_policies' THEN
+        checked_tenant_id := NEW.tenant_id;
+        checked_policy_id := NEW.id;
+    ELSE
+        checked_tenant_id := NEW.tenant_id;
+        checked_policy_id := NEW.item_storage_policy_id;
+    END IF;
+    SELECT * INTO policy FROM public.item_storage_policies
+    WHERE tenant_id = checked_tenant_id AND id = checked_policy_id;
+
+    IF NOT FOUND
+       OR policy.allowed_purpose_count <> (
+           SELECT count(*) FROM public.item_storage_policy_zone_purposes purpose
+           WHERE purpose.tenant_id = policy.tenant_id
+             AND purpose.item_storage_policy_id = policy.id)
+       OR policy.allowed_purpose_count <> (
+           SELECT max(purpose.purpose_sequence)
+           FROM public.item_storage_policy_zone_purposes purpose
+           WHERE purpose.tenant_id = policy.tenant_id
+             AND purpose.item_storage_policy_id = policy.id)
+       OR (policy.effective_to IS NULL AND EXISTS (
+           SELECT 1
+           FROM public.inventory_balances balance
+           JOIN public.storage_zone_locations member
+             ON member.tenant_id = balance.tenant_id
+            AND member.facility_id = balance.facility_id
+            AND member.location_id = balance.location_id
+           JOIN public.storage_zones zone
+             ON zone.tenant_id = member.tenant_id
+            AND zone.facility_id = member.facility_id
+            AND zone.id = member.storage_zone_id
+            AND zone.effective_to IS NULL
+           WHERE balance.tenant_id = policy.tenant_id
+             AND balance.inventory_owner_id = policy.inventory_owner_id
+             AND balance.facility_id = policy.facility_id
+             AND balance.item_id = policy.item_id AND balance.uom = policy.uom
+             AND balance.deleted IS NULL AND balance.qty_on_hand > 0
+             AND NOT EXISTS (
+                 SELECT 1 FROM public.item_storage_policy_zone_purposes allowed
+                 WHERE allowed.tenant_id = policy.tenant_id
+                   AND allowed.item_storage_policy_id = policy.id
+                   AND allowed.purpose = zone.purpose)))
+       OR (policy.effective_to IS NULL
+           AND policy.max_quantity_per_location IS NOT NULL AND EXISTS (
+           SELECT 1
+           FROM public.inventory_balances balance
+           JOIN public.storage_zone_locations member
+             ON member.tenant_id = balance.tenant_id
+            AND member.facility_id = balance.facility_id
+            AND member.location_id = balance.location_id
+           JOIN public.storage_zones zone
+             ON zone.tenant_id = member.tenant_id
+            AND zone.facility_id = member.facility_id
+            AND zone.id = member.storage_zone_id
+            AND zone.effective_to IS NULL
+           WHERE balance.tenant_id = policy.tenant_id
+             AND balance.inventory_owner_id = policy.inventory_owner_id
+             AND balance.facility_id = policy.facility_id
+             AND balance.item_id = policy.item_id AND balance.uom = policy.uom
+             AND balance.deleted IS NULL
+           GROUP BY balance.location_id
+           HAVING sum(balance.qty_on_hand) > policy.max_quantity_per_location))
+    THEN
+        RAISE EXCEPTION 'item storage policy purposes, current positions, or capacity are inconsistent'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.enforce_item_storage_policy_for_balance() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    policy_id bigint;
+    capacity bigint;
+    zone_purpose text;
+    resulting_on_hand bigint;
+BEGIN
+    IF NEW.deleted IS NOT NULL OR NEW.qty_on_hand <= 0 THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT policy.id, policy.max_quantity_per_location, zone.purpose
+      INTO policy_id, capacity, zone_purpose
+    FROM public.item_storage_policies policy
+    JOIN public.storage_zone_locations member
+      ON member.tenant_id = policy.tenant_id
+     AND member.facility_id = policy.facility_id
+     AND member.location_id = NEW.location_id
+    JOIN public.storage_zones zone
+      ON zone.tenant_id = member.tenant_id
+     AND zone.facility_id = member.facility_id
+     AND zone.id = member.storage_zone_id
+     AND zone.effective_to IS NULL
+    WHERE policy.tenant_id = NEW.tenant_id
+      AND policy.inventory_owner_id = NEW.inventory_owner_id
+      AND policy.facility_id = NEW.facility_id
+      AND policy.item_id = NEW.item_id AND policy.uom = NEW.uom
+      AND policy.effective_to IS NULL;
+    IF NOT FOUND THEN
+        RETURN NEW;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM public.item_storage_policy_zone_purposes allowed
+        WHERE allowed.tenant_id = NEW.tenant_id
+          AND allowed.item_storage_policy_id = policy_id
+          AND allowed.purpose = zone_purpose)
+    THEN
+        RAISE EXCEPTION 'item is not compatible with the destination storage zone'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF capacity IS NOT NULL THEN
+        PERFORM pg_advisory_xact_lock(hashtextextended(
+            'inventory-location-item:' || NEW.tenant_id::text || ':'
+            || NEW.inventory_owner_id::text || ':' || NEW.location_id::text
+            || ':' || NEW.item_id::text, 0));
+        SELECT COALESCE(sum(balance.qty_on_hand), 0) + NEW.qty_on_hand
+          INTO resulting_on_hand
+        FROM public.inventory_balances balance
+        WHERE balance.tenant_id = NEW.tenant_id
+          AND balance.inventory_owner_id = NEW.inventory_owner_id
+          AND balance.facility_id = NEW.facility_id
+          AND balance.location_id = NEW.location_id
+          AND balance.item_id = NEW.item_id AND balance.uom = NEW.uom
+          AND balance.id <> COALESCE(NEW.id, -1)
+          AND balance.deleted IS NULL;
+        IF resulting_on_hand > capacity THEN
+            RAISE EXCEPTION 'item storage location capacity would be exceeded'
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.require_storage_zone_item_policy_compatibility() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    checked_tenant_id bigint;
+    checked_zone_id bigint;
+BEGIN
+    IF TG_TABLE_NAME = 'storage_zones' THEN
+        checked_tenant_id := NEW.tenant_id;
+        checked_zone_id := NEW.id;
+    ELSE
+        checked_tenant_id := NEW.tenant_id;
+        checked_zone_id := NEW.storage_zone_id;
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM public.storage_zones zone
+        JOIN public.storage_zone_locations member
+          ON member.tenant_id = zone.tenant_id
+         AND member.storage_zone_id = zone.id
+        JOIN public.inventory_balances balance
+          ON balance.tenant_id = member.tenant_id
+         AND balance.facility_id = member.facility_id
+         AND balance.location_id = member.location_id
+         AND balance.deleted IS NULL AND balance.qty_on_hand > 0
+        JOIN public.item_storage_policies policy
+          ON policy.tenant_id = balance.tenant_id
+         AND policy.inventory_owner_id = balance.inventory_owner_id
+         AND policy.facility_id = balance.facility_id
+         AND policy.item_id = balance.item_id AND policy.uom = balance.uom
+         AND policy.effective_to IS NULL
+        WHERE zone.tenant_id = checked_tenant_id AND zone.id = checked_zone_id
+          AND zone.effective_to IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM public.item_storage_policy_zone_purposes allowed
+              WHERE allowed.tenant_id = policy.tenant_id
+                AND allowed.item_storage_policy_id = policy.id
+                AND allowed.purpose = zone.purpose))
+       OR EXISTS (
+        SELECT 1
+        FROM public.storage_zones zone
+        JOIN public.storage_zone_locations member
+          ON member.tenant_id = zone.tenant_id
+         AND member.storage_zone_id = zone.id
+        JOIN public.inventory_balances balance
+          ON balance.tenant_id = member.tenant_id
+         AND balance.facility_id = member.facility_id
+         AND balance.location_id = member.location_id
+         AND balance.deleted IS NULL
+        JOIN public.item_storage_policies policy
+          ON policy.tenant_id = balance.tenant_id
+         AND policy.inventory_owner_id = balance.inventory_owner_id
+         AND policy.facility_id = balance.facility_id
+         AND policy.item_id = balance.item_id AND policy.uom = balance.uom
+         AND policy.effective_to IS NULL
+         AND policy.max_quantity_per_location IS NOT NULL
+        WHERE zone.tenant_id = checked_tenant_id AND zone.id = checked_zone_id
+          AND zone.effective_to IS NULL
+        GROUP BY policy.id, member.location_id, policy.max_quantity_per_location
+        HAVING sum(balance.qty_on_hand) > policy.max_quantity_per_location)
+    THEN
+        RAISE EXCEPTION 'storage zone conflicts with an active item storage policy'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER item_storage_policies_validate
+BEFORE INSERT ON public.item_storage_policies
+FOR EACH ROW EXECUTE FUNCTION public.validate_item_storage_policy();
+CREATE TRIGGER item_storage_policies_guard
+BEFORE UPDATE OR DELETE ON public.item_storage_policies
+FOR EACH ROW EXECUTE FUNCTION public.guard_item_storage_policy_mutation();
+CREATE TRIGGER item_storage_policy_purposes_validate
+BEFORE INSERT ON public.item_storage_policy_zone_purposes
+FOR EACH ROW EXECUTE FUNCTION public.validate_item_storage_policy_purpose();
+CREATE TRIGGER item_storage_policy_purposes_immutable
+BEFORE UPDATE OR DELETE ON public.item_storage_policy_zone_purposes
+FOR EACH ROW EXECUTE FUNCTION public.reject_item_storage_policy_purpose_mutation();
+CREATE CONSTRAINT TRIGGER item_storage_policies_consistent
+AFTER INSERT OR UPDATE ON public.item_storage_policies DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_item_storage_policy_consistency();
+CREATE CONSTRAINT TRIGGER item_storage_policy_purposes_consistent
+AFTER INSERT ON public.item_storage_policy_zone_purposes DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_item_storage_policy_consistency();
+CREATE TRIGGER inventory_balances_enforce_item_storage_policy
+BEFORE INSERT OR UPDATE OF tenant_id, inventory_owner_id, facility_id, location_id,
+    item_id, uom, qty_on_hand, deleted ON public.inventory_balances
+FOR EACH ROW EXECUTE FUNCTION public.enforce_item_storage_policy_for_balance();
+CREATE CONSTRAINT TRIGGER storage_zones_item_policy_compatible
+AFTER INSERT OR UPDATE ON public.storage_zones DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_storage_zone_item_policy_compatibility();
+CREATE CONSTRAINT TRIGGER storage_zone_locations_item_policy_compatible
+AFTER INSERT ON public.storage_zone_locations DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_storage_zone_item_policy_compatibility();
+
+ALTER TABLE public.item_storage_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.item_storage_policies FORCE ROW LEVEL SECURITY;
+CREATE POLICY item_storage_policies_tenant_isolation ON public.item_storage_policies
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+ALTER TABLE public.item_storage_policy_zone_purposes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.item_storage_policy_zone_purposes FORCE ROW LEVEL SECURITY;
+CREATE POLICY item_storage_policy_zone_purposes_tenant_isolation
+ON public.item_storage_policy_zone_purposes
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT, INSERT ON public.item_storage_policies TO wareboxes_app;
+GRANT UPDATE (effective_to, retired_by_user_id)
+ON public.item_storage_policies TO wareboxes_app;
+GRANT SELECT, INSERT ON public.item_storage_policy_zone_purposes TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.item_storage_policies_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_item_storage_policy() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_item_storage_policy_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_item_storage_policy_purpose() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_item_storage_policy_purpose_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_item_storage_policy_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.enforce_item_storage_policy_for_balance() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_storage_zone_item_policy_compatibility() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

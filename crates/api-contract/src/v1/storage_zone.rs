@@ -6,7 +6,7 @@ use super::{CursorPage, OpaqueCursor, PageLimit, Revision};
 const MAX_CODE_LENGTH: usize = 32;
 const MAX_NAME_LENGTH: usize = 120;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageZonePurpose {
     Receiving,

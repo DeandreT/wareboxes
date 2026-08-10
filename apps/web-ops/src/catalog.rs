@@ -6,6 +6,8 @@ use crate::api;
 #[cfg(target_arch = "wasm32")]
 use crate::toast::use_toast_bus;
 
+#[path = "catalog_item_storage_policies.rs"]
+mod item_storage_policies;
 #[path = "catalog_items.rs"]
 mod items;
 #[path = "catalog_license_plates.rs"]
@@ -15,6 +17,7 @@ mod locations;
 #[path = "catalog_storage_zones.rs"]
 mod storage_zones;
 
+use item_storage_policies::ItemStoragePolicyCatalog;
 use items::ItemCatalog;
 use license_plates::LicensePlateCatalog;
 use locations::LocationCatalog;
@@ -64,6 +67,7 @@ enum CatalogSection {
     Locations,
     LicensePlates,
     StorageZones,
+    ItemStoragePolicies,
 }
 
 #[component]
@@ -144,6 +148,14 @@ pub fn CatalogWorkbench(on_unauthorized: Callback<()>, can_supervise: bool) -> i
                 >
                     "Storage zones"
                 </button>
+                <button
+                    type="button"
+                    class:active=move || section.get() == CatalogSection::ItemStoragePolicies
+                    aria-current=move || (section.get() == CatalogSection::ItemStoragePolicies).then_some("page")
+                    on:click=move |_| section.set(CatalogSection::ItemStoragePolicies)
+                >
+                    "Storage policies"
+                </button>
             </nav>
 
             {move || match store.load_state.get() {
@@ -182,6 +194,9 @@ pub fn CatalogWorkbench(on_unauthorized: Callback<()>, can_supervise: bool) -> i
                     }
                     CatalogSection::StorageZones => {
                         view! { <StorageZoneCatalog store can_supervise/> }.into_any()
+                    }
+                    CatalogSection::ItemStoragePolicies => {
+                        view! { <ItemStoragePolicyCatalog store can_supervise/> }.into_any()
                     }
                 },
             }}

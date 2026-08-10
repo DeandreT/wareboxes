@@ -49,6 +49,10 @@ pub use inventory_integrity::{
     create_inventory_recall, inventory_aging, inventory_integrity_issues, inventory_journal,
     inventory_recalls, release_inventory_recall, AgingFilters, IntegrityFilters, JournalFilters,
 };
+mod item_storage_policy;
+pub use item_storage_policy::{
+    configure_item_storage_policy, item_storage_policies, retire_item_storage_policy,
+};
 mod order;
 pub use order::{
     amend_fulfillment_order, create_fulfillment_order, order_entry_items,
