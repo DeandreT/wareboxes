@@ -3,13 +3,14 @@ use axum::Json;
 use wareboxes_api_contract::v1::{
     InventoryFacilityRollupPage, InventoryFacilityRollupResponse, InventoryItemRollupPage,
     InventoryItemRollupResponse, InventoryLocationRollupPage, InventoryLocationRollupResponse,
-    InventoryQuantity, InventoryRollupPageRequest, InventoryRollupQuantity, OpaqueCursor,
+    InventoryQuantity, InventoryRollupPageRequest, InventoryRollupQuantity, InventoryRollupSort,
+    InventorySortDirection, OpaqueCursor,
 };
 use wareboxes_application::inventory::{
-    FacilityRollupCursor, InventoryRollupQuantity as ApplicationInventoryRollupQuantity,
-    ItemRollupCursor, LocationRollupCursor,
+    InventoryRollupPageQuery, InventoryRollupQuantity as ApplicationInventoryRollupQuantity,
+    InventoryRollupSort as ApplicationRollupSort,
+    InventoryRollupSortDirection as ApplicationSortDirection,
 };
-use wareboxes_domain::{FacilityId, InventoryOwnerId};
 
 use super::error::{V1Error, V1Result};
 use crate::auth::CurrentTenant;
@@ -17,9 +18,9 @@ use crate::error::AppError;
 use crate::state::AppState;
 
 const PERMISSION: &str = "wms";
-const LOCATION_CURSOR_PREFIX: &str = "irl1.";
-const FACILITY_CURSOR_PREFIX: &str = "irf1.";
-const ITEM_CURSOR_PREFIX: &str = "iri1.";
+const LOCATION_CURSOR_PREFIX: &str = "irl2.";
+const FACILITY_CURSOR_PREFIX: &str = "irf2.";
+const ITEM_CURSOR_PREFIX: &str = "iri2.";
 
 pub async fn list_by_location(
     State(state): State<AppState>,
@@ -27,19 +28,15 @@ pub async fn list_by_location(
     Query(query): Query<InventoryRollupPageRequest>,
 ) -> V1Result<Json<InventoryLocationRollupPage>> {
     user.require_permission(&state.db, PERMISSION).await?;
-    let after = query
-        .cursor
-        .as_ref()
-        .map(decode_location_cursor)
-        .transpose()?;
+    validate_rollup_sort(query.sort, false)?;
+    let page_query = page_query(&query, LOCATION_CURSOR_PREFIX)?;
     let page =
         wareboxes_persistence_postgres::inventory_rollups::get_inventory_location_rollup_page(
             &state.db,
             user.tenant.tenant_id,
             &user.tenant.site_scope,
             &user.tenant.owner_scope,
-            after,
-            query.limit.get(),
+            &page_query,
         )
         .await
         .map_err(AppError::from)?;
@@ -62,7 +59,10 @@ pub async fn list_by_location(
             batch_count: row.batch_count.get(),
         })
         .collect();
-    let next_cursor = page.next_cursor.map(encode_location_cursor).transpose()?;
+    let next_cursor = page
+        .next_offset
+        .map(|offset| encode_cursor(&query, LOCATION_CURSOR_PREFIX, offset))
+        .transpose()?;
 
     Ok(Json(InventoryLocationRollupPage::new(items, next_cursor)))
 }
@@ -73,19 +73,14 @@ pub async fn list_by_facility(
     Query(query): Query<InventoryRollupPageRequest>,
 ) -> V1Result<Json<InventoryFacilityRollupPage>> {
     user.require_permission(&state.db, PERMISSION).await?;
-    let after = query
-        .cursor
-        .as_ref()
-        .map(decode_facility_cursor)
-        .transpose()?;
+    let page_query = page_query(&query, FACILITY_CURSOR_PREFIX)?;
     let page =
         wareboxes_persistence_postgres::inventory_rollups::get_inventory_facility_rollup_page(
             &state.db,
             user.tenant.tenant_id,
             &user.tenant.site_scope,
             &user.tenant.owner_scope,
-            after,
-            query.limit.get(),
+            &page_query,
         )
         .await
         .map_err(AppError::from)?;
@@ -106,7 +101,10 @@ pub async fn list_by_facility(
             location_count: row.location_count.get(),
         })
         .collect();
-    let next_cursor = page.next_cursor.map(encode_facility_cursor).transpose()?;
+    let next_cursor = page
+        .next_offset
+        .map(|offset| encode_cursor(&query, FACILITY_CURSOR_PREFIX, offset))
+        .transpose()?;
 
     Ok(Json(InventoryFacilityRollupPage::new(items, next_cursor)))
 }
@@ -117,14 +115,13 @@ pub async fn list_by_item(
     Query(query): Query<InventoryRollupPageRequest>,
 ) -> V1Result<Json<InventoryItemRollupPage>> {
     user.require_permission(&state.db, PERMISSION).await?;
-    let after = query.cursor.as_ref().map(decode_item_cursor).transpose()?;
+    let page_query = page_query(&query, ITEM_CURSOR_PREFIX)?;
     let page = wareboxes_persistence_postgres::inventory_rollups::get_inventory_item_rollup_page(
         &state.db,
         user.tenant.tenant_id,
         &user.tenant.site_scope,
         &user.tenant.owner_scope,
-        after,
-        query.limit.get(),
+        &page_query,
     )
     .await
     .map_err(AppError::from)?;
@@ -144,7 +141,10 @@ pub async fn list_by_item(
             facility_count: row.facility_count.get(),
         })
         .collect();
-    let next_cursor = page.next_cursor.map(encode_item_cursor).transpose()?;
+    let next_cursor = page
+        .next_offset
+        .map(|offset| encode_cursor(&query, ITEM_CURSOR_PREFIX, offset))
+        .transpose()?;
 
     Ok(Json(InventoryItemRollupPage::new(items, next_cursor)))
 }
@@ -169,104 +169,121 @@ fn map_quantities(
         .collect()
 }
 
-fn decode_location_cursor(cursor: &OpaqueCursor) -> V1Result<LocationRollupCursor> {
-    let values = decode_cursor(cursor, LOCATION_CURSOR_PREFIX, 3)?;
-    Ok(LocationRollupCursor {
-        inventory_owner_id: InventoryOwnerId::new(values[0])
-            .map_err(|_| V1Error::invalid_cursor())?,
-        item_id: values[1],
-        location_id: values[2],
-    })
-}
-
-fn encode_location_cursor(cursor: LocationRollupCursor) -> V1Result<OpaqueCursor> {
-    encode_cursor(
-        LOCATION_CURSOR_PREFIX,
-        &[
-            cursor.inventory_owner_id.get(),
-            cursor.item_id,
-            cursor.location_id,
-        ],
-    )
-}
-
-fn decode_facility_cursor(cursor: &OpaqueCursor) -> V1Result<FacilityRollupCursor> {
-    let values = decode_cursor(cursor, FACILITY_CURSOR_PREFIX, 3)?;
-    Ok(FacilityRollupCursor {
-        inventory_owner_id: InventoryOwnerId::new(values[0])
-            .map_err(|_| V1Error::invalid_cursor())?,
-        item_id: values[1],
-        facility_id: FacilityId::new(values[2]).map_err(|_| V1Error::invalid_cursor())?,
-    })
-}
-
-fn encode_facility_cursor(cursor: FacilityRollupCursor) -> V1Result<OpaqueCursor> {
-    encode_cursor(
-        FACILITY_CURSOR_PREFIX,
-        &[
-            cursor.inventory_owner_id.get(),
-            cursor.item_id,
-            cursor.facility_id.get(),
-        ],
-    )
-}
-
-fn decode_item_cursor(cursor: &OpaqueCursor) -> V1Result<ItemRollupCursor> {
-    let values = decode_cursor(cursor, ITEM_CURSOR_PREFIX, 2)?;
-    Ok(ItemRollupCursor {
-        inventory_owner_id: InventoryOwnerId::new(values[0])
-            .map_err(|_| V1Error::invalid_cursor())?,
-        item_id: values[1],
-    })
-}
-
-fn encode_item_cursor(cursor: ItemRollupCursor) -> V1Result<OpaqueCursor> {
-    encode_cursor(
-        ITEM_CURSOR_PREFIX,
-        &[cursor.inventory_owner_id.get(), cursor.item_id],
-    )
-}
-
-fn decode_cursor(
-    cursor: &OpaqueCursor,
+fn page_query(
+    request: &InventoryRollupPageRequest,
     prefix: &str,
-    expected_values: usize,
-) -> V1Result<Vec<i64>> {
+) -> V1Result<InventoryRollupPageQuery> {
+    let query = validated_query(request.query.as_deref())?;
+    Ok(InventoryRollupPageQuery {
+        offset: decode_cursor(request, prefix)?,
+        limit: request.limit.get(),
+        query: query.map(str::to_owned),
+        sort: map_sort(request.sort),
+        direction: map_direction(request.direction),
+    })
+}
+
+fn validated_query(query: Option<&str>) -> V1Result<Option<&str>> {
+    if query.is_some_and(|value| {
+        value.is_empty()
+            || value.trim() != value
+            || value.chars().count() > 200
+            || value.chars().any(char::is_control)
+    }) {
+        return Err(AppError::bad_request("inventory rollup query is invalid").into());
+    }
+    Ok(query)
+}
+
+fn validate_rollup_sort(sort: InventoryRollupSort, locations_supported: bool) -> V1Result<()> {
+    if sort == InventoryRollupSort::Locations && !locations_supported {
+        return Err(AppError::bad_request(
+            "location summary rows do not support location-count sorting",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+const fn map_sort(sort: InventoryRollupSort) -> ApplicationRollupSort {
+    match sort {
+        InventoryRollupSort::Client => ApplicationRollupSort::Client,
+        InventoryRollupSort::Item => ApplicationRollupSort::Item,
+        InventoryRollupSort::Scope => ApplicationRollupSort::Scope,
+        InventoryRollupSort::Balances => ApplicationRollupSort::Balances,
+        InventoryRollupSort::Batches => ApplicationRollupSort::Batches,
+        InventoryRollupSort::Locations => ApplicationRollupSort::Locations,
+    }
+}
+
+const fn map_direction(direction: InventorySortDirection) -> ApplicationSortDirection {
+    match direction {
+        InventorySortDirection::Ascending => ApplicationSortDirection::Ascending,
+        InventorySortDirection::Descending => ApplicationSortDirection::Descending,
+    }
+}
+
+fn decode_cursor(request: &InventoryRollupPageRequest, prefix: &str) -> V1Result<u64> {
+    let Some(cursor) = request.cursor.as_ref() else {
+        return Ok(0);
+    };
     let encoded = cursor
         .as_str()
         .strip_prefix(prefix)
         .ok_or_else(V1Error::invalid_cursor)?;
-    let values = encoded
-        .split('.')
-        .map(|part| {
-            if part.len() != 16 {
-                return Err(V1Error::invalid_cursor());
-            }
-            i64::from_str_radix(part, 16)
-                .ok()
-                .filter(|value| *value > 0)
-                .ok_or_else(V1Error::invalid_cursor)
-        })
-        .collect::<V1Result<Vec<_>>>()?;
-    if values.len() != expected_values {
+    let (filter, offset) = encoded
+        .rsplit_once('.')
+        .ok_or_else(V1Error::invalid_cursor)?;
+    if filter != cursor_filter(request) || offset.len() != 16 {
         return Err(V1Error::invalid_cursor());
     }
-    Ok(values)
+    u64::from_str_radix(offset, 16).map_err(|_| V1Error::invalid_cursor())
 }
 
-fn encode_cursor(prefix: &str, values: &[i64]) -> V1Result<OpaqueCursor> {
-    if values.iter().any(|value| *value <= 0) {
-        return Err(V1Error::internal(
-            "generated an invalid inventory rollup cursor",
-        ));
-    }
-    let encoded = values
-        .iter()
-        .map(|value| format!("{value:016x}"))
-        .collect::<Vec<_>>()
-        .join(".");
-    OpaqueCursor::new(format!("{prefix}{encoded}"))
+fn encode_cursor(
+    request: &InventoryRollupPageRequest,
+    prefix: &str,
+    offset: u64,
+) -> V1Result<OpaqueCursor> {
+    OpaqueCursor::new(format!("{prefix}{}.{offset:016x}", cursor_filter(request)))
         .map_err(|_| V1Error::internal("generated an invalid inventory rollup cursor"))
+}
+
+fn cursor_filter(request: &InventoryRollupPageRequest) -> String {
+    let query = request.query.as_ref().map_or_else(
+        || "-".to_owned(),
+        |value| {
+            value
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        },
+    );
+    format!(
+        "{}.{}.{}",
+        sort_key(request.sort),
+        direction_key(request.direction),
+        query
+    )
+}
+
+const fn sort_key(sort: InventoryRollupSort) -> &'static str {
+    match sort {
+        InventoryRollupSort::Client => "c",
+        InventoryRollupSort::Item => "i",
+        InventoryRollupSort::Scope => "s",
+        InventoryRollupSort::Balances => "b",
+        InventoryRollupSort::Batches => "t",
+        InventoryRollupSort::Locations => "l",
+    }
+}
+
+const fn direction_key(direction: InventorySortDirection) -> &'static str {
+    match direction {
+        InventorySortDirection::Ascending => "a",
+        InventorySortDirection::Descending => "d",
+    }
 }
 
 #[cfg(test)]
@@ -274,15 +291,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rollup_cursors_round_trip_and_reject_cross_dimension_reuse() {
-        let location = LocationRollupCursor {
-            inventory_owner_id: InventoryOwnerId::new(11).unwrap(),
-            item_id: 22,
-            location_id: 33,
+    fn rollup_cursors_bind_dimension_filter_and_sort() {
+        let request = InventoryRollupPageRequest {
+            query: Some("widget".to_owned()),
+            sort: InventoryRollupSort::Batches,
+            direction: InventorySortDirection::Descending,
+            ..InventoryRollupPageRequest::default()
         };
-        let encoded = encode_location_cursor(location).unwrap();
-        assert_eq!(decode_location_cursor(&encoded).unwrap(), location);
-        assert!(decode_facility_cursor(&encoded).is_err());
-        assert!(decode_item_cursor(&encoded).is_err());
+        let encoded = encode_cursor(&request, LOCATION_CURSOR_PREFIX, 250).unwrap();
+        let mut bound = request.clone();
+        bound.cursor = Some(encoded.clone());
+        assert_eq!(decode_cursor(&bound, LOCATION_CURSOR_PREFIX).unwrap(), 250);
+        assert!(decode_cursor(&bound, ITEM_CURSOR_PREFIX).is_err());
+
+        bound.sort = InventoryRollupSort::Client;
+        assert!(decode_cursor(&bound, LOCATION_CURSOR_PREFIX).is_err());
     }
 }

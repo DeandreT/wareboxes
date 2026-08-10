@@ -119,7 +119,7 @@ pub use inventory_relocation::{
 pub use inventory_rollup::{
     InventoryFacilityRollupPage, InventoryFacilityRollupResponse, InventoryItemRollupPage,
     InventoryItemRollupResponse, InventoryLocationRollupPage, InventoryLocationRollupResponse,
-    InventoryRollupPageRequest, InventoryRollupQuantity,
+    InventoryRollupPageRequest, InventoryRollupQuantity, InventoryRollupSort,
 };
 pub use inventory_status_transition::{
     CreateInventoryStatusTransitionRequest, InventoryStatusTransitionReason,

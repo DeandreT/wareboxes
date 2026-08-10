@@ -132,7 +132,7 @@ async fn place_hold(
 }
 
 #[tokio::test]
-async fn inventory_rollups_are_typed_scoped_and_keyset_paginated() {
+async fn inventory_rollups_are_typed_scoped_searchable_and_paginated() {
     let fixture = Fixture::new().await;
     let administrator = fixture.user("rollups-admin@test.com").await;
     let operator = fixture.user("rollups-operator@test.com").await;
@@ -365,6 +365,73 @@ async fn inventory_rollups_are_typed_scoped_and_keyset_paginated() {
     assert_eq!(first_location_row.quantities[0].quantity.reserved, 2);
     assert_eq!(first_location_row.quantities[0].quantity.held, 3);
     assert_eq!(first_location_row.quantities[0].quantity.available, 5);
+
+    let sorted_response = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            "/api/v1/inventory/rollups/by-location?limit=1&sort=scope&direction=descending",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(sorted_response.status(), StatusCode::OK);
+    let sorted_page: InventoryLocationRollupPage = response_json(sorted_response).await;
+    assert_eq!(sorted_page.items.len(), 1);
+    assert_eq!(
+        sorted_page.items[0].location_barcode.as_deref(),
+        Some("ROLLUP-S-01")
+    );
+    let sorted_cursor = sorted_page.next_cursor.unwrap();
+    let sorted_second_response = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!(
+                "/api/v1/inventory/rollups/by-location?limit=1&sort=scope&direction=descending&cursor={}",
+                sorted_cursor.as_str()
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(sorted_second_response.status(), StatusCode::OK);
+    let sorted_second: InventoryLocationRollupPage = response_json(sorted_second_response).await;
+    assert_eq!(
+        sorted_second.items[0].location_barcode.as_deref(),
+        Some("ROLLUP-N-03")
+    );
+
+    let searched_response = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            "/api/v1/inventory/rollups/by-location?query=ROLLUP-N-02",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(searched_response.status(), StatusCode::OK);
+    let searched_page: InventoryLocationRollupPage = response_json(searched_response).await;
+    assert_eq!(searched_page.items.len(), 1);
+    assert_eq!(
+        searched_page.items[0].location_barcode.as_deref(),
+        Some("ROLLUP-N-02")
+    );
+
+    let mismatched_sort_cursor = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!(
+                "/api/v1/inventory/rollups/by-location?limit=1&sort=client&direction=descending&cursor={}",
+                sorted_cursor.as_str()
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(mismatched_sort_cursor.status(), StatusCode::BAD_REQUEST);
 
     let facility_response = app
         .clone()

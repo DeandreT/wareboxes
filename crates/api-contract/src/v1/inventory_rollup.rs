@@ -1,15 +1,50 @@
 use serde::{Deserialize, Serialize};
 
-use super::{CursorPage, InventoryQuantity, OpaqueCursor, PageLimit};
+use super::{CursorPage, InventoryQuantity, InventorySortDirection, OpaqueCursor, PageLimit};
+
+/// Sortable dimensions shared by inventory summary views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryRollupSort {
+    #[default]
+    Client,
+    Item,
+    Scope,
+    Balances,
+    Batches,
+    Locations,
+}
 
 /// Cursor query shared by the inventory rollup collections.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InventoryRollupPageRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<OpaqueCursor>,
     #[serde(default)]
     pub limit: PageLimit,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub sort: InventoryRollupSort,
+    #[serde(default = "default_rollup_direction")]
+    pub direction: InventorySortDirection,
+}
+
+impl Default for InventoryRollupPageRequest {
+    fn default() -> Self {
+        Self {
+            cursor: None,
+            limit: PageLimit::default(),
+            query: None,
+            sort: InventoryRollupSort::Client,
+            direction: default_rollup_direction(),
+        }
+    }
+}
+
+const fn default_rollup_direction() -> InventorySortDirection {
+    InventorySortDirection::Ascending
 }
 
 /// Quantities for one unit of measure inside an inventory rollup.
@@ -125,6 +160,11 @@ mod tests {
         let request = serde_json::from_str::<InventoryRollupPageRequest>("{}").unwrap();
         assert!(request.cursor.is_none());
         assert_eq!(request.limit, PageLimit::default());
+        assert_eq!(request.sort, InventoryRollupSort::Client);
+        assert_eq!(request.direction, InventorySortDirection::Ascending);
         assert!(serde_json::from_str::<InventoryRollupPageRequest>(r#"{"limit":0}"#).is_err());
+        assert!(
+            serde_json::from_str::<InventoryRollupPageRequest>(r#"{"sort":"unknown"}"#).is_err()
+        );
     }
 }

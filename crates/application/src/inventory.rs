@@ -263,23 +263,50 @@ pub struct InventoryHoldPage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LocationRollupCursor {
-    pub inventory_owner_id: InventoryOwnerId,
-    pub item_id: i64,
-    pub location_id: i64,
+pub enum InventoryRollupSort {
+    Client,
+    Item,
+    Scope,
+    Balances,
+    Batches,
+    Locations,
+}
+
+impl InventoryRollupSort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Client => "client",
+            Self::Item => "item",
+            Self::Scope => "scope",
+            Self::Balances => "balances",
+            Self::Batches => "batches",
+            Self::Locations => "locations",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FacilityRollupCursor {
-    pub inventory_owner_id: InventoryOwnerId,
-    pub item_id: i64,
-    pub facility_id: FacilityId,
+pub enum InventoryRollupSortDirection {
+    Ascending,
+    Descending,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ItemRollupCursor {
-    pub inventory_owner_id: InventoryOwnerId,
-    pub item_id: i64,
+impl InventoryRollupSortDirection {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ascending => "ascending",
+            Self::Descending => "descending",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryRollupPageQuery {
+    pub offset: u64,
+    pub limit: u16,
+    pub query: Option<String>,
+    pub sort: InventoryRollupSort,
+    pub direction: InventoryRollupSortDirection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -396,7 +423,7 @@ pub struct InventoryLocationRollupReadModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryLocationRollupPage {
     pub items: Vec<InventoryLocationRollupReadModel>,
-    pub next_cursor: Option<LocationRollupCursor>,
+    pub next_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,7 +444,7 @@ pub struct InventoryFacilityRollupReadModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryFacilityRollupPage {
     pub items: Vec<InventoryFacilityRollupReadModel>,
-    pub next_cursor: Option<FacilityRollupCursor>,
+    pub next_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -437,7 +464,7 @@ pub struct InventoryItemRollupReadModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryItemRollupPage {
     pub items: Vec<InventoryItemRollupReadModel>,
-    pub next_cursor: Option<ItemRollupCursor>,
+    pub next_offset: Option<u64>,
 }
 
 #[cfg(test)]

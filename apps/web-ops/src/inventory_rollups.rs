@@ -75,6 +75,22 @@ enum RollupState {
     Failed(String),
 }
 
+#[derive(Clone, Copy)]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    expect(
+        dead_code,
+        reason = "hydration consumes inventory rollup request state"
+    )
+)]
+struct RollupRequestState {
+    state: RwSignal<RollupState>,
+    loading_more: RwSignal<bool>,
+    page_error: RwSignal<Option<String>>,
+    generation: RwSignal<u64>,
+    on_unauthorized: Callback<()>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RollupSort {
     Client,
@@ -92,18 +108,50 @@ pub fn InventoryRollupsWorkbench(
 ) -> impl IntoView {
     let state = RwSignal::new(RollupState::Loading);
     let filter = RwSignal::new(String::new());
+    let applied_filter = RwSignal::new(String::new());
     let loading_more = RwSignal::new(false);
     let page_error = RwSignal::new(None::<String>);
+    let generation = RwSignal::new(0_u64);
     let sort = RwSignal::new(SortSpec {
         key: RollupSort::Client,
         direction: SortDirection::Ascending,
     });
+    let request_state = RollupRequestState {
+        state,
+        loading_more,
+        page_error,
+        generation,
+        on_unauthorized,
+    };
 
     #[cfg(target_arch = "wasm32")]
-    request_rollups(kind, None, state, loading_more, page_error, on_unauthorized);
+    request_rollups(
+        kind,
+        None,
+        applied_filter.get_untracked(),
+        sort.get_untracked(),
+        request_state,
+    );
 
-    let retry =
-        move |_| request_rollups(kind, None, state, loading_more, page_error, on_unauthorized);
+    let reload = move || {
+        request_rollups(
+            kind,
+            None,
+            applied_filter.get_untracked(),
+            sort.get_untracked(),
+            request_state,
+        );
+    };
+    let retry = move |_| reload();
+    let apply_filter = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        applied_filter.set(filter.get_untracked().trim().to_owned());
+        reload();
+    };
+    let change_sort = move |key: RollupSort| {
+        SortSpec::select(sort, key);
+        reload();
+    };
     let load_more = move |_| {
         let RollupState::Ready { next_cursor, .. } = state.get_untracked() else {
             return;
@@ -114,10 +162,9 @@ pub fn InventoryRollupsWorkbench(
         request_rollups(
             kind,
             Some(cursor),
-            state,
-            loading_more,
-            page_error,
-            on_unauthorized,
+            applied_filter.get_untracked(),
+            sort.get_untracked(),
+            request_state,
         );
     };
 
@@ -142,18 +189,19 @@ pub fn InventoryRollupsWorkbench(
                 }
                 .into_any(),
                 RollupState::Ready { rows, next_cursor } => view! {
-                    <div class="table-toolbar">
+                    <form class="table-toolbar" on:submit=apply_filter>
                         <div class="toolbar-summary">
                             <strong>{format_quantity(rows.len() as i64)}</strong>
                             <span>{format!("{} loaded", kind.label())}</span>
                         </div>
                         <SearchField
-                            label=format!("Filter {}", kind.label())
-                            placeholder="Filter summaries"
+                            label=format!("Search {}", kind.label())
+                            placeholder="Search all summaries"
                             value=filter
                         />
-                    </div>
-                    <RollupTable rows filter sort/>
+                        <button class="button secondary-action" type="submit">"Apply"</button>
+                    </form>
+                    <RollupTable rows sort on_sort=Callback::new(change_sort)/>
                     <div class="table-footer">
                         <span>
                             {if next_cursor.is_some() {
@@ -204,11 +252,17 @@ impl InventoryRollupKind {
 fn request_rollups(
     kind: InventoryRollupKind,
     cursor: Option<OpaqueCursor>,
-    state: RwSignal<RollupState>,
-    loading_more: RwSignal<bool>,
-    page_error: RwSignal<Option<String>>,
-    on_unauthorized: Callback<()>,
+    query: String,
+    sort: SortSpec<RollupSort>,
+    request: RollupRequestState,
 ) {
+    let RollupRequestState {
+        state,
+        loading_more,
+        page_error,
+        generation,
+        on_unauthorized,
+    } = request;
     let append = cursor.is_some();
     if append {
         loading_more.set(true);
@@ -216,13 +270,27 @@ fn request_rollups(
         state.set(RollupState::Loading);
     }
     page_error.set(None);
+    let request_generation = generation.get_untracked().wrapping_add(1);
+    generation.set(request_generation);
     leptos::task::spawn_local(async move {
-        let mut path = format!("{}?limit={PAGE_LIMIT}", kind.path());
+        let mut path = format!(
+            "{}?limit={PAGE_LIMIT}&sort={}&direction={}",
+            kind.path(),
+            api_sort(sort.key),
+            api_direction(sort.direction),
+        );
+        if !query.is_empty() {
+            path.push_str("&query=");
+            path.push_str(&urlencoding::encode(&query));
+        }
         if let Some(cursor) = cursor {
             path.push_str("&cursor=");
-            path.push_str(cursor.as_str());
+            path.push_str(&urlencoding::encode(cursor.as_str()));
         }
         let result = fetch_rollups(kind, &path).await;
+        if generation.get_untracked() != request_generation {
+            return;
+        }
         match result {
             Ok((next_rows, next_cursor)) => {
                 if append {
@@ -276,88 +344,48 @@ async fn fetch_rollups(
 fn request_rollups(
     _kind: InventoryRollupKind,
     _cursor: Option<OpaqueCursor>,
-    _state: RwSignal<RollupState>,
-    _loading_more: RwSignal<bool>,
-    _page_error: RwSignal<Option<String>>,
-    _on_unauthorized: Callback<()>,
+    _query: String,
+    _sort: SortSpec<RollupSort>,
+    _request: RollupRequestState,
 ) {
 }
 
 #[component]
 fn RollupTable(
     rows: RollupRows,
-    filter: RwSignal<String>,
     sort: RwSignal<SortSpec<RollupSort>>,
+    on_sort: Callback<RollupSort>,
 ) -> impl IntoView {
     match rows {
-        RollupRows::Location(rows) => view! { <LocationRollupTable rows filter sort/> }.into_any(),
-        RollupRows::Facility(rows) => view! { <FacilityRollupTable rows filter sort/> }.into_any(),
-        RollupRows::Item(rows) => view! { <ItemRollupTable rows filter sort/> }.into_any(),
+        RollupRows::Location(rows) => view! { <LocationRollupTable rows sort on_sort/> }.into_any(),
+        RollupRows::Facility(rows) => view! { <FacilityRollupTable rows sort on_sort/> }.into_any(),
+        RollupRows::Item(rows) => view! { <ItemRollupTable rows sort on_sort/> }.into_any(),
     }
 }
 
 #[component]
 fn LocationRollupTable(
     rows: Vec<InventoryLocationRollupResponse>,
-    filter: RwSignal<String>,
     sort: RwSignal<SortSpec<RollupSort>>,
+    on_sort: Callback<RollupSort>,
 ) -> impl IntoView {
     view! {
         <div class="table-scroll">
             <table class="data-table rollup-table location-rollup-table">
                 <thead><tr>
-                    <RollupHeader label="Client" key=RollupSort::Client sort/>
-                    <RollupHeader label="Item" key=RollupSort::Item sort/>
-                    <RollupHeader label="Location" key=RollupSort::Scope sort/>
-                    <RollupHeader label="Balances" key=RollupSort::Balances sort numeric=true/>
-                    <RollupHeader label="Batches" key=RollupSort::Batches sort numeric=true/>
+                    <RollupHeader label="Client" key=RollupSort::Client sort on_sort/>
+                    <RollupHeader label="Item" key=RollupSort::Item sort on_sort/>
+                    <RollupHeader label="Location" key=RollupSort::Scope sort on_sort/>
+                    <RollupHeader label="Balances" key=RollupSort::Balances sort on_sort numeric=true/>
+                    <RollupHeader label="Batches" key=RollupSort::Batches sort on_sort numeric=true/>
                     <th scope="col">"Quantity by UOM"</th>
                 </tr></thead>
                 <tbody>
                     {move || {
-                        let query = normalized_filter(filter);
-                        let mut matching = rows
-                            .clone()
-                            .into_iter()
-                            .filter(|row| location_matches(row, &query))
-                            .collect::<Vec<_>>();
-                        matching.sort_by(|left, right| {
-                            let left_item = item_label(
-                                left.item_id,
-                                left.primary_sku.as_deref(),
-                                left.item_description.as_deref(),
-                            );
-                            let right_item = item_label(
-                                right.item_id,
-                                right.primary_sku.as_deref(),
-                                right.item_description.as_deref(),
-                            );
-                            let left_scope = location_label(left);
-                            let right_scope = location_label(right);
-                            apply_sort(
-                                sort.get(),
-                                RollupSortValues {
-                                    client: &left.inventory_owner_name,
-                                    item: &left_item,
-                                    scope: &left_scope,
-                                    balances: left.balance_count,
-                                    batches: left.batch_count,
-                                    locations: 1,
-                                },
-                                RollupSortValues {
-                                    client: &right.inventory_owner_name,
-                                    item: &right_item,
-                                    scope: &right_scope,
-                                    balances: right.balance_count,
-                                    batches: right.batch_count,
-                                    locations: 1,
-                                },
-                            )
-                        });
-                        if matching.is_empty() {
+                        if rows.is_empty() {
                             empty_row(6)
                         } else {
-                            matching
+                            rows.clone()
                                 .into_iter()
                                 .map(|row| {
                                     let item = item_label(
@@ -397,68 +425,27 @@ fn LocationRollupTable(
 #[component]
 fn FacilityRollupTable(
     rows: Vec<InventoryFacilityRollupResponse>,
-    filter: RwSignal<String>,
     sort: RwSignal<SortSpec<RollupSort>>,
+    on_sort: Callback<RollupSort>,
 ) -> impl IntoView {
     view! {
         <div class="table-scroll">
             <table class="data-table rollup-table facility-rollup-table">
                 <thead><tr>
-                    <RollupHeader label="Client" key=RollupSort::Client sort/>
-                    <RollupHeader label="Item" key=RollupSort::Item sort/>
-                    <RollupHeader label="Facility" key=RollupSort::Scope sort/>
-                    <RollupHeader label="Locations" key=RollupSort::Locations sort numeric=true/>
-                    <RollupHeader label="Balances" key=RollupSort::Balances sort numeric=true/>
-                    <RollupHeader label="Batches" key=RollupSort::Batches sort numeric=true/>
+                    <RollupHeader label="Client" key=RollupSort::Client sort on_sort/>
+                    <RollupHeader label="Item" key=RollupSort::Item sort on_sort/>
+                    <RollupHeader label="Facility" key=RollupSort::Scope sort on_sort/>
+                    <RollupHeader label="Locations" key=RollupSort::Locations sort on_sort numeric=true/>
+                    <RollupHeader label="Balances" key=RollupSort::Balances sort on_sort numeric=true/>
+                    <RollupHeader label="Batches" key=RollupSort::Batches sort on_sort numeric=true/>
                     <th scope="col">"Quantity by UOM"</th>
                 </tr></thead>
                 <tbody>
                     {move || {
-                        let query = normalized_filter(filter);
-                        let mut matching = rows
-                            .clone()
-                            .into_iter()
-                            .filter(|row| facility_matches(row, &query))
-                            .collect::<Vec<_>>();
-                        matching.sort_by(|left, right| {
-                            let left_item = item_label(
-                                left.item_id,
-                                left.primary_sku.as_deref(),
-                                left.item_description.as_deref(),
-                            );
-                            let right_item = item_label(
-                                right.item_id,
-                                right.primary_sku.as_deref(),
-                                right.item_description.as_deref(),
-                            );
-                            let left_scope =
-                                facility_label(left.facility_id, left.facility_name.as_deref());
-                            let right_scope =
-                                facility_label(right.facility_id, right.facility_name.as_deref());
-                            apply_sort(
-                                sort.get(),
-                                RollupSortValues {
-                                    client: &left.inventory_owner_name,
-                                    item: &left_item,
-                                    scope: &left_scope,
-                                    balances: left.balance_count,
-                                    batches: left.batch_count,
-                                    locations: left.location_count,
-                                },
-                                RollupSortValues {
-                                    client: &right.inventory_owner_name,
-                                    item: &right_item,
-                                    scope: &right_scope,
-                                    balances: right.balance_count,
-                                    batches: right.batch_count,
-                                    locations: right.location_count,
-                                },
-                            )
-                        });
-                        if matching.is_empty() {
+                        if rows.is_empty() {
                             empty_row(7)
                         } else {
-                            matching.into_iter().map(|row| view! {
+                            rows.clone().into_iter().map(|row| view! {
                                 <tr>
                                     <td>{row.inventory_owner_name}</td>
                                     <td>{item_label(row.item_id, row.primary_sku.as_deref(), row.item_description.as_deref())}</td>
@@ -480,47 +467,27 @@ fn FacilityRollupTable(
 #[component]
 fn ItemRollupTable(
     rows: Vec<InventoryItemRollupResponse>,
-    filter: RwSignal<String>,
     sort: RwSignal<SortSpec<RollupSort>>,
+    on_sort: Callback<RollupSort>,
 ) -> impl IntoView {
     view! {
         <div class="table-scroll">
             <table class="data-table rollup-table item-rollup-table">
                 <thead><tr>
-                    <RollupHeader label="Client" key=RollupSort::Client sort/>
-                    <RollupHeader label="Item" key=RollupSort::Item sort/>
-                    <RollupHeader label="Facilities" key=RollupSort::Scope sort numeric=true/>
-                    <RollupHeader label="Locations" key=RollupSort::Locations sort numeric=true/>
-                    <RollupHeader label="Balances" key=RollupSort::Balances sort numeric=true/>
-                    <RollupHeader label="Batches" key=RollupSort::Batches sort numeric=true/>
+                    <RollupHeader label="Client" key=RollupSort::Client sort on_sort/>
+                    <RollupHeader label="Item" key=RollupSort::Item sort on_sort/>
+                    <RollupHeader label="Facilities" key=RollupSort::Scope sort on_sort numeric=true/>
+                    <RollupHeader label="Locations" key=RollupSort::Locations sort on_sort numeric=true/>
+                    <RollupHeader label="Balances" key=RollupSort::Balances sort on_sort numeric=true/>
+                    <RollupHeader label="Batches" key=RollupSort::Batches sort on_sort numeric=true/>
                     <th scope="col">"Quantity by UOM"</th>
                 </tr></thead>
                 <tbody>
                     {move || {
-                        let query = normalized_filter(filter);
-                        let mut matching = rows
-                            .clone()
-                            .into_iter()
-                            .filter(|row| item_matches(row, &query))
-                            .collect::<Vec<_>>();
-                        matching.sort_by(|left, right| {
-                            let left_item = item_label(left.item_id, left.primary_sku.as_deref(), left.item_description.as_deref());
-                            let right_item = item_label(right.item_id, right.primary_sku.as_deref(), right.item_description.as_deref());
-                            let spec = sort.get();
-                            let ordering = match spec.key {
-                                RollupSort::Client => left.inventory_owner_name.to_ascii_lowercase().cmp(&right.inventory_owner_name.to_ascii_lowercase()),
-                                RollupSort::Item => left_item.to_ascii_lowercase().cmp(&right_item.to_ascii_lowercase()),
-                                RollupSort::Scope => left.facility_count.cmp(&right.facility_count),
-                                RollupSort::Locations => left.location_count.cmp(&right.location_count),
-                                RollupSort::Balances => left.balance_count.cmp(&right.balance_count),
-                                RollupSort::Batches => left.batch_count.cmp(&right.batch_count),
-                            };
-                            directed(ordering.then_with(|| left.item_id.cmp(&right.item_id)), spec.direction)
-                        });
-                        if matching.is_empty() {
+                        if rows.is_empty() {
                             empty_row(7)
                         } else {
-                            matching.into_iter().map(|row| view! {
+                            rows.clone().into_iter().map(|row| view! {
                                 <tr>
                                     <td>{row.inventory_owner_name}</td>
                                     <td><strong>{item_label(row.item_id, row.primary_sku.as_deref(), row.item_description.as_deref())}</strong></td>
@@ -544,6 +511,7 @@ fn RollupHeader(
     label: &'static str,
     key: RollupSort,
     sort: RwSignal<SortSpec<RollupSort>>,
+    on_sort: Callback<RollupSort>,
     #[prop(default = false)] numeric: bool,
 ) -> impl IntoView {
     view! {
@@ -551,7 +519,7 @@ fn RollupHeader(
             label
             active=move || sort.get().key == key
             direction=move || sort.get().direction
-            on_sort=Callback::new(move |_| SortSpec::select(sort, key))
+            on_sort=Callback::new(move |_| on_sort.run(key))
             numeric
         />
     }
@@ -577,52 +545,6 @@ fn QuantityBreakdown(quantities: Vec<InventoryRollupQuantity>) -> impl IntoView 
     }
 }
 
-struct RollupSortValues<'a> {
-    client: &'a str,
-    item: &'a str,
-    scope: &'a str,
-    balances: i64,
-    batches: i64,
-    locations: i64,
-}
-
-fn apply_sort(
-    spec: SortSpec<RollupSort>,
-    left: RollupSortValues<'_>,
-    right: RollupSortValues<'_>,
-) -> std::cmp::Ordering {
-    let ordering = match spec.key {
-        RollupSort::Client => left
-            .client
-            .to_ascii_lowercase()
-            .cmp(&right.client.to_ascii_lowercase()),
-        RollupSort::Item => left
-            .item
-            .to_ascii_lowercase()
-            .cmp(&right.item.to_ascii_lowercase()),
-        RollupSort::Scope => left
-            .scope
-            .to_ascii_lowercase()
-            .cmp(&right.scope.to_ascii_lowercase()),
-        RollupSort::Balances => left.balances.cmp(&right.balances),
-        RollupSort::Batches => left.batches.cmp(&right.batches),
-        RollupSort::Locations => left.locations.cmp(&right.locations),
-    };
-    directed(ordering, spec.direction)
-}
-
-fn directed(ordering: std::cmp::Ordering, direction: SortDirection) -> std::cmp::Ordering {
-    if direction == SortDirection::Ascending {
-        ordering
-    } else {
-        ordering.reverse()
-    }
-}
-
-fn normalized_filter(filter: RwSignal<String>) -> String {
-    filter.get().trim().to_ascii_lowercase()
-}
-
 fn item_label(id: i64, sku: Option<&str>, description: Option<&str>) -> String {
     sku.or(description)
         .map(str::to_owned)
@@ -641,41 +563,24 @@ fn location_label(row: &InventoryLocationRollupResponse) -> String {
         .unwrap_or_else(|| format!("Location #{}", row.location_id))
 }
 
-fn location_matches(row: &InventoryLocationRollupResponse, query: &str) -> bool {
-    query.is_empty()
-        || [
-            row.inventory_owner_name.as_str(),
-            row.primary_sku.as_deref().unwrap_or_default(),
-            row.item_description.as_deref().unwrap_or_default(),
-            row.facility_name.as_deref().unwrap_or_default(),
-            row.location_name.as_deref().unwrap_or_default(),
-            row.location_barcode.as_deref().unwrap_or_default(),
-        ]
-        .iter()
-        .any(|value| value.to_ascii_lowercase().contains(query))
+#[cfg(target_arch = "wasm32")]
+const fn api_sort(sort: RollupSort) -> &'static str {
+    match sort {
+        RollupSort::Client => "client",
+        RollupSort::Item => "item",
+        RollupSort::Scope => "scope",
+        RollupSort::Balances => "balances",
+        RollupSort::Batches => "batches",
+        RollupSort::Locations => "locations",
+    }
 }
 
-fn facility_matches(row: &InventoryFacilityRollupResponse, query: &str) -> bool {
-    query.is_empty()
-        || [
-            row.inventory_owner_name.as_str(),
-            row.primary_sku.as_deref().unwrap_or_default(),
-            row.item_description.as_deref().unwrap_or_default(),
-            row.facility_name.as_deref().unwrap_or_default(),
-        ]
-        .iter()
-        .any(|value| value.to_ascii_lowercase().contains(query))
-}
-
-fn item_matches(row: &InventoryItemRollupResponse, query: &str) -> bool {
-    query.is_empty()
-        || [
-            row.inventory_owner_name.as_str(),
-            row.primary_sku.as_deref().unwrap_or_default(),
-            row.item_description.as_deref().unwrap_or_default(),
-        ]
-        .iter()
-        .any(|value| value.to_ascii_lowercase().contains(query))
+#[cfg(target_arch = "wasm32")]
+const fn api_direction(direction: SortDirection) -> &'static str {
+    match direction {
+        SortDirection::Ascending => "ascending",
+        SortDirection::Descending => "descending",
+    }
 }
 
 fn empty_row(columns: usize) -> AnyView {

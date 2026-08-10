@@ -3,10 +3,10 @@
 use sqlx::postgres::PgRow;
 use sqlx::Row;
 use wareboxes_application::inventory::{
-    FacilityRollupCursor, InventoryFacilityRollupPage, InventoryFacilityRollupReadModel,
-    InventoryItemRollupPage, InventoryItemRollupReadModel, InventoryLocationRollupPage,
-    InventoryLocationRollupReadModel, InventoryRollupCount, InventoryRollupQuantity,
-    ItemRollupCursor, LocationRollupCursor, MAX_INVENTORY_ROLLUP_PAGE_SIZE,
+    InventoryFacilityRollupPage, InventoryFacilityRollupReadModel, InventoryItemRollupPage,
+    InventoryItemRollupReadModel, InventoryLocationRollupPage, InventoryLocationRollupReadModel,
+    InventoryRollupCount, InventoryRollupPageQuery, InventoryRollupQuantity,
+    MAX_INVENTORY_ROLLUP_PAGE_SIZE,
 };
 use wareboxes_domain::{FacilityId, InventoryOwnerId, OwnerScope, SiteScope, TenantId};
 
@@ -18,20 +18,9 @@ pub async fn get_inventory_location_rollup_page(
     tenant_id: TenantId,
     site_scope: &SiteScope,
     owner_scope: &OwnerScope,
-    after: Option<LocationRollupCursor>,
-    limit: u16,
+    query: &InventoryRollupPageQuery,
 ) -> PersistenceResult<InventoryLocationRollupPage> {
-    let cursor_values = after.map(|cursor| {
-        [
-            cursor.inventory_owner_id.get(),
-            cursor.item_id,
-            cursor.location_id,
-        ]
-    });
-    validate_page_request(
-        limit,
-        cursor_values.as_ref().map(|values| values.as_slice()),
-    )?;
+    validate_page_request(query)?;
     let facility_ids = site_scope
         .facility_ids
         .iter()
@@ -42,7 +31,9 @@ pub async fn get_inventory_location_rollup_page(
         .iter()
         .map(|id| id.get())
         .collect::<Vec<_>>();
-    let fetch_limit = i64::from(limit) + 1;
+    let fetch_limit = i64::from(query.limit) + 1;
+    let offset = i64::try_from(query.offset)
+        .map_err(|_| PersistenceError::invalid_input("inventory rollup offset is too large"))?;
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
@@ -81,11 +72,9 @@ pub async fn get_inventory_location_rollup_page(
               AND balance.deleted IS NULL
               AND ($2 OR balance.facility_id = ANY($3))
               AND ($4 OR balance.inventory_owner_id = ANY($5))
-              AND (
-                    $6::BIGINT IS NULL
-                    OR (balance.inventory_owner_id, balance.item_id, balance.location_id)
-                       > ($6, $7, $8)
-              )
+              AND ($6::TEXT IS NULL OR CONCAT_WS(' ', owner.name, sku.name,
+                    item.description, facility.name, location.name, location.barcode)
+                    ILIKE '%' || $6 || '%')
         ),
         by_uom AS (
             SELECT inventory_owner_id, item_id, facility_id, location_id, uom,
@@ -132,8 +121,19 @@ pub async fn get_inventory_location_rollup_page(
                  stats.facility_id, stats.facility_name, stats.location_id,
                  stats.location_name, stats.location_barcode,
                  stats.balance_count, stats.batch_count
-        ORDER BY stats.inventory_owner_id, stats.item_id, stats.location_id
-        LIMIT $9
+        ORDER BY
+            CASE WHEN $7 = 'client' AND $8 = 'ascending' THEN LOWER(stats.inventory_owner_name) END ASC,
+            CASE WHEN $7 = 'client' AND $8 = 'descending' THEN LOWER(stats.inventory_owner_name) END DESC,
+            CASE WHEN $7 = 'item' AND $8 = 'ascending' THEN LOWER(COALESCE(stats.primary_sku, stats.item_description, 'Item #' || stats.item_id)) END ASC,
+            CASE WHEN $7 = 'item' AND $8 = 'descending' THEN LOWER(COALESCE(stats.primary_sku, stats.item_description, 'Item #' || stats.item_id)) END DESC,
+            CASE WHEN $7 = 'scope' AND $8 = 'ascending' THEN LOWER(COALESCE(stats.location_barcode, stats.location_name, 'Location #' || stats.location_id)) END ASC,
+            CASE WHEN $7 = 'scope' AND $8 = 'descending' THEN LOWER(COALESCE(stats.location_barcode, stats.location_name, 'Location #' || stats.location_id)) END DESC,
+            CASE WHEN $7 = 'balances' AND $8 = 'ascending' THEN stats.balance_count END ASC,
+            CASE WHEN $7 = 'balances' AND $8 = 'descending' THEN stats.balance_count END DESC,
+            CASE WHEN $7 = 'batches' AND $8 = 'ascending' THEN stats.batch_count END ASC,
+            CASE WHEN $7 = 'batches' AND $8 = 'descending' THEN stats.batch_count END DESC,
+            stats.inventory_owner_id, stats.item_id, stats.location_id
+        LIMIT $9 OFFSET $10
         "#,
     )
     .bind(tenant_id.get())
@@ -141,33 +141,26 @@ pub async fn get_inventory_location_rollup_page(
     .bind(&facility_ids)
     .bind(owner_scope.all_inventory_owners)
     .bind(&inventory_owner_ids)
-    .bind(after.map(|cursor| cursor.inventory_owner_id.get()))
-    .bind(after.map(|cursor| cursor.item_id))
-    .bind(after.map(|cursor| cursor.location_id))
+    .bind(query.query.as_deref())
+    .bind(query.sort.as_str())
+    .bind(query.direction.as_str())
     .bind(fetch_limit)
+    .bind(offset)
     .fetch_all(&mut *tx)
     .await?;
 
-    let has_more = rows.len() > usize::from(limit);
+    let has_more = rows.len() > usize::from(query.limit);
     let rows = rows
         .iter()
-        .take(usize::from(limit))
+        .take(usize::from(query.limit))
         .map(map_location_row)
         .collect::<PersistenceResult<Vec<_>>>()?;
-    let next_cursor = if has_more {
-        rows.last().map(|row| LocationRollupCursor {
-            inventory_owner_id: row.inventory_owner_id,
-            item_id: row.item_id,
-            location_id: row.location_id,
-        })
-    } else {
-        None
-    };
+    let next_offset = has_more.then(|| query.offset + u64::from(query.limit));
     tx.commit().await?;
 
     Ok(InventoryLocationRollupPage {
         items: rows,
-        next_cursor,
+        next_offset,
     })
 }
 
@@ -176,20 +169,9 @@ pub async fn get_inventory_facility_rollup_page(
     tenant_id: TenantId,
     site_scope: &SiteScope,
     owner_scope: &OwnerScope,
-    after: Option<FacilityRollupCursor>,
-    limit: u16,
+    query: &InventoryRollupPageQuery,
 ) -> PersistenceResult<InventoryFacilityRollupPage> {
-    let cursor_values = after.map(|cursor| {
-        [
-            cursor.inventory_owner_id.get(),
-            cursor.item_id,
-            cursor.facility_id.get(),
-        ]
-    });
-    validate_page_request(
-        limit,
-        cursor_values.as_ref().map(|values| values.as_slice()),
-    )?;
+    validate_page_request(query)?;
     let facility_ids = site_scope
         .facility_ids
         .iter()
@@ -200,7 +182,9 @@ pub async fn get_inventory_facility_rollup_page(
         .iter()
         .map(|id| id.get())
         .collect::<Vec<_>>();
-    let fetch_limit = i64::from(limit) + 1;
+    let fetch_limit = i64::from(query.limit) + 1;
+    let offset = i64::try_from(query.offset)
+        .map_err(|_| PersistenceError::invalid_input("inventory rollup offset is too large"))?;
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
@@ -234,11 +218,8 @@ pub async fn get_inventory_facility_rollup_page(
               AND balance.deleted IS NULL
               AND ($2 OR balance.facility_id = ANY($3))
               AND ($4 OR balance.inventory_owner_id = ANY($5))
-              AND (
-                    $6::BIGINT IS NULL
-                    OR (balance.inventory_owner_id, balance.item_id, balance.facility_id)
-                       > ($6, $7, $8)
-              )
+              AND ($6::TEXT IS NULL OR CONCAT_WS(' ', owner.name, sku.name,
+                    item.description, facility.name) ILIKE '%' || $6 || '%')
         ),
         by_uom AS (
             SELECT inventory_owner_id, item_id, facility_id, uom,
@@ -282,8 +263,21 @@ pub async fn get_inventory_facility_rollup_page(
                  stats.item_id, stats.item_description, stats.primary_sku,
                  stats.facility_id, stats.facility_name,
                  stats.balance_count, stats.batch_count, stats.location_count
-        ORDER BY stats.inventory_owner_id, stats.item_id, stats.facility_id
-        LIMIT $9
+        ORDER BY
+            CASE WHEN $7 = 'client' AND $8 = 'ascending' THEN LOWER(stats.inventory_owner_name) END ASC,
+            CASE WHEN $7 = 'client' AND $8 = 'descending' THEN LOWER(stats.inventory_owner_name) END DESC,
+            CASE WHEN $7 = 'item' AND $8 = 'ascending' THEN LOWER(COALESCE(stats.primary_sku, stats.item_description, 'Item #' || stats.item_id)) END ASC,
+            CASE WHEN $7 = 'item' AND $8 = 'descending' THEN LOWER(COALESCE(stats.primary_sku, stats.item_description, 'Item #' || stats.item_id)) END DESC,
+            CASE WHEN $7 = 'scope' AND $8 = 'ascending' THEN LOWER(COALESCE(stats.facility_name, 'Facility #' || stats.facility_id)) END ASC,
+            CASE WHEN $7 = 'scope' AND $8 = 'descending' THEN LOWER(COALESCE(stats.facility_name, 'Facility #' || stats.facility_id)) END DESC,
+            CASE WHEN $7 = 'locations' AND $8 = 'ascending' THEN stats.location_count END ASC,
+            CASE WHEN $7 = 'locations' AND $8 = 'descending' THEN stats.location_count END DESC,
+            CASE WHEN $7 = 'balances' AND $8 = 'ascending' THEN stats.balance_count END ASC,
+            CASE WHEN $7 = 'balances' AND $8 = 'descending' THEN stats.balance_count END DESC,
+            CASE WHEN $7 = 'batches' AND $8 = 'ascending' THEN stats.batch_count END ASC,
+            CASE WHEN $7 = 'batches' AND $8 = 'descending' THEN stats.batch_count END DESC,
+            stats.inventory_owner_id, stats.item_id, stats.facility_id
+        LIMIT $9 OFFSET $10
         "#,
     )
     .bind(tenant_id.get())
@@ -291,33 +285,26 @@ pub async fn get_inventory_facility_rollup_page(
     .bind(&facility_ids)
     .bind(owner_scope.all_inventory_owners)
     .bind(&inventory_owner_ids)
-    .bind(after.map(|cursor| cursor.inventory_owner_id.get()))
-    .bind(after.map(|cursor| cursor.item_id))
-    .bind(after.map(|cursor| cursor.facility_id.get()))
+    .bind(query.query.as_deref())
+    .bind(query.sort.as_str())
+    .bind(query.direction.as_str())
     .bind(fetch_limit)
+    .bind(offset)
     .fetch_all(&mut *tx)
     .await?;
 
-    let has_more = rows.len() > usize::from(limit);
+    let has_more = rows.len() > usize::from(query.limit);
     let rows = rows
         .iter()
-        .take(usize::from(limit))
+        .take(usize::from(query.limit))
         .map(map_facility_row)
         .collect::<PersistenceResult<Vec<_>>>()?;
-    let next_cursor = if has_more {
-        rows.last().map(|row| FacilityRollupCursor {
-            inventory_owner_id: row.inventory_owner_id,
-            item_id: row.item_id,
-            facility_id: row.facility_id,
-        })
-    } else {
-        None
-    };
+    let next_offset = has_more.then(|| query.offset + u64::from(query.limit));
     tx.commit().await?;
 
     Ok(InventoryFacilityRollupPage {
         items: rows,
-        next_cursor,
+        next_offset,
     })
 }
 
@@ -326,14 +313,9 @@ pub async fn get_inventory_item_rollup_page(
     tenant_id: TenantId,
     site_scope: &SiteScope,
     owner_scope: &OwnerScope,
-    after: Option<ItemRollupCursor>,
-    limit: u16,
+    query: &InventoryRollupPageQuery,
 ) -> PersistenceResult<InventoryItemRollupPage> {
-    let cursor_values = after.map(|cursor| [cursor.inventory_owner_id.get(), cursor.item_id]);
-    validate_page_request(
-        limit,
-        cursor_values.as_ref().map(|values| values.as_slice()),
-    )?;
+    validate_page_request(query)?;
     let facility_ids = site_scope
         .facility_ids
         .iter()
@@ -344,7 +326,9 @@ pub async fn get_inventory_item_rollup_page(
         .iter()
         .map(|id| id.get())
         .collect::<Vec<_>>();
-    let fetch_limit = i64::from(limit) + 1;
+    let fetch_limit = i64::from(query.limit) + 1;
+    let offset = i64::try_from(query.offset)
+        .map_err(|_| PersistenceError::invalid_input("inventory rollup offset is too large"))?;
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
@@ -374,10 +358,8 @@ pub async fn get_inventory_item_rollup_page(
               AND balance.deleted IS NULL
               AND ($2 OR balance.facility_id = ANY($3))
               AND ($4 OR balance.inventory_owner_id = ANY($5))
-              AND (
-                    $6::BIGINT IS NULL
-                    OR (balance.inventory_owner_id, balance.item_id) > ($6, $7)
-              )
+              AND ($6::TEXT IS NULL OR CONCAT_WS(' ', owner.name, sku.name,
+                    item.description) ILIKE '%' || $6 || '%')
         ),
         by_uom AS (
             SELECT inventory_owner_id, item_id, uom,
@@ -420,8 +402,21 @@ pub async fn get_inventory_item_rollup_page(
                  stats.item_id, stats.item_description, stats.primary_sku,
                  stats.balance_count, stats.batch_count,
                  stats.location_count, stats.facility_count
-        ORDER BY stats.inventory_owner_id, stats.item_id
-        LIMIT $8
+        ORDER BY
+            CASE WHEN $7 = 'client' AND $8 = 'ascending' THEN LOWER(stats.inventory_owner_name) END ASC,
+            CASE WHEN $7 = 'client' AND $8 = 'descending' THEN LOWER(stats.inventory_owner_name) END DESC,
+            CASE WHEN $7 = 'item' AND $8 = 'ascending' THEN LOWER(COALESCE(stats.primary_sku, stats.item_description, 'Item #' || stats.item_id)) END ASC,
+            CASE WHEN $7 = 'item' AND $8 = 'descending' THEN LOWER(COALESCE(stats.primary_sku, stats.item_description, 'Item #' || stats.item_id)) END DESC,
+            CASE WHEN $7 = 'scope' AND $8 = 'ascending' THEN stats.facility_count END ASC,
+            CASE WHEN $7 = 'scope' AND $8 = 'descending' THEN stats.facility_count END DESC,
+            CASE WHEN $7 = 'locations' AND $8 = 'ascending' THEN stats.location_count END ASC,
+            CASE WHEN $7 = 'locations' AND $8 = 'descending' THEN stats.location_count END DESC,
+            CASE WHEN $7 = 'balances' AND $8 = 'ascending' THEN stats.balance_count END ASC,
+            CASE WHEN $7 = 'balances' AND $8 = 'descending' THEN stats.balance_count END DESC,
+            CASE WHEN $7 = 'batches' AND $8 = 'ascending' THEN stats.batch_count END ASC,
+            CASE WHEN $7 = 'batches' AND $8 = 'descending' THEN stats.batch_count END DESC,
+            stats.inventory_owner_id, stats.item_id
+        LIMIT $9 OFFSET $10
         "#,
     )
     .bind(tenant_id.get())
@@ -429,31 +424,26 @@ pub async fn get_inventory_item_rollup_page(
     .bind(&facility_ids)
     .bind(owner_scope.all_inventory_owners)
     .bind(&inventory_owner_ids)
-    .bind(after.map(|cursor| cursor.inventory_owner_id.get()))
-    .bind(after.map(|cursor| cursor.item_id))
+    .bind(query.query.as_deref())
+    .bind(query.sort.as_str())
+    .bind(query.direction.as_str())
     .bind(fetch_limit)
+    .bind(offset)
     .fetch_all(&mut *tx)
     .await?;
 
-    let has_more = rows.len() > usize::from(limit);
+    let has_more = rows.len() > usize::from(query.limit);
     let rows = rows
         .iter()
-        .take(usize::from(limit))
+        .take(usize::from(query.limit))
         .map(map_item_row)
         .collect::<PersistenceResult<Vec<_>>>()?;
-    let next_cursor = if has_more {
-        rows.last().map(|row| ItemRollupCursor {
-            inventory_owner_id: row.inventory_owner_id,
-            item_id: row.item_id,
-        })
-    } else {
-        None
-    };
+    let next_offset = has_more.then(|| query.offset + u64::from(query.limit));
     tx.commit().await?;
 
     Ok(InventoryItemRollupPage {
         items: rows,
-        next_cursor,
+        next_offset,
     })
 }
 
@@ -567,15 +557,25 @@ fn map_count(row: &PgRow, column: &str) -> PersistenceResult<InventoryRollupCoun
     })
 }
 
-fn validate_page_request(limit: u16, cursor_values: Option<&[i64]>) -> PersistenceResult<()> {
-    if !(1..=MAX_INVENTORY_ROLLUP_PAGE_SIZE).contains(&limit) {
+fn validate_page_request(query: &InventoryRollupPageQuery) -> PersistenceResult<()> {
+    if !(1..=MAX_INVENTORY_ROLLUP_PAGE_SIZE).contains(&query.limit) {
         return Err(PersistenceError::invalid_input(format!(
             "inventory rollup page size must be between 1 and {MAX_INVENTORY_ROLLUP_PAGE_SIZE}"
         )));
     }
-    if cursor_values.is_some_and(|values| values.iter().any(|value| *value <= 0)) {
+    if query.offset > i64::MAX as u64 {
         return Err(PersistenceError::invalid_input(
-            "inventory rollup cursor values must be positive",
+            "inventory rollup offset is too large",
+        ));
+    }
+    if query.query.as_ref().is_some_and(|value| {
+        value.is_empty()
+            || value.trim() != value
+            || value.chars().count() > 200
+            || value.chars().any(char::is_control)
+    }) {
+        return Err(PersistenceError::invalid_input(
+            "inventory rollup query is invalid",
         ));
     }
     Ok(())
@@ -587,18 +587,33 @@ mod tests {
 
     #[test]
     fn page_request_validation_rejects_untrusted_direct_inputs() {
-        assert!(validate_page_request(1, None).is_ok());
-        assert!(validate_page_request(1, Some(&[1, 2, 3])).is_ok());
+        let request = InventoryRollupPageQuery {
+            offset: 0,
+            limit: 1,
+            query: None,
+            sort: wareboxes_application::inventory::InventoryRollupSort::Client,
+            direction: wareboxes_application::inventory::InventoryRollupSortDirection::Ascending,
+        };
+        assert!(validate_page_request(&request).is_ok());
         assert!(matches!(
-            validate_page_request(0, None),
+            validate_page_request(&InventoryRollupPageQuery {
+                limit: 0,
+                ..request.clone()
+            }),
             Err(PersistenceError::InvalidInput(_))
         ));
         assert!(matches!(
-            validate_page_request(MAX_INVENTORY_ROLLUP_PAGE_SIZE + 1, None),
+            validate_page_request(&InventoryRollupPageQuery {
+                limit: MAX_INVENTORY_ROLLUP_PAGE_SIZE + 1,
+                ..request.clone()
+            }),
             Err(PersistenceError::InvalidInput(_))
         ));
         assert!(matches!(
-            validate_page_request(1, Some(&[1, 0, 3])),
+            validate_page_request(&InventoryRollupPageQuery {
+                query: Some(" not-trimmed ".to_owned()),
+                ..request
+            }),
             Err(PersistenceError::InvalidInput(_))
         ));
     }
