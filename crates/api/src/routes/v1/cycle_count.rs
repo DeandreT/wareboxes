@@ -6,11 +6,12 @@ use wareboxes_api_contract::v1::{
     CycleCountCandidatePageRequest, CycleCountCandidateResponse,
     CycleCountCandidateSort as ApiCandidateSort, CycleCountClaimHeartbeatResponse,
     CycleCountClaimReleaseReason, CycleCountClaimReleaseResponse, CycleCountClaimResponse,
-    CycleCountConfirmationResponse, CycleCountItem, CycleCountLocation, CycleCountQuantityResponse,
-    CycleCountSortDirection as ApiSortDirection, CycleCountStock, CycleCountWorkPage,
-    CycleCountWorkPageRequest, CycleCountWorkResponse, CycleCountWorkSort as ApiWorkSort,
-    CycleCountWorkStatus as ApiWorkStatus, HeartbeatCycleCountClaimRequest, InventoryBalanceStatus,
-    OpaqueCursor, ReleaseCycleCountClaimRequest,
+    CycleCountConfirmationResponse, CycleCountDisposition as ApiDisposition, CycleCountItem,
+    CycleCountLocation, CycleCountQuantityResponse, CycleCountSortDirection as ApiSortDirection,
+    CycleCountStock, CycleCountWorkPage, CycleCountWorkPageRequest, CycleCountWorkResponse,
+    CycleCountWorkSort as ApiWorkSort, CycleCountWorkStatus as ApiWorkStatus,
+    HeartbeatCycleCountClaimRequest, InventoryBalanceStatus, OpaqueCursor,
+    ReleaseCycleCountClaimRequest, Revision,
 };
 use wareboxes_application::cycle_count::{
     CycleCountCandidatePage as ApplicationCandidatePage, CycleCountCandidateQuery,
@@ -32,12 +33,17 @@ use crate::request_context::IdempotencyKey;
 use crate::state::AppState;
 
 const PERMISSION: &str = "wms";
-const SUPERVISOR_PERMISSION: &str = "wms_supervisor";
+pub(super) const SUPERVISOR_PERMISSION: &str = "wms_supervisor";
 const MAX_BARCODE_LENGTH: usize = 200;
 const MAX_NOTE_LENGTH: usize = 1_000;
 const MAX_PAGE_LIMIT: u16 = 100;
 const CANDIDATE_CURSOR_PREFIX: &str = "cc1.";
 const WORK_CURSOR_PREFIX: &str = "cw1.";
+
+mod control;
+#[cfg_attr(not(feature = "ssr"), allow(unused_imports))]
+pub(crate) use control::pages_for_access as control_pages_for_access;
+pub use control::{configure_policy, decide_variance, policies, variances};
 
 pub async fn candidates(
     State(state): State<AppState>,
@@ -345,6 +351,25 @@ pub async fn confirm(
         counted_quantity: confirmation.counted_quantity,
         variance_quantity: confirmation.variance_quantity,
         inventory_transaction_id: confirmation.inventory_transaction_id,
+        disposition: match confirmation.disposition {
+            wareboxes_domain::CycleCountDisposition::Posted => ApiDisposition::Posted,
+            wareboxes_domain::CycleCountDisposition::RecountRequired => {
+                ApiDisposition::RecountRequired
+            }
+            wareboxes_domain::CycleCountDisposition::ApprovalRequired => {
+                ApiDisposition::ApprovalRequired
+            }
+        },
+        variance_id: confirmation.variance_id.map(|id| id.get()),
+        variance_revision: confirmation
+            .variance_revision
+            .map(|revision| {
+                wareboxes_api_contract::v1::Revision::new(revision.get()).map_err(|_| {
+                    V1Error::internal("cycle count produced an invalid variance revision")
+                })
+            })
+            .transpose()?,
+        next_recount_task_id: confirmation.next_recount_task_id,
         confirmed_by: confirmation.confirmed_by,
         confirmed_at: confirmation.confirmed_at.to_rfc3339(),
     }))
@@ -690,7 +715,7 @@ fn decode_work_cursor(cursor: &OpaqueCursor) -> V1Result<WorkCursor> {
     })
 }
 
-fn cursor_parts<'a>(
+pub(super) fn cursor_parts<'a>(
     cursor: &'a OpaqueCursor,
     prefix: &str,
     expected: usize,
@@ -704,11 +729,11 @@ fn cursor_parts<'a>(
         .ok_or_else(|| V1Error::invalid_cursor_for(label))
 }
 
-fn optional_id(value: Option<i64>) -> String {
+pub(super) fn optional_id(value: Option<i64>) -> String {
     value.map_or_else(|| "a".into(), |value| format!("{value:016x}"))
 }
 
-fn parse_optional_facility(
+pub(super) fn parse_optional_facility(
     value: &str,
     label: &str,
 ) -> V1Result<Option<wareboxes_domain::FacilityId>> {
@@ -718,7 +743,7 @@ fn parse_optional_facility(
         .map_err(|_| V1Error::invalid_cursor_for(label))
 }
 
-fn parse_optional_owner(
+pub(super) fn parse_optional_owner(
     value: &str,
     label: &str,
 ) -> V1Result<Option<wareboxes_domain::InventoryOwnerId>> {
@@ -747,6 +772,14 @@ fn parse_hex_u64(value: &str, label: &str) -> V1Result<u64> {
         return Err(V1Error::invalid_cursor_for(label));
     }
     u64::from_str_radix(value, 16).map_err(|_| V1Error::invalid_cursor_for(label))
+}
+
+pub(super) fn parse_hex_i64(value: &str, label: &str) -> V1Result<i64> {
+    let value = parse_hex_u64(value, label)?;
+    i64::try_from(value)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| V1Error::invalid_cursor_for(label))
 }
 
 const fn inventory_status_code(value: Option<ApplicationInventoryStatus>) -> &'static str {
@@ -827,12 +860,12 @@ fn parse_direction(value: &str, label: &str) -> V1Result<CycleCountSortDirection
     }
 }
 
-fn opaque_cursor(value: String) -> AppResult<OpaqueCursor> {
+pub(super) fn opaque_cursor(value: String) -> AppResult<OpaqueCursor> {
     OpaqueCursor::new(value)
         .map_err(|_| AppError::internal("generated an invalid cycle-count cursor"))
 }
 
-fn require_page_limit(limit: u16) -> V1Result<()> {
+pub(super) fn require_page_limit(limit: u16) -> V1Result<()> {
     if limit <= MAX_PAGE_LIMIT {
         Ok(())
     } else {
@@ -877,6 +910,14 @@ fn validate_note(note: Option<&str>) -> V1Result<()> {
 
 fn invalid(message: impl Into<String>) -> V1Error {
     AppError::bad_request(message).into()
+}
+
+pub(super) fn domain_validation(error: impl std::fmt::Display) -> V1Error {
+    invalid(error.to_string())
+}
+
+pub(super) fn revision_to_api(value: i64) -> AppResult<Revision> {
+    Revision::new(value).map_err(|_| AppError::internal("cycle count produced an invalid revision"))
 }
 
 #[cfg(test)]

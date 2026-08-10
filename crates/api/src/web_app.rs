@@ -143,6 +143,8 @@ async fn workspace_bootstrap(
                 putaway_work: None,
                 cycle_count_candidates: None,
                 cycle_count_work: None,
+                cycle_count_policies: None,
+                cycle_count_variances: None,
                 replenishment_policies: None,
                 replenishment_queue: None,
                 balances,
@@ -274,13 +276,20 @@ async fn workspace_bootstrap(
             if !has_permission(session, "wms_supervisor") {
                 return Ok(WorkspaceBootstrapData::default());
             }
-            let ((cycle_count_candidates, cycle_count_work), access_workspace) = tokio::try_join!(
+            let (
+                (cycle_count_candidates, cycle_count_work),
+                (cycle_count_policies, cycle_count_variances),
+                access_workspace,
+            ) = tokio::try_join!(
                 routes::v1::cycle_count::pages_for_access(state, access, 100),
+                routes::v1::cycle_count::control_pages_for_access(state, access, 100),
                 routes::access::workspace_for_access(state, access),
             )?;
             Ok(WorkspaceBootstrapData {
                 cycle_count_candidates: Some(cycle_count_candidates),
                 cycle_count_work: Some(cycle_count_work),
+                cycle_count_policies: Some(cycle_count_policies),
+                cycle_count_variances: Some(cycle_count_variances),
                 access: access_workspace,
                 ..WorkspaceBootstrapData::default()
             })

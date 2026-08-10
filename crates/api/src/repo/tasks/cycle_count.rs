@@ -25,25 +25,28 @@ struct CountScans<'a> {
     license_plate_barcode: Option<&'a str>,
 }
 
-struct CountTarget {
-    inventory_owner_id: i64,
-    facility_id: i64,
-    location_id: i64,
-    item_id: i64,
-    inventory_balance_id: i64,
+pub(super) struct CountTarget {
+    pub(super) task_id: i64,
+    pub(super) inventory_owner_id: i64,
+    pub(super) facility_id: i64,
+    pub(super) location_id: i64,
+    pub(super) item_id: i64,
+    pub(super) inventory_balance_id: i64,
+    pub(super) variance_id: Option<wareboxes_domain::CycleCountVarianceId>,
+    pub(super) attempt_sequence: u16,
 }
 
-struct LockedBalance {
-    item_batch_id: i64,
-    license_plate_id: Option<i64>,
-    uom: String,
-    lot: Option<String>,
-    expiration: Option<wareboxes_core::models::Timestamp>,
-    serial: Option<String>,
-    status: InventoryStatus,
-    qty_on_hand: i64,
-    qty_reserved: i64,
-    qty_held: i64,
+pub(super) struct LockedBalance {
+    pub(super) item_batch_id: i64,
+    pub(super) license_plate_id: Option<i64>,
+    pub(super) uom: String,
+    pub(super) lot: Option<String>,
+    pub(super) expiration: Option<wareboxes_core::models::Timestamp>,
+    pub(super) serial: Option<String>,
+    pub(super) status: InventoryStatus,
+    pub(super) qty_on_hand: i64,
+    pub(super) qty_reserved: i64,
+    pub(super) qty_held: i64,
 }
 
 fn validated_note(note: Option<&str>) -> AppResult<Option<&str>> {
@@ -84,7 +87,9 @@ async fn lock_task_target(
                detail.facility_id,
                detail.location_id,
                detail.item_id,
-               detail.inventory_balance_id
+               detail.inventory_balance_id,
+               detail.variance_case_id,
+               detail.attempt_sequence
         FROM work_tasks task
         INNER JOIN cycle_count_item_location_tasks detail
           ON detail.tenant_id = task.tenant_id
@@ -103,11 +108,19 @@ async fn lock_task_target(
     .ok_or_else(|| AppError::not_found("cycle count task"))?;
 
     let target = CountTarget {
+        task_id,
         inventory_owner_id: row.try_get("inventory_owner_id")?,
         facility_id: row.try_get("facility_id")?,
         location_id: row.try_get("location_id")?,
         item_id: row.try_get("item_id")?,
         inventory_balance_id: row.try_get("inventory_balance_id")?,
+        variance_id: row
+            .try_get::<Option<i64>, _>("variance_case_id")?
+            .map(wareboxes_domain::CycleCountVarianceId::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        attempt_sequence: u16::try_from(row.try_get::<i16, _>("attempt_sequence")?)
+            .map_err(|_| AppError::internal("cycle count attempt sequence is invalid"))?,
     };
     let dimensions = TaskDimensions {
         facility_id: Some(target.facility_id),
@@ -307,8 +320,22 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
         .checked_sub(balance.qty_on_hand)
         .ok_or_else(|| AppError::bad_request("cycle count variance is out of range"))?;
     let confirmed_at = now_iso();
+    let control = super::prepare_count_control_tx(
+        &mut tx,
+        access.tenant_id,
+        command.actor_id.get(),
+        task_id,
+        &target,
+        &balance,
+        counted_quantity,
+        variance_quantity,
+        confirmed_at,
+    )
+    .await?;
 
-    let inventory_transaction_id = if variance_quantity == 0 {
+    let inventory_transaction_id = if variance_quantity == 0
+        || control.disposition != wareboxes_domain::CycleCountDisposition::Posted
+    {
         None
     } else {
         let owner_facility =
@@ -378,7 +405,7 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
         Some(transaction_id)
     };
 
-    let confirmation = ItemLocationCycleCountConfirmation {
+    let mut confirmation = ItemLocationCycleCountConfirmation {
         tenant_id: access.tenant_id,
         task_id,
         inventory_owner_id: InventoryOwnerId::new(target.inventory_owner_id)
@@ -389,10 +416,10 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
         license_plate_id: balance.license_plate_id,
         item_batch_id: balance.item_batch_id,
         item_id: target.item_id,
-        uom: balance.uom,
-        lot: balance.lot,
+        uom: balance.uom.clone(),
+        lot: balance.lot.clone(),
         expiration: balance.expiration,
-        serial: balance.serial,
+        serial: balance.serial.clone(),
         inventory_status: balance.status,
         previous_on_hand_quantity: balance.qty_on_hand,
         reserved_quantity: balance.qty_reserved,
@@ -400,6 +427,10 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
         counted_quantity,
         variance_quantity,
         inventory_transaction_id,
+        disposition: control.disposition,
+        variance_id: control.variance_id,
+        variance_revision: control.variance_revision,
+        next_recount_task_id: None,
         confirmed_by: command.actor_id.get(),
         confirmed_at,
         note: note.map(str::to_owned),
@@ -412,11 +443,15 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
             item_id, inventory_balance_id, item_batch_id, license_plate_id, uom,
             lot, expiration, serial, status, system_qty_on_hand,
             system_qty_reserved, system_qty_held, counted_qty, variance_qty,
-            inventory_transaction_id, confirmed_by, confirmed_at, note
+            inventory_transaction_id, confirmed_by, confirmed_at, note,
+            disposition, variance_case_id, attempt_sequence, policy_id,
+            policy_revision, absolute_tolerance_qty, percentage_tolerance_bps,
+            automatic_recount_limit, allowed_variance_qty
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-            $15, $16, $17, $18, $19, $20, $21, $22, $23
+            $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
+            $27, $28, $29, $30, $31, $32
         )
         "#,
     )
@@ -443,6 +478,44 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
     .bind(confirmation.confirmed_by)
     .bind(confirmation.confirmed_at)
     .bind(&confirmation.note)
+    .bind(match control.disposition {
+        wareboxes_domain::CycleCountDisposition::Posted => "posted",
+        wareboxes_domain::CycleCountDisposition::RecountRequired => "recount_required",
+        wareboxes_domain::CycleCountDisposition::ApprovalRequired => "approval_required",
+    })
+    .bind(control.variance_id.map(|id| id.get()))
+    .bind(
+        i16::try_from(control.attempt_sequence)
+            .map_err(|_| AppError::internal("cycle count attempt is out of database range"))?,
+    )
+    .bind(control.policy.map(|policy| policy.id.get()))
+    .bind(control.policy.map(|policy| policy.revision.get()))
+    .bind(
+        control
+            .policy
+            .map(|policy| policy.policy.absolute_tolerance_quantity()),
+    )
+    .bind(
+        control
+            .policy
+            .map(|policy| {
+                i32::try_from(policy.policy.percentage_tolerance_basis_points()).map_err(|_| {
+                    AppError::internal("cycle count percentage is out of database range")
+                })
+            })
+            .transpose()?,
+    )
+    .bind(
+        control
+            .policy
+            .map(|policy| {
+                i16::try_from(policy.policy.automatic_recount_limit()).map_err(|_| {
+                    AppError::internal("cycle count recount limit is out of database range")
+                })
+            })
+            .transpose()?,
+    )
+    .bind(control.allowed_variance_quantity)
     .execute(&mut *tx)
     .await?;
 
@@ -473,6 +546,22 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
             "cycle count task claim expired during confirmation",
         ));
     }
+
+    let advanced = super::advance_count_control_after_confirmation_tx(
+        &mut tx,
+        access.tenant_id,
+        command.actor_id.get(),
+        &target,
+        &balance,
+        counted_quantity,
+        variance_quantity,
+        inventory_transaction_id,
+        control,
+        confirmed_at,
+    )
+    .await?;
+    confirmation.variance_revision = advanced.variance_revision;
+    confirmation.next_recount_task_id = advanced.next_recount_task_id;
 
     insert_progress_tx(
         &mut tx,
@@ -510,6 +599,14 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
         "counted_quantity": counted_quantity,
         "variance_quantity": variance_quantity,
         "inventory_transaction_id": inventory_transaction_id,
+        "disposition": match confirmation.disposition {
+            wareboxes_domain::CycleCountDisposition::Posted => "posted",
+            wareboxes_domain::CycleCountDisposition::RecountRequired => "recount_required",
+            wareboxes_domain::CycleCountDisposition::ApprovalRequired => "approval_required",
+        },
+        "variance_id": confirmation.variance_id.map(|id| id.get()),
+        "variance_revision": confirmation.variance_revision.map(|revision| revision.get()),
+        "next_recount_task_id": confirmation.next_recount_task_id,
     });
     outbox::enqueue(
         &mut tx,
@@ -530,6 +627,48 @@ async fn confirm_item_location_cycle_count_with_scans_in_scope(
         },
     )
     .await?;
+
+    if let (Some(variance_id), Some(variance_revision)) =
+        (confirmation.variance_id, confirmation.variance_revision)
+    {
+        let variance_event_key = format!("cycle-count-variance-confirmation:{task_id}");
+        let variance_aggregate_id = variance_id.to_string();
+        let variance_ordering_key = format!("cycle-count-variance:{variance_id}");
+        let aggregate_sequence = variance_revision
+            .get()
+            .checked_sub(1)
+            .filter(|sequence| *sequence > 0)
+            .ok_or_else(|| AppError::internal("cycle count variance event sequence is invalid"))?;
+        outbox::enqueue(
+            &mut tx,
+            &NewOutboxEvent {
+                tenant_id: access.tenant_id,
+                inventory_owner_id: Some(inventory_owner_id),
+                facility_id: Some(facility_id),
+                actor_user_id: Some(command.actor_id.get()),
+                event_key: &variance_event_key,
+                aggregate_type: "cycle_count_variance",
+                aggregate_id: &variance_aggregate_id,
+                ordering_key: &variance_ordering_key,
+                aggregate_sequence,
+                event_type: match confirmation.disposition {
+                    wareboxes_domain::CycleCountDisposition::Posted => {
+                        "inventory.cycle_count_variance.posted"
+                    }
+                    wareboxes_domain::CycleCountDisposition::RecountRequired => {
+                        "inventory.cycle_count_variance.recount_required"
+                    }
+                    wareboxes_domain::CycleCountDisposition::ApprovalRequired => {
+                        "inventory.cycle_count_variance.approval_required"
+                    }
+                },
+                schema_version: 1,
+                payload: &payload,
+                occurred_at: confirmed_at,
+            },
+        )
+        .await?;
+    }
 
     Ok(prepared
         .commit_with_inventory_transaction(tx, confirmation, inventory_transaction_id)

@@ -45,13 +45,19 @@ pub use cursor::{
     DEFAULT_PAGE_LIMIT, MAX_CURSOR_LENGTH, MAX_PAGE_LIMIT,
 };
 pub use cycle_count::{
-    ClaimCycleCountByIdRequest, ClaimNextCycleCountRequest, ConfirmCycleCountRequest,
-    CreateCycleCountTaskRequest, CreateCycleCountTaskResponse, CycleCountCandidatePage,
-    CycleCountCandidatePageRequest, CycleCountCandidateResponse, CycleCountCandidateSort,
-    CycleCountClaimHeartbeatResponse, CycleCountClaimReleaseReason, CycleCountClaimReleaseResponse,
-    CycleCountClaimResponse, CycleCountConfirmationResponse, CycleCountItem, CycleCountLocation,
-    CycleCountQuantityResponse, CycleCountSortDirection, CycleCountStock, CycleCountWorkPage,
-    CycleCountWorkPageRequest, CycleCountWorkResponse, CycleCountWorkSort, CycleCountWorkStatus,
+    ClaimCycleCountByIdRequest, ClaimNextCycleCountRequest, ConfigureCycleCountPolicyRequest,
+    ConfigureCycleCountPolicyResponse, ConfirmCycleCountRequest, CreateCycleCountTaskRequest,
+    CreateCycleCountTaskResponse, CycleCountCandidatePage, CycleCountCandidatePageRequest,
+    CycleCountCandidateResponse, CycleCountCandidateSort, CycleCountClaimHeartbeatResponse,
+    CycleCountClaimReleaseReason, CycleCountClaimReleaseResponse, CycleCountClaimResponse,
+    CycleCountConfirmationResponse, CycleCountDisposition, CycleCountItem, CycleCountLocation,
+    CycleCountPolicyPage, CycleCountPolicyPageRequest, CycleCountPolicyResponse,
+    CycleCountQuantityResponse, CycleCountSortDirection, CycleCountStock,
+    CycleCountVarianceDecision, CycleCountVariancePage, CycleCountVariancePageRequest,
+    CycleCountVarianceReason, CycleCountVarianceResponse, CycleCountVarianceStatus,
+    CycleCountVarianceStockResponse, CycleCountWorkPage, CycleCountWorkPageRequest,
+    CycleCountWorkResponse, CycleCountWorkSort, CycleCountWorkStatus,
+    DecideCycleCountVarianceRequest, DecideCycleCountVarianceResponse,
     HeartbeatCycleCountClaimRequest, ReleaseCycleCountClaimRequest,
 };
 pub use error::{ErrorReason, ErrorResponse, FieldViolation};

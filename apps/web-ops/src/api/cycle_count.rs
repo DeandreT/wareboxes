@@ -1,7 +1,10 @@
 use wareboxes_api_contract::v1::{
+    ConfigureCycleCountPolicyRequest, ConfigureCycleCountPolicyResponse,
     CreateCycleCountTaskRequest, CreateCycleCountTaskResponse, CycleCountCandidatePage,
-    CycleCountCandidateSort, CycleCountSortDirection, CycleCountWorkPage, CycleCountWorkSort,
-    CycleCountWorkStatus, InventoryBalanceStatus, OpaqueCursor,
+    CycleCountCandidateSort, CycleCountPolicyPage, CycleCountSortDirection, CycleCountVariancePage,
+    CycleCountVarianceStatus, CycleCountWorkPage, CycleCountWorkSort, CycleCountWorkStatus,
+    DecideCycleCountVarianceRequest, DecideCycleCountVarianceResponse, InventoryBalanceStatus,
+    OpaqueCursor,
 };
 
 use super::ApiError;
@@ -82,6 +85,89 @@ pub async fn create_cycle_count_task(
     super::browser::post("/api/v1/cycle-count-tasks", request, idempotency_key).await
 }
 
+#[cfg(target_arch = "wasm32")]
+pub async fn cycle_count_policies(
+    facility_id: Option<i64>,
+    inventory_owner_id: Option<i64>,
+    cursor: Option<&OpaqueCursor>,
+) -> Result<CycleCountPolicyPage, ApiError> {
+    super::browser::get(&policy_page_path(facility_id, inventory_owner_id, cursor)).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn cycle_count_policies(
+    _facility_id: Option<i64>,
+    _inventory_owner_id: Option<i64>,
+    _cursor: Option<&OpaqueCursor>,
+) -> Result<CycleCountPolicyPage, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn configure_cycle_count_policy(
+    request: &ConfigureCycleCountPolicyRequest,
+    idempotency_key: &str,
+) -> Result<ConfigureCycleCountPolicyResponse, ApiError> {
+    super::browser::post("/api/v1/cycle-count-policies", request, idempotency_key).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn configure_cycle_count_policy(
+    _request: &ConfigureCycleCountPolicyRequest,
+    _idempotency_key: &str,
+) -> Result<ConfigureCycleCountPolicyResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn cycle_count_variances(
+    facility_id: Option<i64>,
+    inventory_owner_id: Option<i64>,
+    status: Option<CycleCountVarianceStatus>,
+    cursor: Option<&OpaqueCursor>,
+) -> Result<CycleCountVariancePage, ApiError> {
+    super::browser::get(&variance_page_path(
+        facility_id,
+        inventory_owner_id,
+        status,
+        cursor,
+    ))
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn cycle_count_variances(
+    _facility_id: Option<i64>,
+    _inventory_owner_id: Option<i64>,
+    _status: Option<CycleCountVarianceStatus>,
+    _cursor: Option<&OpaqueCursor>,
+) -> Result<CycleCountVariancePage, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn decide_cycle_count_variance(
+    variance_id: i64,
+    request: &DecideCycleCountVarianceRequest,
+    idempotency_key: &str,
+) -> Result<DecideCycleCountVarianceResponse, ApiError> {
+    super::browser::post(
+        &format!("/api/v1/cycle-count-variances/{variance_id}/decisions"),
+        request,
+        idempotency_key,
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn decide_cycle_count_variance(
+    _variance_id: i64,
+    _request: &DecideCycleCountVarianceRequest,
+    _idempotency_key: &str,
+) -> Result<DecideCycleCountVarianceResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn create_cycle_count_task(
     _request: &CreateCycleCountTaskRequest,
@@ -130,6 +216,33 @@ fn work_page_path(
     if let Some(status) = status {
         path.push_str("&status=");
         path.push_str(work_status_wire(status));
+    }
+    path
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn policy_page_path(
+    facility_id: Option<i64>,
+    inventory_owner_id: Option<i64>,
+    cursor: Option<&OpaqueCursor>,
+) -> String {
+    let mut path = "/api/v1/cycle-count-policies?limit=100".to_owned();
+    append_common(&mut path, facility_id, inventory_owner_id, cursor);
+    path
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn variance_page_path(
+    facility_id: Option<i64>,
+    inventory_owner_id: Option<i64>,
+    status: Option<CycleCountVarianceStatus>,
+    cursor: Option<&OpaqueCursor>,
+) -> String {
+    let mut path = "/api/v1/cycle-count-variances?limit=100".to_owned();
+    append_common(&mut path, facility_id, inventory_owner_id, cursor);
+    if let Some(status) = status {
+        path.push_str("&status=");
+        path.push_str(variance_status_wire(status));
     }
     path
 }
@@ -209,6 +322,15 @@ const fn work_status_wire(value: CycleCountWorkStatus) -> &'static str {
     }
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+const fn variance_status_wire(value: CycleCountVarianceStatus) -> &'static str {
+    match value {
+        CycleCountVarianceStatus::AwaitingRecount => "awaiting_recount",
+        CycleCountVarianceStatus::AwaitingApproval => "awaiting_approval",
+        CycleCountVarianceStatus::Posted => "posted",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +365,21 @@ mod tests {
         );
         assert!(path.contains("sort=variance&direction=asc"));
         assert!(path.contains("status=completed"));
+    }
+
+    #[test]
+    fn control_paths_bind_scope_status_and_cursor() {
+        let cursor = OpaqueCursor::new("cv1.cursor").unwrap();
+        let policies = policy_page_path(Some(7), Some(9), None);
+        assert!(policies.contains("facility_id=7"));
+        assert!(policies.contains("inventory_owner_id=9"));
+        let variances = variance_page_path(
+            Some(7),
+            Some(9),
+            Some(CycleCountVarianceStatus::AwaitingApproval),
+            Some(&cursor),
+        );
+        assert!(variances.contains("status=awaiting_approval"));
+        assert!(variances.contains("cursor=cv1.cursor"));
     }
 }

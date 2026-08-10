@@ -2,6 +2,7 @@
 
 mod allocation;
 mod backorder;
+mod cycle_count;
 mod facility;
 mod inbound_inspection;
 mod item_substitution;
@@ -29,6 +30,13 @@ pub use backorder::{
     split_current_allocation_shortage, BackorderDetails, BackorderError, BackorderLineSnapshot,
     BackorderNote, BackorderPolicyMode, BackorderPolicyRevision, BackorderReason,
     BackorderSplitLineTransition, BackorderSplitTransition, MAX_BACKORDER_NOTE_LENGTH,
+};
+pub use cycle_count::{
+    decide_cycle_count_disposition, CycleCountDisposition, CycleCountError,
+    CycleCountPolicyRevision, CycleCountTolerancePolicy, CycleCountVarianceDecision,
+    CycleCountVarianceDecisionDetails, CycleCountVarianceNote, CycleCountVarianceReason,
+    CycleCountVarianceRevision, CycleCountVarianceStatus, MAX_CYCLE_COUNT_PERCENTAGE_BASIS_POINTS,
+    MAX_CYCLE_COUNT_RECOUNTS, MAX_CYCLE_COUNT_VARIANCE_NOTE_LENGTH,
 };
 pub use facility::{
     FacilityRevision, FacilityShippingOrigin, FacilityShippingOriginError,
@@ -216,6 +224,12 @@ positive_id!(OrderLineAmendmentId, "order line amendment ID");
 positive_id!(OrderCancellationId, "order cancellation ID");
 positive_id!(BackorderPolicyId, "backorder policy ID");
 positive_id!(BackorderSplitId, "backorder split ID");
+positive_id!(CycleCountPolicyId, "cycle count policy ID");
+positive_id!(CycleCountVarianceId, "cycle count variance ID");
+positive_id!(
+    CycleCountVarianceDecisionId,
+    "cycle count variance decision ID"
+);
 positive_id!(ItemSubstitutionPolicyId, "item substitution policy ID");
 positive_id!(ItemSubstitutionId, "item substitution ID");
 positive_id!(OrderReleaseId, "order release ID");

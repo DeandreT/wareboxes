@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{CursorPage, InventoryBalanceStatus, OpaqueCursor, PageLimit};
+use super::{CursorPage, InventoryBalanceStatus, OpaqueCursor, PageLimit, Revision};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -268,8 +268,194 @@ pub struct CycleCountConfirmationResponse {
     pub counted_quantity: i64,
     pub variance_quantity: i64,
     pub inventory_transaction_id: Option<i64>,
+    pub disposition: CycleCountDisposition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variance_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variance_revision: Option<Revision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_recount_task_id: Option<i64>,
     pub confirmed_by: i64,
     pub confirmed_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CycleCountDisposition {
+    Posted,
+    RecountRequired,
+    ApprovalRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CycleCountVarianceStatus {
+    AwaitingRecount,
+    AwaitingApproval,
+    Posted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CycleCountVarianceDecision {
+    ApproveAdjustment,
+    RequestRecount,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CycleCountVarianceReason {
+    VerifiedPhysicalCount,
+    PackagingOrUomIssue,
+    ReceivingOrShippingTiming,
+    SuspectedMiscount,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigureCycleCountPolicyRequest {
+    pub inventory_owner_id: i64,
+    pub facility_id: i64,
+    pub absolute_tolerance_quantity: i64,
+    pub percentage_tolerance_basis_points: u32,
+    pub automatic_recount_limit: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<Revision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigureCycleCountPolicyResponse {
+    pub policy_id: i64,
+    pub inventory_owner_id: i64,
+    pub facility_id: i64,
+    pub absolute_tolerance_quantity: i64,
+    pub percentage_tolerance_basis_points: u32,
+    pub automatic_recount_limit: u16,
+    pub previous_revision: Option<Revision>,
+    pub revision: Revision,
+    pub configured_by: i64,
+    pub configured_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CycleCountPolicyPageRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facility_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_owner_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<OpaqueCursor>,
+    #[serde(default)]
+    pub limit: PageLimit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CycleCountPolicyResponse {
+    pub policy_id: i64,
+    pub inventory_owner_id: i64,
+    pub inventory_owner_name: String,
+    pub facility_id: i64,
+    pub facility_name: String,
+    pub absolute_tolerance_quantity: i64,
+    pub percentage_tolerance_basis_points: u32,
+    pub automatic_recount_limit: u16,
+    pub revision: Revision,
+    pub configured_by: i64,
+    pub configured_at: String,
+}
+
+pub type CycleCountPolicyPage = CursorPage<CycleCountPolicyResponse>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CycleCountVariancePageRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facility_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_owner_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<CycleCountVarianceStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<OpaqueCursor>,
+    #[serde(default)]
+    pub limit: PageLimit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CycleCountVarianceStockResponse {
+    pub inventory_balance_id: i64,
+    pub location_id: i64,
+    pub location_barcode: String,
+    pub location_name: Option<String>,
+    pub item_id: i64,
+    pub item_description: Option<String>,
+    pub primary_sku: Option<String>,
+    pub license_plate_barcode: Option<String>,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub serial: Option<String>,
+    pub inventory_status: InventoryBalanceStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CycleCountVarianceResponse {
+    pub variance_id: i64,
+    pub revision: Revision,
+    pub status: CycleCountVarianceStatus,
+    pub inventory_owner_id: i64,
+    pub inventory_owner_name: String,
+    pub facility_id: i64,
+    pub facility_name: String,
+    pub stock: CycleCountVarianceStockResponse,
+    pub policy_id: i64,
+    pub policy_revision: Revision,
+    pub absolute_tolerance_quantity: i64,
+    pub percentage_tolerance_basis_points: u32,
+    pub automatic_recount_limit: u16,
+    pub latest_task_id: i64,
+    pub latest_attempt_sequence: u16,
+    pub automatic_recounts_used: u16,
+    pub system_quantity: i64,
+    pub counted_quantity: i64,
+    pub variance_quantity: i64,
+    pub allowed_variance_quantity: i64,
+    pub inventory_transaction_id: Option<i64>,
+    pub created_at: String,
+    pub modified_at: String,
+}
+
+pub type CycleCountVariancePage = CursorPage<CycleCountVarianceResponse>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecideCycleCountVarianceRequest {
+    pub expected_revision: Revision,
+    pub decision: CycleCountVarianceDecision,
+    pub reason: CycleCountVarianceReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecideCycleCountVarianceResponse {
+    pub decision_id: i64,
+    pub variance_id: i64,
+    pub previous_status: CycleCountVarianceStatus,
+    pub status: CycleCountVarianceStatus,
+    pub previous_revision: Revision,
+    pub revision: Revision,
+    pub disposition: CycleCountDisposition,
+    pub next_task_id: Option<i64>,
+    pub inventory_transaction_id: Option<i64>,
+    pub decided_by: i64,
+    pub decided_at: String,
 }
 
 #[cfg(test)]
@@ -349,5 +535,27 @@ mod tests {
             r#"{"inventory_balance_id":41,"location_id":9}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn policy_and_variance_decision_contracts_are_strict() {
+        let policy = serde_json::from_str::<ConfigureCycleCountPolicyRequest>(
+            r#"{"inventory_owner_id":1,"facility_id":2,"absolute_tolerance_quantity":1,"percentage_tolerance_basis_points":250,"automatic_recount_limit":1}"#,
+        )
+        .unwrap();
+        assert_eq!(policy.percentage_tolerance_basis_points, 250);
+        assert!(serde_json::from_str::<ConfigureCycleCountPolicyRequest>(
+            r#"{"inventory_owner_id":1,"facility_id":2,"absolute_tolerance_quantity":1,"percentage_tolerance_basis_points":250,"automatic_recount_limit":1,"unknown":true}"#,
+        )
+        .is_err());
+
+        let decision = serde_json::from_str::<DecideCycleCountVarianceRequest>(
+            r#"{"expected_revision":1,"decision":"request_recount","reason":"suspected_miscount"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            decision.decision,
+            CycleCountVarianceDecision::RequestRecount
+        );
     }
 }

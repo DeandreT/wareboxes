@@ -2,8 +2,9 @@ use leptos::prelude::*;
 use lucide_leptos::{ClipboardList, Eye, RefreshCw, RotateCcw};
 use wareboxes_api_contract::v1::{
     CreateCycleCountTaskRequest, CycleCountCandidatePage, CycleCountCandidateResponse,
-    CycleCountCandidateSort, CycleCountSortDirection, CycleCountWorkPage, CycleCountWorkResponse,
-    CycleCountWorkSort, CycleCountWorkStatus, InventoryBalanceStatus, OpaqueCursor,
+    CycleCountCandidateSort, CycleCountPolicyPage, CycleCountSortDirection, CycleCountVariancePage,
+    CycleCountWorkPage, CycleCountWorkResponse, CycleCountWorkSort, CycleCountWorkStatus,
+    InventoryBalanceStatus, OpaqueCursor,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 
@@ -13,10 +14,15 @@ use crate::toast::{use_toast_bus, ToastBus};
 use crate::view_model::format_quantity;
 use crate::workspace_layout::{PaneControls, SplitPaneHandle, SplitPaneState};
 
+mod control;
+use control::{CycleCountPolicyControl, CycleCountVarianceControl};
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
     Candidates,
     Work,
+    Variances,
+    Policies,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,9 +65,12 @@ struct Signals {
 pub(crate) fn CycleCountWorkspace(
     initial_candidates: CycleCountCandidatePage,
     initial_work: CycleCountWorkPage,
+    initial_policies: CycleCountPolicyPage,
+    initial_variances: CycleCountVariancePage,
     access: AccessScopeWorkspace,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
+    let control_access = access.clone();
     let facilities = StoredValue::new(access.facilities);
     let owners = StoredValue::new(access.inventory_owners);
     let layout = SplitPaneState::new("cycle-count", 720);
@@ -143,18 +152,24 @@ pub(crate) fn CycleCountWorkspace(
             <header class="cycle-count-header">
                 <div class="cycle-count-heading"><ClipboardList size=16/><div><h1>"Cycle count control"</h1><span>"Blind RF counts and immutable variance results"</span></div></div>
                 <div class="cycle-count-header-actions">
-                    <PaneControls layout master_label="count queue" detail_label="count detail"/>
-                    <button type="button" class="icon-button" title="Reset filters" aria-label="Reset cycle-count filters" on:click=move |_| reset_filters.run(())><RotateCcw size=14/></button>
-                    <button type="button" class="icon-button" title="Refresh" aria-label="Refresh cycle counts" disabled=move || signals.loading.get() on:click=move |_| refresh.run(())><RefreshCw size=14/></button>
+                    <Show when=move || matches!(signals.mode.get(), ViewMode::Candidates | ViewMode::Work)>
+                        <PaneControls layout master_label="count queue" detail_label="count detail"/>
+                        <button type="button" class="icon-button" title="Reset filters" aria-label="Reset cycle-count filters" on:click=move |_| reset_filters.run(())><RotateCcw size=14/></button>
+                        <button type="button" class="icon-button" title="Refresh" aria-label="Refresh cycle counts" disabled=move || signals.loading.get() on:click=move |_| refresh.run(())><RefreshCw size=14/></button>
+                    </Show>
                 </div>
             </header>
             <div class="cycle-count-toolbar">
                 <div class="segmented-control" role="tablist" aria-label="Cycle count views">
                     <button type="button" role="tab" aria-selected=move || (signals.mode.get()==ViewMode::Candidates).to_string() class:active=move || signals.mode.get()==ViewMode::Candidates on:click=move |_| { signals.mode.set(ViewMode::Candidates); signals.selected_work.set(None); }><ClipboardList size=13/>"To count"</button>
                     <button type="button" role="tab" aria-selected=move || (signals.mode.get()==ViewMode::Work).to_string() class:active=move || signals.mode.get()==ViewMode::Work on:click=move |_| { signals.mode.set(ViewMode::Work); signals.selected_candidate.set(None); }><ClipboardList size=13/>"Work"</button>
+                    <button type="button" role="tab" aria-selected=move || (signals.mode.get()==ViewMode::Variances).to_string() class:active=move || signals.mode.get()==ViewMode::Variances on:click=move |_| { signals.mode.set(ViewMode::Variances); signals.selected_candidate.set(None); signals.selected_work.set(None); }><ClipboardList size=13/>"Variance review"</button>
+                    <button type="button" role="tab" aria-selected=move || (signals.mode.get()==ViewMode::Policies).to_string() class:active=move || signals.mode.get()==ViewMode::Policies on:click=move |_| { signals.mode.set(ViewMode::Policies); signals.selected_candidate.set(None); signals.selected_work.set(None); }><ClipboardList size=13/>"Policies"</button>
                 </div>
-                <label><span>"Facility"</span><select prop:value=move || option_value(signals.facility_id.get()) on:change=move |event| { signals.facility_id.set(parse_optional_id(&event_target_value(&event))); reset_and_load(signals); }><option value="">"All facilities"</option>{facility_options}</select></label>
-                <label><span>"Client"</span><select prop:value=move || option_value(signals.inventory_owner_id.get()) on:change=move |event| { signals.inventory_owner_id.set(parse_optional_id(&event_target_value(&event))); reset_and_load(signals); }><option value="">"All clients"</option>{owner_options}</select></label>
+                <Show when=move || matches!(signals.mode.get(), ViewMode::Candidates | ViewMode::Work)>
+                    <label><span>"Facility"</span><select prop:value=move || option_value(signals.facility_id.get()) on:change=move |event| { signals.facility_id.set(parse_optional_id(&event_target_value(&event))); reset_and_load(signals); }><option value="">"All facilities"</option>{facility_options}</select></label>
+                    <label><span>"Client"</span><select prop:value=move || option_value(signals.inventory_owner_id.get()) on:change=move |event| { signals.inventory_owner_id.set(parse_optional_id(&event_target_value(&event))); reset_and_load(signals); }><option value="">"All clients"</option>{owner_options}</select></label>
+                </Show>
                 <Show when=move || signals.mode.get()==ViewMode::Candidates>
                     <label><span>"Inventory status"</span><select prop:value=move || inventory_status_value(signals.inventory_status.get()) on:change=move |event| { signals.inventory_status.set(parse_inventory_status(&event_target_value(&event))); reset_candidates(signals); }><option value="">"All statuses"</option><option value="available">"Available"</option><option value="hold">"Hold"</option><option value="damaged">"Damaged"</option><option value="quarantine">"Quarantine"</option></select></label>
                 </Show>
@@ -162,25 +177,31 @@ pub(crate) fn CycleCountWorkspace(
                     <label><span>"Work status"</span><select prop:value=move || work_status_value(signals.work_status.get()) on:change=move |event| { signals.work_status.set(parse_work_status(&event_target_value(&event))); reset_work(signals); }><option value="">"Open work"</option><option value="pending">"Pending"</option><option value="claimed">"Claimed"</option><option value="completed">"Completed"</option><option value="cancelled">"Cancelled"</option></select></label>
                 </Show>
             </div>
-            <div class="cycle-count-body split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
-                <section class="cycle-count-master split-master">
-                    <Show when=move || signals.mode.get()==ViewMode::Candidates fallback=move || view! { <WorkTable signals select=select_work/> }>
-                        <CandidateTable signals select=select_candidate/>
-                    </Show>
-                </section>
-                <SplitPaneHandle layout/>
-                <aside class="cycle-count-detail split-detail">
-                    {move || {
-                        if let Some(candidate)=signals.selected_candidate.get() {
-                            view! { <PlanningPanel candidate signals submit retry/> }.into_any()
-                        } else if let Some(work)=signals.selected_work.get() {
-                            view! { <WorkDetail work/> }.into_any()
-                        } else {
-                            view! { <div class="cycle-count-empty"><ClipboardList size=24/><h2>"Cycle count detail"</h2><p>"Select stock to schedule a blind RF count, or select work to inspect execution and variance."</p></div> }.into_any()
-                        }
-                    }}
-                </aside>
-            </div>
+            {move || match signals.mode.get() {
+                ViewMode::Candidates | ViewMode::Work => view! {
+                    <div class="cycle-count-body split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
+                        <section class="cycle-count-master split-master">
+                            <Show when=move || signals.mode.get()==ViewMode::Candidates fallback=move || view! { <WorkTable signals select=select_work/> }>
+                                <CandidateTable signals select=select_candidate/>
+                            </Show>
+                        </section>
+                        <SplitPaneHandle layout/>
+                        <aside class="cycle-count-detail split-detail">
+                            {move || {
+                                if let Some(candidate)=signals.selected_candidate.get() {
+                                    view! { <PlanningPanel candidate signals submit retry/> }.into_any()
+                                } else if let Some(work)=signals.selected_work.get() {
+                                    view! { <WorkDetail work/> }.into_any()
+                                } else {
+                                    view! { <div class="cycle-count-empty"><ClipboardList size=24/><h2>"Cycle count detail"</h2><p>"Select stock to schedule a blind RF count, or select work to inspect execution and variance."</p></div> }.into_any()
+                                }
+                            }}
+                        </aside>
+                    </div>
+                }.into_any(),
+                ViewMode::Variances => view! { <CycleCountVarianceControl initial_page=initial_variances.clone() access=control_access.clone() on_unauthorized/> }.into_any(),
+                ViewMode::Policies => view! { <CycleCountPolicyControl initial_page=initial_policies.clone() access=control_access.clone() on_unauthorized/> }.into_any(),
+            }}
         </section>
     }
 }
@@ -309,6 +330,7 @@ fn refresh_active(signals: Signals) {
             request_candidates(signals, signals.candidate_cursor.get_untracked())
         }
         ViewMode::Work => request_work(signals, signals.work_cursor.get_untracked()),
+        ViewMode::Variances | ViewMode::Policies => {}
     }
 }
 fn reset_and_load(signals: Signals) {

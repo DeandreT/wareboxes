@@ -448,6 +448,18 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "cycle_count_item_location_results_tenant_isolation",
         ),
         (
+            "cycle_count_policies",
+            "cycle_count_policies_tenant_isolation",
+        ),
+        (
+            "cycle_count_variance_cases",
+            "cycle_count_variance_cases_tenant_isolation",
+        ),
+        (
+            "cycle_count_variance_decisions",
+            "cycle_count_variance_decisions_tenant_isolation",
+        ),
+        (
             "cycle_count_location_tasks",
             "cycle_count_location_tasks_tenant_isolation",
         ),

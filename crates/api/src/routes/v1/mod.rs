@@ -63,6 +63,15 @@ pub fn router() -> Router<AppState> {
         )
         .route("/cycle-count-candidates", get(cycle_count::candidates))
         .route(
+            "/cycle-count-policies",
+            get(cycle_count::policies).post(cycle_count::configure_policy),
+        )
+        .route("/cycle-count-variances", get(cycle_count::variances))
+        .route(
+            "/cycle-count-variances/{variance_id}/decisions",
+            post(cycle_count::decide_variance),
+        )
+        .route(
             "/cycle-count-tasks",
             get(cycle_count::list).post(cycle_count::create),
         )

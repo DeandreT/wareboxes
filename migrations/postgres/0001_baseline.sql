@@ -32051,6 +32051,457 @@ REVOKE ALL ON FUNCTION public.validate_inbound_inspection_disposition() FROM PUB
 REVOKE ALL ON FUNCTION public.reject_inbound_inspection_disposition_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_inbound_receipt_hold_disposition() FROM PUBLIC;
 
+-- Typed cycle-count tolerance, recount, and variance approval control.
+CREATE TABLE public.cycle_count_policies (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    absolute_tolerance_qty bigint NOT NULL CHECK (absolute_tolerance_qty >= 0),
+    percentage_tolerance_bps integer NOT NULL
+        CHECK (percentage_tolerance_bps BETWEEN 0 AND 10000),
+    automatic_recount_limit smallint NOT NULL
+        CHECK (automatic_recount_limit BETWEEN 0 AND 10),
+    revision bigint NOT NULL CHECK (revision > 0),
+    supersedes_policy_id bigint,
+    effective_from timestamptz NOT NULL,
+    effective_to timestamptz,
+    configured_by_user_id bigint NOT NULL,
+    CONSTRAINT cycle_count_policies_effective_window_check
+        CHECK (effective_to IS NULL OR effective_to >= effective_from),
+    CONSTRAINT cycle_count_policies_scope_id_key
+        UNIQUE (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT cycle_count_policies_scope_revision_key
+        UNIQUE (tenant_id, inventory_owner_id, facility_id, revision),
+    CONSTRAINT cycle_count_policies_tenant_owner_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners (tenant_id, id),
+    CONSTRAINT cycle_count_policies_tenant_facility_fkey
+        FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities (tenant_id, id),
+    CONSTRAINT cycle_count_policies_owner_facility_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id)
+        REFERENCES public.inventory_owner_facilities
+            (tenant_id, inventory_owner_id, facility_id),
+    CONSTRAINT cycle_count_policies_configured_by_fkey
+        FOREIGN KEY (tenant_id, configured_by_user_id)
+        REFERENCES public.tenant_memberships (tenant_id, user_id),
+    CONSTRAINT cycle_count_policies_supersedes_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, supersedes_policy_id)
+        REFERENCES public.cycle_count_policies
+            (tenant_id, inventory_owner_id, facility_id, id)
+);
+
+CREATE UNIQUE INDEX cycle_count_policies_active_key
+ON public.cycle_count_policies (tenant_id, inventory_owner_id, facility_id)
+WHERE effective_to IS NULL;
+
+CREATE TABLE public.cycle_count_variance_cases (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    inventory_balance_id bigint NOT NULL,
+    location_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    license_plate_id bigint,
+    uom text NOT NULL CHECK (btrim(uom) <> ''),
+    lot text,
+    expiration timestamptz,
+    serial text,
+    inventory_status text NOT NULL
+        CHECK (inventory_status IN ('available','hold','damaged','quarantine')),
+    policy_id bigint NOT NULL,
+    policy_revision bigint NOT NULL CHECK (policy_revision > 0),
+    absolute_tolerance_qty bigint NOT NULL CHECK (absolute_tolerance_qty >= 0),
+    percentage_tolerance_bps integer NOT NULL
+        CHECK (percentage_tolerance_bps BETWEEN 0 AND 10000),
+    automatic_recount_limit smallint NOT NULL
+        CHECK (automatic_recount_limit BETWEEN 0 AND 10),
+    latest_task_id bigint NOT NULL,
+    latest_attempt_sequence smallint NOT NULL CHECK (latest_attempt_sequence > 0),
+    automatic_recounts_used smallint NOT NULL
+        CHECK (automatic_recounts_used BETWEEN 0 AND 10),
+    system_qty_on_hand bigint NOT NULL CHECK (system_qty_on_hand >= 0),
+    system_qty_reserved bigint NOT NULL CHECK (system_qty_reserved >= 0),
+    system_qty_held bigint NOT NULL CHECK (system_qty_held >= 0),
+    counted_qty bigint NOT NULL CHECK (counted_qty >= 0),
+    variance_qty bigint NOT NULL,
+    allowed_variance_qty bigint NOT NULL CHECK (allowed_variance_qty >= 0),
+    state text NOT NULL CHECK (state IN ('awaiting_recount','awaiting_approval','posted')),
+    revision bigint NOT NULL CHECK (revision > 0),
+    inventory_transaction_id bigint,
+    created_at timestamptz NOT NULL,
+    modified_at timestamptz NOT NULL,
+    resolved_by_user_id bigint,
+    resolved_at timestamptz,
+    CONSTRAINT cycle_count_variance_cases_quantity_check
+        CHECK (variance_qty = counted_qty - system_qty_on_hand),
+    CONSTRAINT cycle_count_variance_cases_commitment_check
+        CHECK (counted_qty >= system_qty_reserved + system_qty_held),
+    CONSTRAINT cycle_count_variance_cases_resolution_check CHECK (
+        (state = 'posted' AND ((variance_qty = 0) = (inventory_transaction_id IS NULL))
+            AND resolved_by_user_id IS NOT NULL AND resolved_at IS NOT NULL)
+        OR
+        (state <> 'posted' AND inventory_transaction_id IS NULL
+            AND resolved_by_user_id IS NULL AND resolved_at IS NULL)
+    ),
+    CONSTRAINT cycle_count_variance_cases_scope_id_key
+        UNIQUE (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT cycle_count_variance_cases_scope_revision_key
+        UNIQUE (tenant_id, inventory_owner_id, facility_id, id, revision),
+    CONSTRAINT cycle_count_variance_cases_balance_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, inventory_balance_id)
+        REFERENCES public.inventory_balances
+            (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT cycle_count_variance_cases_policy_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, policy_id)
+        REFERENCES public.cycle_count_policies
+            (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT cycle_count_variance_cases_task_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, latest_task_id)
+        REFERENCES public.work_tasks
+            (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT cycle_count_variance_cases_resolved_by_fkey
+        FOREIGN KEY (tenant_id, resolved_by_user_id)
+        REFERENCES public.tenant_memberships (tenant_id, user_id)
+);
+
+CREATE UNIQUE INDEX cycle_count_variance_cases_active_balance_key
+ON public.cycle_count_variance_cases
+    (tenant_id, inventory_owner_id, facility_id, inventory_balance_id)
+WHERE state <> 'posted';
+
+CREATE INDEX cycle_count_variance_cases_queue_idx
+ON public.cycle_count_variance_cases
+    (tenant_id, state, facility_id, inventory_owner_id, modified_at, id);
+
+CREATE TABLE public.cycle_count_variance_decisions (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    variance_case_id bigint NOT NULL,
+    expected_revision bigint NOT NULL CHECK (expected_revision > 0),
+    resulting_revision bigint NOT NULL CHECK (resulting_revision = expected_revision + 1),
+    decision text NOT NULL CHECK (decision IN ('approve_adjustment','request_recount')),
+    reason_code text NOT NULL CHECK (reason_code IN (
+        'verified_physical_count','packaging_or_uom_issue',
+        'receiving_or_shipping_timing','suspected_miscount','other'
+    )),
+    note text,
+    next_task_id bigint,
+    inventory_transaction_id bigint,
+    decided_by_user_id bigint NOT NULL,
+    decided_at timestamptz NOT NULL,
+    CONSTRAINT cycle_count_variance_decisions_note_check CHECK (
+        note IS NULL OR (note = btrim(note) AND char_length(note) BETWEEN 1 AND 500)
+    ),
+    CONSTRAINT cycle_count_variance_decisions_other_note_check
+        CHECK (reason_code <> 'other' OR note IS NOT NULL),
+    CONSTRAINT cycle_count_variance_decisions_effect_check CHECK (
+        (decision = 'approve_adjustment' AND inventory_transaction_id IS NOT NULL
+            AND next_task_id IS NULL)
+        OR
+        (decision = 'request_recount' AND inventory_transaction_id IS NULL
+            AND next_task_id IS NOT NULL)
+    ),
+    CONSTRAINT cycle_count_variance_decisions_scope_id_key
+        UNIQUE (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT cycle_count_variance_decisions_revision_key
+        UNIQUE (tenant_id, inventory_owner_id, variance_case_id, expected_revision),
+    CONSTRAINT cycle_count_variance_decisions_case_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, variance_case_id)
+        REFERENCES public.cycle_count_variance_cases
+            (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT cycle_count_variance_decisions_next_task_fkey
+        FOREIGN KEY (tenant_id, next_task_id)
+        REFERENCES public.work_tasks (tenant_id, id),
+    CONSTRAINT cycle_count_variance_decisions_transaction_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, inventory_transaction_id)
+        REFERENCES public.inventory_transactions (tenant_id, inventory_owner_id, id),
+    CONSTRAINT cycle_count_variance_decisions_actor_fkey
+        FOREIGN KEY (tenant_id, decided_by_user_id)
+        REFERENCES public.tenant_memberships (tenant_id, user_id)
+);
+
+ALTER TABLE public.cycle_count_item_location_tasks
+    ADD COLUMN variance_case_id bigint,
+    ADD COLUMN attempt_sequence smallint NOT NULL DEFAULT 1
+        CHECK (attempt_sequence > 0),
+    ADD CONSTRAINT cycle_count_item_location_tasks_variance_case_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, variance_case_id)
+        REFERENCES public.cycle_count_variance_cases
+            (tenant_id, inventory_owner_id, facility_id, id);
+
+ALTER TABLE public.cycle_count_item_location_results
+    DROP CONSTRAINT cycle_count_item_location_results_check3,
+    ADD COLUMN disposition text NOT NULL DEFAULT 'posted'
+        CHECK (disposition IN ('posted','recount_required','approval_required')),
+    ADD COLUMN variance_case_id bigint,
+    ADD COLUMN attempt_sequence smallint NOT NULL DEFAULT 1
+        CHECK (attempt_sequence > 0),
+    ADD COLUMN policy_id bigint,
+    ADD COLUMN policy_revision bigint,
+    ADD COLUMN absolute_tolerance_qty bigint,
+    ADD COLUMN percentage_tolerance_bps integer,
+    ADD COLUMN automatic_recount_limit smallint,
+    ADD COLUMN allowed_variance_qty bigint,
+    ADD CONSTRAINT cycle_count_item_location_results_posting_check CHECK (
+        (disposition = 'posted' AND ((variance_qty = 0) = (inventory_transaction_id IS NULL)))
+        OR (disposition <> 'posted' AND inventory_transaction_id IS NULL)
+    ),
+    ADD CONSTRAINT cycle_count_item_location_results_policy_snapshot_check CHECK (
+        (policy_id IS NULL AND policy_revision IS NULL
+            AND absolute_tolerance_qty IS NULL
+            AND percentage_tolerance_bps IS NULL
+            AND automatic_recount_limit IS NULL
+            AND allowed_variance_qty IS NULL)
+        OR
+        (policy_id IS NOT NULL AND policy_revision > 0
+            AND absolute_tolerance_qty >= 0
+            AND percentage_tolerance_bps BETWEEN 0 AND 10000
+            AND automatic_recount_limit BETWEEN 0 AND 10
+            AND allowed_variance_qty >= 0)
+    ),
+    ADD CONSTRAINT cycle_count_item_location_results_case_required_check CHECK (
+        disposition = 'posted' OR variance_case_id IS NOT NULL
+    ),
+    ADD CONSTRAINT cycle_count_item_location_results_variance_case_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, variance_case_id)
+        REFERENCES public.cycle_count_variance_cases
+            (tenant_id, inventory_owner_id, facility_id, id),
+    ADD CONSTRAINT cycle_count_item_location_results_policy_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, policy_id)
+        REFERENCES public.cycle_count_policies
+            (tenant_id, inventory_owner_id, facility_id, id);
+
+CREATE FUNCTION public.guard_cycle_count_policy_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'cycle count policy versions cannot be deleted' USING ERRCODE = '55000';
+    END IF;
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.absolute_tolerance_qty IS DISTINCT FROM OLD.absolute_tolerance_qty
+       OR NEW.percentage_tolerance_bps IS DISTINCT FROM OLD.percentage_tolerance_bps
+       OR NEW.automatic_recount_limit IS DISTINCT FROM OLD.automatic_recount_limit
+       OR NEW.revision IS DISTINCT FROM OLD.revision
+       OR NEW.supersedes_policy_id IS DISTINCT FROM OLD.supersedes_policy_id
+       OR NEW.effective_from IS DISTINCT FROM OLD.effective_from
+       OR NEW.configured_by_user_id IS DISTINCT FROM OLD.configured_by_user_id
+       OR OLD.effective_to IS NOT NULL
+       OR NEW.effective_to IS NULL
+    THEN
+        RAISE EXCEPTION 'cycle count policy facts are immutable' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_cycle_count_variance_case_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'cycle count variance cases cannot be deleted' USING ERRCODE = '55000';
+    END IF;
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.inventory_balance_id IS DISTINCT FROM OLD.inventory_balance_id
+       OR NEW.location_id IS DISTINCT FROM OLD.location_id
+       OR NEW.item_id IS DISTINCT FROM OLD.item_id
+       OR NEW.item_batch_id IS DISTINCT FROM OLD.item_batch_id
+       OR NEW.license_plate_id IS DISTINCT FROM OLD.license_plate_id
+       OR NEW.uom IS DISTINCT FROM OLD.uom
+       OR NEW.lot IS DISTINCT FROM OLD.lot
+       OR NEW.expiration IS DISTINCT FROM OLD.expiration
+       OR NEW.serial IS DISTINCT FROM OLD.serial
+       OR NEW.inventory_status IS DISTINCT FROM OLD.inventory_status
+       OR NEW.policy_id IS DISTINCT FROM OLD.policy_id
+       OR NEW.policy_revision IS DISTINCT FROM OLD.policy_revision
+       OR NEW.absolute_tolerance_qty IS DISTINCT FROM OLD.absolute_tolerance_qty
+       OR NEW.percentage_tolerance_bps IS DISTINCT FROM OLD.percentage_tolerance_bps
+       OR NEW.automatic_recount_limit IS DISTINCT FROM OLD.automatic_recount_limit
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+       OR NEW.revision <> OLD.revision + 1
+       OR NEW.modified_at < OLD.modified_at
+       OR OLD.state = 'posted'
+    THEN
+        RAISE EXCEPTION 'cycle count variance case mutation is invalid' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.reject_cycle_count_variance_decision_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION 'cycle count variance decisions are immutable' USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.validate_item_location_cycle_count_result() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    task_row RECORD;
+    balance_row RECORD;
+    transaction_matches BOOLEAN;
+    matching_entry_count BIGINT;
+    transaction_entry_count BIGINT;
+BEGIN
+    SELECT task.status, task.assigned_user_id, task.deleted, task.lease_expires_at,
+           detail.inventory_owner_id, detail.facility_id, detail.location_id,
+           detail.item_id, detail.inventory_balance_id, detail.variance_case_id,
+           detail.attempt_sequence
+    INTO task_row
+    FROM public.work_tasks task
+    JOIN public.cycle_count_item_location_tasks detail
+      ON detail.tenant_id = task.tenant_id AND detail.task_id = task.id
+    WHERE task.tenant_id = NEW.tenant_id AND task.id = NEW.task_id
+      AND task.task_type = 'cycle_count_item_location'
+    FOR UPDATE OF task, detail;
+
+    IF NOT FOUND OR task_row.deleted IS NOT NULL OR task_row.status <> 'in_progress'
+       OR task_row.assigned_user_id IS DISTINCT FROM NEW.confirmed_by
+       OR task_row.lease_expires_at IS NULL
+       OR task_row.lease_expires_at <= statement_timestamp()
+       OR task_row.inventory_owner_id IS DISTINCT FROM NEW.inventory_owner_id
+       OR task_row.facility_id IS DISTINCT FROM NEW.facility_id
+       OR task_row.location_id IS DISTINCT FROM NEW.location_id
+       OR task_row.item_id IS DISTINCT FROM NEW.item_id
+       OR task_row.inventory_balance_id IS DISTINCT FROM NEW.inventory_balance_id
+       OR task_row.variance_case_id IS DISTINCT FROM NEW.variance_case_id
+       OR task_row.attempt_sequence IS DISTINCT FROM NEW.attempt_sequence
+    THEN
+        RAISE EXCEPTION 'cycle count result does not match an active task claim'
+            USING ERRCODE = '55000';
+    END IF;
+
+    SELECT balance.item_batch_id, balance.license_plate_id, balance.uom,
+           batch.lot, batch.expiration, batch.serial, balance.status,
+           balance.qty_on_hand, balance.qty_reserved, balance.qty_held, balance.deleted
+    INTO balance_row
+    FROM public.inventory_balances balance
+    JOIN public.item_batches batch
+      ON batch.tenant_id = balance.tenant_id
+     AND batch.inventory_owner_id = balance.inventory_owner_id
+     AND batch.id = balance.item_batch_id
+    WHERE balance.tenant_id = NEW.tenant_id
+      AND balance.inventory_owner_id = NEW.inventory_owner_id
+      AND balance.facility_id = NEW.facility_id
+      AND balance.location_id = NEW.location_id
+      AND balance.item_id = NEW.item_id
+      AND balance.id = NEW.inventory_balance_id
+    FOR UPDATE;
+
+    IF NOT FOUND OR balance_row.deleted IS NOT NULL
+       OR balance_row.item_batch_id IS DISTINCT FROM NEW.item_batch_id
+       OR balance_row.license_plate_id IS DISTINCT FROM NEW.license_plate_id
+       OR balance_row.uom IS DISTINCT FROM NEW.uom
+       OR balance_row.lot IS DISTINCT FROM NEW.lot
+       OR balance_row.expiration IS DISTINCT FROM NEW.expiration
+       OR balance_row.serial IS DISTINCT FROM NEW.serial
+       OR balance_row.status IS DISTINCT FROM NEW.status
+       OR balance_row.qty_reserved IS DISTINCT FROM NEW.system_qty_reserved
+       OR balance_row.qty_held IS DISTINCT FROM NEW.system_qty_held
+       OR (NEW.disposition = 'posted' AND balance_row.qty_on_hand IS DISTINCT FROM NEW.counted_qty)
+       OR (NEW.disposition <> 'posted' AND balance_row.qty_on_hand IS DISTINCT FROM NEW.system_qty_on_hand)
+    THEN
+        RAISE EXCEPTION 'cycle count result does not match the current balance'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.disposition = 'posted' AND NEW.variance_qty <> 0 THEN
+        SELECT EXISTS (
+            SELECT 1 FROM public.inventory_transactions transaction
+            WHERE transaction.tenant_id = NEW.tenant_id
+              AND transaction.inventory_owner_id = NEW.inventory_owner_id
+              AND transaction.id = NEW.inventory_transaction_id
+              AND transaction.transaction_type = 'adjust'
+              AND transaction.actor_user_id = NEW.confirmed_by
+              AND transaction.reference_type = 'cycle_count_item_location_task'
+              AND transaction.reference_id = NEW.task_id
+              AND transaction.operation = 'task.confirm_item_location_cycle_count.v1'
+        ) INTO transaction_matches;
+
+        SELECT COUNT(*), COUNT(*) FILTER (
+            WHERE entry.facility_id = NEW.facility_id
+              AND entry.location_id = NEW.location_id
+              AND entry.item_batch_id = NEW.item_batch_id
+              AND entry.item_id = NEW.item_id
+              AND entry.license_plate_id IS NOT DISTINCT FROM NEW.license_plate_id
+              AND entry.uom = NEW.uom AND entry.status = NEW.status
+              AND entry.quantity_delta = NEW.variance_qty
+        )
+        INTO transaction_entry_count, matching_entry_count
+        FROM public.inventory_entries entry
+        WHERE entry.tenant_id = NEW.tenant_id
+          AND entry.inventory_owner_id = NEW.inventory_owner_id
+          AND entry.transaction_id = NEW.inventory_transaction_id;
+
+        IF NOT transaction_matches OR transaction_entry_count <> 1 OR matching_entry_count <> 1 THEN
+            RAISE EXCEPTION 'cycle count adjustment does not match its result'
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER cycle_count_policies_guard_mutation
+BEFORE UPDATE OR DELETE ON public.cycle_count_policies
+FOR EACH ROW EXECUTE FUNCTION public.guard_cycle_count_policy_mutation();
+CREATE TRIGGER cycle_count_variance_cases_guard_mutation
+BEFORE UPDATE OR DELETE ON public.cycle_count_variance_cases
+FOR EACH ROW EXECUTE FUNCTION public.guard_cycle_count_variance_case_mutation();
+CREATE TRIGGER cycle_count_variance_decisions_are_immutable
+BEFORE UPDATE OR DELETE ON public.cycle_count_variance_decisions
+FOR EACH ROW EXECUTE FUNCTION public.reject_cycle_count_variance_decision_mutation();
+
+ALTER TABLE public.cycle_count_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.cycle_count_policies FORCE ROW LEVEL SECURITY;
+CREATE POLICY cycle_count_policies_tenant_isolation ON public.cycle_count_policies
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+ALTER TABLE public.cycle_count_variance_cases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.cycle_count_variance_cases FORCE ROW LEVEL SECURITY;
+CREATE POLICY cycle_count_variance_cases_tenant_isolation ON public.cycle_count_variance_cases
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+ALTER TABLE public.cycle_count_variance_decisions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.cycle_count_variance_decisions FORCE ROW LEVEL SECURITY;
+CREATE POLICY cycle_count_variance_decisions_tenant_isolation ON public.cycle_count_variance_decisions
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT,INSERT ON public.cycle_count_policies TO wareboxes_app;
+GRANT UPDATE (effective_to) ON public.cycle_count_policies TO wareboxes_app;
+GRANT SELECT,INSERT ON public.cycle_count_variance_cases TO wareboxes_app;
+GRANT UPDATE (
+    latest_task_id, latest_attempt_sequence, automatic_recounts_used,
+    system_qty_on_hand, system_qty_reserved, system_qty_held, counted_qty,
+    variance_qty, allowed_variance_qty, state, revision, inventory_transaction_id,
+    modified_at, resolved_by_user_id, resolved_at
+) ON public.cycle_count_variance_cases TO wareboxes_app;
+GRANT SELECT,INSERT ON public.cycle_count_variance_decisions TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.cycle_count_policies_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.cycle_count_variance_cases_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.cycle_count_variance_decisions_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.guard_cycle_count_policy_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_cycle_count_variance_case_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_cycle_count_variance_decision_mutation() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

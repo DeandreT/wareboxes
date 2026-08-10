@@ -4,10 +4,10 @@ use leptos_router::{
     StaticSegment,
 };
 use wareboxes_api_contract::v1::{
-    CycleCountCandidatePage, CycleCountWorkPage, InventoryBalanceResponse, InventoryHoldResponse,
-    InventoryHoldStatus, OpaqueCursor, OutboundLoadQueuePage, PackingQueuePage, PickWavePage,
-    PutawayCandidatePage, PutawayWorkPage, ReplenishmentPolicyPage, ReplenishmentQueuePage,
-    ShippingQueuePage,
+    CycleCountCandidatePage, CycleCountPolicyPage, CycleCountVariancePage, CycleCountWorkPage,
+    InventoryBalanceResponse, InventoryHoldResponse, InventoryHoldStatus, OpaqueCursor,
+    OutboundLoadQueuePage, PackingQueuePage, PickWavePage, PutawayCandidatePage, PutawayWorkPage,
+    ReplenishmentPolicyPage, ReplenishmentQueuePage, ShippingQueuePage,
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 use wareboxes_core::dto::{OrderPage, WebSessionContext};
@@ -72,6 +72,8 @@ pub struct WorkspaceBootstrapData {
     pub putaway_work: Option<PutawayWorkPage>,
     pub cycle_count_candidates: Option<CycleCountCandidatePage>,
     pub cycle_count_work: Option<CycleCountWorkPage>,
+    pub cycle_count_policies: Option<CycleCountPolicyPage>,
+    pub cycle_count_variances: Option<CycleCountVariancePage>,
     pub replenishment_policies: Option<ReplenishmentPolicyPage>,
     pub replenishment_queue: Option<ReplenishmentQueuePage>,
     pub balances: Vec<InventoryBalanceResponse>,
@@ -110,6 +112,8 @@ struct WorkspaceData {
     putaway_work: Option<PutawayWorkPage>,
     cycle_count_candidates: Option<CycleCountCandidatePage>,
     cycle_count_work: Option<CycleCountWorkPage>,
+    cycle_count_policies: Option<CycleCountPolicyPage>,
+    cycle_count_variances: Option<CycleCountVariancePage>,
     replenishment_policies: Option<ReplenishmentPolicyPage>,
     replenishment_queue: Option<ReplenishmentQueuePage>,
     balances: Vec<InventoryBalanceResponse>,
@@ -134,6 +138,8 @@ impl From<WorkspaceBootstrapData> for WorkspaceData {
             putaway_work: bootstrap.putaway_work,
             cycle_count_candidates: bootstrap.cycle_count_candidates,
             cycle_count_work: bootstrap.cycle_count_work,
+            cycle_count_policies: bootstrap.cycle_count_policies,
+            cycle_count_variances: bootstrap.cycle_count_variances,
             replenishment_policies: bootstrap.replenishment_policies,
             replenishment_queue: bootstrap.replenishment_queue,
             balances: bootstrap.balances,
@@ -665,6 +671,9 @@ async fn load_workspace(
                 )
                 .await?,
             );
+            data.cycle_count_policies = Some(api::cycle_count_policies(None, None, None).await?);
+            data.cycle_count_variances =
+                Some(api::cycle_count_variances(None, None, None, None).await?);
             data.access = api::access().await?;
         }
         Section::Loads if has_permission(session, "wms") => {
@@ -918,6 +927,10 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                         .unwrap_or_else(|| CycleCountCandidatePage::new(Vec::new(), None))
                     initial_work=data.cycle_count_work
                         .unwrap_or_else(|| CycleCountWorkPage::new(Vec::new(), None))
+                    initial_policies=data.cycle_count_policies
+                        .unwrap_or_else(|| CycleCountPolicyPage::new(Vec::new(), None))
+                    initial_variances=data.cycle_count_variances
+                        .unwrap_or_else(|| CycleCountVariancePage::new(Vec::new(), None))
                     access=data.access
                     on_unauthorized=session_expired_callback()
                 />
