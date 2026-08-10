@@ -34531,6 +34531,258 @@ REVOKE ALL ON FUNCTION public.validate_outbox_dead_letter_discard() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_outbox_dead_letter_discard_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_outbox_discard_evidence() FROM PUBLIC;
 
+-- Durable execution state and append-only attempt history for standard inbound
+-- order processing. Raw inbox receipts remain the immutable source envelope.
+CREATE TABLE public.integration_inbox_processings (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    receipt_id bigint NOT NULL,
+    source_key text NOT NULL,
+    deduplication_key text NOT NULL,
+    payload_sha256 bytea NOT NULL,
+    adapter_key text NOT NULL,
+    mapping_version integer NOT NULL,
+    status text NOT NULL,
+    revision bigint NOT NULL,
+    attempt_count integer NOT NULL,
+    order_id bigint,
+    order_revision bigint,
+    error_code text,
+    error_message text,
+    last_attempted_by_user_id bigint NOT NULL,
+    last_attempted_at timestamp with time zone NOT NULL,
+    processed_at timestamp with time zone,
+    CONSTRAINT integration_inbox_processings_receipt_unique UNIQUE (tenant_id,receipt_id),
+    CONSTRAINT integration_inbox_processings_scope_id_unique
+        UNIQUE (tenant_id,inventory_owner_id,id),
+    CONSTRAINT integration_inbox_processings_source_check
+        CHECK (source_key=btrim(source_key) AND source_key<>'' AND char_length(source_key)<=200),
+    CONSTRAINT integration_inbox_processings_deduplication_check
+        CHECK (deduplication_key=btrim(deduplication_key) AND deduplication_key<>''
+            AND char_length(deduplication_key)<=500),
+    CONSTRAINT integration_inbox_processings_payload_hash_check
+        CHECK (octet_length(payload_sha256)=32),
+    CONSTRAINT integration_inbox_processings_adapter_check
+        CHECK (adapter_key=btrim(adapter_key) AND adapter_key<>'' AND char_length(adapter_key)<=200),
+    CONSTRAINT integration_inbox_processings_mapping_version_check CHECK (mapping_version>0),
+    CONSTRAINT integration_inbox_processings_status_check
+        CHECK (status IN ('quarantined','processed')),
+    CONSTRAINT integration_inbox_processings_revision_check CHECK (revision>0),
+    CONSTRAINT integration_inbox_processings_attempt_count_check CHECK (attempt_count>0),
+    CONSTRAINT integration_inbox_processings_error_code_check CHECK (
+        error_code IS NULL OR
+        (error_code=btrim(error_code) AND error_code<>'' AND char_length(error_code)<=100)),
+    CONSTRAINT integration_inbox_processings_error_message_check CHECK (
+        error_message IS NULL OR
+        (error_message=btrim(error_message) AND error_message<>''
+            AND char_length(error_message)<=1000 AND error_message!~'[[:cntrl:]]')),
+    CONSTRAINT integration_inbox_processings_result_shape_check CHECK (
+        (status='processed' AND order_id IS NOT NULL AND order_revision IS NOT NULL
+            AND error_code IS NULL AND error_message IS NULL AND processed_at IS NOT NULL)
+        OR
+        (status='quarantined' AND order_id IS NULL AND order_revision IS NULL
+            AND error_code IS NOT NULL AND error_message IS NOT NULL AND processed_at IS NULL)),
+    CONSTRAINT integration_inbox_processings_receipt_fkey
+        FOREIGN KEY (tenant_id,receipt_id)
+        REFERENCES public.integration_inbox_receipts(tenant_id,id),
+    CONSTRAINT integration_inbox_processings_owner_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id,id),
+    CONSTRAINT integration_inbox_processings_order_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,order_id)
+        REFERENCES public.orders(tenant_id,inventory_owner_id,id),
+    CONSTRAINT integration_inbox_processings_actor_fkey
+        FOREIGN KEY (tenant_id,last_attempted_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.integration_inbox_processing_attempts (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    processing_id bigint NOT NULL,
+    receipt_id bigint NOT NULL,
+    attempt_number integer NOT NULL,
+    previous_revision bigint,
+    resulting_revision bigint NOT NULL,
+    outcome text NOT NULL,
+    order_id bigint,
+    order_revision bigint,
+    error_code text,
+    error_message text,
+    attempted_by_user_id bigint NOT NULL,
+    attempted_at timestamp with time zone NOT NULL,
+    CONSTRAINT integration_inbox_processing_attempts_sequence_unique
+        UNIQUE (tenant_id,processing_id,attempt_number),
+    CONSTRAINT integration_inbox_processing_attempts_revision_unique
+        UNIQUE (tenant_id,processing_id,resulting_revision),
+    CONSTRAINT integration_inbox_processing_attempts_scope_id_unique
+        UNIQUE (tenant_id,inventory_owner_id,id),
+    CONSTRAINT integration_inbox_processing_attempts_number_check CHECK (attempt_number>0),
+    CONSTRAINT integration_inbox_processing_attempts_revision_check CHECK (
+        resulting_revision>0 AND
+        ((previous_revision IS NULL AND resulting_revision=1 AND attempt_number=1)
+         OR (previous_revision IS NOT NULL AND previous_revision>0
+             AND resulting_revision=previous_revision+1))),
+    CONSTRAINT integration_inbox_processing_attempts_outcome_check
+        CHECK (outcome IN ('quarantined','processed')),
+    CONSTRAINT integration_inbox_processing_attempts_error_code_check CHECK (
+        error_code IS NULL OR
+        (error_code=btrim(error_code) AND error_code<>'' AND char_length(error_code)<=100)),
+    CONSTRAINT integration_inbox_processing_attempts_error_message_check CHECK (
+        error_message IS NULL OR
+        (error_message=btrim(error_message) AND error_message<>''
+            AND char_length(error_message)<=1000 AND error_message!~'[[:cntrl:]]')),
+    CONSTRAINT integration_inbox_processing_attempts_result_shape_check CHECK (
+        (outcome='processed' AND order_id IS NOT NULL AND order_revision IS NOT NULL
+            AND error_code IS NULL AND error_message IS NULL)
+        OR
+        (outcome='quarantined' AND order_id IS NULL AND order_revision IS NULL
+            AND error_code IS NOT NULL AND error_message IS NOT NULL)),
+    CONSTRAINT integration_inbox_processing_attempts_processing_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,processing_id)
+        REFERENCES public.integration_inbox_processings(tenant_id,inventory_owner_id,id),
+    CONSTRAINT integration_inbox_processing_attempts_receipt_fkey
+        FOREIGN KEY (tenant_id,receipt_id)
+        REFERENCES public.integration_inbox_receipts(tenant_id,id),
+    CONSTRAINT integration_inbox_processing_attempts_order_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,order_id)
+        REFERENCES public.orders(tenant_id,inventory_owner_id,id),
+    CONSTRAINT integration_inbox_processing_attempts_actor_fkey
+        FOREIGN KEY (tenant_id,attempted_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE INDEX integration_inbox_processings_operational_idx
+ON public.integration_inbox_processings
+    (tenant_id,status,last_attempted_at DESC,id DESC);
+
+CREATE FUNCTION public.guard_integration_inbox_processing_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    receipt public.integration_inbox_receipts%ROWTYPE;
+BEGIN
+    IF TG_OP='DELETE' THEN
+        RAISE EXCEPTION 'integration inbox processing state cannot be deleted'
+            USING ERRCODE='55000';
+    END IF;
+
+    SELECT * INTO receipt FROM public.integration_inbox_receipts
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.receipt_id
+    FOR SHARE;
+    IF NOT FOUND OR receipt.inventory_owner_id IS DISTINCT FROM NEW.inventory_owner_id
+       OR receipt.facility_id IS NOT NULL OR receipt.source_key<>NEW.source_key
+       OR receipt.deduplication_key<>NEW.deduplication_key
+       OR receipt.payload_sha256<>NEW.payload_sha256
+    THEN
+        RAISE EXCEPTION 'integration inbox processing does not match its immutable receipt'
+            USING ERRCODE='23514';
+    END IF;
+
+    IF TG_OP='INSERT' THEN
+        IF NEW.revision<>1 OR NEW.attempt_count<>1 THEN
+            RAISE EXCEPTION 'initial integration inbox processing revision is invalid'
+                USING ERRCODE='23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    IF OLD.status='processed' THEN
+        RAISE EXCEPTION 'processed integration inbox state is terminal'
+            USING ERRCODE='55000';
+    END IF;
+    IF NEW.tenant_id<>OLD.tenant_id
+       OR NEW.inventory_owner_id<>OLD.inventory_owner_id
+       OR NEW.receipt_id<>OLD.receipt_id
+       OR NEW.source_key<>OLD.source_key
+       OR NEW.deduplication_key<>OLD.deduplication_key
+       OR NEW.payload_sha256<>OLD.payload_sha256
+       OR NEW.adapter_key<>OLD.adapter_key
+       OR NEW.mapping_version<>OLD.mapping_version
+       OR NEW.revision<>OLD.revision+1
+       OR NEW.attempt_count<>OLD.attempt_count+1
+    THEN
+        RAISE EXCEPTION 'integration inbox processing transition is invalid'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.reject_integration_inbox_processing_attempt_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    RAISE EXCEPTION 'integration inbox processing attempts are immutable'
+        USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION public.require_integration_inbox_processing_consistency() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM public.integration_inbox_processing_attempts attempt
+        WHERE attempt.tenant_id=NEW.tenant_id
+          AND attempt.inventory_owner_id=NEW.inventory_owner_id
+          AND attempt.processing_id=NEW.id
+          AND attempt.receipt_id=NEW.receipt_id
+          AND attempt.attempt_number=NEW.attempt_count
+          AND attempt.resulting_revision=NEW.revision
+          AND attempt.outcome=NEW.status
+          AND attempt.order_id IS NOT DISTINCT FROM NEW.order_id
+          AND attempt.order_revision IS NOT DISTINCT FROM NEW.order_revision
+          AND attempt.error_code IS NOT DISTINCT FROM NEW.error_code
+          AND attempt.error_message IS NOT DISTINCT FROM NEW.error_message
+          AND attempt.attempted_by_user_id=NEW.last_attempted_by_user_id
+          AND attempt.attempted_at=NEW.last_attempted_at
+    ) THEN
+        RAISE EXCEPTION 'integration inbox processing lacks exact attempt evidence'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER integration_inbox_processings_guard
+BEFORE INSERT OR UPDATE OR DELETE ON public.integration_inbox_processings
+FOR EACH ROW EXECUTE FUNCTION public.guard_integration_inbox_processing_mutation();
+CREATE CONSTRAINT TRIGGER integration_inbox_processings_require_attempt
+AFTER INSERT OR UPDATE ON public.integration_inbox_processings
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_integration_inbox_processing_consistency();
+CREATE TRIGGER integration_inbox_processing_attempts_are_immutable
+BEFORE UPDATE OR DELETE ON public.integration_inbox_processing_attempts
+FOR EACH ROW EXECUTE FUNCTION public.reject_integration_inbox_processing_attempt_mutation();
+
+ALTER TABLE public.integration_inbox_processings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.integration_inbox_processings FORCE ROW LEVEL SECURITY;
+CREATE POLICY integration_inbox_processings_tenant_isolation
+ON public.integration_inbox_processings
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+ALTER TABLE public.integration_inbox_processing_attempts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.integration_inbox_processing_attempts FORCE ROW LEVEL SECURITY;
+CREATE POLICY integration_inbox_processing_attempts_tenant_isolation
+ON public.integration_inbox_processing_attempts
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT,UPDATE ON public.integration_inbox_processings TO wareboxes_app;
+GRANT SELECT,INSERT ON public.integration_inbox_processing_attempts TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.integration_inbox_processings_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.integration_inbox_processing_attempts_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.guard_integration_inbox_processing_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_integration_inbox_processing_attempt_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_integration_inbox_processing_consistency() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

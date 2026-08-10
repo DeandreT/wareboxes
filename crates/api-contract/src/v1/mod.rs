@@ -9,6 +9,7 @@ mod facility_shipping_origin;
 mod idempotency;
 mod inbound_inspection;
 mod integration_monitor;
+mod integration_order_intake;
 mod inventory;
 mod inventory_hold;
 mod inventory_integrity;
@@ -88,12 +89,17 @@ pub use inbound_inspection::{
 pub use integration_monitor::{
     DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse,
     InboundIntegrationDetailResponse, InboundIntegrationPage, InboundIntegrationPageRequest,
+    InboundIntegrationProcessingAttemptResponse, InboundIntegrationProcessingResponse,
     InboundIntegrationReceiptResponse, InboundIntegrationSort, InboundPayloadPreviewEncoding,
     IntegrationSortDirection, OutboundDeliveryAttemptOutcome, OutboundDeliveryAttemptResponse,
     OutboundDeliveryStatus, OutboundIntegrationDetailResponse, OutboundIntegrationEventResponse,
     OutboundIntegrationPage, OutboundIntegrationPageRequest, OutboundIntegrationSort,
     OutboxDeadLetterDiscardResponse, OutboxDeadLetterReplayResponse, ReplayOutboxDeadLetterRequest,
     ReplayOutboxDeadLetterResponse,
+};
+pub use integration_order_intake::{
+    IntegrationOrderIntakeResponse, IntegrationOrderProcessingStatus,
+    ReprocessIntegrationOrderRequest, ReprocessIntegrationOrderResponse,
 };
 pub use inventory::{
     InventoryBalancePage, InventoryBalancePageRequest, InventoryBalanceResponse,

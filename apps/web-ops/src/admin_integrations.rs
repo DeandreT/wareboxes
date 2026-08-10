@@ -1,9 +1,10 @@
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
     DiscardOutboxDeadLetterRequest, InboundIntegrationDetailResponse, InboundIntegrationPage,
-    InboundIntegrationSort, InboundPayloadPreviewEncoding, IntegrationSortDirection, OpaqueCursor,
-    OutboundDeliveryAttemptOutcome, OutboundDeliveryStatus, OutboundIntegrationDetailResponse,
-    OutboundIntegrationPage, OutboundIntegrationSort, ReplayOutboxDeadLetterRequest,
+    InboundIntegrationSort, InboundPayloadPreviewEncoding, IntegrationOrderProcessingStatus,
+    IntegrationSortDirection, OpaqueCursor, OutboundDeliveryAttemptOutcome, OutboundDeliveryStatus,
+    OutboundIntegrationDetailResponse, OutboundIntegrationPage, OutboundIntegrationSort,
+    ReplayOutboxDeadLetterRequest, ReprocessIntegrationOrderRequest,
 };
 
 use crate::api::{self, InboundIntegrationFilters, OutboundIntegrationFilters};
@@ -40,6 +41,13 @@ struct SavedDiscardCommand {
     idempotency_key: String,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct SavedReprocessCommand {
+    receipt_id: i64,
+    request: ReprocessIntegrationOrderRequest,
+    idempotency_key: String,
+}
+
 #[derive(Clone, Copy)]
 struct MonitorSignals {
     tab: RwSignal<MonitorTab>,
@@ -68,6 +76,8 @@ struct MonitorSignals {
     notice: RwSignal<Option<String>>,
     selected_inbound_id: RwSignal<Option<i64>>,
     inbound_detail: RwSignal<Option<InboundIntegrationDetailResponse>>,
+    reprocess_confirmation: RwSignal<Option<i64>>,
+    reprocess_retry: RwSignal<Option<SavedReprocessCommand>>,
     selected_outbound_id: RwSignal<Option<i64>>,
     outbound_detail: RwSignal<Option<OutboundIntegrationDetailResponse>>,
     replay_confirmation: RwSignal<Option<DeadLetterTarget>>,
@@ -107,6 +117,8 @@ impl MonitorSignals {
             notice: RwSignal::new(None),
             selected_inbound_id: RwSignal::new(None),
             inbound_detail: RwSignal::new(None),
+            reprocess_confirmation: RwSignal::new(None),
+            reprocess_retry: RwSignal::new(None),
             selected_outbound_id: RwSignal::new(None),
             outbound_detail: RwSignal::new(None),
             replay_confirmation: RwSignal::new(None),
@@ -266,6 +278,7 @@ fn InboundTable(signals: MonitorSignals, select: Callback<i64>) -> impl IntoView
                     <SortableHeader label="Received" active=move || signals.inbound_sort.get()==InboundIntegrationSort::ReceivedAt direction=move || display_direction(signals.inbound_direction.get()) on_sort=Callback::new(move |_| change_inbound_sort(signals,InboundIntegrationSort::ReceivedAt))/>
                     <SortableHeader label="Source" active=move || signals.inbound_sort.get()==InboundIntegrationSort::Source direction=move || display_direction(signals.inbound_direction.get()) on_sort=Callback::new(move |_| change_inbound_sort(signals,InboundIntegrationSort::Source))/>
                     <th scope="col">"Deduplication key"</th>
+                    <th scope="col">"Processing"</th>
                     <th scope="col">"Scope"</th>
                     <th scope="col">"Content type"</th>
                     <SortableHeader label="Bytes" active=move || signals.inbound_sort.get()==InboundIntegrationSort::PayloadSize direction=move || display_direction(signals.inbound_direction.get()) on_sort=Callback::new(move |_| change_inbound_sort(signals,InboundIntegrationSort::PayloadSize)) numeric=true/>
@@ -274,7 +287,7 @@ fn InboundTable(signals: MonitorSignals, select: Callback<i64>) -> impl IntoView
                 <tbody>{move || {
                     let page=signals.inbound_page.get();
                     if !signals.inbound_loading.get() && page.items.is_empty() {
-                        view! { <tr><td class="table-empty-row" colspan="7">"No inbound receipts match these filters."</td></tr> }.into_any()
+                        view! { <tr><td class="table-empty-row" colspan="8">"No inbound receipts match these filters."</td></tr> }.into_any()
                     } else {
                         page.items.into_iter().map(|receipt| {
                             let receipt_id=receipt.id;
@@ -283,6 +296,7 @@ fn InboundTable(signals: MonitorSignals, select: Callback<i64>) -> impl IntoView
                                 <td>{compact_time(&receipt.received_at)}</td>
                                 <td><strong class="mono">{receipt.source_key}</strong><small>{receipt.request_id.unwrap_or_else(|| "No request ID".into())}</small></td>
                                 <td class="mono truncate-cell">{receipt.deduplication_key}</td>
+                                <td>{receipt.processing_status.map_or_else(|| view! { <span class="status muted">"Received"</span> }.into_any(),|status| view! { <span class=processing_status_class(status)>{processing_status_label(status)}</span> }.into_any())}</td>
                                 <td>{scope_label(receipt.inventory_owner_name.as_deref(),receipt.facility_name.as_deref())}</td>
                                 <td>{receipt.content_type}</td>
                                 <td class="numeric">{format_bytes(receipt.payload_bytes)}</td>
@@ -383,19 +397,67 @@ fn InboundDetail(signals: MonitorSignals) -> impl IntoView {
         } else {
             signals.inbound_detail.get().map_or_else(
                 || view! { <div class="integration-empty"><h2>"Inbound receipt detail"</h2><p>"Select a receipt to inspect its immutable envelope and retained payload."</p></div> }.into_any(),
-                inbound_detail_view,
+                |detail| inbound_detail_view(signals, detail),
             )
         }
     }} }
 }
 
-fn inbound_detail_view(detail: InboundIntegrationDetailResponse) -> AnyView {
+fn inbound_detail_view(
+    signals: MonitorSignals,
+    detail: InboundIntegrationDetailResponse,
+) -> AnyView {
     let receipt = detail.receipt;
+    let receipt_id = receipt.id;
     let download_path = api::inbound_payload_download_path(receipt.id);
     let encoding = match detail.payload_preview_encoding {
         InboundPayloadPreviewEncoding::Utf8 => "UTF-8",
         InboundPayloadPreviewEncoding::Hex => "Hexadecimal",
     };
+    let processing = detail.processing.map(|processing| {
+        let processing_for_command = StoredValue::new(processing.clone());
+        let status_class = match processing.status {
+            IntegrationOrderProcessingStatus::Quarantined => "status held",
+            IntegrationOrderProcessingStatus::Processed => "status shipped",
+        };
+        let status_label = match processing.status {
+            IntegrationOrderProcessingStatus::Quarantined => "Quarantined",
+            IntegrationOrderProcessingStatus::Processed => "Processed",
+        };
+        view! {
+            <section class="integration-detail-section integration-processing">
+                <header><h3>"Order processing"</h3><span class=status_class>{status_label}</span></header>
+                <Show when=move || processing_for_command.get_value().status==IntegrationOrderProcessingStatus::Quarantined>
+                    <div class="integration-command-band">
+                    {move || {
+                        if signals.reprocess_confirmation.get()==Some(receipt_id) {
+                            view! { <div class="integration-replay-confirmation"><div><strong>"Reprocess retained payload?"</strong><span>"The current fulfillment-order mapping and business configuration will run against the immutable raw envelope."</span></div><div><button type="button" class="button quiet-action compact" disabled=move || signals.command_pending.get() on:click=move |_| signals.reprocess_confirmation.set(None)>"Cancel"</button><button type="button" class="button primary-action compact" disabled=move || signals.command_pending.get() on:click=move |_| submit_reprocess(signals,processing_for_command.get_value())><Icon icon=UiIcon::Refresh/>{move || if signals.command_pending.get() { "Processing" } else { "Reprocess" }}</button></div></div> }.into_any()
+                        } else if let Some(saved)=signals.reprocess_retry.get().filter(|saved| saved.receipt_id==receipt_id) {
+                            let saved=StoredValue::new(saved);
+                            view! { <div class="integration-replay-confirmation"><div><strong>"Reprocess outcome is unknown"</strong><span>"Retry the exact saved command to reconcile without adding another attempt."</span></div><button type="button" class="button secondary-action compact" disabled=move || signals.command_pending.get() on:click=move |_| execute_reprocess(signals,saved.get_value())><Icon icon=UiIcon::Refresh/>"Retry exact command"</button></div> }.into_any()
+                        } else {
+                            view! { <button type="button" class="button secondary-action compact" disabled=move || signals.command_pending.get() on:click=move |_| signals.reprocess_confirmation.set(Some(receipt_id))><Icon icon=UiIcon::Refresh/>"Reprocess retained payload"</button> }.into_any()
+                        }
+                    }}
+                    </div>
+                </Show>
+                <dl class="integration-facts">
+                    <div><dt>"Adapter"</dt><dd class="mono">{processing.adapter_key}</dd></div>
+                    <div><dt>"Mapping"</dt><dd>{format!("Version {}",processing.mapping_version)}</dd></div>
+                    <div><dt>"Revision"</dt><dd>{processing.revision.get()}</dd></div>
+                    <div><dt>"Attempts"</dt><dd>{processing.attempt_count}</dd></div>
+                    <div><dt>"Last operator"</dt><dd>{processing.attempted_by_name}</dd></div>
+                    <div><dt>"Last attempt"</dt><dd>{processing.attempted_at}</dd></div>
+                    {processing.order_id.map(|order_id| view! { <div><dt>"Created order"</dt><dd class="mono">{format!("#{order_id}")}</dd></div> })}
+                    {processing.error_message.map(|message| view! { <div class="wide integration-failure"><dt>{processing.error_code.unwrap_or_else(|| "processing_error".into())}</dt><dd>{message}</dd></div> })}
+                </dl>
+                <div class="integration-attempts">{processing.attempts.into_iter().map(|attempt| {
+                    let label=match attempt.status { IntegrationOrderProcessingStatus::Quarantined=>"Quarantined",IntegrationOrderProcessingStatus::Processed=>"Processed" };
+                    view! { <article><header><strong>{format!("Attempt {}",attempt.attempt_number)}</strong><span>{label}</span></header><dl><div><dt>"Operator"</dt><dd>{attempt.attempted_by_name}</dd></div><div><dt>"Attempted"</dt><dd>{attempt.attempted_at}</dd></div><div><dt>"Revision"</dt><dd>{attempt.revision.get()}</dd></div>{attempt.order_id.map(|id| view! { <div><dt>"Order"</dt><dd class="mono">{format!("#{id}")}</dd></div> })}</dl>{attempt.error_message.map(|message| view! { <p class="integration-failure">{message}</p> })}</article> }
+                }).collect_view()}</div>
+            </section>
+        }
+    });
     view! { <div class="integration-detail-content">
             <header><div><h2>{receipt.source_key.clone()}</h2><small>{format!("Receipt #{}",receipt.id)}</small></div><a class="button secondary-action compact" href=download_path download=""><Icon icon=UiIcon::Download/>"Download payload"</a></header>
             <dl class="integration-facts">
@@ -407,6 +469,7 @@ fn inbound_detail_view(detail: InboundIntegrationDetailResponse) -> AnyView {
                 <div class="wide"><dt>"Request ID"</dt><dd class="mono">{receipt.request_id.unwrap_or_else(|| "Not supplied".into())}</dd></div>
                 <div class="wide"><dt>"SHA-256"</dt><dd class="mono wrap-anywhere">{receipt.payload_sha256}</dd></div>
             </dl>
+            {processing}
             <section class="integration-detail-section"><header><h3>"Payload preview"</h3><small>{format!("{encoding} / {}{}",format_bytes(detail.preview_bytes),if detail.preview_truncated { " shown" } else { " complete" })}</small></header><pre>{detail.payload_preview}</pre>{detail.preview_truncated.then(|| view! { <p>"Preview is limited to 64 KiB. Download the retained payload for the complete envelope."</p> })}</section>
         </div> }.into_any()
 }
@@ -504,6 +567,73 @@ fn outbound_detail_view(
             }}</div>
         </section>
     </div> }.into_any()
+}
+
+fn submit_reprocess(
+    signals: MonitorSignals,
+    processing: wareboxes_api_contract::v1::InboundIntegrationProcessingResponse,
+) {
+    let saved = SavedReprocessCommand {
+        receipt_id: signals
+            .selected_inbound_id
+            .get_untracked()
+            .unwrap_or_default(),
+        request: ReprocessIntegrationOrderRequest {
+            expected_revision: processing.revision,
+        },
+        idempotency_key: api::new_idempotency_key(),
+    };
+    execute_reprocess(signals, saved);
+}
+
+fn execute_reprocess(signals: MonitorSignals, saved: SavedReprocessCommand) {
+    if signals.command_pending.get_untracked() || saved.receipt_id <= 0 {
+        return;
+    }
+    signals.command_pending.set(true);
+    signals.error.set(None);
+    signals.notice.set(None);
+    let receipt_id = saved.receipt_id;
+    leptos::task::spawn_local(async move {
+        let result =
+            api::reprocess_inbound_order(receipt_id, &saved.request, &saved.idempotency_key).await;
+        match result {
+            Ok(result) => {
+                signals.reprocess_retry.set(None);
+                signals.reprocess_confirmation.set(None);
+                request_inbound(signals, None, Vec::new());
+                select_inbound_receipt(signals, receipt_id);
+                signals.notice.set(Some(match result.status {
+                    IntegrationOrderProcessingStatus::Processed => result.order_id.map_or_else(
+                        || "Inbound order processed.".to_owned(),
+                        |order_id| format!("Inbound order processed as order #{order_id}."),
+                    ),
+                    IntegrationOrderProcessingStatus::Quarantined => {
+                        format!(
+                            "Reprocess attempt {} remains quarantined.",
+                            result.attempt_count
+                        )
+                    }
+                }));
+            }
+            Err(error) if error.unauthorized => signals.on_unauthorized.run(()),
+            Err(error) if error.ambiguous_outcome => {
+                signals.reprocess_retry.set(Some(saved));
+                signals.reprocess_confirmation.set(None);
+                signals.error.set(Some(format!(
+                    "{} Retry the exact saved reprocess command to reconcile the outcome.",
+                    error.message
+                )));
+            }
+            Err(error) => {
+                signals.reprocess_retry.set(None);
+                signals.reprocess_confirmation.set(None);
+                select_inbound_receipt(signals, receipt_id);
+                signals.error.set(Some(error.message));
+            }
+        }
+        signals.command_pending.set(false);
+    });
 }
 
 fn submit_replay(signals: MonitorSignals, confirmation: DeadLetterTarget) {
@@ -713,6 +843,16 @@ fn select_inbound_receipt(signals: MonitorSignals, receipt_id: i64) {
     signals.detail_loading.set(true);
     signals.error.set(None);
     signals.notice.set(None);
+    if signals
+        .reprocess_retry
+        .get_untracked()
+        .as_ref()
+        .map(|saved| saved.receipt_id)
+        != Some(receipt_id)
+    {
+        signals.reprocess_retry.set(None);
+    }
+    signals.reprocess_confirmation.set(None);
     leptos::task::spawn_local(async move {
         let result = api::inbound_integration_detail(receipt_id).await;
         if signals.detail_generation.get_untracked() != generation
@@ -889,6 +1029,18 @@ fn status_class(value: OutboundDeliveryStatus) -> &'static str {
         OutboundDeliveryStatus::Discarded => "status muted",
     }
 }
+fn processing_status_label(value: IntegrationOrderProcessingStatus) -> &'static str {
+    match value {
+        IntegrationOrderProcessingStatus::Quarantined => "Quarantined",
+        IntegrationOrderProcessingStatus::Processed => "Processed",
+    }
+}
+fn processing_status_class(value: IntegrationOrderProcessingStatus) -> &'static str {
+    match value {
+        IntegrationOrderProcessingStatus::Quarantined => "status held",
+        IntegrationOrderProcessingStatus::Processed => "status shipped",
+    }
+}
 fn attempt_outcome_label(value: Option<OutboundDeliveryAttemptOutcome>) -> &'static str {
     match value {
         Some(OutboundDeliveryAttemptOutcome::Published) => "Published",
@@ -941,6 +1093,21 @@ mod tests {
         assert_eq!(
             compact_time("2026-08-10T11:22:33+00:00"),
             "2026-08-10 11:22:33"
+        );
+    }
+    #[test]
+    fn inbound_processing_labels_distinguish_actionable_quarantine() {
+        assert_eq!(
+            processing_status_label(IntegrationOrderProcessingStatus::Quarantined),
+            "Quarantined"
+        );
+        assert_eq!(
+            processing_status_class(IntegrationOrderProcessingStatus::Quarantined),
+            "status held"
+        );
+        assert_eq!(
+            processing_status_label(IntegrationOrderProcessingStatus::Processed),
+            "Processed"
         );
     }
 }

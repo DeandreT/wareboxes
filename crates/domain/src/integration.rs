@@ -1,6 +1,50 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub const MAX_OUTBOX_DEAD_LETTER_DISCARD_REASON_LENGTH: usize = 1_000;
+pub const MAX_INTEGRATION_PROCESSING_ERROR_CODE_LENGTH: usize = 100;
+pub const MAX_INTEGRATION_PROCESSING_ERROR_MESSAGE_LENGTH: usize = 1_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationInboxProcessingStatus {
+    Quarantined,
+    Processed,
+}
+
+impl IntegrationInboxProcessingStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Quarantined => "quarantined",
+            Self::Processed => "processed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "quarantined" => Some(Self::Quarantined),
+            "processed" => Some(Self::Processed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct IntegrationInboxProcessingRevision(i64);
+
+impl IntegrationInboxProcessingRevision {
+    pub fn new(value: i64) -> Result<Self, &'static str> {
+        if value > 0 {
+            Ok(Self(value))
+        } else {
+            Err("integration inbox processing revision must be positive")
+        }
+    }
+
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum OutboxDeadLetterDiscardReasonError {
@@ -55,5 +99,20 @@ mod tests {
             "x".repeat(MAX_OUTBOX_DEAD_LETTER_DISCARD_REASON_LENGTH + 1)
         )
         .is_err());
+    }
+
+    #[test]
+    fn inbox_processing_status_and_revision_are_strict() {
+        assert_eq!(
+            IntegrationInboxProcessingStatus::parse("quarantined"),
+            Some(IntegrationInboxProcessingStatus::Quarantined)
+        );
+        assert_eq!(
+            IntegrationInboxProcessingStatus::Processed.as_str(),
+            "processed"
+        );
+        assert!(IntegrationInboxProcessingStatus::parse("received").is_none());
+        assert_eq!(IntegrationInboxProcessingRevision::new(2).unwrap().get(), 2);
+        assert!(IntegrationInboxProcessingRevision::new(0).is_err());
     }
 }

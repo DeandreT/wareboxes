@@ -9,7 +9,7 @@ use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{InventoryOwnerId, NewFulfillmentOrder, OrderStatus};
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
-use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
+use wareboxes_persistence_postgres::idempotency::{insert_result, PostgresPreparedCommandExt};
 use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 use super::access::{lock_current_scope_tx, require_permission_tx};
@@ -131,6 +131,19 @@ pub async fn create_fulfillment_order(
     command: &CommandContext,
     order: &NewFulfillmentOrder,
 ) -> AppResult<CreateFulfillmentOrderResult> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    let result = create_fulfillment_order_tx(&mut tx, access, command, order).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(crate) async fn create_fulfillment_order_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    access: &TenantAccess,
+    command: &CommandContext,
+    order: &NewFulfillmentOrder,
+) -> AppResult<CreateFulfillmentOrderResult> {
     command.require_actor(access.tenant_id, access.user_id)?;
     let request_lines = order
         .demand_lines()
@@ -165,31 +178,24 @@ pub async fn create_fulfillment_order(
         &request_lines,
     );
     let prepared = PreparedCommand::new_v1(command, CREATE_OPERATION, &request_identity)?;
-    let mut tx = db.begin().await?;
-    bind_tenant_context(&mut tx, access.tenant_id).await?;
-    let scope = lock_current_scope_tx(&mut tx, access.tenant_id, command.actor_id.get()).await?;
-    require_permission_tx(&mut tx, access.tenant_id, command.actor_id.get(), "orders").await?;
+    bind_tenant_context(tx, access.tenant_id).await?;
+    let scope = lock_current_scope_tx(tx, access.tenant_id, command.actor_id.get()).await?;
+    require_permission_tx(tx, access.tenant_id, command.actor_id.get(), "orders").await?;
     if let Some(result) = prepared
-        .replayed::<CreateFulfillmentOrderResult>(&mut tx)
+        .replayed::<CreateFulfillmentOrderResult>(tx)
         .await?
     {
-        orders::require_replayed_order_visible_tx(
-            &mut tx,
-            access.tenant_id,
-            result.order_id,
-            &scope,
-        )
-        .await?;
-        tx.commit().await?;
+        orders::require_replayed_order_visible_tx(tx, access.tenant_id, result.order_id, &scope)
+            .await?;
         return Ok(result);
     }
     if !scope.includes_inventory_owner(order.inventory_owner_id().get()) {
         return Err(AppError::forbidden());
     }
 
-    lock_order_key(&mut tx, access, order).await?;
-    lock_active_owner(&mut tx, access, order.inventory_owner_id()).await?;
-    let catalog_uoms = lock_order_items(&mut tx, access, order).await?;
+    lock_order_key(tx, access, order).await?;
+    lock_active_owner(tx, access, order.inventory_owner_id()).await?;
+    let catalog_uoms = lock_order_items(tx, access, order).await?;
     for line in order.demand_lines() {
         let catalog_uom = catalog_uoms.get(&line.item_id().get()).ok_or_else(|| {
             AppError::conflict("one or more items are inactive or not linked to the client")
@@ -204,7 +210,7 @@ pub async fn create_fulfillment_order(
 
     let occurred_at = now_iso();
     let address_id = address::insert_address_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         address::NewAddress {
             name: Some(destination.recipient().name()),
@@ -237,7 +243,7 @@ pub async fn create_fulfillment_order(
     .bind(order.initial_status().as_str())
     .bind(address_id)
     .bind(order.ship_by())
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
 
     let mut created_lines = Vec::with_capacity(order.demand_lines().len());
@@ -265,7 +271,7 @@ pub async fn create_fulfillment_order(
         .bind(line.item_id().get())
         .bind(order_id)
         .bind(line.requested_uom().as_str())
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         ordered_quantity = ordered_quantity
             .checked_add(line.quantity().get())
@@ -277,7 +283,7 @@ pub async fn create_fulfillment_order(
     }
 
     orders::insert_order_activity_tx(
-        &mut tx,
+        tx,
         access.tenant_id,
         order.inventory_owner_id(),
         order_id,
@@ -286,7 +292,7 @@ pub async fn create_fulfillment_order(
     )
     .await?;
     enqueue_created_event(
-        &mut tx,
+        tx,
         access,
         command,
         order,
@@ -304,7 +310,9 @@ pub async fn create_fulfillment_order(
         revision,
         lines: created_lines,
     };
-    Ok(prepared.commit(tx, result).await?)
+    let completed = prepared.completed_result(&result, None)?;
+    insert_result(tx, &completed).await?;
+    Ok(result)
 }
 
 async fn lock_order_key(

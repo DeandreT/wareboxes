@@ -198,6 +198,18 @@
   background: var(--surface-sunken);
 }
 
+.integration-processing > header {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.integration-processing .integration-command-band {
+  margin: 0 -8px;
+}
+
 .integration-replay-confirmation {
   display: flex;
   width: 100%;

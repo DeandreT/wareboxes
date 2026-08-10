@@ -7,6 +7,7 @@ mod expected_receiving;
 mod facility_shipping_origins;
 mod inbound_inspections;
 mod integration_monitor;
+mod integration_order_intake;
 pub(crate) mod inventory_balances;
 mod inventory_holds;
 mod inventory_integrity;
@@ -111,6 +112,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/integration-monitor/inbound/{receipt_id}/payload",
             get(integration_monitor::download_inbound_payload),
+        )
+        .route(
+            "/integrations/order-intake/{source_key}/inventory-owners/{inventory_owner_id}/orders",
+            post(integration_order_intake::receive_order),
+        )
+        .route(
+            "/integration-monitor/inbound/{receipt_id}/reprocessings",
+            post(integration_order_intake::reprocess_order),
         )
         .route(
             "/integration-monitor/outbound",

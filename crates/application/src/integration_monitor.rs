@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wareboxes_domain::{
-    FacilityId, InventoryOwnerId, OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason,
+    FacilityId, IntegrationInboxProcessingAttemptId, IntegrationInboxProcessingId,
+    IntegrationInboxProcessingRevision, IntegrationInboxProcessingStatus, InventoryOwnerId,
+    OrderId, OrderRevision, OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason,
     OutboxDeadLetterReplayId, Timestamp, UserId,
 };
 
@@ -196,6 +198,9 @@ pub struct InboundIntegrationReceiptReadModel {
     pub payload_bytes: i64,
     pub payload_sha256: String,
     pub request_id: Option<String>,
+    pub processing_status: Option<IntegrationInboxProcessingStatus>,
+    pub processing_revision: Option<IntegrationInboxProcessingRevision>,
+    pub processing_attempt_count: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,10 +212,45 @@ pub enum InboundPayloadPreviewEncoding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundIntegrationDetailReadModel {
     pub receipt: InboundIntegrationReceiptReadModel,
+    pub processing: Option<InboundIntegrationProcessingReadModel>,
     pub payload_preview: String,
     pub payload_preview_encoding: InboundPayloadPreviewEncoding,
     pub preview_bytes: i64,
     pub preview_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundIntegrationProcessingAttemptReadModel {
+    pub attempt_id: IntegrationInboxProcessingAttemptId,
+    pub attempt_number: i32,
+    pub status: IntegrationInboxProcessingStatus,
+    pub revision: IntegrationInboxProcessingRevision,
+    pub order_id: Option<OrderId>,
+    pub order_revision: Option<OrderRevision>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub attempted_by: UserId,
+    pub attempted_by_name: String,
+    pub attempted_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundIntegrationProcessingReadModel {
+    pub processing_id: IntegrationInboxProcessingId,
+    pub adapter_key: String,
+    pub mapping_version: i32,
+    pub status: IntegrationInboxProcessingStatus,
+    pub revision: IntegrationInboxProcessingRevision,
+    pub attempt_count: i32,
+    pub order_id: Option<OrderId>,
+    pub order_revision: Option<OrderRevision>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub attempted_by: UserId,
+    pub attempted_by_name: String,
+    pub attempted_at: Timestamp,
+    pub processed_at: Option<Timestamp>,
+    pub attempts: Vec<InboundIntegrationProcessingAttemptReadModel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

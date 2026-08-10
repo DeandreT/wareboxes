@@ -162,7 +162,9 @@ pub async fn entry_items(
     ))
 }
 
-fn new_fulfillment_order(request: CreateFulfillmentOrderRequest) -> V1Result<NewFulfillmentOrder> {
+pub(crate) fn new_fulfillment_order(
+    request: CreateFulfillmentOrderRequest,
+) -> V1Result<NewFulfillmentOrder> {
     let inventory_owner_id = InventoryOwnerId::new(request.inventory_owner_id)
         .map_err(|error| invalid(error.to_string()))?;
     let order_key = OrderKey::new(request.order_key).map_err(domain_validation)?;

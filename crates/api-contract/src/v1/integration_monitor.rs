@@ -77,6 +77,9 @@ pub struct InboundIntegrationReceiptResponse {
     pub payload_bytes: i64,
     pub payload_sha256: String,
     pub request_id: Option<String>,
+    pub processing_status: Option<super::IntegrationOrderProcessingStatus>,
+    pub processing_revision: Option<super::Revision>,
+    pub processing_attempt_count: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,10 +93,47 @@ pub enum InboundPayloadPreviewEncoding {
 #[serde(deny_unknown_fields)]
 pub struct InboundIntegrationDetailResponse {
     pub receipt: InboundIntegrationReceiptResponse,
+    pub processing: Option<InboundIntegrationProcessingResponse>,
     pub payload_preview: String,
     pub payload_preview_encoding: InboundPayloadPreviewEncoding,
     pub preview_bytes: i64,
     pub preview_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InboundIntegrationProcessingAttemptResponse {
+    pub attempt_id: i64,
+    pub attempt_number: i32,
+    pub status: super::IntegrationOrderProcessingStatus,
+    pub revision: super::Revision,
+    pub order_id: Option<i64>,
+    pub order_revision: Option<super::Revision>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub attempted_by: i64,
+    pub attempted_by_name: String,
+    pub attempted_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InboundIntegrationProcessingResponse {
+    pub processing_id: i64,
+    pub adapter_key: String,
+    pub mapping_version: i32,
+    pub status: super::IntegrationOrderProcessingStatus,
+    pub revision: super::Revision,
+    pub attempt_count: i32,
+    pub order_id: Option<i64>,
+    pub order_revision: Option<super::Revision>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub attempted_by: i64,
+    pub attempted_by_name: String,
+    pub attempted_at: String,
+    pub processed_at: Option<String>,
+    pub attempts: Vec<InboundIntegrationProcessingAttemptResponse>,
 }
 
 pub type InboundIntegrationPage = CursorPage<InboundIntegrationReceiptResponse>;

@@ -4,6 +4,7 @@ use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_application::integration_monitor::{
     DiscardOutboxDeadLetterCommand, DiscardOutboxDeadLetterResult,
     InboundIntegrationDetailReadModel, InboundIntegrationPage, InboundIntegrationPayloadReadModel,
+    InboundIntegrationProcessingAttemptReadModel, InboundIntegrationProcessingReadModel,
     InboundIntegrationQuery, InboundIntegrationReceiptReadModel, InboundIntegrationSort,
     InboundPayloadPreviewEncoding, IntegrationSortDirection, OutboundDeliveryAttemptReadModel,
     OutboundDeliveryStatus, OutboundIntegrationDetailReadModel, OutboundIntegrationEventReadModel,
@@ -16,7 +17,9 @@ use wareboxes_application::outbox::DeliveryAttemptOutcome;
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    FacilityId, InventoryOwnerId, OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason,
+    FacilityId, IntegrationInboxProcessingAttemptId, IntegrationInboxProcessingId,
+    IntegrationInboxProcessingRevision, IntegrationInboxProcessingStatus, InventoryOwnerId,
+    OrderId, OrderRevision, OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason,
     OutboxDeadLetterReplayId, Timestamp, UserId,
 };
 use wareboxes_persistence_postgres::db::bind_tenant_context;
@@ -73,6 +76,13 @@ fn attempt_outcome(value: &str) -> AppResult<DeliveryAttemptOutcome> {
 }
 
 fn map_inbound(row: &PgRow) -> AppResult<InboundIntegrationReceiptReadModel> {
+    let processing_status = row
+        .try_get::<Option<String>, _>("processing_status")?
+        .map(|status| {
+            IntegrationInboxProcessingStatus::parse(&status)
+                .ok_or_else(|| AppError::internal("invalid inbound processing status"))
+        })
+        .transpose()?;
     Ok(InboundIntegrationReceiptReadModel {
         id: row.try_get("id")?,
         inventory_owner_id: optional_owner(row)?,
@@ -86,6 +96,43 @@ fn map_inbound(row: &PgRow) -> AppResult<InboundIntegrationReceiptReadModel> {
         payload_bytes: row.try_get("payload_bytes")?,
         payload_sha256: row.try_get("payload_sha256")?,
         request_id: row.try_get("request_id")?,
+        processing_status,
+        processing_revision: row
+            .try_get::<Option<i64>, _>("processing_revision")?
+            .map(IntegrationInboxProcessingRevision::new)
+            .transpose()
+            .map_err(AppError::internal)?,
+        processing_attempt_count: row.try_get("processing_attempt_count")?,
+    })
+}
+
+fn map_processing_attempt(row: &PgRow) -> AppResult<InboundIntegrationProcessingAttemptReadModel> {
+    Ok(InboundIntegrationProcessingAttemptReadModel {
+        attempt_id: IntegrationInboxProcessingAttemptId::new(row.try_get("attempt_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        attempt_number: row.try_get("attempt_number")?,
+        status: IntegrationInboxProcessingStatus::parse(
+            row.try_get::<String, _>("outcome")?.as_str(),
+        )
+        .ok_or_else(|| AppError::internal("invalid inbound processing attempt outcome"))?,
+        revision: IntegrationInboxProcessingRevision::new(row.try_get("resulting_revision")?)
+            .map_err(AppError::internal)?,
+        order_id: row
+            .try_get::<Option<i64>, _>("order_id")?
+            .map(OrderId::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        order_revision: row
+            .try_get::<Option<i64>, _>("order_revision")?
+            .map(OrderRevision::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        error_code: row.try_get("error_code")?,
+        error_message: row.try_get("error_message")?,
+        attempted_by: UserId::new(row.try_get("attempted_by_user_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        attempted_by_name: row.try_get("attempted_by_name")?,
+        attempted_at: row.try_get("attempted_at")?,
     })
 }
 
@@ -306,12 +353,16 @@ pub async fn inbound_page(
                receipt.source_key, receipt.deduplication_key, receipt.content_type,
                octet_length(receipt.raw_payload)::BIGINT AS payload_bytes,
                encode(receipt.payload_sha256, 'hex') AS payload_sha256,
-               receipt.request_id
+               receipt.request_id,processing.status AS processing_status,
+               processing.revision AS processing_revision,
+               processing.attempt_count AS processing_attempt_count
         FROM integration_inbox_receipts receipt
         LEFT JOIN inventory_owners owner
           ON owner.tenant_id=receipt.tenant_id AND owner.id=receipt.inventory_owner_id
         LEFT JOIN facilities facility
           ON facility.tenant_id=receipt.tenant_id AND facility.id=receipt.facility_id
+        LEFT JOIN integration_inbox_processings processing
+          ON processing.tenant_id=receipt.tenant_id AND processing.receipt_id=receipt.id
         WHERE receipt.tenant_id=$1
           AND (receipt.facility_id IS NULL OR $2 OR receipt.facility_id=ANY($3))
           AND (receipt.inventory_owner_id IS NULL OR $4 OR receipt.inventory_owner_id=ANY($5))
@@ -354,6 +405,90 @@ pub async fn inbound_page(
     })
 }
 
+async fn inbound_processing_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: wareboxes_domain::TenantId,
+    receipt_id: i64,
+) -> AppResult<Option<InboundIntegrationProcessingReadModel>> {
+    let row = sqlx::query(
+        r#"
+        SELECT processing.id AS processing_id,processing.adapter_key,
+               processing.mapping_version,processing.status,processing.revision,
+               processing.attempt_count,processing.order_id,processing.order_revision,
+               processing.error_code,processing.error_message,
+               processing.last_attempted_by_user_id,processing.last_attempted_at,
+               processing.processed_at,
+               COALESCE(NULLIF(BTRIM(CONCAT_WS(' ',actor.first_name,actor.last_name)),''),
+                        NULLIF(actor.nick_name,''),actor.email) AS attempted_by_name
+        FROM integration_inbox_processings processing
+        JOIN users actor ON actor.id=processing.last_attempted_by_user_id
+        WHERE processing.tenant_id=$1 AND processing.receipt_id=$2
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(receipt_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let processing_id = IntegrationInboxProcessingId::new(row.try_get("processing_id")?)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let attempt_rows = sqlx::query(
+        r#"
+        SELECT attempt.id AS attempt_id,attempt.attempt_number,
+               attempt.resulting_revision,attempt.outcome,attempt.order_id,
+               attempt.order_revision,attempt.error_code,attempt.error_message,
+               attempt.attempted_by_user_id,attempt.attempted_at,
+               COALESCE(NULLIF(BTRIM(CONCAT_WS(' ',actor.first_name,actor.last_name)),''),
+                        NULLIF(actor.nick_name,''),actor.email) AS attempted_by_name
+        FROM integration_inbox_processing_attempts attempt
+        JOIN users actor ON actor.id=attempt.attempted_by_user_id
+        WHERE attempt.tenant_id=$1 AND attempt.processing_id=$2
+        ORDER BY attempt.attempt_number DESC
+        LIMIT 100
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(processing_id.get())
+    .fetch_all(&mut **tx)
+    .await?;
+    let attempts = attempt_rows
+        .iter()
+        .map(map_processing_attempt)
+        .collect::<AppResult<Vec<_>>>()?;
+    Ok(Some(InboundIntegrationProcessingReadModel {
+        processing_id,
+        adapter_key: row.try_get("adapter_key")?,
+        mapping_version: row.try_get("mapping_version")?,
+        status: IntegrationInboxProcessingStatus::parse(
+            row.try_get::<String, _>("status")?.as_str(),
+        )
+        .ok_or_else(|| AppError::internal("invalid inbound processing status"))?,
+        revision: IntegrationInboxProcessingRevision::new(row.try_get("revision")?)
+            .map_err(AppError::internal)?,
+        attempt_count: row.try_get("attempt_count")?,
+        order_id: row
+            .try_get::<Option<i64>, _>("order_id")?
+            .map(OrderId::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        order_revision: row
+            .try_get::<Option<i64>, _>("order_revision")?
+            .map(OrderRevision::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        error_code: row.try_get("error_code")?,
+        error_message: row.try_get("error_message")?,
+        attempted_by: UserId::new(row.try_get("last_attempted_by_user_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        attempted_by_name: row.try_get("attempted_by_name")?,
+        attempted_at: row.try_get("last_attempted_at")?,
+        processed_at: row.try_get("processed_at")?,
+        attempts,
+    }))
+}
+
 pub async fn inbound_detail(
     db: &Db,
     access: &TenantAccess,
@@ -373,13 +508,17 @@ pub async fn inbound_detail(
                receipt.source_key, receipt.deduplication_key, receipt.content_type,
                octet_length(receipt.raw_payload)::BIGINT AS payload_bytes,
                encode(receipt.payload_sha256, 'hex') AS payload_sha256,
-               receipt.request_id,
+               receipt.request_id,processing.status AS processing_status,
+               processing.revision AS processing_revision,
+               processing.attempt_count AS processing_attempt_count,
                substring(receipt.raw_payload FROM 1 FOR $7) AS payload_preview
         FROM integration_inbox_receipts receipt
         LEFT JOIN inventory_owners owner
           ON owner.tenant_id=receipt.tenant_id AND owner.id=receipt.inventory_owner_id
         LEFT JOIN facilities facility
           ON facility.tenant_id=receipt.tenant_id AND facility.id=receipt.facility_id
+        LEFT JOIN integration_inbox_processings processing
+          ON processing.tenant_id=receipt.tenant_id AND processing.receipt_id=receipt.id
         WHERE receipt.tenant_id=$1 AND receipt.id=$2
           AND (receipt.facility_id IS NULL OR $3 OR receipt.facility_id=ANY($4))
           AND (receipt.inventory_owner_id IS NULL OR $5 OR receipt.inventory_owner_id=ANY($6))
@@ -394,6 +533,11 @@ pub async fn inbound_detail(
     .bind(INBOUND_PAYLOAD_PREVIEW_BYTES)
     .fetch_optional(&mut *tx)
     .await?;
+    let processing = if row.is_some() {
+        inbound_processing_tx(&mut tx, access.tenant_id, receipt_id).await?
+    } else {
+        None
+    };
     let detail = row
         .as_ref()
         .map(|row| -> AppResult<InboundIntegrationDetailReadModel> {
@@ -413,6 +557,7 @@ pub async fn inbound_detail(
             Ok(InboundIntegrationDetailReadModel {
                 preview_truncated: preview_bytes < receipt.payload_bytes,
                 receipt,
+                processing: processing.clone(),
                 payload_preview,
                 payload_preview_encoding,
                 preview_bytes,

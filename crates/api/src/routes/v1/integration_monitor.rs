@@ -6,10 +6,11 @@ use axum::Json;
 use wareboxes_api_contract::v1::{
     DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse,
     InboundIntegrationDetailResponse, InboundIntegrationPage as ApiInboundPage,
-    InboundIntegrationPageRequest, InboundIntegrationReceiptResponse,
+    InboundIntegrationPageRequest, InboundIntegrationProcessingAttemptResponse,
+    InboundIntegrationProcessingResponse, InboundIntegrationReceiptResponse,
     InboundIntegrationSort as ApiInboundSort,
     InboundPayloadPreviewEncoding as ApiInboundPayloadPreviewEncoding,
-    IntegrationSortDirection as ApiDirection, OpaqueCursor,
+    IntegrationOrderProcessingStatus, IntegrationSortDirection as ApiDirection, OpaqueCursor,
     OutboundDeliveryAttemptOutcome as ApiAttemptOutcome, OutboundDeliveryAttemptResponse,
     OutboundDeliveryStatus as ApiStatus, OutboundIntegrationDetailResponse,
     OutboundIntegrationEventResponse, OutboundIntegrationPage as ApiOutboundPage,
@@ -18,7 +19,8 @@ use wareboxes_api_contract::v1::{
     ReplayOutboxDeadLetterResponse,
 };
 use wareboxes_application::integration_monitor::{
-    DiscardOutboxDeadLetterCommand, DiscardOutboxDeadLetterResult, InboundIntegrationQuery,
+    DiscardOutboxDeadLetterCommand, DiscardOutboxDeadLetterResult,
+    InboundIntegrationProcessingReadModel, InboundIntegrationQuery,
     InboundIntegrationReceiptReadModel, InboundIntegrationSort, InboundPayloadPreviewEncoding,
     IntegrationSortDirection, OutboundDeliveryAttemptReadModel, OutboundDeliveryStatus,
     OutboundIntegrationDetailReadModel, OutboundIntegrationEventReadModel,
@@ -26,7 +28,9 @@ use wareboxes_application::integration_monitor::{
     ReplayOutboxDeadLetterResult,
 };
 use wareboxes_application::outbox::DeliveryAttemptOutcome;
-use wareboxes_domain::{FacilityId, InventoryOwnerId, OutboxDeadLetterDiscardReason};
+use wareboxes_domain::{
+    FacilityId, IntegrationInboxProcessingStatus, InventoryOwnerId, OutboxDeadLetterDiscardReason,
+};
 
 use super::error::{V1Error, V1Result};
 use crate::auth::CurrentTenant;
@@ -69,6 +73,7 @@ pub async fn inbound_detail(
         .ok_or_else(|| AppError::not_found("inbound integration receipt"))?;
     Ok(Json(InboundIntegrationDetailResponse {
         receipt: map_inbound(detail.receipt),
+        processing: detail.processing.map(map_inbound_processing).transpose()?,
         payload_preview: detail.payload_preview,
         payload_preview_encoding: match detail.payload_preview_encoding {
             InboundPayloadPreviewEncoding::Utf8 => ApiInboundPayloadPreviewEncoding::Utf8,
@@ -319,7 +324,78 @@ fn map_inbound(value: InboundIntegrationReceiptReadModel) -> InboundIntegrationR
         payload_bytes: value.payload_bytes,
         payload_sha256: value.payload_sha256,
         request_id: value.request_id,
+        processing_status: value.processing_status.map(api_processing_status),
+        processing_revision: value
+            .processing_revision
+            .map(|revision| wareboxes_api_contract::v1::Revision::new(revision.get()))
+            .transpose()
+            .ok()
+            .flatten(),
+        processing_attempt_count: value.processing_attempt_count,
     }
+}
+
+fn api_processing_status(
+    status: IntegrationInboxProcessingStatus,
+) -> IntegrationOrderProcessingStatus {
+    match status {
+        IntegrationInboxProcessingStatus::Quarantined => {
+            IntegrationOrderProcessingStatus::Quarantined
+        }
+        IntegrationInboxProcessingStatus::Processed => IntegrationOrderProcessingStatus::Processed,
+    }
+}
+
+fn map_inbound_processing(
+    value: InboundIntegrationProcessingReadModel,
+) -> V1Result<InboundIntegrationProcessingResponse> {
+    Ok(InboundIntegrationProcessingResponse {
+        processing_id: value.processing_id.get(),
+        adapter_key: value.adapter_key,
+        mapping_version: value.mapping_version,
+        status: api_processing_status(value.status),
+        revision: wareboxes_api_contract::v1::Revision::new(value.revision.get())
+            .map_err(|_| V1Error::internal("inbound processing revision is invalid"))?,
+        attempt_count: value.attempt_count,
+        order_id: value.order_id.map(|id| id.get()),
+        order_revision: value
+            .order_revision
+            .map(|revision| wareboxes_api_contract::v1::Revision::new(revision.get()))
+            .transpose()
+            .map_err(|_| V1Error::internal("inbound order revision is invalid"))?,
+        error_code: value.error_code,
+        error_message: value.error_message,
+        attempted_by: value.attempted_by.get(),
+        attempted_by_name: value.attempted_by_name,
+        attempted_at: value.attempted_at.to_rfc3339(),
+        processed_at: value.processed_at.map(|time| time.to_rfc3339()),
+        attempts: value
+            .attempts
+            .into_iter()
+            .map(|attempt| {
+                Ok(InboundIntegrationProcessingAttemptResponse {
+                    attempt_id: attempt.attempt_id.get(),
+                    attempt_number: attempt.attempt_number,
+                    status: api_processing_status(attempt.status),
+                    revision: wareboxes_api_contract::v1::Revision::new(attempt.revision.get())
+                        .map_err(|_| V1Error::internal("inbound attempt revision is invalid"))?,
+                    order_id: attempt.order_id.map(|id| id.get()),
+                    order_revision: attempt
+                        .order_revision
+                        .map(|revision| wareboxes_api_contract::v1::Revision::new(revision.get()))
+                        .transpose()
+                        .map_err(|_| {
+                            V1Error::internal("inbound attempt order revision is invalid")
+                        })?,
+                    error_code: attempt.error_code,
+                    error_message: attempt.error_message,
+                    attempted_by: attempt.attempted_by.get(),
+                    attempted_by_name: attempt.attempted_by_name,
+                    attempted_at: attempt.attempted_at.to_rfc3339(),
+                })
+            })
+            .collect::<V1Result<Vec<_>>>()?,
+    })
 }
 
 fn map_outbound(value: OutboundIntegrationEventReadModel) -> OutboundIntegrationEventResponse {

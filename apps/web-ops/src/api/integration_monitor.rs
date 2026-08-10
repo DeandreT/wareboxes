@@ -4,6 +4,7 @@ use wareboxes_api_contract::v1::{
     IntegrationSortDirection, OpaqueCursor, OutboundDeliveryStatus,
     OutboundIntegrationDetailResponse, OutboundIntegrationPage, OutboundIntegrationSort,
     ReplayOutboxDeadLetterRequest, ReplayOutboxDeadLetterResponse,
+    ReprocessIntegrationOrderRequest, ReprocessIntegrationOrderResponse,
 };
 
 use super::{internal_get, internal_post_idempotent, ApiError};
@@ -42,6 +43,19 @@ pub async fn inbound_integration_detail(
 
 pub fn inbound_payload_download_path(receipt_id: i64) -> String {
     format!("/api/v1/integration-monitor/inbound/{receipt_id}/payload")
+}
+
+pub async fn reprocess_inbound_order(
+    receipt_id: i64,
+    request: &ReprocessIntegrationOrderRequest,
+    idempotency_key: &str,
+) -> Result<ReprocessIntegrationOrderResponse, ApiError> {
+    internal_post_idempotent(
+        &format!("/api/v1/integration-monitor/inbound/{receipt_id}/reprocessings"),
+        request,
+        idempotency_key,
+    )
+    .await
 }
 
 pub async fn outbound_integrations(
@@ -233,6 +247,14 @@ mod tests {
         assert_eq!(
             inbound_payload_download_path(37),
             "/api/v1/integration-monitor/inbound/37/payload"
+        );
+    }
+
+    #[test]
+    fn inbound_reprocessing_is_receipt_scoped() {
+        assert_eq!(
+            format!("/api/v1/integration-monitor/inbound/{}/reprocessings", 37),
+            "/api/v1/integration-monitor/inbound/37/reprocessings"
         );
     }
 }

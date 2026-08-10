@@ -41,6 +41,14 @@ impl V1Error {
             violations: Vec::new(),
         }
     }
+
+    pub fn unsupported_media_type(message: impl Into<String>) -> Self {
+        Self::simple(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            ErrorReason::UnsupportedMediaType,
+            message,
+        )
+    }
 }
 
 impl From<AppError> for V1Error {
