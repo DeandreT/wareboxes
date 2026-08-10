@@ -193,7 +193,10 @@ pub use picking::{
 };
 pub use putaway::{
     ConfirmPutawayRequest, CreatePutawayTaskRequest, CreatePutawayTaskResponse,
-    PutawayConfirmationResponse,
+    PutawayCandidatePage, PutawayCandidatePageRequest, PutawayCandidateResponse,
+    PutawayCandidateSort, PutawayConfirmationResponse, PutawayLocationResponse,
+    PutawaySortDirection, PutawayWorkPage, PutawayWorkPageRequest, PutawayWorkResponse,
+    PutawayWorkSort, PutawayWorkStatus,
 };
 pub use putaway_claim::{
     ClaimNextPutawayRequest, ClaimPutawayByIdRequest, HeartbeatPutawayClaimRequest,

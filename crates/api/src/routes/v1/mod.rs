@@ -24,7 +24,7 @@ pub(crate) mod packing;
 mod pick_shortages;
 pub(crate) mod pick_waves;
 mod picking;
-mod putaway;
+pub(crate) mod putaway;
 mod putaway_claim_lifecycle;
 mod putaway_claims;
 pub(crate) mod replenishment;
@@ -366,7 +366,8 @@ pub fn router() -> Router<AppState> {
             "/orders/{order_id}/holds/{hold_id}/releases",
             post(order_holds::release),
         )
-        .route("/putaway-tasks", post(putaway::create))
+        .route("/putaway-candidates", get(putaway::candidates))
+        .route("/putaway-tasks", get(putaway::list).post(putaway::create))
         .route(
             "/putaway-tasks/{task_id}/confirmations",
             post(putaway::confirm),

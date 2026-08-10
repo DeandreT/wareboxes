@@ -93,6 +93,7 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
         "/packing" | "/packing/" => Some(WorkspaceBootstrapSection::Packing),
         "/shipping" | "/shipping/" => Some(WorkspaceBootstrapSection::Shipping),
         "/outbound-loads" | "/outbound-loads/" => Some(WorkspaceBootstrapSection::OutboundLoads),
+        "/putaway" | "/putaway/" => Some(WorkspaceBootstrapSection::Putaway),
         "/replenishment" | "/replenishment/" => Some(WorkspaceBootstrapSection::Replenishment),
         "/inventory" | "/inventory/" => Some(WorkspaceBootstrapSection::Inventory),
         "/access" | "/access/" => Some(WorkspaceBootstrapSection::Access),
@@ -137,6 +138,8 @@ async fn workspace_bootstrap(
                 packing_queue: None,
                 shipping_queue: None,
                 outbound_load_queue: None,
+                putaway_candidates: None,
+                putaway_work: None,
                 replenishment_policies: None,
                 replenishment_queue: None,
                 balances,
@@ -247,6 +250,23 @@ async fn workspace_bootstrap(
                 ..WorkspaceBootstrapData::default()
             })
         }
+        WorkspaceBootstrapSection::Putaway => {
+            if !has_permission(session, "wms") {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            let ((putaway_candidates, putaway_work), access_workspace, locations) = tokio::try_join!(
+                routes::v1::putaway::pages_for_access(state, access, 100),
+                routes::access::workspace_for_access(state, access),
+                routes::locations::list_for_access(state, access, false),
+            )?;
+            Ok(WorkspaceBootstrapData {
+                putaway_candidates: Some(putaway_candidates),
+                putaway_work: Some(putaway_work),
+                access: access_workspace,
+                locations,
+                ..WorkspaceBootstrapData::default()
+            })
+        }
         WorkspaceBootstrapSection::Inventory => {
             if !has_permission(session, "wms") {
                 return Ok(WorkspaceBootstrapData::default());
@@ -318,6 +338,10 @@ mod tests {
         assert_eq!(
             section_for_path("/outbound-loads"),
             Some(WorkspaceBootstrapSection::OutboundLoads)
+        );
+        assert_eq!(
+            section_for_path("/putaway"),
+            Some(WorkspaceBootstrapSection::Putaway)
         );
         assert_eq!(
             section_for_path("/replenishment"),

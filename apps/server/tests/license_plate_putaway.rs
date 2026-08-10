@@ -10,7 +10,7 @@ use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     CreateLicensePlatePutawayTaskResponse, ErrorReason, ErrorResponse,
-    LicensePlatePutawayConfirmationResponse,
+    LicensePlatePutawayConfirmationResponse, PutawayCandidatePage, PutawayWorkPage,
 };
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::{
@@ -69,6 +69,26 @@ async fn send(
 ) -> axum::response::Response {
     app.clone()
         .oneshot(request(token, tenant_id, uri, idempotency_key, body))
+        .await
+        .unwrap()
+}
+
+async fn get(
+    app: &axum::Router,
+    token: &str,
+    tenant_id: TenantId,
+    uri: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(uri)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(TENANT_ID_HEADER, tenant_id.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap()
 }
@@ -395,6 +415,24 @@ async fn whole_license_plate_putaway_is_atomic_replay_safe_and_rejects_content_d
 
     let token = auth::create_session(&fixture.db, user.id).await.unwrap();
     let app = routes::app(AppState::new(fixture.db.clone()));
+    let candidates = get(
+        &app,
+        &token,
+        tenant_id,
+        "/api/v1/putaway-candidates?limit=100&workflow=license_plate&sort=quantity&direction=desc",
+    )
+    .await;
+    assert_eq!(candidates.status(), StatusCode::OK);
+    let candidates: PutawayCandidatePage = response_json(candidates).await;
+    let candidate = candidates
+        .items
+        .iter()
+        .find(|candidate| candidate.license_plate_id == Some(license_plate_id))
+        .expect("received plate is eligible for putaway");
+    assert_eq!(candidate.balance_count, 2);
+    assert_eq!(candidate.item_count, 2);
+    assert_eq!(candidate.available_quantity, quantities[0] + quantities[1]);
+
     let create_body = json!({
         "license_plate_id": license_plate_id,
         "destination_location_id": destination_location_id,
@@ -414,6 +452,22 @@ async fn whole_license_plate_putaway_is_atomic_replay_safe_and_rejects_content_d
     assert_eq!(created.status(), StatusCode::OK);
     let created: CreateLicensePlatePutawayTaskResponse = response_json(created).await;
     assert!(created.task_id > 0);
+    let work = get(
+        &app,
+        &token,
+        tenant_id,
+        "/api/v1/putaway-tasks?limit=100&workflow=license_plate&sort=priority&direction=desc",
+    )
+    .await;
+    assert_eq!(work.status(), StatusCode::OK);
+    let work: PutawayWorkPage = response_json(work).await;
+    let work = work
+        .items
+        .iter()
+        .find(|work| work.task_id == created.task_id)
+        .expect("planned plate task is visible");
+    assert_eq!(work.balance_count, 2);
+    assert_eq!(work.planned_quantity, quantities[0] + quantities[1]);
 
     let replayed_create = send(
         &app,

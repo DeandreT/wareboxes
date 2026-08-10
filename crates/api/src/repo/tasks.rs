@@ -28,6 +28,7 @@ mod license_plate_putaway;
 mod putaway;
 mod putaway_claim;
 mod putaway_claim_lifecycle;
+mod putaway_read_model;
 mod queries;
 mod references;
 
@@ -44,6 +45,7 @@ pub use license_plate_putaway::*;
 pub use putaway::*;
 pub use putaway_claim::*;
 pub use putaway_claim_lifecycle::*;
+pub use putaway_read_model::*;
 pub use queries::*;
 
 pub(crate) async fn release_tasks_outside_scope_tx(

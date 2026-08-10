@@ -22,6 +22,7 @@ pub mod outbox;
 pub mod packing;
 pub mod pick_wave;
 pub mod picking;
+pub mod putaway;
 pub mod replenishment;
 pub mod shipping;
 pub mod topology;

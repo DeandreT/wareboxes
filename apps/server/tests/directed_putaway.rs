@@ -9,7 +9,8 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    CreatePutawayTaskResponse, ErrorReason, ErrorResponse, PutawayConfirmationResponse,
+    CreatePutawayTaskResponse, ErrorReason, ErrorResponse, PutawayCandidatePage,
+    PutawayConfirmationResponse, PutawayWorkPage,
 };
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::{InboundReceiptExceptionReason, InventoryHoldReason};
@@ -50,6 +51,26 @@ async fn send(
             idempotency_key,
             body,
         ))
+        .await
+        .unwrap()
+}
+
+async fn get(
+    app: &axum::Router,
+    token: &str,
+    tenant_id: TenantId,
+    uri: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(uri)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(TENANT_ID_HEADER, tenant_id.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap()
 }
@@ -184,6 +205,22 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
 
     let token = auth::create_session(&fixture.db, user.id).await.unwrap();
     let app = routes::app(AppState::new(fixture.db.clone()));
+    let candidates = get(
+        &app,
+        &token,
+        tenant_id,
+        "/api/v1/putaway-candidates?limit=100&sort=quantity&direction=desc",
+    )
+    .await;
+    assert_eq!(candidates.status(), StatusCode::OK);
+    let candidates: PutawayCandidatePage = response_json(candidates).await;
+    assert_eq!(candidates.items.len(), 1);
+    assert_eq!(
+        candidates.items[0].source_inventory_balance_id,
+        Some(source_inventory_balance_id)
+    );
+    assert_eq!(candidates.items[0].available_quantity, 10);
+
     let create_body = json!({
         "source_inventory_balance_id": source_inventory_balance_id,
         "destination_location_id": destination_location_id,
@@ -204,6 +241,31 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
     assert_eq!(created.status(), StatusCode::OK);
     let created: CreatePutawayTaskResponse = response_json(created).await;
     assert!(created.task_id > 0);
+
+    let candidates_after_plan = get(
+        &app,
+        &token,
+        tenant_id,
+        "/api/v1/putaway-candidates?limit=100",
+    )
+    .await;
+    assert_eq!(candidates_after_plan.status(), StatusCode::OK);
+    assert!(response_json::<PutawayCandidatePage>(candidates_after_plan)
+        .await
+        .items
+        .is_empty());
+    let work = get(
+        &app,
+        &token,
+        tenant_id,
+        "/api/v1/putaway-tasks?limit=100&sort=priority&direction=desc",
+    )
+    .await;
+    assert_eq!(work.status(), StatusCode::OK);
+    let work: PutawayWorkPage = response_json(work).await;
+    assert_eq!(work.items.len(), 1);
+    assert_eq!(work.items[0].task_id, created.task_id);
+    assert_eq!(work.items[0].planned_quantity, 6);
 
     let replayed_create = send(
         &app,
@@ -291,6 +353,19 @@ async fn directed_putaway_is_claimed_scanned_atomic_and_replay_safe() {
     assert_eq!(confirmed.destination_location_barcode, "PUTAWAY-A-01");
     assert_eq!(confirmed.quantity, 6);
     assert_eq!(confirmed.inventory_status, "available");
+
+    let completed_work = get(
+        &app,
+        &token,
+        tenant_id,
+        "/api/v1/putaway-tasks?limit=100&status=completed&sort=created_at&direction=asc",
+    )
+    .await;
+    assert_eq!(completed_work.status(), StatusCode::OK);
+    let completed_work: PutawayWorkPage = response_json(completed_work).await;
+    assert_eq!(completed_work.items.len(), 1);
+    assert_eq!(completed_work.items[0].task_id, created.task_id);
+    assert!(completed_work.items[0].completed_at.is_some());
 
     let replayed_confirmation = send(
         &app,
