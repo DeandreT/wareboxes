@@ -29,6 +29,7 @@ pub mod picking;
 pub mod putaway;
 pub mod replenishment;
 pub mod shipping;
+pub mod storage_zone;
 pub mod topology;
 
 pub use context::CommandContext;

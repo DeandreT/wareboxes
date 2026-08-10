@@ -940,7 +940,7 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                 view! { <Loads data on_unauthorized=session_expired_callback()/> }.into_any()
             }
             Section::Catalog if has_permission(&session, "wms") => {
-                view! { <CatalogWorkbench on_unauthorized=session_expired_callback()/> }.into_any()
+                view! { <CatalogWorkbench on_unauthorized=session_expired_callback() can_supervise=has_permission(&session,"wms_supervisor")/> }.into_any()
             }
             Section::Inventory if has_permission(&session, "wms") => {
                 view! { <Inventory data/> }.into_any()

@@ -1,8 +1,8 @@
 .catalog-workbench {
   display: grid;
   min-width: 0;
-  height: calc(100vh - 58px);
-  min-height: 620px;
+  height: calc(100vh - 76px);
+  min-height: min(620px, calc(100vh - 76px));
   grid-template-rows: auto 34px minmax(0, 1fr);
   color: var(--ink);
 }
@@ -199,6 +199,152 @@
 .catalog-row-link:focus-visible {
   outline: 2px solid var(--blue);
   outline-offset: 2px;
+}
+
+.storage-zone-layout .catalog-browser {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.storage-zone-toolbar > label {
+  min-width: 118px;
+  margin: 0;
+}
+
+.storage-zone-toolbar select {
+  min-width: 118px;
+}
+
+.storage-zone-table {
+  min-width: 760px;
+}
+
+.storage-zone-detail {
+  padding-bottom: 8px;
+}
+
+.storage-zone-members {
+  min-height: 0;
+  width: 100%;
+  max-width: 100%;
+  margin: 10px 0 0;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  box-sizing: border-box;
+}
+
+.storage-zone-members h3 {
+  margin: 0;
+  padding: 8px 14px 5px;
+  font-size: 11px;
+}
+
+.storage-zone-members table {
+  min-width: 520px;
+}
+
+.destructive-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--danger);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.storage-zone-dialog {
+  width: min(760px, calc(100vw - 48px));
+  max-height: calc(100vh - 72px);
+  overflow: hidden;
+}
+
+.storage-zone-dialog fieldset {
+  display: grid;
+  min-height: 0;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+}
+
+.storage-zone-form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.storage-zone-location-picker {
+  min-height: 0;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--line);
+}
+
+.storage-zone-location-picker > div:first-child {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.storage-zone-location-picker h3 {
+  margin: 0;
+  font-size: 11px;
+}
+
+.storage-zone-location-picker > div:first-child span {
+  color: var(--ink-soft);
+  font-size: 10px;
+}
+
+.storage-zone-location-option {
+  display: grid !important;
+  min-height: 36px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px !important;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.storage-zone-location-option:last-child {
+  border-bottom: 0;
+}
+
+.storage-zone-location-option:hover {
+  background: var(--surface-raised);
+}
+
+.storage-zone-location-option input {
+  width: 14px !important;
+  height: 14px !important;
+  margin: 0;
+}
+
+.storage-zone-location-option span {
+  display: grid;
+  min-width: 0;
+}
+
+.storage-zone-location-option strong,
+.storage-zone-location-option small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storage-zone-location-option strong {
+  font-size: 10px;
+}
+
+.storage-zone-location-option small,
+.catalog-command-note {
+  color: var(--ink-soft);
+  font-size: 9px;
 }
 
 .catalog-badge,

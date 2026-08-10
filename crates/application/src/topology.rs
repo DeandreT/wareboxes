@@ -28,4 +28,9 @@ pub struct LocationReadModel {
     pub active: bool,
     pub pickable: bool,
     pub receivable: bool,
+    pub storage_zone_id: Option<i64>,
+    pub storage_zone_code: Option<String>,
+    pub storage_zone_name: Option<String>,
+    pub storage_zone_purpose: Option<String>,
+    pub storage_zone_travel_sequence: Option<i64>,
 }

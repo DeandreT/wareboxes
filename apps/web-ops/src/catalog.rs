@@ -12,10 +12,13 @@ mod items;
 mod license_plates;
 #[path = "catalog_locations.rs"]
 mod locations;
+#[path = "catalog_storage_zones.rs"]
+mod storage_zones;
 
 use items::ItemCatalog;
 use license_plates::LicensePlateCatalog;
 use locations::LocationCatalog;
+use storage_zones::StorageZoneCatalog;
 
 #[derive(Clone, Default)]
 pub(crate) struct CatalogData {
@@ -60,10 +63,11 @@ enum CatalogSection {
     Items,
     Locations,
     LicensePlates,
+    StorageZones,
 }
 
 #[component]
-pub fn CatalogWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
+pub fn CatalogWorkbench(on_unauthorized: Callback<()>, can_supervise: bool) -> impl IntoView {
     let store = CatalogStore {
         data: RwSignal::new(CatalogData::default()),
         load_state: RwSignal::new(LoadState::Loading),
@@ -80,7 +84,7 @@ pub fn CatalogWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                 <div>
                     <p class="eyebrow">"Warehouse setup"</p>
                     <h1>"Master data"</h1>
-                    <p>"Maintain sellable items, facility locations, and scannable license plates."</p>
+                    <p>"Maintain sellable items, storage topology, facility locations, and scannable license plates."</p>
                 </div>
                 <button
                     class="button secondary-action compact"
@@ -132,6 +136,14 @@ pub fn CatalogWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                     "License plates"
                     <span>{move || store.data.get().license_plates.len()}</span>
                 </button>
+                <button
+                    type="button"
+                    class:active=move || section.get() == CatalogSection::StorageZones
+                    aria-current=move || (section.get() == CatalogSection::StorageZones).then_some("page")
+                    on:click=move |_| section.set(CatalogSection::StorageZones)
+                >
+                    "Storage zones"
+                </button>
             </nav>
 
             {move || match store.load_state.get() {
@@ -167,6 +179,9 @@ pub fn CatalogWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                     CatalogSection::Locations => view! { <LocationCatalog store/> }.into_any(),
                     CatalogSection::LicensePlates => {
                         view! { <LicensePlateCatalog store/> }.into_any()
+                    }
+                    CatalogSection::StorageZones => {
+                        view! { <StorageZoneCatalog store can_supervise/> }.into_any()
                     }
                 },
             }}

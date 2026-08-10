@@ -38,6 +38,7 @@ pub mod pick_wave;
 pub mod picking;
 pub mod replenishment;
 pub mod shipping;
+pub mod storage_zone;
 pub mod tasks;
 pub mod tenants;
 pub mod unexpected_receipt;

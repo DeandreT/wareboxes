@@ -336,6 +336,16 @@ pub struct Location {
     pub active: bool,
     pub pickable: bool,
     pub receivable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_zone_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_zone_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_zone_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_zone_purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_zone_travel_sequence: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------

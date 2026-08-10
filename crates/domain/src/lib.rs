@@ -19,6 +19,7 @@ mod pick_wave;
 mod picking;
 mod replenishment;
 mod shipping;
+mod storage_zone;
 mod tenant;
 
 pub use allocation::{
@@ -154,6 +155,11 @@ pub use shipping::{
     MAX_SHIPMENT_CANCELLATION_NOTE_LENGTH, MAX_SHIPMENT_SCAN_VALUE_LENGTH,
     MAX_TRACKING_NUMBER_LENGTH,
 };
+pub use storage_zone::{
+    StorageZoneCode, StorageZoneDefinition, StorageZoneError, StorageZoneLocationIds,
+    StorageZoneName, StorageZonePurpose, StorageZoneRevision, StorageZoneStatus,
+    StorageZoneTravelSequence, MAX_STORAGE_ZONE_CODE_LENGTH, MAX_STORAGE_ZONE_NAME_LENGTH,
+};
 pub use tenant::TenantStatus;
 
 use chrono::{DateTime, Utc};
@@ -252,6 +258,7 @@ positive_id!(
 );
 positive_id!(InventoryHoldId, "inventory hold ID");
 positive_id!(InventoryRecallId, "inventory recall ID");
+positive_id!(StorageZoneId, "storage zone ID");
 positive_id!(
     InboundInspectionDispositionId,
     "inbound inspection disposition ID"

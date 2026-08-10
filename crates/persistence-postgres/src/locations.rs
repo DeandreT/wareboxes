@@ -24,6 +24,11 @@ fn map(row: &sqlx::postgres::PgRow) -> PersistenceResult<LocationReadModel> {
         active: row.try_get("active")?,
         pickable: row.try_get("pickable")?,
         receivable: row.try_get("receivable")?,
+        storage_zone_id: row.try_get("storage_zone_id")?,
+        storage_zone_code: row.try_get("storage_zone_code")?,
+        storage_zone_name: row.try_get("storage_zone_name")?,
+        storage_zone_purpose: row.try_get("storage_zone_purpose")?,
+        storage_zone_travel_sequence: row.try_get("storage_zone_travel_sequence")?,
     })
 }
 
@@ -37,10 +42,25 @@ pub async fn get_locations(
         r#"
         SELECT l.id, l.tenant_id, l.created, l.deleted, l.facility_id,
                w.name AS facility_name, l.parent_location_id, l.barcode,
-               l.name, l.type, l.active, l.pickable, l.receivable
+               l.name, l.type, l.active, l.pickable, l.receivable,
+               active_zone.storage_zone_id, active_zone.storage_zone_code,
+               active_zone.storage_zone_name, active_zone.storage_zone_purpose,
+               active_zone.storage_zone_travel_sequence
         FROM locations l
         INNER JOIN facilities w
             ON w.tenant_id = l.tenant_id AND w.id = l.facility_id
+        LEFT JOIN (
+            SELECT member.tenant_id, member.facility_id, member.location_id,
+                   zone.id AS storage_zone_id, zone.code AS storage_zone_code,
+                   zone.name AS storage_zone_name, zone.purpose AS storage_zone_purpose,
+                   zone.travel_sequence AS storage_zone_travel_sequence
+            FROM storage_zone_locations member
+            JOIN storage_zones zone
+              ON zone.tenant_id=member.tenant_id AND zone.facility_id=member.facility_id
+             AND zone.id=member.storage_zone_id AND zone.effective_to IS NULL
+        ) active_zone
+          ON active_zone.tenant_id=l.tenant_id AND active_zone.facility_id=l.facility_id
+         AND active_zone.location_id=l.id
         WHERE l.tenant_id = $1 AND ($2 OR l.deleted IS NULL)
         ORDER BY l.id
         "#,
@@ -74,11 +94,27 @@ pub async fn get_locations_in_scope(
         SELECT location.id, location.tenant_id, location.created, location.deleted,
                location.facility_id, facility.name AS facility_name,
                location.parent_location_id, location.barcode, location.name,
-               location.type, location.active, location.pickable, location.receivable
+               location.type, location.active, location.pickable, location.receivable,
+               active_zone.storage_zone_id, active_zone.storage_zone_code,
+               active_zone.storage_zone_name, active_zone.storage_zone_purpose,
+               active_zone.storage_zone_travel_sequence
         FROM locations location
         INNER JOIN facilities facility
             ON facility.tenant_id = location.tenant_id
            AND facility.id = location.facility_id
+        LEFT JOIN (
+            SELECT member.tenant_id, member.facility_id, member.location_id,
+                   zone.id AS storage_zone_id, zone.code AS storage_zone_code,
+                   zone.name AS storage_zone_name, zone.purpose AS storage_zone_purpose,
+                   zone.travel_sequence AS storage_zone_travel_sequence
+            FROM storage_zone_locations member
+            JOIN storage_zones zone
+              ON zone.tenant_id=member.tenant_id AND zone.facility_id=member.facility_id
+             AND zone.id=member.storage_zone_id AND zone.effective_to IS NULL
+        ) active_zone
+          ON active_zone.tenant_id=location.tenant_id
+         AND active_zone.facility_id=location.facility_id
+         AND active_zone.location_id=location.id
         WHERE location.tenant_id = $1
           AND ($2 OR location.deleted IS NULL)
           AND ($3 OR location.facility_id = ANY($4))

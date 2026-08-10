@@ -15,6 +15,7 @@ use super::{label_or_id, optional_text, CatalogStore};
 enum LocationSort {
     Id,
     Facility,
+    Zone,
     Name,
     Barcode,
     Type,
@@ -37,8 +38,8 @@ pub(super) fn LocationCatalog(store: CatalogStore) -> impl IntoView {
             <section class="data-section catalog-browser">
                 <div class="catalog-toolbar">
                     <SearchField
-                        label="Filter locations by name, scan code, type, or facility".to_owned()
-                        placeholder="Name, scan code, type, or facility"
+                        label="Filter locations by name, scan code, zone, type, or facility".to_owned()
+                        placeholder="Name, scan code, zone, type, or facility"
                         value=filter
                     />
                     <label class="catalog-check">
@@ -81,6 +82,7 @@ pub(super) fn LocationCatalog(store: CatalogStore) -> impl IntoView {
                             <tr>
                                 <SortableHeader label="ID" active=move || sort.get().key == LocationSort::Id direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, LocationSort::Id)) numeric=true/>
                                 <SortableHeader label="Facility" active=move || sort.get().key == LocationSort::Facility direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, LocationSort::Facility))/>
+                                <SortableHeader label="Zone" active=move || sort.get().key == LocationSort::Zone direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, LocationSort::Zone))/>
                                 <SortableHeader label="Location" active=move || sort.get().key == LocationSort::Name direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, LocationSort::Name))/>
                                 <SortableHeader label="Scan code" active=move || sort.get().key == LocationSort::Barcode direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, LocationSort::Barcode))/>
                                 <SortableHeader label="Type" active=move || sort.get().key == LocationSort::Type direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, LocationSort::Type))/>
@@ -100,7 +102,7 @@ pub(super) fn LocationCatalog(store: CatalogStore) -> impl IntoView {
                                 );
                                 if locations.is_empty() {
                                     view! {
-                                        <tr><td class="table-empty-row" colspan="7">"No locations match this view."</td></tr>
+                                        <tr><td class="table-empty-row" colspan="8">"No locations match this view."</td></tr>
                                     }
                                     .into_any()
                                 } else {
@@ -113,6 +115,7 @@ pub(super) fn LocationCatalog(store: CatalogStore) -> impl IntoView {
                                                 <tr class:selected=move || selected_id.get() == Some(id)>
                                                     <td class="numeric muted">{id}</td>
                                                     <td>{facility_label(&data.facilities, location.facility_id)}</td>
+                                                    <td>{storage_zone_table_label(&location)}</td>
                                                     <td>
                                                         <button
                                                             class="catalog-row-link"
@@ -417,7 +420,7 @@ fn LocationDetail(
                 <div>
                     <p class="eyebrow">{format!("Location #{id}")}</p>
                     <h2>{location_label(&location)}</h2>
-                    <small>{facility_label(&facilities, facility_id)}</small>
+                    <small>{format!("{} / {}", facility_label(&facilities, facility_id), storage_zone_detail_label(&location))}</small>
                 </div>
                 <span class=location_status(&location).1>{location_status(&location).0}</span>
             </div>
@@ -556,6 +559,24 @@ fn visible_locations(
                         .to_ascii_lowercase()
                         .contains(&query)
                     || location.r#type.to_ascii_lowercase().contains(&query)
+                    || location
+                        .storage_zone_code
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .contains(&query)
+                    || location
+                        .storage_zone_name
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .contains(&query)
+                    || location
+                        .storage_zone_purpose
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .contains(&query)
                     || facility_label(facilities, location.facility_id)
                         .to_ascii_lowercase()
                         .contains(&query))
@@ -585,6 +606,14 @@ fn compare_locations(
         LocationSort::Facility => facility_label(facilities, left.facility_id)
             .to_ascii_lowercase()
             .cmp(&facility_label(facilities, right.facility_id).to_ascii_lowercase()),
+        LocationSort::Zone => left
+            .storage_zone_travel_sequence
+            .unwrap_or(i64::MAX)
+            .cmp(&right.storage_zone_travel_sequence.unwrap_or(i64::MAX))
+            .then_with(|| {
+                normalized(left.storage_zone_code.as_deref())
+                    .cmp(&normalized(right.storage_zone_code.as_deref()))
+            }),
         LocationSort::Name => location_label(left)
             .to_ascii_lowercase()
             .cmp(&location_label(right).to_ascii_lowercase()),
@@ -611,6 +640,24 @@ fn location_label(location: &Location) -> String {
         .or(location.barcode.as_deref())
         .map(str::to_owned)
         .unwrap_or_else(|| format!("Location #{}", location.id))
+}
+
+fn storage_zone_table_label(location: &Location) -> String {
+    location
+        .storage_zone_code
+        .clone()
+        .unwrap_or_else(|| "Unzoned".to_owned())
+}
+
+fn storage_zone_detail_label(location: &Location) -> String {
+    match (
+        location.storage_zone_code.as_deref(),
+        location.storage_zone_name.as_deref(),
+    ) {
+        (Some(code), Some(name)) => format!("{code} - {name}"),
+        (Some(code), None) => code.to_owned(),
+        _ => "Unzoned".to_owned(),
+    }
 }
 
 fn location_status(location: &Location) -> (&'static str, &'static str) {

@@ -33,6 +33,7 @@ pub(crate) mod replenishment;
 mod rf_sessions;
 mod shipping;
 pub(crate) mod shipping_queue;
+mod storage_zones;
 
 use axum::middleware;
 use axum::routing::{get, post};
@@ -109,6 +110,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/inventory/integrity-issues",
             get(inventory_integrity::issues),
+        )
+        .route(
+            "/storage-zones",
+            get(storage_zones::list).post(storage_zones::configure),
+        )
+        .route(
+            "/storage-zones/{storage_zone_id}/retirements",
+            post(storage_zones::retire),
         )
         .route(
             "/inventory/rollups/by-location",

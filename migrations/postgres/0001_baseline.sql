@@ -32835,6 +32835,367 @@ REVOKE ALL ON FUNCTION public.guard_inventory_recall_case_mutation() FROM PUBLIC
 REVOKE ALL ON FUNCTION public.reject_inventory_recall_case_hold_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_inventory_recall_consistency() FROM PUBLIC;
 
+-- Versioned facility storage zones and immutable location membership.
+CREATE TABLE public.storage_zones (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    code text NOT NULL,
+    name text NOT NULL,
+    purpose text NOT NULL,
+    travel_sequence bigint NOT NULL,
+    revision bigint NOT NULL,
+    supersedes_storage_zone_id bigint,
+    location_count bigint NOT NULL,
+    effective_from timestamptz NOT NULL,
+    effective_to timestamptz,
+    configured_by_user_id bigint NOT NULL,
+    configured_at timestamptz NOT NULL,
+    retired_by_user_id bigint,
+    CONSTRAINT storage_zones_scope_id_key UNIQUE (tenant_id, facility_id, id),
+    CONSTRAINT storage_zones_revision_key UNIQUE (tenant_id, facility_id, code, revision),
+    CONSTRAINT storage_zones_code_check CHECK (
+        code = upper(btrim(code)) AND code <> '' AND char_length(code) <= 32
+        AND code ~ '^[A-Z0-9_-]+$'
+    ),
+    CONSTRAINT storage_zones_name_check CHECK (
+        name = btrim(name) AND name <> '' AND char_length(name) <= 120
+    ),
+    CONSTRAINT storage_zones_purpose_check CHECK (
+        purpose IN ('receiving', 'reserve', 'pick', 'staging', 'packing', 'shipping', 'quarantine', 'damage')
+    ),
+    CONSTRAINT storage_zones_travel_sequence_check CHECK (travel_sequence >= 0),
+    CONSTRAINT storage_zones_revision_check CHECK (
+        revision > 0 AND (
+            (revision = 1 AND supersedes_storage_zone_id IS NULL)
+            OR (revision > 1 AND supersedes_storage_zone_id IS NOT NULL)
+        )
+    ),
+    CONSTRAINT storage_zones_location_count_check CHECK (location_count > 0),
+    CONSTRAINT storage_zones_effective_check CHECK (
+        effective_from >= configured_at AND (
+            (effective_to IS NULL AND retired_by_user_id IS NULL)
+            OR (effective_to > effective_from AND retired_by_user_id IS NOT NULL)
+        )
+    ),
+    CONSTRAINT storage_zones_facility_fkey FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities (tenant_id, id),
+    CONSTRAINT storage_zones_configured_by_fkey FOREIGN KEY (tenant_id, configured_by_user_id)
+        REFERENCES public.tenant_memberships (tenant_id, user_id),
+    CONSTRAINT storage_zones_retired_by_fkey FOREIGN KEY (tenant_id, retired_by_user_id)
+        REFERENCES public.tenant_memberships (tenant_id, user_id),
+    CONSTRAINT storage_zones_supersedes_fkey FOREIGN KEY (tenant_id, facility_id, supersedes_storage_zone_id)
+        REFERENCES public.storage_zones (tenant_id, facility_id, id)
+);
+
+CREATE TABLE public.storage_zone_locations (
+    tenant_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    storage_zone_id bigint NOT NULL,
+    location_id bigint NOT NULL,
+    location_sequence bigint NOT NULL,
+    PRIMARY KEY (tenant_id, storage_zone_id, location_id),
+    CONSTRAINT storage_zone_locations_sequence_key UNIQUE (tenant_id, storage_zone_id, location_sequence),
+    CONSTRAINT storage_zone_locations_sequence_check CHECK (location_sequence > 0),
+    CONSTRAINT storage_zone_locations_zone_fkey FOREIGN KEY (tenant_id, facility_id, storage_zone_id)
+        REFERENCES public.storage_zones (tenant_id, facility_id, id),
+    CONSTRAINT storage_zone_locations_location_fkey FOREIGN KEY (tenant_id, facility_id, location_id)
+        REFERENCES public.locations (tenant_id, facility_id, id)
+);
+
+CREATE UNIQUE INDEX storage_zones_one_active_code_idx
+ON public.storage_zones (tenant_id, facility_id, code)
+WHERE effective_to IS NULL;
+CREATE INDEX storage_zones_page_idx
+ON public.storage_zones (tenant_id, travel_sequence, id);
+CREATE INDEX storage_zones_facility_page_idx
+ON public.storage_zones (tenant_id, facility_id, travel_sequence, id);
+CREATE INDEX storage_zone_locations_location_idx
+ON public.storage_zone_locations (tenant_id, facility_id, location_id, storage_zone_id);
+
+CREATE FUNCTION public.validate_storage_zone() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    predecessor public.storage_zones%ROWTYPE;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        concat_ws(':', 'storage_zone', NEW.tenant_id, NEW.facility_id, NEW.code), 0
+    ));
+
+    IF NOT EXISTS (
+        SELECT 1 FROM public.facilities facility
+        WHERE facility.tenant_id = NEW.tenant_id
+          AND facility.id = NEW.facility_id
+          AND facility.deleted IS NULL
+    ) OR NOT EXISTS (
+        SELECT 1 FROM public.tenant_memberships membership
+        WHERE membership.tenant_id = NEW.tenant_id
+          AND membership.user_id = NEW.configured_by_user_id
+          AND membership.deleted IS NULL
+    ) THEN
+        RAISE EXCEPTION 'storage zone requires an active facility and configuring membership'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.supersedes_storage_zone_id IS NULL THEN
+        IF NEW.revision <> 1 THEN
+            RAISE EXCEPTION 'initial storage zone revision must be one'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    SELECT * INTO predecessor
+    FROM public.storage_zones zone
+    WHERE zone.tenant_id = NEW.tenant_id
+      AND zone.facility_id = NEW.facility_id
+      AND zone.id = NEW.supersedes_storage_zone_id;
+
+    IF NOT FOUND
+       OR predecessor.code <> NEW.code
+       OR predecessor.revision + 1 <> NEW.revision
+       OR predecessor.effective_to IS NULL
+       OR predecessor.retired_by_user_id IS NULL
+       OR NEW.effective_from < predecessor.effective_to
+       OR EXISTS (
+           SELECT 1 FROM public.storage_zones newer
+           WHERE newer.tenant_id = NEW.tenant_id
+             AND newer.facility_id = NEW.facility_id
+             AND newer.code = NEW.code
+             AND newer.revision > predecessor.revision
+       )
+    THEN
+        RAISE EXCEPTION 'storage zone successor does not match its closed predecessor'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_storage_zone_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'storage zones are immutable' USING ERRCODE = '23514';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        concat_ws(':', 'storage_zone', OLD.tenant_id, OLD.facility_id, OLD.code), 0
+    ));
+    IF NEW.id <> OLD.id
+       OR NEW.tenant_id <> OLD.tenant_id
+       OR NEW.facility_id <> OLD.facility_id
+       OR NEW.code <> OLD.code
+       OR NEW.name <> OLD.name
+       OR NEW.purpose <> OLD.purpose
+       OR NEW.travel_sequence <> OLD.travel_sequence
+       OR NEW.revision <> OLD.revision
+       OR NEW.supersedes_storage_zone_id IS DISTINCT FROM OLD.supersedes_storage_zone_id
+       OR NEW.location_count <> OLD.location_count
+       OR NEW.effective_from <> OLD.effective_from
+       OR NEW.configured_by_user_id <> OLD.configured_by_user_id
+       OR NEW.configured_at <> OLD.configured_at
+       OR OLD.effective_to IS NOT NULL
+       OR NEW.effective_to IS NULL
+       OR NEW.retired_by_user_id IS NULL
+       OR NEW.effective_to <= OLD.effective_from
+    THEN
+        RAISE EXCEPTION 'only active storage zone retirement is allowed'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_storage_zone_location() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    zone_purpose text;
+    location_pickable boolean;
+    location_receivable boolean;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        concat_ws(':', 'storage_zone_location', NEW.tenant_id, NEW.facility_id, NEW.location_id), 0
+    ));
+
+    SELECT zone.purpose INTO zone_purpose
+    FROM public.storage_zones zone
+    WHERE zone.tenant_id = NEW.tenant_id
+      AND zone.facility_id = NEW.facility_id
+      AND zone.id = NEW.storage_zone_id
+      AND zone.effective_to IS NULL;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'storage zone location requires an active zone'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT location.pickable, location.receivable
+    INTO location_pickable, location_receivable
+    FROM public.locations location
+    WHERE location.tenant_id = NEW.tenant_id
+      AND location.facility_id = NEW.facility_id
+      AND location.id = NEW.location_id
+      AND location.deleted IS NULL
+      AND location.active
+      AND NULLIF(btrim(location.barcode), '') IS NOT NULL
+    FOR SHARE;
+    IF NOT FOUND
+       OR (zone_purpose = 'receiving' AND (NOT location_receivable OR location_pickable))
+       OR (zone_purpose = 'pick' AND (NOT location_pickable OR location_receivable))
+       OR (zone_purpose NOT IN ('receiving', 'pick') AND (location_pickable OR location_receivable))
+    THEN
+        RAISE EXCEPTION 'storage zone location flags are incompatible with zone purpose'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.storage_zone_locations other_member
+        JOIN public.storage_zones other_zone
+          ON other_zone.tenant_id = other_member.tenant_id
+         AND other_zone.facility_id = other_member.facility_id
+         AND other_zone.id = other_member.storage_zone_id
+         AND other_zone.effective_to IS NULL
+        WHERE other_member.tenant_id = NEW.tenant_id
+          AND other_member.facility_id = NEW.facility_id
+          AND other_member.location_id = NEW.location_id
+          AND other_member.storage_zone_id <> NEW.storage_zone_id
+    ) THEN
+        RAISE EXCEPTION 'location already belongs to an active storage zone'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.reject_storage_zone_location_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'storage zone location membership is immutable'
+        USING ERRCODE = '23514';
+END;
+$$;
+
+CREATE FUNCTION public.require_storage_zone_location_count() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    checked_tenant_id bigint;
+    checked_zone_id bigint;
+BEGIN
+    IF TG_TABLE_NAME = 'storage_zones' THEN
+        checked_tenant_id := NEW.tenant_id;
+        checked_zone_id := NEW.id;
+    ELSE
+        checked_tenant_id := NEW.tenant_id;
+        checked_zone_id := NEW.storage_zone_id;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM public.storage_zones zone
+        WHERE zone.tenant_id = checked_tenant_id
+          AND zone.id = checked_zone_id
+          AND zone.location_count = (
+              SELECT count(*) FROM public.storage_zone_locations member
+              WHERE member.tenant_id = checked_tenant_id
+                AND member.storage_zone_id = checked_zone_id
+          )
+          AND zone.location_count = (
+              SELECT max(member.location_sequence)
+              FROM public.storage_zone_locations member
+              WHERE member.tenant_id = checked_tenant_id
+                AND member.storage_zone_id = checked_zone_id
+          )
+    ) THEN
+        RAISE EXCEPTION 'storage zone location set is inconsistent'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.require_active_storage_zone_location_eligibility() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM public.storage_zone_locations member
+        JOIN public.storage_zones zone
+          ON zone.tenant_id = member.tenant_id
+         AND zone.facility_id = member.facility_id
+         AND zone.id = member.storage_zone_id
+         AND zone.effective_to IS NULL
+        WHERE member.tenant_id = OLD.tenant_id
+          AND member.facility_id = OLD.facility_id
+          AND member.location_id = OLD.id
+          AND (
+              TG_OP = 'DELETE'
+              OR NEW.deleted IS NOT NULL
+              OR NOT NEW.active
+              OR NULLIF(btrim(NEW.barcode), '') IS NULL
+              OR (zone.purpose = 'receiving' AND (NOT NEW.receivable OR NEW.pickable))
+              OR (zone.purpose = 'pick' AND (NOT NEW.pickable OR NEW.receivable))
+              OR (zone.purpose NOT IN ('receiving', 'pick') AND (NEW.pickable OR NEW.receivable))
+          )
+    ) THEN
+        RAISE EXCEPTION 'location is assigned to an active storage zone'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+CREATE TRIGGER storage_zones_validate
+BEFORE INSERT ON public.storage_zones
+FOR EACH ROW EXECUTE FUNCTION public.validate_storage_zone();
+CREATE TRIGGER storage_zones_guard
+BEFORE UPDATE OR DELETE ON public.storage_zones
+FOR EACH ROW EXECUTE FUNCTION public.guard_storage_zone_mutation();
+CREATE TRIGGER storage_zone_locations_validate
+BEFORE INSERT ON public.storage_zone_locations
+FOR EACH ROW EXECUTE FUNCTION public.validate_storage_zone_location();
+CREATE TRIGGER storage_zone_locations_immutable
+BEFORE UPDATE OR DELETE ON public.storage_zone_locations
+FOR EACH ROW EXECUTE FUNCTION public.reject_storage_zone_location_mutation();
+CREATE CONSTRAINT TRIGGER storage_zones_location_count_consistent
+AFTER INSERT OR UPDATE ON public.storage_zones DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_storage_zone_location_count();
+CREATE CONSTRAINT TRIGGER storage_zone_locations_count_consistent
+AFTER INSERT ON public.storage_zone_locations DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_storage_zone_location_count();
+CREATE CONSTRAINT TRIGGER locations_active_storage_zone_eligible
+AFTER UPDATE OR DELETE ON public.locations DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_active_storage_zone_location_eligibility();
+
+ALTER TABLE public.storage_zones ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.storage_zones FORCE ROW LEVEL SECURITY;
+CREATE POLICY storage_zones_tenant_isolation ON public.storage_zones
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+ALTER TABLE public.storage_zone_locations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.storage_zone_locations FORCE ROW LEVEL SECURITY;
+CREATE POLICY storage_zone_locations_tenant_isolation ON public.storage_zone_locations
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT, INSERT ON public.storage_zones TO wareboxes_app;
+GRANT UPDATE (effective_to, retired_by_user_id) ON public.storage_zones TO wareboxes_app;
+GRANT SELECT, INSERT ON public.storage_zone_locations TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.storage_zones_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_storage_zone() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_storage_zone_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_storage_zone_location() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_storage_zone_location_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_storage_zone_location_count() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_active_storage_zone_location_eligibility() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

@@ -270,7 +270,7 @@ fn PlanningPanel(
 ) -> impl IntoView {
     let facility_id = candidate.facility_id;
     let source_id = candidate.source_location.location_id;
-    let destinations = locations.with_value(|values| {
+    let mut destinations = locations.with_value(|values| {
         values
             .iter()
             .filter(|value| {
@@ -287,8 +287,19 @@ fn PlanningPanel(
             .cloned()
             .collect::<Vec<_>>()
     });
+    destinations.sort_by(compare_putaway_destinations);
     let is_loose = candidate.workflow == PutawayWorkflow::Loose;
-    view! { <div class="putaway-planning-panel"><header><span class="eyebrow">"Directed work"</span><h2>{if is_loose { "Plan loose putaway" } else { "Plan whole-LP putaway" }}</h2><p>{format!("{} / {}",candidate.inventory_owner_name,candidate.facility_name)}</p></header><dl class="putaway-facts"><div><dt>"Source"</dt><dd>{location_label(&candidate.source_location)}</dd></div><div><dt>"Inventory"</dt><dd>{candidate_item(&candidate)}</dd></div><div><dt>"Available"</dt><dd>{format!("{} {}",format_quantity(candidate.available_quantity),candidate.uom.clone().unwrap_or_else(|| "units".into()))}</dd></div><div><dt>"Trace"</dt><dd>{candidate_trace(&candidate)}</dd></div></dl><fieldset disabled=move || signals.command_pending.get()><label><span>"Destination"</span><select required prop:value=move || option_value(drafts.destination_id.get()) on:change=move |event| drafts.destination_id.set(parse_optional_id(&event_target_value(&event)))><option value="">"Select storage location"</option>{destinations.into_iter().map(|value| { let label=value.name.clone().or(value.barcode.clone()).unwrap_or_else(|| format!("Location #{}",value.id)); view! { <option value=value.id>{label}</option> } }).collect_view()}</select></label><Show when=move || is_loose><label><span>"Quantity"</span><input type="number" min="1" max=candidate.available_quantity prop:value=move || drafts.quantity.get() on:input=move |event| { if let Ok(value)=event_target_value(&event).parse() { drafts.quantity.set(value); } }/></label></Show><label><span>"Priority"</span><input type="number" min="0" max="999" prop:value=move || drafts.priority.get() on:input=move |event| { if let Ok(value)=event_target_value(&event).parse() { drafts.priority.set(value); } }/></label><label><span>"Instructions"</span><textarea maxlength="1000" prop:value=move || drafts.instructions.get() on:input=move |event| drafts.instructions.set(event_target_value(&event))></textarea></label></fieldset><Show when=move || signals.error.get().is_some()><p class="inline-command-error" role="alert">{move || signals.error.get().unwrap_or_default()}</p></Show><footer><Show when=move || signals.retry.get().is_some()><button type="button" class="button secondary-action" disabled=move || signals.command_pending.get() on:click=move |_| retry.run(())>"Retry exact command"</button></Show><button type="button" class="button primary-action" disabled=move || signals.command_pending.get() on:click=move |_| submit.run(())>{move || if signals.command_pending.get() { "Planning..." } else { "Create putaway work" }}</button></footer></div> }
+    view! { <div class="putaway-planning-panel"><header><span class="eyebrow">"Directed work"</span><h2>{if is_loose { "Plan loose putaway" } else { "Plan whole-LP putaway" }}</h2><p>{format!("{} / {}",candidate.inventory_owner_name,candidate.facility_name)}</p></header><dl class="putaway-facts"><div><dt>"Source"</dt><dd>{location_label(&candidate.source_location)}</dd></div><div><dt>"Inventory"</dt><dd>{candidate_item(&candidate)}</dd></div><div><dt>"Available"</dt><dd>{format!("{} {}",format_quantity(candidate.available_quantity),candidate.uom.clone().unwrap_or_else(|| "units".into()))}</dd></div><div><dt>"Trace"</dt><dd>{candidate_trace(&candidate)}</dd></div></dl><fieldset disabled=move || signals.command_pending.get()><label><span>"Destination"</span><select required prop:value=move || option_value(drafts.destination_id.get()) on:change=move |event| drafts.destination_id.set(parse_optional_id(&event_target_value(&event)))><option value="">"Select storage location"</option>{destinations.into_iter().map(|value| { let location=value.name.clone().or(value.barcode.clone()).unwrap_or_else(|| format!("Location #{}",value.id)); let label=value.storage_zone_code.as_ref().map_or(location.clone(),|zone| format!("{zone} / {location}")); view! { <option value=value.id>{label}</option> } }).collect_view()}</select></label><Show when=move || is_loose><label><span>"Quantity"</span><input type="number" min="1" max=candidate.available_quantity prop:value=move || drafts.quantity.get() on:input=move |event| { if let Ok(value)=event_target_value(&event).parse() { drafts.quantity.set(value); } }/></label></Show><label><span>"Priority"</span><input type="number" min="0" max="999" prop:value=move || drafts.priority.get() on:input=move |event| { if let Ok(value)=event_target_value(&event).parse() { drafts.priority.set(value); } }/></label><label><span>"Instructions"</span><textarea maxlength="1000" prop:value=move || drafts.instructions.get() on:input=move |event| drafts.instructions.set(event_target_value(&event))></textarea></label></fieldset><Show when=move || signals.error.get().is_some()><p class="inline-command-error" role="alert">{move || signals.error.get().unwrap_or_default()}</p></Show><footer><Show when=move || signals.retry.get().is_some()><button type="button" class="button secondary-action" disabled=move || signals.command_pending.get() on:click=move |_| retry.run(())>"Retry exact command"</button></Show><button type="button" class="button primary-action" disabled=move || signals.command_pending.get() on:click=move |_| submit.run(())>{move || if signals.command_pending.get() { "Planning..." } else { "Create putaway work" }}</button></footer></div> }
+}
+
+fn compare_putaway_destinations(left: &Location, right: &Location) -> std::cmp::Ordering {
+    left.storage_zone_travel_sequence
+        .unwrap_or(i64::MAX)
+        .cmp(&right.storage_zone_travel_sequence.unwrap_or(i64::MAX))
+        .then_with(|| left.storage_zone_code.cmp(&right.storage_zone_code))
+        .then_with(|| left.name.cmp(&right.name))
+        .then_with(|| left.barcode.cmp(&right.barcode))
+        .then_with(|| left.id.cmp(&right.id))
 }
 
 #[component]
@@ -660,6 +671,31 @@ fn compact_time(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn destination(id: i64, zone_sequence: Option<i64>, zone_code: Option<&str>) -> Location {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "tenant_id": 1,
+            "created": "2026-08-10T12:00:00Z",
+            "deleted": null,
+            "facility_id": 1,
+            "facility_name": "Riverside",
+            "parent_location_id": null,
+            "barcode": format!("LOC-{id}"),
+            "name": format!("Location {id}"),
+            "type": "bin",
+            "active": true,
+            "pickable": true,
+            "receivable": false,
+            "storage_zone_id": zone_sequence.map(|_| id + 100),
+            "storage_zone_code": zone_code,
+            "storage_zone_name": zone_code.map(|value| format!("{value} zone")),
+            "storage_zone_purpose": zone_code.map(|_| "pick"),
+            "storage_zone_travel_sequence": zone_sequence
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn sorting_changes_are_server_requests() {
         assert_eq!(
@@ -678,5 +714,23 @@ mod tests {
             Some("Scan upper rack")
         );
         assert_eq!(optional_text("   "), None);
+    }
+
+    #[test]
+    fn putaway_destinations_follow_zone_travel_order_before_location_identity() {
+        let mut locations = vec![
+            destination(1, None, None),
+            destination(2, Some(20), Some("PICK-B")),
+            destination(3, Some(10), Some("PICK-A")),
+            destination(4, Some(10), Some("PICK-B")),
+        ];
+        locations.sort_by(compare_putaway_destinations);
+        assert_eq!(
+            locations
+                .into_iter()
+                .map(|location| location.id)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 2, 1]
+        );
     }
 }

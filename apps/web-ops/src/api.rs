@@ -58,6 +58,8 @@ mod pick_wave;
 pub use pick_wave::{cancel_pick_wave, pick_wave, pick_waves, plan_pick_wave, release_pick_wave};
 mod putaway;
 pub use putaway::{create_license_plate_putaway, create_putaway, putaway_candidates, putaway_work};
+mod storage_zone;
+pub use storage_zone::{configure_storage_zone, retire_storage_zone, storage_zones};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiError {

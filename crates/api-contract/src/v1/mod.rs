@@ -36,6 +36,7 @@ mod revision;
 mod rf_session;
 mod shipping;
 mod shipping_queue;
+mod storage_zone;
 
 pub use backorder::{
     BackorderPolicyMode, BackorderPolicyRequest, BackorderPolicyResponse, BackorderReason,
@@ -264,6 +265,11 @@ pub use shipping::{
 pub use shipping_queue::{
     ShippingQueueEntryResponse, ShippingQueueFacilityId, ShippingQueueFacilityIdError,
     ShippingQueuePage, ShippingQueuePageRequest, ShippingQueueShipmentResponse,
+};
+pub use storage_zone::{
+    ConfigureStorageZoneRequest, RetireStorageZoneRequest, StorageZoneLocationResponse,
+    StorageZonePage, StorageZonePageRequest, StorageZonePurpose, StorageZoneResponse,
+    StorageZoneStatus,
 };
 
 /// URL prefix for the version 1 public API.

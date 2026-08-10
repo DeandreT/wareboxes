@@ -50,6 +50,11 @@ pub(crate) async fn list_for_access(
         active: location.active,
         pickable: location.pickable,
         receivable: location.receivable,
+        storage_zone_id: location.storage_zone_id,
+        storage_zone_code: location.storage_zone_code,
+        storage_zone_name: location.storage_zone_name,
+        storage_zone_purpose: location.storage_zone_purpose,
+        storage_zone_travel_sequence: location.storage_zone_travel_sequence,
     })
     .collect();
     Ok(locations)
