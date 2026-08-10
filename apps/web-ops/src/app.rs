@@ -1299,18 +1299,20 @@ fn Inventory(data: WorkspaceData) -> impl IntoView {
     });
 
     view! {
-        <section class="page-heading">
-            <div>
-                <h1>"Inventory"</h1>
-                <p>"Current balances by facility, location, item, status, and client."</p>
-            </div>
-            <RefreshButton section=Section::Inventory/>
+        <section class="viewport-page inventory-page">
+            <section class="page-heading">
+                <div>
+                    <h1>"Inventory"</h1>
+                    <p>"Current balances by facility, location, item, status, and client."</p>
+                </div>
+                <RefreshButton section=Section::Inventory/>
+            </section>
+            <InventoryWorkspace
+                initial_balances=data.balances
+                initial_cursor=data.balance_next_cursor
+                on_unauthorized
+            />
         </section>
-        <InventoryWorkspace
-            initial_balances=data.balances
-            initial_cursor=data.balance_next_cursor
-            on_unauthorized
-        />
     }
 }
 
@@ -1321,40 +1323,44 @@ fn InventoryHolds(
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     view! {
-        <section class="page-heading">
-            <div>
-                <h1>"Quantity holds"</h1>
-                <p>"Restrict and release specific quantities without changing inventory disposition."</p>
-            </div>
-            <RefreshButton section=Section::InventoryHolds/>
+        <section class="viewport-page inventory-holds-page">
+            <section class="page-heading">
+                <div>
+                    <h1>"Quantity holds"</h1>
+                    <p>"Restrict and release specific quantities without changing inventory disposition."</p>
+                </div>
+                <RefreshButton section=Section::InventoryHolds/>
+            </section>
+            <QuantityHoldsWorkbench
+                initial_balances=data.balances
+                initial_balance_cursor=data.balance_next_cursor
+                initial_holds=data.holds
+                initial_hold_cursor=data.hold_next_cursor
+                can_inspect_receipts
+                on_unauthorized
+            />
         </section>
-        <QuantityHoldsWorkbench
-            initial_balances=data.balances
-            initial_balance_cursor=data.balance_next_cursor
-            initial_holds=data.holds
-            initial_hold_cursor=data.hold_next_cursor
-            can_inspect_receipts
-            on_unauthorized
-        />
     }
 }
 
 #[component]
 fn InventoryDisposition(data: WorkspaceData, on_unauthorized: Callback<()>) -> impl IntoView {
     view! {
-        <section class="page-heading">
-            <div>
-                <p class="eyebrow">"Inventory control"</p>
-                <h1>"Disposition"</h1>
-                <p>"Move uncommitted stock between available, hold, damaged, and quarantine status."</p>
-            </div>
-            <RefreshButton section=Section::InventoryDisposition/>
+        <section class="viewport-page inventory-disposition-page">
+            <section class="page-heading">
+                <div>
+                    <p class="eyebrow">"Inventory control"</p>
+                    <h1>"Disposition"</h1>
+                    <p>"Move uncommitted stock between available, hold, damaged, and quarantine status."</p>
+                </div>
+                <RefreshButton section=Section::InventoryDisposition/>
+            </section>
+            <InventoryDispositionWorkbench
+                initial_balances=data.balances
+                initial_cursor=data.balance_next_cursor
+                on_unauthorized
+            />
         </section>
-        <InventoryDispositionWorkbench
-            initial_balances=data.balances
-            initial_cursor=data.balance_next_cursor
-            on_unauthorized
-        />
     }
 }
 

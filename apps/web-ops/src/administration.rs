@@ -60,36 +60,41 @@ pub fn AdministrationWorkspace(
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     view! {
-        <section class="page-heading">
-            <div>
-                <p class="eyebrow">{area.eyebrow()}</p>
-                <h1>{area.title()}</h1>
-                <p>{area_description(area)}</p>
-            </div>
+        <section
+            class="administration-page"
+            class:integration-page=area == AdministrationArea::Integrations
+        >
+            <section class="page-heading">
+                <div>
+                    <p class="eyebrow">{area.eyebrow()}</p>
+                    <h1>{area.title()}</h1>
+                    <p>{area_description(area)}</p>
+                </div>
+            </section>
+            {match area {
+                AdministrationArea::Clients => {
+                    view! { <ClientsWorkbench on_unauthorized/> }.into_any()
+                }
+                AdministrationArea::Users => {
+                    view! { <UsersWorkbench on_unauthorized/> }.into_any()
+                }
+                AdministrationArea::Roles => {
+                    view! { <RolesWorkbench on_unauthorized/> }.into_any()
+                }
+                AdministrationArea::Permissions => {
+                    view! { <PermissionsWorkbench on_unauthorized/> }.into_any()
+                }
+                AdministrationArea::Employees => {
+                    view! { <EmployeesWorkbench on_unauthorized/> }.into_any()
+                }
+                AdministrationArea::CountPlans => {
+                    view! { <CountPlansWorkbench on_unauthorized/> }.into_any()
+                }
+                AdministrationArea::Integrations => {
+                    view! { <IntegrationsWorkbench on_unauthorized/> }.into_any()
+                }
+            }}
         </section>
-        {match area {
-            AdministrationArea::Clients => {
-                view! { <ClientsWorkbench on_unauthorized/> }.into_any()
-            }
-            AdministrationArea::Users => {
-                view! { <UsersWorkbench on_unauthorized/> }.into_any()
-            }
-            AdministrationArea::Roles => {
-                view! { <RolesWorkbench on_unauthorized/> }.into_any()
-            }
-            AdministrationArea::Permissions => {
-                view! { <PermissionsWorkbench on_unauthorized/> }.into_any()
-            }
-            AdministrationArea::Employees => {
-                view! { <EmployeesWorkbench on_unauthorized/> }.into_any()
-            }
-            AdministrationArea::CountPlans => {
-                view! { <CountPlansWorkbench on_unauthorized/> }.into_any()
-            }
-            AdministrationArea::Integrations => {
-                view! { <IntegrationsWorkbench on_unauthorized/> }.into_any()
-            }
-        }}
     }
 }
 

@@ -1,12 +1,23 @@
 .disposition-workbench {
   display: grid;
+  min-height: 0;
   grid-template-columns: minmax(0, 1fr) 340px;
-  align-items: start;
+  align-items: stretch;
   gap: 14px;
+  overflow: hidden;
 }
 
 .disposition-browser {
+  display: grid;
   min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+.disposition-browser .table-scroll {
+  min-height: 0;
+  overflow: auto;
 }
 
 .disposition-table {
@@ -23,11 +34,15 @@
 }
 
 .disposition-command {
-  min-height: 440px;
+  position: relative;
+  top: auto;
+  min-height: 0;
+  height: 100%;
+  max-height: none;
 }
 
 .disposition-command .hold-form {
-  min-height: 438px;
+  min-height: 0;
 }
 
 @media (max-width: 1180px) {

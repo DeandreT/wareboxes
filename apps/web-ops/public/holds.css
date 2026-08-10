@@ -1,6 +1,9 @@
 .holds-workbench {
   display: grid;
+  min-height: 0;
+  grid-template-rows: minmax(320px, 0.58fr) minmax(180px, 0.42fr);
   gap: 14px;
+  overflow: hidden;
 }
 
 .command-notice {
@@ -14,13 +17,25 @@
 
 .holds-position-grid {
   display: grid;
+  min-height: 0;
   grid-template-columns: minmax(0, 1fr) 330px;
-  align-items: start;
+  align-items: stretch;
   gap: 14px;
+  overflow: hidden;
 }
 
 .position-browser {
+  display: grid;
   min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+.position-browser .table-scroll,
+.hold-ledger .table-scroll {
+  min-height: 0;
+  overflow: auto;
 }
 
 .workbench-title {
@@ -98,10 +113,11 @@
 }
 
 .command-panel {
-  position: sticky;
-  top: 66px;
-  min-height: 380px;
-  max-height: calc(100vh - 80px);
+  position: relative;
+  top: auto;
+  min-height: 0;
+  height: 100%;
+  max-height: none;
   overflow-y: auto;
   border: 1px solid var(--line);
   background: var(--surface);
@@ -313,7 +329,11 @@
 }
 
 .hold-ledger {
+  display: grid;
   min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  overflow: hidden;
 }
 
 .ledger-toolbar {
@@ -405,11 +425,6 @@
 }
 
 @media (max-height: 820px) and (min-width: 1101px) {
-  .command-panel {
-    min-height: 360px;
-    height: 360px;
-  }
-
   .hold-form,
   .release-panel,
   .command-placeholder {

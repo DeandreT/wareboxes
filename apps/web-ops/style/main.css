@@ -599,7 +599,7 @@ html[data-navigation-hidden="true"] .sidebar {
   width: 100%;
   max-width: none;
   margin: 0;
-  padding: 8px 10px 16px;
+  padding: 8px 10px 4px;
 }
 
 .page-heading {
@@ -607,7 +607,16 @@ html[data-navigation-hidden="true"] .sidebar {
   align-items: flex-end;
   justify-content: space-between;
   gap: 18px;
-  margin-bottom: 16px;
+  margin-bottom: 8px;
+}
+
+.viewport-page,
+.administration-page.integration-page {
+  display: grid;
+  height: calc(100vh - 64px);
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
 }
 
 .page-heading h1 {
