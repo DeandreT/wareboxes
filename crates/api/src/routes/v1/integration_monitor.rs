@@ -357,6 +357,10 @@ fn map_inbound_processing(
         revision: wareboxes_api_contract::v1::Revision::new(value.revision.get())
             .map_err(|_| V1Error::internal("inbound processing revision is invalid"))?,
         attempt_count: value.attempt_count,
+        input_payload_sha256: hex::encode(value.input_payload_sha256),
+        latest_correction_id: value.latest_correction_id.map(|id| id.get()),
+        latest_correction_payload: value.latest_correction_payload,
+        latest_correction_payload_truncated: value.latest_correction_payload_truncated,
         order_id: value.order_id.map(|id| id.get()),
         order_revision: value
             .order_revision
@@ -379,6 +383,9 @@ fn map_inbound_processing(
                     status: api_processing_status(attempt.status),
                     revision: wareboxes_api_contract::v1::Revision::new(attempt.revision.get())
                         .map_err(|_| V1Error::internal("inbound attempt revision is invalid"))?,
+                    input_payload_sha256: hex::encode(attempt.input_payload_sha256),
+                    correction_id: attempt.correction_id.map(|id| id.get()),
+                    correction_reason: attempt.correction_reason,
                     order_id: attempt.order_id.map(|id| id.get()),
                     order_revision: attempt
                         .order_revision

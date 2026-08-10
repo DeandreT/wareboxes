@@ -17,10 +17,11 @@ use wareboxes_application::outbox::DeliveryAttemptOutcome;
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    FacilityId, IntegrationInboxProcessingAttemptId, IntegrationInboxProcessingId,
-    IntegrationInboxProcessingRevision, IntegrationInboxProcessingStatus, InventoryOwnerId,
-    OrderId, OrderRevision, OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason,
-    OutboxDeadLetterReplayId, Timestamp, UserId,
+    FacilityId, IntegrationInboxCorrectionId, IntegrationInboxProcessingAttemptId,
+    IntegrationInboxProcessingId, IntegrationInboxProcessingRevision,
+    IntegrationInboxProcessingStatus, InventoryOwnerId, OrderId, OrderRevision,
+    OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason, OutboxDeadLetterReplayId, Timestamp,
+    UserId,
 };
 use wareboxes_persistence_postgres::db::bind_tenant_context;
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
@@ -117,6 +118,16 @@ fn map_processing_attempt(row: &PgRow) -> AppResult<InboundIntegrationProcessing
         .ok_or_else(|| AppError::internal("invalid inbound processing attempt outcome"))?,
         revision: IntegrationInboxProcessingRevision::new(row.try_get("resulting_revision")?)
             .map_err(AppError::internal)?,
+        input_payload_sha256: row
+            .try_get::<Vec<u8>, _>("input_payload_sha256")?
+            .try_into()
+            .map_err(|_| AppError::internal("invalid inbound attempt payload hash"))?,
+        correction_id: row
+            .try_get::<Option<i64>, _>("correction_id")?
+            .map(IntegrationInboxCorrectionId::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        correction_reason: row.try_get("correction_reason")?,
         order_id: row
             .try_get::<Option<i64>, _>("order_id")?
             .map(OrderId::new)
@@ -417,11 +428,19 @@ async fn inbound_processing_tx(
                processing.attempt_count,processing.order_id,processing.order_revision,
                processing.error_code,processing.error_message,
                processing.last_attempted_by_user_id,processing.last_attempted_at,
-               processing.processed_at,
+               processing.processed_at,processing.last_input_payload_sha256,
+               processing.last_correction_id,
+               LEFT(convert_from(latest_correction.corrected_payload,'UTF8'),65536)
+                   AS latest_correction_payload,
+               COALESCE(char_length(convert_from(latest_correction.corrected_payload,'UTF8'))>65536,FALSE)
+                   AS latest_correction_payload_truncated,
                COALESCE(NULLIF(BTRIM(CONCAT_WS(' ',actor.first_name,actor.last_name)),''),
                         NULLIF(actor.nick_name,''),actor.email) AS attempted_by_name
         FROM integration_inbox_processings processing
         JOIN users actor ON actor.id=processing.last_attempted_by_user_id
+        LEFT JOIN integration_inbox_processing_corrections latest_correction
+          ON latest_correction.tenant_id=processing.tenant_id
+         AND latest_correction.id=processing.last_correction_id
         WHERE processing.tenant_id=$1 AND processing.receipt_id=$2
         "#,
     )
@@ -439,11 +458,15 @@ async fn inbound_processing_tx(
         SELECT attempt.id AS attempt_id,attempt.attempt_number,
                attempt.resulting_revision,attempt.outcome,attempt.order_id,
                attempt.order_revision,attempt.error_code,attempt.error_message,
+               attempt.input_payload_sha256,attempt.correction_id,
+               correction.reason AS correction_reason,
                attempt.attempted_by_user_id,attempt.attempted_at,
                COALESCE(NULLIF(BTRIM(CONCAT_WS(' ',actor.first_name,actor.last_name)),''),
                         NULLIF(actor.nick_name,''),actor.email) AS attempted_by_name
         FROM integration_inbox_processing_attempts attempt
         JOIN users actor ON actor.id=attempt.attempted_by_user_id
+        LEFT JOIN integration_inbox_processing_corrections correction
+          ON correction.tenant_id=attempt.tenant_id AND correction.id=attempt.correction_id
         WHERE attempt.tenant_id=$1 AND attempt.processing_id=$2
         ORDER BY attempt.attempt_number DESC
         LIMIT 100
@@ -468,6 +491,17 @@ async fn inbound_processing_tx(
         revision: IntegrationInboxProcessingRevision::new(row.try_get("revision")?)
             .map_err(AppError::internal)?,
         attempt_count: row.try_get("attempt_count")?,
+        input_payload_sha256: row
+            .try_get::<Vec<u8>, _>("last_input_payload_sha256")?
+            .try_into()
+            .map_err(|_| AppError::internal("invalid inbound processing input hash"))?,
+        latest_correction_id: row
+            .try_get::<Option<i64>, _>("last_correction_id")?
+            .map(IntegrationInboxCorrectionId::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        latest_correction_payload: row.try_get("latest_correction_payload")?,
+        latest_correction_payload_truncated: row.try_get("latest_correction_payload_truncated")?,
         order_id: row
             .try_get::<Option<i64>, _>("order_id")?
             .map(OrderId::new)

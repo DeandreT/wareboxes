@@ -56,10 +56,11 @@ pub use inbound_inspection::{
     InboundInspectionOutcome, InboundInspectionTargetStatus, MAX_INBOUND_INSPECTION_NOTE_LENGTH,
 };
 pub use integration::{
+    IntegrationInboxCorrectionReason, IntegrationInboxCorrectionReasonError,
     IntegrationInboxProcessingRevision, IntegrationInboxProcessingStatus,
     OutboxDeadLetterDiscardReason, OutboxDeadLetterDiscardReasonError,
-    MAX_INTEGRATION_PROCESSING_ERROR_CODE_LENGTH, MAX_INTEGRATION_PROCESSING_ERROR_MESSAGE_LENGTH,
-    MAX_OUTBOX_DEAD_LETTER_DISCARD_REASON_LENGTH,
+    MAX_INTEGRATION_INBOX_CORRECTION_REASON_LENGTH, MAX_INTEGRATION_PROCESSING_ERROR_CODE_LENGTH,
+    MAX_INTEGRATION_PROCESSING_ERROR_MESSAGE_LENGTH, MAX_OUTBOX_DEAD_LETTER_DISCARD_REASON_LENGTH,
 };
 pub use inventory_recall::{
     release_inventory_recall, InventoryRecallDetails, InventoryRecallError, InventoryRecallNote,
@@ -298,6 +299,10 @@ positive_id!(
 positive_id!(
     IntegrationInboxProcessingAttemptId,
     "integration inbox processing attempt ID"
+);
+positive_id!(
+    IntegrationInboxCorrectionId,
+    "integration inbox correction ID"
 );
 positive_id!(PackSessionId, "pack session ID");
 positive_id!(CartonId, "carton ID");

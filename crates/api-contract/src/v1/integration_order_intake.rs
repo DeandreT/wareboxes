@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::Revision;
+use super::{CreateFulfillmentOrderRequest, Revision};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,6 +15,8 @@ pub struct IntegrationOrderIntakeResponse {
     pub receipt_id: i64,
     pub processing_id: i64,
     pub processing_attempt_id: i64,
+    pub correction_id: Option<i64>,
+    pub input_payload_sha256: String,
     pub inventory_owner_id: i64,
     pub adapter_key: String,
     pub mapping_version: i32,
@@ -36,7 +38,16 @@ pub struct ReprocessIntegrationOrderRequest {
     pub expected_revision: Revision,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorrectIntegrationOrderRequest {
+    pub expected_revision: Revision,
+    pub reason: String,
+    pub order: CreateFulfillmentOrderRequest,
+}
+
 pub type ReprocessIntegrationOrderResponse = IntegrationOrderIntakeResponse;
+pub type CorrectIntegrationOrderResponse = IntegrationOrderIntakeResponse;
 
 #[cfg(test)]
 mod tests {
@@ -56,5 +67,41 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn correction_request_is_strict_and_carries_a_typed_order() {
+        let value = json!({
+            "expected_revision": 2,
+            "reason": "corrected item mapping",
+            "order": {
+                "inventory_owner_id": 7,
+                "order_key": "EXT-200",
+                "rush": false,
+                "ship_by": null,
+                "destination": {
+                    "recipient_name": "Receiving",
+                    "company": null,
+                    "phone": null,
+                    "email": null,
+                    "line1": "10 Main St",
+                    "line2": null,
+                    "city": "Reno",
+                    "region": "NV",
+                    "postal_code": "89501",
+                    "country": "US"
+                },
+                "lines": [{
+                    "line_key": "1",
+                    "item_id": 11,
+                    "quantity": 2,
+                    "requested_uom": "case"
+                }]
+            }
+        });
+        assert!(serde_json::from_value::<CorrectIntegrationOrderRequest>(value.clone()).is_ok());
+        let mut unknown = value;
+        unknown["force"] = json!(true);
+        assert!(serde_json::from_value::<CorrectIntegrationOrderRequest>(unknown).is_err());
     }
 }

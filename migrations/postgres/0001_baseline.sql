@@ -34541,6 +34541,8 @@ CREATE TABLE public.integration_inbox_processings (
     source_key text NOT NULL,
     deduplication_key text NOT NULL,
     payload_sha256 bytea NOT NULL,
+    last_input_payload_sha256 bytea NOT NULL,
+    last_correction_id bigint,
     adapter_key text NOT NULL,
     mapping_version integer NOT NULL,
     status text NOT NULL,
@@ -34563,6 +34565,8 @@ CREATE TABLE public.integration_inbox_processings (
             AND char_length(deduplication_key)<=500),
     CONSTRAINT integration_inbox_processings_payload_hash_check
         CHECK (octet_length(payload_sha256)=32),
+    CONSTRAINT integration_inbox_processings_input_payload_hash_check
+        CHECK (octet_length(last_input_payload_sha256)=32),
     CONSTRAINT integration_inbox_processings_adapter_check
         CHECK (adapter_key=btrim(adapter_key) AND adapter_key<>'' AND char_length(adapter_key)<=200),
     CONSTRAINT integration_inbox_processings_mapping_version_check CHECK (mapping_version>0),
@@ -34606,6 +34610,8 @@ CREATE TABLE public.integration_inbox_processing_attempts (
     attempt_number integer NOT NULL,
     previous_revision bigint,
     resulting_revision bigint NOT NULL,
+    input_payload_sha256 bytea NOT NULL,
+    correction_id bigint,
     outcome text NOT NULL,
     order_id bigint,
     order_revision bigint,
@@ -34627,6 +34633,8 @@ CREATE TABLE public.integration_inbox_processing_attempts (
              AND resulting_revision=previous_revision+1))),
     CONSTRAINT integration_inbox_processing_attempts_outcome_check
         CHECK (outcome IN ('quarantined','processed')),
+    CONSTRAINT integration_inbox_processing_attempts_payload_hash_check
+        CHECK (octet_length(input_payload_sha256)=32),
     CONSTRAINT integration_inbox_processing_attempts_error_code_check CHECK (
         error_code IS NULL OR
         (error_code=btrim(error_code) AND error_code<>'' AND char_length(error_code)<=100)),
@@ -34653,6 +34661,54 @@ CREATE TABLE public.integration_inbox_processing_attempts (
         FOREIGN KEY (tenant_id,attempted_by_user_id)
         REFERENCES public.tenant_memberships(tenant_id,user_id)
 );
+
+CREATE TABLE public.integration_inbox_processing_corrections (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    processing_id bigint NOT NULL,
+    receipt_id bigint NOT NULL,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    corrected_payload bytea NOT NULL,
+    payload_sha256 bytea NOT NULL,
+    reason text NOT NULL,
+    corrected_by_user_id bigint NOT NULL,
+    corrected_at timestamp with time zone NOT NULL,
+    CONSTRAINT integration_inbox_processing_corrections_scope_id_unique
+        UNIQUE (tenant_id,inventory_owner_id,id),
+    CONSTRAINT integration_inbox_processing_corrections_revision_unique
+        UNIQUE (tenant_id,processing_id,resulting_revision),
+    CONSTRAINT integration_inbox_processing_corrections_revision_check
+        CHECK (expected_revision>0 AND resulting_revision=expected_revision+1),
+    CONSTRAINT integration_inbox_processing_corrections_payload_check
+        CHECK (octet_length(corrected_payload)>0 AND octet_length(payload_sha256)=32
+            AND sha256(corrected_payload)=payload_sha256
+            AND convert_from(corrected_payload,'UTF8')::jsonb IS NOT NULL),
+    CONSTRAINT integration_inbox_processing_corrections_reason_check
+        CHECK (reason=btrim(reason) AND reason<>'' AND char_length(reason)<=500
+            AND reason!~'[[:cntrl:]]'),
+    CONSTRAINT integration_inbox_processing_corrections_processing_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,processing_id)
+        REFERENCES public.integration_inbox_processings(tenant_id,inventory_owner_id,id),
+    CONSTRAINT integration_inbox_processing_corrections_receipt_fkey
+        FOREIGN KEY (tenant_id,receipt_id)
+        REFERENCES public.integration_inbox_receipts(tenant_id,id),
+    CONSTRAINT integration_inbox_processing_corrections_actor_fkey
+        FOREIGN KEY (tenant_id,corrected_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+ALTER TABLE public.integration_inbox_processings
+ADD CONSTRAINT integration_inbox_processings_last_correction_fkey
+FOREIGN KEY (tenant_id,inventory_owner_id,last_correction_id)
+REFERENCES public.integration_inbox_processing_corrections(tenant_id,inventory_owner_id,id)
+DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE public.integration_inbox_processing_attempts
+ADD CONSTRAINT integration_inbox_processing_attempts_correction_fkey
+FOREIGN KEY (tenant_id,inventory_owner_id,correction_id)
+REFERENCES public.integration_inbox_processing_corrections(tenant_id,inventory_owner_id,id);
 
 CREATE INDEX integration_inbox_processings_operational_idx
 ON public.integration_inbox_processings
@@ -34683,7 +34739,10 @@ BEGIN
     END IF;
 
     IF TG_OP='INSERT' THEN
-        IF NEW.revision<>1 OR NEW.attempt_count<>1 THEN
+        IF NEW.revision<>1 OR NEW.attempt_count<>1
+           OR NEW.last_input_payload_sha256<>NEW.payload_sha256
+           OR NEW.last_correction_id IS NOT NULL
+        THEN
             RAISE EXCEPTION 'initial integration inbox processing revision is invalid'
                 USING ERRCODE='23514';
         END IF;
@@ -34712,6 +34771,28 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION public.validate_integration_inbox_processing_correction() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    processing public.integration_inbox_processings%ROWTYPE;
+BEGIN
+    SELECT * INTO processing FROM public.integration_inbox_processings
+    WHERE tenant_id=NEW.tenant_id AND inventory_owner_id=NEW.inventory_owner_id
+      AND id=NEW.processing_id AND receipt_id=NEW.receipt_id
+    FOR UPDATE;
+    IF NOT FOUND OR processing.status<>'quarantined'
+       OR processing.revision<>NEW.expected_revision
+       OR NEW.resulting_revision<>processing.revision+1
+    THEN
+        RAISE EXCEPTION 'integration inbox correction processing revision is stale'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE FUNCTION public.reject_integration_inbox_processing_attempt_mutation() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path TO 'pg_catalog', 'public'
@@ -34735,6 +34816,8 @@ BEGIN
           AND attempt.receipt_id=NEW.receipt_id
           AND attempt.attempt_number=NEW.attempt_count
           AND attempt.resulting_revision=NEW.revision
+          AND attempt.input_payload_sha256=NEW.last_input_payload_sha256
+          AND attempt.correction_id IS NOT DISTINCT FROM NEW.last_correction_id
           AND attempt.outcome=NEW.status
           AND attempt.order_id IS NOT DISTINCT FROM NEW.order_id
           AND attempt.order_revision IS NOT DISTINCT FROM NEW.order_revision
@@ -34744,6 +34827,62 @@ BEGIN
           AND attempt.attempted_at=NEW.last_attempted_at
     ) THEN
         RAISE EXCEPTION 'integration inbox processing lacks exact attempt evidence'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.require_integration_inbox_processing_attempt_projection() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM public.integration_inbox_processings processing
+        WHERE processing.tenant_id=NEW.tenant_id
+          AND processing.inventory_owner_id=NEW.inventory_owner_id
+          AND processing.id=NEW.processing_id
+          AND processing.receipt_id=NEW.receipt_id
+          AND processing.revision=NEW.resulting_revision
+          AND processing.attempt_count=NEW.attempt_number
+          AND processing.last_input_payload_sha256=NEW.input_payload_sha256
+          AND processing.last_correction_id IS NOT DISTINCT FROM NEW.correction_id
+    ) THEN
+        RAISE EXCEPTION 'integration inbox processing attempt lacks exact current projection'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.require_integration_inbox_processing_correction_consistency() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.integration_inbox_processings processing
+        JOIN public.integration_inbox_processing_attempts attempt
+          ON attempt.tenant_id=processing.tenant_id
+         AND attempt.inventory_owner_id=processing.inventory_owner_id
+         AND attempt.processing_id=processing.id
+         AND attempt.receipt_id=processing.receipt_id
+         AND attempt.resulting_revision=NEW.resulting_revision
+        WHERE processing.tenant_id=NEW.tenant_id
+          AND processing.inventory_owner_id=NEW.inventory_owner_id
+          AND processing.id=NEW.processing_id
+          AND processing.receipt_id=NEW.receipt_id
+          AND processing.revision=NEW.resulting_revision
+          AND processing.last_correction_id=NEW.id
+          AND processing.last_input_payload_sha256=NEW.payload_sha256
+          AND attempt.correction_id=NEW.id
+          AND attempt.input_payload_sha256=NEW.payload_sha256
+          AND attempt.attempted_by_user_id=NEW.corrected_by_user_id
+          AND attempt.attempted_at=NEW.corrected_at
+    ) THEN
+        RAISE EXCEPTION 'integration inbox correction lacks exact processing attempt evidence'
             USING ERRCODE='23514';
     END IF;
     RETURN NULL;
@@ -34760,6 +34899,20 @@ EXECUTE FUNCTION public.require_integration_inbox_processing_consistency();
 CREATE TRIGGER integration_inbox_processing_attempts_are_immutable
 BEFORE UPDATE OR DELETE ON public.integration_inbox_processing_attempts
 FOR EACH ROW EXECUTE FUNCTION public.reject_integration_inbox_processing_attempt_mutation();
+CREATE CONSTRAINT TRIGGER integration_inbox_processing_attempts_require_projection
+AFTER INSERT ON public.integration_inbox_processing_attempts
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_integration_inbox_processing_attempt_projection();
+CREATE TRIGGER integration_inbox_processing_corrections_validate
+BEFORE INSERT ON public.integration_inbox_processing_corrections
+FOR EACH ROW EXECUTE FUNCTION public.validate_integration_inbox_processing_correction();
+CREATE TRIGGER integration_inbox_processing_corrections_are_immutable
+BEFORE UPDATE OR DELETE ON public.integration_inbox_processing_corrections
+FOR EACH ROW EXECUTE FUNCTION public.reject_integration_inbox_processing_attempt_mutation();
+CREATE CONSTRAINT TRIGGER integration_inbox_processing_corrections_require_attempt
+AFTER INSERT ON public.integration_inbox_processing_corrections
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_integration_inbox_processing_correction_consistency();
 
 ALTER TABLE public.integration_inbox_processings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.integration_inbox_processings FORCE ROW LEVEL SECURITY;
@@ -34775,13 +34928,25 @@ ON public.integration_inbox_processing_attempts
 USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
 WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
 
+ALTER TABLE public.integration_inbox_processing_corrections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.integration_inbox_processing_corrections FORCE ROW LEVEL SECURITY;
+CREATE POLICY integration_inbox_processing_corrections_tenant_isolation
+ON public.integration_inbox_processing_corrections
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
 GRANT SELECT,INSERT,UPDATE ON public.integration_inbox_processings TO wareboxes_app;
 GRANT SELECT,INSERT ON public.integration_inbox_processing_attempts TO wareboxes_app;
+GRANT SELECT,INSERT ON public.integration_inbox_processing_corrections TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.integration_inbox_processings_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.integration_inbox_processing_attempts_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.integration_inbox_processing_corrections_id_seq TO wareboxes_app;
 REVOKE ALL ON FUNCTION public.guard_integration_inbox_processing_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_integration_inbox_processing_attempt_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_integration_inbox_processing_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_integration_inbox_processing_correction() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_integration_inbox_processing_attempt_projection() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_integration_inbox_processing_correction_consistency() FROM PUBLIC;
 
 -- PostgreSQL database dump complete
 --

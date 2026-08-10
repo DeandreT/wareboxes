@@ -1,4 +1,5 @@
 use wareboxes_api_contract::v1::{
+    CorrectIntegrationOrderRequest, CorrectIntegrationOrderResponse,
     DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse,
     InboundIntegrationDetailResponse, InboundIntegrationPage, InboundIntegrationSort,
     IntegrationSortDirection, OpaqueCursor, OutboundDeliveryStatus,
@@ -52,6 +53,19 @@ pub async fn reprocess_inbound_order(
 ) -> Result<ReprocessIntegrationOrderResponse, ApiError> {
     internal_post_idempotent(
         &format!("/api/v1/integration-monitor/inbound/{receipt_id}/reprocessings"),
+        request,
+        idempotency_key,
+    )
+    .await
+}
+
+pub async fn correct_inbound_order(
+    receipt_id: i64,
+    request: &CorrectIntegrationOrderRequest,
+    idempotency_key: &str,
+) -> Result<CorrectIntegrationOrderResponse, ApiError> {
+    internal_post_idempotent(
+        &format!("/api/v1/integration-monitor/inbound/{receipt_id}/corrections"),
         request,
         idempotency_key,
     )
@@ -255,6 +269,14 @@ mod tests {
         assert_eq!(
             format!("/api/v1/integration-monitor/inbound/{}/reprocessings", 37),
             "/api/v1/integration-monitor/inbound/37/reprocessings"
+        );
+    }
+
+    #[test]
+    fn inbound_correction_is_receipt_scoped() {
+        assert_eq!(
+            format!("/api/v1/integration-monitor/inbound/{}/corrections", 37),
+            "/api/v1/integration-monitor/inbound/37/corrections"
         );
     }
 }

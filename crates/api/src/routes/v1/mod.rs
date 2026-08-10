@@ -122,6 +122,10 @@ pub fn router() -> Router<AppState> {
             post(integration_order_intake::reprocess_order),
         )
         .route(
+            "/integration-monitor/inbound/{receipt_id}/corrections",
+            post(integration_order_intake::correct_order),
+        )
+        .route(
             "/integration-monitor/outbound",
             get(integration_monitor::outbound),
         )

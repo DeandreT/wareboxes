@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
-    FacilityId, IntegrationInboxProcessingAttemptId, IntegrationInboxProcessingId,
+    FacilityId, IntegrationInboxCorrectionId, IntegrationInboxCorrectionReason,
+    IntegrationInboxProcessingAttemptId, IntegrationInboxProcessingId,
     IntegrationInboxProcessingRevision, IntegrationInboxProcessingStatus, InventoryOwnerId,
     OrderId, OrderRevision, TenantId, Timestamp, UserId,
 };
@@ -8,6 +9,52 @@ use wareboxes_domain::{
 pub const STANDARD_ORDER_INTAKE_ADAPTER: &str = "wareboxes.fulfillment_order";
 pub const STANDARD_ORDER_INTAKE_MAPPING_VERSION: i32 = 1;
 pub const REPROCESS_INTEGRATION_ORDER_OPERATION: &str = "integration.order_intake.reprocess.v1";
+pub const CORRECT_INTEGRATION_ORDER_OPERATION: &str = "integration.order_intake.correct.v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorrectIntegrationOrderCommand {
+    receipt_id: i64,
+    expected_revision: IntegrationInboxProcessingRevision,
+    reason: IntegrationInboxCorrectionReason,
+    corrected_payload_sha256: [u8; 32],
+}
+
+impl CorrectIntegrationOrderCommand {
+    pub fn new(
+        receipt_id: i64,
+        expected_revision: IntegrationInboxProcessingRevision,
+        reason: IntegrationInboxCorrectionReason,
+        corrected_payload_sha256: [u8; 32],
+    ) -> crate::ApplicationResult<Self> {
+        if receipt_id <= 0 {
+            return Err(crate::ApplicationError::InvalidRequest(
+                "integration inbox receipt ID must be positive".into(),
+            ));
+        }
+        Ok(Self {
+            receipt_id,
+            expected_revision,
+            reason,
+            corrected_payload_sha256,
+        })
+    }
+
+    pub const fn receipt_id(&self) -> i64 {
+        self.receipt_id
+    }
+
+    pub const fn expected_revision(&self) -> IntegrationInboxProcessingRevision {
+        self.expected_revision
+    }
+
+    pub fn reason(&self) -> &IntegrationInboxCorrectionReason {
+        &self.reason
+    }
+
+    pub const fn corrected_payload_sha256(&self) -> &[u8; 32] {
+        &self.corrected_payload_sha256
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReprocessIntegrationOrderCommand {
@@ -45,6 +92,8 @@ pub struct IntegrationOrderProcessingResult {
     pub receipt_id: i64,
     pub processing_id: IntegrationInboxProcessingId,
     pub processing_attempt_id: IntegrationInboxProcessingAttemptId,
+    pub correction_id: Option<IntegrationInboxCorrectionId>,
+    pub input_payload_sha256: [u8; 32],
     pub inventory_owner_id: InventoryOwnerId,
     pub adapter_key: String,
     pub mapping_version: i32,
@@ -110,5 +159,17 @@ mod tests {
         assert_eq!(command.receipt_id(), 17);
         assert_eq!(command.expected_revision(), revision);
         assert!(ReprocessIntegrationOrderCommand::new(0, revision).is_err());
+    }
+
+    #[test]
+    fn correction_command_binds_revision_reason_and_payload_hash() {
+        let revision = IntegrationInboxProcessingRevision::new(2).unwrap();
+        let reason = IntegrationInboxCorrectionReason::new("fixed owner item mapping").unwrap();
+        let command =
+            CorrectIntegrationOrderCommand::new(9, revision, reason.clone(), [7; 32]).unwrap();
+        assert_eq!(command.receipt_id(), 9);
+        assert_eq!(command.expected_revision(), revision);
+        assert_eq!(command.reason(), &reason);
+        assert_eq!(command.corrected_payload_sha256(), &[7; 32]);
     }
 }

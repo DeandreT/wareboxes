@@ -2,18 +2,20 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::Json;
+use sha2::{Digest, Sha256};
 use wareboxes_api_contract::v1::{
-    CreateFulfillmentOrderRequest, IntegrationOrderIntakeResponse,
-    IntegrationOrderProcessingStatus, ReprocessIntegrationOrderRequest,
-    ReprocessIntegrationOrderResponse, Revision,
+    CorrectIntegrationOrderRequest, CorrectIntegrationOrderResponse, CreateFulfillmentOrderRequest,
+    IntegrationOrderIntakeResponse, IntegrationOrderProcessingStatus,
+    ReprocessIntegrationOrderRequest, ReprocessIntegrationOrderResponse, Revision,
 };
 use wareboxes_application::integration::{
-    IntegrationInboxReceipt, IntegrationOrderProcessingResult, NewIntegrationInboxReceipt,
-    ReprocessIntegrationOrderCommand,
+    CorrectIntegrationOrderCommand, IntegrationInboxReceipt, IntegrationOrderProcessingResult,
+    NewIntegrationInboxReceipt, ReprocessIntegrationOrderCommand,
 };
 use wareboxes_application::{ApplicationError, CommandContext};
 use wareboxes_domain::{
-    IntegrationInboxProcessingRevision, IntegrationInboxProcessingStatus, InventoryOwnerId,
+    IntegrationInboxCorrectionReason, IntegrationInboxProcessingRevision,
+    IntegrationInboxProcessingStatus, InventoryOwnerId,
 };
 use wareboxes_persistence_postgres::integration_inbox;
 
@@ -59,11 +61,14 @@ pub async fn receive_order(
     .await
     .map_err(AppError::from)?;
     let context = user.command_context(&idempotency_key);
+    let input = repo::integration_order_intake::ProcessingInput::retained(&received.receipt)?;
     let result = process_payload(
         &state,
         &user,
         &context,
         &received.receipt,
+        &received.receipt.raw_payload,
+        input,
         inventory_owner_id,
         None,
         None,
@@ -83,14 +88,15 @@ pub async fn reprocess_order(
     let revision = IntegrationInboxProcessingRevision::new(body.expected_revision.get())
         .map_err(AppError::bad_request)?;
     let command = ReprocessIntegrationOrderCommand::new(receipt_id, revision)?;
-    let receipt = repo::integration_order_intake::receipt_for_reprocessing(
+    let envelope = repo::integration_order_intake::receipt_for_reprocessing(
         &state.db,
         &user.tenant,
         receipt_id,
     )
     .await?
     .ok_or_else(|| AppError::not_found("integration inbox receipt"))?;
-    let inventory_owner_id = receipt
+    let inventory_owner_id = envelope
+        .receipt
         .inventory_owner_id
         .ok_or_else(|| AppError::not_found("integration inbox receipt"))?;
     let context = user.command_context(&idempotency_key);
@@ -98,12 +104,94 @@ pub async fn reprocess_order(
         &state,
         &user,
         &context,
-        &receipt,
+        &envelope.receipt,
+        &envelope.input_payload,
+        repo::integration_order_intake::ProcessingInput {
+            payload_sha256: envelope.input_payload_sha256,
+            correction_id: envelope.correction_id,
+            attempted_at: None,
+        },
         inventory_owner_id,
         Some(revision),
         Some(&command),
     )
     .await?;
+    Ok(Json(response(result)?))
+}
+
+pub async fn correct_order(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(receipt_id): Path<i64>,
+    Json(body): Json<CorrectIntegrationOrderRequest>,
+) -> V1Result<Json<CorrectIntegrationOrderResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let revision = IntegrationInboxProcessingRevision::new(body.expected_revision.get())
+        .map_err(AppError::bad_request)?;
+    let reason = IntegrationInboxCorrectionReason::new(body.reason)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let corrected_payload = serde_json::to_vec(&body.order)
+        .map_err(|error| AppError::internal(format!("serializing corrected order: {error}")))?;
+    let corrected_payload_sha256: [u8; 32] = Sha256::digest(&corrected_payload).into();
+    let command = CorrectIntegrationOrderCommand::new(
+        receipt_id,
+        revision,
+        reason,
+        corrected_payload_sha256,
+    )?;
+    let envelope = repo::integration_order_intake::receipt_for_reprocessing(
+        &state.db,
+        &user.tenant,
+        receipt_id,
+    )
+    .await?
+    .ok_or_else(|| AppError::not_found("integration inbox receipt"))?;
+    let owner_id = envelope
+        .receipt
+        .inventory_owner_id
+        .ok_or_else(|| AppError::not_found("integration inbox receipt"))?;
+    if body.order.inventory_owner_id != owner_id.get() {
+        return Err(AppError::bad_request(
+            "corrected order inventory owner must match the retained receipt",
+        )
+        .into());
+    }
+    let order = orders::new_fulfillment_order(body.order)?;
+    let context = user.command_context(&idempotency_key);
+    let correction_input = repo::integration_order_intake::CorrectionInput {
+        command: &command,
+        corrected_payload: &corrected_payload,
+    };
+    let result = match repo::integration_order_intake::correct(
+        &state.db,
+        &user.tenant,
+        &context,
+        &envelope.receipt,
+        &order,
+        correction_input,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            let Some(message) = quarantinable_message(&error) else {
+                return Err(error.into());
+            };
+            repo::integration_order_intake::quarantine_correction(
+                &state.db,
+                &user.tenant,
+                &context,
+                &envelope.receipt,
+                correction_input,
+                repo::integration_order_intake::QuarantineReason {
+                    code: BUSINESS_REJECTION_CODE,
+                    message: &message,
+                },
+            )
+            .await?
+        }
+    };
     Ok(Json(response(result)?))
 }
 
@@ -113,6 +201,8 @@ async fn process_payload(
     user: &CurrentTenant,
     context: &CommandContext,
     receipt: &IntegrationInboxReceipt,
+    input_payload: &[u8],
+    input: repo::integration_order_intake::ProcessingInput,
     expected_owner_id: InventoryOwnerId,
     expected_revision: Option<IntegrationInboxProcessingRevision>,
     reprocess: Option<&ReprocessIntegrationOrderCommand>,
@@ -125,38 +215,39 @@ async fn process_payload(
             return Ok(existing);
         }
     }
+    let processing_request = repo::integration_order_intake::ProcessingRequest::new(
+        receipt,
+        expected_revision,
+        input,
+        reprocess,
+    );
 
-    let request =
-        match serde_json::from_slice::<CreateFulfillmentOrderRequest>(&receipt.raw_payload) {
-            Ok(request) => request,
-            Err(_) => {
-                return repo::integration_order_intake::quarantine(
-                    &state.db,
-                    &user.tenant,
-                    context,
-                    receipt,
-                    expected_revision,
-                    repo::integration_order_intake::QuarantineReason {
-                        code: INVALID_PAYLOAD_CODE,
-                        message: "payload is not a valid fulfillment order v1 JSON document",
-                    },
-                    reprocess,
-                )
-                .await;
-            }
-        };
+    let request = match serde_json::from_slice::<CreateFulfillmentOrderRequest>(input_payload) {
+        Ok(request) => request,
+        Err(_) => {
+            return repo::integration_order_intake::quarantine(
+                &state.db,
+                &user.tenant,
+                context,
+                processing_request,
+                repo::integration_order_intake::QuarantineReason {
+                    code: INVALID_PAYLOAD_CODE,
+                    message: "payload is not a valid fulfillment order v1 JSON document",
+                },
+            )
+            .await;
+        }
+    };
     if request.inventory_owner_id != expected_owner_id.get() {
         return repo::integration_order_intake::quarantine(
             &state.db,
             &user.tenant,
             context,
-            receipt,
-            expected_revision,
+            processing_request,
             repo::integration_order_intake::QuarantineReason {
                 code: OWNER_MISMATCH_CODE,
                 message: "payload inventory owner does not match the intake endpoint scope",
             },
-            reprocess,
         )
         .await;
     }
@@ -167,13 +258,11 @@ async fn process_payload(
                 &state.db,
                 &user.tenant,
                 context,
-                receipt,
-                expected_revision,
+                processing_request,
                 repo::integration_order_intake::QuarantineReason {
                     code: MAPPING_VALIDATION_CODE,
                     message: "payload values do not satisfy the fulfillment order v1 mapping",
                 },
-                reprocess,
             )
             .await;
         }
@@ -182,10 +271,8 @@ async fn process_payload(
         &state.db,
         &user.tenant,
         context,
-        receipt,
+        processing_request,
         &order,
-        expected_revision,
-        reprocess,
     )
     .await
     {
@@ -198,13 +285,11 @@ async fn process_payload(
                 &state.db,
                 &user.tenant,
                 context,
-                receipt,
-                expected_revision,
+                processing_request,
                 repo::integration_order_intake::QuarantineReason {
                     code: BUSINESS_REJECTION_CODE,
                     message: &message,
                 },
-                reprocess,
             )
             .await
         }
@@ -264,6 +349,8 @@ fn response(result: IntegrationOrderProcessingResult) -> V1Result<IntegrationOrd
         receipt_id: result.receipt_id,
         processing_id: result.processing_id.get(),
         processing_attempt_id: result.processing_attempt_id.get(),
+        correction_id: result.correction_id.map(|id| id.get()),
+        input_payload_sha256: hex::encode(result.input_payload_sha256),
         inventory_owner_id: result.inventory_owner_id.get(),
         adapter_key: result.adapter_key,
         mapping_version: result.mapping_version,

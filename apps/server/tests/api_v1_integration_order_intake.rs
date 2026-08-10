@@ -9,8 +9,9 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    CreateFulfillmentOrderLineRequest, CreateFulfillmentOrderRequest, ErrorReason, ErrorResponse,
-    FulfillmentOrderDestination, InboundIntegrationDetailResponse, IntegrationOrderIntakeResponse,
+    CorrectIntegrationOrderRequest, CreateFulfillmentOrderLineRequest,
+    CreateFulfillmentOrderRequest, ErrorReason, ErrorResponse, FulfillmentOrderDestination,
+    InboundIntegrationDetailResponse, IntegrationOrderIntakeResponse,
     IntegrationOrderProcessingStatus, ReprocessIntegrationOrderRequest, Revision,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
@@ -445,6 +446,11 @@ async fn processing_ledgers_are_forced_rls_minimally_granted_and_immutable() {
             "integration_inbox_processing_attempts_tenant_isolation",
             false,
         ),
+        (
+            "integration_inbox_processing_corrections",
+            "integration_inbox_processing_corrections_tenant_isolation",
+            false,
+        ),
     ] {
         let rls: (bool, bool) = sqlx::query_as(
             "SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid=$1::regclass",
@@ -487,6 +493,7 @@ async fn processing_ledgers_are_forced_rls_minimally_granted_and_immutable() {
     for sequence in [
         "integration_inbox_processings_id_seq",
         "integration_inbox_processing_attempts_id_seq",
+        "integration_inbox_processing_corrections_id_seq",
     ] {
         let privileges: (bool, bool, bool) = sqlx::query_as(
             r#"
@@ -534,6 +541,251 @@ async fn processing_ledgers_are_forced_rls_minimally_granted_and_immutable() {
     .execute(&admin)
     .await;
     assert!(attempt_tamper.is_err());
+}
+
+#[tokio::test]
+async fn corrected_envelope_is_immutable_replayable_and_drives_later_reprocessing() {
+    let fixture = Fixture::new().await;
+    let user = fixture
+        .user("integration-order-correction@test.local")
+        .await;
+    let tenant_id = tenant_for_user(&fixture.db, user.id).await;
+    grant(&fixture, tenant_id, user.id, "orders").await;
+    grant(&fixture, tenant_id, user.id, "admin").await;
+    let owner_id = fixture
+        .inventory_owner(tenant_id, "Integration Correction Client")
+        .await;
+    let item_id = fixture
+        .item(tenant_id, "Integration Correction Item", "case")
+        .await;
+    let token = auth::create_session(&fixture.db, user.id).await.unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let intake_uri =
+        format!("/api/v1/integrations/order-intake/correction/inventory-owners/{owner_id}/orders");
+    let initial: IntegrationOrderIntakeResponse = success(
+        app.clone()
+            .oneshot(request(
+                &token,
+                tenant_id,
+                Method::POST,
+                &intake_uri,
+                Some("correction-intake"),
+                &serde_json::json!({"malformed": true}),
+            ))
+            .await
+            .unwrap(),
+        StatusCode::ACCEPTED,
+    )
+    .await;
+    assert_eq!(initial.error_code.as_deref(), Some("invalid_payload"));
+    assert!(initial.correction_id.is_none());
+
+    let correction_uri = format!(
+        "/api/v1/integration-monitor/inbound/{}/corrections",
+        initial.receipt_id
+    );
+    let correction_body = CorrectIntegrationOrderRequest {
+        expected_revision: Revision::new(1).unwrap(),
+        reason: "Corrected malformed partner envelope".into(),
+        order: order(owner_id, item_id, "INTAKE-CORRECTED"),
+    };
+    let invalid_reason = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            Method::POST,
+            &correction_uri,
+            Some("invalid-correction"),
+            &CorrectIntegrationOrderRequest {
+                reason: " ".into(),
+                ..correction_body.clone()
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(invalid_reason.status(), StatusCode::BAD_REQUEST);
+    let correction_response = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            Method::POST,
+            &correction_uri,
+            Some("correction-command"),
+            &correction_body,
+        ))
+        .await
+        .unwrap();
+    let corrected: IntegrationOrderIntakeResponse =
+        success(correction_response, StatusCode::OK).await;
+    assert_eq!(
+        corrected.status,
+        IntegrationOrderProcessingStatus::Quarantined
+    );
+    assert_eq!(corrected.revision.get(), 2);
+    assert_eq!(corrected.attempt_count, 2);
+    let correction_id = corrected.correction_id.unwrap();
+    assert_ne!(corrected.input_payload_sha256, initial.input_payload_sha256);
+
+    let exact_replay = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            Method::POST,
+            &correction_uri,
+            Some("correction-command"),
+            &correction_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(exact_replay.status(), StatusCode::OK);
+    assert_eq!(
+        response::<IntegrationOrderIntakeResponse>(exact_replay).await,
+        corrected
+    );
+
+    let changed_replay = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            Method::POST,
+            &correction_uri,
+            Some("correction-command"),
+            &CorrectIntegrationOrderRequest {
+                reason: "Different rationale".into(),
+                ..correction_body.clone()
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(changed_replay.status(), StatusCode::CONFLICT);
+
+    link_item(&fixture, tenant_id, owner_id, item_id).await;
+    let reprocess_uri = format!(
+        "/api/v1/integration-monitor/inbound/{}/reprocessings",
+        initial.receipt_id
+    );
+    let processed: IntegrationOrderIntakeResponse = success(
+        app.clone()
+            .oneshot(request(
+                &token,
+                tenant_id,
+                Method::POST,
+                &reprocess_uri,
+                Some("correction-reprocess"),
+                &ReprocessIntegrationOrderRequest {
+                    expected_revision: Revision::new(2).unwrap(),
+                },
+            ))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        processed.status,
+        IntegrationOrderProcessingStatus::Processed
+    );
+    assert_eq!(processed.revision.get(), 3);
+    assert_eq!(processed.correction_id, Some(correction_id));
+    assert_eq!(
+        processed.input_payload_sha256,
+        corrected.input_payload_sha256
+    );
+
+    let detail: InboundIntegrationDetailResponse = success(
+        app.oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/integration-monitor/inbound/{}",
+                    initial.receipt_id
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(TENANT_ID_HEADER, tenant_id.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    let processing = detail.processing.unwrap();
+    assert_eq!(processing.latest_correction_id, Some(correction_id));
+    assert!(processing
+        .latest_correction_payload
+        .as_deref()
+        .is_some_and(|payload| payload.contains("INTAKE-CORRECTED")));
+    assert_eq!(processing.attempts.len(), 3);
+    assert_eq!(processing.attempts[0].correction_id, Some(correction_id));
+    assert_eq!(processing.attempts[1].correction_id, Some(correction_id));
+    assert_eq!(
+        processing.attempts[1].correction_reason.as_deref(),
+        Some("Corrected malformed partner envelope")
+    );
+    assert!(processing.attempts[2].correction_id.is_none());
+
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let evidence: (Vec<u8>, Vec<u8>, String, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT receipt.raw_payload,correction.corrected_payload,correction.reason,
+               (SELECT COUNT(*) FROM integration_inbox_processing_corrections),
+               (SELECT COUNT(*) FROM integration_inbox_processing_attempts),
+               (SELECT COUNT(*) FROM orders WHERE order_key='INTAKE-CORRECTED')
+        FROM integration_inbox_receipts receipt
+        JOIN integration_inbox_processing_corrections correction
+          ON correction.tenant_id=receipt.tenant_id AND correction.receipt_id=receipt.id
+        WHERE receipt.id=$1
+        "#,
+    )
+    .bind(initial.receipt_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&evidence.0).unwrap(),
+        serde_json::json!({"malformed": true})
+    );
+    assert_ne!(evidence.0, evidence.1);
+    assert_eq!(evidence.2, "Corrected malformed partner envelope");
+    assert_eq!((evidence.3, evidence.4, evidence.5), (1, 3, 1));
+    let admin = admin_db_for(&fixture.db).await;
+    assert!(sqlx::query(
+        "UPDATE integration_inbox_processing_corrections SET reason='tampered' WHERE id=$1"
+    )
+    .bind(correction_id)
+    .execute(&admin)
+    .await
+    .is_err());
+    assert!(repo::tenants::update_user_access_scope(
+        &fixture.db,
+        tenant_id,
+        &UpdateUserAccessScope {
+            user_id: user.id,
+            all_facilities: true,
+            facility_ids: Vec::new(),
+            all_inventory_owners: false,
+            inventory_owner_ids: Vec::new(),
+        },
+    )
+    .await
+    .unwrap());
+    let concealed_replay = routes::app(AppState::new(fixture.db.clone()))
+        .oneshot(request(
+            &token,
+            tenant_id,
+            Method::POST,
+            &correction_uri,
+            Some("correction-command"),
+            &correction_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(concealed_replay.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

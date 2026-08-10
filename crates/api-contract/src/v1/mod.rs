@@ -98,6 +98,7 @@ pub use integration_monitor::{
     ReplayOutboxDeadLetterResponse,
 };
 pub use integration_order_intake::{
+    CorrectIntegrationOrderRequest, CorrectIntegrationOrderResponse,
     IntegrationOrderIntakeResponse, IntegrationOrderProcessingStatus,
     ReprocessIntegrationOrderRequest, ReprocessIntegrationOrderResponse,
 };

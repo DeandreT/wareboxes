@@ -1,5 +1,9 @@
 //! Durable standard-order inbox processing and quarantine evidence.
 
+mod correction;
+
+pub(crate) use correction::{correct, quarantine_correction, CorrectionInput};
+
 use sqlx::postgres::PgRow;
 use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
@@ -11,10 +15,11 @@ use wareboxes_application::integration::{
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    IntegrationInboxProcessingAttemptId, IntegrationInboxProcessingId,
-    IntegrationInboxProcessingRevision, IntegrationInboxProcessingStatus, InventoryOwnerId,
-    NewFulfillmentOrder, OrderId, OrderRevision, TenantId, UserId,
-    MAX_INTEGRATION_PROCESSING_ERROR_CODE_LENGTH, MAX_INTEGRATION_PROCESSING_ERROR_MESSAGE_LENGTH,
+    IntegrationInboxCorrectionId, IntegrationInboxProcessingAttemptId,
+    IntegrationInboxProcessingId, IntegrationInboxProcessingRevision,
+    IntegrationInboxProcessingStatus, InventoryOwnerId, NewFulfillmentOrder, OrderId,
+    OrderRevision, TenantId, UserId, MAX_INTEGRATION_PROCESSING_ERROR_CODE_LENGTH,
+    MAX_INTEGRATION_PROCESSING_ERROR_MESSAGE_LENGTH,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, Db};
 use wareboxes_persistence_postgres::idempotency::{insert_result, PostgresPreparedCommandExt};
@@ -24,14 +29,76 @@ use super::order_creation;
 use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone)]
-struct StoredProcessing {
+pub(super) struct StoredProcessing {
     result: IntegrationOrderProcessingResult,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ReprocessingEnvelope {
+    pub(crate) receipt: IntegrationInboxReceipt,
+    pub(crate) input_payload: Vec<u8>,
+    pub(crate) input_payload_sha256: [u8; 32],
+    pub(crate) correction_id: Option<IntegrationInboxCorrectionId>,
+}
+
 #[derive(Debug, Clone, Copy)]
-struct OutcomeIds {
+pub(crate) struct ProcessingInput {
+    pub(crate) payload_sha256: [u8; 32],
+    pub(crate) correction_id: Option<IntegrationInboxCorrectionId>,
+    pub(crate) attempted_at: Option<wareboxes_domain::Timestamp>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProcessingRequest<'a> {
+    receipt: &'a IntegrationInboxReceipt,
+    expected_revision: Option<IntegrationInboxProcessingRevision>,
+    input: ProcessingInput,
+    reprocess: Option<&'a ReprocessIntegrationOrderCommand>,
+}
+
+impl<'a> ProcessingRequest<'a> {
+    pub(crate) fn new(
+        receipt: &'a IntegrationInboxReceipt,
+        expected_revision: Option<IntegrationInboxProcessingRevision>,
+        input: ProcessingInput,
+        reprocess: Option<&'a ReprocessIntegrationOrderCommand>,
+    ) -> Self {
+        Self {
+            receipt,
+            expected_revision,
+            input,
+            reprocess,
+        }
+    }
+}
+
+impl ProcessingInput {
+    pub(crate) fn retained(receipt: &IntegrationInboxReceipt) -> AppResult<Self> {
+        Ok(Self {
+            payload_sha256: receipt
+                .payload_sha256
+                .as_slice()
+                .try_into()
+                .map_err(|_| AppError::internal("integration inbox payload hash is invalid"))?,
+            correction_id: None,
+            attempted_at: None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct OutcomeIds {
     order_id: Option<OrderId>,
     order_revision: Option<OrderRevision>,
+}
+
+pub(super) struct OutcomeWrite<'a> {
+    receipt: &'a IntegrationInboxReceipt,
+    actor_id: UserId,
+    previous: Option<&'a StoredProcessing>,
+    input: ProcessingInput,
+    ids: OutcomeIds,
+    failure: Option<QuarantineReason<'a>>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +136,15 @@ fn map_processing(row: &PgRow) -> AppResult<StoredProcessing> {
                 row.try_get("processing_attempt_id")?,
             )
             .map_err(|error| AppError::internal(error.to_string()))?,
+            correction_id: row
+                .try_get::<Option<i64>, _>("last_correction_id")?
+                .map(IntegrationInboxCorrectionId::new)
+                .transpose()
+                .map_err(|error| AppError::internal(error.to_string()))?,
+            input_payload_sha256: row
+                .try_get::<Vec<u8>, _>("last_input_payload_sha256")?
+                .try_into()
+                .map_err(|_| AppError::internal("integration processing input hash is invalid"))?,
             inventory_owner_id: InventoryOwnerId::new(row.try_get("inventory_owner_id")?)
                 .map_err(|error| AppError::internal(error.to_string()))?,
             adapter_key: row.try_get("adapter_key")?,
@@ -97,6 +173,7 @@ const PROCESSING_SELECT: &str = r#"
            processing.order_revision, processing.error_code,
            processing.error_message, processing.last_attempted_by_user_id,
            processing.last_attempted_at, processing.processed_at,
+           processing.last_input_payload_sha256,processing.last_correction_id,
            attempt.id AS processing_attempt_id
     FROM integration_inbox_processings processing
     INNER JOIN integration_inbox_processing_attempts attempt
@@ -106,7 +183,7 @@ const PROCESSING_SELECT: &str = r#"
     WHERE processing.tenant_id=$1 AND processing.receipt_id=$2
 "#;
 
-async fn current_processing_tx(
+pub(super) async fn current_processing_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: wareboxes_domain::TenantId,
     receipt_id: i64,
@@ -121,7 +198,7 @@ async fn current_processing_tx(
         .transpose()
 }
 
-async fn lock_receipt_tx(
+pub(super) async fn lock_receipt_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     access: &TenantAccess,
     actor_id: UserId,
@@ -186,15 +263,19 @@ fn validate_failure(failure: &QuarantineReason<'_>) -> AppResult<()> {
     Ok(())
 }
 
-async fn write_outcome_tx(
+pub(super) async fn write_outcome_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     access: &TenantAccess,
-    receipt: &IntegrationInboxReceipt,
-    actor_id: UserId,
-    previous: Option<&StoredProcessing>,
-    outcome_ids: OutcomeIds,
-    failure: Option<QuarantineReason<'_>>,
+    outcome: OutcomeWrite<'_>,
 ) -> AppResult<IntegrationOrderProcessingResult> {
+    let OutcomeWrite {
+        receipt,
+        actor_id,
+        previous,
+        input,
+        ids: outcome_ids,
+        failure,
+    } = outcome;
     if let Some(failure) = &failure {
         validate_failure(failure)?;
     }
@@ -206,9 +287,13 @@ async fn write_outcome_tx(
     let previous_revision = previous.map(|value| value.result.revision.get());
     let revision = previous_revision.map_or(1, |value| value + 1);
     let attempt_count = previous.map_or(1, |value| value.result.attempt_count + 1);
-    let attempted_at: wareboxes_domain::Timestamp = sqlx::query_scalar("SELECT clock_timestamp()")
-        .fetch_one(&mut **tx)
-        .await?;
+    let attempted_at = if let Some(attempted_at) = input.attempted_at {
+        attempted_at
+    } else {
+        sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut **tx)
+            .await?
+    };
     let processed_at =
         (status == IntegrationInboxProcessingStatus::Processed).then_some(attempted_at);
     let owner_id = receipt
@@ -226,7 +311,7 @@ async fn write_outcome_tx(
             SET status=$4,revision=$5,attempt_count=$6,order_id=$7,
                 order_revision=$8,error_code=$9,error_message=$10,
                 last_attempted_by_user_id=$11,last_attempted_at=$12,
-                processed_at=$13
+                processed_at=$13,last_input_payload_sha256=$14,last_correction_id=$15
             WHERE tenant_id=$1 AND inventory_owner_id=$2 AND id=$3
             RETURNING id
             "#,
@@ -244,6 +329,8 @@ async fn write_outcome_tx(
         .bind(actor_id.get())
         .bind(attempted_at)
         .bind(processed_at)
+        .bind(input.payload_sha256.as_slice())
+        .bind(input.correction_id.map(IntegrationInboxCorrectionId::get))
         .fetch_one(&mut **tx)
         .await?
     } else {
@@ -251,10 +338,11 @@ async fn write_outcome_tx(
             r#"
             INSERT INTO integration_inbox_processings
                 (tenant_id,inventory_owner_id,receipt_id,source_key,
-                 deduplication_key,payload_sha256,adapter_key,mapping_version,
+                 deduplication_key,payload_sha256,last_input_payload_sha256,
+                 last_correction_id,adapter_key,mapping_version,
                  status,revision,attempt_count,order_id,order_revision,error_code,
                  error_message,last_attempted_by_user_id,last_attempted_at,processed_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,1,$10,$11,$12,$13,$14,$15,$16)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,$8,$9,$10,1,1,$11,$12,$13,$14,$15,$16,$17)
             RETURNING id
             "#,
         )
@@ -264,6 +352,7 @@ async fn write_outcome_tx(
         .bind(&receipt.source_key)
         .bind(&receipt.deduplication_key)
         .bind(&receipt.payload_sha256)
+        .bind(input.payload_sha256.as_slice())
         .bind(STANDARD_ORDER_INTAKE_ADAPTER)
         .bind(STANDARD_ORDER_INTAKE_MAPPING_VERSION)
         .bind(status.as_str())
@@ -282,10 +371,11 @@ async fn write_outcome_tx(
         r#"
         INSERT INTO integration_inbox_processing_attempts
             (tenant_id,inventory_owner_id,processing_id,receipt_id,
-             attempt_number,previous_revision,resulting_revision,outcome,
+             attempt_number,previous_revision,resulting_revision,input_payload_sha256,
+             correction_id,outcome,
              order_id,order_revision,error_code,error_message,
              attempted_by_user_id,attempted_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
         RETURNING id
         "#,
     )
@@ -296,6 +386,8 @@ async fn write_outcome_tx(
     .bind(attempt_count)
     .bind(previous_revision)
     .bind(revision)
+    .bind(input.payload_sha256.as_slice())
+    .bind(input.correction_id.map(IntegrationInboxCorrectionId::get))
     .bind(status.as_str())
     .bind(outcome_ids.order_id.map(OrderId::get))
     .bind(outcome_ids.order_revision.map(OrderRevision::get))
@@ -312,6 +404,8 @@ async fn write_outcome_tx(
             .map_err(|error| AppError::internal(error.to_string()))?,
         processing_attempt_id: IntegrationInboxProcessingAttemptId::new(attempt_id)
             .map_err(|error| AppError::internal(error.to_string()))?,
+        correction_id: input.correction_id,
+        input_payload_sha256: input.payload_sha256,
         inventory_owner_id: owner_id,
         adapter_key: STANDARD_ORDER_INTAKE_ADAPTER.into(),
         mapping_version: STANDARD_ORDER_INTAKE_MAPPING_VERSION,
@@ -347,19 +441,18 @@ pub(crate) async fn quarantine(
     db: &Db,
     access: &TenantAccess,
     context: &CommandContext,
-    receipt: &IntegrationInboxReceipt,
-    expected_revision: Option<IntegrationInboxProcessingRevision>,
+    request: ProcessingRequest<'_>,
     reason: QuarantineReason<'_>,
-    reprocess: Option<&ReprocessIntegrationOrderCommand>,
 ) -> AppResult<IntegrationOrderProcessingResult> {
-    let prepared = reprocess
+    let prepared = request
+        .reprocess
         .map(|command| {
             PreparedCommand::new_v1(context, REPROCESS_INTEGRATION_ORDER_OPERATION, command)
         })
         .transpose()?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
-    lock_receipt_tx(&mut tx, access, context.actor_id, receipt).await?;
+    lock_receipt_tx(&mut tx, access, context.actor_id, request.receipt).await?;
     if let Some(prepared) = &prepared {
         if let Some(result) = prepared
             .replayed::<IntegrationOrderProcessingResult>(&mut tx)
@@ -369,25 +462,28 @@ pub(crate) async fn quarantine(
             return Ok(result);
         }
     }
-    let previous = current_processing_tx(&mut tx, access.tenant_id, receipt.id).await?;
-    if reprocess.is_none() {
+    let previous = current_processing_tx(&mut tx, access.tenant_id, request.receipt.id).await?;
+    if request.reprocess.is_none() {
         if let Some(previous) = previous {
             tx.commit().await?;
             return Ok(previous.result);
         }
     }
-    validate_expected_revision(previous.as_ref(), expected_revision)?;
+    validate_expected_revision(previous.as_ref(), request.expected_revision)?;
     let result = write_outcome_tx(
         &mut tx,
         access,
-        receipt,
-        context.actor_id,
-        previous.as_ref(),
-        OutcomeIds {
-            order_id: None,
-            order_revision: None,
+        OutcomeWrite {
+            receipt: request.receipt,
+            actor_id: context.actor_id,
+            previous: previous.as_ref(),
+            input: request.input,
+            ids: OutcomeIds {
+                order_id: None,
+                order_revision: None,
+            },
+            failure: Some(reason),
         },
-        Some(reason),
     )
     .await?;
     if let Some(prepared) = prepared {
@@ -398,23 +494,22 @@ pub(crate) async fn quarantine(
     Ok(result)
 }
 
-pub async fn process(
+pub(crate) async fn process(
     db: &Db,
     access: &TenantAccess,
     context: &CommandContext,
-    receipt: &IntegrationInboxReceipt,
+    request: ProcessingRequest<'_>,
     order: &NewFulfillmentOrder,
-    expected_revision: Option<IntegrationInboxProcessingRevision>,
-    reprocess: Option<&ReprocessIntegrationOrderCommand>,
 ) -> AppResult<IntegrationOrderProcessingResult> {
-    let prepared = reprocess
+    let prepared = request
+        .reprocess
         .map(|command| {
             PreparedCommand::new_v1(context, REPROCESS_INTEGRATION_ORDER_OPERATION, command)
         })
         .transpose()?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
-    lock_receipt_tx(&mut tx, access, context.actor_id, receipt).await?;
+    lock_receipt_tx(&mut tx, access, context.actor_id, request.receipt).await?;
     if let Some(prepared) = &prepared {
         if let Some(result) = prepared
             .replayed::<IntegrationOrderProcessingResult>(&mut tx)
@@ -424,14 +519,14 @@ pub async fn process(
             return Ok(result);
         }
     }
-    let previous = current_processing_tx(&mut tx, access.tenant_id, receipt.id).await?;
-    if reprocess.is_none() {
+    let previous = current_processing_tx(&mut tx, access.tenant_id, request.receipt.id).await?;
+    if request.reprocess.is_none() {
         if let Some(previous) = previous {
             tx.commit().await?;
             return Ok(previous.result);
         }
     }
-    validate_expected_revision(previous.as_ref(), expected_revision)?;
+    validate_expected_revision(previous.as_ref(), request.expected_revision)?;
     if previous
         .as_ref()
         .is_some_and(|value| value.result.status == IntegrationInboxProcessingStatus::Processed)
@@ -441,6 +536,44 @@ pub async fn process(
         ));
     }
 
+    let outcome_ids = create_order_for_processing_tx(
+        &mut tx,
+        access,
+        context,
+        request.receipt,
+        request.expected_revision,
+        order,
+    )
+    .await?;
+    let result = write_outcome_tx(
+        &mut tx,
+        access,
+        OutcomeWrite {
+            receipt: request.receipt,
+            actor_id: context.actor_id,
+            previous: previous.as_ref(),
+            input: request.input,
+            ids: outcome_ids,
+            failure: None,
+        },
+    )
+    .await?;
+    if let Some(prepared) = prepared {
+        let completed = prepared.completed_result(&result, None)?;
+        insert_result(&mut tx, &completed).await?;
+    }
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(super) async fn create_order_for_processing_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    access: &TenantAccess,
+    context: &CommandContext,
+    receipt: &IntegrationInboxReceipt,
+    expected_revision: Option<IntegrationInboxProcessingRevision>,
+    order: &NewFulfillmentOrder,
+) -> AppResult<OutcomeIds> {
     let order_context = CommandContext {
         tenant_id: context.tenant_id,
         actor_id: context.actor_id,
@@ -452,33 +585,18 @@ pub async fn process(
         )),
     };
     let order_result =
-        order_creation::create_fulfillment_order_tx(&mut tx, access, &order_context, order).await?;
+        order_creation::create_fulfillment_order_tx(tx, access, &order_context, order).await?;
     let order_id = OrderId::new(order_result.order_id)
         .map_err(|error| AppError::internal(error.to_string()))?;
     let order_revision = OrderRevision::new(order_result.revision)
         .map_err(|error| AppError::internal(error.to_string()))?;
-    let result = write_outcome_tx(
-        &mut tx,
-        access,
-        receipt,
-        context.actor_id,
-        previous.as_ref(),
-        OutcomeIds {
-            order_id: Some(order_id),
-            order_revision: Some(order_revision),
-        },
-        None,
-    )
-    .await?;
-    if let Some(prepared) = prepared {
-        let completed = prepared.completed_result(&result, None)?;
-        insert_result(&mut tx, &completed).await?;
-    }
-    tx.commit().await?;
-    Ok(result)
+    Ok(OutcomeIds {
+        order_id: Some(order_id),
+        order_revision: Some(order_revision),
+    })
 }
 
-fn validate_expected_revision(
+pub(super) fn validate_expected_revision(
     previous: Option<&StoredProcessing>,
     expected: Option<IntegrationInboxProcessingRevision>,
 ) -> AppResult<()> {
@@ -497,11 +615,11 @@ fn validate_expected_revision(
     }
 }
 
-pub async fn receipt_for_reprocessing(
+pub(crate) async fn receipt_for_reprocessing(
     db: &Db,
     access: &TenantAccess,
     receipt_id: i64,
-) -> AppResult<Option<IntegrationInboxReceipt>> {
+) -> AppResult<Option<ReprocessingEnvelope>> {
     if receipt_id <= 0 {
         return Err(AppError::bad_request(
             "integration inbox receipt ID must be positive",
@@ -513,14 +631,23 @@ pub async fn receipt_for_reprocessing(
     require_permission_tx(&mut tx, access.tenant_id, access.user_id.get(), "orders").await?;
     let row = sqlx::query(
         r#"
-        SELECT id,tenant_id,inventory_owner_id,facility_id,received_at,
-               source_key,deduplication_key,content_type,raw_payload,
-               payload_sha256,request_id
-        FROM integration_inbox_receipts
-        WHERE tenant_id=$1 AND id=$2
-          AND inventory_owner_id IS NOT NULL
-          AND facility_id IS NULL
-          AND ($3 OR inventory_owner_id=ANY($4))
+        SELECT receipt.id,receipt.tenant_id,receipt.inventory_owner_id,
+               receipt.facility_id,receipt.received_at,receipt.source_key,
+               receipt.deduplication_key,receipt.content_type,receipt.raw_payload,
+               receipt.payload_sha256,receipt.request_id,
+               COALESCE(correction.corrected_payload,receipt.raw_payload) AS input_payload,
+               COALESCE(correction.payload_sha256,receipt.payload_sha256) AS input_payload_sha256,
+               processing.last_correction_id
+        FROM integration_inbox_receipts receipt
+        LEFT JOIN integration_inbox_processings processing
+          ON processing.tenant_id=receipt.tenant_id AND processing.receipt_id=receipt.id
+        LEFT JOIN integration_inbox_processing_corrections correction
+          ON correction.tenant_id=processing.tenant_id
+         AND correction.id=processing.last_correction_id
+        WHERE receipt.tenant_id=$1 AND receipt.id=$2
+          AND receipt.inventory_owner_id IS NOT NULL
+          AND receipt.facility_id IS NULL
+          AND ($3 OR receipt.inventory_owner_id=ANY($4))
         "#,
     )
     .bind(access.tenant_id.get())
@@ -531,7 +658,7 @@ pub async fn receipt_for_reprocessing(
     .await?;
     let receipt = row
         .map(|row| {
-            Ok::<_, AppError>(IntegrationInboxReceipt {
+            let receipt = IntegrationInboxReceipt {
                 id: row.try_get("id")?,
                 tenant_id: TenantId::new(row.try_get("tenant_id")?)
                     .map_err(|error| AppError::internal(error.to_string()))?,
@@ -548,6 +675,21 @@ pub async fn receipt_for_reprocessing(
                 raw_payload: row.try_get("raw_payload")?,
                 payload_sha256: row.try_get("payload_sha256")?,
                 request_id: row.try_get("request_id")?,
+            };
+            Ok::<_, AppError>(ReprocessingEnvelope {
+                receipt,
+                input_payload: row.try_get("input_payload")?,
+                input_payload_sha256: row
+                    .try_get::<Vec<u8>, _>("input_payload_sha256")?
+                    .try_into()
+                    .map_err(|_| {
+                        AppError::internal("integration processing input hash is invalid")
+                    })?,
+                correction_id: row
+                    .try_get::<Option<i64>, _>("last_correction_id")?
+                    .map(IntegrationInboxCorrectionId::new)
+                    .transpose()
+                    .map_err(|error| AppError::internal(error.to_string()))?,
             })
         })
         .transpose()?;

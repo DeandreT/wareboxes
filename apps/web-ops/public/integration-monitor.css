@@ -207,8 +207,29 @@
 }
 
 .integration-processing .integration-command-band {
+  flex-wrap: wrap;
+  gap: 4px;
   margin: 0 -8px;
 }
+
+.integration-correction-form {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(220px, 0.4fr) minmax(320px, 1fr);
+  gap: 6px;
+}
+
+.integration-correction-form label { display: grid; gap: 3px; }
+.integration-correction-form label > span { color: var(--ink-soft); font-size: 8px; font-weight: 700; text-transform: uppercase; }
+.integration-correction-form input,
+.integration-correction-form textarea { width: 100%; min-width: 0; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--surface); color: var(--control-ink); font-size: 10px; }
+.integration-correction-form input { height: 28px; padding: 0 7px; }
+.integration-correction-form textarea { min-height: 96px; padding: 6px 7px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.integration-correction-form .wide,
+.integration-correction-form > p,
+.integration-correction-form footer { grid-column: 1 / -1; }
+.integration-correction-form footer { display: flex; justify-content: flex-end; gap: 4px; }
 
 .integration-replay-confirmation {
   display: flex;

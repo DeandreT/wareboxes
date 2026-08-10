@@ -3,6 +3,47 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub const MAX_OUTBOX_DEAD_LETTER_DISCARD_REASON_LENGTH: usize = 1_000;
 pub const MAX_INTEGRATION_PROCESSING_ERROR_CODE_LENGTH: usize = 100;
 pub const MAX_INTEGRATION_PROCESSING_ERROR_MESSAGE_LENGTH: usize = 1_000;
+pub const MAX_INTEGRATION_INBOX_CORRECTION_REASON_LENGTH: usize = 500;
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IntegrationInboxCorrectionReasonError {
+    #[error("correction reason must be trimmed, nonempty, and control-free")]
+    Invalid,
+    #[error(
+        "correction reason cannot exceed {MAX_INTEGRATION_INBOX_CORRECTION_REASON_LENGTH} characters"
+    )]
+    TooLong,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct IntegrationInboxCorrectionReason(String);
+
+impl IntegrationInboxCorrectionReason {
+    pub fn new(value: impl Into<String>) -> Result<Self, IntegrationInboxCorrectionReasonError> {
+        let value = value.into();
+        if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+            return Err(IntegrationInboxCorrectionReasonError::Invalid);
+        }
+        if value.chars().count() > MAX_INTEGRATION_INBOX_CORRECTION_REASON_LENGTH {
+            return Err(IntegrationInboxCorrectionReasonError::TooLong);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for IntegrationInboxCorrectionReason {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,5 +155,16 @@ mod tests {
         assert!(IntegrationInboxProcessingStatus::parse("received").is_none());
         assert_eq!(IntegrationInboxProcessingRevision::new(2).unwrap().get(), 2);
         assert!(IntegrationInboxProcessingRevision::new(0).is_err());
+    }
+
+    #[test]
+    fn correction_reason_is_bounded_and_operator_safe() {
+        assert!(IntegrationInboxCorrectionReason::new("corrected partner item mapping").is_ok());
+        assert!(IntegrationInboxCorrectionReason::new(" corrected partner item mapping").is_err());
+        assert!(IntegrationInboxCorrectionReason::new("contains\ncontrol").is_err());
+        assert!(IntegrationInboxCorrectionReason::new(
+            "x".repeat(MAX_INTEGRATION_INBOX_CORRECTION_REASON_LENGTH + 1)
+        )
+        .is_err());
     }
 }

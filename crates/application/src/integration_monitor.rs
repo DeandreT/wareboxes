@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wareboxes_domain::{
-    FacilityId, IntegrationInboxProcessingAttemptId, IntegrationInboxProcessingId,
-    IntegrationInboxProcessingRevision, IntegrationInboxProcessingStatus, InventoryOwnerId,
-    OrderId, OrderRevision, OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason,
-    OutboxDeadLetterReplayId, Timestamp, UserId,
+    FacilityId, IntegrationInboxCorrectionId, IntegrationInboxProcessingAttemptId,
+    IntegrationInboxProcessingId, IntegrationInboxProcessingRevision,
+    IntegrationInboxProcessingStatus, InventoryOwnerId, OrderId, OrderRevision,
+    OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason, OutboxDeadLetterReplayId, Timestamp,
+    UserId,
 };
 
 use crate::outbox::DeliveryAttemptOutcome;
@@ -225,6 +226,9 @@ pub struct InboundIntegrationProcessingAttemptReadModel {
     pub attempt_number: i32,
     pub status: IntegrationInboxProcessingStatus,
     pub revision: IntegrationInboxProcessingRevision,
+    pub input_payload_sha256: [u8; 32],
+    pub correction_id: Option<IntegrationInboxCorrectionId>,
+    pub correction_reason: Option<String>,
     pub order_id: Option<OrderId>,
     pub order_revision: Option<OrderRevision>,
     pub error_code: Option<String>,
@@ -242,6 +246,10 @@ pub struct InboundIntegrationProcessingReadModel {
     pub status: IntegrationInboxProcessingStatus,
     pub revision: IntegrationInboxProcessingRevision,
     pub attempt_count: i32,
+    pub input_payload_sha256: [u8; 32],
+    pub latest_correction_id: Option<IntegrationInboxCorrectionId>,
+    pub latest_correction_payload: Option<String>,
+    pub latest_correction_payload_truncated: bool,
     pub order_id: Option<OrderId>,
     pub order_revision: Option<OrderRevision>,
     pub error_code: Option<String>,

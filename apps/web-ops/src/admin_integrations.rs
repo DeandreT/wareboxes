@@ -1,3 +1,6 @@
+#[path = "admin_integrations/correction.rs"]
+mod correction;
+
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
     DiscardOutboxDeadLetterRequest, InboundIntegrationDetailResponse, InboundIntegrationPage,
@@ -11,6 +14,7 @@ use crate::api::{self, InboundIntegrationFilters, OutboundIntegrationFilters};
 use crate::components::{Icon, SearchField, UiIcon};
 use crate::sorting::{SortDirection, SortableHeader};
 use crate::workspace_layout::{PaneControls, SplitPaneHandle, SplitPaneState};
+use correction::CorrectionPanel;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MonitorTab {
@@ -410,12 +414,29 @@ fn inbound_detail_view(
     let receipt = detail.receipt;
     let receipt_id = receipt.id;
     let download_path = api::inbound_payload_download_path(receipt.id);
+    let correction_initial_payload = if detail.payload_preview_encoding
+        == InboundPayloadPreviewEncoding::Utf8
+        && !detail.preview_truncated
+    {
+        detail.payload_preview.clone()
+    } else {
+        String::new()
+    };
     let encoding = match detail.payload_preview_encoding {
         InboundPayloadPreviewEncoding::Utf8 => "UTF-8",
         InboundPayloadPreviewEncoding::Hex => "Hexadecimal",
     };
     let processing = detail.processing.map(|processing| {
         let processing_for_command = StoredValue::new(processing.clone());
+        let payload_for_correction = StoredValue::new(if processing.latest_correction_id.is_some() {
+            if processing.latest_correction_payload_truncated {
+                String::new()
+            } else {
+                processing.latest_correction_payload.clone().unwrap_or_default()
+            }
+        } else {
+            correction_initial_payload.clone()
+        });
         let status_class = match processing.status {
             IntegrationOrderProcessingStatus::Quarantined => "status held",
             IntegrationOrderProcessingStatus::Processed => "status shipped",
@@ -439,6 +460,7 @@ fn inbound_detail_view(
                             view! { <button type="button" class="button secondary-action compact" disabled=move || signals.command_pending.get() on:click=move |_| signals.reprocess_confirmation.set(Some(receipt_id))><Icon icon=UiIcon::Refresh/>"Reprocess retained payload"</button> }.into_any()
                         }
                     }}
+                    <CorrectionPanel signals receipt_id processing=processing_for_command.get_value() initial_payload=payload_for_correction.get_value()/>
                     </div>
                 </Show>
                 <dl class="integration-facts">
@@ -446,6 +468,7 @@ fn inbound_detail_view(
                     <div><dt>"Mapping"</dt><dd>{format!("Version {}",processing.mapping_version)}</dd></div>
                     <div><dt>"Revision"</dt><dd>{processing.revision.get()}</dd></div>
                     <div><dt>"Attempts"</dt><dd>{processing.attempt_count}</dd></div>
+                    <div><dt>"Input SHA-256"</dt><dd class="mono wrap-anywhere">{processing.input_payload_sha256}</dd></div>
                     <div><dt>"Last operator"</dt><dd>{processing.attempted_by_name}</dd></div>
                     <div><dt>"Last attempt"</dt><dd>{processing.attempted_at}</dd></div>
                     {processing.order_id.map(|order_id| view! { <div><dt>"Created order"</dt><dd class="mono">{format!("#{order_id}")}</dd></div> })}
@@ -453,7 +476,7 @@ fn inbound_detail_view(
                 </dl>
                 <div class="integration-attempts">{processing.attempts.into_iter().map(|attempt| {
                     let label=match attempt.status { IntegrationOrderProcessingStatus::Quarantined=>"Quarantined",IntegrationOrderProcessingStatus::Processed=>"Processed" };
-                    view! { <article><header><strong>{format!("Attempt {}",attempt.attempt_number)}</strong><span>{label}</span></header><dl><div><dt>"Operator"</dt><dd>{attempt.attempted_by_name}</dd></div><div><dt>"Attempted"</dt><dd>{attempt.attempted_at}</dd></div><div><dt>"Revision"</dt><dd>{attempt.revision.get()}</dd></div>{attempt.order_id.map(|id| view! { <div><dt>"Order"</dt><dd class="mono">{format!("#{id}")}</dd></div> })}</dl>{attempt.error_message.map(|message| view! { <p class="integration-failure">{message}</p> })}</article> }
+                    view! { <article><header><strong>{format!("Attempt {}",attempt.attempt_number)}</strong><span>{label}</span></header><dl><div><dt>"Operator"</dt><dd>{attempt.attempted_by_name}</dd></div><div><dt>"Attempted"</dt><dd>{attempt.attempted_at}</dd></div><div><dt>"Revision"</dt><dd>{attempt.revision.get()}</dd></div>{attempt.order_id.map(|id| view! { <div><dt>"Order"</dt><dd class="mono">{format!("#{id}")}</dd></div> })}{attempt.correction_id.map(|id| view! { <div><dt>"Correction"</dt><dd class="mono">{format!("#{id}")}</dd></div> })}</dl>{attempt.correction_reason.map(|reason| view! { <p>{reason}</p> })}{attempt.error_message.map(|message| view! { <p class="integration-failure">{message}</p> })}</article> }
                 }).collect_view()}</div>
             </section>
         }
