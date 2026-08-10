@@ -53,6 +53,11 @@ mod item_storage_policy;
 pub use item_storage_policy::{
     configure_item_storage_policy, item_storage_policies, retire_item_storage_policy,
 };
+mod item_traceability_policy;
+pub use item_traceability_policy::{
+    configure_item_traceability_policy, item_traceability_policies,
+    retire_item_traceability_policy, ItemTraceabilityPolicyFilters,
+};
 mod order;
 pub use order::{
     amend_fulfillment_order, create_fulfillment_order, order_entry_items,

@@ -8,6 +8,8 @@ use crate::toast::use_toast_bus;
 
 #[path = "catalog_item_storage_policies.rs"]
 mod item_storage_policies;
+#[path = "catalog_item_traceability_policies.rs"]
+mod item_traceability_policies;
 #[path = "catalog_items.rs"]
 mod items;
 #[path = "catalog_license_plates.rs"]
@@ -18,6 +20,7 @@ mod locations;
 mod storage_zones;
 
 use item_storage_policies::ItemStoragePolicyCatalog;
+use item_traceability_policies::ItemTraceabilityPolicyCatalog;
 use items::ItemCatalog;
 use license_plates::LicensePlateCatalog;
 use locations::LocationCatalog;
@@ -68,6 +71,7 @@ enum CatalogSection {
     LicensePlates,
     StorageZones,
     ItemStoragePolicies,
+    ItemTraceabilityPolicies,
 }
 
 #[component]
@@ -156,6 +160,14 @@ pub fn CatalogWorkbench(on_unauthorized: Callback<()>, can_supervise: bool) -> i
                 >
                     "Storage policies"
                 </button>
+                <button
+                    type="button"
+                    class:active=move || section.get() == CatalogSection::ItemTraceabilityPolicies
+                    aria-current=move || (section.get() == CatalogSection::ItemTraceabilityPolicies).then_some("page")
+                    on:click=move |_| section.set(CatalogSection::ItemTraceabilityPolicies)
+                >
+                    "Traceability"
+                </button>
             </nav>
 
             {move || match store.load_state.get() {
@@ -197,6 +209,9 @@ pub fn CatalogWorkbench(on_unauthorized: Callback<()>, can_supervise: bool) -> i
                     }
                     CatalogSection::ItemStoragePolicies => {
                         view! { <ItemStoragePolicyCatalog store can_supervise/> }.into_any()
+                    }
+                    CatalogSection::ItemTraceabilityPolicies => {
+                        view! { <ItemTraceabilityPolicyCatalog store can_supervise/> }.into_any()
                     }
                 },
             }}

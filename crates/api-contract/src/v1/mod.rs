@@ -17,6 +17,7 @@ mod inventory_rollup;
 mod inventory_status_transition;
 mod item_storage_policy;
 mod item_substitution;
+mod item_traceability_policy;
 mod license_plate_putaway;
 mod order;
 mod order_allocation;
@@ -132,6 +133,11 @@ pub use item_substitution::{
     ConfigureItemSubstitutionPolicyRequest, ItemSubstitutionPolicyListRequest,
     ItemSubstitutionPolicyResponse, ItemSubstitutionReason, RetireItemSubstitutionPolicyRequest,
     SubstitutePickShortageRequest, SubstitutePickShortageResponse, SubstitutePickWorkResponse,
+};
+pub use item_traceability_policy::{
+    ConfigureItemTraceabilityPolicyRequest, ItemTraceabilityPolicyPage,
+    ItemTraceabilityPolicyPageRequest, ItemTraceabilityPolicyResponse,
+    ItemTraceabilityPolicyStatus, RetireItemTraceabilityPolicyRequest, TraceabilityRequirement,
 };
 pub use license_plate_putaway::{
     ConfirmLicensePlatePutawayRequest, CreateLicensePlatePutawayTaskRequest,

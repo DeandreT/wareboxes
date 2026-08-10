@@ -16,6 +16,7 @@ pub mod inventory_integrity;
 pub mod inventory_recall;
 pub mod item_storage_policy;
 pub mod item_substitution;
+pub mod item_traceability_policy;
 pub mod order_allocation;
 pub mod order_amendment;
 pub mod order_cancellation;

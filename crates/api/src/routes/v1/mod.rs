@@ -15,6 +15,7 @@ mod inventory_rollups;
 mod inventory_status_transitions;
 mod item_storage_policies;
 mod item_substitutions;
+mod item_traceability_policies;
 mod license_plate_putaway;
 mod order_allocations;
 mod order_cancellations;
@@ -127,6 +128,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/item-storage-policies/{policy_id}/retirements",
             post(item_storage_policies::retire),
+        )
+        .route(
+            "/item-traceability-policies",
+            get(item_traceability_policies::list).post(item_traceability_policies::configure),
+        )
+        .route(
+            "/item-traceability-policies/{policy_id}/retirements",
+            post(item_traceability_policies::retire),
         )
         .route(
             "/inventory/rollups/by-location",

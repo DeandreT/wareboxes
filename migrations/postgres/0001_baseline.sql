@@ -33675,6 +33675,313 @@ REVOKE ALL ON FUNCTION public.require_item_storage_policy_consistency() FROM PUB
 REVOKE ALL ON FUNCTION public.enforce_item_storage_policy_for_balance() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_storage_zone_item_policy_compatibility() FROM PUBLIC;
 
+-- Versioned owner/facility/item lot, serial, expiration, and shelf-life policy.
+CREATE TABLE public.item_traceability_policies (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    lot_requirement text NOT NULL,
+    serial_requirement text NOT NULL,
+    expiration_requirement text NOT NULL,
+    minimum_shelf_life_days bigint,
+    revision bigint NOT NULL,
+    supersedes_item_traceability_policy_id bigint,
+    effective_from timestamptz NOT NULL,
+    effective_to timestamptz,
+    configured_by_user_id bigint NOT NULL,
+    configured_at timestamptz NOT NULL,
+    retired_by_user_id bigint,
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, id),
+    UNIQUE (tenant_id, inventory_owner_id, facility_id, item_id, uom, revision),
+    CHECK (uom = btrim(uom) AND uom <> '' AND char_length(uom) <= 32),
+    CHECK (lot_requirement IN ('not_tracked','required')),
+    CHECK (serial_requirement IN ('not_tracked','required')),
+    CHECK (expiration_requirement IN ('not_tracked','required')),
+    CHECK (minimum_shelf_life_days IS NULL
+           OR minimum_shelf_life_days BETWEEN 0 AND 36500),
+    CHECK (expiration_requirement = 'required' OR minimum_shelf_life_days IS NULL),
+    CHECK (revision > 0 AND configured_at = effective_from),
+    CHECK ((effective_to IS NULL AND retired_by_user_id IS NULL)
+           OR (effective_to > effective_from AND retired_by_user_id IS NOT NULL)),
+    FOREIGN KEY (tenant_id) REFERENCES public.tenants(id),
+    FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities(tenant_id, id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id)
+        REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, item_id)
+        REFERENCES public.inventory_owner_items(tenant_id, inventory_owner_id, item_id),
+    FOREIGN KEY (tenant_id, configured_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id),
+    FOREIGN KEY (tenant_id, retired_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id),
+    FOREIGN KEY (tenant_id, inventory_owner_id, facility_id,
+                 supersedes_item_traceability_policy_id)
+        REFERENCES public.item_traceability_policies(
+            tenant_id, inventory_owner_id, facility_id, id)
+);
+
+CREATE UNIQUE INDEX item_traceability_policies_one_active_natural_key
+ON public.item_traceability_policies(
+    tenant_id, inventory_owner_id, facility_id, item_id, uom)
+WHERE effective_to IS NULL;
+CREATE INDEX item_traceability_policies_history_idx
+ON public.item_traceability_policies(
+    tenant_id, inventory_owner_id, facility_id, item_id, uom, revision DESC);
+
+CREATE FUNCTION public.validate_item_traceability_policy() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    predecessor public.item_traceability_policies%ROWTYPE;
+    item_uom text;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':',
+        'item_traceability_policy', NEW.tenant_id, NEW.inventory_owner_id,
+        NEW.facility_id, NEW.item_id, NEW.uom), 0));
+
+    SELECT item.packaging_unit INTO item_uom
+    FROM public.inventory_owner_items owner_item
+    JOIN public.items item
+      ON item.tenant_id = owner_item.tenant_id AND item.id = owner_item.item_id
+    JOIN public.inventory_owner_facilities assignment
+      ON assignment.tenant_id = owner_item.tenant_id
+     AND assignment.inventory_owner_id = owner_item.inventory_owner_id
+     AND assignment.facility_id = NEW.facility_id
+     AND assignment.deleted IS NULL
+    WHERE owner_item.tenant_id = NEW.tenant_id
+      AND owner_item.inventory_owner_id = NEW.inventory_owner_id
+      AND owner_item.item_id = NEW.item_id
+      AND owner_item.deleted IS NULL AND item.deleted IS NULL
+    FOR SHARE OF owner_item, item, assignment;
+    IF item_uom IS DISTINCT FROM NEW.uom THEN
+        RAISE EXCEPTION 'item traceability policy owner, facility, item, or UOM is unavailable'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF NEW.supersedes_item_traceability_policy_id IS NULL THEN
+        IF NEW.revision <> 1 OR EXISTS (
+            SELECT 1 FROM public.item_traceability_policies existing
+            WHERE existing.tenant_id = NEW.tenant_id
+              AND existing.inventory_owner_id = NEW.inventory_owner_id
+              AND existing.facility_id = NEW.facility_id
+              AND existing.item_id = NEW.item_id AND existing.uom = NEW.uom)
+        THEN
+            RAISE EXCEPTION 'initial item traceability policy revision must be one'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    SELECT * INTO predecessor FROM public.item_traceability_policies
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND facility_id = NEW.facility_id
+      AND item_id = NEW.item_id AND uom = NEW.uom
+      AND id = NEW.supersedes_item_traceability_policy_id
+    FOR SHARE;
+    IF NOT FOUND
+       OR predecessor.effective_to IS NULL
+       OR NEW.revision <> predecessor.revision + 1
+       OR NEW.effective_from < predecessor.effective_to
+       OR EXISTS (
+           SELECT 1 FROM public.item_traceability_policies newer
+           WHERE newer.tenant_id = NEW.tenant_id
+             AND newer.inventory_owner_id = NEW.inventory_owner_id
+             AND newer.facility_id = NEW.facility_id
+             AND newer.item_id = NEW.item_id AND newer.uom = NEW.uom
+             AND newer.revision > predecessor.revision)
+    THEN
+        RAISE EXCEPTION 'item traceability policy successor does not match its closed predecessor'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_item_traceability_policy_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'item traceability policies are immutable' USING ERRCODE = '23514';
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':',
+        'item_traceability_policy', OLD.tenant_id, OLD.inventory_owner_id,
+        OLD.facility_id, OLD.item_id, OLD.uom), 0));
+    IF NEW.id <> OLD.id
+       OR NEW.tenant_id <> OLD.tenant_id
+       OR NEW.inventory_owner_id <> OLD.inventory_owner_id
+       OR NEW.facility_id <> OLD.facility_id
+       OR NEW.item_id <> OLD.item_id OR NEW.uom <> OLD.uom
+       OR NEW.lot_requirement <> OLD.lot_requirement
+       OR NEW.serial_requirement <> OLD.serial_requirement
+       OR NEW.expiration_requirement <> OLD.expiration_requirement
+       OR NEW.minimum_shelf_life_days IS DISTINCT FROM OLD.minimum_shelf_life_days
+       OR NEW.revision <> OLD.revision
+       OR NEW.supersedes_item_traceability_policy_id IS DISTINCT FROM OLD.supersedes_item_traceability_policy_id
+       OR NEW.effective_from <> OLD.effective_from
+       OR NEW.configured_by_user_id <> OLD.configured_by_user_id
+       OR NEW.configured_at <> OLD.configured_at
+       OR OLD.effective_to IS NOT NULL
+       OR NEW.effective_to IS NULL OR NEW.retired_by_user_id IS NULL
+       OR NEW.effective_to <= OLD.effective_from
+    THEN
+        RAISE EXCEPTION 'only active item traceability policy retirement is allowed'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.require_item_traceability_consistency() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    checked_tenant_id bigint;
+    checked_owner_id bigint;
+    checked_facility_id bigint;
+    checked_item_id bigint;
+    checked_uom text;
+    policy public.item_traceability_policies%ROWTYPE;
+BEGIN
+    IF TG_TABLE_NAME = 'item_traceability_policies' THEN
+        SELECT * INTO policy FROM public.item_traceability_policies
+        WHERE tenant_id = NEW.tenant_id AND id = NEW.id;
+    ELSE
+        checked_tenant_id := NEW.tenant_id;
+        checked_owner_id := NEW.inventory_owner_id;
+        checked_facility_id := NEW.facility_id;
+        checked_item_id := NEW.item_id;
+        checked_uom := NEW.uom;
+        SELECT * INTO policy FROM public.item_traceability_policies
+        WHERE tenant_id = checked_tenant_id
+          AND inventory_owner_id = checked_owner_id
+          AND facility_id = checked_facility_id
+          AND item_id = checked_item_id AND uom = checked_uom
+          AND effective_to IS NULL;
+    END IF;
+    IF NOT FOUND OR policy.effective_to IS NOT NULL THEN
+        RETURN NULL;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.inventory_balances balance
+        JOIN public.item_batches batch
+          ON batch.tenant_id = balance.tenant_id
+         AND batch.inventory_owner_id = balance.inventory_owner_id
+         AND batch.id = balance.item_batch_id
+        WHERE balance.tenant_id = policy.tenant_id
+          AND balance.inventory_owner_id = policy.inventory_owner_id
+          AND balance.facility_id = policy.facility_id
+          AND balance.item_id = policy.item_id AND balance.uom = policy.uom
+          AND balance.deleted IS NULL AND balance.qty_on_hand > 0
+          AND ((policy.lot_requirement = 'required' AND batch.lot IS NULL)
+            OR (policy.lot_requirement = 'not_tracked' AND batch.lot IS NOT NULL)
+            OR (policy.serial_requirement = 'required' AND batch.serial IS NULL)
+            OR (policy.serial_requirement = 'not_tracked' AND batch.serial IS NOT NULL)
+            OR (policy.expiration_requirement = 'required' AND batch.expiration IS NULL)
+            OR (policy.expiration_requirement = 'not_tracked' AND batch.expiration IS NOT NULL)
+            OR (policy.minimum_shelf_life_days IS NOT NULL
+                AND batch.expiration < batch.created
+                    + make_interval(days => policy.minimum_shelf_life_days::integer))))
+       OR (policy.serial_requirement = 'required' AND EXISTS (
+        SELECT 1
+        FROM public.inventory_balances balance
+        JOIN public.item_batches batch
+          ON batch.tenant_id = balance.tenant_id
+         AND batch.inventory_owner_id = balance.inventory_owner_id
+         AND batch.id = balance.item_batch_id
+        WHERE balance.tenant_id = policy.tenant_id
+          AND balance.inventory_owner_id = policy.inventory_owner_id
+          AND balance.facility_id = policy.facility_id
+          AND balance.item_id = policy.item_id AND balance.uom = policy.uom
+          AND balance.deleted IS NULL AND balance.qty_on_hand > 0
+        GROUP BY batch.serial
+        HAVING batch.serial IS NULL OR sum(balance.qty_on_hand) > 1))
+    THEN
+        RAISE EXCEPTION 'inventory does not satisfy the active item traceability policy'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.lock_item_traceability_identity() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    serial_required boolean;
+    batch_serial text;
+BEGIN
+    IF NEW.deleted IS NOT NULL OR NEW.qty_on_hand <= 0 THEN
+        RETURN NEW;
+    END IF;
+    SELECT policy.serial_requirement = 'required', batch.serial
+      INTO serial_required, batch_serial
+    FROM public.item_traceability_policies policy
+    JOIN public.item_batches batch
+      ON batch.tenant_id = NEW.tenant_id
+     AND batch.inventory_owner_id = NEW.inventory_owner_id
+     AND batch.id = NEW.item_batch_id
+    WHERE policy.tenant_id = NEW.tenant_id
+      AND policy.inventory_owner_id = NEW.inventory_owner_id
+      AND policy.facility_id = NEW.facility_id
+      AND policy.item_id = NEW.item_id AND policy.uom = NEW.uom
+      AND policy.effective_to IS NULL
+    FOR SHARE OF policy, batch;
+    IF FOUND AND serial_required AND batch_serial IS NOT NULL THEN
+        PERFORM pg_advisory_xact_lock(hashtextextended(concat_ws(':',
+            'item_serial', NEW.tenant_id, NEW.inventory_owner_id,
+            NEW.facility_id, NEW.item_id, NEW.uom, batch_serial), 0));
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER item_traceability_policies_validate
+BEFORE INSERT ON public.item_traceability_policies
+FOR EACH ROW EXECUTE FUNCTION public.validate_item_traceability_policy();
+CREATE TRIGGER item_traceability_policies_guard
+BEFORE UPDATE OR DELETE ON public.item_traceability_policies
+FOR EACH ROW EXECUTE FUNCTION public.guard_item_traceability_policy_mutation();
+CREATE CONSTRAINT TRIGGER item_traceability_policies_consistent
+AFTER INSERT OR UPDATE ON public.item_traceability_policies DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_item_traceability_consistency();
+CREATE TRIGGER inventory_balances_lock_traceability_identity
+BEFORE INSERT OR UPDATE OF tenant_id, inventory_owner_id, facility_id, item_batch_id,
+    item_id, uom, qty_on_hand, deleted ON public.inventory_balances
+FOR EACH ROW EXECUTE FUNCTION public.lock_item_traceability_identity();
+CREATE CONSTRAINT TRIGGER inventory_balances_traceability_consistent
+AFTER INSERT OR UPDATE ON public.inventory_balances DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_item_traceability_consistency();
+
+ALTER TABLE public.item_traceability_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.item_traceability_policies FORCE ROW LEVEL SECURITY;
+CREATE POLICY item_traceability_policies_tenant_isolation
+ON public.item_traceability_policies
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT, INSERT ON public.item_traceability_policies TO wareboxes_app;
+GRANT UPDATE (effective_to, retired_by_user_id)
+ON public.item_traceability_policies TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.item_traceability_policies_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_item_traceability_policy() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_item_traceability_policy_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_item_traceability_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.lock_item_traceability_identity() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

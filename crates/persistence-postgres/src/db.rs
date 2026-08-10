@@ -770,6 +770,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'item_storage_policy_zone_purposes_tenant_isolation'
                 ),
                 (
+                    'item_traceability_policies',
+                    'item_traceability_policies_tenant_isolation'
+                ),
+                (
                     'cycle_count_location_tasks',
                     'cycle_count_location_tasks_tenant_isolation'
                 ),
