@@ -104,6 +104,7 @@
 
 .fulfillment-detail {
   position: static;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   max-height: none;
@@ -894,6 +895,123 @@
   min-height: 25px;
   padding: 0 8px;
   font-size: 10px;
+}
+
+.receiving-execution-section {
+  display: grid;
+  min-height: 0;
+}
+
+.receiving-execution-title .icon-button {
+  flex: 0 0 auto;
+}
+
+.receiving-execution-state,
+.receiving-execution-error {
+  margin: 0;
+  padding: 8px;
+  font-size: 10px;
+}
+
+.receiving-execution-context {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.4fr) minmax(0, 0.6fr);
+  border-bottom: 1px solid var(--line);
+}
+
+.receiving-execution-context > div {
+  display: grid;
+  min-width: 0;
+  align-content: center;
+  gap: 2px;
+  padding: 7px 8px;
+  border-right: 1px solid var(--line);
+}
+
+.receiving-execution-context > div:last-child {
+  border-right: 0;
+}
+
+.receiving-execution-context span,
+.receiving-progress-strip span {
+  color: var(--label-ink);
+  font-size: 8px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.receiving-execution-context strong,
+.receiving-execution-context small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.receiving-execution-context strong {
+  font-size: 10px;
+}
+
+.receiving-execution-context small {
+  color: var(--ink-soft);
+  font-size: 9px;
+}
+
+.receiving-progress-strip {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.receiving-progress-strip > div {
+  display: grid;
+  gap: 1px;
+  padding: 5px 8px;
+  border-right: 1px solid var(--line);
+}
+
+.receiving-progress-strip > div:last-child {
+  border-right: 0;
+}
+
+.receiving-progress-strip strong {
+  font-size: 13px;
+}
+
+.receiving-progress-strip .attention strong {
+  color: var(--warning-ink);
+}
+
+.receiving-lines-scroll {
+  min-height: 0;
+  overflow: auto;
+}
+
+.detail-table.receiving-lines-table {
+  min-width: 760px;
+}
+
+.receiving-lines-table th,
+.receiving-lines-table td {
+  white-space: nowrap;
+}
+
+.receiving-line-scans {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.receiving-line-complete {
+  background: color-mix(in srgb, var(--green-soft) 42%, transparent);
+}
+
+.receiving-quantity-positive:not(:empty) {
+  color: var(--success-ink);
+}
+
+.receiving-quantity-exception:not(:empty) {
+  color: var(--danger-ink);
 }
 
 .detail-table {

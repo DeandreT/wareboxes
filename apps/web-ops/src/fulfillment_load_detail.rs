@@ -14,9 +14,13 @@ use crate::fulfillment_shared::{
 use crate::toast::use_toast_bus;
 use crate::view_model::format_quantity;
 
+mod receiving;
+use receiving::ReceivingExecutionPanel;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LoadDetailTab {
     Header,
+    Receiving,
     Freight,
     Notes,
     Activity,
@@ -106,14 +110,20 @@ pub fn LoadDetailPanel(
             </dl>
             <div class="detail-tabs" role="tablist" aria-label="Load detail sections">
                 {[
-                    (LoadDetailTab::Header, "Header"),
-                    (LoadDetailTab::Freight, "Freight"),
-                    (LoadDetailTab::Notes, "Notes"),
-                    (LoadDetailTab::Activity, "Activity"),
-                    (LoadDetailTab::Documents, "Documents"),
+                    (LoadDetailTab::Header, "Header", true),
+                    (
+                        LoadDetailTab::Receiving,
+                        "Receiving",
+                        load.get_value().r#type == LoadType::Inbound,
+                    ),
+                    (LoadDetailTab::Freight, "Freight", true),
+                    (LoadDetailTab::Notes, "Notes", true),
+                    (LoadDetailTab::Activity, "Activity", true),
+                    (LoadDetailTab::Documents, "Documents", true),
                 ]
                     .into_iter()
-                    .map(|(value, label)| {
+                    .filter(|(_, _, visible)| *visible)
+                    .map(|(value, label, _)| {
                         view! {
                             <button
                                 type="button"
@@ -252,6 +262,14 @@ pub fn LoadDetailPanel(
                         })
                     }}
                 </Show>
+            </Show>
+
+            <Show when=move || tab.get() == LoadDetailTab::Receiving>
+                <ReceivingExecutionPanel
+                    load_id
+                    execution_barcode=load.get_value().execution_barcode
+                    on_unauthorized
+                />
             </Show>
 
             <Show when=move || tab.get() == LoadDetailTab::Freight>

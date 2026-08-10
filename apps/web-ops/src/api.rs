@@ -39,6 +39,8 @@ pub use cycle_count::{
     configure_cycle_count_policy, create_cycle_count_task, cycle_count_candidates,
     cycle_count_policies, cycle_count_variances, cycle_count_work, decide_cycle_count_variance,
 };
+mod expected_receiving;
+pub use expected_receiving::expected_receiving_session;
 mod item_substitution;
 pub use item_substitution::{
     configure_item_substitution_policy, item_substitution_policies,
