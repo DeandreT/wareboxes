@@ -8,6 +8,7 @@ use wareboxes_core::models::{Facility, Location};
 use crate::api;
 use crate::components::{Icon, UiIcon};
 use crate::toast::{use_toast_bus, ToastBus};
+use crate::workspace_layout::{SplitPaneHandle, SplitPaneState};
 
 use super::{label_or_id, CatalogStore};
 
@@ -63,7 +64,11 @@ struct Drafts {
 }
 
 #[component]
-pub(super) fn StorageZoneCatalog(store: CatalogStore, can_supervise: bool) -> impl IntoView {
+pub(super) fn StorageZoneCatalog(
+    store: CatalogStore,
+    can_supervise: bool,
+    layout: SplitPaneState,
+) -> impl IntoView {
     let signals = Signals {
         page: RwSignal::new(StorageZonePage::new(Vec::new(), None)),
         facility_id: RwSignal::new(None),
@@ -98,6 +103,7 @@ pub(super) fn StorageZoneCatalog(store: CatalogStore, can_supervise: bool) -> im
         drafts.confirm_retire.set(false);
         signals.error.set(None);
         signals.selected.set(Some(zone));
+        layout.show_detail();
     });
     let open_create = Callback::new(move |_| {
         drafts.facility_id.set(signals.facility_id.get_untracked());
@@ -146,8 +152,8 @@ pub(super) fn StorageZoneCatalog(store: CatalogStore, can_supervise: bool) -> im
     });
 
     view! {
-        <div class="catalog-layout storage-zone-layout">
-            <section class="data-section catalog-browser">
+        <div class="catalog-layout storage-zone-layout split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
+            <section class="data-section catalog-browser split-master">
                 <div class="catalog-toolbar storage-zone-toolbar">
                     <label><span class="sr-only">"Facility"</span><select prop:value=move || option_id(signals.facility_id.get()) on:change=move |event| { signals.facility_id.set(parse_id(&event_target_value(&event))); reset_filtered_page(signals); }><option value="">"All facilities"</option>{move || facility_options(&store.data.get().facilities)}</select></label>
                     <label><span class="sr-only">"Purpose"</span><select prop:value=move || signals.purpose.get().map_or("all",purpose_wire) on:change=move |event| { signals.purpose.set(parse_purpose(&event_target_value(&event))); reset_filtered_page(signals); }><option value="all">"All purposes"</option>{purpose_options()}</select></label>
@@ -165,7 +171,8 @@ pub(super) fn StorageZoneCatalog(store: CatalogStore, can_supervise: bool) -> im
                 </div>
                 <footer class="table-footer"><span>{move || if signals.loading.get(){"Refreshing...".into()}else{format!("{} on this page",signals.page.get().items.len())}}</span><button class="button secondary-action compact" type="button" disabled=move || signals.loading.get() || signals.history.get().is_empty() on:click=move |_| previous_page(signals)>"Previous"</button><button class="button secondary-action compact" type="button" disabled=move || signals.loading.get() || signals.page.get().next_cursor.is_none() on:click=move |_| next_page(signals)>"Next"</button></footer>
             </section>
-            <aside class="data-section catalog-editor" aria-label="Storage zone details">
+            <SplitPaneHandle layout/>
+            <aside class="data-section catalog-editor split-detail" aria-label="Storage zone details">
                 {move || signals.selected.get().map(|zone| zone_detail(zone,can_supervise,signals,drafts,open_edit,retire,retry)).unwrap_or_else(|| view!{<div class="catalog-editor-empty"><strong>"Select a storage zone"</strong><p>"Review purpose, travel order, and exact member locations."</p></div>}.into_any())}
             </aside>
         </div>

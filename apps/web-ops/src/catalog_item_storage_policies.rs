@@ -9,6 +9,7 @@ use wareboxes_core::models::{Facility, InventoryOwner, Item};
 use crate::api;
 use crate::components::{Icon, UiIcon};
 use crate::toast::{use_toast_bus, ToastBus};
+use crate::workspace_layout::{SplitPaneHandle, SplitPaneState};
 
 use super::{label_or_id, CatalogStore};
 
@@ -62,7 +63,11 @@ struct Drafts {
 }
 
 #[component]
-pub(super) fn ItemStoragePolicyCatalog(store: CatalogStore, can_supervise: bool) -> impl IntoView {
+pub(super) fn ItemStoragePolicyCatalog(
+    store: CatalogStore,
+    can_supervise: bool,
+    layout: SplitPaneState,
+) -> impl IntoView {
     let signals = Signals {
         page: RwSignal::new(ItemStoragePolicyPage::new(Vec::new(), None)),
         owner_id: RwSignal::new(None),
@@ -98,6 +103,7 @@ pub(super) fn ItemStoragePolicyCatalog(store: CatalogStore, can_supervise: bool)
         drafts.confirm_retire.set(false);
         signals.error.set(None);
         signals.selected.set(Some(policy));
+        layout.show_detail();
     });
     let open_create = Callback::new(move |_| {
         drafts.owner_id.set(signals.owner_id.get_untracked());
@@ -146,8 +152,8 @@ pub(super) fn ItemStoragePolicyCatalog(store: CatalogStore, can_supervise: bool)
     });
 
     view! {
-        <div class="catalog-layout item-storage-policy-layout">
-            <section class="data-section catalog-browser">
+        <div class="catalog-layout item-storage-policy-layout split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
+            <section class="data-section catalog-browser split-master">
                 <div class="catalog-toolbar item-storage-policy-toolbar">
                     <label><span class="sr-only">"Client"</span><select prop:value=move || option_id(signals.owner_id.get()) on:change=move |event| { signals.owner_id.set(parse_id(&event_target_value(&event))); reset_filtered_page(signals); }><option value="">"All clients"</option>{move || owner_options(&store.data.get().clients)}</select></label>
                     <label><span class="sr-only">"Facility"</span><select prop:value=move || option_id(signals.facility_id.get()) on:change=move |event| { signals.facility_id.set(parse_id(&event_target_value(&event))); reset_filtered_page(signals); }><option value="">"All facilities"</option>{move || facility_options(&store.data.get().facilities)}</select></label>
@@ -166,7 +172,8 @@ pub(super) fn ItemStoragePolicyCatalog(store: CatalogStore, can_supervise: bool)
                 </div>
                 <footer class="table-footer"><span>{move || if signals.loading.get(){"Refreshing...".into()}else{format!("{} on this page",signals.page.get().items.len())}}</span><button class="button secondary-action compact" type="button" disabled=move || signals.loading.get() || signals.history.get().is_empty() on:click=move |_| previous_page(signals)>"Previous"</button><button class="button secondary-action compact" type="button" disabled=move || signals.loading.get() || signals.page.get().next_cursor.is_none() on:click=move |_| next_page(signals)>"Next"</button></footer>
             </section>
-            <aside class="data-section catalog-editor" aria-label="Item storage policy details">
+            <SplitPaneHandle layout/>
+            <aside class="data-section catalog-editor split-detail" aria-label="Item storage policy details">
                 {move || signals.selected.get().map(|policy| policy_detail(policy,can_supervise,signals,drafts,open_edit,retire,retry)).unwrap_or_else(|| view!{<div class="catalog-editor-empty"><strong>"Select a storage policy"</strong><p>"Review allowed zone purposes and per-location capacity for an item."</p></div>}.into_any())}
             </aside>
         </div>

@@ -5,6 +5,7 @@ use wareboxes_core::models::{Facility, InventoryOwner, Item, LicensePlate, Locat
 use crate::api;
 #[cfg(target_arch = "wasm32")]
 use crate::toast::use_toast_bus;
+use crate::workspace_layout::{PaneControls, SplitPaneState};
 
 #[path = "catalog_item_storage_policies.rs"]
 mod item_storage_policies;
@@ -83,6 +84,7 @@ pub fn CatalogWorkbench(on_unauthorized: Callback<()>, can_supervise: bool) -> i
         on_unauthorized,
     };
     let section = RwSignal::new(CatalogSection::Items);
+    let layout = SplitPaneState::new("catalog", 760);
 
     store.refresh();
 
@@ -94,20 +96,23 @@ pub fn CatalogWorkbench(on_unauthorized: Callback<()>, can_supervise: bool) -> i
                     <h1>"Master data"</h1>
                     <p>"Maintain sellable items, storage topology, facility locations, and scannable license plates."</p>
                 </div>
-                <button
-                    class="button secondary-action compact"
-                    type="button"
-                    disabled=move || store.load_state.get() == LoadState::Refreshing
-                    on:click=move |_| store.refresh()
-                >
-                    {move || {
-                        if store.load_state.get() == LoadState::Refreshing {
-                            "Refreshing"
-                        } else {
-                            "Refresh"
-                        }
-                    }}
-                </button>
+                <div class="catalog-heading-actions">
+                    <PaneControls layout master_label="catalog table" detail_label="catalog detail"/>
+                    <button
+                        class="button secondary-action compact"
+                        type="button"
+                        disabled=move || store.load_state.get() == LoadState::Refreshing
+                        on:click=move |_| store.refresh()
+                    >
+                        {move || {
+                            if store.load_state.get() == LoadState::Refreshing {
+                                "Refreshing"
+                            } else {
+                                "Refresh"
+                            }
+                        }}
+                    </button>
+                </div>
             </header>
 
             <nav class="catalog-tabs" aria-label="Master data">
@@ -199,19 +204,19 @@ pub fn CatalogWorkbench(on_unauthorized: Callback<()>, can_supervise: bool) -> i
                     .into_any()
                 }
                 LoadState::Ready | LoadState::Refreshing => match section.get() {
-                    CatalogSection::Items => view! { <ItemCatalog store/> }.into_any(),
-                    CatalogSection::Locations => view! { <LocationCatalog store/> }.into_any(),
+                    CatalogSection::Items => view! { <ItemCatalog store layout/> }.into_any(),
+                    CatalogSection::Locations => view! { <LocationCatalog store layout/> }.into_any(),
                     CatalogSection::LicensePlates => {
-                        view! { <LicensePlateCatalog store/> }.into_any()
+                        view! { <LicensePlateCatalog store layout/> }.into_any()
                     }
                     CatalogSection::StorageZones => {
-                        view! { <StorageZoneCatalog store can_supervise/> }.into_any()
+                        view! { <StorageZoneCatalog store can_supervise layout/> }.into_any()
                     }
                     CatalogSection::ItemStoragePolicies => {
-                        view! { <ItemStoragePolicyCatalog store can_supervise/> }.into_any()
+                        view! { <ItemStoragePolicyCatalog store can_supervise layout/> }.into_any()
                     }
                     CatalogSection::ItemTraceabilityPolicies => {
-                        view! { <ItemTraceabilityPolicyCatalog store can_supervise/> }.into_any()
+                        view! { <ItemTraceabilityPolicyCatalog store can_supervise layout/> }.into_any()
                     }
                 },
             }}

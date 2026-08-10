@@ -9,6 +9,7 @@ use crate::components::SearchField;
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::toast::{use_toast_bus, ToastBus};
 use crate::view_model::format_quantity;
+use crate::workspace_layout::{SplitPaneHandle, SplitPaneState};
 
 use super::{label_or_id, optional_text, CatalogStore};
 
@@ -24,7 +25,7 @@ enum PlateSort {
 }
 
 #[component]
-pub(super) fn LicensePlateCatalog(store: CatalogStore) -> impl IntoView {
+pub(super) fn LicensePlateCatalog(store: CatalogStore, layout: SplitPaneState) -> impl IntoView {
     let filter = RwSignal::new(String::new());
     let lookup = RwSignal::new(String::new());
     let show_inactive = RwSignal::new(false);
@@ -55,6 +56,7 @@ pub(super) fn LicensePlateCatalog(store: CatalogStore) -> impl IntoView {
                 Ok(Some(plate)) => {
                     selected_id.set(Some(plate.id));
                     creating.set(false);
+                    layout.show_detail();
                     lookup_pending.set(false);
                     toasts.info(format!("License plate #{} located.", plate.id));
                 }
@@ -73,8 +75,8 @@ pub(super) fn LicensePlateCatalog(store: CatalogStore) -> impl IntoView {
     };
 
     view! {
-        <div class="catalog-layout">
-            <section class="data-section catalog-browser">
+        <div class="catalog-layout split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
+            <section class="data-section catalog-browser split-master">
                 <div class="catalog-toolbar plate-toolbar">
                     <SearchField
                         label="Filter license plates".to_owned()
@@ -105,6 +107,7 @@ pub(super) fn LicensePlateCatalog(store: CatalogStore) -> impl IntoView {
                         on:click=move |_| {
                             selected_id.set(None);
                             creating.set(true);
+                            layout.show_detail();
                         }
                     >
                         "New plate"
@@ -160,6 +163,7 @@ pub(super) fn LicensePlateCatalog(store: CatalogStore) -> impl IntoView {
                                                             on:click=move |_| {
                                                                 creating.set(false);
                                                                 selected_id.set(Some(id));
+                                                                layout.show_detail();
                                                             }
                                                         >
                                                             {plate.barcode.clone().unwrap_or_else(|| "Unlabeled".to_owned())}
@@ -181,8 +185,8 @@ pub(super) fn LicensePlateCatalog(store: CatalogStore) -> impl IntoView {
                     </table>
                 </div>
             </section>
-
-            <aside class="data-section catalog-editor plate-editor" aria-label="License plate editor">
+            <SplitPaneHandle layout/>
+            <aside class="data-section catalog-editor plate-editor split-detail" aria-label="License plate editor">
                 {move || {
                     let data = store.data.get();
                     if creating.get() {

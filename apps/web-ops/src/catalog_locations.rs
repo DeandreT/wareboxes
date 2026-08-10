@@ -8,6 +8,7 @@ use crate::api;
 use crate::components::SearchField;
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::toast::{use_toast_bus, ToastBus};
+use crate::workspace_layout::{SplitPaneHandle, SplitPaneState};
 
 use super::{label_or_id, optional_text, CatalogStore};
 
@@ -23,7 +24,7 @@ enum LocationSort {
 }
 
 #[component]
-pub(super) fn LocationCatalog(store: CatalogStore) -> impl IntoView {
+pub(super) fn LocationCatalog(store: CatalogStore, layout: SplitPaneState) -> impl IntoView {
     let filter = RwSignal::new(String::new());
     let show_inactive = RwSignal::new(false);
     let selected_id = RwSignal::new(None::<i64>);
@@ -34,8 +35,8 @@ pub(super) fn LocationCatalog(store: CatalogStore) -> impl IntoView {
     });
 
     view! {
-        <div class="catalog-layout">
-            <section class="data-section catalog-browser">
+        <div class="catalog-layout split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
+            <section class="data-section catalog-browser split-master">
                 <div class="catalog-toolbar">
                     <SearchField
                         label="Filter locations by name, scan code, zone, type, or facility".to_owned()
@@ -70,6 +71,7 @@ pub(super) fn LocationCatalog(store: CatalogStore) -> impl IntoView {
                         on:click=move |_| {
                             selected_id.set(None);
                             creating.set(true);
+                            layout.show_detail();
                         }
                     >
                         "New location"
@@ -123,6 +125,7 @@ pub(super) fn LocationCatalog(store: CatalogStore) -> impl IntoView {
                                                             on:click=move |_| {
                                                                 creating.set(false);
                                                                 selected_id.set(Some(id));
+                                                                layout.show_detail();
                                                             }
                                                         >
                                                             {location_label(&location)}
@@ -148,8 +151,8 @@ pub(super) fn LocationCatalog(store: CatalogStore) -> impl IntoView {
                     </table>
                 </div>
             </section>
-
-            <aside class="data-section catalog-editor" aria-label="Location editor">
+            <SplitPaneHandle layout/>
+            <aside class="data-section catalog-editor split-detail" aria-label="Location editor">
                 {move || {
                     let data = store.data.get();
                     if creating.get() {

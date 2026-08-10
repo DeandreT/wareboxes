@@ -13,6 +13,7 @@ use crate::api;
 use crate::components::{Icon, SearchField, UiIcon};
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::toast::use_toast_bus;
+use crate::workspace_layout::{SplitPaneHandle, SplitPaneState};
 
 use super::{optional_text, CatalogStore};
 
@@ -27,7 +28,7 @@ enum ItemSort {
 }
 
 #[component]
-pub(super) fn ItemCatalog(store: CatalogStore) -> impl IntoView {
+pub(super) fn ItemCatalog(store: CatalogStore, layout: SplitPaneState) -> impl IntoView {
     let filter = RwSignal::new(String::new());
     let show_inactive = RwSignal::new(false);
     let selected_id = RwSignal::new(None::<i64>);
@@ -38,8 +39,8 @@ pub(super) fn ItemCatalog(store: CatalogStore) -> impl IntoView {
     });
 
     view! {
-        <div class="catalog-layout">
-            <section class="data-section catalog-browser">
+        <div class="catalog-layout split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
+            <section class="data-section catalog-browser split-master">
                 <div class="catalog-toolbar">
                     <SearchField
                         label="Filter items by description, SKU, or barcode".to_owned()
@@ -74,6 +75,7 @@ pub(super) fn ItemCatalog(store: CatalogStore) -> impl IntoView {
                         on:click=move |_| {
                             selected_id.set(None);
                             creating.set(true);
+                            layout.show_detail();
                         }
                     >
                         "New item"
@@ -172,6 +174,7 @@ pub(super) fn ItemCatalog(store: CatalogStore) -> impl IntoView {
                                                             on:click=move |_| {
                                                                 creating.set(false);
                                                                 selected_id.set(Some(id));
+                                                                layout.show_detail();
                                                             }
                                                         >
                                                             {item
@@ -206,8 +209,8 @@ pub(super) fn ItemCatalog(store: CatalogStore) -> impl IntoView {
                     </table>
                 </div>
             </section>
-
-            <aside class="data-section catalog-editor" aria-label="Item editor">
+            <SplitPaneHandle layout/>
+            <aside class="data-section catalog-editor split-detail" aria-label="Item editor">
                 {move || {
                     if creating.get() {
                         view! {
