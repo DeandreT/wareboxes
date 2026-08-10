@@ -6,6 +6,7 @@ mod cycle_count;
 mod facility;
 mod inbound_inspection;
 mod integration;
+mod integration_mapping;
 mod inventory_recall;
 mod item_storage_policy;
 mod item_substitution;
@@ -61,6 +62,12 @@ pub use integration::{
     OutboxDeadLetterDiscardReason, OutboxDeadLetterDiscardReasonError,
     MAX_INTEGRATION_INBOX_CORRECTION_REASON_LENGTH, MAX_INTEGRATION_PROCESSING_ERROR_CODE_LENGTH,
     MAX_INTEGRATION_PROCESSING_ERROR_MESSAGE_LENGTH, MAX_OUTBOX_DEAD_LETTER_DISCARD_REASON_LENGTH,
+};
+pub use integration_mapping::{
+    ExternalItemKey, ExternalItemUom, IntegrationMappedUom, IntegrationMappingError,
+    IntegrationOrderItemMappingDefinition, IntegrationOrderItemMappingRevision,
+    IntegrationOrderItemMappingStatus, IntegrationSourceKey, MAX_EXTERNAL_ITEM_KEY_LENGTH,
+    MAX_EXTERNAL_ITEM_UOM_LENGTH, MAX_INTEGRATION_SOURCE_KEY_LENGTH,
 };
 pub use inventory_recall::{
     release_inventory_recall, InventoryRecallDetails, InventoryRecallError, InventoryRecallNote,
@@ -303,6 +310,10 @@ positive_id!(
 positive_id!(
     IntegrationInboxCorrectionId,
     "integration inbox correction ID"
+);
+positive_id!(
+    IntegrationOrderItemMappingId,
+    "integration order item mapping ID"
 );
 positive_id!(PackSessionId, "pack session ID");
 positive_id!(CartonId, "carton ID");

@@ -610,6 +610,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'integration_inbox_processing_corrections_tenant_isolation'
                 ),
                 (
+                    'integration_order_item_mappings',
+                    'integration_order_item_mappings_tenant_isolation'
+                ),
+                (
                     'inventory_transactions',
                     'inventory_transactions_tenant_isolation'
                 ),

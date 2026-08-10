@@ -55,6 +55,11 @@ pub use integration_monitor::{
     outbound_integrations, replay_outbound_dead_letter, reprocess_inbound_order,
     InboundIntegrationFilters, OutboundIntegrationFilters,
 };
+mod integration_mapping;
+pub use integration_mapping::{
+    configure_integration_order_item_mapping, integration_order_item_mappings,
+    retire_integration_order_item_mapping, IntegrationMappingFilters,
+};
 mod inventory_integrity;
 pub use inventory_integrity::{
     create_inventory_recall, inventory_aging, inventory_integrity_issues, inventory_journal,

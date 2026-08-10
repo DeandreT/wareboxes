@@ -34531,6 +34531,173 @@ REVOKE ALL ON FUNCTION public.validate_outbox_dead_letter_discard() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_outbox_dead_letter_discard_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_outbox_discard_evidence() FROM PUBLIC;
 
+-- Versioned client source identities map external order item/UOM values to
+-- tenant catalog items without exposing internal IDs to partner systems.
+CREATE TABLE public.integration_order_item_mappings (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    source_key text NOT NULL,
+    external_item_key text NOT NULL,
+    external_uom text NOT NULL,
+    item_id bigint NOT NULL,
+    requested_uom text NOT NULL,
+    revision bigint NOT NULL,
+    supersedes_mapping_id bigint,
+    effective_from timestamptz NOT NULL,
+    effective_to timestamptz,
+    configured_by_user_id bigint NOT NULL,
+    configured_at timestamptz NOT NULL,
+    retired_by_user_id bigint,
+    CONSTRAINT integration_order_item_mappings_scope_id_unique
+        UNIQUE (tenant_id,inventory_owner_id,id),
+    CONSTRAINT integration_order_item_mappings_natural_revision_unique
+        UNIQUE (tenant_id,inventory_owner_id,source_key,external_item_key,external_uom,revision),
+    CONSTRAINT integration_order_item_mappings_source_check CHECK (
+        source_key=btrim(source_key) AND source_key<>'' AND char_length(source_key)<=200
+        AND source_key!~'[[:cntrl:]]'),
+    CONSTRAINT integration_order_item_mappings_external_item_check CHECK (
+        external_item_key=btrim(external_item_key) AND external_item_key<>''
+        AND char_length(external_item_key)<=200 AND external_item_key!~'[[:cntrl:]]'),
+    CONSTRAINT integration_order_item_mappings_uom_check CHECK (
+        external_uom=btrim(external_uom) AND external_uom<>'' AND char_length(external_uom)<=32
+        AND external_uom!~'[[:cntrl:]]' AND requested_uom=btrim(requested_uom)
+        AND requested_uom<>'' AND char_length(requested_uom)<=32
+        AND requested_uom!~'[[:cntrl:]]'),
+    CONSTRAINT integration_order_item_mappings_revision_check CHECK (
+        revision>0 AND ((revision=1 AND supersedes_mapping_id IS NULL)
+            OR (revision>1 AND supersedes_mapping_id IS NOT NULL))),
+    CONSTRAINT integration_order_item_mappings_effective_check CHECK (
+        configured_at=effective_from AND (
+            (effective_to IS NULL AND retired_by_user_id IS NULL)
+            OR (effective_to>effective_from AND retired_by_user_id IS NOT NULL))),
+    CONSTRAINT integration_order_item_mappings_owner_item_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,item_id)
+        REFERENCES public.inventory_owner_items(tenant_id,inventory_owner_id,item_id),
+    CONSTRAINT integration_order_item_mappings_supersedes_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,supersedes_mapping_id)
+        REFERENCES public.integration_order_item_mappings(tenant_id,inventory_owner_id,id),
+    CONSTRAINT integration_order_item_mappings_configured_by_fkey
+        FOREIGN KEY (tenant_id,configured_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id),
+    CONSTRAINT integration_order_item_mappings_retired_by_fkey
+        FOREIGN KEY (tenant_id,retired_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE UNIQUE INDEX integration_order_item_mappings_one_active_idx
+ON public.integration_order_item_mappings
+    (tenant_id,inventory_owner_id,source_key,external_item_key,external_uom)
+WHERE effective_to IS NULL;
+CREATE INDEX integration_order_item_mappings_page_idx
+ON public.integration_order_item_mappings (tenant_id,id);
+CREATE INDEX integration_order_item_mappings_history_idx
+ON public.integration_order_item_mappings
+    (tenant_id,inventory_owner_id,source_key,external_item_key,external_uom,revision DESC);
+
+CREATE FUNCTION public.guard_integration_order_item_mapping() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    predecessor public.integration_order_item_mappings%ROWTYPE;
+    catalog_uom text;
+BEGIN
+    IF TG_OP='DELETE' THEN
+        RAISE EXCEPTION 'integration order item mapping evidence is immutable'
+            USING ERRCODE='55000';
+    END IF;
+    IF TG_OP='UPDATE' THEN
+        IF NEW.tenant_id<>OLD.tenant_id
+           OR NEW.inventory_owner_id<>OLD.inventory_owner_id
+           OR NEW.source_key<>OLD.source_key
+           OR NEW.external_item_key<>OLD.external_item_key
+           OR NEW.external_uom<>OLD.external_uom
+           OR NEW.item_id<>OLD.item_id
+           OR NEW.requested_uom<>OLD.requested_uom
+           OR NEW.revision<>OLD.revision
+           OR NEW.supersedes_mapping_id IS DISTINCT FROM OLD.supersedes_mapping_id
+           OR NEW.effective_from<>OLD.effective_from
+           OR NEW.configured_by_user_id<>OLD.configured_by_user_id
+           OR NEW.configured_at<>OLD.configured_at
+           OR OLD.effective_to IS NOT NULL
+           OR NEW.effective_to IS NULL
+           OR NEW.effective_to<=OLD.effective_from
+           OR NEW.retired_by_user_id IS NULL
+        THEN
+            RAISE EXCEPTION 'integration order item mapping mutation is invalid'
+                USING ERRCODE='55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'integration-order-item-mapping:' || NEW.tenant_id::text || ':' ||
+        NEW.inventory_owner_id::text || ':' || NEW.source_key || ':' ||
+        NEW.external_item_key || ':' || NEW.external_uom, 0));
+    SELECT item.packaging_unit INTO catalog_uom
+    FROM public.inventory_owner_items owner_item
+    JOIN public.items item ON item.tenant_id=owner_item.tenant_id
+                          AND item.id=owner_item.item_id
+    WHERE owner_item.tenant_id=NEW.tenant_id
+      AND owner_item.inventory_owner_id=NEW.inventory_owner_id
+      AND owner_item.item_id=NEW.item_id
+      AND owner_item.deleted IS NULL AND item.deleted IS NULL;
+    IF NOT FOUND OR catalog_uom<>NEW.requested_uom THEN
+        RAISE EXCEPTION 'integration order item mapping target is not an active owner item and UOM'
+            USING ERRCODE='55000';
+    END IF;
+
+    IF NEW.supersedes_mapping_id IS NULL THEN
+        IF NEW.revision<>1 OR EXISTS (
+            SELECT 1 FROM public.integration_order_item_mappings existing
+            WHERE existing.tenant_id=NEW.tenant_id
+              AND existing.inventory_owner_id=NEW.inventory_owner_id
+              AND existing.source_key=NEW.source_key
+              AND existing.external_item_key=NEW.external_item_key
+              AND existing.external_uom=NEW.external_uom)
+        THEN
+            RAISE EXCEPTION 'initial integration order item mapping revision is invalid'
+                USING ERRCODE='55000';
+        END IF;
+    ELSE
+        SELECT * INTO predecessor FROM public.integration_order_item_mappings
+        WHERE tenant_id=NEW.tenant_id
+          AND inventory_owner_id=NEW.inventory_owner_id
+          AND id=NEW.supersedes_mapping_id
+        FOR UPDATE;
+        IF NOT FOUND
+           OR predecessor.source_key<>NEW.source_key
+           OR predecessor.external_item_key<>NEW.external_item_key
+           OR predecessor.external_uom<>NEW.external_uom
+           OR NEW.revision<>predecessor.revision+1
+           OR predecessor.effective_to IS NULL
+           OR predecessor.effective_to>NEW.effective_from
+        THEN
+            RAISE EXCEPTION 'integration order item mapping predecessor is invalid'
+                USING ERRCODE='55000';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER integration_order_item_mappings_guard
+BEFORE INSERT OR UPDATE OR DELETE ON public.integration_order_item_mappings
+FOR EACH ROW EXECUTE FUNCTION public.guard_integration_order_item_mapping();
+
+ALTER TABLE public.integration_order_item_mappings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.integration_order_item_mappings FORCE ROW LEVEL SECURITY;
+CREATE POLICY integration_order_item_mappings_tenant_isolation
+ON public.integration_order_item_mappings
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT,UPDATE(effective_to,retired_by_user_id)
+ON public.integration_order_item_mappings TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.integration_order_item_mappings_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.guard_integration_order_item_mapping() FROM PUBLIC;
+
 -- Durable execution state and append-only attempt history for standard inbound
 -- order processing. Raw inbox receipts remain the immutable source envelope.
 CREATE TABLE public.integration_inbox_processings (

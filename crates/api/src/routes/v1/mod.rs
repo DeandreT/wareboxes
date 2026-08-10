@@ -6,6 +6,7 @@ mod error;
 mod expected_receiving;
 mod facility_shipping_origins;
 mod inbound_inspections;
+mod integration_mappings;
 mod integration_monitor;
 mod integration_order_intake;
 pub(crate) mod inventory_balances;
@@ -124,6 +125,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/integration-monitor/inbound/{receipt_id}/corrections",
             post(integration_order_intake::correct_order),
+        )
+        .route(
+            "/integration-order-item-mappings",
+            get(integration_mappings::list).post(integration_mappings::configure),
+        )
+        .route(
+            "/integration-order-item-mappings/{mapping_id}/retirements",
+            post(integration_mappings::retire),
         )
         .route(
             "/integration-monitor/outbound",

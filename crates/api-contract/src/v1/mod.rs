@@ -8,6 +8,7 @@ mod expected_receiving;
 mod facility_shipping_origin;
 mod idempotency;
 mod inbound_inspection;
+mod integration_mapping;
 mod integration_monitor;
 mod integration_order_intake;
 mod inventory;
@@ -85,6 +86,11 @@ pub use idempotency::{
 };
 pub use inbound_inspection::{
     DisposeInboundInspectionRequest, DisposeInboundInspectionResponse, InboundInspectionOutcome,
+};
+pub use integration_mapping::{
+    ConfigureIntegrationOrderItemMappingRequest, IntegrationOrderItemMappingPage,
+    IntegrationOrderItemMappingPageRequest, IntegrationOrderItemMappingResponse,
+    IntegrationOrderItemMappingStatus, RetireIntegrationOrderItemMappingRequest,
 };
 pub use integration_monitor::{
     DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse,

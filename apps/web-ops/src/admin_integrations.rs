@@ -1,5 +1,7 @@
 #[path = "admin_integrations/correction.rs"]
 mod correction;
+#[path = "admin_integrations/mappings.rs"]
+mod mappings;
 
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
@@ -15,11 +17,13 @@ use crate::components::{Icon, SearchField, UiIcon};
 use crate::sorting::{SortDirection, SortableHeader};
 use crate::workspace_layout::{PaneControls, SplitPaneHandle, SplitPaneState};
 use correction::CorrectionPanel;
+use mappings::IntegrationMappingsWorkspace;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MonitorTab {
     Inbound,
     Outbound,
+    Mappings,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -177,7 +181,15 @@ pub fn IntegrationsWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                         class:active=move || signals.tab.get() == MonitorTab::Outbound
                         on:click=move |_| signals.tab.set(MonitorTab::Outbound)
                     >"Outbound"</button>
+                    <button
+                        type="button"
+                        role="tab"
+                        aria-selected=move || (signals.tab.get() == MonitorTab::Mappings).to_string()
+                        class:active=move || signals.tab.get() == MonitorTab::Mappings
+                        on:click=move |_| signals.tab.set(MonitorTab::Mappings)
+                    >"Item mappings"</button>
                 </div>
+                <Show when=move || signals.tab.get() != MonitorTab::Mappings>
                 <form class="integration-filters" on:submit=apply>
                     <SearchField
                         label="Search integrations".to_owned()
@@ -236,38 +248,46 @@ pub fn IntegrationsWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                     disabled=move || active_loading(signals)
                     on:click=refresh
                 ><Icon icon=UiIcon::Refresh/></button>
+                </Show>
             </header>
 
-            {move || signals.error.get().map(|message| view! {
-                <div class="integration-error" role="alert">{message}</div>
-            })}
-            {move || signals.notice.get().map(|message| view! {
-                <div class="integration-notice" role="status">{message}</div>
-            })}
+            <Show
+                when=move || signals.tab.get() == MonitorTab::Mappings
+                fallback=move || view! {
+                    {move || signals.error.get().map(|message| view! {
+                        <div class="integration-error" role="alert">{message}</div>
+                    })}
+                    {move || signals.notice.get().map(|message| view! {
+                        <div class="integration-notice" role="status">{message}</div>
+                    })}
 
-            <div
-                class="integration-body split-workspace"
-                style=move || layout.style()
-                data-pane-mode=move || layout.mode_attribute()
+                    <div
+                        class="integration-body split-workspace"
+                        style=move || layout.style()
+                        data-pane-mode=move || layout.mode_attribute()
+                    >
+                        <section class="integration-list split-master">
+                            <Show
+                                when=move || signals.tab.get() == MonitorTab::Inbound
+                                fallback=move || view! { <OutboundTable signals select=select_outbound/> }
+                            >
+                                <InboundTable signals select=select_inbound/>
+                            </Show>
+                        </section>
+                        <SplitPaneHandle layout/>
+                        <aside class="integration-detail split-detail">
+                            <Show
+                                when=move || signals.tab.get() == MonitorTab::Inbound
+                                fallback=move || view! { <OutboundDetail signals/> }
+                            >
+                                <InboundDetail signals/>
+                            </Show>
+                        </aside>
+                    </div>
+                }
             >
-                <section class="integration-list split-master">
-                    <Show
-                        when=move || signals.tab.get() == MonitorTab::Inbound
-                        fallback=move || view! { <OutboundTable signals select=select_outbound/> }
-                    >
-                        <InboundTable signals select=select_inbound/>
-                    </Show>
-                </section>
-                <SplitPaneHandle layout/>
-                <aside class="integration-detail split-detail">
-                    <Show
-                        when=move || signals.tab.get() == MonitorTab::Inbound
-                        fallback=move || view! { <OutboundDetail signals/> }
-                    >
-                        <InboundDetail signals/>
-                    </Show>
-                </aside>
-            </div>
+                <IntegrationMappingsWorkspace on_unauthorized/>
+            </Show>
         </section>
     }
 }
@@ -786,6 +806,7 @@ fn refresh_current(signals: MonitorSignals) {
     match signals.tab.get_untracked() {
         MonitorTab::Inbound => request_inbound(signals, None, Vec::new()),
         MonitorTab::Outbound => request_outbound(signals, None, Vec::new()),
+        MonitorTab::Mappings => {}
     }
 }
 
@@ -1009,6 +1030,7 @@ fn active_loading(signals: MonitorSignals) -> bool {
     match signals.tab.get() {
         MonitorTab::Inbound => signals.inbound_loading.get(),
         MonitorTab::Outbound => signals.outbound_loading.get(),
+        MonitorTab::Mappings => false,
     }
 }
 fn parse_status(value: &str) -> Option<OutboundDeliveryStatus> {
