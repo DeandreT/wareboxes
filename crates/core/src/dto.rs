@@ -302,6 +302,20 @@ pub struct ItemPackLinkIdRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct AddInventoryOwnerItem {
+    #[validate(range(min = 1, message = "Invalid inventory owner ID"))]
+    pub inventory_owner_id: i64,
+    #[validate(range(min = 1, message = "Invalid item ID"))]
+    pub item_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct InventoryOwnerItemIdRequest {
+    #[validate(range(min = 1, message = "Invalid inventory owner item ID"))]
+    pub inventory_owner_item_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct AddSku {
     #[validate(range(min = 1, message = "Invalid item ID"))]
     pub item_id: i64,

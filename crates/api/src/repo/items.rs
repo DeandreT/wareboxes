@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use sqlx::Row;
-use wareboxes_core::models::{Barcode, Item, ItemPackLink, Sku};
-use wareboxes_domain::TenantId;
+use wareboxes_core::models::{Barcode, InventoryOwnerItem, Item, ItemPackLink, Sku};
+use wareboxes_domain::{OwnerScope, TenantId};
 
 use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::{AppError, AppResult};
@@ -154,6 +154,172 @@ fn map_item_pack_link(row: &sqlx::postgres::PgRow) -> AppResult<ItemPackLink> {
         inner_qty: row.try_get("inner_qty")?,
         notes: row.try_get("notes")?,
     })
+}
+
+fn map_inventory_owner_item(row: &sqlx::postgres::PgRow) -> AppResult<InventoryOwnerItem> {
+    Ok(InventoryOwnerItem {
+        id: row.try_get("id")?,
+        tenant_id: map_tenant_id(row)?,
+        created: row.try_get("created")?,
+        deleted: row.try_get("deleted")?,
+        inventory_owner_id: row.try_get("inventory_owner_id")?,
+        item_id: row.try_get("item_id")?,
+    })
+}
+
+pub async fn get_inventory_owner_items_in_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    owner_scope: &OwnerScope,
+    show_deleted: bool,
+) -> AppResult<Vec<InventoryOwnerItem>> {
+    let owner_ids = owner_scope
+        .inventory_owner_ids
+        .iter()
+        .map(|id| id.get())
+        .collect::<Vec<_>>();
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, tenant_id, created, deleted, inventory_owner_id, item_id
+        FROM inventory_owner_items
+        WHERE tenant_id=$1
+          AND ($2 OR deleted IS NULL)
+          AND ($3 OR inventory_owner_id=ANY($4))
+        ORDER BY inventory_owner_id, item_id, id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(show_deleted)
+    .bind(owner_scope.all_inventory_owners)
+    .bind(&owner_ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    let assignments = rows
+        .iter()
+        .map(map_inventory_owner_item)
+        .collect::<AppResult<Vec<_>>>()?;
+    tx.commit().await?;
+    Ok(assignments)
+}
+
+pub async fn add_inventory_owner_item(
+    db: &Db,
+    tenant_id: TenantId,
+    inventory_owner_id: i64,
+    item_id: i64,
+) -> AppResult<InventoryOwnerItem> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    let owner = sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM inventory_owners WHERE tenant_id=$1 AND id=$2 AND deleted IS NULL FOR SHARE",
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if owner.is_none() {
+        return Err(AppError::bad_request("inventory owner not found"));
+    }
+    if !lock_active_item_tx(&mut tx, tenant_id, item_id).await? {
+        return Err(AppError::bad_request("item not found"));
+    }
+
+    let existing = sqlx::query(
+        r#"
+        SELECT id, tenant_id, created, deleted, inventory_owner_id, item_id
+        FROM inventory_owner_items
+        WHERE tenant_id=$1 AND inventory_owner_id=$2 AND item_id=$3
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id)
+    .bind(item_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let assignment = if let Some(row) = existing {
+        if row
+            .try_get::<Option<wareboxes_domain::Timestamp>, _>("deleted")?
+            .is_none()
+        {
+            return Err(AppError::conflict(
+                "inventory owner is already assigned to this item",
+            ));
+        }
+        let row = sqlx::query(
+            r#"
+            UPDATE inventory_owner_items SET deleted=NULL
+            WHERE tenant_id=$1 AND id=$2
+            RETURNING id, tenant_id, created, deleted, inventory_owner_id, item_id
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(row.try_get::<i64, _>("id")?)
+        .fetch_one(&mut *tx)
+        .await?;
+        map_inventory_owner_item(&row)?
+    } else {
+        let row = sqlx::query(
+            r#"
+            INSERT INTO inventory_owner_items
+                (tenant_id, created, inventory_owner_id, item_id)
+            VALUES ($1,$2,$3,$4)
+            RETURNING id, tenant_id, created, deleted, inventory_owner_id, item_id
+            "#,
+        )
+        .bind(tenant_id.get())
+        .bind(now_iso())
+        .bind(inventory_owner_id)
+        .bind(item_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        map_inventory_owner_item(&row)?
+    };
+    tx.commit().await?;
+    Ok(assignment)
+}
+
+pub async fn deactivate_inventory_owner_item_in_scope(
+    db: &Db,
+    tenant_id: TenantId,
+    owner_scope: &OwnerScope,
+    inventory_owner_item_id: i64,
+) -> AppResult<bool> {
+    let owner_ids = owner_scope
+        .inventory_owner_ids
+        .iter()
+        .map(|id| id.get())
+        .collect::<Vec<_>>();
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    let assignment_id = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT id
+        FROM inventory_owner_items
+        WHERE tenant_id=$1 AND id=$2 AND deleted IS NULL
+          AND ($3 OR inventory_owner_id=ANY($4))
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_item_id)
+    .bind(owner_scope.all_inventory_owners)
+    .bind(&owner_ids)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(assignment_id) = assignment_id else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    let result = sqlx::query(
+        "UPDATE inventory_owner_items SET deleted=$1 WHERE tenant_id=$2 AND id=$3 AND deleted IS NULL",
+    )
+    .bind(now_iso())
+    .bind(tenant_id.get())
+    .bind(assignment_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub async fn get_item_pack_links(

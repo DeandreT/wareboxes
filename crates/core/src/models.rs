@@ -295,6 +295,16 @@ pub struct ItemPackLink {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventoryOwnerItem {
+    pub id: i64,
+    pub tenant_id: TenantId,
+    pub created: Timestamp,
+    pub deleted: Option<Timestamp>,
+    pub inventory_owner_id: i64,
+    pub item_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Sku {
     pub id: i64,
     pub tenant_id: TenantId,

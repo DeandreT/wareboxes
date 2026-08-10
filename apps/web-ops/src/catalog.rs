@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 use wareboxes_core::models::{
-    Facility, InventoryOwner, Item, ItemPackLink, LicensePlate, Location,
+    Facility, InventoryOwner, InventoryOwnerItem, Item, ItemPackLink, LicensePlate, Location,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -33,6 +33,7 @@ use storage_zones::StorageZoneCatalog;
 pub(crate) struct CatalogData {
     pub(crate) items: Vec<Item>,
     pub(crate) item_pack_links: Vec<ItemPackLink>,
+    pub(crate) item_owner_assignments: Vec<InventoryOwnerItem>,
     pub(crate) locations: Vec<Location>,
     pub(crate) license_plates: Vec<LicensePlate>,
     pub(crate) facilities: Vec<Facility>,
@@ -207,7 +208,7 @@ pub fn CatalogWorkbench(on_unauthorized: Callback<()>, can_supervise: bool) -> i
                     .into_any()
                 }
                 LoadState::Ready | LoadState::Refreshing => match section.get() {
-                    CatalogSection::Items => view! { <ItemCatalog store layout/> }.into_any(),
+                    CatalogSection::Items => view! { <ItemCatalog store layout can_supervise/> }.into_any(),
                     CatalogSection::Locations => view! { <LocationCatalog store layout/> }.into_any(),
                     CatalogSection::LicensePlates => {
                         view! { <LicensePlateCatalog store layout/> }.into_any()
@@ -275,6 +276,8 @@ async fn load_catalog() -> Result<CatalogData, api::ApiError> {
     Ok(CatalogData {
         items: api::internal_get("/api/items?show_deleted=true").await?,
         item_pack_links: api::internal_get("/api/items/pack-links?show_deleted=false").await?,
+        item_owner_assignments: api::internal_get("/api/items/inventory-owners?show_deleted=false")
+            .await?,
         locations: api::internal_get("/api/locations?show_deleted=true").await?,
         license_plates: api::internal_get("/api/license-plates?show_deleted=true").await?,
         facilities: api::internal_get("/api/facilities?show_deleted=false").await?,

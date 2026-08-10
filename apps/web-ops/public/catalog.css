@@ -904,6 +904,10 @@
   grid-template-columns: minmax(110px, 1.4fr) 72px minmax(76px, 1fr) max-content;
 }
 
+.inline-command.owner-item-command {
+  grid-template-columns: minmax(0, 1fr) max-content;
+}
+
 .inline-command .button {
   white-space: nowrap;
 }
@@ -955,6 +959,10 @@
 
 .pack-conversion-row {
   grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.4fr) 28px;
+}
+
+.owner-item-row {
+  grid-template-columns: minmax(100px, 0.8fr) minmax(0, 1.4fr) 28px;
 }
 
 .identifier-row span {

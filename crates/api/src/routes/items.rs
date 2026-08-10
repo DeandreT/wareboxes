@@ -1,10 +1,10 @@
 use axum::extract::{Query, State};
 use axum::Json;
 use wareboxes_core::dto::{
-    AddBarcode, AddItem, AddItemPackLink, AddSku, BarcodeIdRequest, ItemIdRequest,
-    ItemPackLinkIdRequest, ItemUpdate,
+    AddBarcode, AddInventoryOwnerItem, AddItem, AddItemPackLink, AddSku, BarcodeIdRequest,
+    InventoryOwnerItemIdRequest, ItemIdRequest, ItemPackLinkIdRequest, ItemUpdate,
 };
-use wareboxes_core::models::{Item, ItemPackLink};
+use wareboxes_core::models::{InventoryOwnerItem, Item, ItemPackLink};
 
 use crate::auth::CurrentTenant;
 use crate::error::{AppError, AppResult};
@@ -14,6 +14,7 @@ use crate::routes::validate;
 use crate::state::AppState;
 
 const PERM: &str = "wms";
+const SUPERVISOR_PERM: &str = "wms_supervisor";
 const PACKAGING_UNITS: &[&str] = &["each", "case"];
 const BARCODE_TYPES: &[&str] = &["code128", "gs1-128", "upc-a", "qr"];
 
@@ -55,6 +56,60 @@ pub async fn list_pack_links(
     user.require_permission(&state.db, PERM).await?;
     Ok(Json(
         repo::items::get_item_pack_links(&state.db, user.tenant.tenant_id, q.show_deleted).await?,
+    ))
+}
+
+pub async fn list_inventory_owner_items(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Query(q): Query<ShowDeleted>,
+) -> AppResult<Json<Vec<InventoryOwnerItem>>> {
+    user.require_permission(&state.db, PERM).await?;
+    Ok(Json(
+        repo::items::get_inventory_owner_items_in_scope(
+            &state.db,
+            user.tenant.tenant_id,
+            &user.tenant.owner_scope,
+            q.show_deleted,
+        )
+        .await?,
+    ))
+}
+
+pub async fn add_inventory_owner_item(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Json(body): Json<AddInventoryOwnerItem>,
+) -> AppResult<Json<InventoryOwnerItem>> {
+    user.require_permission(&state.db, SUPERVISOR_PERM).await?;
+    validate(&body)?;
+    user.require_inventory_owner(body.inventory_owner_id)?;
+    Ok(Json(
+        repo::items::add_inventory_owner_item(
+            &state.db,
+            user.tenant.tenant_id,
+            body.inventory_owner_id,
+            body.item_id,
+        )
+        .await?,
+    ))
+}
+
+pub async fn deactivate_inventory_owner_item(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Json(body): Json<InventoryOwnerItemIdRequest>,
+) -> AppResult<Json<bool>> {
+    user.require_permission(&state.db, SUPERVISOR_PERM).await?;
+    validate(&body)?;
+    Ok(Json(
+        repo::items::deactivate_inventory_owner_item_in_scope(
+            &state.db,
+            user.tenant.tenant_id,
+            &user.tenant.owner_scope,
+            body.inventory_owner_item_id,
+        )
+        .await?,
     ))
 }
 

@@ -3198,6 +3198,163 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION public.protect_inventory_owner_item_assignment() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE
+    referenced_tenant_id bigint;
+    referenced_inventory_owner_id bigint;
+    referenced_item_id bigint;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        referenced_tenant_id := NEW.tenant_id;
+        referenced_inventory_owner_id := NEW.inventory_owner_id;
+        referenced_item_id := NEW.item_id;
+    ELSE
+        referenced_tenant_id := OLD.tenant_id;
+        referenced_inventory_owner_id := OLD.inventory_owner_id;
+        referenced_item_id := OLD.item_id;
+    END IF;
+
+    IF TG_OP = 'INSERT'
+       OR (TG_OP = 'UPDATE' AND OLD.deleted IS NOT NULL AND NEW.deleted IS NULL)
+    THEN
+        PERFORM owner.id
+        FROM public.inventory_owners owner
+        JOIN public.items item
+          ON item.tenant_id=owner.tenant_id AND item.id=NEW.item_id
+        WHERE owner.tenant_id=NEW.tenant_id
+          AND owner.id=NEW.inventory_owner_id
+          AND owner.deleted IS NULL AND item.deleted IS NULL
+        FOR SHARE OF owner, item;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'inventory owner item assignment requires active owner and item'
+                USING ERRCODE = '55000';
+        END IF;
+    END IF;
+
+    IF TG_OP = 'INSERT' THEN
+        RETURN NEW;
+    END IF;
+
+    IF TG_OP = 'UPDATE' THEN
+        IF NEW.id IS DISTINCT FROM OLD.id
+           OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+           OR NEW.created IS DISTINCT FROM OLD.created
+           OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+           OR NEW.item_id IS DISTINCT FROM OLD.item_id
+        THEN
+            RAISE EXCEPTION 'inventory owner item assignment dimensions are immutable'
+                USING ERRCODE = '55000';
+        END IF;
+        IF OLD.deleted IS NOT NULL AND NEW.deleted IS NOT NULL
+           AND NEW.deleted IS DISTINCT FROM OLD.deleted
+        THEN
+            RAISE EXCEPTION 'inventory owner item retirement evidence is immutable'
+                USING ERRCODE = '55000';
+        END IF;
+        IF OLD.deleted IS NOT NULL OR NEW.deleted IS NULL THEN
+            RETURN NEW;
+        END IF;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.inventory_balances balance
+        WHERE balance.tenant_id=referenced_tenant_id
+          AND balance.inventory_owner_id=referenced_inventory_owner_id
+          AND balance.item_id=referenced_item_id
+          AND (balance.qty_on_hand > 0 OR balance.qty_reserved > 0 OR balance.qty_held > 0)
+    ) THEN
+        RAISE EXCEPTION 'inventory owner item assignment has committed inventory'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.inventory_reservations reservation
+        WHERE reservation.tenant_id=referenced_tenant_id
+          AND reservation.inventory_owner_id=referenced_inventory_owner_id
+          AND reservation.item_id=referenced_item_id
+          AND reservation.deleted IS NULL AND reservation.status='active'
+    ) THEN
+        RAISE EXCEPTION 'inventory owner item assignment has active reservations'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.order_items order_item
+        JOIN public.orders order_header
+          ON order_header.tenant_id=order_item.tenant_id
+         AND order_header.inventory_owner_id=order_item.inventory_owner_id
+         AND order_header.id=order_item.order_id
+        WHERE order_item.tenant_id=referenced_tenant_id
+          AND order_item.inventory_owner_id=referenced_inventory_owner_id
+          AND order_item.item_id=referenced_item_id
+          AND order_item.deleted IS NULL AND order_header.deleted IS NULL
+          AND order_header.status NOT IN ('shipped','cancelled','void')
+    ) THEN
+        RAISE EXCEPTION 'inventory owner item assignment has active order demand'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.audit_wave_items wave_item
+        JOIN public.audit_waves wave
+          ON wave.tenant_id=wave_item.tenant_id AND wave.id=wave_item.audit_wave_id
+        WHERE wave_item.tenant_id=referenced_tenant_id
+          AND wave_item.inventory_owner_id=referenced_inventory_owner_id
+          AND wave_item.item_id=referenced_item_id
+          AND wave_item.deleted IS NULL AND wave.deleted IS NULL
+    ) OR EXISTS (
+        SELECT 1
+        FROM public.audit_location_counts location_count
+        WHERE location_count.tenant_id=referenced_tenant_id
+          AND location_count.inventory_owner_id=referenced_inventory_owner_id
+          AND location_count.item_id=referenced_item_id
+          AND location_count.deleted IS NULL AND location_count.ended IS NULL
+    ) THEN
+        RAISE EXCEPTION 'inventory owner item assignment has active count work'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM public.replenishment_policies policy
+        WHERE policy.tenant_id=referenced_tenant_id
+          AND policy.inventory_owner_id=referenced_inventory_owner_id
+          AND policy.item_id=referenced_item_id AND policy.effective_to IS NULL
+    ) OR EXISTS (
+        SELECT 1 FROM public.item_storage_policies policy
+        WHERE policy.tenant_id=referenced_tenant_id
+          AND policy.inventory_owner_id=referenced_inventory_owner_id
+          AND policy.item_id=referenced_item_id AND policy.effective_to IS NULL
+    ) OR EXISTS (
+        SELECT 1 FROM public.item_traceability_policies policy
+        WHERE policy.tenant_id=referenced_tenant_id
+          AND policy.inventory_owner_id=referenced_inventory_owner_id
+          AND policy.item_id=referenced_item_id AND policy.effective_to IS NULL
+    ) OR EXISTS (
+        SELECT 1 FROM public.item_substitution_policies policy
+        WHERE policy.tenant_id=referenced_tenant_id
+          AND policy.inventory_owner_id=referenced_inventory_owner_id
+          AND (policy.source_item_id=referenced_item_id
+               OR policy.substitute_item_id=referenced_item_id)
+          AND policy.effective_to IS NULL
+    ) THEN
+        RAISE EXCEPTION 'inventory owner item assignment has active policies'
+            USING ERRCODE = '55000';
+    END IF;
+
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 
 --
 -- Name: protect_outbox_aggregate_sequence_state(); Type: FUNCTION; Schema: public; Owner: -
@@ -17448,6 +17605,11 @@ CREATE TRIGGER inventory_holds_validate BEFORE INSERT OR UPDATE ON public.invent
 --
 
 CREATE TRIGGER inventory_owner_facilities_protect_active_references BEFORE DELETE OR UPDATE OF tenant_id, inventory_owner_id, facility_id, deleted ON public.inventory_owner_facilities FOR EACH ROW EXECUTE FUNCTION public.protect_inventory_owner_facility_assignment();
+
+CREATE TRIGGER inventory_owner_items_protect_active_references
+BEFORE INSERT OR DELETE OR UPDATE ON public.inventory_owner_items
+FOR EACH ROW EXECUTE FUNCTION public.protect_inventory_owner_item_assignment();
+REVOKE ALL ON FUNCTION public.protect_inventory_owner_item_assignment() FROM PUBLIC;
 
 
 --

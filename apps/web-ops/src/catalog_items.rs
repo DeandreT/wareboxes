@@ -18,9 +18,12 @@ use crate::workspace_layout::{SplitPaneHandle, SplitPaneState};
 
 use super::{optional_text, CatalogStore};
 
+#[path = "catalog_items/ownership.rs"]
+mod ownership;
 #[path = "catalog_items/pack.rs"]
 mod pack;
 
+use ownership::ItemOwnerAssignments;
 use pack::{active_pack_links_for_item, pack_conversion_label};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,7 +37,11 @@ enum ItemSort {
 }
 
 #[component]
-pub(super) fn ItemCatalog(store: CatalogStore, layout: SplitPaneState) -> impl IntoView {
+pub(super) fn ItemCatalog(
+    store: CatalogStore,
+    layout: SplitPaneState,
+    can_supervise: bool,
+) -> impl IntoView {
     let filter = RwSignal::new(String::new());
     let show_inactive = RwSignal::new(false);
     let selected_id = RwSignal::new(None::<i64>);
@@ -231,7 +238,7 @@ pub(super) fn ItemCatalog(store: CatalogStore, layout: SplitPaneState) -> impl I
                         }
                         .into_any()
                     } else if let Some(item) = selected_item(&store.data.get().items, selected_id.get()) {
-                        view! { <ItemDetail store item/> }.into_any()
+                        view! { <ItemDetail store item can_supervise/> }.into_any()
                     } else {
                         view! {
                             <div class="catalog-editor-empty">
@@ -405,7 +412,7 @@ fn ItemCreate(
 }
 
 #[component]
-fn ItemDetail(store: CatalogStore, item: Item) -> impl IntoView {
+fn ItemDetail(store: CatalogStore, item: Item, can_supervise: bool) -> impl IntoView {
     let description = RwSignal::new(item.description.clone().unwrap_or_default());
     let packaging = RwSignal::new(item.packaging_unit.clone());
     let notes = RwSignal::new(item.notes.clone().unwrap_or_default());
@@ -734,6 +741,8 @@ fn ItemDetail(store: CatalogStore, item: Item) -> impl IntoView {
                     }}
                 </div>
             </section>
+
+            <ItemOwnerAssignments store item_id can_supervise inactive/>
 
             <section class="catalog-subsection">
                 <div class="catalog-subheading">
