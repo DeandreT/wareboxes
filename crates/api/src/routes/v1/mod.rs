@@ -105,6 +105,14 @@ pub fn router() -> Router<AppState> {
             get(integration_monitor::inbound),
         )
         .route(
+            "/integration-monitor/inbound/{receipt_id}",
+            get(integration_monitor::inbound_detail),
+        )
+        .route(
+            "/integration-monitor/inbound/{receipt_id}/payload",
+            get(integration_monitor::download_inbound_payload),
+        )
+        .route(
             "/integration-monitor/outbound",
             get(integration_monitor::outbound),
         )

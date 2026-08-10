@@ -50,9 +50,9 @@ mod inbound_inspection;
 pub use inbound_inspection::dispose_inbound_inspection;
 mod integration_monitor;
 pub use integration_monitor::{
-    discard_outbound_dead_letter, inbound_integrations, outbound_integration_detail,
-    outbound_integrations, replay_outbound_dead_letter, InboundIntegrationFilters,
-    OutboundIntegrationFilters,
+    discard_outbound_dead_letter, inbound_integration_detail, inbound_integrations,
+    inbound_payload_download_path, outbound_integration_detail, outbound_integrations,
+    replay_outbound_dead_letter, InboundIntegrationFilters, OutboundIntegrationFilters,
 };
 mod inventory_integrity;
 pub use inventory_integrity::{

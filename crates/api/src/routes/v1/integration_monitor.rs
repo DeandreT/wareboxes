@@ -1,9 +1,14 @@
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderValue};
+use axum::response::Response;
 use axum::Json;
 use wareboxes_api_contract::v1::{
     DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse,
-    InboundIntegrationPage as ApiInboundPage, InboundIntegrationPageRequest,
-    InboundIntegrationReceiptResponse, InboundIntegrationSort as ApiInboundSort,
+    InboundIntegrationDetailResponse, InboundIntegrationPage as ApiInboundPage,
+    InboundIntegrationPageRequest, InboundIntegrationReceiptResponse,
+    InboundIntegrationSort as ApiInboundSort,
+    InboundPayloadPreviewEncoding as ApiInboundPayloadPreviewEncoding,
     IntegrationSortDirection as ApiDirection, OpaqueCursor,
     OutboundDeliveryAttemptOutcome as ApiAttemptOutcome, OutboundDeliveryAttemptResponse,
     OutboundDeliveryStatus as ApiStatus, OutboundIntegrationDetailResponse,
@@ -14,10 +19,11 @@ use wareboxes_api_contract::v1::{
 };
 use wareboxes_application::integration_monitor::{
     DiscardOutboxDeadLetterCommand, DiscardOutboxDeadLetterResult, InboundIntegrationQuery,
-    InboundIntegrationReceiptReadModel, InboundIntegrationSort, IntegrationSortDirection,
-    OutboundDeliveryAttemptReadModel, OutboundDeliveryStatus, OutboundIntegrationDetailReadModel,
-    OutboundIntegrationEventReadModel, OutboundIntegrationQuery, OutboundIntegrationSort,
-    ReplayOutboxDeadLetterCommand, ReplayOutboxDeadLetterResult,
+    InboundIntegrationReceiptReadModel, InboundIntegrationSort, InboundPayloadPreviewEncoding,
+    IntegrationSortDirection, OutboundDeliveryAttemptReadModel, OutboundDeliveryStatus,
+    OutboundIntegrationDetailReadModel, OutboundIntegrationEventReadModel,
+    OutboundIntegrationQuery, OutboundIntegrationSort, ReplayOutboxDeadLetterCommand,
+    ReplayOutboxDeadLetterResult,
 };
 use wareboxes_application::outbox::DeliveryAttemptOutcome;
 use wareboxes_domain::{FacilityId, InventoryOwnerId, OutboxDeadLetterDiscardReason};
@@ -50,6 +56,65 @@ pub async fn inbound(
         page.items.into_iter().map(map_inbound).collect(),
         next_cursor,
     )))
+}
+
+pub async fn inbound_detail(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(receipt_id): Path<i64>,
+) -> V1Result<Json<InboundIntegrationDetailResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let detail = repo::integration_monitor::inbound_detail(&state.db, &user.tenant, receipt_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("inbound integration receipt"))?;
+    Ok(Json(InboundIntegrationDetailResponse {
+        receipt: map_inbound(detail.receipt),
+        payload_preview: detail.payload_preview,
+        payload_preview_encoding: match detail.payload_preview_encoding {
+            InboundPayloadPreviewEncoding::Utf8 => ApiInboundPayloadPreviewEncoding::Utf8,
+            InboundPayloadPreviewEncoding::Hex => ApiInboundPayloadPreviewEncoding::Hex,
+        },
+        preview_bytes: detail.preview_bytes,
+        preview_truncated: detail.preview_truncated,
+    }))
+}
+
+pub async fn download_inbound_payload(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(receipt_id): Path<i64>,
+) -> V1Result<Response> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let payload = repo::integration_monitor::inbound_payload(&state.db, &user.tenant, receipt_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("inbound integration receipt"))?;
+    let content_type = HeaderValue::from_str(&payload.content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    let content_length = HeaderValue::from_str(&payload.payload.len().to_string())
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let disposition = HeaderValue::from_str(&format!(
+        "attachment; filename=\"inbound-receipt-{receipt_id}.bin\""
+    ))
+    .map_err(|error| AppError::internal(error.to_string()))?;
+    let mut response = Response::new(Body::from(payload.payload));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, content_type);
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, content_length);
+    response
+        .headers_mut()
+        .insert(header::CONTENT_DISPOSITION, disposition);
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
 }
 
 pub async fn outbound(

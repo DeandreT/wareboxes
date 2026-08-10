@@ -12,8 +12,9 @@ use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse, ErrorReason, ErrorResponse,
-    InboundIntegrationPage, OutboundDeliveryStatus, OutboundIntegrationDetailResponse,
-    OutboundIntegrationPage, ReplayOutboxDeadLetterRequest, ReplayOutboxDeadLetterResponse,
+    InboundIntegrationDetailResponse, InboundIntegrationPage, InboundPayloadPreviewEncoding,
+    OutboundDeliveryStatus, OutboundIntegrationDetailResponse, OutboundIntegrationPage,
+    ReplayOutboxDeadLetterRequest, ReplayOutboxDeadLetterResponse,
 };
 use wareboxes_application::integration::NewIntegrationInboxReceipt;
 use wareboxes_application::outbox::DeliveryFailureClass;
@@ -195,7 +196,7 @@ async fn integration_monitor_is_scope_safe_server_sorted_and_exposes_attempt_evi
         br#"{"order":"large-payload"}"#,
     )
     .await;
-    let _hidden_receipt = receive(
+    let hidden_receipt = receive(
         &fixture,
         tenant_id,
         denied_owner,
@@ -333,6 +334,113 @@ async fn integration_monitor_is_scope_safe_server_sorted_and_exposes_attempt_evi
     assert_eq!(second.items.len(), 1);
     assert_eq!(second.items[0].id, large_receipt);
     assert!(second.next_cursor.is_none());
+
+    let text_detail = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!("/api/v1/integration-monitor/inbound/{small_receipt}"),
+        ))
+        .await
+        .unwrap();
+    let text_detail: InboundIntegrationDetailResponse = response(text_detail).await;
+    assert_eq!(
+        text_detail.payload_preview_encoding,
+        InboundPayloadPreviewEncoding::Utf8
+    );
+    assert_eq!(text_detail.payload_preview, "{}");
+    assert_eq!(text_detail.preview_bytes, 2);
+    assert!(!text_detail.preview_truncated);
+
+    let binary_payload = vec![0xa5; 70_000];
+    let binary_receipt = integration_inbox::receive(
+        &fixture.db,
+        &NewIntegrationInboxReceipt {
+            tenant_id,
+            inventory_owner_id: Some(InventoryOwnerId::new(allowed_owner).unwrap()),
+            facility_id: Some(FacilityId::new(allowed_facility).unwrap()),
+            source_key: "binary-sftp",
+            deduplication_key: "binary-diagnostic",
+            content_type: "application/octet-stream",
+            raw_payload: &binary_payload,
+            request_id: Some("binary-diagnostic"),
+        },
+    )
+    .await
+    .unwrap()
+    .receipt
+    .id;
+    let detail = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!("/api/v1/integration-monitor/inbound/{binary_receipt}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(detail.status(), StatusCode::OK);
+    let detail: InboundIntegrationDetailResponse = response(detail).await;
+    assert_eq!(detail.receipt.id, binary_receipt);
+    assert_eq!(
+        detail.payload_preview_encoding,
+        InboundPayloadPreviewEncoding::Hex
+    );
+    assert_eq!(detail.preview_bytes, 65_536);
+    assert!(detail.preview_truncated);
+    assert_eq!(detail.payload_preview.len(), 131_072);
+
+    let download = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!("/api/v1/integration-monitor/inbound/{binary_receipt}/payload"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(download.status(), StatusCode::OK);
+    assert_eq!(
+        download.headers()[header::CONTENT_TYPE],
+        "application/octet-stream"
+    );
+    assert_eq!(
+        download.headers()[header::CACHE_CONTROL],
+        "private, no-store"
+    );
+    assert_eq!(download.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        download.headers()[header::CONTENT_DISPOSITION],
+        format!("attachment; filename=\"inbound-receipt-{binary_receipt}.bin\"")
+    );
+    assert_eq!(
+        to_bytes(download.into_body(), 16 * 1024 * 1024)
+            .await
+            .unwrap(),
+        binary_payload
+    );
+
+    let concealed_detail = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!("/api/v1/integration-monitor/inbound/{hidden_receipt}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(concealed_detail.status(), StatusCode::NOT_FOUND);
+    let concealed_payload = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!("/api/v1/integration-monitor/inbound/{hidden_receipt}/payload"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(concealed_payload.status(), StatusCode::NOT_FOUND);
 
     let mismatched_cursor = app
         .clone()

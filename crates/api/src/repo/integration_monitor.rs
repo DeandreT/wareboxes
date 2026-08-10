@@ -2,12 +2,14 @@ use sqlx::postgres::PgRow;
 use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_application::integration_monitor::{
-    DiscardOutboxDeadLetterCommand, DiscardOutboxDeadLetterResult, InboundIntegrationPage,
+    DiscardOutboxDeadLetterCommand, DiscardOutboxDeadLetterResult,
+    InboundIntegrationDetailReadModel, InboundIntegrationPage, InboundIntegrationPayloadReadModel,
     InboundIntegrationQuery, InboundIntegrationReceiptReadModel, InboundIntegrationSort,
-    IntegrationSortDirection, OutboundDeliveryAttemptReadModel, OutboundDeliveryStatus,
-    OutboundIntegrationDetailReadModel, OutboundIntegrationEventReadModel, OutboundIntegrationPage,
-    OutboundIntegrationQuery, OutboundIntegrationSort, OutboxDeadLetterDiscardReadModel,
-    OutboxDeadLetterReplayReadModel, ReplayOutboxDeadLetterCommand, ReplayOutboxDeadLetterResult,
+    InboundPayloadPreviewEncoding, IntegrationSortDirection, OutboundDeliveryAttemptReadModel,
+    OutboundDeliveryStatus, OutboundIntegrationDetailReadModel, OutboundIntegrationEventReadModel,
+    OutboundIntegrationPage, OutboundIntegrationQuery, OutboundIntegrationSort,
+    OutboxDeadLetterDiscardReadModel, OutboxDeadLetterReplayReadModel,
+    ReplayOutboxDeadLetterCommand, ReplayOutboxDeadLetterResult,
     DISCARD_OUTBOX_DEAD_LETTER_OPERATION, REPLAY_OUTBOX_DEAD_LETTER_OPERATION,
 };
 use wareboxes_application::outbox::DeliveryAttemptOutcome;
@@ -27,6 +29,7 @@ use crate::repo::access::{lock_current_scope_tx, require_permission_tx, ScopeBin
 const MAX_PAGE_SIZE: u16 = 1_000;
 const MAX_SEARCH_CHARACTERS: usize = 200;
 const MAX_SOURCE_CHARACTERS: usize = 200;
+const INBOUND_PAYLOAD_PREVIEW_BYTES: i32 = 65_536;
 
 fn optional_owner(row: &PgRow) -> AppResult<Option<InventoryOwnerId>> {
     row.try_get::<Option<i64>, _>("inventory_owner_id")?
@@ -84,6 +87,20 @@ fn map_inbound(row: &PgRow) -> AppResult<InboundIntegrationReceiptReadModel> {
         payload_sha256: row.try_get("payload_sha256")?,
         request_id: row.try_get("request_id")?,
     })
+}
+
+fn text_payload(content_type: &str) -> bool {
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    media_type.starts_with("text/")
+        || media_type == "application/json"
+        || media_type == "application/xml"
+        || media_type.ends_with("+json")
+        || media_type.ends_with("+xml")
 }
 
 fn map_outbound(row: &PgRow) -> AppResult<OutboundIntegrationEventReadModel> {
@@ -335,6 +352,117 @@ pub async fn inbound_page(
         items,
         next_offset: has_more.then(|| query.offset + u64::from(query.limit)),
     })
+}
+
+pub async fn inbound_detail(
+    db: &Db,
+    access: &TenantAccess,
+    receipt_id: i64,
+) -> AppResult<Option<InboundIntegrationDetailReadModel>> {
+    if receipt_id <= 0 {
+        return Err(AppError::bad_request(
+            "inbound integration receipt ID must be positive",
+        ));
+    }
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
+    let scope = current_admin_scope(&mut tx, access).await?;
+    let row = sqlx::query(
+        r#"
+        SELECT receipt.id, receipt.inventory_owner_id, owner.name AS inventory_owner_name,
+               receipt.facility_id, facility.name AS facility_name, receipt.received_at,
+               receipt.source_key, receipt.deduplication_key, receipt.content_type,
+               octet_length(receipt.raw_payload)::BIGINT AS payload_bytes,
+               encode(receipt.payload_sha256, 'hex') AS payload_sha256,
+               receipt.request_id,
+               substring(receipt.raw_payload FROM 1 FOR $7) AS payload_preview
+        FROM integration_inbox_receipts receipt
+        LEFT JOIN inventory_owners owner
+          ON owner.tenant_id=receipt.tenant_id AND owner.id=receipt.inventory_owner_id
+        LEFT JOIN facilities facility
+          ON facility.tenant_id=receipt.tenant_id AND facility.id=receipt.facility_id
+        WHERE receipt.tenant_id=$1 AND receipt.id=$2
+          AND (receipt.facility_id IS NULL OR $3 OR receipt.facility_id=ANY($4))
+          AND (receipt.inventory_owner_id IS NULL OR $5 OR receipt.inventory_owner_id=ANY($6))
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(receipt_id)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .bind(INBOUND_PAYLOAD_PREVIEW_BYTES)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let detail = row
+        .as_ref()
+        .map(|row| -> AppResult<InboundIntegrationDetailReadModel> {
+            let receipt = map_inbound(row)?;
+            let preview: Vec<u8> = row.try_get("payload_preview")?;
+            let (payload_preview_encoding, payload_preview) = if text_payload(&receipt.content_type)
+            {
+                (
+                    InboundPayloadPreviewEncoding::Utf8,
+                    String::from_utf8_lossy(&preview).into_owned(),
+                )
+            } else {
+                (InboundPayloadPreviewEncoding::Hex, hex::encode(&preview))
+            };
+            let preview_bytes = i64::try_from(preview.len())
+                .map_err(|_| AppError::internal("inbound payload preview is too large"))?;
+            Ok(InboundIntegrationDetailReadModel {
+                preview_truncated: preview_bytes < receipt.payload_bytes,
+                receipt,
+                payload_preview,
+                payload_preview_encoding,
+                preview_bytes,
+            })
+        })
+        .transpose()?;
+    tx.commit().await?;
+    Ok(detail)
+}
+
+pub async fn inbound_payload(
+    db: &Db,
+    access: &TenantAccess,
+    receipt_id: i64,
+) -> AppResult<Option<InboundIntegrationPayloadReadModel>> {
+    if receipt_id <= 0 {
+        return Err(AppError::bad_request(
+            "inbound integration receipt ID must be positive",
+        ));
+    }
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
+    let scope = current_admin_scope(&mut tx, access).await?;
+    let row = sqlx::query(
+        r#"
+        SELECT receipt.content_type,receipt.raw_payload
+        FROM integration_inbox_receipts receipt
+        WHERE receipt.tenant_id=$1 AND receipt.id=$2
+          AND (receipt.facility_id IS NULL OR $3 OR receipt.facility_id=ANY($4))
+          AND (receipt.inventory_owner_id IS NULL OR $5 OR receipt.inventory_owner_id=ANY($6))
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(receipt_id)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let payload = row
+        .as_ref()
+        .map(|row| -> AppResult<InboundIntegrationPayloadReadModel> {
+            Ok(InboundIntegrationPayloadReadModel {
+                content_type: row.try_get("content_type")?,
+                payload: row.try_get("raw_payload")?,
+            })
+        })
+        .transpose()?;
+    tx.commit().await?;
+    Ok(payload)
 }
 
 const OUTBOUND_SELECT: &str = r#"

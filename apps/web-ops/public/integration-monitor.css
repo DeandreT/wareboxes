@@ -369,6 +369,19 @@
   border-bottom: 1px solid var(--line);
 }
 
+.integration-detail-section > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.integration-detail-section > p {
+  margin: 5px 0 0;
+  color: var(--ink-soft);
+  font-size: 9px;
+}
+
 .integration-detail-section pre {
   max-height: 230px;
   margin: 5px 0 0;

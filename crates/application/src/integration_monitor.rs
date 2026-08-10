@@ -198,6 +198,27 @@ pub struct InboundIntegrationReceiptReadModel {
     pub request_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundPayloadPreviewEncoding {
+    Utf8,
+    Hex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundIntegrationDetailReadModel {
+    pub receipt: InboundIntegrationReceiptReadModel,
+    pub payload_preview: String,
+    pub payload_preview_encoding: InboundPayloadPreviewEncoding,
+    pub preview_bytes: i64,
+    pub preview_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundIntegrationPayloadReadModel {
+    pub content_type: String,
+    pub payload: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundIntegrationPage {
     pub items: Vec<InboundIntegrationReceiptReadModel>,

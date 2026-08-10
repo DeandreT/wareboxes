@@ -1,9 +1,9 @@
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
-    DiscardOutboxDeadLetterRequest, InboundIntegrationPage, InboundIntegrationReceiptResponse,
-    InboundIntegrationSort, IntegrationSortDirection, OpaqueCursor, OutboundDeliveryAttemptOutcome,
-    OutboundDeliveryStatus, OutboundIntegrationDetailResponse, OutboundIntegrationPage,
-    OutboundIntegrationSort, ReplayOutboxDeadLetterRequest,
+    DiscardOutboxDeadLetterRequest, InboundIntegrationDetailResponse, InboundIntegrationPage,
+    InboundIntegrationSort, InboundPayloadPreviewEncoding, IntegrationSortDirection, OpaqueCursor,
+    OutboundDeliveryAttemptOutcome, OutboundDeliveryStatus, OutboundIntegrationDetailResponse,
+    OutboundIntegrationPage, OutboundIntegrationSort, ReplayOutboxDeadLetterRequest,
 };
 
 use crate::api::{self, InboundIntegrationFilters, OutboundIntegrationFilters};
@@ -66,7 +66,8 @@ struct MonitorSignals {
     command_pending: RwSignal<bool>,
     error: RwSignal<Option<String>>,
     notice: RwSignal<Option<String>>,
-    selected_inbound: RwSignal<Option<InboundIntegrationReceiptResponse>>,
+    selected_inbound_id: RwSignal<Option<i64>>,
+    inbound_detail: RwSignal<Option<InboundIntegrationDetailResponse>>,
     selected_outbound_id: RwSignal<Option<i64>>,
     outbound_detail: RwSignal<Option<OutboundIntegrationDetailResponse>>,
     replay_confirmation: RwSignal<Option<DeadLetterTarget>>,
@@ -104,7 +105,8 @@ impl MonitorSignals {
             command_pending: RwSignal::new(false),
             error: RwSignal::new(None),
             notice: RwSignal::new(None),
-            selected_inbound: RwSignal::new(None),
+            selected_inbound_id: RwSignal::new(None),
+            inbound_detail: RwSignal::new(None),
             selected_outbound_id: RwSignal::new(None),
             outbound_detail: RwSignal::new(None),
             replay_confirmation: RwSignal::new(None),
@@ -132,8 +134,8 @@ pub fn IntegrationsWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
         refresh_current(signals);
     };
     let refresh = move |_| refresh_current(signals);
-    let select_inbound = Callback::new(move |receipt: InboundIntegrationReceiptResponse| {
-        signals.selected_inbound.set(Some(receipt));
+    let select_inbound = Callback::new(move |receipt_id: i64| {
+        select_inbound_receipt(signals, receipt_id);
         layout.show_detail();
     });
     let select_outbound = Callback::new(move |event_id: i64| {
@@ -255,10 +257,7 @@ pub fn IntegrationsWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
 }
 
 #[component]
-fn InboundTable(
-    signals: MonitorSignals,
-    select: Callback<InboundIntegrationReceiptResponse>,
-) -> impl IntoView {
+fn InboundTable(signals: MonitorSignals, select: Callback<i64>) -> impl IntoView {
     view! {
         <div class="integration-table-scroll">
             <table class="data-table integration-table">
@@ -278,8 +277,8 @@ fn InboundTable(
                         view! { <tr><td class="table-empty-row" colspan="7">"No inbound receipts match these filters."</td></tr> }.into_any()
                     } else {
                         page.items.into_iter().map(|receipt| {
-                            let selected=signals.selected_inbound.get().as_ref().is_some_and(|value| value.id==receipt.id);
-                            let row=receipt.clone();
+                            let receipt_id=receipt.id;
+                            let selected=signals.selected_inbound_id.get()==Some(receipt_id);
                             view! { <tr class:selected=selected>
                                 <td>{compact_time(&receipt.received_at)}</td>
                                 <td><strong class="mono">{receipt.source_key}</strong><small>{receipt.request_id.unwrap_or_else(|| "No request ID".into())}</small></td>
@@ -287,7 +286,7 @@ fn InboundTable(
                                 <td>{scope_label(receipt.inventory_owner_name.as_deref(),receipt.facility_name.as_deref())}</td>
                                 <td>{receipt.content_type}</td>
                                 <td class="numeric">{format_bytes(receipt.payload_bytes)}</td>
-                                <td><button type="button" class="icon-button" title="Open receipt detail" aria-label=format!("Open inbound receipt {}",receipt.id) aria-pressed=selected on:click=move |_| select.run(row.clone())><Icon icon=UiIcon::Search/></button></td>
+                                <td><button type="button" class="icon-button" title="Open receipt detail" aria-label=format!("Open inbound receipt {receipt_id}") aria-pressed=selected on:click=move |_| select.run(receipt_id)><Icon icon=UiIcon::Search/></button></td>
                             </tr> }
                         }).collect_view().into_any()
                     }
@@ -378,10 +377,27 @@ fn PageFooter(
 
 #[component]
 fn InboundDetail(signals: MonitorSignals) -> impl IntoView {
-    view! { {move || signals.selected_inbound.get().map_or_else(
-        || view! { <div class="integration-empty"><h2>"Inbound receipt detail"</h2><p>"Select a receipt to inspect its immutable envelope."</p></div> }.into_any(),
-        |receipt| view! { <div class="integration-detail-content">
-            <header><h2>{receipt.source_key.clone()}</h2><span>{format!("Receipt #{}",receipt.id)}</span></header>
+    view! { {move || {
+        if signals.detail_loading.get() {
+            view! { <div class="integration-empty" aria-busy="true"><h2>"Loading receipt detail"</h2></div> }.into_any()
+        } else {
+            signals.inbound_detail.get().map_or_else(
+                || view! { <div class="integration-empty"><h2>"Inbound receipt detail"</h2><p>"Select a receipt to inspect its immutable envelope and retained payload."</p></div> }.into_any(),
+                inbound_detail_view,
+            )
+        }
+    }} }
+}
+
+fn inbound_detail_view(detail: InboundIntegrationDetailResponse) -> AnyView {
+    let receipt = detail.receipt;
+    let download_path = api::inbound_payload_download_path(receipt.id);
+    let encoding = match detail.payload_preview_encoding {
+        InboundPayloadPreviewEncoding::Utf8 => "UTF-8",
+        InboundPayloadPreviewEncoding::Hex => "Hexadecimal",
+    };
+    view! { <div class="integration-detail-content">
+            <header><div><h2>{receipt.source_key.clone()}</h2><small>{format!("Receipt #{}",receipt.id)}</small></div><a class="button secondary-action compact" href=download_path download=""><Icon icon=UiIcon::Download/>"Download payload"</a></header>
             <dl class="integration-facts">
                 <div><dt>"Received"</dt><dd>{receipt.received_at}</dd></div>
                 <div><dt>"Content type"</dt><dd>{receipt.content_type}</dd></div>
@@ -391,8 +407,8 @@ fn InboundDetail(signals: MonitorSignals) -> impl IntoView {
                 <div class="wide"><dt>"Request ID"</dt><dd class="mono">{receipt.request_id.unwrap_or_else(|| "Not supplied".into())}</dd></div>
                 <div class="wide"><dt>"SHA-256"</dt><dd class="mono wrap-anywhere">{receipt.payload_sha256}</dd></div>
             </dl>
+            <section class="integration-detail-section"><header><h3>"Payload preview"</h3><small>{format!("{encoding} / {}{}",format_bytes(detail.preview_bytes),if detail.preview_truncated { " shown" } else { " complete" })}</small></header><pre>{detail.payload_preview}</pre>{detail.preview_truncated.then(|| view! { <p>"Preview is limited to 64 KiB. Download the retained payload for the complete envelope."</p> })}</section>
         </div> }.into_any()
-    )} }
 }
 
 #[component]
@@ -686,6 +702,30 @@ fn request_outbound(
             Err(error) => signals.error.set(Some(error.message)),
         }
         signals.outbound_loading.set(false);
+    });
+}
+
+fn select_inbound_receipt(signals: MonitorSignals, receipt_id: i64) {
+    let generation = signals.detail_generation.get_untracked() + 1;
+    signals.detail_generation.set(generation);
+    signals.selected_inbound_id.set(Some(receipt_id));
+    signals.inbound_detail.set(None);
+    signals.detail_loading.set(true);
+    signals.error.set(None);
+    signals.notice.set(None);
+    leptos::task::spawn_local(async move {
+        let result = api::inbound_integration_detail(receipt_id).await;
+        if signals.detail_generation.get_untracked() != generation
+            || signals.selected_inbound_id.get_untracked() != Some(receipt_id)
+        {
+            return;
+        }
+        match result {
+            Ok(detail) => signals.inbound_detail.set(Some(detail)),
+            Err(error) if error.unauthorized => signals.on_unauthorized.run(()),
+            Err(error) => signals.error.set(Some(error.message)),
+        }
+        signals.detail_loading.set(false);
     });
 }
 

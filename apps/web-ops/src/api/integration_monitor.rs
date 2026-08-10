@@ -1,6 +1,7 @@
 use wareboxes_api_contract::v1::{
-    DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse, InboundIntegrationPage,
-    InboundIntegrationSort, IntegrationSortDirection, OpaqueCursor, OutboundDeliveryStatus,
+    DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse,
+    InboundIntegrationDetailResponse, InboundIntegrationPage, InboundIntegrationSort,
+    IntegrationSortDirection, OpaqueCursor, OutboundDeliveryStatus,
     OutboundIntegrationDetailResponse, OutboundIntegrationPage, OutboundIntegrationSort,
     ReplayOutboxDeadLetterRequest, ReplayOutboxDeadLetterResponse,
 };
@@ -31,6 +32,16 @@ pub async fn inbound_integrations(
     cursor: Option<&OpaqueCursor>,
 ) -> Result<InboundIntegrationPage, ApiError> {
     internal_get(&inbound_path(filters, sort, direction, cursor)).await
+}
+
+pub async fn inbound_integration_detail(
+    receipt_id: i64,
+) -> Result<InboundIntegrationDetailResponse, ApiError> {
+    internal_get(&format!("/api/v1/integration-monitor/inbound/{receipt_id}")).await
+}
+
+pub fn inbound_payload_download_path(receipt_id: i64) -> String {
+    format!("/api/v1/integration-monitor/inbound/{receipt_id}/payload")
 }
 
 pub async fn outbound_integrations(
@@ -214,6 +225,14 @@ mod tests {
         assert_eq!(
             format!("/api/v1/integration-monitor/outbound/{}/discards", 44),
             "/api/v1/integration-monitor/outbound/44/discards"
+        );
+    }
+
+    #[test]
+    fn inbound_payload_download_is_receipt_scoped() {
+        assert_eq!(
+            inbound_payload_download_path(37),
+            "/api/v1/integration-monitor/inbound/37/payload"
         );
     }
 }

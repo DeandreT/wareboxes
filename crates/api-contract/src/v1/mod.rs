@@ -86,8 +86,9 @@ pub use inbound_inspection::{
     DisposeInboundInspectionRequest, DisposeInboundInspectionResponse, InboundInspectionOutcome,
 };
 pub use integration_monitor::{
-    DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse, InboundIntegrationPage,
-    InboundIntegrationPageRequest, InboundIntegrationReceiptResponse, InboundIntegrationSort,
+    DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse,
+    InboundIntegrationDetailResponse, InboundIntegrationPage, InboundIntegrationPageRequest,
+    InboundIntegrationReceiptResponse, InboundIntegrationSort, InboundPayloadPreviewEncoding,
     IntegrationSortDirection, OutboundDeliveryAttemptOutcome, OutboundDeliveryAttemptResponse,
     OutboundDeliveryStatus, OutboundIntegrationDetailResponse, OutboundIntegrationEventResponse,
     OutboundIntegrationPage, OutboundIntegrationPageRequest, OutboundIntegrationSort,

@@ -79,6 +79,23 @@ pub struct InboundIntegrationReceiptResponse {
     pub request_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundPayloadPreviewEncoding {
+    Utf8,
+    Hex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InboundIntegrationDetailResponse {
+    pub receipt: InboundIntegrationReceiptResponse,
+    pub payload_preview: String,
+    pub payload_preview_encoding: InboundPayloadPreviewEncoding,
+    pub preview_bytes: i64,
+    pub preview_truncated: bool,
+}
+
 pub type InboundIntegrationPage = CursorPage<InboundIntegrationReceiptResponse>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -261,6 +278,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&InboundIntegrationSort::PayloadSize).unwrap(),
             r#""payload_size""#
+        );
+        assert_eq!(
+            serde_json::to_string(&InboundPayloadPreviewEncoding::Hex).unwrap(),
+            r#""hex""#
         );
     }
 
