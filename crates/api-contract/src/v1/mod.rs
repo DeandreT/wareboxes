@@ -90,7 +90,8 @@ pub use integration_monitor::{
     InboundIntegrationSort, IntegrationSortDirection, OutboundDeliveryAttemptOutcome,
     OutboundDeliveryAttemptResponse, OutboundDeliveryStatus, OutboundIntegrationDetailResponse,
     OutboundIntegrationEventResponse, OutboundIntegrationPage, OutboundIntegrationPageRequest,
-    OutboundIntegrationSort,
+    OutboundIntegrationSort, OutboxDeadLetterReplayResponse, ReplayOutboxDeadLetterRequest,
+    ReplayOutboxDeadLetterResponse,
 };
 pub use inventory::{
     InventoryBalancePage, InventoryBalancePageRequest, InventoryBalanceResponse,

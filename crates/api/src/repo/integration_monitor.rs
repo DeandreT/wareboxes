@@ -1,14 +1,20 @@
 use sqlx::postgres::PgRow;
 use sqlx::Row;
+use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_application::integration_monitor::{
     InboundIntegrationPage, InboundIntegrationQuery, InboundIntegrationReceiptReadModel,
     InboundIntegrationSort, IntegrationSortDirection, OutboundDeliveryAttemptReadModel,
     OutboundDeliveryStatus, OutboundIntegrationDetailReadModel, OutboundIntegrationEventReadModel,
     OutboundIntegrationPage, OutboundIntegrationQuery, OutboundIntegrationSort,
+    OutboxDeadLetterReplayReadModel, ReplayOutboxDeadLetterCommand, ReplayOutboxDeadLetterResult,
+    REPLAY_OUTBOX_DEAD_LETTER_OPERATION,
 };
 use wareboxes_application::outbox::DeliveryAttemptOutcome;
+use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
-use wareboxes_domain::{FacilityId, InventoryOwnerId};
+use wareboxes_domain::{FacilityId, InventoryOwnerId, OutboxDeadLetterReplayId, Timestamp, UserId};
+use wareboxes_persistence_postgres::db::bind_tenant_context;
+use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
 use crate::db::{begin_tenant_transaction, Db};
 use crate::error::{AppError, AppResult};
@@ -122,6 +128,21 @@ fn map_attempt(row: &PgRow) -> AppResult<OutboundDeliveryAttemptReadModel> {
         completed_at: row.try_get("completed_at")?,
         error: row.try_get("error")?,
         retry_after_seconds: row.try_get("retry_after_seconds")?,
+    })
+}
+
+fn map_replay(row: &PgRow) -> AppResult<OutboxDeadLetterReplayReadModel> {
+    Ok(OutboxDeadLetterReplayReadModel {
+        replay_id: OutboxDeadLetterReplayId::new(row.try_get("replay_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        previous_replay_count: row.try_get("previous_replay_count")?,
+        replay_count: row.try_get("resulting_replay_count")?,
+        previous_attempts: row.try_get("previous_attempts")?,
+        last_error: row.try_get("last_error_snapshot")?,
+        replayed_by: UserId::new(row.try_get("replayed_by_user_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        replayed_by_name: row.try_get("replayed_by_name")?,
+        replayed_at: row.try_get("replayed_at")?,
     })
 }
 
@@ -454,10 +475,243 @@ pub async fn outbound_detail(
         .iter()
         .map(map_attempt)
         .collect::<AppResult<Vec<_>>>()?;
+    let replay_rows = sqlx::query(
+        r#"
+        SELECT replay.id AS replay_id,replay.previous_replay_count,
+               replay.resulting_replay_count,replay.previous_attempts,
+               replay.last_error_snapshot,replay.replayed_by_user_id,replay.replayed_at,
+               COALESCE(NULLIF(BTRIM(CONCAT_WS(' ',actor.first_name,actor.last_name)),''),
+                        NULLIF(actor.nick_name,''),actor.email) AS replayed_by_name
+        FROM outbox_dead_letter_replays replay
+        JOIN users actor ON actor.id=replay.replayed_by_user_id
+        WHERE replay.tenant_id=$1 AND replay.outbox_event_id=$2
+        ORDER BY replay.resulting_replay_count DESC
+        LIMIT 100
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(event_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let replays = replay_rows
+        .iter()
+        .map(map_replay)
+        .collect::<AppResult<Vec<_>>>()?;
     tx.commit().await?;
     Ok(Some(OutboundIntegrationDetailReadModel {
         event,
         payload,
         attempts,
+        replays,
     }))
+}
+
+#[derive(Debug)]
+struct ReplayTarget {
+    inventory_owner_id: Option<i64>,
+    facility_id: Option<i64>,
+    event_key: String,
+    event_type: String,
+    replay_count: i32,
+    attempts: i32,
+    last_error: String,
+}
+
+fn require_target_scope(scope: &ScopeBindings, target: &ReplayTarget) -> AppResult<()> {
+    if target
+        .inventory_owner_id
+        .is_some_and(|owner_id| !scope.includes_inventory_owner(owner_id))
+        || target
+            .facility_id
+            .is_some_and(|facility_id| !scope.includes_facility(facility_id))
+    {
+        return Err(AppError::not_found("outbound integration event"));
+    }
+    Ok(())
+}
+
+async fn require_event_visible_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: i64,
+    event_id: i64,
+    scope: &ScopeBindings,
+) -> AppResult<()> {
+    let visible = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM outbox_events event
+            WHERE event.tenant_id=$1 AND event.id=$2
+              AND (event.inventory_owner_id IS NULL OR $3 OR event.inventory_owner_id=ANY($4))
+              AND (event.facility_id IS NULL OR $5 OR event.facility_id=ANY($6)))
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(event_id)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .fetch_one(&mut **tx)
+    .await?;
+    if !visible {
+        return Err(AppError::not_found("outbound integration event"));
+    }
+    Ok(())
+}
+
+async fn lock_replay_target_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: i64,
+    event_id: i64,
+    scope: &ScopeBindings,
+) -> AppResult<ReplayTarget> {
+    let row = sqlx::query(
+        r#"
+        SELECT event.inventory_owner_id,event.facility_id,event.event_key,event.event_type,
+               event.replay_count,event.attempts,event.last_error,event.dead_lettered_at,
+               event.published_at,event.discarded_at,event.claimed_at
+        FROM outbox_events event
+        WHERE event.tenant_id=$1 AND event.id=$2
+          AND (event.inventory_owner_id IS NULL OR $3 OR event.inventory_owner_id=ANY($4))
+          AND (event.facility_id IS NULL OR $5 OR event.facility_id=ANY($6))
+        FOR UPDATE
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(event_id)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::not_found("outbound integration event"))?;
+    if row
+        .try_get::<Option<Timestamp>, _>("dead_lettered_at")?
+        .is_none()
+        || row
+            .try_get::<Option<Timestamp>, _>("published_at")?
+            .is_some()
+        || row
+            .try_get::<Option<Timestamp>, _>("discarded_at")?
+            .is_some()
+        || row.try_get::<Option<Timestamp>, _>("claimed_at")?.is_some()
+    {
+        return Err(AppError::conflict(
+            "outbound integration event is not dead lettered",
+        ));
+    }
+    let last_error = row
+        .try_get::<Option<String>, _>("last_error")?
+        .ok_or_else(|| AppError::conflict("dead-letter failure evidence is missing"))?;
+    let target = ReplayTarget {
+        inventory_owner_id: row.try_get("inventory_owner_id")?,
+        facility_id: row.try_get("facility_id")?,
+        event_key: row.try_get("event_key")?,
+        event_type: row.try_get("event_type")?,
+        replay_count: row.try_get("replay_count")?,
+        attempts: row.try_get("attempts")?,
+        last_error,
+    };
+    require_target_scope(scope, &target)?;
+    Ok(target)
+}
+
+pub async fn replay_dead_letter(
+    db: &Db,
+    access: &TenantAccess,
+    context: &CommandContext,
+    command: ReplayOutboxDeadLetterCommand,
+) -> AppResult<ReplayOutboxDeadLetterResult> {
+    context.require_actor(access.tenant_id, access.user_id)?;
+    let prepared = PreparedCommand::new_v1(context, REPLAY_OUTBOX_DEAD_LETTER_OPERATION, &command)?;
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    let scope = lock_current_scope_tx(&mut tx, access.tenant_id, context.actor_id.get()).await?;
+    require_permission_tx(&mut tx, access.tenant_id, context.actor_id.get(), "admin").await?;
+    require_event_visible_tx(&mut tx, access.tenant_id.get(), command.event_id(), &scope).await?;
+    if let Some(result) = prepared
+        .replayed::<ReplayOutboxDeadLetterResult>(&mut tx)
+        .await?
+    {
+        require_event_visible_tx(&mut tx, access.tenant_id.get(), result.event_id, &scope).await?;
+        tx.commit().await?;
+        return Ok(result);
+    }
+
+    let target =
+        lock_replay_target_tx(&mut tx, access.tenant_id.get(), command.event_id(), &scope).await?;
+    if target.replay_count != command.expected_replay_count() {
+        return Err(AppError::conflict(
+            "outbound integration event replay generation is stale",
+        ));
+    }
+    if target.attempts <= 0 {
+        return Err(AppError::conflict(
+            "dead-letter event has no completed delivery attempt",
+        ));
+    }
+    let row = sqlx::query(
+        r#"
+        INSERT INTO outbox_dead_letter_replays(
+            tenant_id,outbox_event_id,inventory_owner_id,facility_id,event_key,event_type,
+            previous_replay_count,resulting_replay_count,previous_attempts,last_error_snapshot,
+            replayed_by_user_id,replayed_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$7+1,$8,$9,$10,clock_timestamp())
+        RETURNING id,replayed_at
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(command.event_id())
+    .bind(target.inventory_owner_id)
+    .bind(target.facility_id)
+    .bind(&target.event_key)
+    .bind(&target.event_type)
+    .bind(target.replay_count)
+    .bind(target.attempts)
+    .bind(&target.last_error)
+    .bind(context.actor_id.get())
+    .fetch_one(&mut *tx)
+    .await?;
+    let replay_id = OutboxDeadLetterReplayId::new(row.try_get("id")?)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let replayed_at: Timestamp = row.try_get("replayed_at")?;
+    let replay_count = target
+        .replay_count
+        .checked_add(1)
+        .ok_or_else(|| AppError::conflict("outbound replay generation is exhausted"))?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE outbox_events
+        SET available_at=$1,attempts=0,last_error=NULL,dead_lettered_at=NULL,
+            replay_count=$2,claimed_at=NULL,claimed_by=NULL,lease_expires_at=NULL
+        WHERE tenant_id=$3 AND id=$4 AND replay_count=$5
+        "#,
+    )
+    .bind(replayed_at)
+    .bind(replay_count)
+    .bind(access.tenant_id.get())
+    .bind(command.event_id())
+    .bind(target.replay_count)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::conflict(
+            "outbound integration event changed during replay",
+        ));
+    }
+    let result = ReplayOutboxDeadLetterResult {
+        replay_id,
+        event_id: command.event_id(),
+        event_key: target.event_key,
+        event_type: target.event_type,
+        previous_replay_count: target.replay_count,
+        replay_count,
+        previous_attempts: target.attempts,
+        status: OutboundDeliveryStatus::Pending,
+        replayed_by: UserId::new(context.actor_id.get())
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        replayed_at,
+    };
+    Ok(prepared.commit(tx, result).await?)
 }

@@ -34172,6 +34172,187 @@ REVOKE ALL ON FUNCTION public.guard_item_traceability_policy_mutation() FROM PUB
 REVOKE ALL ON FUNCTION public.require_item_traceability_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.lock_item_traceability_identity() FROM PUBLIC;
 
+-- Immutable evidence for operator-controlled dead-letter replay.
+CREATE TABLE public.outbox_dead_letter_replays (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    outbox_event_id bigint NOT NULL,
+    inventory_owner_id bigint,
+    facility_id bigint,
+    event_key text NOT NULL,
+    event_type text NOT NULL,
+    previous_replay_count integer NOT NULL,
+    resulting_replay_count integer NOT NULL,
+    previous_attempts integer NOT NULL,
+    last_error_snapshot text NOT NULL,
+    replayed_by_user_id bigint NOT NULL,
+    replayed_at timestamp with time zone NOT NULL,
+    CONSTRAINT outbox_dead_letter_replays_event_key_check
+        CHECK (event_key=btrim(event_key) AND event_key<>'' AND char_length(event_key)<=500),
+    CONSTRAINT outbox_dead_letter_replays_event_type_check
+        CHECK (event_type=btrim(event_type) AND event_type<>'' AND char_length(event_type)<=500),
+    CONSTRAINT outbox_dead_letter_replays_generation_check
+        CHECK (previous_replay_count>=0 AND resulting_replay_count=previous_replay_count+1),
+    CONSTRAINT outbox_dead_letter_replays_attempts_check CHECK (previous_attempts>0),
+    CONSTRAINT outbox_dead_letter_replays_error_check
+        CHECK (last_error_snapshot=btrim(last_error_snapshot)
+            AND last_error_snapshot<>'' AND char_length(last_error_snapshot)<=4000),
+    CONSTRAINT outbox_dead_letter_replays_event_generation_unique
+        UNIQUE (tenant_id,outbox_event_id,resulting_replay_count),
+    -- The outbox envelope is operationally purged after publication. Insert-time
+    -- validation and immutable snapshots preserve this evidence after that purge.
+    CONSTRAINT outbox_dead_letter_replays_owner_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id,id),
+    CONSTRAINT outbox_dead_letter_replays_facility_fkey
+        FOREIGN KEY (tenant_id,facility_id)
+        REFERENCES public.facilities(tenant_id,id),
+    CONSTRAINT outbox_dead_letter_replays_actor_membership_fkey
+        FOREIGN KEY (tenant_id,replayed_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE INDEX outbox_dead_letter_replays_event_history_idx
+ON public.outbox_dead_letter_replays(tenant_id,outbox_event_id,replayed_at DESC,id DESC);
+
+CREATE FUNCTION public.validate_outbox_dead_letter_replay() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    target public.outbox_events%ROWTYPE;
+BEGIN
+    SELECT * INTO target
+    FROM public.outbox_events
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.outbox_event_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'outbox dead-letter replay target does not exist'
+            USING ERRCODE='23503';
+    END IF;
+    IF target.dead_lettered_at IS NULL OR target.published_at IS NOT NULL
+       OR target.discarded_at IS NOT NULL OR target.claimed_at IS NOT NULL
+       OR target.claimed_by IS NOT NULL OR target.lease_expires_at IS NOT NULL
+       OR target.last_error IS NULL
+    THEN
+        RAISE EXCEPTION 'outbox event is not replayable from dead-letter state'
+            USING ERRCODE='55000';
+    END IF;
+    IF NEW.inventory_owner_id IS DISTINCT FROM target.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM target.facility_id
+       OR NEW.event_key<>target.event_key OR NEW.event_type<>target.event_type
+       OR NEW.previous_replay_count<>target.replay_count
+       OR NEW.resulting_replay_count<>target.replay_count+1
+       OR NEW.previous_attempts<>target.attempts
+       OR NEW.last_error_snapshot<>target.last_error
+    THEN
+        RAISE EXCEPTION 'outbox dead-letter replay evidence does not match its event'
+            USING ERRCODE='23514';
+    END IF;
+    PERFORM 1 FROM public.tenant_memberships membership
+    WHERE membership.tenant_id=NEW.tenant_id
+      AND membership.user_id=NEW.replayed_by_user_id
+      AND membership.deleted IS NULL
+    FOR SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'outbox dead-letter replay actor is not an active tenant member'
+            USING ERRCODE='23503';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_outbox_dead_letter_replay_mutation() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION 'outbox dead-letter replay evidence is immutable'
+        USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION public.require_outbox_dead_letter_replay_consistency() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    target public.outbox_events%ROWTYPE;
+BEGIN
+    SELECT * INTO target FROM public.outbox_events
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.outbox_event_id;
+    IF NOT FOUND OR target.replay_count<>NEW.resulting_replay_count
+       OR target.attempts<>0 OR target.last_error IS NOT NULL
+       OR target.dead_lettered_at IS NOT NULL OR target.discarded_at IS NOT NULL
+       OR target.published_at IS NOT NULL OR target.claimed_at IS NOT NULL
+       OR target.claimed_by IS NOT NULL OR target.lease_expires_at IS NOT NULL
+       OR target.available_at<>NEW.replayed_at
+    THEN
+        RAISE EXCEPTION 'outbox dead-letter replay result is inconsistent'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.require_outbox_replay_evidence() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF NEW.replay_count IS NOT DISTINCT FROM OLD.replay_count THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.replay_count<>OLD.replay_count+1 OR OLD.dead_lettered_at IS NULL
+       OR OLD.last_error IS NULL OR OLD.attempts<=0
+       OR OLD.published_at IS NOT NULL OR OLD.discarded_at IS NOT NULL
+       OR NEW.attempts<>0 OR NEW.last_error IS NOT NULL
+       OR NEW.dead_lettered_at IS NOT NULL OR NEW.published_at IS NOT NULL
+       OR NEW.discarded_at IS NOT NULL OR NEW.claimed_at IS NOT NULL
+       OR NEW.claimed_by IS NOT NULL OR NEW.lease_expires_at IS NOT NULL
+       OR NOT EXISTS (
+           SELECT 1 FROM public.outbox_dead_letter_replays replay
+           WHERE replay.tenant_id=NEW.tenant_id
+             AND replay.outbox_event_id=NEW.id
+             AND replay.previous_replay_count=OLD.replay_count
+             AND replay.resulting_replay_count=NEW.replay_count
+             AND replay.previous_attempts=OLD.attempts
+             AND replay.last_error_snapshot=OLD.last_error
+             AND replay.replayed_at=NEW.available_at)
+    THEN
+        RAISE EXCEPTION 'outbox dead-letter replay requires exact immutable evidence'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER outbox_dead_letter_replays_validate
+BEFORE INSERT ON public.outbox_dead_letter_replays
+FOR EACH ROW EXECUTE FUNCTION public.validate_outbox_dead_letter_replay();
+CREATE TRIGGER outbox_dead_letter_replays_are_immutable
+BEFORE UPDATE OR DELETE ON public.outbox_dead_letter_replays
+FOR EACH ROW EXECUTE FUNCTION public.guard_outbox_dead_letter_replay_mutation();
+CREATE CONSTRAINT TRIGGER outbox_dead_letter_replays_require_consistency
+AFTER INSERT ON public.outbox_dead_letter_replays DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_outbox_dead_letter_replay_consistency();
+CREATE TRIGGER outbox_events_require_replay_evidence
+BEFORE UPDATE OF replay_count ON public.outbox_events
+FOR EACH ROW EXECUTE FUNCTION public.require_outbox_replay_evidence();
+
+ALTER TABLE public.outbox_dead_letter_replays ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.outbox_dead_letter_replays FORCE ROW LEVEL SECURITY;
+CREATE POLICY outbox_dead_letter_replays_tenant_isolation
+ON public.outbox_dead_letter_replays
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.outbox_dead_letter_replays TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.outbox_dead_letter_replays_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_outbox_dead_letter_replay() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_outbox_dead_letter_replay_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_outbox_dead_letter_replay_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_outbox_replay_evidence() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

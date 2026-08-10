@@ -166,6 +166,41 @@ pub struct OutboundIntegrationDetailResponse {
     pub event: OutboundIntegrationEventResponse,
     pub payload: Value,
     pub attempts: Vec<OutboundDeliveryAttemptResponse>,
+    pub replays: Vec<OutboxDeadLetterReplayResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutboxDeadLetterReplayResponse {
+    pub replay_id: i64,
+    pub previous_replay_count: i32,
+    pub replay_count: i32,
+    pub previous_attempts: i32,
+    pub last_error: String,
+    pub replayed_by: i64,
+    pub replayed_by_name: String,
+    pub replayed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayOutboxDeadLetterRequest {
+    pub expected_replay_count: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayOutboxDeadLetterResponse {
+    pub replay_id: i64,
+    pub event_id: i64,
+    pub event_key: String,
+    pub event_type: String,
+    pub previous_replay_count: i32,
+    pub replay_count: i32,
+    pub previous_attempts: i32,
+    pub status: OutboundDeliveryStatus,
+    pub replayed_by: i64,
+    pub replayed_at: String,
 }
 
 #[cfg(test)]
@@ -191,5 +226,16 @@ mod tests {
             serde_json::to_string(&InboundIntegrationSort::PayloadSize).unwrap(),
             r#""payload_size""#
         );
+    }
+
+    #[test]
+    fn replay_request_is_strict_and_optimistic() {
+        let request: ReplayOutboxDeadLetterRequest =
+            serde_json::from_str(r#"{"expected_replay_count":2}"#).unwrap();
+        assert_eq!(request.expected_replay_count, 2);
+        assert!(serde_json::from_str::<ReplayOutboxDeadLetterRequest>(
+            r#"{"expected_replay_count":2,"force":true}"#
+        )
+        .is_err());
     }
 }

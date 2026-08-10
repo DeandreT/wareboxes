@@ -1,10 +1,10 @@
 use wareboxes_api_contract::v1::{
     InboundIntegrationPage, InboundIntegrationSort, IntegrationSortDirection, OpaqueCursor,
     OutboundDeliveryStatus, OutboundIntegrationDetailResponse, OutboundIntegrationPage,
-    OutboundIntegrationSort,
+    OutboundIntegrationSort, ReplayOutboxDeadLetterRequest, ReplayOutboxDeadLetterResponse,
 };
 
-use super::{internal_get, ApiError};
+use super::{internal_get, internal_post_idempotent, ApiError};
 
 #[derive(Clone, Default)]
 pub struct InboundIntegrationFilters {
@@ -45,6 +45,19 @@ pub async fn outbound_integration_detail(
     event_id: i64,
 ) -> Result<OutboundIntegrationDetailResponse, ApiError> {
     internal_get(&format!("/api/v1/integration-monitor/outbound/{event_id}")).await
+}
+
+pub async fn replay_outbound_dead_letter(
+    event_id: i64,
+    request: &ReplayOutboxDeadLetterRequest,
+    idempotency_key: &str,
+) -> Result<ReplayOutboxDeadLetterResponse, ApiError> {
+    internal_post_idempotent(
+        &format!("/api/v1/integration-monitor/outbound/{event_id}/replays"),
+        request,
+        idempotency_key,
+    )
+    .await
 }
 
 fn inbound_path(
@@ -171,6 +184,14 @@ mod tests {
         assert_eq!(
             path,
             "/api/v1/integration-monitor/outbound?limit=100&sort=attempts&direction=descending&query=shipping%20event&status=dead_lettered&facility_id=4&inventory_owner_id=8&cursor=imo1.filter.0000000000000064"
+        );
+    }
+
+    #[test]
+    fn replay_path_is_event_scoped() {
+        assert_eq!(
+            format!("/api/v1/integration-monitor/outbound/{}/replays", 44),
+            "/api/v1/integration-monitor/outbound/44/replays"
         );
     }
 }

@@ -3,6 +3,7 @@ use wareboxes_api_contract::v1::{
     InboundIntegrationPage, InboundIntegrationReceiptResponse, InboundIntegrationSort,
     IntegrationSortDirection, OpaqueCursor, OutboundDeliveryAttemptOutcome, OutboundDeliveryStatus,
     OutboundIntegrationDetailResponse, OutboundIntegrationPage, OutboundIntegrationSort,
+    ReplayOutboxDeadLetterRequest,
 };
 
 use crate::api::{self, InboundIntegrationFilters, OutboundIntegrationFilters};
@@ -14,6 +15,22 @@ use crate::workspace_layout::{PaneControls, SplitPaneHandle, SplitPaneState};
 enum MonitorTab {
     Inbound,
     Outbound,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ReplayConfirmation {
+    event_id: i64,
+    event_type: String,
+    event_key: String,
+    expected_replay_count: i32,
+    previous_attempts: i32,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct SavedReplayCommand {
+    event_id: i64,
+    request: ReplayOutboxDeadLetterRequest,
+    idempotency_key: String,
 }
 
 #[derive(Clone, Copy)]
@@ -39,10 +56,14 @@ struct MonitorSignals {
     inbound_loading: RwSignal<bool>,
     outbound_loading: RwSignal<bool>,
     detail_loading: RwSignal<bool>,
+    replay_pending: RwSignal<bool>,
     error: RwSignal<Option<String>>,
+    notice: RwSignal<Option<String>>,
     selected_inbound: RwSignal<Option<InboundIntegrationReceiptResponse>>,
     selected_outbound_id: RwSignal<Option<i64>>,
     outbound_detail: RwSignal<Option<OutboundIntegrationDetailResponse>>,
+    replay_confirmation: RwSignal<Option<ReplayConfirmation>>,
+    replay_retry: RwSignal<Option<SavedReplayCommand>>,
     on_unauthorized: Callback<()>,
 }
 
@@ -70,10 +91,14 @@ impl MonitorSignals {
             inbound_loading: RwSignal::new(false),
             outbound_loading: RwSignal::new(false),
             detail_loading: RwSignal::new(false),
+            replay_pending: RwSignal::new(false),
             error: RwSignal::new(None),
+            notice: RwSignal::new(None),
             selected_inbound: RwSignal::new(None),
             selected_outbound_id: RwSignal::new(None),
             outbound_detail: RwSignal::new(None),
+            replay_confirmation: RwSignal::new(None),
+            replay_retry: RwSignal::new(None),
             on_unauthorized,
         }
     }
@@ -184,6 +209,9 @@ pub fn IntegrationsWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
 
             {move || signals.error.get().map(|message| view! {
                 <div class="integration-error" role="alert">{message}</div>
+            })}
+            {move || signals.notice.get().map(|message| view! {
+                <div class="integration-notice" role="status">{message}</div>
             })}
 
             <div
@@ -362,17 +390,47 @@ fn OutboundDetail(signals: MonitorSignals) -> impl IntoView {
         } else {
             signals.outbound_detail.get().map_or_else(
                 || view! { <div class="integration-empty"><h2>"Outbound delivery detail"</h2><p>"Select an event to inspect its payload and attempts."</p></div> }.into_any(),
-                outbound_detail_view,
+                |detail| outbound_detail_view(signals, detail),
             )
         }
     }} }
 }
 
-fn outbound_detail_view(detail: OutboundIntegrationDetailResponse) -> AnyView {
+fn outbound_detail_view(
+    signals: MonitorSignals,
+    detail: OutboundIntegrationDetailResponse,
+) -> AnyView {
     let event = detail.event;
     let payload = serde_json::to_string_pretty(&detail.payload).unwrap_or_else(|_| "{}".to_owned());
+    let replay_confirmation = StoredValue::new(ReplayConfirmation {
+        event_id: event.id,
+        event_type: event.event_type.clone(),
+        event_key: event.event_key.clone(),
+        expected_replay_count: event.replay_count,
+        previous_attempts: event.attempts,
+    });
+    let event_id = event.id;
+    let can_replay = event.status == OutboundDeliveryStatus::DeadLettered;
     view! { <div class="integration-detail-content">
         <header><div><h2>{event.event_type.clone()}</h2><small class="mono">{event.event_key.clone()}</small></div><span class=status_class(event.status)>{status_label(event.status)}</span></header>
+        <Show when=move || can_replay>
+            <div class="integration-command-band">
+                {move || {
+                    if let Some(confirmation)=signals.replay_confirmation.get().filter(|value| value.event_id==event_id) {
+                        let confirmation=StoredValue::new(confirmation);
+                        view! { <div class="integration-replay-confirmation">
+                            <div><strong>"Replay this dead letter?"</strong><span>{format!("Delivery generation {} failed after {} attempts. The original immutable event will be queued again.",confirmation.get_value().expected_replay_count,confirmation.get_value().previous_attempts)}</span><small class="mono">{format!("{} / {}",confirmation.get_value().event_type,confirmation.get_value().event_key)}</small></div>
+                            <div><button type="button" class="button quiet-action compact" disabled=move || signals.replay_pending.get() on:click=move |_| signals.replay_confirmation.set(None)>"Cancel"</button><button type="button" class="button primary-action compact" disabled=move || signals.replay_pending.get() on:click=move |_| submit_replay(signals,confirmation.get_value())><Icon icon=UiIcon::Refresh/>{move || if signals.replay_pending.get() { "Replaying" } else { "Replay now" }}</button></div>
+                        </div> }.into_any()
+                    } else if let Some(saved)=signals.replay_retry.get().filter(|value| value.event_id==event_id) {
+                        let saved=StoredValue::new(saved);
+                        view! { <div class="integration-replay-confirmation"><div><strong>"Replay outcome is unknown"</strong><span>"Retry the exact saved command to reconcile the delivery without creating another replay generation."</span></div><button type="button" class="button secondary-action compact" disabled=move || signals.replay_pending.get() on:click=move |_| execute_replay(signals,saved.get_value())><Icon icon=UiIcon::Refresh/>{move || if signals.replay_pending.get() { "Reconciling" } else { "Retry exact replay" }}</button></div> }.into_any()
+                    } else {
+                        view! { <button type="button" class="button secondary-action compact" disabled=move || signals.replay_pending.get() on:click=move |_| signals.replay_confirmation.set(Some(replay_confirmation.get_value()))><Icon icon=UiIcon::Refresh/>"Replay delivery"</button> }.into_any()
+                    }
+                }}
+            </div>
+        </Show>
         <dl class="integration-facts">
             <div><dt>"Aggregate"</dt><dd>{format!("{} / {}",event.aggregate_type,event.aggregate_id)}</dd></div>
             <div><dt>"Sequence"</dt><dd>{event.aggregate_sequence}</dd></div>
@@ -394,7 +452,72 @@ fn outbound_detail_view(detail: OutboundIntegrationDetailResponse) -> AnyView {
                 </article> }).collect_view().into_any()
             }}</div>
         </section>
+        <section class="integration-detail-section"><h3>"Replay history"</h3>
+            <div class="integration-attempts">{if detail.replays.is_empty() {
+                view! { <p>"No dead-letter replays recorded."</p> }.into_any()
+            } else {
+                detail.replays.into_iter().map(|replay| view! { <article>
+                    <header><strong>{format!("Replay {}",replay.replay_count)}</strong><span>{replay.replayed_at}</span></header>
+                    <dl><div><dt>"Operator"</dt><dd>{replay.replayed_by_name}</dd></div><div><dt>"Prior attempts"</dt><dd>{replay.previous_attempts}</dd></div><div><dt>"Generation"</dt><dd>{format!("{} -> {}",replay.previous_replay_count,replay.replay_count)}</dd></div><div><dt>"Evidence ID"</dt><dd class="mono">{format!("#{}",replay.replay_id)}</dd></div></dl>
+                    <p class="integration-failure">{replay.last_error}</p>
+                </article> }).collect_view().into_any()
+            }}</div>
+        </section>
     </div> }.into_any()
+}
+
+fn submit_replay(signals: MonitorSignals, confirmation: ReplayConfirmation) {
+    let saved = SavedReplayCommand {
+        event_id: confirmation.event_id,
+        request: ReplayOutboxDeadLetterRequest {
+            expected_replay_count: confirmation.expected_replay_count,
+        },
+        idempotency_key: api::new_idempotency_key(),
+    };
+    execute_replay(signals, saved);
+}
+
+fn execute_replay(signals: MonitorSignals, saved: SavedReplayCommand) {
+    if signals.replay_pending.get_untracked() {
+        return;
+    }
+    signals.replay_pending.set(true);
+    signals.error.set(None);
+    signals.notice.set(None);
+    let event_id = saved.event_id;
+    leptos::task::spawn_local(async move {
+        let result =
+            api::replay_outbound_dead_letter(event_id, &saved.request, &saved.idempotency_key)
+                .await;
+        match result {
+            Ok(result) => {
+                signals.replay_retry.set(None);
+                signals.replay_confirmation.set(None);
+                request_outbound(signals, None, Vec::new());
+                select_outbound_event(signals, event_id);
+                signals.notice.set(Some(format!(
+                    "Replay {} queued for {}.",
+                    result.replay_count, result.event_type
+                )));
+            }
+            Err(error) if error.unauthorized => signals.on_unauthorized.run(()),
+            Err(error) if error.ambiguous_outcome => {
+                signals.replay_retry.set(Some(saved));
+                signals.replay_confirmation.set(None);
+                signals.error.set(Some(format!(
+                    "{} Retry the exact saved replay to reconcile the outcome.",
+                    error.message
+                )));
+            }
+            Err(error) => {
+                signals.replay_retry.set(None);
+                signals.replay_confirmation.set(None);
+                select_outbound_event(signals, event_id);
+                signals.error.set(Some(error.message));
+            }
+        }
+        signals.replay_pending.set(false);
+    });
 }
 
 fn refresh_current(signals: MonitorSignals) {
@@ -480,6 +603,17 @@ fn select_outbound_event(signals: MonitorSignals, event_id: i64) {
     signals.outbound_detail.set(None);
     signals.detail_loading.set(true);
     signals.error.set(None);
+    signals.notice.set(None);
+    if signals
+        .replay_retry
+        .get_untracked()
+        .as_ref()
+        .map(|value| value.event_id)
+        != Some(event_id)
+    {
+        signals.replay_retry.set(None);
+    }
+    signals.replay_confirmation.set(None);
     leptos::task::spawn_local(async move {
         let result = api::outbound_integration_detail(event_id).await;
         if signals.detail_generation.get_untracked() != generation

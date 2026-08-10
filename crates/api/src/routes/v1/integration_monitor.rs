@@ -8,12 +8,14 @@ use wareboxes_api_contract::v1::{
     OutboundDeliveryStatus as ApiStatus, OutboundIntegrationDetailResponse,
     OutboundIntegrationEventResponse, OutboundIntegrationPage as ApiOutboundPage,
     OutboundIntegrationPageRequest, OutboundIntegrationSort as ApiOutboundSort,
+    OutboxDeadLetterReplayResponse, ReplayOutboxDeadLetterRequest, ReplayOutboxDeadLetterResponse,
 };
 use wareboxes_application::integration_monitor::{
     InboundIntegrationQuery, InboundIntegrationReceiptReadModel, InboundIntegrationSort,
     IntegrationSortDirection, OutboundDeliveryAttemptReadModel, OutboundDeliveryStatus,
     OutboundIntegrationDetailReadModel, OutboundIntegrationEventReadModel,
-    OutboundIntegrationQuery, OutboundIntegrationSort,
+    OutboundIntegrationQuery, OutboundIntegrationSort, ReplayOutboxDeadLetterCommand,
+    ReplayOutboxDeadLetterResult,
 };
 use wareboxes_application::outbox::DeliveryAttemptOutcome;
 use wareboxes_domain::{FacilityId, InventoryOwnerId};
@@ -22,6 +24,7 @@ use super::error::{V1Error, V1Result};
 use crate::auth::CurrentTenant;
 use crate::error::{AppError, AppResult};
 use crate::repo;
+use crate::request_context::IdempotencyKey;
 use crate::state::AppState;
 
 const PERMISSION: &str = "admin";
@@ -81,6 +84,23 @@ pub async fn outbound_detail(
         .await?
         .ok_or_else(|| AppError::not_found("outbound integration event"))?;
     Ok(Json(map_detail(detail)))
+}
+
+pub async fn replay_outbound_dead_letter(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(event_id): Path<i64>,
+    Json(body): Json<ReplayOutboxDeadLetterRequest>,
+) -> V1Result<Json<ReplayOutboxDeadLetterResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let command = ReplayOutboxDeadLetterCommand::new(event_id, body.expected_replay_count)
+        .map_err(AppError::from)?;
+    let context = user.command_context(&idempotency_key);
+    let result =
+        repo::integration_monitor::replay_dead_letter(&state.db, &user.tenant, &context, command)
+            .await?;
+    Ok(Json(map_replay_result(result)))
 }
 
 fn validated_text(value: Option<&str>, label: &str) -> AppResult<Option<String>> {
@@ -271,6 +291,35 @@ fn map_detail(value: OutboundIntegrationDetailReadModel) -> OutboundIntegrationD
         event: map_outbound(value.event),
         payload: value.payload,
         attempts: value.attempts.into_iter().map(map_attempt).collect(),
+        replays: value
+            .replays
+            .into_iter()
+            .map(|replay| OutboxDeadLetterReplayResponse {
+                replay_id: replay.replay_id.get(),
+                previous_replay_count: replay.previous_replay_count,
+                replay_count: replay.replay_count,
+                previous_attempts: replay.previous_attempts,
+                last_error: replay.last_error,
+                replayed_by: replay.replayed_by.get(),
+                replayed_by_name: replay.replayed_by_name,
+                replayed_at: replay.replayed_at.to_rfc3339(),
+            })
+            .collect(),
+    }
+}
+
+fn map_replay_result(value: ReplayOutboxDeadLetterResult) -> ReplayOutboxDeadLetterResponse {
+    ReplayOutboxDeadLetterResponse {
+        replay_id: value.replay_id.get(),
+        event_id: value.event_id,
+        event_key: value.event_key,
+        event_type: value.event_type,
+        previous_replay_count: value.previous_replay_count,
+        replay_count: value.replay_count,
+        previous_attempts: value.previous_attempts,
+        status: api_status(value.status),
+        replayed_by: value.replayed_by.get(),
+        replayed_at: value.replayed_at.to_rfc3339(),
     }
 }
 

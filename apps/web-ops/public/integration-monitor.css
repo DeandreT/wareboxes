@@ -58,6 +58,14 @@
   font-size: 10px;
 }
 
+.integration-notice {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--success-ink);
+  background: var(--green-soft);
+  color: var(--success-ink);
+  font-size: 10px;
+}
+
 .integration-body {
   min-height: 480px;
   height: calc(100vh - 205px);
@@ -178,6 +186,50 @@
   padding: 6px 8px;
   border-bottom: 1px solid var(--line);
   background: var(--surface-raised);
+}
+
+.integration-command-band {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-sunken);
+}
+
+.integration-replay-confirmation {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.integration-replay-confirmation > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.integration-replay-confirmation > div:last-child {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.integration-replay-confirmation strong {
+  font-size: 10px;
+}
+
+.integration-replay-confirmation span,
+.integration-replay-confirmation small {
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .integration-detail-content h2,

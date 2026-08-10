@@ -5,7 +5,7 @@ pub use wareboxes_application::outbox::{
     DeliveryAttempt, DeliveryAttemptOutcome, DeliveryFailureClass, FailOutboxEvent, NewOutboxEvent,
     OutboxEvent,
 };
-use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
+use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId, Timestamp};
 
 use crate::db::{bind_tenant_context, Db};
 use crate::{PersistenceError, PersistenceResult};
@@ -669,26 +669,67 @@ pub async fn replay_dead_letter(
     db: &Db,
     tenant_id: TenantId,
     event_id: i64,
+    user_id: i64,
+    expected_replay_count: i32,
 ) -> PersistenceResult<bool> {
+    if event_id <= 0 || user_id <= 0 || expected_replay_count < 0 {
+        return Err(PersistenceError::invalid_input(
+            "dead-letter replay identity and expected generation are invalid",
+        ));
+    }
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
-    let result = sqlx::query(
+    let evidence = sqlx::query(
         r#"
-        UPDATE outbox_events
-        SET available_at = clock_timestamp(), attempts = 0, last_error = NULL,
-            dead_lettered_at = NULL, replay_count = replay_count + 1
-        WHERE tenant_id = $1
-          AND id = $2
-          AND dead_lettered_at IS NOT NULL
-          AND discarded_at IS NULL
+        INSERT INTO outbox_dead_letter_replays(
+            tenant_id,outbox_event_id,inventory_owner_id,facility_id,event_key,event_type,
+            previous_replay_count,resulting_replay_count,previous_attempts,last_error_snapshot,
+            replayed_by_user_id,replayed_at)
+        SELECT event.tenant_id,event.id,event.inventory_owner_id,event.facility_id,
+               event.event_key,event.event_type,event.replay_count,event.replay_count+1,
+               event.attempts,event.last_error,$3,clock_timestamp()
+        FROM outbox_events event
+        WHERE event.tenant_id=$1 AND event.id=$2
+          AND event.replay_count=$4 AND event.dead_lettered_at IS NOT NULL
+          AND event.last_error IS NOT NULL AND event.published_at IS NULL
+          AND event.discarded_at IS NULL AND event.claimed_at IS NULL
+        RETURNING resulting_replay_count,replayed_at
         "#,
     )
     .bind(tenant_id.get())
     .bind(event_id)
+    .bind(user_id)
+    .bind(expected_replay_count)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(evidence) = evidence else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    let replay_count: i32 = evidence.try_get("resulting_replay_count")?;
+    let replayed_at: Timestamp = evidence.try_get("replayed_at")?;
+    let result = sqlx::query(
+        r#"
+        UPDATE outbox_events
+        SET available_at=$1,attempts=0,last_error=NULL,dead_lettered_at=NULL,
+            replay_count=$2,claimed_at=NULL,claimed_by=NULL,lease_expires_at=NULL
+        WHERE tenant_id=$3 AND id=$4 AND replay_count=$5
+        "#,
+    )
+    .bind(replayed_at)
+    .bind(replay_count)
+    .bind(tenant_id.get())
+    .bind(event_id)
+    .bind(expected_replay_count)
     .execute(&mut *tx)
     .await?;
+    if result.rows_affected() != 1 {
+        return Err(PersistenceError::conflict(
+            "outbox dead-letter replay target changed",
+        ));
+    }
     tx.commit().await?;
-    Ok(result.rows_affected() == 1)
+    Ok(true)
 }
 
 pub async fn discard_dead_letter(

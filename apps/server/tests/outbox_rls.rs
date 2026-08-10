@@ -165,7 +165,7 @@ async fn outbox_storage_and_workers_are_tenant_isolated() {
     .await
     .unwrap());
     assert!(
-        !outbox::replay_dead_letter(&fixture.db, tenant_b, refs_a.event_id)
+        !outbox::replay_dead_letter(&fixture.db, tenant_b, refs_a.event_id, user_b.id, 0)
             .await
             .unwrap()
     );
@@ -179,7 +179,7 @@ async fn outbox_storage_and_workers_are_tenant_isolated() {
     .await
     .unwrap());
     assert!(
-        outbox::replay_dead_letter(&fixture.db, tenant_a, refs_a.event_id)
+        outbox::replay_dead_letter(&fixture.db, tenant_a, refs_a.event_id, user_a.id, 0)
             .await
             .unwrap()
     );

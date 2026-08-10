@@ -1058,7 +1058,7 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
     assert!(poison_event.dead_lettered_at.is_some());
     assert_eq!(poison_event.attempts, 1);
     assert!(
-        outbox::replay_dead_letter(&fixture.db, tenant_id, poison_event_id)
+        outbox::replay_dead_letter(&fixture.db, tenant_id, poison_event_id, user.id, 0)
             .await
             .unwrap()
     );

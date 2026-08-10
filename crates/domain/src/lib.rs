@@ -282,6 +282,7 @@ positive_id!(ReplenishmentPlanId, "replenishment plan ID");
 positive_id!(ReplenishmentWorkId, "replenishment work ID");
 positive_id!(ReplenishmentCancellationId, "replenishment cancellation ID");
 positive_id!(ReplenishmentConfirmationId, "replenishment confirmation ID");
+positive_id!(OutboxDeadLetterReplayId, "outbox dead-letter replay ID");
 positive_id!(PackSessionId, "pack session ID");
 positive_id!(CartonId, "carton ID");
 positive_id!(CartonContentId, "carton content ID");

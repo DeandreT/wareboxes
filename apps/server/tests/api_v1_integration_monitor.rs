@@ -4,13 +4,16 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use common::*;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::json;
 use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
+use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     ErrorReason, ErrorResponse, InboundIntegrationPage, OutboundDeliveryStatus,
-    OutboundIntegrationDetailResponse, OutboundIntegrationPage,
+    OutboundIntegrationDetailResponse, OutboundIntegrationPage, ReplayOutboxDeadLetterRequest,
+    ReplayOutboxDeadLetterResponse,
 };
 use wareboxes_application::integration::NewIntegrationInboxReceipt;
 use wareboxes_application::outbox::DeliveryFailureClass;
@@ -25,6 +28,27 @@ fn request(token: &str, tenant_id: TenantId, uri: &str) -> Request<Body> {
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(TENANT_ID_HEADER, tenant_id.to_string())
         .body(Body::empty())
+        .unwrap()
+}
+
+fn post_request<T: Serialize>(
+    token: &str,
+    tenant_id: TenantId,
+    uri: &str,
+    idempotency_key: Option<&str>,
+    body: &T,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(key) = idempotency_key {
+        builder = builder.header(IDEMPOTENCY_KEY_HEADER, key);
+    }
+    builder
+        .body(Body::from(serde_json::to_vec(body).unwrap()))
         .unwrap()
 }
 
@@ -378,4 +402,262 @@ async fn integration_monitor_is_scope_safe_server_sorted_and_exposes_attempt_evi
         .await
         .unwrap();
     assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn dead_letter_replay_is_optimistic_audited_idempotent_and_scope_safe() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.user("integration-replay-admin@test.local").await;
+    let tenant_id = tenant_for_user(&fixture.db, admin.id).await;
+    grant_permission(&fixture, tenant_id, admin.id, "admin").await;
+    let owner_id = fixture.inventory_owner(tenant_id, "Replay Client").await;
+    let facility_id = fixture.facility(tenant_id, "Replay DC").await;
+    fixture
+        .assign_owner_to_facility(tenant_id, owner_id, facility_id)
+        .await;
+    assert!(wareboxes_api::repo::tenants::update_user_access_scope(
+        &fixture.db,
+        tenant_id,
+        &UpdateUserAccessScope {
+            user_id: admin.id,
+            all_facilities: false,
+            facility_ids: vec![facility_id],
+            all_inventory_owners: false,
+            inventory_owner_ids: vec![owner_id],
+        },
+    )
+    .await
+    .unwrap());
+    let event_id = enqueue(
+        &fixture,
+        tenant_id,
+        admin.id,
+        owner_id,
+        facility_id,
+        "dead-letter-replay",
+        "shipping.shipment_departed",
+    )
+    .await;
+    let claimed = outbox::claim_events(
+        &fixture.db,
+        tenant_id,
+        "replay-test-worker",
+        "replay-test-publisher",
+        1,
+        60,
+    )
+    .await
+    .unwrap();
+    assert_eq!(claimed[0].id, event_id);
+    assert!(outbox::mark_failed(
+        &fixture.db,
+        &FailOutboxEvent {
+            tenant_id,
+            event_id,
+            worker_id: "replay-test-worker",
+            claim_version: claimed[0].claim_version,
+            failure_class: DeliveryFailureClass::Permanent,
+            error: "carrier endpoint rejected delivery",
+            retry_after_seconds: 0,
+            max_attempts: 1,
+        },
+    )
+    .await
+    .unwrap());
+
+    let token = wareboxes_api::auth::create_session(&fixture.db, admin.id)
+        .await
+        .unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let uri = format!("/api/v1/integration-monitor/outbound/{event_id}/replays");
+    let command = ReplayOutboxDeadLetterRequest {
+        expected_replay_count: 0,
+    };
+
+    let missing_key = app
+        .clone()
+        .oneshot(post_request(&token, tenant_id, &uri, None, &command))
+        .await
+        .unwrap();
+    assert_eq!(missing_key.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response::<ErrorResponse>(missing_key).await.reason,
+        ErrorReason::IdempotencyKeyRequired
+    );
+
+    let (race_a, race_b) = tokio::join!(
+        app.clone().oneshot(post_request(
+            &token,
+            tenant_id,
+            &uri,
+            Some("integration-replay-race-a"),
+            &command,
+        )),
+        app.clone().oneshot(post_request(
+            &token,
+            tenant_id,
+            &uri,
+            Some("integration-replay-race-b"),
+            &command,
+        )),
+    );
+    let race_a = race_a.unwrap();
+    let race_b = race_b.unwrap();
+    assert_eq!(
+        [race_a.status(), race_b.status()]
+            .into_iter()
+            .filter(|status| *status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        [race_a.status(), race_b.status()]
+            .into_iter()
+            .filter(|status| *status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let (winner_key, first_response) = if race_a.status() == StatusCode::OK {
+        ("integration-replay-race-a", race_a)
+    } else {
+        ("integration-replay-race-b", race_b)
+    };
+    let first: ReplayOutboxDeadLetterResponse = response(first_response).await;
+    assert_eq!(first.event_id, event_id);
+    assert_eq!(first.previous_replay_count, 0);
+    assert_eq!(first.replay_count, 1);
+    assert_eq!(first.previous_attempts, 1);
+    assert_eq!(first.status, OutboundDeliveryStatus::Pending);
+    assert_eq!(first.replayed_by, admin.id);
+
+    let exact = app
+        .clone()
+        .oneshot(post_request(
+            &token,
+            tenant_id,
+            &uri,
+            Some(winner_key),
+            &command,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(exact.status(), StatusCode::OK);
+    assert_eq!(
+        response::<ReplayOutboxDeadLetterResponse>(exact).await,
+        first
+    );
+
+    let changed = app
+        .clone()
+        .oneshot(post_request(
+            &token,
+            tenant_id,
+            &uri,
+            Some(winner_key),
+            &ReplayOutboxDeadLetterRequest {
+                expected_replay_count: 1,
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(changed.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response::<ErrorResponse>(changed).await.reason,
+        ErrorReason::IdempotencyKeyReused
+    );
+
+    let stale = app
+        .clone()
+        .oneshot(post_request(
+            &token,
+            tenant_id,
+            &uri,
+            Some("integration-replay-stale"),
+            &command,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+    let detail = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!("/api/v1/integration-monitor/outbound/{event_id}"),
+        ))
+        .await
+        .unwrap();
+    let detail: OutboundIntegrationDetailResponse = response(detail).await;
+    assert_eq!(detail.event.status, OutboundDeliveryStatus::Pending);
+    assert_eq!(detail.event.attempts, 0);
+    assert_eq!(detail.event.replay_count, 1);
+    assert_eq!(detail.replays.len(), 1);
+    assert_eq!(detail.replays[0].replay_id, first.replay_id);
+    assert_eq!(
+        detail.replays[0].last_error,
+        "carrier endpoint rejected delivery"
+    );
+
+    let mut scoped = tenant_tx(&fixture.db, tenant_id).await;
+    let evidence: (i64, i32, i32, i32, i64) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*),MIN(previous_replay_count),MIN(resulting_replay_count),
+               MIN(previous_attempts),MIN(replayed_by_user_id)
+        FROM outbox_dead_letter_replays WHERE outbox_event_id=$1
+        "#,
+    )
+    .bind(event_id)
+    .fetch_one(&mut *scoped)
+    .await
+    .unwrap();
+    assert_eq!(evidence, (1, 0, 1, 1, admin.id));
+    assert!(sqlx::query(
+        "UPDATE outbox_dead_letter_replays SET previous_attempts=2 WHERE outbox_event_id=$1",
+    )
+    .bind(event_id)
+    .execute(&mut *scoped)
+    .await
+    .is_err());
+    scoped.rollback().await.unwrap();
+    let admin_db = admin_db_for(&fixture.db).await;
+    assert!(
+        sqlx::query("UPDATE outbox_dead_letter_replays SET previous_attempts=2 WHERE id=$1",)
+            .bind(first.replay_id)
+            .execute(&admin_db)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE outbox_events SET replay_count=replay_count+1 WHERE id=$1")
+            .bind(event_id)
+            .execute(&admin_db)
+            .await
+            .is_err()
+    );
+
+    assert!(wareboxes_api::repo::tenants::update_user_access_scope(
+        &fixture.db,
+        tenant_id,
+        &UpdateUserAccessScope {
+            user_id: admin.id,
+            all_facilities: false,
+            facility_ids: Vec::new(),
+            all_inventory_owners: false,
+            inventory_owner_ids: Vec::new(),
+        },
+    )
+    .await
+    .unwrap());
+    let concealed_replay = app
+        .oneshot(post_request(
+            &token,
+            tenant_id,
+            &uri,
+            Some(winner_key),
+            &command,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(concealed_replay.status(), StatusCode::NOT_FOUND);
 }
