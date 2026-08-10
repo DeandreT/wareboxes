@@ -268,11 +268,12 @@ pub fn InventoryIntegrityWorkbench(
 
                         {move || match tab.get() {
                             IntegrityTab::Journal => {
-                                view! { <read_views::JournalView on_unauthorized/> }.into_any()
+                                view! { <read_views::JournalView access=access.get_value() on_unauthorized/> }.into_any()
                             }
                             IntegrityTab::Aging => {
                                 view! {
                                     <aging::AgingView
+                                        access=access.get_value()
                                         on_unauthorized
                                         on_recall=open_recall
                                         can_manage_recalls

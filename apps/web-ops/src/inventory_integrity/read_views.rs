@@ -5,6 +5,7 @@ use wareboxes_api_contract::v1::{
     InventoryIntegritySort, InventoryJournalPage, InventoryJournalSort,
     InventoryJournalTransactionResponse, InventorySortDirection, OpaqueCursor,
 };
+use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 
 use crate::api::{self, IntegrityFilters, JournalFilters};
 use crate::components::SearchField;
@@ -21,9 +22,8 @@ struct JournalSignals {
     generation: RwSignal<u64>,
     search: RwSignal<String>,
     applied_search: RwSignal<String>,
-    item_id: RwSignal<String>,
-    batch_id: RwSignal<String>,
-    plate_id: RwSignal<String>,
+    facility_id: RwSignal<String>,
+    owner_id: RwSignal<String>,
     transaction_id: RwSignal<String>,
     sort: RwSignal<InventoryJournalSort>,
     direction: RwSignal<InventorySortDirection>,
@@ -41,9 +41,8 @@ impl JournalSignals {
             generation: RwSignal::new(0),
             search: RwSignal::new(String::new()),
             applied_search: RwSignal::new(String::new()),
-            item_id: RwSignal::new(String::new()),
-            batch_id: RwSignal::new(String::new()),
-            plate_id: RwSignal::new(String::new()),
+            facility_id: RwSignal::new(String::new()),
+            owner_id: RwSignal::new(String::new()),
             transaction_id: RwSignal::new(String::new()),
             sort: RwSignal::new(InventoryJournalSort::OccurredAt),
             direction: RwSignal::new(InventorySortDirection::Descending),
@@ -56,9 +55,8 @@ impl JournalSignals {
         let search = self.applied_search.get_untracked();
         JournalFilters {
             query: (!search.is_empty()).then_some(search),
-            item_id: positive_id(&self.item_id.get_untracked()),
-            item_batch_id: positive_id(&self.batch_id.get_untracked()),
-            license_plate_id: positive_id(&self.plate_id.get_untracked()),
+            facility_id: positive_id(&self.facility_id.get_untracked()),
+            inventory_owner_id: positive_id(&self.owner_id.get_untracked()),
             transaction_id: positive_id(&self.transaction_id.get_untracked()),
             ..Default::default()
         }
@@ -66,9 +64,14 @@ impl JournalSignals {
 }
 
 #[component]
-pub(super) fn JournalView(on_unauthorized: Callback<()>) -> impl IntoView {
+pub(super) fn JournalView(
+    access: AccessScopeWorkspace,
+    on_unauthorized: Callback<()>,
+) -> impl IntoView {
     let signals = JournalSignals::new();
     let layout = SplitPaneState::new("inventory-journal", 790);
+    let facilities = StoredValue::new(access.facilities);
+    let owners = StoredValue::new(access.inventory_owners);
     Effect::new(move || request_journal(signals, on_unauthorized));
 
     let apply = move |_| {
@@ -106,9 +109,8 @@ pub(super) fn JournalView(on_unauthorized: Callback<()>) -> impl IntoView {
         <section class="integrity-read-view">
             <div class="integrity-query-bar">
                 <SearchField label="Search the inventory journal and trace dimensions".to_owned() placeholder="SKU, lot, serial, location, operation" value=signals.search/>
-                <label><span>"Item ID"</span><input inputmode="numeric" placeholder="Any" prop:value=move || signals.item_id.get() on:input=move |event| signals.item_id.set(event_target_value(&event))/></label>
-                <label><span>"Batch ID"</span><input inputmode="numeric" placeholder="Any" prop:value=move || signals.batch_id.get() on:input=move |event| signals.batch_id.set(event_target_value(&event))/></label>
-                <label><span>"LP ID"</span><input inputmode="numeric" placeholder="Any" prop:value=move || signals.plate_id.get() on:input=move |event| signals.plate_id.set(event_target_value(&event))/></label>
+                <label><span>"Client"</span><select prop:value=move || signals.owner_id.get() on:change=move |event| signals.owner_id.set(event_target_value(&event))><option value="">"All clients"</option>{owners.get_value().into_iter().map(|owner| view! { <option value=owner.id>{owner.name}</option> }).collect_view()}</select></label>
+                <label><span>"Facility"</span><select prop:value=move || signals.facility_id.get() on:change=move |event| signals.facility_id.set(event_target_value(&event))><option value="">"All facilities"</option>{facilities.get_value().into_iter().map(|facility| view! { <option value=facility.id>{facility.name}</option> }).collect_view()}</select></label>
                 <label><span>"Transaction"</span><input inputmode="numeric" placeholder="Any" prop:value=move || signals.transaction_id.get() on:input=move |event| signals.transaction_id.set(event_target_value(&event))/></label>
                 <button type="button" class="button primary-action" disabled=move || signals.loading.get() on:click=apply>"Apply"</button>
                 <PaneControls layout master_label="journal table" detail_label="transaction detail"/>

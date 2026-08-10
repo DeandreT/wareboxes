@@ -4,6 +4,7 @@ use wareboxes_api_contract::v1::{
     InventoryAgingBucket, InventoryAgingPage, InventoryAgingResponse, InventoryAgingSort,
     InventorySortDirection, OpaqueCursor,
 };
+use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 
 #[cfg(target_arch = "wasm32")]
 use crate::api;
@@ -26,7 +27,8 @@ struct AgingSignals {
     generation: RwSignal<u64>,
     search: RwSignal<String>,
     applied_search: RwSignal<String>,
-    item_id: RwSignal<String>,
+    facility_id: RwSignal<String>,
+    owner_id: RwSignal<String>,
     bucket: RwSignal<Option<InventoryAgingBucket>>,
     sort: RwSignal<InventoryAgingSort>,
     direction: RwSignal<InventorySortDirection>,
@@ -44,7 +46,8 @@ impl AgingSignals {
             generation: RwSignal::new(0),
             search: RwSignal::new(String::new()),
             applied_search: RwSignal::new(String::new()),
-            item_id: RwSignal::new(String::new()),
+            facility_id: RwSignal::new(String::new()),
+            owner_id: RwSignal::new(String::new()),
             bucket: RwSignal::new(None),
             sort: RwSignal::new(InventoryAgingSort::Age),
             direction: RwSignal::new(InventorySortDirection::Descending),
@@ -61,7 +64,8 @@ impl AgingSignals {
         let search = self.applied_search.get_untracked();
         AgingFilters {
             query: (!search.is_empty()).then_some(search),
-            item_id: positive_id(&self.item_id.get_untracked()),
+            facility_id: positive_id(&self.facility_id.get_untracked()),
+            inventory_owner_id: positive_id(&self.owner_id.get_untracked()),
             bucket: self.bucket.get_untracked(),
             ..Default::default()
         }
@@ -70,12 +74,15 @@ impl AgingSignals {
 
 #[component]
 pub(super) fn AgingView(
+    access: AccessScopeWorkspace,
     on_unauthorized: Callback<()>,
     on_recall: Callback<InventoryAgingResponse>,
     can_manage_recalls: bool,
 ) -> impl IntoView {
     let signals = AgingSignals::new();
     let layout = SplitPaneState::new("inventory-aging", 820);
+    let facilities = StoredValue::new(access.facilities);
+    let owners = StoredValue::new(access.inventory_owners);
     Effect::new(move || request_aging(signals, on_unauthorized));
 
     let apply = move |_| {
@@ -136,15 +143,8 @@ pub(super) fn AgingView(
                         <option value="no_expiration">"No expiration"</option>
                     </select>
                 </label>
-                <label>
-                    <span>"Item ID"</span>
-                    <input
-                        inputmode="numeric"
-                        placeholder="Any"
-                        prop:value=move || signals.item_id.get()
-                        on:input=move |event| signals.item_id.set(event_target_value(&event))
-                    />
-                </label>
+                <label><span>"Client"</span><select prop:value=move || signals.owner_id.get() on:change=move |event| signals.owner_id.set(event_target_value(&event))><option value="">"All clients"</option>{owners.get_value().into_iter().map(|owner| view! { <option value=owner.id>{owner.name}</option> }).collect_view()}</select></label>
+                <label><span>"Facility"</span><select prop:value=move || signals.facility_id.get() on:change=move |event| signals.facility_id.set(event_target_value(&event))><option value="">"All facilities"</option>{facilities.get_value().into_iter().map(|facility| view! { <option value=facility.id>{facility.name}</option> }).collect_view()}</select></label>
                 <button
                     type="button"
                     class="button primary-action"
@@ -372,7 +372,7 @@ fn request_aging(_signals: AgingSignals, _on_unauthorized: Callback<()>) {}
 
 #[cfg_attr(
     not(target_arch = "wasm32"),
-    expect(dead_code, reason = "hydration validates the item filter")
+    expect(dead_code, reason = "hydration validates the scope filters")
 )]
 fn positive_id(value: &str) -> Option<i64> {
     value.trim().parse::<i64>().ok().filter(|id| *id > 0)
