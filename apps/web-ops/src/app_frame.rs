@@ -243,6 +243,13 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                     == Section::Administration(AdministrationArea::CountPlans)
                             />
                             <NavItem
+                                href="/administration/integrations"
+                                label="Integrations"
+                                icon=UiIcon::Disposition
+                                active=section
+                                    == Section::Administration(AdministrationArea::Integrations)
+                            />
+                            <NavItem
                                 href="/administration/users"
                                 label="Users"
                                 icon=UiIcon::Users

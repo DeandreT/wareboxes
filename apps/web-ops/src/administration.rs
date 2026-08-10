@@ -4,6 +4,8 @@ use leptos::prelude::*;
 mod clients;
 #[path = "admin_count_plans.rs"]
 mod count_plans;
+#[path = "admin_integrations.rs"]
+mod integrations;
 #[path = "admin_security.rs"]
 mod security;
 #[path = "admin_workforce.rs"]
@@ -11,6 +13,7 @@ mod workforce;
 
 pub use clients::ClientsWorkbench;
 pub use count_plans::CountPlansWorkbench;
+pub use integrations::IntegrationsWorkbench;
 pub use security::{PermissionsWorkbench, RolesWorkbench, UsersWorkbench};
 pub use workforce::EmployeesWorkbench;
 
@@ -24,6 +27,7 @@ pub enum AdministrationArea {
     Permissions,
     Employees,
     CountPlans,
+    Integrations,
 }
 
 impl AdministrationArea {
@@ -35,6 +39,7 @@ impl AdministrationArea {
             Self::Permissions => "Permissions",
             Self::Employees => "Employees",
             Self::CountPlans => "Count plans",
+            Self::Integrations => "Integrations",
         }
     }
 
@@ -44,6 +49,7 @@ impl AdministrationArea {
             Self::Users | Self::Roles | Self::Permissions => "Organization security",
             Self::Employees => "Warehouse workforce",
             Self::CountPlans => "Inventory accuracy",
+            Self::Integrations => "Platform operations",
         }
     }
 }
@@ -80,6 +86,9 @@ pub fn AdministrationWorkspace(
             AdministrationArea::CountPlans => {
                 view! { <CountPlansWorkbench on_unauthorized/> }.into_any()
             }
+            AdministrationArea::Integrations => {
+                view! { <IntegrationsWorkbench on_unauthorized/> }.into_any()
+            }
         }}
     }
 }
@@ -101,6 +110,9 @@ const fn area_description(area: AdministrationArea) -> &'static str {
         }
         AdministrationArea::CountPlans => {
             "Plan facility and client inventory counts and review recorded count lines."
+        }
+        AdministrationArea::Integrations => {
+            "Inspect inbound receipts and outbound delivery state across connected systems."
         }
     }
 }

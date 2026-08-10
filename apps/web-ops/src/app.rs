@@ -247,6 +247,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/cycle-count.css"/>
                 <link rel="stylesheet" href="/catalog.css"/>
                 <link rel="stylesheet" href="/administration.css"/>
+                <link rel="stylesheet" href="/integration-monitor.css"/>
                 <script src="/presentation-init.js"></script>
                 <AutoReload options=options.clone()/>
                 <HydrationScripts options/>
@@ -327,6 +328,10 @@ pub fn App() -> impl IntoView {
                     <Route
                         path=(StaticSegment("administration"), StaticSegment("employees"))
                         view=EmployeesPage
+                    />
+                    <Route
+                        path=(StaticSegment("administration"), StaticSegment("integrations"))
+                        view=IntegrationsPage
                     />
                     <Route
                         path=(StaticSegment("administration"), StaticSegment("count-plans"))
@@ -856,6 +861,13 @@ fn EmployeesPage() -> impl IntoView {
 fn CountPlansPage() -> impl IntoView {
     view! {
         <AuthenticatedPage section=Section::Administration(AdministrationArea::CountPlans)/>
+    }
+}
+
+#[component]
+fn IntegrationsPage() -> impl IntoView {
+    view! {
+        <AuthenticatedPage section=Section::Administration(AdministrationArea::Integrations)/>
     }
 }
 

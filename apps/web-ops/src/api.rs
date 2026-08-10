@@ -48,6 +48,11 @@ pub use item_substitution::{
 };
 mod inbound_inspection;
 pub use inbound_inspection::dispose_inbound_inspection;
+mod integration_monitor;
+pub use integration_monitor::{
+    inbound_integrations, outbound_integration_detail, outbound_integrations,
+    InboundIntegrationFilters, OutboundIntegrationFilters,
+};
 mod inventory_integrity;
 pub use inventory_integrity::{
     create_inventory_recall, inventory_aging, inventory_integrity_issues, inventory_journal,

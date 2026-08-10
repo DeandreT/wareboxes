@@ -11,6 +11,7 @@ pub mod idempotency;
 pub mod identity;
 pub mod inbound_inspection;
 pub mod integration;
+pub mod integration_monitor;
 pub mod inventory;
 pub mod inventory_integrity;
 pub mod inventory_recall;

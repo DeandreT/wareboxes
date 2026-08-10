@@ -16939,6 +16939,13 @@ CREATE INDEX integration_inbox_receipts_tenant_history_idx ON public.integration
 
 
 --
+-- Name: integration_inbox_receipts_tenant_source_history_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX integration_inbox_receipts_tenant_source_history_idx ON public.integration_inbox_receipts USING btree (tenant_id, lower(source_key), received_at DESC, id DESC);
+
+
+--
 -- Name: inventory_allocations_active_balance_reservation_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -17118,6 +17125,27 @@ CREATE INDEX outbox_events_owner_facility_idx ON public.outbox_events USING btre
 --
 
 CREATE INDEX outbox_events_tenant_history_idx ON public.outbox_events USING btree (tenant_id, created, id);
+
+
+--
+-- Name: outbox_events_tenant_attempt_history_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX outbox_events_tenant_attempt_history_idx ON public.outbox_events USING btree (tenant_id, attempts, created DESC, id DESC);
+
+
+--
+-- Name: outbox_events_tenant_dead_letter_history_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX outbox_events_tenant_dead_letter_history_idx ON public.outbox_events USING btree (tenant_id, created DESC, id DESC) WHERE ((dead_lettered_at IS NOT NULL) AND (discarded_at IS NULL));
+
+
+--
+-- Name: outbox_events_tenant_event_type_history_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX outbox_events_tenant_event_type_history_idx ON public.outbox_events USING btree (tenant_id, lower(event_type), created DESC, id DESC);
 
 
 --

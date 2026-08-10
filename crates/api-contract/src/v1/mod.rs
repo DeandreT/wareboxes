@@ -8,6 +8,7 @@ mod expected_receiving;
 mod facility_shipping_origin;
 mod idempotency;
 mod inbound_inspection;
+mod integration_monitor;
 mod inventory;
 mod inventory_hold;
 mod inventory_integrity;
@@ -83,6 +84,13 @@ pub use idempotency::{
 };
 pub use inbound_inspection::{
     DisposeInboundInspectionRequest, DisposeInboundInspectionResponse, InboundInspectionOutcome,
+};
+pub use integration_monitor::{
+    InboundIntegrationPage, InboundIntegrationPageRequest, InboundIntegrationReceiptResponse,
+    InboundIntegrationSort, IntegrationSortDirection, OutboundDeliveryAttemptOutcome,
+    OutboundDeliveryAttemptResponse, OutboundDeliveryStatus, OutboundIntegrationDetailResponse,
+    OutboundIntegrationEventResponse, OutboundIntegrationPage, OutboundIntegrationPageRequest,
+    OutboundIntegrationSort,
 };
 pub use inventory::{
     InventoryBalancePage, InventoryBalancePageRequest, InventoryBalanceResponse,

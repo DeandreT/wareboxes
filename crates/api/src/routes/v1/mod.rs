@@ -6,6 +6,7 @@ mod error;
 mod expected_receiving;
 mod facility_shipping_origins;
 mod inbound_inspections;
+mod integration_monitor;
 pub(crate) mod inventory_balances;
 mod inventory_holds;
 mod inventory_integrity;
@@ -99,6 +100,18 @@ pub fn router() -> Router<AppState> {
             post(cycle_count::confirm),
         )
         .route("/inventory/balances", get(inventory_balances::list))
+        .route(
+            "/integration-monitor/inbound",
+            get(integration_monitor::inbound),
+        )
+        .route(
+            "/integration-monitor/outbound",
+            get(integration_monitor::outbound),
+        )
+        .route(
+            "/integration-monitor/outbound/{event_id}",
+            get(integration_monitor::outbound_detail),
+        )
         .route("/inventory/journal", get(inventory_integrity::journal))
         .route("/inventory/aging", get(inventory_integrity::aging))
         .route(
