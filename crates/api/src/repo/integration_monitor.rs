@@ -2,17 +2,21 @@ use sqlx::postgres::PgRow;
 use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_application::integration_monitor::{
-    InboundIntegrationPage, InboundIntegrationQuery, InboundIntegrationReceiptReadModel,
-    InboundIntegrationSort, IntegrationSortDirection, OutboundDeliveryAttemptReadModel,
-    OutboundDeliveryStatus, OutboundIntegrationDetailReadModel, OutboundIntegrationEventReadModel,
-    OutboundIntegrationPage, OutboundIntegrationQuery, OutboundIntegrationSort,
+    DiscardOutboxDeadLetterCommand, DiscardOutboxDeadLetterResult, InboundIntegrationPage,
+    InboundIntegrationQuery, InboundIntegrationReceiptReadModel, InboundIntegrationSort,
+    IntegrationSortDirection, OutboundDeliveryAttemptReadModel, OutboundDeliveryStatus,
+    OutboundIntegrationDetailReadModel, OutboundIntegrationEventReadModel, OutboundIntegrationPage,
+    OutboundIntegrationQuery, OutboundIntegrationSort, OutboxDeadLetterDiscardReadModel,
     OutboxDeadLetterReplayReadModel, ReplayOutboxDeadLetterCommand, ReplayOutboxDeadLetterResult,
-    REPLAY_OUTBOX_DEAD_LETTER_OPERATION,
+    DISCARD_OUTBOX_DEAD_LETTER_OPERATION, REPLAY_OUTBOX_DEAD_LETTER_OPERATION,
 };
 use wareboxes_application::outbox::DeliveryAttemptOutcome;
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
-use wareboxes_domain::{FacilityId, InventoryOwnerId, OutboxDeadLetterReplayId, Timestamp, UserId};
+use wareboxes_domain::{
+    FacilityId, InventoryOwnerId, OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason,
+    OutboxDeadLetterReplayId, Timestamp, UserId,
+};
 use wareboxes_persistence_postgres::db::bind_tenant_context;
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
 
@@ -143,6 +147,22 @@ fn map_replay(row: &PgRow) -> AppResult<OutboxDeadLetterReplayReadModel> {
             .map_err(|error| AppError::internal(error.to_string()))?,
         replayed_by_name: row.try_get("replayed_by_name")?,
         replayed_at: row.try_get("replayed_at")?,
+    })
+}
+
+fn map_discard(row: &PgRow) -> AppResult<OutboxDeadLetterDiscardReadModel> {
+    Ok(OutboxDeadLetterDiscardReadModel {
+        discard_id: OutboxDeadLetterDiscardId::new(row.try_get("discard_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        replay_count: row.try_get("replay_count")?,
+        previous_attempts: row.try_get("previous_attempts")?,
+        last_error: row.try_get("last_error_snapshot")?,
+        reason: OutboxDeadLetterDiscardReason::new(row.try_get::<String, _>("discard_reason")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        discarded_by: UserId::new(row.try_get("discarded_by_user_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        discarded_by_name: row.try_get("discarded_by_name")?,
+        discarded_at: row.try_get("discarded_at")?,
     })
 }
 
@@ -497,12 +517,32 @@ pub async fn outbound_detail(
         .iter()
         .map(map_replay)
         .collect::<AppResult<Vec<_>>>()?;
+    let discard = sqlx::query(
+        r#"
+        SELECT discard.id AS discard_id,discard.replay_count,discard.previous_attempts,
+               discard.last_error_snapshot,discard.discard_reason,
+               discard.discarded_by_user_id,discard.discarded_at,
+               COALESCE(NULLIF(BTRIM(CONCAT_WS(' ',actor.first_name,actor.last_name)),''),
+                        NULLIF(actor.nick_name,''),actor.email) AS discarded_by_name
+        FROM outbox_dead_letter_discards discard
+        JOIN users actor ON actor.id=discard.discarded_by_user_id
+        WHERE discard.tenant_id=$1 AND discard.outbox_event_id=$2
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(event_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .as_ref()
+    .map(map_discard)
+    .transpose()?;
     tx.commit().await?;
     Ok(Some(OutboundIntegrationDetailReadModel {
         event,
         payload,
         attempts,
         replays,
+        discard,
     }))
 }
 
@@ -712,6 +752,103 @@ pub async fn replay_dead_letter(
         replayed_by: UserId::new(context.actor_id.get())
             .map_err(|error| AppError::internal(error.to_string()))?,
         replayed_at,
+    };
+    Ok(prepared.commit(tx, result).await?)
+}
+
+pub async fn discard_dead_letter(
+    db: &Db,
+    access: &TenantAccess,
+    context: &CommandContext,
+    command: DiscardOutboxDeadLetterCommand,
+) -> AppResult<DiscardOutboxDeadLetterResult> {
+    context.require_actor(access.tenant_id, access.user_id)?;
+    let prepared =
+        PreparedCommand::new_v1(context, DISCARD_OUTBOX_DEAD_LETTER_OPERATION, &command)?;
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    let scope = lock_current_scope_tx(&mut tx, access.tenant_id, context.actor_id.get()).await?;
+    require_permission_tx(&mut tx, access.tenant_id, context.actor_id.get(), "admin").await?;
+    require_event_visible_tx(&mut tx, access.tenant_id.get(), command.event_id(), &scope).await?;
+    if let Some(result) = prepared
+        .replayed::<DiscardOutboxDeadLetterResult>(&mut tx)
+        .await?
+    {
+        require_event_visible_tx(&mut tx, access.tenant_id.get(), result.event_id, &scope).await?;
+        tx.commit().await?;
+        return Ok(result);
+    }
+
+    let target =
+        lock_replay_target_tx(&mut tx, access.tenant_id.get(), command.event_id(), &scope).await?;
+    if target.replay_count != command.expected_replay_count() {
+        return Err(AppError::conflict(
+            "outbound integration event replay generation is stale",
+        ));
+    }
+    if target.attempts <= 0 {
+        return Err(AppError::conflict(
+            "dead-letter event has no completed delivery attempt",
+        ));
+    }
+    let row = sqlx::query(
+        r#"
+        INSERT INTO outbox_dead_letter_discards(
+            tenant_id,outbox_event_id,inventory_owner_id,facility_id,event_key,event_type,
+            replay_count,previous_attempts,last_error_snapshot,discard_reason,
+            discarded_by_user_id,discarded_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,clock_timestamp())
+        RETURNING id,discarded_at
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(command.event_id())
+    .bind(target.inventory_owner_id)
+    .bind(target.facility_id)
+    .bind(&target.event_key)
+    .bind(&target.event_type)
+    .bind(target.replay_count)
+    .bind(target.attempts)
+    .bind(&target.last_error)
+    .bind(command.reason().as_str())
+    .bind(context.actor_id.get())
+    .fetch_one(&mut *tx)
+    .await?;
+    let discard_id = OutboxDeadLetterDiscardId::new(row.try_get("id")?)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let discarded_at: Timestamp = row.try_get("discarded_at")?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE outbox_events
+        SET discarded_at=$1,discard_reason=$2,discarded_by_user_id=$3
+        WHERE tenant_id=$4 AND id=$5 AND replay_count=$6
+        "#,
+    )
+    .bind(discarded_at)
+    .bind(command.reason().as_str())
+    .bind(context.actor_id.get())
+    .bind(access.tenant_id.get())
+    .bind(command.event_id())
+    .bind(target.replay_count)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::conflict(
+            "outbound integration event changed during discard",
+        ));
+    }
+    let result = DiscardOutboxDeadLetterResult {
+        discard_id,
+        event_id: command.event_id(),
+        event_key: target.event_key,
+        event_type: target.event_type,
+        replay_count: target.replay_count,
+        previous_attempts: target.attempts,
+        reason: command.reason().clone(),
+        status: OutboundDeliveryStatus::Discarded,
+        discarded_by: UserId::new(context.actor_id.get())
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        discarded_at,
     };
     Ok(prepared.commit(tx, result).await?)
 }

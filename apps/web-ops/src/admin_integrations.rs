@@ -1,9 +1,9 @@
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
-    InboundIntegrationPage, InboundIntegrationReceiptResponse, InboundIntegrationSort,
-    IntegrationSortDirection, OpaqueCursor, OutboundDeliveryAttemptOutcome, OutboundDeliveryStatus,
-    OutboundIntegrationDetailResponse, OutboundIntegrationPage, OutboundIntegrationSort,
-    ReplayOutboxDeadLetterRequest,
+    DiscardOutboxDeadLetterRequest, InboundIntegrationPage, InboundIntegrationReceiptResponse,
+    InboundIntegrationSort, IntegrationSortDirection, OpaqueCursor, OutboundDeliveryAttemptOutcome,
+    OutboundDeliveryStatus, OutboundIntegrationDetailResponse, OutboundIntegrationPage,
+    OutboundIntegrationSort, ReplayOutboxDeadLetterRequest,
 };
 
 use crate::api::{self, InboundIntegrationFilters, OutboundIntegrationFilters};
@@ -18,7 +18,7 @@ enum MonitorTab {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct ReplayConfirmation {
+struct DeadLetterTarget {
     event_id: i64,
     event_type: String,
     event_key: String,
@@ -30,6 +30,13 @@ struct ReplayConfirmation {
 struct SavedReplayCommand {
     event_id: i64,
     request: ReplayOutboxDeadLetterRequest,
+    idempotency_key: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct SavedDiscardCommand {
+    event_id: i64,
+    request: DiscardOutboxDeadLetterRequest,
     idempotency_key: String,
 }
 
@@ -56,14 +63,17 @@ struct MonitorSignals {
     inbound_loading: RwSignal<bool>,
     outbound_loading: RwSignal<bool>,
     detail_loading: RwSignal<bool>,
-    replay_pending: RwSignal<bool>,
+    command_pending: RwSignal<bool>,
     error: RwSignal<Option<String>>,
     notice: RwSignal<Option<String>>,
     selected_inbound: RwSignal<Option<InboundIntegrationReceiptResponse>>,
     selected_outbound_id: RwSignal<Option<i64>>,
     outbound_detail: RwSignal<Option<OutboundIntegrationDetailResponse>>,
-    replay_confirmation: RwSignal<Option<ReplayConfirmation>>,
+    replay_confirmation: RwSignal<Option<DeadLetterTarget>>,
     replay_retry: RwSignal<Option<SavedReplayCommand>>,
+    discard_confirmation: RwSignal<Option<DeadLetterTarget>>,
+    discard_reason: RwSignal<String>,
+    discard_retry: RwSignal<Option<SavedDiscardCommand>>,
     on_unauthorized: Callback<()>,
 }
 
@@ -91,7 +101,7 @@ impl MonitorSignals {
             inbound_loading: RwSignal::new(false),
             outbound_loading: RwSignal::new(false),
             detail_loading: RwSignal::new(false),
-            replay_pending: RwSignal::new(false),
+            command_pending: RwSignal::new(false),
             error: RwSignal::new(None),
             notice: RwSignal::new(None),
             selected_inbound: RwSignal::new(None),
@@ -99,6 +109,9 @@ impl MonitorSignals {
             outbound_detail: RwSignal::new(None),
             replay_confirmation: RwSignal::new(None),
             replay_retry: RwSignal::new(None),
+            discard_confirmation: RwSignal::new(None),
+            discard_reason: RwSignal::new(String::new()),
+            discard_retry: RwSignal::new(None),
             on_unauthorized,
         }
     }
@@ -402,7 +415,7 @@ fn outbound_detail_view(
 ) -> AnyView {
     let event = detail.event;
     let payload = serde_json::to_string_pretty(&detail.payload).unwrap_or_else(|_| "{}".to_owned());
-    let replay_confirmation = StoredValue::new(ReplayConfirmation {
+    let dead_letter_target = StoredValue::new(DeadLetterTarget {
         event_id: event.id,
         event_type: event.event_type.clone(),
         event_key: event.event_key.clone(),
@@ -420,13 +433,23 @@ fn outbound_detail_view(
                         let confirmation=StoredValue::new(confirmation);
                         view! { <div class="integration-replay-confirmation">
                             <div><strong>"Replay this dead letter?"</strong><span>{format!("Delivery generation {} failed after {} attempts. The original immutable event will be queued again.",confirmation.get_value().expected_replay_count,confirmation.get_value().previous_attempts)}</span><small class="mono">{format!("{} / {}",confirmation.get_value().event_type,confirmation.get_value().event_key)}</small></div>
-                            <div><button type="button" class="button quiet-action compact" disabled=move || signals.replay_pending.get() on:click=move |_| signals.replay_confirmation.set(None)>"Cancel"</button><button type="button" class="button primary-action compact" disabled=move || signals.replay_pending.get() on:click=move |_| submit_replay(signals,confirmation.get_value())><Icon icon=UiIcon::Refresh/>{move || if signals.replay_pending.get() { "Replaying" } else { "Replay now" }}</button></div>
+                            <div><button type="button" class="button quiet-action compact" disabled=move || signals.command_pending.get() on:click=move |_| signals.replay_confirmation.set(None)>"Cancel"</button><button type="button" class="button primary-action compact" disabled=move || signals.command_pending.get() on:click=move |_| submit_replay(signals,confirmation.get_value())><Icon icon=UiIcon::Refresh/>{move || if signals.command_pending.get() { "Replaying" } else { "Replay now" }}</button></div>
                         </div> }.into_any()
                     } else if let Some(saved)=signals.replay_retry.get().filter(|value| value.event_id==event_id) {
                         let saved=StoredValue::new(saved);
-                        view! { <div class="integration-replay-confirmation"><div><strong>"Replay outcome is unknown"</strong><span>"Retry the exact saved command to reconcile the delivery without creating another replay generation."</span></div><button type="button" class="button secondary-action compact" disabled=move || signals.replay_pending.get() on:click=move |_| execute_replay(signals,saved.get_value())><Icon icon=UiIcon::Refresh/>{move || if signals.replay_pending.get() { "Reconciling" } else { "Retry exact replay" }}</button></div> }.into_any()
+                        view! { <div class="integration-replay-confirmation"><div><strong>"Replay outcome is unknown"</strong><span>"Retry the exact saved command to reconcile the delivery without creating another replay generation."</span></div><button type="button" class="button secondary-action compact" disabled=move || signals.command_pending.get() on:click=move |_| execute_replay(signals,saved.get_value())><Icon icon=UiIcon::Refresh/>{move || if signals.command_pending.get() { "Reconciling" } else { "Retry exact replay" }}</button></div> }.into_any()
+                    } else if let Some(confirmation)=signals.discard_confirmation.get().filter(|value| value.event_id==event_id) {
+                        let confirmation=StoredValue::new(confirmation);
+                        view! { <div class="integration-discard-confirmation">
+                            <div><strong>"Discard this dead letter permanently?"</strong><span>"This terminal action unblocks later events on the ordering key. The failure and operator rationale remain auditable after outbox purge."</span><small class="mono">{format!("{} / {}",confirmation.get_value().event_type,confirmation.get_value().event_key)}</small></div>
+                            <label><span>"Reason"</span><textarea maxlength="1000" placeholder="Why delivery must not be retried" prop:value=move || signals.discard_reason.get() on:input=move |event| signals.discard_reason.set(event_target_value(&event))></textarea></label>
+                            <div><button type="button" class="button quiet-action compact" disabled=move || signals.command_pending.get() on:click=move |_| signals.discard_confirmation.set(None)>"Cancel"</button><button type="button" class="button danger-action compact" disabled=move || signals.command_pending.get() on:click=move |_| submit_discard(signals,confirmation.get_value())><Icon icon=UiIcon::Remove/>{move || if signals.command_pending.get() { "Discarding" } else { "Confirm discard" }}</button></div>
+                        </div> }.into_any()
+                    } else if let Some(saved)=signals.discard_retry.get().filter(|value| value.event_id==event_id) {
+                        let saved=StoredValue::new(saved);
+                        view! { <div class="integration-replay-confirmation"><div><strong>"Discard outcome is unknown"</strong><span>"Retry the exact saved command to reconcile the terminal disposition without changing its reason."</span></div><button type="button" class="button danger-action compact" disabled=move || signals.command_pending.get() on:click=move |_| execute_discard(signals,saved.get_value())><Icon icon=UiIcon::Refresh/>{move || if signals.command_pending.get() { "Reconciling" } else { "Retry exact discard" }}</button></div> }.into_any()
                     } else {
-                        view! { <button type="button" class="button secondary-action compact" disabled=move || signals.replay_pending.get() on:click=move |_| signals.replay_confirmation.set(Some(replay_confirmation.get_value()))><Icon icon=UiIcon::Refresh/>"Replay delivery"</button> }.into_any()
+                        view! { <div class="integration-dead-letter-actions"><button type="button" class="button secondary-action compact" disabled=move || signals.command_pending.get() on:click=move |_| signals.replay_confirmation.set(Some(dead_letter_target.get_value()))><Icon icon=UiIcon::Refresh/>"Replay delivery"</button><button type="button" class="button danger-action compact" disabled=move || signals.command_pending.get() on:click=move |_| { signals.discard_reason.set(String::new()); signals.discard_confirmation.set(Some(dead_letter_target.get_value())); }><Icon icon=UiIcon::Remove/>"Discard permanently"</button></div> }.into_any()
                     }
                 }}
             </div>
@@ -440,6 +463,7 @@ fn outbound_detail_view(
             <div><dt>"Replays"</dt><dd>{event.replay_count}</dd></div>
             {event.last_error.map(|error| view! { <div class="wide integration-failure"><dt>"Latest failure"</dt><dd>{error}</dd></div> })}
         </dl>
+        {detail.discard.map(|discard| view! { <section class="integration-detail-section integration-discard-evidence"><h3>"Terminal discard"</h3><dl><div><dt>"Operator"</dt><dd>{discard.discarded_by_name}</dd></div><div><dt>"Discarded"</dt><dd>{discard.discarded_at}</dd></div><div><dt>"Generation"</dt><dd>{discard.replay_count}</dd></div><div><dt>"Prior attempts"</dt><dd>{discard.previous_attempts}</dd></div></dl><p>{discard.reason}</p><small class="mono">{format!("Evidence #{}",discard.discard_id)}</small></section> })}
         <section class="integration-detail-section"><h3>"Payload"</h3><pre>{payload}</pre></section>
         <section class="integration-detail-section"><h3>"Delivery attempts"</h3>
             <div class="integration-attempts">{if detail.attempts.is_empty() {
@@ -466,7 +490,7 @@ fn outbound_detail_view(
     </div> }.into_any()
 }
 
-fn submit_replay(signals: MonitorSignals, confirmation: ReplayConfirmation) {
+fn submit_replay(signals: MonitorSignals, confirmation: DeadLetterTarget) {
     let saved = SavedReplayCommand {
         event_id: confirmation.event_id,
         request: ReplayOutboxDeadLetterRequest {
@@ -478,10 +502,10 @@ fn submit_replay(signals: MonitorSignals, confirmation: ReplayConfirmation) {
 }
 
 fn execute_replay(signals: MonitorSignals, saved: SavedReplayCommand) {
-    if signals.replay_pending.get_untracked() {
+    if signals.command_pending.get_untracked() {
         return;
     }
-    signals.replay_pending.set(true);
+    signals.command_pending.set(true);
     signals.error.set(None);
     signals.notice.set(None);
     let event_id = saved.event_id;
@@ -516,7 +540,76 @@ fn execute_replay(signals: MonitorSignals, saved: SavedReplayCommand) {
                 signals.error.set(Some(error.message));
             }
         }
-        signals.replay_pending.set(false);
+        signals.command_pending.set(false);
+    });
+}
+
+fn submit_discard(signals: MonitorSignals, target: DeadLetterTarget) {
+    let reason = signals.discard_reason.get_untracked();
+    let reason = reason.trim();
+    if reason.is_empty() {
+        signals
+            .error
+            .set(Some("Discard reason is required.".to_owned()));
+        return;
+    }
+    if reason.chars().count() > 1_000 || reason.chars().any(char::is_control) {
+        signals.error.set(Some(
+            "Discard reason must be at most 1000 control-free characters.".to_owned(),
+        ));
+        return;
+    }
+    let saved = SavedDiscardCommand {
+        event_id: target.event_id,
+        request: DiscardOutboxDeadLetterRequest {
+            expected_replay_count: target.expected_replay_count,
+            reason: reason.to_owned(),
+        },
+        idempotency_key: api::new_idempotency_key(),
+    };
+    execute_discard(signals, saved);
+}
+
+fn execute_discard(signals: MonitorSignals, saved: SavedDiscardCommand) {
+    if signals.command_pending.get_untracked() {
+        return;
+    }
+    signals.command_pending.set(true);
+    signals.error.set(None);
+    signals.notice.set(None);
+    let event_id = saved.event_id;
+    leptos::task::spawn_local(async move {
+        let result =
+            api::discard_outbound_dead_letter(event_id, &saved.request, &saved.idempotency_key)
+                .await;
+        match result {
+            Ok(result) => {
+                signals.discard_retry.set(None);
+                signals.discard_confirmation.set(None);
+                request_outbound(signals, None, Vec::new());
+                select_outbound_event(signals, event_id);
+                signals.notice.set(Some(format!(
+                    "{} discarded permanently.",
+                    result.event_type
+                )));
+            }
+            Err(error) if error.unauthorized => signals.on_unauthorized.run(()),
+            Err(error) if error.ambiguous_outcome => {
+                signals.discard_retry.set(Some(saved));
+                signals.discard_confirmation.set(None);
+                signals.error.set(Some(format!(
+                    "{} Retry the exact saved discard to reconcile the outcome.",
+                    error.message
+                )));
+            }
+            Err(error) => {
+                signals.discard_retry.set(None);
+                signals.discard_confirmation.set(None);
+                select_outbound_event(signals, event_id);
+                signals.error.set(Some(error.message));
+            }
+        }
+        signals.command_pending.set(false);
     });
 }
 
@@ -613,7 +706,17 @@ fn select_outbound_event(signals: MonitorSignals, event_id: i64) {
     {
         signals.replay_retry.set(None);
     }
+    if signals
+        .discard_retry
+        .get_untracked()
+        .as_ref()
+        .map(|value| value.event_id)
+        != Some(event_id)
+    {
+        signals.discard_retry.set(None);
+    }
     signals.replay_confirmation.set(None);
+    signals.discard_confirmation.set(None);
     leptos::task::spawn_local(async move {
         let result = api::outbound_integration_detail(event_id).await;
         if signals.detail_generation.get_untracked() != generation

@@ -116,6 +116,10 @@ pub fn router() -> Router<AppState> {
             "/integration-monitor/outbound/{event_id}/replays",
             post(integration_monitor::replay_outbound_dead_letter),
         )
+        .route(
+            "/integration-monitor/outbound/{event_id}/discards",
+            post(integration_monitor::discard_outbound_dead_letter),
+        )
         .route("/inventory/journal", get(inventory_integrity::journal))
         .route("/inventory/aging", get(inventory_integrity::aging))
         .route(

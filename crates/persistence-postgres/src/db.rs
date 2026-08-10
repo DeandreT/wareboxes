@@ -848,6 +848,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 (
                     'outbox_dead_letter_replays',
                     'outbox_dead_letter_replays_tenant_isolation'
+                ),
+                (
+                    'outbox_dead_letter_discards',
+                    'outbox_dead_letter_discards_tenant_isolation'
                 )
         ),
         expected_session_policy(table_name, policy_name) AS (

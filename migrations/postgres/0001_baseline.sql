@@ -34353,6 +34353,184 @@ REVOKE ALL ON FUNCTION public.guard_outbox_dead_letter_replay_mutation() FROM PU
 REVOKE ALL ON FUNCTION public.require_outbox_dead_letter_replay_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_outbox_replay_evidence() FROM PUBLIC;
 
+-- Immutable evidence for the terminal disposition of an undeliverable event.
+CREATE TABLE public.outbox_dead_letter_discards (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    outbox_event_id bigint NOT NULL,
+    inventory_owner_id bigint,
+    facility_id bigint,
+    event_key text NOT NULL,
+    event_type text NOT NULL,
+    replay_count integer NOT NULL,
+    previous_attempts integer NOT NULL,
+    last_error_snapshot text NOT NULL,
+    discard_reason text NOT NULL,
+    discarded_by_user_id bigint NOT NULL,
+    discarded_at timestamp with time zone NOT NULL,
+    CONSTRAINT outbox_dead_letter_discards_event_key_check
+        CHECK (event_key=btrim(event_key) AND event_key<>'' AND char_length(event_key)<=500),
+    CONSTRAINT outbox_dead_letter_discards_event_type_check
+        CHECK (event_type=btrim(event_type) AND event_type<>'' AND char_length(event_type)<=500),
+    CONSTRAINT outbox_dead_letter_discards_replay_count_check CHECK (replay_count>=0),
+    CONSTRAINT outbox_dead_letter_discards_attempts_check CHECK (previous_attempts>0),
+    CONSTRAINT outbox_dead_letter_discards_error_check
+        CHECK (last_error_snapshot=btrim(last_error_snapshot)
+            AND last_error_snapshot<>'' AND char_length(last_error_snapshot)<=4000),
+    CONSTRAINT outbox_dead_letter_discards_reason_check
+        CHECK (discard_reason=btrim(discard_reason) AND discard_reason<>''
+            AND char_length(discard_reason)<=1000
+            AND discard_reason!~'[[:cntrl:]]'),
+    CONSTRAINT outbox_dead_letter_discards_event_unique UNIQUE (tenant_id,outbox_event_id),
+    -- The purgeable outbox envelope is verified and locked by the insert trigger.
+    CONSTRAINT outbox_dead_letter_discards_owner_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id,id),
+    CONSTRAINT outbox_dead_letter_discards_facility_fkey
+        FOREIGN KEY (tenant_id,facility_id)
+        REFERENCES public.facilities(tenant_id,id),
+    CONSTRAINT outbox_dead_letter_discards_actor_membership_fkey
+        FOREIGN KEY (tenant_id,discarded_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE FUNCTION public.validate_outbox_dead_letter_discard() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    target public.outbox_events%ROWTYPE;
+BEGIN
+    SELECT * INTO target FROM public.outbox_events
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.outbox_event_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'outbox dead-letter discard target does not exist'
+            USING ERRCODE='23503';
+    END IF;
+    IF target.dead_lettered_at IS NULL OR target.published_at IS NOT NULL
+       OR target.discarded_at IS NOT NULL OR target.claimed_at IS NOT NULL
+       OR target.claimed_by IS NOT NULL OR target.lease_expires_at IS NOT NULL
+       OR target.last_error IS NULL
+    THEN
+        RAISE EXCEPTION 'outbox event is not discardable from dead-letter state'
+            USING ERRCODE='55000';
+    END IF;
+    IF NEW.inventory_owner_id IS DISTINCT FROM target.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM target.facility_id
+       OR NEW.event_key<>target.event_key OR NEW.event_type<>target.event_type
+       OR NEW.replay_count<>target.replay_count
+       OR NEW.previous_attempts<>target.attempts
+       OR NEW.last_error_snapshot<>target.last_error
+    THEN
+        RAISE EXCEPTION 'outbox dead-letter discard evidence does not match its event'
+            USING ERRCODE='23514';
+    END IF;
+    PERFORM 1 FROM public.tenant_memberships membership
+    WHERE membership.tenant_id=NEW.tenant_id
+      AND membership.user_id=NEW.discarded_by_user_id
+      AND membership.deleted IS NULL
+    FOR SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'outbox dead-letter discard actor is not an active tenant member'
+            USING ERRCODE='23503';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.require_outbox_dead_letter_discard_consistency() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    target public.outbox_events%ROWTYPE;
+BEGIN
+    SELECT * INTO target FROM public.outbox_events
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.outbox_event_id;
+    IF NOT FOUND OR target.replay_count<>NEW.replay_count
+       OR target.attempts<>NEW.previous_attempts
+       OR target.last_error<>NEW.last_error_snapshot
+       OR target.dead_lettered_at IS NULL OR target.published_at IS NOT NULL
+       OR target.discarded_at<>NEW.discarded_at
+       OR target.discard_reason<>NEW.discard_reason
+       OR target.discarded_by_user_id<>NEW.discarded_by_user_id
+       OR target.claimed_at IS NOT NULL OR target.claimed_by IS NOT NULL
+       OR target.lease_expires_at IS NOT NULL
+    THEN
+        RAISE EXCEPTION 'outbox dead-letter discard result is inconsistent'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.require_outbox_discard_evidence() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF NEW.discarded_at IS NOT DISTINCT FROM OLD.discarded_at
+       AND NEW.discard_reason IS NOT DISTINCT FROM OLD.discard_reason
+       AND NEW.discarded_by_user_id IS NOT DISTINCT FROM OLD.discarded_by_user_id
+    THEN
+        RETURN NEW;
+    END IF;
+    IF OLD.discarded_at IS NOT NULL OR OLD.discard_reason IS NOT NULL
+       OR OLD.discarded_by_user_id IS NOT NULL OR OLD.dead_lettered_at IS NULL
+       OR OLD.last_error IS NULL OR OLD.attempts<=0 OR OLD.published_at IS NOT NULL
+       OR NEW.discarded_at IS NULL OR NEW.discard_reason IS NULL
+       OR NEW.discarded_by_user_id IS NULL
+       OR NEW.replay_count<>OLD.replay_count OR NEW.attempts<>OLD.attempts
+       OR NEW.last_error<>OLD.last_error
+       OR NEW.dead_lettered_at IS DISTINCT FROM OLD.dead_lettered_at
+       OR NEW.available_at<>OLD.available_at OR NEW.claimed_at IS NOT NULL
+       OR NEW.claimed_by IS NOT NULL OR NEW.lease_expires_at IS NOT NULL
+       OR NEW.published_at IS NOT NULL
+       OR NOT EXISTS (
+           SELECT 1 FROM public.outbox_dead_letter_discards discard
+           WHERE discard.tenant_id=NEW.tenant_id
+             AND discard.outbox_event_id=NEW.id
+             AND discard.replay_count=OLD.replay_count
+             AND discard.previous_attempts=OLD.attempts
+             AND discard.last_error_snapshot=OLD.last_error
+             AND discard.discard_reason=NEW.discard_reason
+             AND discard.discarded_by_user_id=NEW.discarded_by_user_id
+             AND discard.discarded_at=NEW.discarded_at)
+    THEN
+        RAISE EXCEPTION 'outbox dead-letter discard requires exact immutable evidence'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER outbox_dead_letter_discards_validate
+BEFORE INSERT ON public.outbox_dead_letter_discards
+FOR EACH ROW EXECUTE FUNCTION public.validate_outbox_dead_letter_discard();
+CREATE TRIGGER outbox_dead_letter_discards_are_immutable
+BEFORE UPDATE OR DELETE ON public.outbox_dead_letter_discards
+FOR EACH ROW EXECUTE FUNCTION public.guard_outbox_dead_letter_replay_mutation();
+CREATE CONSTRAINT TRIGGER outbox_dead_letter_discards_require_consistency
+AFTER INSERT ON public.outbox_dead_letter_discards DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_outbox_dead_letter_discard_consistency();
+CREATE TRIGGER outbox_events_require_discard_evidence
+BEFORE UPDATE OF discarded_at,discard_reason,discarded_by_user_id ON public.outbox_events
+FOR EACH ROW EXECUTE FUNCTION public.require_outbox_discard_evidence();
+
+ALTER TABLE public.outbox_dead_letter_discards ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.outbox_dead_letter_discards FORCE ROW LEVEL SECURITY;
+CREATE POLICY outbox_dead_letter_discards_tenant_isolation
+ON public.outbox_dead_letter_discards
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.outbox_dead_letter_discards TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.outbox_dead_letter_discards_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_outbox_dead_letter_discard() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_outbox_dead_letter_discard_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_outbox_discard_evidence() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

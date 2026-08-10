@@ -167,6 +167,7 @@ pub struct OutboundIntegrationDetailResponse {
     pub payload: Value,
     pub attempts: Vec<OutboundDeliveryAttemptResponse>,
     pub replays: Vec<OutboxDeadLetterReplayResponse>,
+    pub discard: Option<OutboxDeadLetterDiscardResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +204,41 @@ pub struct ReplayOutboxDeadLetterResponse {
     pub replayed_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutboxDeadLetterDiscardResponse {
+    pub discard_id: i64,
+    pub replay_count: i32,
+    pub previous_attempts: i32,
+    pub last_error: String,
+    pub reason: String,
+    pub discarded_by: i64,
+    pub discarded_by_name: String,
+    pub discarded_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscardOutboxDeadLetterRequest {
+    pub expected_replay_count: i32,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscardOutboxDeadLetterResponse {
+    pub discard_id: i64,
+    pub event_id: i64,
+    pub event_key: String,
+    pub event_type: String,
+    pub replay_count: i32,
+    pub previous_attempts: i32,
+    pub reason: String,
+    pub status: OutboundDeliveryStatus,
+    pub discarded_by: i64,
+    pub discarded_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +271,19 @@ mod tests {
         assert_eq!(request.expected_replay_count, 2);
         assert!(serde_json::from_str::<ReplayOutboxDeadLetterRequest>(
             r#"{"expected_replay_count":2,"force":true}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn discard_request_is_strict_and_carries_operator_rationale() {
+        let request: DiscardOutboxDeadLetterRequest =
+            serde_json::from_str(r#"{"expected_replay_count":2,"reason":"destination retired"}"#)
+                .unwrap();
+        assert_eq!(request.expected_replay_count, 2);
+        assert_eq!(request.reason, "destination retired");
+        assert!(serde_json::from_str::<DiscardOutboxDeadLetterRequest>(
+            r#"{"expected_replay_count":2,"reason":"destination retired","force":true}"#
         )
         .is_err());
     }

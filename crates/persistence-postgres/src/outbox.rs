@@ -737,31 +737,73 @@ pub async fn discard_dead_letter(
     tenant_id: TenantId,
     event_id: i64,
     user_id: i64,
+    expected_replay_count: i32,
     reason: &str,
 ) -> PersistenceResult<bool> {
-    required_text(reason, "discard reason")?;
+    bounded_text(reason, "discard reason", 1_000)?;
+    if reason.trim() != reason || reason.chars().any(char::is_control) {
+        return Err(PersistenceError::invalid_input(
+            "discard reason must be trimmed and control-free",
+        ));
+    }
+    if event_id <= 0 || user_id <= 0 || expected_replay_count < 0 {
+        return Err(PersistenceError::invalid_input(
+            "dead-letter discard identity and expected generation are invalid",
+        ));
+    }
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, tenant_id).await?;
+    let evidence = sqlx::query(
+        r#"
+        INSERT INTO outbox_dead_letter_discards(
+            tenant_id,outbox_event_id,inventory_owner_id,facility_id,event_key,event_type,
+            replay_count,previous_attempts,last_error_snapshot,discard_reason,
+            discarded_by_user_id,discarded_at)
+        SELECT event.tenant_id,event.id,event.inventory_owner_id,event.facility_id,
+               event.event_key,event.event_type,event.replay_count,event.attempts,event.last_error,
+               $3,$4,clock_timestamp()
+        FROM outbox_events event
+        WHERE event.tenant_id=$1 AND event.id=$2 AND event.replay_count=$5
+          AND event.dead_lettered_at IS NOT NULL AND event.last_error IS NOT NULL
+          AND event.discarded_at IS NULL AND event.published_at IS NULL
+          AND event.claimed_at IS NULL
+        RETURNING discarded_at
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(event_id)
+    .bind(reason)
+    .bind(user_id)
+    .bind(expected_replay_count)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(evidence) = evidence else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    let discarded_at: Timestamp = evidence.try_get("discarded_at")?;
     let result = sqlx::query(
         r#"
         UPDATE outbox_events
-        SET discarded_at = clock_timestamp(), discard_reason = $1,
-            discarded_by_user_id = $2
-        WHERE tenant_id = $3
-          AND id = $4
-          AND dead_lettered_at IS NOT NULL
-          AND discarded_at IS NULL
-          AND published_at IS NULL
+        SET discarded_at=$1,discard_reason=$2,discarded_by_user_id=$3
+        WHERE tenant_id=$4 AND id=$5 AND replay_count=$6
         "#,
     )
-    .bind(reason.trim())
+    .bind(discarded_at)
+    .bind(reason)
     .bind(user_id)
     .bind(tenant_id.get())
     .bind(event_id)
+    .bind(expected_replay_count)
     .execute(&mut *tx)
     .await?;
+    if result.rows_affected() != 1 {
+        return Err(PersistenceError::conflict(
+            "outbox dead-letter discard target changed",
+        ));
+    }
     tx.commit().await?;
-    Ok(result.rows_affected() == 1)
+    Ok(true)
 }
 
 pub async fn purge_published(

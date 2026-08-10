@@ -11,9 +11,9 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    ErrorReason, ErrorResponse, InboundIntegrationPage, OutboundDeliveryStatus,
-    OutboundIntegrationDetailResponse, OutboundIntegrationPage, ReplayOutboxDeadLetterRequest,
-    ReplayOutboxDeadLetterResponse,
+    DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse, ErrorReason, ErrorResponse,
+    InboundIntegrationPage, OutboundDeliveryStatus, OutboundIntegrationDetailResponse,
+    OutboundIntegrationPage, ReplayOutboxDeadLetterRequest, ReplayOutboxDeadLetterResponse,
 };
 use wareboxes_application::integration::NewIntegrationInboxReceipt;
 use wareboxes_application::outbox::DeliveryFailureClass;
@@ -660,4 +660,335 @@ async fn dead_letter_replay_is_optimistic_audited_idempotent_and_scope_safe() {
         .await
         .unwrap();
     assert_eq!(concealed_replay.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn dead_letter_discard_is_terminal_audited_idempotent_and_purge_safe() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.user("integration-discard-admin@test.local").await;
+    let tenant_id = tenant_for_user(&fixture.db, admin.id).await;
+    grant_permission(&fixture, tenant_id, admin.id, "admin").await;
+    let owner_id = fixture.inventory_owner(tenant_id, "Discard Client").await;
+    let facility_id = fixture.facility(tenant_id, "Discard DC").await;
+    fixture
+        .assign_owner_to_facility(tenant_id, owner_id, facility_id)
+        .await;
+    assert!(wareboxes_api::repo::tenants::update_user_access_scope(
+        &fixture.db,
+        tenant_id,
+        &UpdateUserAccessScope {
+            user_id: admin.id,
+            all_facilities: false,
+            facility_ids: vec![facility_id],
+            all_inventory_owners: false,
+            inventory_owner_ids: vec![owner_id],
+        },
+    )
+    .await
+    .unwrap());
+    let event_id = enqueue(
+        &fixture,
+        tenant_id,
+        admin.id,
+        owner_id,
+        facility_id,
+        "dead-letter-discard",
+        "shipping.manifest_recorded",
+    )
+    .await;
+    let claimed = outbox::claim_events(
+        &fixture.db,
+        tenant_id,
+        "discard-test-worker",
+        "discard-test-publisher",
+        1,
+        60,
+    )
+    .await
+    .unwrap();
+    assert_eq!(claimed[0].id, event_id);
+    assert!(outbox::mark_failed(
+        &fixture.db,
+        &FailOutboxEvent {
+            tenant_id,
+            event_id,
+            worker_id: "discard-test-worker",
+            claim_version: claimed[0].claim_version,
+            failure_class: DeliveryFailureClass::Permanent,
+            error: "destination no longer exists",
+            retry_after_seconds: 0,
+            max_attempts: 1,
+        },
+    )
+    .await
+    .unwrap());
+
+    let token = wareboxes_api::auth::create_session(&fixture.db, admin.id)
+        .await
+        .unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let uri = format!("/api/v1/integration-monitor/outbound/{event_id}/discards");
+    let invalid = app
+        .clone()
+        .oneshot(post_request(
+            &token,
+            tenant_id,
+            &uri,
+            Some("integration-discard-invalid"),
+            &DiscardOutboxDeadLetterRequest {
+                expected_replay_count: 0,
+                reason: " ".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    let command = DiscardOutboxDeadLetterRequest {
+        expected_replay_count: 0,
+        reason: "partner destination was permanently retired".into(),
+    };
+    let (race_a, race_b) = tokio::join!(
+        app.clone().oneshot(post_request(
+            &token,
+            tenant_id,
+            &uri,
+            Some("integration-discard-race-a"),
+            &command,
+        )),
+        app.clone().oneshot(post_request(
+            &token,
+            tenant_id,
+            &uri,
+            Some("integration-discard-race-b"),
+            &command,
+        )),
+    );
+    let race_a = race_a.unwrap();
+    let race_b = race_b.unwrap();
+    assert_eq!(
+        [race_a.status(), race_b.status()]
+            .into_iter()
+            .filter(|status| *status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        [race_a.status(), race_b.status()]
+            .into_iter()
+            .filter(|status| *status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let (winner_key, first_response) = if race_a.status() == StatusCode::OK {
+        ("integration-discard-race-a", race_a)
+    } else {
+        ("integration-discard-race-b", race_b)
+    };
+    let first: DiscardOutboxDeadLetterResponse = response(first_response).await;
+    assert_eq!(first.event_id, event_id);
+    assert_eq!(first.replay_count, 0);
+    assert_eq!(first.previous_attempts, 1);
+    assert_eq!(first.status, OutboundDeliveryStatus::Discarded);
+    assert_eq!(first.discarded_by, admin.id);
+    assert_eq!(first.reason, command.reason);
+
+    let exact = app
+        .clone()
+        .oneshot(post_request(
+            &token,
+            tenant_id,
+            &uri,
+            Some(winner_key),
+            &command,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(exact.status(), StatusCode::OK);
+    assert_eq!(
+        response::<DiscardOutboxDeadLetterResponse>(exact).await,
+        first
+    );
+    let changed = app
+        .clone()
+        .oneshot(post_request(
+            &token,
+            tenant_id,
+            &uri,
+            Some(winner_key),
+            &DiscardOutboxDeadLetterRequest {
+                expected_replay_count: 0,
+                reason: "different rationale".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(changed.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response::<ErrorResponse>(changed).await.reason,
+        ErrorReason::IdempotencyKeyReused
+    );
+
+    let detail = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!("/api/v1/integration-monitor/outbound/{event_id}"),
+        ))
+        .await
+        .unwrap();
+    let detail: OutboundIntegrationDetailResponse = response(detail).await;
+    assert_eq!(detail.event.status, OutboundDeliveryStatus::Discarded);
+    let discard = detail.discard.unwrap();
+    assert_eq!(discard.discard_id, first.discard_id);
+    assert_eq!(discard.last_error, "destination no longer exists");
+    assert_eq!(discard.reason, command.reason);
+
+    let admin_db = admin_db_for(&fixture.db).await;
+    assert!(sqlx::query(
+        "UPDATE outbox_dead_letter_discards SET discard_reason='forged' WHERE id=$1"
+    )
+    .bind(first.discard_id)
+    .execute(&admin_db)
+    .await
+    .is_err());
+    assert!(
+        sqlx::query("UPDATE outbox_events SET discard_reason='forged' WHERE id=$1")
+            .bind(event_id)
+            .execute(&admin_db)
+            .await
+            .is_err()
+    );
+
+    let competing_event_id = enqueue(
+        &fixture,
+        tenant_id,
+        admin.id,
+        owner_id,
+        facility_id,
+        "dead-letter-competing-dispositions",
+        "shipping.manifest_recorded",
+    )
+    .await;
+    let competing_claim = outbox::claim_events(
+        &fixture.db,
+        tenant_id,
+        "competing-disposition-worker",
+        "competing-disposition-publisher",
+        1,
+        60,
+    )
+    .await
+    .unwrap();
+    assert_eq!(competing_claim[0].id, competing_event_id);
+    assert!(outbox::mark_failed(
+        &fixture.db,
+        &FailOutboxEvent {
+            tenant_id,
+            event_id: competing_event_id,
+            worker_id: "competing-disposition-worker",
+            claim_version: competing_claim[0].claim_version,
+            failure_class: DeliveryFailureClass::Permanent,
+            error: "permanent integration failure",
+            retry_after_seconds: 0,
+            max_attempts: 1,
+        },
+    )
+    .await
+    .unwrap());
+    let replay_uri = format!("/api/v1/integration-monitor/outbound/{competing_event_id}/replays");
+    let discard_uri = format!("/api/v1/integration-monitor/outbound/{competing_event_id}/discards");
+    let (replay, discard) = tokio::join!(
+        app.clone().oneshot(post_request(
+            &token,
+            tenant_id,
+            &replay_uri,
+            Some("integration-competing-replay"),
+            &ReplayOutboxDeadLetterRequest {
+                expected_replay_count: 0,
+            },
+        )),
+        app.clone().oneshot(post_request(
+            &token,
+            tenant_id,
+            &discard_uri,
+            Some("integration-competing-discard"),
+            &DiscardOutboxDeadLetterRequest {
+                expected_replay_count: 0,
+                reason: "permanent failure accepted".into(),
+            },
+        )),
+    );
+    let replay = replay.unwrap();
+    let discard = discard.unwrap();
+    assert_eq!(
+        [replay.status(), discard.status()]
+            .into_iter()
+            .filter(|status| *status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        [replay.status(), discard.status()]
+            .into_iter()
+            .filter(|status| *status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let competing_evidence: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+          (SELECT COUNT(*) FROM outbox_dead_letter_replays WHERE outbox_event_id=$1),
+          (SELECT COUNT(*) FROM outbox_dead_letter_discards WHERE outbox_event_id=$1)
+        "#,
+    )
+    .bind(competing_event_id)
+    .fetch_one(&admin_db)
+    .await
+    .unwrap();
+    assert_eq!(competing_evidence.0 + competing_evidence.1, 1);
+
+    assert!(wareboxes_api::repo::tenants::update_user_access_scope(
+        &fixture.db,
+        tenant_id,
+        &UpdateUserAccessScope {
+            user_id: admin.id,
+            all_facilities: false,
+            facility_ids: Vec::new(),
+            all_inventory_owners: false,
+            inventory_owner_ids: Vec::new(),
+        },
+    )
+    .await
+    .unwrap());
+    let concealed = app
+        .clone()
+        .oneshot(post_request(
+            &token,
+            tenant_id,
+            &uri,
+            Some(winner_key),
+            &command,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(concealed.status(), StatusCode::NOT_FOUND);
+
+    assert_eq!(
+        outbox::purge_published(&fixture.db, tenant_id, 0, 10)
+            .await
+            .unwrap(),
+        1 + competing_evidence.1 as u64
+    );
+    let mut scoped = tenant_tx(&fixture.db, tenant_id).await;
+    let retained: (i64, String, i64) = sqlx::query_as(
+        "SELECT COUNT(*),MIN(discard_reason),MIN(discarded_by_user_id) FROM outbox_dead_letter_discards WHERE outbox_event_id=$1",
+    )
+    .bind(event_id)
+    .fetch_one(&mut *scoped)
+    .await
+    .unwrap();
+    assert_eq!(retained, (1, command.reason, admin.id));
+    scoped.rollback().await.unwrap();
 }

@@ -1,6 +1,7 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use wareboxes_api_contract::v1::{
+    DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse,
     InboundIntegrationPage as ApiInboundPage, InboundIntegrationPageRequest,
     InboundIntegrationReceiptResponse, InboundIntegrationSort as ApiInboundSort,
     IntegrationSortDirection as ApiDirection, OpaqueCursor,
@@ -8,17 +9,18 @@ use wareboxes_api_contract::v1::{
     OutboundDeliveryStatus as ApiStatus, OutboundIntegrationDetailResponse,
     OutboundIntegrationEventResponse, OutboundIntegrationPage as ApiOutboundPage,
     OutboundIntegrationPageRequest, OutboundIntegrationSort as ApiOutboundSort,
-    OutboxDeadLetterReplayResponse, ReplayOutboxDeadLetterRequest, ReplayOutboxDeadLetterResponse,
+    OutboxDeadLetterDiscardResponse, OutboxDeadLetterReplayResponse, ReplayOutboxDeadLetterRequest,
+    ReplayOutboxDeadLetterResponse,
 };
 use wareboxes_application::integration_monitor::{
-    InboundIntegrationQuery, InboundIntegrationReceiptReadModel, InboundIntegrationSort,
-    IntegrationSortDirection, OutboundDeliveryAttemptReadModel, OutboundDeliveryStatus,
-    OutboundIntegrationDetailReadModel, OutboundIntegrationEventReadModel,
-    OutboundIntegrationQuery, OutboundIntegrationSort, ReplayOutboxDeadLetterCommand,
-    ReplayOutboxDeadLetterResult,
+    DiscardOutboxDeadLetterCommand, DiscardOutboxDeadLetterResult, InboundIntegrationQuery,
+    InboundIntegrationReceiptReadModel, InboundIntegrationSort, IntegrationSortDirection,
+    OutboundDeliveryAttemptReadModel, OutboundDeliveryStatus, OutboundIntegrationDetailReadModel,
+    OutboundIntegrationEventReadModel, OutboundIntegrationQuery, OutboundIntegrationSort,
+    ReplayOutboxDeadLetterCommand, ReplayOutboxDeadLetterResult,
 };
 use wareboxes_application::outbox::DeliveryAttemptOutcome;
-use wareboxes_domain::{FacilityId, InventoryOwnerId};
+use wareboxes_domain::{FacilityId, InventoryOwnerId, OutboxDeadLetterDiscardReason};
 
 use super::error::{V1Error, V1Result};
 use crate::auth::CurrentTenant;
@@ -101,6 +103,25 @@ pub async fn replay_outbound_dead_letter(
         repo::integration_monitor::replay_dead_letter(&state.db, &user.tenant, &context, command)
             .await?;
     Ok(Json(map_replay_result(result)))
+}
+
+pub async fn discard_outbound_dead_letter(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(event_id): Path<i64>,
+    Json(body): Json<DiscardOutboxDeadLetterRequest>,
+) -> V1Result<Json<DiscardOutboxDeadLetterResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let reason = OutboxDeadLetterDiscardReason::new(body.reason)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let command = DiscardOutboxDeadLetterCommand::new(event_id, body.expected_replay_count, reason)
+        .map_err(AppError::from)?;
+    let context = user.command_context(&idempotency_key);
+    let result =
+        repo::integration_monitor::discard_dead_letter(&state.db, &user.tenant, &context, command)
+            .await?;
+    Ok(Json(map_discard_result(result)))
 }
 
 fn validated_text(value: Option<&str>, label: &str) -> AppResult<Option<String>> {
@@ -305,6 +326,18 @@ fn map_detail(value: OutboundIntegrationDetailReadModel) -> OutboundIntegrationD
                 replayed_at: replay.replayed_at.to_rfc3339(),
             })
             .collect(),
+        discard: value
+            .discard
+            .map(|discard| OutboxDeadLetterDiscardResponse {
+                discard_id: discard.discard_id.get(),
+                replay_count: discard.replay_count,
+                previous_attempts: discard.previous_attempts,
+                last_error: discard.last_error,
+                reason: discard.reason.as_str().to_owned(),
+                discarded_by: discard.discarded_by.get(),
+                discarded_by_name: discard.discarded_by_name,
+                discarded_at: discard.discarded_at.to_rfc3339(),
+            }),
     }
 }
 
@@ -320,6 +353,21 @@ fn map_replay_result(value: ReplayOutboxDeadLetterResult) -> ReplayOutboxDeadLet
         status: api_status(value.status),
         replayed_by: value.replayed_by.get(),
         replayed_at: value.replayed_at.to_rfc3339(),
+    }
+}
+
+fn map_discard_result(value: DiscardOutboxDeadLetterResult) -> DiscardOutboxDeadLetterResponse {
+    DiscardOutboxDeadLetterResponse {
+        discard_id: value.discard_id.get(),
+        event_id: value.event_id,
+        event_key: value.event_key,
+        event_type: value.event_type,
+        replay_count: value.replay_count,
+        previous_attempts: value.previous_attempts,
+        reason: value.reason.as_str().to_owned(),
+        status: api_status(value.status),
+        discarded_by: value.discarded_by.get(),
+        discarded_at: value.discarded_at.to_rfc3339(),
     }
 }
 
@@ -442,6 +490,14 @@ mod tests {
         assert_eq!(
             validated_text(Some(" event "), "search").unwrap(),
             Some("event".into())
+        );
+    }
+
+    #[test]
+    fn discard_reason_limit_matches_domain_contract() {
+        assert_eq!(
+            wareboxes_domain::MAX_OUTBOX_DEAD_LETTER_DISCARD_REASON_LENGTH,
+            1_000
         );
     }
 }

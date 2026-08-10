@@ -1,7 +1,8 @@
 use wareboxes_api_contract::v1::{
-    InboundIntegrationPage, InboundIntegrationSort, IntegrationSortDirection, OpaqueCursor,
-    OutboundDeliveryStatus, OutboundIntegrationDetailResponse, OutboundIntegrationPage,
-    OutboundIntegrationSort, ReplayOutboxDeadLetterRequest, ReplayOutboxDeadLetterResponse,
+    DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse, InboundIntegrationPage,
+    InboundIntegrationSort, IntegrationSortDirection, OpaqueCursor, OutboundDeliveryStatus,
+    OutboundIntegrationDetailResponse, OutboundIntegrationPage, OutboundIntegrationSort,
+    ReplayOutboxDeadLetterRequest, ReplayOutboxDeadLetterResponse,
 };
 
 use super::{internal_get, internal_post_idempotent, ApiError};
@@ -54,6 +55,19 @@ pub async fn replay_outbound_dead_letter(
 ) -> Result<ReplayOutboxDeadLetterResponse, ApiError> {
     internal_post_idempotent(
         &format!("/api/v1/integration-monitor/outbound/{event_id}/replays"),
+        request,
+        idempotency_key,
+    )
+    .await
+}
+
+pub async fn discard_outbound_dead_letter(
+    event_id: i64,
+    request: &DiscardOutboxDeadLetterRequest,
+    idempotency_key: &str,
+) -> Result<DiscardOutboxDeadLetterResponse, ApiError> {
+    internal_post_idempotent(
+        &format!("/api/v1/integration-monitor/outbound/{event_id}/discards"),
         request,
         idempotency_key,
     )
@@ -192,6 +206,14 @@ mod tests {
         assert_eq!(
             format!("/api/v1/integration-monitor/outbound/{}/replays", 44),
             "/api/v1/integration-monitor/outbound/44/replays"
+        );
+    }
+
+    #[test]
+    fn discard_path_is_event_scoped() {
+        assert_eq!(
+            format!("/api/v1/integration-monitor/outbound/{}/discards", 44),
+            "/api/v1/integration-monitor/outbound/44/discards"
         );
     }
 }

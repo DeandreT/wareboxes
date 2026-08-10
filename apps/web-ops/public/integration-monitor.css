@@ -219,17 +219,89 @@
   gap: 4px;
 }
 
+.integration-dead-letter-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.integration-discard-confirmation {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 0.8fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.integration-discard-confirmation > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.integration-discard-confirmation > div:last-child {
+  display: flex;
+  gap: 4px;
+}
+
+.integration-discard-confirmation label {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  color: var(--ink-soft);
+  font-size: 8px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.integration-discard-confirmation textarea {
+  min-height: 42px;
+  resize: vertical;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 10px;
+}
+
 .integration-replay-confirmation strong {
   font-size: 10px;
 }
 
 .integration-replay-confirmation span,
-.integration-replay-confirmation small {
+.integration-replay-confirmation small,
+.integration-discard-confirmation > div:first-child span,
+.integration-discard-confirmation > div:first-child small {
   overflow: hidden;
   color: var(--ink-soft);
   font-size: 9px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.integration-discard-evidence {
+  background: var(--red-soft);
+}
+
+.integration-discard-evidence dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 5px 0;
+}
+
+.integration-discard-evidence dt {
+  color: var(--danger-ink);
+  font-size: 8px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.integration-discard-evidence dd,
+.integration-discard-evidence p,
+.integration-discard-evidence small {
+  margin: 2px 0 0;
+  font-size: 9px;
 }
 
 .integration-detail-content h2,

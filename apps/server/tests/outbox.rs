@@ -1146,6 +1146,7 @@ async fn workers_claim_retry_and_recover_outbox_events_once_per_lease() {
         tenant_id,
         blocked_first_id,
         user.id,
+        0,
         "destination was permanently decommissioned",
     )
     .await

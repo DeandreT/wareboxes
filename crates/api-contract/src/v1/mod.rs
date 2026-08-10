@@ -86,11 +86,12 @@ pub use inbound_inspection::{
     DisposeInboundInspectionRequest, DisposeInboundInspectionResponse, InboundInspectionOutcome,
 };
 pub use integration_monitor::{
-    InboundIntegrationPage, InboundIntegrationPageRequest, InboundIntegrationReceiptResponse,
-    InboundIntegrationSort, IntegrationSortDirection, OutboundDeliveryAttemptOutcome,
-    OutboundDeliveryAttemptResponse, OutboundDeliveryStatus, OutboundIntegrationDetailResponse,
-    OutboundIntegrationEventResponse, OutboundIntegrationPage, OutboundIntegrationPageRequest,
-    OutboundIntegrationSort, OutboxDeadLetterReplayResponse, ReplayOutboxDeadLetterRequest,
+    DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse, InboundIntegrationPage,
+    InboundIntegrationPageRequest, InboundIntegrationReceiptResponse, InboundIntegrationSort,
+    IntegrationSortDirection, OutboundDeliveryAttemptOutcome, OutboundDeliveryAttemptResponse,
+    OutboundDeliveryStatus, OutboundIntegrationDetailResponse, OutboundIntegrationEventResponse,
+    OutboundIntegrationPage, OutboundIntegrationPageRequest, OutboundIntegrationSort,
+    OutboxDeadLetterDiscardResponse, OutboxDeadLetterReplayResponse, ReplayOutboxDeadLetterRequest,
     ReplayOutboxDeadLetterResponse,
 };
 pub use inventory::{

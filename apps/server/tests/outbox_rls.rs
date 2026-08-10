@@ -174,6 +174,7 @@ async fn outbox_storage_and_workers_are_tenant_isolated() {
         tenant_b,
         refs_a.event_id,
         user_b.id,
+        0,
         "wrong tenant",
     )
     .await

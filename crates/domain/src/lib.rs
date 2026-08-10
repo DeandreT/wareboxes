@@ -5,6 +5,7 @@ mod backorder;
 mod cycle_count;
 mod facility;
 mod inbound_inspection;
+mod integration;
 mod inventory_recall;
 mod item_storage_policy;
 mod item_substitution;
@@ -53,6 +54,10 @@ pub use facility::{
 pub use inbound_inspection::{
     decide_inbound_inspection, InboundInspectionError, InboundInspectionNote,
     InboundInspectionOutcome, InboundInspectionTargetStatus, MAX_INBOUND_INSPECTION_NOTE_LENGTH,
+};
+pub use integration::{
+    OutboxDeadLetterDiscardReason, OutboxDeadLetterDiscardReasonError,
+    MAX_OUTBOX_DEAD_LETTER_DISCARD_REASON_LENGTH,
 };
 pub use inventory_recall::{
     release_inventory_recall, InventoryRecallDetails, InventoryRecallError, InventoryRecallNote,
@@ -283,6 +288,7 @@ positive_id!(ReplenishmentWorkId, "replenishment work ID");
 positive_id!(ReplenishmentCancellationId, "replenishment cancellation ID");
 positive_id!(ReplenishmentConfirmationId, "replenishment confirmation ID");
 positive_id!(OutboxDeadLetterReplayId, "outbox dead-letter replay ID");
+positive_id!(OutboxDeadLetterDiscardId, "outbox dead-letter discard ID");
 positive_id!(PackSessionId, "pack session ID");
 positive_id!(CartonId, "carton ID");
 positive_id!(CartonContentId, "carton content ID");
