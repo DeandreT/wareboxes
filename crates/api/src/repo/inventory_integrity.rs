@@ -4,10 +4,11 @@ use sqlx::postgres::PgRow;
 use sqlx::Row;
 use wareboxes_application::inventory::InventoryBalanceStatus;
 use wareboxes_application::inventory_integrity::{
-    InventoryIntegrityIssueKind, InventoryIntegrityIssueReadModel, InventoryIntegrityPage,
-    InventoryIntegrityQuery, InventoryIntegritySort, InventoryJournalEntryReadModel,
-    InventoryJournalPage, InventoryJournalQuery, InventoryJournalSort,
-    InventoryJournalTransactionReadModel,
+    InventoryAgingBucket, InventoryAgingPage, InventoryAgingQuery, InventoryAgingReadModel,
+    InventoryAgingSort, InventoryIntegrityIssueKind, InventoryIntegrityIssueReadModel,
+    InventoryIntegrityPage, InventoryIntegrityQuery, InventoryIntegritySort,
+    InventoryJournalEntryReadModel, InventoryJournalPage, InventoryJournalQuery,
+    InventoryJournalSort, InventoryJournalTransactionReadModel,
 };
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{FacilityId, InventoryOwnerId};
@@ -383,6 +384,145 @@ pub async fn integrity_page(
     Ok(InventoryIntegrityPage { items, next_offset })
 }
 
+pub async fn aging_page(
+    db: &Db,
+    access: &TenantAccess,
+    query: &InventoryAgingQuery,
+) -> AppResult<InventoryAgingPage> {
+    validate_aging_query(query)?;
+    let mut tx = begin_tenant_transaction(db, access.tenant_id).await?;
+    let scope = lock_current_scope_tx(&mut tx, access.tenant_id, access.user_id.get()).await?;
+    require_permission_tx(&mut tx, access.tenant_id, access.user_id.get(), "wms").await?;
+    let query_id = query
+        .search
+        .as_deref()
+        .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0);
+    let offset = i64::try_from(query.offset)
+        .map_err(|_| AppError::bad_request("inventory aging cursor is out of range"))?;
+    let fetch_limit = i64::from(query.limit) + 1;
+    let rows = sqlx::query(
+        r#"
+        WITH aging AS (
+          SELECT balance.id AS inventory_balance_id,
+                 balance.inventory_owner_id, owner.name AS inventory_owner_name,
+                 balance.facility_id, facility.name AS facility_name,
+                 balance.location_id, location.name AS location_name,
+                 location.barcode AS location_barcode,
+                 balance.license_plate_id, plate.barcode AS license_plate_barcode,
+                 balance.item_batch_id, balance.item_id, sku.name AS primary_sku,
+                 item.description AS item_description, balance.uom,
+                 batch.lot, batch.serial, batch.created AS received_at,
+                 GREATEST((CURRENT_DATE-batch.created::DATE)::BIGINT,0) AS age_days,
+                 batch.expiration,
+                 CASE WHEN batch.expiration IS NULL THEN NULL
+                      ELSE (batch.expiration::DATE-CURRENT_DATE)::BIGINT END AS days_to_expiration,
+                 CASE WHEN batch.expiration IS NULL THEN 'no_expiration'
+                      WHEN batch.expiration::DATE<CURRENT_DATE THEN 'expired'
+                      WHEN batch.expiration::DATE<=CURRENT_DATE+7 THEN 'due_within_7_days'
+                      WHEN batch.expiration::DATE<=CURRENT_DATE+30 THEN 'due_within_30_days'
+                      WHEN batch.expiration::DATE<=CURRENT_DATE+90 THEN 'due_within_90_days'
+                      ELSE 'beyond_90_days' END AS aging_bucket,
+                 balance.status, balance.qty_on_hand, balance.qty_reserved,
+                 balance.qty_held,
+                 (balance.qty_on_hand-balance.qty_reserved-balance.qty_held)::BIGINT
+                   AS available_quantity
+          FROM inventory_balances balance
+          INNER JOIN inventory_owners owner
+            ON owner.tenant_id=balance.tenant_id AND owner.id=balance.inventory_owner_id
+          INNER JOIN facilities facility
+            ON facility.tenant_id=balance.tenant_id AND facility.id=balance.facility_id
+          INNER JOIN locations location
+            ON location.tenant_id=balance.tenant_id AND location.id=balance.location_id
+          INNER JOIN item_batches batch
+            ON batch.tenant_id=balance.tenant_id
+           AND batch.inventory_owner_id=balance.inventory_owner_id
+           AND batch.id=balance.item_batch_id
+          INNER JOIN items item
+            ON item.tenant_id=balance.tenant_id AND item.id=balance.item_id
+          LEFT JOIN license_plates plate
+            ON plate.tenant_id=balance.tenant_id
+           AND plate.inventory_owner_id=balance.inventory_owner_id
+           AND plate.id=balance.license_plate_id
+          LEFT JOIN LATERAL (
+            SELECT item_sku.name FROM skus item_sku
+            WHERE item_sku.tenant_id=balance.tenant_id
+              AND item_sku.item_id=balance.item_id
+              AND item_sku.deleted IS NULL
+            ORDER BY item_sku.id LIMIT 1
+          ) sku ON TRUE
+          WHERE balance.tenant_id=$1 AND balance.deleted IS NULL
+            AND balance.qty_on_hand>0
+            AND ($2 OR balance.facility_id=ANY($3))
+            AND ($4 OR balance.inventory_owner_id=ANY($5))
+            AND ($6::BIGINT IS NULL OR balance.facility_id=$6)
+            AND ($7::BIGINT IS NULL OR balance.inventory_owner_id=$7)
+            AND ($8::BIGINT IS NULL OR balance.item_id=$8)
+        )
+        SELECT * FROM aging
+        WHERE ($9::TEXT IS NULL OR aging_bucket=$9)
+          AND (
+            $10::TEXT IS NULL
+            OR STRPOS(LOWER(inventory_owner_name),LOWER($10))>0
+            OR STRPOS(LOWER(facility_name),LOWER($10))>0
+            OR STRPOS(LOWER(COALESCE(location_name,'')),LOWER($10))>0
+            OR STRPOS(LOWER(COALESCE(location_barcode,'')),LOWER($10))>0
+            OR STRPOS(LOWER(COALESCE(license_plate_barcode,'')),LOWER($10))>0
+            OR STRPOS(LOWER(COALESCE(primary_sku,'')),LOWER($10))>0
+            OR STRPOS(LOWER(COALESCE(item_description,'')),LOWER($10))>0
+            OR STRPOS(LOWER(COALESCE(lot,'')),LOWER($10))>0
+            OR STRPOS(LOWER(COALESCE(serial,'')),LOWER($10))>0
+            OR ($11::BIGINT IS NOT NULL AND $11 IN (
+              inventory_balance_id, inventory_owner_id, facility_id, location_id,
+              item_batch_id, item_id, COALESCE(license_plate_id,0)
+            ))
+          )
+        ORDER BY
+          CASE WHEN $12='age' AND $13 THEN age_days END ASC,
+          CASE WHEN $12='age' AND NOT $13 THEN age_days END DESC,
+          CASE WHEN $12='expiration' AND $13 THEN expiration END ASC NULLS LAST,
+          CASE WHEN $12='expiration' AND NOT $13 THEN expiration END DESC NULLS LAST,
+          CASE WHEN $12='quantity' AND $13 THEN qty_on_hand END ASC,
+          CASE WHEN $12='quantity' AND NOT $13 THEN qty_on_hand END DESC,
+          CASE WHEN $12='facility' AND $13 THEN LOWER(facility_name) END ASC,
+          CASE WHEN $12='facility' AND NOT $13 THEN LOWER(facility_name) END DESC,
+          CASE WHEN $12='client' AND $13 THEN LOWER(inventory_owner_name) END ASC,
+          CASE WHEN $12='client' AND NOT $13 THEN LOWER(inventory_owner_name) END DESC,
+          CASE WHEN $12='item' AND $13 THEN LOWER(COALESCE(primary_sku,item_description,'')) END ASC,
+          CASE WHEN $12='item' AND NOT $13 THEN LOWER(COALESCE(primary_sku,item_description,'')) END DESC,
+          inventory_balance_id ASC
+        OFFSET $14 LIMIT $15
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .bind(query.facility_id.map(FacilityId::get))
+    .bind(query.inventory_owner_id.map(InventoryOwnerId::get))
+    .bind(query.item_id)
+    .bind(query.bucket.map(aging_bucket_key))
+    .bind(query.search.as_deref())
+    .bind(query_id)
+    .bind(aging_sort_key(query.sort))
+    .bind(query.direction.is_ascending())
+    .bind(offset)
+    .bind(fetch_limit)
+    .fetch_all(&mut *tx)
+    .await?;
+    let has_more = rows.len() > usize::from(query.limit);
+    let items = rows
+        .iter()
+        .take(usize::from(query.limit))
+        .map(map_aging)
+        .collect::<AppResult<Vec<_>>>()?;
+    let next_offset = has_more.then_some(query.offset + u64::from(query.limit));
+    tx.commit().await?;
+    Ok(InventoryAgingPage { items, next_offset })
+}
+
 fn validate_journal_query(query: &InventoryJournalQuery) -> AppResult<()> {
     validate_limit(query.limit)?;
     for value in [
@@ -418,6 +558,22 @@ fn validate_integrity_query(query: &InventoryIntegrityQuery) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_aging_query(query: &InventoryAgingQuery) -> AppResult<()> {
+    validate_limit(query.limit)?;
+    for value in [
+        query.facility_id.map(FacilityId::get),
+        query.inventory_owner_id.map(InventoryOwnerId::get),
+        query.item_id,
+    ] {
+        if value.is_some_and(|id| id <= 0) {
+            return Err(AppError::bad_request(
+                "inventory aging filter IDs must be positive",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_limit(limit: u16) -> AppResult<()> {
     if !(1..=MAX_PAGE_SIZE).contains(&limit) {
         return Err(AppError::bad_request(
@@ -443,6 +599,28 @@ fn integrity_sort_key(sort: InventoryIntegritySort) -> &'static str {
         InventoryIntegritySort::Facility => "facility",
         InventoryIntegritySort::Client => "client",
         InventoryIntegritySort::Item => "item",
+    }
+}
+
+fn aging_sort_key(sort: InventoryAgingSort) -> &'static str {
+    match sort {
+        InventoryAgingSort::Age => "age",
+        InventoryAgingSort::Expiration => "expiration",
+        InventoryAgingSort::Quantity => "quantity",
+        InventoryAgingSort::Facility => "facility",
+        InventoryAgingSort::Client => "client",
+        InventoryAgingSort::Item => "item",
+    }
+}
+
+fn aging_bucket_key(bucket: InventoryAgingBucket) -> &'static str {
+    match bucket {
+        InventoryAgingBucket::Expired => "expired",
+        InventoryAgingBucket::DueWithin7Days => "due_within_7_days",
+        InventoryAgingBucket::DueWithin30Days => "due_within_30_days",
+        InventoryAgingBucket::DueWithin90Days => "due_within_90_days",
+        InventoryAgingBucket::Beyond90Days => "beyond_90_days",
+        InventoryAgingBucket::NoExpiration => "no_expiration",
     }
 }
 
@@ -551,6 +729,53 @@ fn map_issue(row: &PgRow) -> AppResult<InventoryIntegrityIssueReadModel> {
         overcommitted_quantity: row.try_get("overcommitted_quantity")?,
         severity_quantity: row.try_get("severity_quantity")?,
         issue_codes: row.try_get("issue_codes")?,
+    })
+}
+
+fn map_aging(row: &PgRow) -> AppResult<InventoryAgingReadModel> {
+    let bucket = match row.try_get::<String, _>("aging_bucket")?.as_str() {
+        "expired" => InventoryAgingBucket::Expired,
+        "due_within_7_days" => InventoryAgingBucket::DueWithin7Days,
+        "due_within_30_days" => InventoryAgingBucket::DueWithin30Days,
+        "due_within_90_days" => InventoryAgingBucket::DueWithin90Days,
+        "beyond_90_days" => InventoryAgingBucket::Beyond90Days,
+        "no_expiration" => InventoryAgingBucket::NoExpiration,
+        value => {
+            return Err(AppError::internal(format!(
+                "unknown inventory aging bucket {value:?}"
+            )))
+        }
+    };
+    Ok(InventoryAgingReadModel {
+        inventory_balance_id: row.try_get("inventory_balance_id")?,
+        inventory_owner_id: InventoryOwnerId::new(row.try_get("inventory_owner_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        inventory_owner_name: row.try_get("inventory_owner_name")?,
+        facility_id: FacilityId::new(row.try_get("facility_id")?)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        facility_name: row.try_get("facility_name")?,
+        location_id: row.try_get("location_id")?,
+        location_name: row.try_get("location_name")?,
+        location_barcode: row.try_get("location_barcode")?,
+        license_plate_id: row.try_get("license_plate_id")?,
+        license_plate_barcode: row.try_get("license_plate_barcode")?,
+        item_batch_id: row.try_get("item_batch_id")?,
+        item_id: row.try_get("item_id")?,
+        primary_sku: row.try_get("primary_sku")?,
+        item_description: row.try_get("item_description")?,
+        uom: row.try_get("uom")?,
+        lot: row.try_get("lot")?,
+        serial: row.try_get("serial")?,
+        received_at: row.try_get("received_at")?,
+        age_days: row.try_get("age_days")?,
+        expiration: row.try_get("expiration")?,
+        days_to_expiration: row.try_get("days_to_expiration")?,
+        bucket,
+        status: parse_status(&row.try_get::<String, _>("status")?)?,
+        on_hand_quantity: row.try_get("qty_on_hand")?,
+        reserved_quantity: row.try_get("qty_reserved")?,
+        held_quantity: row.try_get("qty_held")?,
+        available_quantity: row.try_get("available_quantity")?,
     })
 }
 

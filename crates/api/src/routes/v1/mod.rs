@@ -96,6 +96,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/inventory/balances", get(inventory_balances::list))
         .route("/inventory/journal", get(inventory_integrity::journal))
+        .route("/inventory/aging", get(inventory_integrity::aging))
         .route(
             "/inventory/integrity-issues",
             get(inventory_integrity::issues),

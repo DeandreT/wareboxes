@@ -7,6 +7,7 @@ use wareboxes_core::models::Location;
 
 use crate::{api, toast::use_toast_bus, view_model::format_quantity};
 
+mod aging;
 mod move_planner;
 mod read_views;
 
@@ -36,6 +37,7 @@ enum IntegrityState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IntegrityTab {
     Journal,
+    Aging,
     Reconciliation,
     MovePlanning,
 }
@@ -210,6 +212,15 @@ pub fn InventoryIntegrityWorkbench(on_unauthorized: Callback<()>) -> impl IntoVi
                             <button
                                 type="button"
                                 role="tab"
+                                aria-selected=move || (tab.get() == IntegrityTab::Aging).to_string()
+                                class:active=move || tab.get() == IntegrityTab::Aging
+                                on:click=move |_| tab.set(IntegrityTab::Aging)
+                            >
+                                "Aging"
+                            </button>
+                            <button
+                                type="button"
+                                role="tab"
                                 aria-selected=move || {
                                     (tab.get() == IntegrityTab::Reconciliation).to_string()
                                 }
@@ -234,6 +245,9 @@ pub fn InventoryIntegrityWorkbench(on_unauthorized: Callback<()>) -> impl IntoVi
                         {move || match tab.get() {
                             IntegrityTab::Journal => {
                                 view! { <read_views::JournalView on_unauthorized/> }.into_any()
+                            }
+                            IntegrityTab::Aging => {
+                                view! { <aging::AgingView on_unauthorized/> }.into_any()
                             }
                             IntegrityTab::Reconciliation => {
                                 view! { <read_views::ReconciliationView on_unauthorized/> }.into_any()

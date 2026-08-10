@@ -7,8 +7,8 @@ use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::{repo, routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    ErrorReason, ErrorResponse, InventoryIntegrityIssueKind, InventoryIntegrityPage,
-    InventoryJournalPage,
+    ErrorReason, ErrorResponse, InventoryAgingBucket, InventoryAgingPage,
+    InventoryIntegrityIssueKind, InventoryIntegrityPage, InventoryJournalPage,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
@@ -242,6 +242,203 @@ async fn inventory_journal_is_scope_safe_filter_bound_and_sorted_across_pages() 
         .items
         .iter()
         .all(|item| item.inventory_owner_id == allowed_owner));
+}
+
+#[tokio::test]
+async fn inventory_aging_is_scope_safe_risk_filtered_and_sorted_across_pages() {
+    let fixture = Fixture::new().await;
+    let operator = fixture.wms_user("inventory-aging@test.local").await;
+    let tenant_id = tenant_for_user(&fixture.db, operator.id).await;
+    let allowed_owner = fixture.inventory_owner(tenant_id, "Aging Client").await;
+    let denied_owner = fixture
+        .inventory_owner(tenant_id, "Hidden Aging Client")
+        .await;
+    let allowed_facility = fixture.facility(tenant_id, "Aging Facility").await;
+    let denied_facility = fixture.facility(tenant_id, "Hidden Aging Facility").await;
+    fixture
+        .assign_owner_to_facility(tenant_id, allowed_owner, allowed_facility)
+        .await;
+    fixture
+        .assign_owner_to_facility(tenant_id, denied_owner, denied_facility)
+        .await;
+    let oldest_location = fixture
+        .location(tenant_id, allowed_facility, "AGING-VISIBLE-OLD")
+        .await;
+    let middle_location = fixture
+        .location(tenant_id, allowed_facility, "AGING-VISIBLE-MID")
+        .await;
+    let fresh_location = fixture
+        .location(tenant_id, allowed_facility, "AGING-VISIBLE-NEW")
+        .await;
+    let denied_location = fixture
+        .location(tenant_id, denied_facility, "AGING-HIDDEN")
+        .await;
+    let item = fixture.item(tenant_id, "Aging Item", "case").await;
+    let hidden_item = fixture.item(tenant_id, "Hidden Aging Item", "case").await;
+    let (_, oldest_balance) = receive(
+        &fixture,
+        tenant_id,
+        operator.id,
+        allowed_owner,
+        oldest_location,
+        item,
+        "AGING-EXPIRED",
+        11,
+        "aging-expired",
+    )
+    .await;
+    let (_, middle_balance) = receive(
+        &fixture,
+        tenant_id,
+        operator.id,
+        allowed_owner,
+        middle_location,
+        item,
+        "AGING-DUE-30",
+        7,
+        "aging-due-30",
+    )
+    .await;
+    let (_, fresh_balance) = receive(
+        &fixture,
+        tenant_id,
+        operator.id,
+        allowed_owner,
+        fresh_location,
+        item,
+        "AGING-NO-EXPIRY",
+        3,
+        "aging-no-expiry",
+    )
+    .await;
+    let _ = receive(
+        &fixture,
+        tenant_id,
+        operator.id,
+        denied_owner,
+        denied_location,
+        hidden_item,
+        "AGING-HIDDEN-LOT",
+        99,
+        "aging-hidden",
+    )
+    .await;
+
+    let admin = admin_db_for(&fixture.db).await;
+    sqlx::query(
+        r#"
+        UPDATE item_batches batch
+        SET created = CASE balance.id
+              WHEN $1 THEN CURRENT_TIMESTAMP-INTERVAL '120 days'
+              WHEN $2 THEN CURRENT_TIMESTAMP-INTERVAL '60 days'
+              WHEN $3 THEN CURRENT_TIMESTAMP-INTERVAL '10 days'
+            END,
+            expiration = CASE balance.id
+              WHEN $1 THEN CURRENT_TIMESTAMP-INTERVAL '1 day'
+              WHEN $2 THEN CURRENT_TIMESTAMP+INTERVAL '20 days'
+              ELSE NULL
+            END
+        FROM inventory_balances balance
+        WHERE balance.item_batch_id=batch.id AND balance.id=ANY($4)
+        "#,
+    )
+    .bind(oldest_balance)
+    .bind(middle_balance)
+    .bind(fresh_balance)
+    .bind(vec![oldest_balance, middle_balance, fresh_balance])
+    .execute(&admin)
+    .await
+    .unwrap();
+    admin.close().await;
+    assert!(repo::tenants::update_user_access_scope(
+        &fixture.db,
+        tenant_id,
+        &UpdateUserAccessScope {
+            user_id: operator.id,
+            all_facilities: false,
+            facility_ids: vec![allowed_facility],
+            all_inventory_owners: false,
+            inventory_owner_ids: vec![allowed_owner],
+        },
+    )
+    .await
+    .unwrap());
+
+    let token = wareboxes_api::auth::create_session(&fixture.db, operator.id)
+        .await
+        .unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let first = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            "/api/v1/inventory/aging?sort=age&direction=descending&limit=1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first: InventoryAgingPage = response(first).await;
+    assert_eq!(first.items.len(), 1);
+    assert_eq!(first.items[0].inventory_balance_id, oldest_balance);
+    assert_eq!(first.items[0].bucket, InventoryAgingBucket::Expired);
+    assert!(first.items[0].age_days >= 120);
+    assert_eq!(first.items[0].on_hand_quantity, 11);
+    assert_eq!(first.items[0].available_quantity, 11);
+    assert_eq!(
+        first.items[0].location_barcode.as_deref(),
+        Some("AGING-VISIBLE-OLD")
+    );
+    let cursor = first.next_cursor.unwrap();
+
+    let second = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!(
+                "/api/v1/inventory/aging?sort=age&direction=descending&limit=1&cursor={cursor}"
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    let second: InventoryAgingPage = response(second).await;
+    assert_eq!(second.items[0].inventory_balance_id, middle_balance);
+
+    let changed_filter = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!(
+                "/api/v1/inventory/aging?sort=age&direction=descending&bucket=expired&limit=1&cursor={cursor}"
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(changed_filter.status(), StatusCode::BAD_REQUEST);
+    let error: ErrorResponse = response(changed_filter).await;
+    assert_eq!(error.reason, ErrorReason::InvalidCursor);
+
+    let due = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            "/api/v1/inventory/aging?bucket=due_within_30_days&query=AGING-DUE-30",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(due.status(), StatusCode::OK);
+    let due: InventoryAgingPage = response(due).await;
+    assert_eq!(due.items.len(), 1);
+    assert_eq!(due.items[0].inventory_balance_id, middle_balance);
+    assert_eq!(due.items[0].days_to_expiration, Some(20));
+    assert!(due
+        .items
+        .iter()
+        .all(|row| row.inventory_owner_id == allowed_owner));
 }
 
 #[tokio::test]

@@ -91,10 +91,11 @@ pub use inventory_hold::{
     ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
 };
 pub use inventory_integrity::{
-    InventoryIntegrityIssueKind, InventoryIntegrityIssueResponse, InventoryIntegrityPage,
-    InventoryIntegrityPageRequest, InventoryIntegritySort, InventoryJournalEntryResponse,
-    InventoryJournalPage, InventoryJournalPageRequest, InventoryJournalSort,
-    InventoryJournalTransactionResponse, InventorySortDirection,
+    InventoryAgingBucket, InventoryAgingPage, InventoryAgingPageRequest, InventoryAgingResponse,
+    InventoryAgingSort, InventoryIntegrityIssueKind, InventoryIntegrityIssueResponse,
+    InventoryIntegrityPage, InventoryIntegrityPageRequest, InventoryIntegritySort,
+    InventoryJournalEntryResponse, InventoryJournalPage, InventoryJournalPageRequest,
+    InventoryJournalSort, InventoryJournalTransactionResponse, InventorySortDirection,
 };
 pub use inventory_relocation::{
     ClaimInventoryRelocationByIdRequest, ClaimNextInventoryRelocationRequest,

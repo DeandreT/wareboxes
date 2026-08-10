@@ -1,6 +1,7 @@
 use wareboxes_api_contract::v1::{
-    InventoryIntegrityIssueKind, InventoryIntegrityPage, InventoryIntegritySort,
-    InventoryJournalPage, InventoryJournalSort, InventorySortDirection, OpaqueCursor,
+    InventoryAgingBucket, InventoryAgingPage, InventoryAgingSort, InventoryIntegrityIssueKind,
+    InventoryIntegrityPage, InventoryIntegritySort, InventoryJournalPage, InventoryJournalSort,
+    InventorySortDirection, OpaqueCursor,
 };
 
 use super::{internal_get, ApiError};
@@ -24,6 +25,15 @@ pub struct IntegrityFilters {
     pub item_id: Option<i64>,
 }
 
+#[derive(Clone, Default)]
+pub struct AgingFilters {
+    pub query: Option<String>,
+    pub facility_id: Option<i64>,
+    pub inventory_owner_id: Option<i64>,
+    pub item_id: Option<i64>,
+    pub bucket: Option<InventoryAgingBucket>,
+}
+
 pub async fn inventory_journal(
     filters: JournalFilters,
     sort: InventoryJournalSort,
@@ -40,6 +50,15 @@ pub async fn inventory_integrity_issues(
     cursor: Option<&OpaqueCursor>,
 ) -> Result<InventoryIntegrityPage, ApiError> {
     internal_get(&integrity_path(filters, sort, direction, cursor)).await
+}
+
+pub async fn inventory_aging(
+    filters: AgingFilters,
+    sort: InventoryAgingSort,
+    direction: InventorySortDirection,
+    cursor: Option<&OpaqueCursor>,
+) -> Result<InventoryAgingPage, ApiError> {
+    internal_get(&aging_path(&filters, sort, direction, cursor)).await
 }
 
 fn journal_path(
@@ -97,6 +116,34 @@ fn integrity_path(
     format!("/api/v1/inventory/integrity-issues?{}", params.join("&"))
 }
 
+fn aging_path(
+    filters: &AgingFilters,
+    sort: InventoryAgingSort,
+    direction: InventorySortDirection,
+    cursor: Option<&OpaqueCursor>,
+) -> String {
+    let mut params = vec![
+        "limit=100".to_owned(),
+        format!("sort={}", aging_sort_value(sort)),
+        format!("direction={}", direction_value(direction)),
+    ];
+    push_text(&mut params, "query", filters.query.as_deref());
+    push_id(&mut params, "facility_id", filters.facility_id);
+    push_id(
+        &mut params,
+        "inventory_owner_id",
+        filters.inventory_owner_id,
+    );
+    push_id(&mut params, "item_id", filters.item_id);
+    if let Some(bucket) = filters.bucket {
+        params.push(format!("bucket={}", aging_bucket_value(bucket)));
+    }
+    if let Some(cursor) = cursor {
+        params.push(format!("cursor={}", urlencoding::encode(cursor.as_str())));
+    }
+    format!("/api/v1/inventory/aging?{}", params.join("&"))
+}
+
 fn push_text(params: &mut Vec<String>, key: &str, value: Option<&str>) {
     if let Some(value) = value.filter(|value| !value.is_empty()) {
         params.push(format!("{key}={}", urlencoding::encode(value)));
@@ -125,6 +172,28 @@ fn integrity_sort_value(value: InventoryIntegritySort) -> &'static str {
         InventoryIntegritySort::Facility => "facility",
         InventoryIntegritySort::Client => "client",
         InventoryIntegritySort::Item => "item",
+    }
+}
+
+fn aging_sort_value(value: InventoryAgingSort) -> &'static str {
+    match value {
+        InventoryAgingSort::Age => "age",
+        InventoryAgingSort::Expiration => "expiration",
+        InventoryAgingSort::Quantity => "quantity",
+        InventoryAgingSort::Facility => "facility",
+        InventoryAgingSort::Client => "client",
+        InventoryAgingSort::Item => "item",
+    }
+}
+
+fn aging_bucket_value(value: InventoryAgingBucket) -> &'static str {
+    match value {
+        InventoryAgingBucket::Expired => "expired",
+        InventoryAgingBucket::DueWithin7Days => "due_within_7_days",
+        InventoryAgingBucket::DueWithin30Days => "due_within_30_days",
+        InventoryAgingBucket::DueWithin90Days => "due_within_90_days",
+        InventoryAgingBucket::Beyond90Days => "beyond_90_days",
+        InventoryAgingBucket::NoExpiration => "no_expiration",
     }
 }
 
@@ -165,5 +234,24 @@ mod tests {
         assert!(path.contains("item_batch_id=9"));
         assert!(path.contains("sort=net_quantity&direction=ascending"));
         assert!(path.contains("cursor=ij1.cursor"));
+    }
+
+    #[test]
+    fn aging_paths_bind_risk_sort_and_search() {
+        let path = aging_path(
+            &AgingFilters {
+                query: Some("LOT A/1".to_owned()),
+                facility_id: Some(7),
+                bucket: Some(InventoryAgingBucket::DueWithin30Days),
+                ..Default::default()
+            },
+            InventoryAgingSort::Expiration,
+            InventorySortDirection::Ascending,
+            None,
+        );
+        assert!(path.contains("query=LOT%20A%2F1"));
+        assert!(path.contains("facility_id=7"));
+        assert!(path.contains("bucket=due_within_30_days"));
+        assert!(path.contains("sort=expiration&direction=ascending"));
     }
 }

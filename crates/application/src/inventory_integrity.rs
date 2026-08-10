@@ -37,6 +37,76 @@ pub enum InventoryIntegrityIssueKind {
     Commitments,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryAgingBucket {
+    Expired,
+    DueWithin7Days,
+    DueWithin30Days,
+    DueWithin90Days,
+    Beyond90Days,
+    NoExpiration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryAgingSort {
+    Age,
+    Expiration,
+    Quantity,
+    Facility,
+    Client,
+    Item,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryAgingQuery {
+    pub search: Option<String>,
+    pub facility_id: Option<FacilityId>,
+    pub inventory_owner_id: Option<InventoryOwnerId>,
+    pub item_id: Option<i64>,
+    pub bucket: Option<InventoryAgingBucket>,
+    pub sort: InventoryAgingSort,
+    pub direction: InventorySortDirection,
+    pub offset: u64,
+    pub limit: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryAgingReadModel {
+    pub inventory_balance_id: i64,
+    pub inventory_owner_id: InventoryOwnerId,
+    pub inventory_owner_name: String,
+    pub facility_id: FacilityId,
+    pub facility_name: String,
+    pub location_id: i64,
+    pub location_name: Option<String>,
+    pub location_barcode: Option<String>,
+    pub license_plate_id: Option<i64>,
+    pub license_plate_barcode: Option<String>,
+    pub item_batch_id: i64,
+    pub item_id: i64,
+    pub primary_sku: Option<String>,
+    pub item_description: Option<String>,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub serial: Option<String>,
+    pub received_at: Timestamp,
+    pub age_days: i64,
+    pub expiration: Option<Timestamp>,
+    pub days_to_expiration: Option<i64>,
+    pub bucket: InventoryAgingBucket,
+    pub status: InventoryBalanceStatus,
+    pub on_hand_quantity: i64,
+    pub reserved_quantity: i64,
+    pub held_quantity: i64,
+    pub available_quantity: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryAgingPage {
+    pub items: Vec<InventoryAgingReadModel>,
+    pub next_offset: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryJournalQuery {
     pub search: Option<String>,

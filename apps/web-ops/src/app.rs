@@ -1347,8 +1347,8 @@ fn InventoryIntegrity(on_unauthorized: Callback<()>) -> impl IntoView {
         <section class="page-heading">
             <div>
                 <p class="eyebrow">"Inventory control"</p>
-                <h1>"Journal, reconciliation, and moves"</h1>
-                <p>"Inspect inventory integrity and direct scanner-confirmed facility moves."</p>
+                <h1>"Inventory trace, aging, and control"</h1>
+                <p>"Trace stock age, reconcile projections, and direct scanner-confirmed facility moves."</p>
             </div>
         </section>
         <InventoryIntegrityWorkbench on_unauthorized/>

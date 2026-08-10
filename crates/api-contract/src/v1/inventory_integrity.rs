@@ -40,6 +40,90 @@ pub enum InventoryIntegrityIssueKind {
     Commitments,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryAgingBucket {
+    Expired,
+    #[serde(rename = "due_within_7_days")]
+    DueWithin7Days,
+    #[serde(rename = "due_within_30_days")]
+    DueWithin30Days,
+    #[serde(rename = "due_within_90_days")]
+    DueWithin90Days,
+    #[serde(rename = "beyond_90_days")]
+    Beyond90Days,
+    NoExpiration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryAgingSort {
+    #[default]
+    Age,
+    Expiration,
+    Quantity,
+    Facility,
+    Client,
+    Item,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct InventoryAgingPageRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<OpaqueCursor>,
+    #[serde(default)]
+    pub limit: PageLimit,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<InventoryBalanceSearchQuery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facility_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_owner_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<InventoryAgingBucket>,
+    #[serde(default)]
+    pub sort: InventoryAgingSort,
+    #[serde(default)]
+    pub direction: InventorySortDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InventoryAgingResponse {
+    pub inventory_balance_id: i64,
+    pub inventory_owner_id: i64,
+    pub inventory_owner_name: String,
+    pub facility_id: i64,
+    pub facility_name: String,
+    pub location_id: i64,
+    pub location_name: Option<String>,
+    pub location_barcode: Option<String>,
+    pub license_plate_id: Option<i64>,
+    pub license_plate_barcode: Option<String>,
+    pub item_batch_id: i64,
+    pub item_id: i64,
+    pub primary_sku: Option<String>,
+    pub item_description: Option<String>,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub serial: Option<String>,
+    pub received_at: String,
+    pub age_days: i64,
+    pub expiration: Option<String>,
+    pub days_to_expiration: Option<i64>,
+    pub bucket: InventoryAgingBucket,
+    pub status: InventoryBalanceStatus,
+    pub on_hand_quantity: i64,
+    pub reserved_quantity: i64,
+    pub held_quantity: i64,
+    pub available_quantity: i64,
+}
+
+pub type InventoryAgingPage = CursorPage<InventoryAgingResponse>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct InventoryJournalPageRequest {
@@ -199,5 +283,19 @@ mod tests {
         assert!(
             serde_json::from_str::<InventoryJournalPageRequest>(r#"{"sort":"created"}"#).is_err()
         );
+    }
+
+    #[test]
+    fn aging_defaults_to_oldest_inventory_and_rejects_unknown_fields() {
+        let request: InventoryAgingPageRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(request.sort, InventoryAgingSort::Age);
+        assert_eq!(request.direction, InventorySortDirection::Descending);
+        let filtered: InventoryAgingPageRequest = serde_json::from_str(
+            r#"{"bucket":"due_within_30_days","sort":"expiration","direction":"ascending"}"#,
+        )
+        .unwrap();
+        assert_eq!(filtered.bucket, Some(InventoryAgingBucket::DueWithin30Days));
+        assert_eq!(filtered.sort, InventoryAgingSort::Expiration);
+        assert!(serde_json::from_str::<InventoryAgingPageRequest>(r#"{"age_days":30}"#).is_err());
     }
 }

@@ -224,6 +224,57 @@
   align-items: center;
 }
 
+.integrity-query-bar.aging {
+  grid-template-columns: minmax(260px, 1fr) 150px 84px auto minmax(130px, 1fr) auto;
+}
+
+.aging-table {
+  min-width: 920px;
+}
+
+.aging-table td .status {
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.aging-facts {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.aging-quantity-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--line);
+}
+
+.aging-quantity-grid > div {
+  display: grid;
+  gap: 2px;
+  padding: 7px;
+  border-right: 1px solid var(--line);
+}
+
+.aging-quantity-grid > div:last-child {
+  border-right: 0;
+}
+
+.aging-quantity-grid span {
+  color: var(--ink-soft);
+  font-size: 8px;
+  font-weight: 740;
+  text-transform: uppercase;
+}
+
+.aging-quantity-grid strong {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.aging-detail .detail-note {
+  color: var(--ink-soft);
+  font-size: 9px;
+}
+
 .integrity-query-bar label {
   display: grid;
   min-width: 0;
