@@ -550,6 +550,9 @@ pub struct PickShortagePageRequest {
     pub inventory_owner_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_id: Option<i64>,
+    /// Exact business-facing order key. Requests must not combine this with `order_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_key: Option<String>,
     /// When omitted, the queue returns unresolved shortage work only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<PickShortageStatus>,
@@ -881,12 +884,12 @@ mod tests {
         let page = serde_json::from_value::<PickShortagePageRequest>(json!({
             "facility_id": 3,
             "inventory_owner_id": 4,
-            "order_id": 5,
+            "order_key": "ORDER-005",
             "status": "recovery_in_progress",
             "limit": 25
         }))
         .unwrap();
-        assert_eq!(page.order_id, Some(5));
+        assert_eq!(page.order_key.as_deref(), Some("ORDER-005"));
         assert_eq!(page.limit.get(), 25);
         assert_eq!(page.sort, PickShortageQueueSort::Reported);
         assert_eq!(page.direction, PickShortageQueueSortDirection::Descending);

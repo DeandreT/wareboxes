@@ -154,8 +154,8 @@ async fn shortage_reallocation_progresses_none_partial_full_then_packing_ready()
         .request(
             Method::GET,
             &format!(
-                "/api/v1/pick-shortages?facility_id={}&inventory_owner_id={}&order_id={}&status=awaiting_inventory&limit=20",
-                shortage.facility_id, shortage.inventory_owner_id, shortage.order_id
+                "/api/v1/pick-shortages?facility_id={}&inventory_owner_id={}&order_key=short-recovery-ORDER&status=awaiting_inventory&limit=20",
+                shortage.facility_id, shortage.inventory_owner_id
             ),
             None,
             None,
@@ -775,10 +775,7 @@ async fn shortage_queue_cursor_pages_without_duplicates_and_rejects_filter_reuse
             "/api/v1/pick-shortages?facility_id={}&inventory_owner_id={}&limit=1&cursor={cursor}",
             shortage.facility_id, shortage.inventory_owner_id
         ),
-        format!(
-            "/api/v1/pick-shortages?{filters}&order_id={}&cursor={cursor}",
-            shortage.order_id
-        ),
+        format!("/api/v1/pick-shortages?{filters}&order_key=cursor-mismatch&cursor={cursor}"),
     ] {
         let mismatch = shortage.request(Method::GET, &path, None, None).await;
         let mismatch =

@@ -133,27 +133,28 @@ pub async fn list_shortages(
           AND ($6::BIGINT IS NULL OR shortage.facility_id = $6)
           AND ($7::BIGINT IS NULL OR shortage.inventory_owner_id = $7)
           AND ($8::BIGINT IS NULL OR shortage.order_id = $8)
-          AND (($9::TEXT IS NULL AND shortage.status <> 'resolved') OR shortage.status = $9)
+          AND ($9::TEXT IS NULL OR LOWER(order_header.order_key) = LOWER($9))
+          AND (($10::TEXT IS NULL AND shortage.status <> 'resolved') OR shortage.status = $10)
         ORDER BY
-          CASE WHEN $10='reported' AND $11 THEN shortage.reported_at END ASC,
-          CASE WHEN $10='reported' AND NOT $11 THEN shortage.reported_at END DESC,
-          CASE WHEN $10='order' AND $11 THEN LOWER(order_header.order_key) END ASC,
-          CASE WHEN $10='order' AND NOT $11 THEN LOWER(order_header.order_key) END DESC,
-          CASE WHEN $10='status' AND $11 THEN shortage.status END ASC,
-          CASE WHEN $10='status' AND NOT $11 THEN shortage.status END DESC,
-          CASE WHEN $10='short_quantity' AND $11 THEN shortage.short_qty END ASC,
-          CASE WHEN $10='short_quantity' AND NOT $11 THEN shortage.short_qty END DESC,
-          CASE WHEN $10='remaining_quantity' AND $11 THEN shortage.remaining_to_allocate_qty END ASC,
-          CASE WHEN $10='remaining_quantity' AND NOT $11 THEN shortage.remaining_to_allocate_qty END DESC,
-          CASE WHEN $10='inventory_owner' AND $11 THEN LOWER(inventory_owner.name) END ASC,
-          CASE WHEN $10='inventory_owner' AND NOT $11 THEN LOWER(inventory_owner.name) END DESC,
-          CASE WHEN $10='item' AND $11 THEN LOWER(COALESCE(item.description, '')) END ASC,
-          CASE WHEN $10='item' AND NOT $11 THEN LOWER(COALESCE(item.description, '')) END DESC,
-          CASE WHEN $10='facility' AND $11 THEN LOWER(facility.name) END ASC,
-          CASE WHEN $10='facility' AND NOT $11 THEN LOWER(facility.name) END DESC,
-          CASE WHEN $11 THEN shortage.id END ASC,
-          CASE WHEN NOT $11 THEN shortage.id END DESC
-        OFFSET $12 LIMIT $13"#
+          CASE WHEN $11='reported' AND $12 THEN shortage.reported_at END ASC,
+          CASE WHEN $11='reported' AND NOT $12 THEN shortage.reported_at END DESC,
+          CASE WHEN $11='order' AND $12 THEN LOWER(order_header.order_key) END ASC,
+          CASE WHEN $11='order' AND NOT $12 THEN LOWER(order_header.order_key) END DESC,
+          CASE WHEN $11='status' AND $12 THEN shortage.status END ASC,
+          CASE WHEN $11='status' AND NOT $12 THEN shortage.status END DESC,
+          CASE WHEN $11='short_quantity' AND $12 THEN shortage.short_qty END ASC,
+          CASE WHEN $11='short_quantity' AND NOT $12 THEN shortage.short_qty END DESC,
+          CASE WHEN $11='remaining_quantity' AND $12 THEN shortage.remaining_to_allocate_qty END ASC,
+          CASE WHEN $11='remaining_quantity' AND NOT $12 THEN shortage.remaining_to_allocate_qty END DESC,
+          CASE WHEN $11='inventory_owner' AND $12 THEN LOWER(inventory_owner.name) END ASC,
+          CASE WHEN $11='inventory_owner' AND NOT $12 THEN LOWER(inventory_owner.name) END DESC,
+          CASE WHEN $11='item' AND $12 THEN LOWER(COALESCE(item.description, '')) END ASC,
+          CASE WHEN $11='item' AND NOT $12 THEN LOWER(COALESCE(item.description, '')) END DESC,
+          CASE WHEN $11='facility' AND $12 THEN LOWER(facility.name) END ASC,
+          CASE WHEN $11='facility' AND NOT $12 THEN LOWER(facility.name) END DESC,
+          CASE WHEN $12 THEN shortage.id END ASC,
+          CASE WHEN NOT $12 THEN shortage.id END DESC
+        OFFSET $13 LIMIT $14"#
     );
     let fetch_limit = i64::from(query.limit) + 1;
     let rows = sqlx::query(&sql)
@@ -165,6 +166,12 @@ pub async fn list_shortages(
         .bind(query.facility_id.map(|id| id.get()))
         .bind(query.inventory_owner_id.map(|id| id.get()))
         .bind(query.order_id.map(|id| id.get()))
+        .bind(
+            query
+                .order_key
+                .as_ref()
+                .map(wareboxes_domain::OrderKey::as_str),
+        )
         .bind(query.status.map(PickShortageStatus::as_str))
         .bind(query.sort.as_str())
         .bind(query.direction.is_ascending())

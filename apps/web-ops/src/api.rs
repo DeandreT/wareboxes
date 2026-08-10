@@ -93,6 +93,17 @@ pub struct ReplenishmentQueueFilters {
     pub direction: ReplenishmentWorkSortDirection,
 }
 
+#[derive(Clone)]
+pub struct PickShortageFilters {
+    pub facility_id: Option<i64>,
+    pub inventory_owner_id: Option<i64>,
+    pub order_id: Option<i64>,
+    pub order_key: Option<String>,
+    pub status: Option<PickShortageStatus>,
+    pub sort: PickShortageQueueSort,
+    pub direction: PickShortageQueueSortDirection,
+}
+
 #[derive(Clone, Copy)]
 pub struct ReplenishmentPolicyFilters {
     pub facility_id: Option<i64>,
@@ -161,18 +172,18 @@ mod browser {
         InventorySortDirection, InventoryStatusTransitionResponse, OpaqueCursor,
         OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
         OrderPage, PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
-        PackingQueuePage, PickConfirmationHistoryPage, PickShortagePage, PickShortageQueueSort,
-        PickShortageQueueSortDirection, PickShortageResponse, PickShortageStatus,
-        PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
-        PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
-        PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
-        ReallocatePickShortageResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
-        ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest,
-        ReleaseOrderResponse, RemovePackedContentRequest, RemovePackedContentResponse,
-        ReopenCartonRequest, ReopenCartonResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
-        ReplenishmentWorkCancellationResponse, RetireReplenishmentPolicyRequest,
-        RetireReplenishmentPolicyResponse, ReversePickConfirmationRequest,
-        ReversePickConfirmationResponse, VoidCartonRequest, VoidCartonResponse, WebSessionContext,
+        PackingQueuePage, PickConfirmationHistoryPage, PickShortageFilters, PickShortagePage,
+        PickShortageResponse, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
+        PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
+        PlanOrderAllocationResponse, PlanReplenishmentRequest, PlanReplenishmentResponse,
+        ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleaseInventoryHoldRequest,
+        ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
+        ReleaseOrderRequest, ReleaseOrderResponse, RemovePackedContentRequest,
+        RemovePackedContentResponse, ReopenCartonRequest, ReopenCartonResponse,
+        ReplenishmentPolicyPage, ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse,
+        RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
+        ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
+        VoidCartonResponse, WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -581,31 +592,10 @@ mod browser {
     }
 
     pub async fn pick_shortages(
-        facility_id: Option<i64>,
-        inventory_owner_id: Option<i64>,
-        order_id: Option<i64>,
-        status: Option<PickShortageStatus>,
-        sort: PickShortageQueueSort,
-        direction: PickShortageQueueSortDirection,
+        filters: &PickShortageFilters,
         cursor: Option<&OpaqueCursor>,
     ) -> Result<PickShortagePage, ApiError> {
-        let mut path = format!(
-            "/api/v1/pick-shortages?limit=100&sort={}&direction={}",
-            pick_shortage_sort_wire(sort),
-            pick_shortage_sort_direction_wire(direction),
-        );
-        append_i64_query(&mut path, "facility_id", facility_id);
-        append_i64_query(&mut path, "inventory_owner_id", inventory_owner_id);
-        append_i64_query(&mut path, "order_id", order_id);
-        if let Some(status) = status {
-            path.push_str("&status=");
-            path.push_str(pick_shortage_status_wire(status));
-        }
-        if let Some(cursor) = cursor {
-            path.push_str("&cursor=");
-            path.push_str(&urlencoding::encode(cursor.as_str()));
-        }
-        get(&path).await
+        get(&super::pick_shortage_page_path(filters, cursor)).await
     }
 
     pub async fn pick_shortage(shortage_id: i64) -> Result<PickShortageResponse, ApiError> {
@@ -833,45 +823,6 @@ mod browser {
         match direction {
             InventorySortDirection::Ascending => "ascending",
             InventorySortDirection::Descending => "descending",
-        }
-    }
-
-    fn append_i64_query(path: &mut String, name: &str, value: Option<i64>) {
-        if let Some(value) = value {
-            path.push('&');
-            path.push_str(name);
-            path.push('=');
-            path.push_str(&value.to_string());
-        }
-    }
-
-    const fn pick_shortage_status_wire(status: PickShortageStatus) -> &'static str {
-        match status {
-            PickShortageStatus::AwaitingInventory => "awaiting_inventory",
-            PickShortageStatus::RecoveryInProgress => "recovery_in_progress",
-            PickShortageStatus::Resolved => "resolved",
-        }
-    }
-
-    const fn pick_shortage_sort_wire(sort: PickShortageQueueSort) -> &'static str {
-        match sort {
-            PickShortageQueueSort::Reported => "reported",
-            PickShortageQueueSort::Order => "order",
-            PickShortageQueueSort::Status => "status",
-            PickShortageQueueSort::ShortQuantity => "short_quantity",
-            PickShortageQueueSort::RemainingQuantity => "remaining_quantity",
-            PickShortageQueueSort::InventoryOwner => "inventory_owner",
-            PickShortageQueueSort::Item => "item",
-            PickShortageQueueSort::Facility => "facility",
-        }
-    }
-
-    const fn pick_shortage_sort_direction_wire(
-        direction: PickShortageQueueSortDirection,
-    ) -> &'static str {
-        match direction {
-            PickShortageQueueSortDirection::Ascending => "ascending",
-            PickShortageQueueSortDirection::Descending => "descending",
         }
     }
 }
@@ -1172,12 +1123,7 @@ pub async fn configure_facility_shipping_origin(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn pick_shortages(
-    _facility_id: Option<i64>,
-    _inventory_owner_id: Option<i64>,
-    _order_id: Option<i64>,
-    _status: Option<PickShortageStatus>,
-    _sort: PickShortageQueueSort,
-    _direction: PickShortageQueueSortDirection,
+    _filters: &PickShortageFilters,
     _cursor: Option<&OpaqueCursor>,
 ) -> Result<PickShortagePage, ApiError> {
     Err(ApiError::unavailable())
@@ -1328,6 +1274,28 @@ fn replenishment_queue_page_path(
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+fn pick_shortage_page_path(filters: &PickShortageFilters, cursor: Option<&OpaqueCursor>) -> String {
+    let mut path = format!(
+        "/api/v1/pick-shortages?limit=100&sort={}&direction={}",
+        pick_shortage_sort_wire(filters.sort),
+        pick_shortage_sort_direction_wire(filters.direction),
+    );
+    append_optional_id(&mut path, "facility_id", filters.facility_id);
+    append_optional_id(&mut path, "inventory_owner_id", filters.inventory_owner_id);
+    append_optional_id(&mut path, "order_id", filters.order_id);
+    if let Some(order_key) = filters.order_key.as_deref() {
+        path.push_str("&order_key=");
+        path.push_str(&urlencoding::encode(order_key));
+    }
+    if let Some(status) = filters.status {
+        path.push_str("&status=");
+        path.push_str(pick_shortage_status_wire(status));
+    }
+    append_cursor(&mut path, cursor);
+    path
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn replenishment_cancellation_path(work_id: i64) -> String {
     format!("/api/v1/replenishment-tasks/{work_id}/cancellations")
 }
@@ -1359,6 +1327,39 @@ fn append_cursor(path: &mut String, cursor: Option<&OpaqueCursor>) {
     if let Some(cursor) = cursor {
         path.push_str("&cursor=");
         path.push_str(&urlencoding::encode(cursor.as_str()));
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+const fn pick_shortage_status_wire(status: PickShortageStatus) -> &'static str {
+    match status {
+        PickShortageStatus::AwaitingInventory => "awaiting_inventory",
+        PickShortageStatus::RecoveryInProgress => "recovery_in_progress",
+        PickShortageStatus::Resolved => "resolved",
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+const fn pick_shortage_sort_wire(sort: PickShortageQueueSort) -> &'static str {
+    match sort {
+        PickShortageQueueSort::Reported => "reported",
+        PickShortageQueueSort::Order => "order",
+        PickShortageQueueSort::Status => "status",
+        PickShortageQueueSort::ShortQuantity => "short_quantity",
+        PickShortageQueueSort::RemainingQuantity => "remaining_quantity",
+        PickShortageQueueSort::InventoryOwner => "inventory_owner",
+        PickShortageQueueSort::Item => "item",
+        PickShortageQueueSort::Facility => "facility",
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+const fn pick_shortage_sort_direction_wire(
+    direction: PickShortageQueueSortDirection,
+) -> &'static str {
+    match direction {
+        PickShortageQueueSortDirection::Ascending => "ascending",
+        PickShortageQueueSortDirection::Descending => "descending",
     }
 }
 
@@ -1471,6 +1472,27 @@ mod tests {
         assert_eq!(
             replenishment_cancellation_path(42),
             "/api/v1/replenishment-tasks/42/cancellations"
+        );
+    }
+
+    #[test]
+    fn pick_shortage_path_uses_business_order_key_and_server_sort() {
+        let cursor = OpaqueCursor::new("ps3.cursor".to_owned()).unwrap();
+        let path = pick_shortage_page_path(
+            &PickShortageFilters {
+                facility_id: Some(3),
+                inventory_owner_id: Some(4),
+                order_id: None,
+                order_key: Some("ORDER 5/BLUE".to_owned()),
+                status: Some(PickShortageStatus::RecoveryInProgress),
+                sort: PickShortageQueueSort::RemainingQuantity,
+                direction: PickShortageQueueSortDirection::Ascending,
+            },
+            Some(&cursor),
+        );
+        assert_eq!(
+            path,
+            "/api/v1/pick-shortages?limit=100&sort=remaining_quantity&direction=ascending&facility_id=3&inventory_owner_id=4&order_key=ORDER%205%2FBLUE&status=recovery_in_progress&cursor=ps3.cursor"
         );
     }
 

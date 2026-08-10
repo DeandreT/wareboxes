@@ -50,7 +50,7 @@ struct QueueSignals {
     generation: RwSignal<u64>,
     facility_id: RwSignal<String>,
     inventory_owner_id: RwSignal<String>,
-    order_id: RwSignal<String>,
+    order_key: RwSignal<String>,
     status: RwSignal<String>,
     sort: RwSignal<SortSpec<ShortageSort>>,
     on_unauthorized: Callback<()>,
@@ -99,7 +99,7 @@ pub(super) fn PickShortageWorkbench(
     let error = RwSignal::new(None::<String>);
     let facility_id = RwSignal::new(String::new());
     let inventory_owner_id = RwSignal::new(String::new());
-    let order_id = RwSignal::new(String::new());
+    let order_key = RwSignal::new(String::new());
     let status = RwSignal::new(String::new());
     let generation = RwSignal::new(0_u64);
     let current_cursor = RwSignal::new(None::<OpaqueCursor>);
@@ -142,7 +142,7 @@ pub(super) fn PickShortageWorkbench(
         generation,
         facility_id,
         inventory_owner_id,
-        order_id,
+        order_key,
         status,
         sort,
         on_unauthorized,
@@ -181,7 +181,7 @@ pub(super) fn PickShortageWorkbench(
 
     let apply_filters = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
-        if let Err(message) = validate_order_filter(&order_id.get_untracked()) {
+        if let Err(message) = validate_order_filter(&order_key.get_untracked()) {
             error.set(Some(message));
             return;
         }
@@ -289,15 +289,14 @@ pub(super) fn PickShortageWorkbench(
                             </select>
                         </label>
                         <label class="shortage-order-filter">
-                            <span class="sr-only">"Order ID"</span>
+                            <span class="sr-only">"Order key"</span>
                             <input
-                                type="number"
-                                min="1"
-                                step="1"
-                                placeholder="Order ID"
-                                aria-label="Order ID"
-                                prop:value=move || order_id.get()
-                                on:input=move |event| order_id.set(event_target_value(&event))
+                                type="search"
+                                maxlength="200"
+                                placeholder="Order key"
+                                aria-label="Order key"
+                                prop:value=move || order_key.get()
+                                on:input=move |event| order_key.set(event_target_value(&event))
                             />
                         </label>
                         <label>
@@ -677,23 +676,23 @@ fn request_queue(
     let generation = signals.generation.get_untracked();
     let facility_id = parse_filter_id(&signals.facility_id.get_untracked());
     let inventory_owner_id = parse_filter_id(&signals.inventory_owner_id.get_untracked());
-    let order_id = parse_filter_id(&signals.order_id.get_untracked());
+    let order_key = normalized_order_filter(&signals.order_key.get_untracked());
     let status = parse_shortage_status(&signals.status.get_untracked());
     let sort = signals.sort.get_untracked();
     signals.loading.set(true);
     signals.error.set(None);
 
     leptos::task::spawn_local(async move {
-        let response = api::pick_shortages(
+        let filters = api::PickShortageFilters {
             facility_id,
             inventory_owner_id,
-            order_id,
+            order_id: None,
+            order_key,
             status,
-            map_shortage_sort(sort.key),
-            map_sort_direction(sort.direction),
-            cursor.as_ref(),
-        )
-        .await;
+            sort: map_shortage_sort(sort.key),
+            direction: map_sort_direction(sort.direction),
+        };
+        let response = api::pick_shortages(&filters, cursor.as_ref()).await;
         if signals.generation.get_untracked() != generation {
             return;
         }
@@ -905,11 +904,16 @@ const fn map_sort_direction(direction: SortDirection) -> PickShortageQueueSortDi
 
 fn validate_order_filter(value: &str) -> Result<(), String> {
     let value = value.trim();
-    if value.is_empty() || value.parse::<i64>().is_ok_and(|id| id > 0) {
+    if value.chars().count() <= 200 {
         Ok(())
     } else {
-        Err("Order ID must be a positive whole number.".to_owned())
+        Err("Order key cannot exceed 200 characters.".to_owned())
     }
+}
+
+fn normalized_order_filter(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn parse_filter_id(value: &str) -> Option<i64> {
@@ -1035,8 +1039,12 @@ mod tests {
         assert_eq!(parse_filter_id(" 41 "), Some(41));
         assert_eq!(parse_filter_id("0"), None);
         assert_eq!(parse_filter_id("bad"), None);
-        assert!(validate_order_filter("41").is_ok());
-        assert!(validate_order_filter("bad").is_err());
+        assert!(validate_order_filter("ORDER-41").is_ok());
+        assert!(validate_order_filter(&"x".repeat(201)).is_err());
+        assert_eq!(
+            normalized_order_filter("  ORDER-41 ").as_deref(),
+            Some("ORDER-41")
+        );
     }
 
     #[test]

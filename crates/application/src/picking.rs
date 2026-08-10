@@ -478,11 +478,12 @@ pub struct PickShortageQuery {
 }
 
 /// Scoped filters for the shortage work queue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickShortagePageQuery {
     pub facility_id: Option<FacilityId>,
     pub inventory_owner_id: Option<InventoryOwnerId>,
     pub order_id: Option<OrderId>,
+    pub order_key: Option<wareboxes_domain::OrderKey>,
     /// `None` selects unresolved shortage work rather than historical rows.
     pub status: Option<PickShortageStatus>,
     pub offset: u64,

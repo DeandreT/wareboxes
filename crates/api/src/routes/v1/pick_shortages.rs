@@ -24,7 +24,7 @@ use wareboxes_application::picking::{
 };
 use wareboxes_domain::{
     AllocationExecutionStage, AllocationOutcome, AllocationStrategy, FacilityId, InventoryOwnerId,
-    OrderId, OrderRevision, OrderStatus, PickContentId, PickQuantity, PickScanValue,
+    OrderId, OrderKey, OrderRevision, OrderStatus, PickContentId, PickQuantity, PickScanValue,
     PickShortShipNote, PickShortShipReason, PickShortageDetails, PickShortageId, PickShortageNote,
     PickShortageReason, PickShortageResolution, PickShortageRevision, PickShortageStatus,
     PickTaskId, ShortShipDemandQuantities,
@@ -39,7 +39,7 @@ use crate::state::AppState;
 
 const OPERATOR_PERMISSION: &str = "wms";
 const SUPERVISOR_PERMISSION: &str = "wms_supervisor";
-const CURSOR_PREFIX: &str = "ps2.";
+const CURSOR_PREFIX: &str = "ps3.";
 
 pub async fn report(
     State(state): State<AppState>,
@@ -158,6 +158,14 @@ pub async fn list(
         .map(OrderId::new)
         .transpose()
         .map_err(domain_validation)?;
+    let order_key = query
+        .order_key
+        .map(|value| OrderKey::new(value.trim().to_owned()))
+        .transpose()
+        .map_err(domain_validation)?;
+    if order_id.is_some() && order_key.is_some() {
+        return Err(AppError::bad_request("filter by order_id or order_key, not both").into());
+    }
     let status = query.status.map(map_status_to_domain);
     if query.limit.get() > 100 {
         return Err(
@@ -168,11 +176,12 @@ pub async fn list(
         facility_id: facility_id.map(FacilityId::get),
         inventory_owner_id: inventory_owner_id.map(InventoryOwnerId::get),
         order_id: order_id.map(OrderId::get),
+        order_key: order_key.as_ref().map(|value| value.as_str().to_owned()),
         status,
         sort: query.sort,
         direction: query.direction,
     };
-    let offset = decode_bound_cursor(query.cursor.as_ref(), filters)?;
+    let offset = decode_bound_cursor(query.cursor.as_ref(), filters.clone())?;
     let page = repo::picking::list_shortages(
         &state.db,
         &user.tenant,
@@ -180,6 +189,7 @@ pub async fn list(
             facility_id,
             inventory_owner_id,
             order_id,
+            order_key,
             status,
             offset,
             limit: query.limit.get(),
@@ -577,17 +587,18 @@ fn revision(value: i64) -> V1Result<Revision> {
     Revision::new(value).map_err(|_| V1Error::internal("repository produced an invalid revision"))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct CursorFilters {
     facility_id: Option<i64>,
     inventory_owner_id: Option<i64>,
     order_id: Option<i64>,
+    order_key: Option<String>,
     status: Option<PickShortageStatus>,
     sort: PickShortageQueueSort,
     direction: PickShortageQueueSortDirection,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct BoundCursor {
     filters: CursorFilters,
     offset: u64,
@@ -599,7 +610,7 @@ fn decode_cursor(cursor: &OpaqueCursor) -> V1Result<BoundCursor> {
         .strip_prefix(CURSOR_PREFIX)
         .ok_or_else(|| V1Error::invalid_cursor_for("pick shortages"))?;
     let parts = encoded.split('.').collect::<Vec<_>>();
-    if parts.len() != 7 {
+    if parts.len() != 8 {
         return Err(V1Error::invalid_cursor_for("pick shortages"));
     }
     Ok(BoundCursor {
@@ -607,20 +618,22 @@ fn decode_cursor(cursor: &OpaqueCursor) -> V1Result<BoundCursor> {
             facility_id: parse_optional_id(parts[0])?,
             inventory_owner_id: parse_optional_id(parts[1])?,
             order_id: parse_optional_id(parts[2])?,
-            status: parse_status_code(parts[3])?,
-            sort: parse_queue_sort_code(parts[4])?,
-            direction: parse_queue_direction_code(parts[5])?,
+            order_key: parse_optional_text(parts[3])?,
+            status: parse_status_code(parts[4])?,
+            sort: parse_queue_sort_code(parts[5])?,
+            direction: parse_queue_direction_code(parts[6])?,
         },
-        offset: parse_offset(parts[6])?,
+        offset: parse_offset(parts[7])?,
     })
 }
 
 fn encode_cursor(cursor: BoundCursor) -> AppResult<OpaqueCursor> {
     OpaqueCursor::new(format!(
-        "{CURSOR_PREFIX}{}.{}.{}.{}.{}.{}.{:016x}",
+        "{CURSOR_PREFIX}{}.{}.{}.{}.{}.{}.{}.{:016x}",
         encode_optional_id(cursor.filters.facility_id),
         encode_optional_id(cursor.filters.inventory_owner_id),
         encode_optional_id(cursor.filters.order_id),
+        encode_optional_text(cursor.filters.order_key.as_deref()),
         status_code(cursor.filters.status),
         queue_sort_code(cursor.filters.sort),
         queue_direction_code(cursor.filters.direction),
@@ -666,6 +679,23 @@ fn parse_offset(encoded: &str) -> V1Result<u64> {
 
 fn encode_optional_id(value: Option<i64>) -> String {
     value.map_or_else(|| "a".to_owned(), |value| format!("{value:016x}"))
+}
+
+fn encode_optional_text(value: Option<&str>) -> String {
+    value.map_or_else(|| "a".to_owned(), hex::encode)
+}
+
+fn parse_optional_text(encoded: &str) -> V1Result<Option<String>> {
+    if encoded == "a" {
+        return Ok(None);
+    }
+    if encoded.is_empty() {
+        return Err(V1Error::invalid_cursor_for("pick shortages"));
+    }
+    let bytes = hex::decode(encoded).map_err(|_| V1Error::invalid_cursor_for("pick shortages"))?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| V1Error::invalid_cursor_for("pick shortages"))
 }
 
 const fn status_code(status: Option<PickShortageStatus>) -> &'static str {
@@ -766,6 +796,7 @@ mod tests {
                 facility_id: Some(3),
                 inventory_owner_id: Some(5),
                 order_id: Some(7),
+                order_key: Some("ORDER-007".to_owned()),
                 status: Some(PickShortageStatus::RecoveryInProgress),
                 sort: PickShortageQueueSort::RemainingQuantity,
                 direction: PickShortageQueueSortDirection::Ascending,
@@ -773,18 +804,18 @@ mod tests {
             offset: 100,
         };
 
-        let encoded = encode_cursor(expected).unwrap();
+        let encoded = encode_cursor(expected.clone()).unwrap();
         assert_eq!(decode_cursor(&encoded).unwrap(), expected);
     }
 
     #[test]
     fn shortage_cursor_rejects_other_resources_and_invalid_identities() {
         for value in [
-            "sq1.a.a.a.a.8000000000000000.0000000000000001",
-            "ps2.a.a.a.x.r.d.0000000000000001",
-            "ps2.a.a.a.a.x.d.0000000000000001",
-            "ps2.a.a.a.a.r.x.0000000000000001",
-            "ps2.a.a.a.a.r.d.not-an-offset",
+            "sq1.a.a.a.a.a.8000000000000000.0000000000000001",
+            "ps3.a.a.a.x.a.r.d.0000000000000001",
+            "ps3.a.a.a.a.a.x.d.0000000000000001",
+            "ps3.a.a.a.a.a.r.x.0000000000000001",
+            "ps3.a.a.a.a.a.r.d.not-an-offset",
         ] {
             let cursor = OpaqueCursor::new(value).unwrap();
             assert!(decode_cursor(&cursor).is_err(), "{value}");
@@ -797,12 +828,13 @@ mod tests {
             facility_id: None,
             inventory_owner_id: None,
             order_id: None,
+            order_key: None,
             status: None,
             sort: PickShortageQueueSort::Reported,
             direction: PickShortageQueueSortDirection::Descending,
         };
         let cursor = encode_cursor(BoundCursor {
-            filters,
+            filters: filters.clone(),
             offset: 100,
         })
         .unwrap();
