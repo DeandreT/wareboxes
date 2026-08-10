@@ -1,9 +1,9 @@
 use sqlx::Row;
 use wareboxes_application::outbound_load::{
-    OutboundLoadCartonReadModel, OutboundLoadCursor, OutboundLoadProgressReadModel,
-    OutboundLoadQuery, OutboundLoadQueueEntryReadModel, OutboundLoadQueuePage,
-    OutboundLoadQueueQuery, OutboundLoadReadModel, OutboundLoadShipmentReadModel,
-    PackedCartonContentPositionReadModel, PackedCartonPositionQuery, PackedCartonPositionReadModel,
+    OutboundLoadCartonReadModel, OutboundLoadProgressReadModel, OutboundLoadQuery,
+    OutboundLoadQueueEntryReadModel, OutboundLoadQueuePage, OutboundLoadQueueQuery,
+    OutboundLoadReadModel, OutboundLoadShipmentReadModel, PackedCartonContentPositionReadModel,
+    PackedCartonPositionQuery, PackedCartonPositionReadModel,
 };
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
@@ -89,6 +89,8 @@ pub async fn list(
     if query.limit == 0 || query.limit > 100 {
         return Err(AppError::bad_request("outbound load page limit is invalid"));
     }
+    let offset = i64::try_from(query.offset)
+        .map_err(|_| AppError::bad_request("outbound load page offset is invalid"))?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, access.user_id.get()).await?;
@@ -99,15 +101,6 @@ pub async fn list(
         }
     }
     let status = query.status.map(OutboundLoadStatus::as_str);
-    let cursor_present = query.cursor.is_some();
-    let cursor_time = query
-        .cursor
-        .as_ref()
-        .and_then(|cursor| cursor.scheduled_departure_at);
-    let cursor_id = query
-        .cursor
-        .as_ref()
-        .map(|cursor| cursor.outbound_load_id.get());
     let fetch_limit = i64::from(query.limit) + 1;
     let rows = sqlx::query(
         r#"
@@ -152,18 +145,22 @@ pub async fn list(
                           AND assignment.deleted IS NULL)
                 )
           )
-          AND (
-              NOT $10
-              OR ($11::TIMESTAMPTZ IS NOT NULL AND
-                  (load.scheduled_departure_at > $11
-                   OR load.scheduled_departure_at IS NULL
-                   OR (load.scheduled_departure_at = $11 AND load.id > $12)))
-              OR ($11::TIMESTAMPTZ IS NULL
-                  AND load.scheduled_departure_at IS NULL AND load.id > $12)
-          )
         GROUP BY load.id, facility.name, staging.name, dock.name
-        ORDER BY load.scheduled_departure_at ASC NULLS LAST, load.id ASC
-        LIMIT $13
+        ORDER BY
+          CASE WHEN $10='reference' AND $11 THEN LOWER(load.load_reference) END ASC,
+          CASE WHEN $10='reference' AND NOT $11 THEN LOWER(load.load_reference) END DESC,
+          CASE WHEN $10='status' AND $11 THEN load.state END ASC,
+          CASE WHEN $10='status' AND NOT $11 THEN load.state END DESC,
+          CASE WHEN $10='progress' AND $11 THEN COUNT(carton.id) FILTER (WHERE carton.state='loaded') END ASC,
+          CASE WHEN $10='progress' AND NOT $11 THEN COUNT(carton.id) FILTER (WHERE carton.state='loaded') END DESC,
+          CASE WHEN $10='facility' AND $11 THEN LOWER(facility.name) END ASC,
+          CASE WHEN $10='facility' AND NOT $11 THEN LOWER(facility.name) END DESC,
+          CASE WHEN $10='trailer' AND $11 THEN LOWER(COALESCE(load.trailer_number,'')) END ASC,
+          CASE WHEN $10='trailer' AND NOT $11 THEN LOWER(COALESCE(load.trailer_number,'')) END DESC,
+          CASE WHEN $10='scheduled_departure' AND $11 THEN load.scheduled_departure_at END ASC NULLS LAST,
+          CASE WHEN $10='scheduled_departure' AND NOT $11 THEN load.scheduled_departure_at END DESC NULLS LAST,
+          load.id ASC
+        OFFSET $12 LIMIT $13
         "#,
     )
     .bind(access.tenant_id.get())
@@ -175,9 +172,9 @@ pub async fn list(
     .bind(query.scheduled_to)
     .bind(scope.all_inventory_owners)
     .bind(&scope.inventory_owner_ids)
-    .bind(cursor_present)
-    .bind(cursor_time)
-    .bind(cursor_id)
+    .bind(query.sort.as_str())
+    .bind(query.direction.is_ascending())
+    .bind(offset)
     .bind(fetch_limit)
     .fetch_all(&mut *tx)
     .await?;
@@ -186,18 +183,7 @@ pub async fn list(
         .into_iter()
         .take(query.limit as usize)
         .collect::<Vec<_>>();
-    let next_cursor = if has_more {
-        rows.last()
-            .map(|row| {
-                Ok::<OutboundLoadCursor, AppError>(OutboundLoadCursor {
-                    scheduled_departure_at: row.try_get("scheduled_departure_at")?,
-                    outbound_load_id: positive(row.try_get("id")?, OutboundLoadId::new)?,
-                })
-            })
-            .transpose()?
-    } else {
-        None
-    };
+    let next_offset = has_more.then(|| query.offset + u64::from(query.limit));
     let entries = rows
         .into_iter()
         .map(queue_entry)
@@ -205,7 +191,7 @@ pub async fn list(
     tx.commit().await?;
     Ok(OutboundLoadQueuePage {
         entries,
-        next_cursor,
+        next_offset,
     })
 }
 

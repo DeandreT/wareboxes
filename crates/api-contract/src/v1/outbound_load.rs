@@ -151,7 +151,27 @@ pub struct ConfirmOutboundLoadDepartureRequest {
     pub seal_number: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboundLoadQueueSort {
+    Reference,
+    Status,
+    Progress,
+    Facility,
+    Trailer,
+    #[default]
+    ScheduledDeparture,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboundLoadQueueSortDirection {
+    #[default]
+    Ascending,
+    Descending,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct OutboundLoadQueuePageRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -166,6 +186,10 @@ pub struct OutboundLoadQueuePageRequest {
     pub cursor: Option<OpaqueCursor>,
     #[serde(default)]
     pub limit: PageLimit,
+    #[serde(default)]
+    pub sort: OutboundLoadQueueSort,
+    #[serde(default)]
+    pub direction: OutboundLoadQueueSortDirection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

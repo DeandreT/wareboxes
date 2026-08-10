@@ -7,19 +7,21 @@ use wareboxes_api_contract::v1::{
     CancelOutboundLoadRequest, CancelOutboundLoadResponse, CompleteOutboundLoadLoadingRequest,
     CompleteOutboundLoadLoadingResponse, ConfirmOutboundLoadDepartureRequest,
     ConfirmOutboundLoadDepartureResponse, LoadOutboundCartonRequest, MovePackedCartonResponse,
-    OpaqueCursor, OutboundLoadQueuePage, OutboundLoadQueuePageRequest, OutboundLoadResponse,
-    OutboundLoadStatus as ApiStatus, PackedCartonPositionResponse, PlanOutboundLoadRequest,
-    PlanOutboundLoadResponse, ReleaseOutboundLoadRequest, ReleaseOutboundLoadResponse,
-    StageOutboundCartonRequest, StartOutboundLoadLoadingRequest, StartOutboundLoadLoadingResponse,
-    UnloadOutboundCartonRequest, UnstageOutboundCartonRequest,
+    OpaqueCursor, OutboundLoadQueuePage, OutboundLoadQueuePageRequest, OutboundLoadQueueSort,
+    OutboundLoadQueueSortDirection, OutboundLoadResponse, OutboundLoadStatus as ApiStatus,
+    PackedCartonPositionResponse, PlanOutboundLoadRequest, PlanOutboundLoadResponse,
+    ReleaseOutboundLoadRequest, ReleaseOutboundLoadResponse, StageOutboundCartonRequest,
+    StartOutboundLoadLoadingRequest, StartOutboundLoadLoadingResponse, UnloadOutboundCartonRequest,
+    UnstageOutboundCartonRequest,
 };
 use wareboxes_application::outbound_load::{
     CancelOutboundLoadCommand, CompleteOutboundLoadLoadingCommand,
-    ConfirmOutboundLoadDepartureCommand, LoadPackedCartonCommand, OutboundLoadCursor,
-    OutboundLoadQuery, OutboundLoadQueueQuery, PackedCartonPositionQuery, PlanOutboundLoadCarton,
-    PlanOutboundLoadCommand, PlanOutboundLoadShipment, ReleaseOutboundLoadCommand,
-    StagePackedCartonCommand, StartOutboundLoadLoadingCommand, UnloadPackedCartonCommand,
-    UnstagePackedCartonCommand,
+    ConfirmOutboundLoadDepartureCommand, LoadPackedCartonCommand, OutboundLoadQuery,
+    OutboundLoadQueueQuery, OutboundLoadQueueSort as ApplicationQueueSort,
+    OutboundLoadQueueSortDirection as ApplicationSortDirection, PackedCartonPositionQuery,
+    PlanOutboundLoadCarton, PlanOutboundLoadCommand, PlanOutboundLoadShipment,
+    ReleaseOutboundLoadCommand, StagePackedCartonCommand, StartOutboundLoadLoadingCommand,
+    UnloadPackedCartonCommand, UnstagePackedCartonCommand,
 };
 #[cfg(feature = "ssr")]
 use wareboxes_core::models::TenantAccess;
@@ -38,7 +40,7 @@ use crate::repo;
 use crate::request_context::IdempotencyKey;
 use crate::state::AppState;
 
-const CURSOR_PREFIX: &str = "ol1.";
+const CURSOR_PREFIX: &str = "ol2.";
 
 pub async fn plan(
     State(state): State<AppState>,
@@ -114,6 +116,8 @@ pub async fn list(
             "scheduled_from",
         )?,
         scheduled_to: parse_optional_timestamp(query.scheduled_to.as_deref(), "scheduled_to")?,
+        sort: query.sort,
+        direction: query.direction,
     };
     if filters
         .scheduled_from
@@ -122,13 +126,7 @@ pub async fn list(
     {
         return Err(invalid("scheduled_from must not be after scheduled_to"));
     }
-    let cursor = query.cursor.as_ref().map(decode_cursor).transpose()?;
-    if cursor
-        .as_ref()
-        .is_some_and(|cursor| cursor.filters != filters)
-    {
-        return Err(V1Error::invalid_cursor_for("outbound loads"));
-    }
+    let offset = decode_bound_cursor(query.cursor.as_ref(), filters)?;
     let page = repo::outbound_load::list(
         &state.db,
         &user.tenant,
@@ -137,14 +135,16 @@ pub async fn list(
             status: filters.status,
             scheduled_from: filters.scheduled_from,
             scheduled_to: filters.scheduled_to,
-            cursor: cursor.map(|cursor| cursor.after),
+            offset,
             limit: u32::from(query.limit.get()),
+            sort: map_queue_sort(query.sort),
+            direction: map_queue_direction(query.direction),
         },
     )
     .await?;
     let next_cursor = page
-        .next_cursor
-        .map(|after| encode_cursor(BoundCursor { filters, after }))
+        .next_offset
+        .map(|offset| encode_cursor(BoundCursor { filters, offset }))
         .transpose()?;
     Ok(Json(mapping::queue_page(page.entries, next_cursor)?))
 }
@@ -166,6 +166,8 @@ pub(crate) async fn page_for_access(
         status: status.map(map_status),
         scheduled_from: None,
         scheduled_to: None,
+        sort: OutboundLoadQueueSort::ScheduledDeparture,
+        direction: OutboundLoadQueueSortDirection::Ascending,
     };
     let page = repo::outbound_load::list(
         &state.db,
@@ -175,14 +177,16 @@ pub(crate) async fn page_for_access(
             status: filters.status,
             scheduled_from: None,
             scheduled_to: None,
-            cursor: None,
+            offset: 0,
             limit: u32::from(limit),
+            sort: ApplicationQueueSort::ScheduledDeparture,
+            direction: ApplicationSortDirection::Ascending,
         },
     )
     .await?;
     let next_cursor = page
-        .next_cursor
-        .map(|after| encode_cursor(BoundCursor { filters, after }))
+        .next_offset
+        .map(|offset| encode_cursor(BoundCursor { filters, offset }))
         .transpose()?;
     mapping::queue_page(page.entries, next_cursor)
 }
@@ -475,12 +479,14 @@ struct CursorFilters {
     status: Option<OutboundLoadStatus>,
     scheduled_from: Option<Timestamp>,
     scheduled_to: Option<Timestamp>,
+    sort: OutboundLoadQueueSort,
+    direction: OutboundLoadQueueSortDirection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BoundCursor {
     filters: CursorFilters,
-    after: OutboundLoadCursor,
+    offset: u64,
 }
 
 fn encode_cursor(cursor: BoundCursor) -> AppResult<OpaqueCursor> {
@@ -491,7 +497,7 @@ fn encode_cursor(cursor: BoundCursor) -> AppResult<OpaqueCursor> {
         )
     };
     OpaqueCursor::new(format!(
-        "{CURSOR_PREFIX}{}.{}.{}.{}.{}.{:016x}",
+        "{CURSOR_PREFIX}{}.{}.{}.{}.{}.{}.{:016x}",
         cursor
             .filters
             .facility_id
@@ -499,8 +505,9 @@ fn encode_cursor(cursor: BoundCursor) -> AppResult<OpaqueCursor> {
         cursor.filters.status.map_or("a", status_code),
         time(cursor.filters.scheduled_from),
         time(cursor.filters.scheduled_to),
-        time(cursor.after.scheduled_departure_at),
-        cursor.after.outbound_load_id.get()
+        queue_sort_code(cursor.filters.sort),
+        queue_direction_code(cursor.filters.direction),
+        cursor.offset,
     ))
     .map_err(|_| AppError::internal("generated an invalid outbound load cursor"))
 }
@@ -511,7 +518,7 @@ fn decode_cursor(cursor: &OpaqueCursor) -> V1Result<BoundCursor> {
         .strip_prefix(CURSOR_PREFIX)
         .ok_or_else(|| V1Error::invalid_cursor_for("outbound loads"))?;
     let parts = encoded.split('.').collect::<Vec<_>>();
-    if parts.len() != 6 {
+    if parts.len() != 7 {
         return Err(V1Error::invalid_cursor_for("outbound loads"));
     }
     Ok(BoundCursor {
@@ -520,12 +527,29 @@ fn decode_cursor(cursor: &OpaqueCursor) -> V1Result<BoundCursor> {
             status: parse_status_code(parts[1])?,
             scheduled_from: parse_cursor_time(parts[2])?,
             scheduled_to: parse_cursor_time(parts[3])?,
+            sort: parse_queue_sort_code(parts[4])?,
+            direction: parse_queue_direction_code(parts[5])?,
         },
-        after: OutboundLoadCursor {
-            scheduled_departure_at: parse_cursor_time(parts[4])?,
-            outbound_load_id: parse_id(parts[5], OutboundLoadId::new)?,
-        },
+        offset: parse_offset(parts[6])?,
     })
+}
+
+fn decode_bound_cursor(cursor: Option<&OpaqueCursor>, filters: CursorFilters) -> V1Result<u64> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    let decoded = decode_cursor(cursor)?;
+    if decoded.filters != filters {
+        return Err(V1Error::invalid_cursor_for("outbound loads"));
+    }
+    Ok(decoded.offset)
+}
+
+fn parse_offset(value: &str) -> V1Result<u64> {
+    if value.len() != 16 {
+        return Err(V1Error::invalid_cursor_for("outbound loads"));
+    }
+    u64::from_str_radix(value, 16).map_err(|_| V1Error::invalid_cursor_for("outbound loads"))
 }
 
 fn parse_cursor_time(value: &str) -> V1Result<Option<Timestamp>> {
@@ -585,6 +609,58 @@ fn parse_status_code(value: &str) -> V1Result<Option<OutboundLoadStatus>> {
         "c" => Some(OutboundLoadStatus::Cancelled),
         _ => return Err(V1Error::invalid_cursor_for("outbound loads")),
     })
+}
+const fn queue_sort_code(sort: OutboundLoadQueueSort) -> &'static str {
+    match sort {
+        OutboundLoadQueueSort::Reference => "r",
+        OutboundLoadQueueSort::Status => "s",
+        OutboundLoadQueueSort::Progress => "p",
+        OutboundLoadQueueSort::Facility => "f",
+        OutboundLoadQueueSort::Trailer => "t",
+        OutboundLoadQueueSort::ScheduledDeparture => "d",
+    }
+}
+fn parse_queue_sort_code(value: &str) -> V1Result<OutboundLoadQueueSort> {
+    match value {
+        "r" => Ok(OutboundLoadQueueSort::Reference),
+        "s" => Ok(OutboundLoadQueueSort::Status),
+        "p" => Ok(OutboundLoadQueueSort::Progress),
+        "f" => Ok(OutboundLoadQueueSort::Facility),
+        "t" => Ok(OutboundLoadQueueSort::Trailer),
+        "d" => Ok(OutboundLoadQueueSort::ScheduledDeparture),
+        _ => Err(V1Error::invalid_cursor_for("outbound loads")),
+    }
+}
+const fn queue_direction_code(direction: OutboundLoadQueueSortDirection) -> &'static str {
+    match direction {
+        OutboundLoadQueueSortDirection::Ascending => "a",
+        OutboundLoadQueueSortDirection::Descending => "d",
+    }
+}
+fn parse_queue_direction_code(value: &str) -> V1Result<OutboundLoadQueueSortDirection> {
+    match value {
+        "a" => Ok(OutboundLoadQueueSortDirection::Ascending),
+        "d" => Ok(OutboundLoadQueueSortDirection::Descending),
+        _ => Err(V1Error::invalid_cursor_for("outbound loads")),
+    }
+}
+const fn map_queue_sort(sort: OutboundLoadQueueSort) -> ApplicationQueueSort {
+    match sort {
+        OutboundLoadQueueSort::Reference => ApplicationQueueSort::Reference,
+        OutboundLoadQueueSort::Status => ApplicationQueueSort::Status,
+        OutboundLoadQueueSort::Progress => ApplicationQueueSort::Progress,
+        OutboundLoadQueueSort::Facility => ApplicationQueueSort::Facility,
+        OutboundLoadQueueSort::Trailer => ApplicationQueueSort::Trailer,
+        OutboundLoadQueueSort::ScheduledDeparture => ApplicationQueueSort::ScheduledDeparture,
+    }
+}
+const fn map_queue_direction(
+    direction: OutboundLoadQueueSortDirection,
+) -> ApplicationSortDirection {
+    match direction {
+        OutboundLoadQueueSortDirection::Ascending => ApplicationSortDirection::Ascending,
+        OutboundLoadQueueSortDirection::Descending => ApplicationSortDirection::Descending,
+    }
 }
 fn map_status(status: ApiStatus) -> OutboundLoadStatus {
     match status {
@@ -668,15 +744,37 @@ mod tests {
                 status: Some(OutboundLoadStatus::Loading),
                 scheduled_from: Some("2026-08-01T00:00:00Z".parse().unwrap()),
                 scheduled_to: None,
+                sort: OutboundLoadQueueSort::Progress,
+                direction: OutboundLoadQueueSortDirection::Descending,
             },
-            after: OutboundLoadCursor {
-                scheduled_departure_at: Some("2026-08-02T00:00:00Z".parse().unwrap()),
-                outbound_load_id: OutboundLoadId::new(9).unwrap(),
-            },
+            offset: 100,
         };
         assert_eq!(
             decode_cursor(&encode_cursor(expected.clone()).unwrap()).unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn cursor_rejects_a_different_sort() {
+        let filters = CursorFilters {
+            facility_id: None,
+            status: Some(OutboundLoadStatus::Staging),
+            scheduled_from: None,
+            scheduled_to: None,
+            sort: OutboundLoadQueueSort::Reference,
+            direction: OutboundLoadQueueSortDirection::Ascending,
+        };
+        let cursor = encode_cursor(BoundCursor {
+            filters,
+            offset: 100,
+        })
+        .unwrap();
+        let changed = CursorFilters {
+            sort: OutboundLoadQueueSort::Progress,
+            ..filters
+        };
+
+        assert!(decode_bound_cursor(Some(&cursor), changed).is_err());
     }
 }

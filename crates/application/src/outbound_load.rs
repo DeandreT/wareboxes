@@ -64,14 +64,45 @@ pub struct OutboundLoadQueueQuery {
     pub status: Option<OutboundLoadStatus>,
     pub scheduled_from: Option<Timestamp>,
     pub scheduled_to: Option<Timestamp>,
-    pub cursor: Option<OutboundLoadCursor>,
+    pub offset: u64,
     pub limit: u32,
+    pub sort: OutboundLoadQueueSort,
+    pub direction: OutboundLoadQueueSortDirection,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutboundLoadCursor {
-    pub scheduled_departure_at: Option<Timestamp>,
-    pub outbound_load_id: OutboundLoadId,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundLoadQueueSort {
+    Reference,
+    Status,
+    Progress,
+    Facility,
+    Trailer,
+    ScheduledDeparture,
+}
+
+impl OutboundLoadQueueSort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reference => "reference",
+            Self::Status => "status",
+            Self::Progress => "progress",
+            Self::Facility => "facility",
+            Self::Trailer => "trailer",
+            Self::ScheduledDeparture => "scheduled_departure",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundLoadQueueSortDirection {
+    Ascending,
+    Descending,
+}
+
+impl OutboundLoadQueueSortDirection {
+    pub const fn is_ascending(self) -> bool {
+        matches!(self, Self::Ascending)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,7 +260,7 @@ pub struct OutboundLoadQueueEntryReadModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundLoadQueuePage {
     pub entries: Vec<OutboundLoadQueueEntryReadModel>,
-    pub next_cursor: Option<OutboundLoadCursor>,
+    pub next_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

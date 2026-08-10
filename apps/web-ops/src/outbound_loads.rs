@@ -14,6 +14,7 @@ use wareboxes_core::models::Location;
 
 use crate::api;
 use crate::components::{Icon, UiIcon};
+use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::toast::{use_toast_bus, ToastBus};
 use crate::workspace_layout::{PaneControls, SplitPaneHandle, SplitPaneState};
 
@@ -60,6 +61,7 @@ struct Signals {
     queue_generation: RwSignal<u64>,
     facility_id: RwSignal<Option<i64>>,
     status: RwSignal<Option<OutboundLoadStatus>>,
+    sort: RwSignal<SortSpec<LoadSort>>,
     queue_pending: RwSignal<bool>,
     shipping_entries: RwSignal<Vec<ShippingQueueEntryResponse>>,
     shipping_next_cursor: RwSignal<Option<OpaqueCursor>>,
@@ -76,6 +78,24 @@ struct Signals {
     dialog: RwSignal<Option<Dialog>>,
     on_unauthorized: Callback<()>,
     toasts: ToastBus,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoadSort {
+    Reference,
+    Status,
+    Progress,
+    Facility,
+    Trailer,
+    ScheduledDeparture,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct QueueRequestIdentity {
+    generation: u64,
+    facility_id: Option<i64>,
+    status: Option<OutboundLoadStatus>,
+    sort: SortSpec<LoadSort>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +138,10 @@ pub(crate) fn OutboundLoadsWorkspace(
         queue_generation: RwSignal::new(0),
         facility_id: RwSignal::new(None),
         status: RwSignal::new(None),
+        sort: RwSignal::new(SortSpec {
+            key: LoadSort::ScheduledDeparture,
+            direction: SortDirection::Ascending,
+        }),
         queue_pending: RwSignal::new(false),
         shipping_entries: RwSignal::new(shipping_queue.items),
         shipping_next_cursor: RwSignal::new(shipping_queue.next_cursor),
@@ -154,6 +178,11 @@ pub(crate) fn OutboundLoadsWorkspace(
 
     let refresh = Callback::new(move |_| request_queue(signals, false));
     let load_more = Callback::new(move |_| request_queue(signals, true));
+    let change_sort = Callback::new(move |key: LoadSort| {
+        SortSpec::select(signals.sort, key);
+        invalidate_queue(signals);
+        request_queue(signals, false);
+    });
     let retry = Callback::new(move |_| {
         if let Some(command) = signals.retry.get_untracked() {
             dispatch(command, signals);
@@ -303,7 +332,15 @@ pub(crate) fn OutboundLoadsWorkspace(
                 <section class="outbound-loads-queue split-master">
                     <header><h2>"Load queue"</h2><span>{move || format!("{} loaded", signals.entries.get().len())}</span></header>
                     <div class="outbound-loads-table-scroll">
-                        <table><thead><tr><th>"Load"</th><th>"State"</th><th>"Progress"</th><th>"Facility"</th><th>"Trailer"</th><th><span class="sr-only">"Open detail"</span></th></tr></thead>
+                        <table><thead><tr>
+                            <SortableHeader label="Load" active=move || signals.sort.get().key == LoadSort::Reference direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| change_sort.run(LoadSort::Reference))/>
+                            <SortableHeader label="State" active=move || signals.sort.get().key == LoadSort::Status direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| change_sort.run(LoadSort::Status))/>
+                            <SortableHeader label="Progress" active=move || signals.sort.get().key == LoadSort::Progress direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| change_sort.run(LoadSort::Progress)) numeric=true/>
+                            <SortableHeader label="Facility" active=move || signals.sort.get().key == LoadSort::Facility direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| change_sort.run(LoadSort::Facility))/>
+                            <SortableHeader label="Trailer" active=move || signals.sort.get().key == LoadSort::Trailer direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| change_sort.run(LoadSort::Trailer))/>
+                            <SortableHeader label="Depart" active=move || signals.sort.get().key == LoadSort::ScheduledDeparture direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| change_sort.run(LoadSort::ScheduledDeparture))/>
+                            <th><span class="sr-only">"Open detail"</span></th>
+                        </tr></thead>
                         <tbody>{move || signals.entries.get().into_iter().map(|entry| {
                             let id = entry.outbound_load_id;
                             let selected = signals.selected_id.get() == Some(id);
@@ -312,6 +349,7 @@ pub(crate) fn OutboundLoadsWorkspace(
                                 <td><span class=format!("status-chip {}", status_class(entry.status))>{status_label(entry.status)}</span></td>
                                 <td><strong>{format!("{}/{} loaded", entry.progress.loaded_carton_count, entry.progress.planned_carton_count)}</strong><small>{format!("{} staged", entry.progress.staged_carton_count)}</small></td>
                                 <td>{entry.facility_name}</td><td>{entry.trailer_number.unwrap_or_else(|| "Not assigned".into())}</td>
+                                <td>{entry.scheduled_departure_at.as_deref().map(compact_timestamp).unwrap_or_else(|| "Not scheduled".into())}</td>
                                 <td><button type="button" class="icon-button" title="Open load detail" aria-label=format!("Open load {}", id) aria-pressed=selected on:click=move |_| select.run(id)><Icon icon=UiIcon::Search/></button></td>
                             </tr> }
                         }).collect_view()}</tbody></table>
@@ -754,17 +792,17 @@ fn request_queue(signals: Signals, append: bool) {
     signals.queue_generation.set(generation);
     let facility_id = signals.facility_id.get_untracked();
     let status = signals.status.get_untracked();
+    let sort = signals.sort.get_untracked();
+    let request_identity = QueueRequestIdentity {
+        generation,
+        facility_id,
+        status,
+        sort,
+    };
     leptos::task::spawn_local(async move {
-        let path = queue_path(facility_id, status, cursor.as_ref());
+        let path = queue_path(facility_id, status, sort, cursor.as_ref());
         let result = api::internal_get::<OutboundLoadQueuePage>(&path).await;
-        if !accept_queue_response(
-            signals.queue_generation.get_untracked(),
-            generation,
-            signals.facility_id.get_untracked(),
-            facility_id,
-            signals.status.get_untracked(),
-            status,
-        ) {
+        if !accept_queue_response(current_queue_identity(signals), request_identity) {
             return;
         }
         signals.queue_pending.set(false);
@@ -888,17 +926,16 @@ fn accept_detail_response(
 ) -> bool {
     current_generation == response_generation && selected_id == Some(requested_id)
 }
-fn accept_queue_response(
-    current_generation: u64,
-    response_generation: u64,
-    current_facility: Option<i64>,
-    requested_facility: Option<i64>,
-    current_status: Option<OutboundLoadStatus>,
-    requested_status: Option<OutboundLoadStatus>,
-) -> bool {
-    current_generation == response_generation
-        && current_facility == requested_facility
-        && current_status == requested_status
+fn current_queue_identity(signals: Signals) -> QueueRequestIdentity {
+    QueueRequestIdentity {
+        generation: signals.queue_generation.get_untracked(),
+        facility_id: signals.facility_id.get_untracked(),
+        status: signals.status.get_untracked(),
+        sort: signals.sort.get_untracked(),
+    }
+}
+fn accept_queue_response(current: QueueRequestIdentity, requested: QueueRequestIdentity) -> bool {
+    current == requested
 }
 fn accept_shipping_response(
     current_generation: u64,
@@ -926,6 +963,9 @@ fn parse_optional_id(value: &str) -> Option<i64> {
 fn optional_text(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
+}
+fn compact_timestamp(value: &str) -> String {
+    value.get(..16).unwrap_or(value).replace('T', " ")
 }
 fn parse_local_timestamp(value: &str) -> Option<String> {
     let value = value.trim();
@@ -1023,9 +1063,14 @@ fn command_success_label(command: &PendingCommand) -> &'static str {
 fn queue_path(
     facility_id: Option<i64>,
     status: Option<OutboundLoadStatus>,
+    sort: SortSpec<LoadSort>,
     cursor: Option<&OpaqueCursor>,
 ) -> String {
-    let mut path = "/api/v1/outbound-loads?limit=100".to_owned();
+    let mut path = format!(
+        "/api/v1/outbound-loads?limit=100&sort={}&direction={}",
+        load_sort_wire(sort.key),
+        sort_direction_wire(sort.direction),
+    );
     if let Some(id) = facility_id {
         path.push_str(&format!("&facility_id={id}"));
     }
@@ -1046,6 +1091,22 @@ fn queue_path(
     }
     path
 }
+const fn load_sort_wire(sort: LoadSort) -> &'static str {
+    match sort {
+        LoadSort::Reference => "reference",
+        LoadSort::Status => "status",
+        LoadSort::Progress => "progress",
+        LoadSort::Facility => "facility",
+        LoadSort::Trailer => "trailer",
+        LoadSort::ScheduledDeparture => "scheduled_departure",
+    }
+}
+const fn sort_direction_wire(direction: SortDirection) -> &'static str {
+    match direction {
+        SortDirection::Ascending => "ascending",
+        SortDirection::Descending => "descending",
+    }
+}
 fn shipping_queue_path(facility_id: Option<i64>, cursor: Option<&OpaqueCursor>) -> String {
     let mut path = "/api/v1/shipping-queue?limit=100".to_owned();
     if let Some(id) = facility_id {
@@ -1063,32 +1124,55 @@ mod tests {
     use super::*;
     #[test]
     fn queue_path_binds_scope_state_and_cursor() {
-        let cursor = OpaqueCursor::new("ol1.a.a.a.a.a.0000000000000001").unwrap();
-        let path = queue_path(Some(4), Some(OutboundLoadStatus::Loading), Some(&cursor));
+        let sort = SortSpec {
+            key: LoadSort::Progress,
+            direction: SortDirection::Descending,
+        };
+        let cursor = OpaqueCursor::new("ol2.a.a.a.a.p.d.0000000000000064").unwrap();
+        let path = queue_path(
+            Some(4),
+            Some(OutboundLoadStatus::Loading),
+            sort,
+            Some(&cursor),
+        );
         assert!(path.contains("facility_id=4"));
         assert!(path.contains("status=loading"));
-        assert!(path.contains("cursor=ol1."));
+        assert!(path.contains("sort=progress"));
+        assert!(path.contains("direction=descending"));
+        assert!(path.contains("cursor=ol2."));
     }
     #[test]
     fn async_responses_are_bound_to_selection_generation_and_filters() {
+        let sort = SortSpec {
+            key: LoadSort::ScheduledDeparture,
+            direction: SortDirection::Ascending,
+        };
+        let requested = QueueRequestIdentity {
+            generation: 8,
+            facility_id: Some(3),
+            status: Some(OutboundLoadStatus::Loading),
+            sort,
+        };
         assert!(accept_detail_response(4, 4, Some(22), 22));
         assert!(!accept_detail_response(5, 4, Some(22), 22));
         assert!(!accept_detail_response(4, 4, Some(23), 22));
-        assert!(accept_queue_response(
-            8,
-            8,
-            Some(3),
-            Some(3),
-            Some(OutboundLoadStatus::Loading),
-            Some(OutboundLoadStatus::Loading),
+        assert!(accept_queue_response(requested, requested));
+        assert!(!accept_queue_response(
+            QueueRequestIdentity {
+                generation: 9,
+                ..requested
+            },
+            requested,
         ));
         assert!(!accept_queue_response(
-            9,
-            8,
-            Some(3),
-            Some(3),
-            Some(OutboundLoadStatus::Loading),
-            Some(OutboundLoadStatus::Loading),
+            QueueRequestIdentity {
+                sort: SortSpec {
+                    key: LoadSort::Progress,
+                    direction: SortDirection::Descending,
+                },
+                ..requested
+            },
+            requested,
         ));
         assert!(!accept_shipping_response(3, 2, Some(7), Some(7)));
         assert!(!accept_shipping_response(3, 3, Some(8), Some(7)));
