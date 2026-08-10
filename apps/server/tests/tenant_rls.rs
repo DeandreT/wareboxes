@@ -391,6 +391,10 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "unexpected_receipts",
             "unexpected_receipts_tenant_isolation",
         ),
+        (
+            "inbound_inspection_dispositions",
+            "inbound_inspection_dispositions_tenant_isolation",
+        ),
         ("work_tasks", "work_tasks_tenant_isolation"),
         ("work_task_progress", "work_task_progress_tenant_isolation"),
         ("putaway_tasks", "putaway_tasks_tenant_isolation"),

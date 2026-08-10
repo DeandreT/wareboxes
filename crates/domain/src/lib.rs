@@ -3,6 +3,7 @@
 mod allocation;
 mod backorder;
 mod facility;
+mod inbound_inspection;
 mod item_substitution;
 mod order;
 mod order_amendment;
@@ -36,6 +37,10 @@ pub use facility::{
     MAX_FACILITY_ORIGIN_COUNTRY_LENGTH, MAX_FACILITY_ORIGIN_EMAIL_LENGTH,
     MAX_FACILITY_ORIGIN_NAME_LENGTH, MAX_FACILITY_ORIGIN_PHONE_LENGTH,
     MAX_FACILITY_ORIGIN_POSTAL_CODE_LENGTH, MAX_FACILITY_ORIGIN_STATE_LENGTH,
+};
+pub use inbound_inspection::{
+    decide_inbound_inspection, InboundInspectionError, InboundInspectionNote,
+    InboundInspectionOutcome, InboundInspectionTargetStatus, MAX_INBOUND_INSPECTION_NOTE_LENGTH,
 };
 pub use item_substitution::{
     substitute_pick_shortage, ItemSubstitutionDefinition, ItemSubstitutionDetails,
@@ -226,6 +231,10 @@ positive_id!(
     "pick shortage reallocation run ID"
 );
 positive_id!(InventoryHoldId, "inventory hold ID");
+positive_id!(
+    InboundInspectionDispositionId,
+    "inbound inspection disposition ID"
+);
 positive_id!(ReplenishmentPolicyId, "replenishment policy ID");
 positive_id!(ReplenishmentPlanId, "replenishment plan ID");
 positive_id!(ReplenishmentWorkId, "replenishment work ID");

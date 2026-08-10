@@ -31755,6 +31755,302 @@ GRANT USAGE ON SEQUENCE public.unexpected_receipts_id_seq TO wareboxes_app;
 REVOKE ALL ON FUNCTION public.validate_unexpected_receipt() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_unexpected_receipt_mutation() FROM PUBLIC;
 
+-- Whole-hold inbound inspection disposition. This composes hold release and a
+-- conserved quarantine status change without relying on two independent UI commands.
+CREATE TABLE public.inbound_inspection_dispositions (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    inventory_hold_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    target_inventory_balance_id bigint NOT NULL,
+    location_id bigint NOT NULL,
+    license_plate_id bigint,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    quantity bigint NOT NULL CHECK (quantity > 0),
+    outcome text NOT NULL CHECK (outcome IN ('approved','damaged')),
+    target_status text NOT NULL CHECK (target_status IN ('available','damaged')),
+    note text NOT NULL,
+    inventory_transaction_id bigint NOT NULL,
+    inventory_status_transition_id bigint NOT NULL,
+    source_reference_type text NOT NULL,
+    source_reference_id bigint NOT NULL CHECK (source_reference_id > 0),
+    inspected_by_user_id bigint NOT NULL,
+    inspected_at timestamptz NOT NULL,
+    CONSTRAINT inbound_inspection_dispositions_status_check CHECK (
+        (outcome = 'approved' AND target_status = 'available')
+        OR (outcome = 'damaged' AND target_status = 'damaged')
+    ),
+    CONSTRAINT inbound_inspection_dispositions_note_check CHECK (
+        note = btrim(note) AND char_length(note) BETWEEN 1 AND 500
+    ),
+    CONSTRAINT inbound_inspection_dispositions_reference_check CHECK (
+        source_reference_type IN ('expected_receipt_line','unexpected_receipt')
+    ),
+    CONSTRAINT inbound_inspection_dispositions_balance_check CHECK (
+        source_inventory_balance_id <> target_inventory_balance_id
+    ),
+    CONSTRAINT inbound_inspection_dispositions_tenant_owner_id_key
+        UNIQUE (tenant_id, inventory_owner_id, id),
+    CONSTRAINT inbound_inspection_dispositions_hold_unique
+        UNIQUE (tenant_id, inventory_hold_id),
+    CONSTRAINT inbound_inspection_dispositions_transaction_unique
+        UNIQUE (tenant_id, inventory_transaction_id),
+    CONSTRAINT inbound_inspection_dispositions_transition_unique
+        UNIQUE (tenant_id, inventory_status_transition_id),
+    CONSTRAINT inbound_inspection_dispositions_owner_facility_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id)
+        REFERENCES public.inventory_owner_facilities(tenant_id, inventory_owner_id, facility_id),
+    CONSTRAINT inbound_inspection_dispositions_hold_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, inventory_hold_id)
+        REFERENCES public.inventory_holds(tenant_id, inventory_owner_id, id),
+    CONSTRAINT inbound_inspection_dispositions_source_balance_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, source_inventory_balance_id)
+        REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT inbound_inspection_dispositions_target_balance_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, target_inventory_balance_id)
+        REFERENCES public.inventory_balances(tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT inbound_inspection_dispositions_location_fkey
+        FOREIGN KEY (tenant_id, facility_id, location_id)
+        REFERENCES public.locations(tenant_id, facility_id, id),
+    CONSTRAINT inbound_inspection_dispositions_license_plate_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, license_plate_id)
+        REFERENCES public.license_plates(tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT inbound_inspection_dispositions_batch_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id)
+        REFERENCES public.item_batches(tenant_id, inventory_owner_id, id),
+    CONSTRAINT inbound_inspection_dispositions_transaction_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, inventory_transaction_id)
+        REFERENCES public.inventory_transactions(tenant_id, inventory_owner_id, id),
+    CONSTRAINT inbound_inspection_dispositions_transition_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, inventory_status_transition_id)
+        REFERENCES public.inventory_status_transitions(tenant_id, inventory_owner_id, id),
+    CONSTRAINT inbound_inspection_dispositions_actor_fkey
+        FOREIGN KEY (tenant_id, inspected_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id, user_id)
+);
+ALTER TABLE public.inbound_inspection_dispositions FORCE ROW LEVEL SECURITY;
+CREATE INDEX inbound_inspection_dispositions_receipt_idx
+ON public.inbound_inspection_dispositions(
+    tenant_id, inventory_owner_id, source_reference_type, source_reference_id, inspected_at, id
+);
+
+CREATE FUNCTION public.validate_inbound_inspection_disposition() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    expected_reason text;
+    receipt_matches boolean;
+BEGIN
+    expected_reason := CASE
+        WHEN NEW.outcome = 'approved' THEN 'inspection_passed'
+        ELSE 'damage_confirmed'
+    END;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.inventory_holds hold
+        WHERE hold.tenant_id = NEW.tenant_id
+          AND hold.inventory_owner_id = NEW.inventory_owner_id
+          AND hold.facility_id = NEW.facility_id
+          AND hold.id = NEW.inventory_hold_id
+          AND hold.inventory_balance_id = NEW.source_inventory_balance_id
+          AND hold.location_id = NEW.location_id
+          AND hold.license_plate_id IS NOT DISTINCT FROM NEW.license_plate_id
+          AND hold.item_batch_id = NEW.item_batch_id
+          AND hold.item_id = NEW.item_id
+          AND hold.uom = NEW.uom
+          AND hold.inventory_status = 'quarantine'
+          AND hold.qty = NEW.quantity
+          AND hold.reference_type = NEW.source_reference_type
+          AND hold.reference_id = NEW.source_reference_id
+          AND hold.status = 'released'
+          AND hold.deleted = NEW.inspected_at
+          AND hold.released_by = NEW.inspected_by_user_id
+          AND hold.released_at = NEW.inspected_at
+        FOR SHARE
+    ) THEN
+        RAISE EXCEPTION 'inbound inspection disposition does not match its released receipt hold'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.source_reference_type = 'expected_receipt_line' THEN
+        SELECT EXISTS (
+            SELECT 1
+            FROM public.load_lines line
+            INNER JOIN public.loads load
+              ON load.tenant_id = line.tenant_id
+             AND load.id = line.load_id
+            WHERE line.tenant_id = NEW.tenant_id
+              AND line.id = NEW.source_reference_id
+              AND line.item_id = NEW.item_id
+              AND line.deleted IS NULL
+              AND load.inventory_owner_id = NEW.inventory_owner_id
+              AND load.facility_id = NEW.facility_id
+              AND load.type = 'inbound'
+              AND load.deleted IS NULL
+        ) INTO receipt_matches;
+    ELSE
+        SELECT EXISTS (
+            SELECT 1
+            FROM public.unexpected_receipts receipt
+            WHERE receipt.tenant_id = NEW.tenant_id
+              AND receipt.inventory_owner_id = NEW.inventory_owner_id
+              AND receipt.facility_id = NEW.facility_id
+              AND receipt.id = NEW.source_reference_id
+              AND receipt.inventory_hold_id = NEW.inventory_hold_id
+              AND receipt.inventory_balance_id = NEW.source_inventory_balance_id
+              AND receipt.item_id = NEW.item_id
+              AND receipt.quantity = NEW.quantity
+        ) INTO receipt_matches;
+    END IF;
+    IF NOT receipt_matches THEN
+        RAISE EXCEPTION 'inbound inspection disposition receipt reference does not exist'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM public.inventory_balances source
+        WHERE source.tenant_id = NEW.tenant_id
+          AND source.inventory_owner_id = NEW.inventory_owner_id
+          AND source.facility_id = NEW.facility_id
+          AND source.id = NEW.source_inventory_balance_id
+          AND source.location_id = NEW.location_id
+          AND source.license_plate_id IS NOT DISTINCT FROM NEW.license_plate_id
+          AND source.item_batch_id = NEW.item_batch_id
+          AND source.item_id = NEW.item_id
+          AND source.uom = NEW.uom
+          AND source.status = 'quarantine'
+          AND source.deleted IS NULL
+          AND source.qty_held = 0
+        FOR SHARE
+    ) OR NOT EXISTS (
+        SELECT 1 FROM public.inventory_balances target
+        WHERE target.tenant_id = NEW.tenant_id
+          AND target.inventory_owner_id = NEW.inventory_owner_id
+          AND target.facility_id = NEW.facility_id
+          AND target.id = NEW.target_inventory_balance_id
+          AND target.location_id = NEW.location_id
+          AND target.license_plate_id IS NOT DISTINCT FROM NEW.license_plate_id
+          AND target.item_batch_id = NEW.item_batch_id
+          AND target.item_id = NEW.item_id
+          AND target.uom = NEW.uom
+          AND target.status = NEW.target_status
+          AND target.deleted IS NULL
+          AND target.qty_on_hand >= NEW.quantity
+        FOR SHARE
+    ) THEN
+        RAISE EXCEPTION 'inbound inspection disposition balance projection does not reconcile'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.inventory_transactions transaction
+        WHERE transaction.tenant_id = NEW.tenant_id
+          AND transaction.inventory_owner_id = NEW.inventory_owner_id
+          AND transaction.id = NEW.inventory_transaction_id
+          AND transaction.transaction_type = 'status_change'
+          AND transaction.reason = expected_reason
+          AND transaction.reference_type = 'inbound_inspection_hold'
+          AND transaction.reference_id = NEW.inventory_hold_id
+          AND transaction.operation = 'inbound.inspection.dispose.v1'
+          AND transaction.actor_user_id = NEW.inspected_by_user_id
+          AND transaction.created = NEW.inspected_at
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM public.inventory_status_transitions transition
+        WHERE transition.tenant_id = NEW.tenant_id
+          AND transition.inventory_owner_id = NEW.inventory_owner_id
+          AND transition.facility_id = NEW.facility_id
+          AND transition.id = NEW.inventory_status_transition_id
+          AND transition.transaction_id = NEW.inventory_transaction_id
+          AND transition.source_balance_id = NEW.source_inventory_balance_id
+          AND transition.destination_balance_id = NEW.target_inventory_balance_id
+          AND transition.from_status = 'quarantine'
+          AND transition.to_status = NEW.target_status
+          AND transition.qty = NEW.quantity
+          AND transition.reason_code = expected_reason
+          AND transition.reason_note = NEW.note
+          AND transition.reference_type = 'inbound_inspection_hold'
+          AND transition.reference_id = NEW.inventory_hold_id
+          AND transition.created_by = NEW.inspected_by_user_id
+          AND transition.created = NEW.inspected_at
+    ) THEN
+        RAISE EXCEPTION 'inbound inspection disposition journal evidence does not reconcile'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.reject_inbound_inspection_disposition_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    RAISE EXCEPTION 'inbound inspection dispositions are immutable' USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE TRIGGER inbound_inspection_dispositions_validate
+BEFORE INSERT ON public.inbound_inspection_dispositions
+FOR EACH ROW EXECUTE FUNCTION public.validate_inbound_inspection_disposition();
+CREATE TRIGGER inbound_inspection_dispositions_are_immutable
+BEFORE UPDATE OR DELETE ON public.inbound_inspection_dispositions
+FOR EACH ROW EXECUTE FUNCTION public.reject_inbound_inspection_disposition_mutation();
+
+CREATE FUNCTION public.require_inbound_receipt_hold_disposition() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF OLD.status = 'active'
+       AND NEW.status = 'released'
+       AND OLD.reference_type IN ('expected_receipt_line','unexpected_receipt')
+       AND NOT EXISTS (
+           SELECT 1
+           FROM public.inbound_inspection_dispositions disposition
+           WHERE disposition.tenant_id = NEW.tenant_id
+             AND disposition.inventory_owner_id = NEW.inventory_owner_id
+             AND disposition.facility_id = NEW.facility_id
+             AND disposition.inventory_hold_id = NEW.id
+             AND disposition.source_inventory_balance_id = NEW.inventory_balance_id
+             AND disposition.quantity = NEW.qty
+             AND disposition.inspected_by_user_id = NEW.released_by
+             AND disposition.inspected_at = NEW.released_at
+       )
+    THEN
+        RAISE EXCEPTION
+            'inbound receipt quarantine hold release requires an inspection disposition'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER inventory_holds_require_inbound_receipt_disposition
+AFTER UPDATE ON public.inventory_holds
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_inbound_receipt_hold_disposition();
+
+ALTER TABLE public.inbound_inspection_dispositions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY inbound_inspection_dispositions_tenant_isolation
+ON public.inbound_inspection_dispositions
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT,INSERT ON public.inbound_inspection_dispositions TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.inbound_inspection_dispositions_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_inbound_inspection_disposition() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_inbound_inspection_disposition_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_inbound_receipt_hold_disposition() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

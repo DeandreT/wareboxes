@@ -7,6 +7,7 @@ mod error;
 mod expected_receiving;
 mod facility_shipping_origin;
 mod idempotency;
+mod inbound_inspection;
 mod inventory;
 mod inventory_hold;
 mod inventory_relocation;
@@ -64,6 +65,9 @@ pub use facility_shipping_origin::{
 };
 pub use idempotency::{
     IdempotencyKey, IdempotencyKeyError, IDEMPOTENCY_KEY_HEADER, MAX_IDEMPOTENCY_KEY_LENGTH,
+};
+pub use inbound_inspection::{
+    DisposeInboundInspectionRequest, DisposeInboundInspectionResponse, InboundInspectionOutcome,
 };
 pub use inventory::{
     InventoryBalancePage, InventoryBalancePageRequest, InventoryBalanceResponse,

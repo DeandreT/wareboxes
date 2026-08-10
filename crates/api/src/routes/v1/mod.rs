@@ -5,6 +5,7 @@ mod cycle_count;
 mod error;
 mod expected_receiving;
 mod facility_shipping_origins;
+mod inbound_inspections;
 pub(crate) mod inventory_balances;
 mod inventory_holds;
 mod inventory_relocation;
@@ -98,6 +99,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/inventory/holds/{hold_id}/releases",
             post(inventory_holds::release),
+        )
+        .route(
+            "/inbound-inspections/{hold_id}/dispositions",
+            post(inbound_inspections::dispose),
         )
         .route(
             "/inventory/balances/{balance_id}/status-transitions",

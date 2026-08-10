@@ -622,6 +622,14 @@ pub async fn release_inventory_hold(
             "inventory hold license plate changed while acquiring locks",
         ));
     }
+    if matches!(
+        hold.reference_type.as_deref(),
+        Some("expected_receipt_line" | "unexpected_receipt")
+    ) {
+        return Err(AppError::conflict(
+            "inbound receipt quarantine holds require an inspection disposition",
+        ));
+    }
     if hold.status != InventoryHoldStatus::Active.as_str() {
         return Err(AppError::conflict("inventory hold is not active"));
     }

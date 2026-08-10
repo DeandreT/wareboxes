@@ -178,7 +178,6 @@ impl Section {
             Self::Overview
                 | Self::Loads
                 | Self::Inventory
-                | Self::InventoryHolds
                 | Self::InventoryDisposition
                 | Self::Access
         )
@@ -831,6 +830,7 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                 view! {
                     <InventoryHolds
                         data
+                        can_inspect_receipts=has_permission(&session, "wms_supervisor")
                         on_unauthorized
                     />
                 }
@@ -1173,7 +1173,11 @@ fn Inventory(data: WorkspaceData) -> impl IntoView {
 }
 
 #[component]
-fn InventoryHolds(data: WorkspaceData, on_unauthorized: Callback<()>) -> impl IntoView {
+fn InventoryHolds(
+    data: WorkspaceData,
+    can_inspect_receipts: bool,
+    on_unauthorized: Callback<()>,
+) -> impl IntoView {
     view! {
         <section class="page-heading">
             <div>
@@ -1187,6 +1191,7 @@ fn InventoryHolds(data: WorkspaceData, on_unauthorized: Callback<()>) -> impl In
             initial_balance_cursor=data.balance_next_cursor
             initial_holds=data.holds
             initial_hold_cursor=data.hold_next_cursor
+            can_inspect_receipts
             on_unauthorized
         />
     }
@@ -1468,6 +1473,7 @@ mod tests {
         });
 
         assert!(Section::Overview.supports_workspace_refresh());
+        assert!(!Section::InventoryHolds.supports_workspace_refresh());
         assert!(!Section::Orders.supports_workspace_refresh());
         assert!(!Section::Packing.supports_workspace_refresh());
         assert!(!Section::Shipping.supports_workspace_refresh());

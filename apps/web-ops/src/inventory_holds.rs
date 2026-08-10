@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
-    InventoryBalanceResponse, InventoryHoldReason, InventoryHoldResponse, InventoryHoldStatus,
-    OpaqueCursor, PlaceInventoryHoldRequest,
+    InboundInspectionOutcome, InventoryBalanceResponse, InventoryHoldReason, InventoryHoldResponse,
+    InventoryHoldStatus, OpaqueCursor, PlaceInventoryHoldRequest,
 };
 
 use crate::api;
@@ -9,6 +9,20 @@ use crate::components::{Icon, SearchField, UiIcon};
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::toast::use_toast_bus;
 use crate::view_model::format_quantity;
+
+#[path = "inventory_holds/model.rs"]
+mod model;
+use model::{
+    balance_item_detail, balance_matches, facility_label, hold_facility_label, hold_item_label,
+    hold_location_label, hold_matches, item_label, location_label, sort_holds, sort_positions,
+    tracking_label, HoldSort, PositionSort,
+};
+#[path = "inventory_holds/panels.rs"]
+mod panels;
+use panels::{
+    inspection_request, is_receipt_inspection_hold, retain_inspection_attempt, InspectionAttempt,
+    InspectionPanel, ReleasePanel,
+};
 
 const HOLD_REASONS: [InventoryHoldReason; 6] = [
     InventoryHoldReason::QualityInspection,
@@ -19,32 +33,13 @@ const HOLD_REASONS: [InventoryHoldReason; 6] = [
     InventoryHoldReason::Other,
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PositionSort {
-    Item,
-    Client,
-    Facility,
-    Location,
-    Available,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum HoldSort {
-    Id,
-    Item,
-    Client,
-    Position,
-    Reason,
-    Created,
-    Quantity,
-}
-
 #[component]
 pub fn QuantityHoldsWorkbench(
     initial_balances: Vec<InventoryBalanceResponse>,
     initial_balance_cursor: Option<OpaqueCursor>,
     initial_holds: Vec<InventoryHoldResponse>,
     initial_hold_cursor: Option<OpaqueCursor>,
+    can_inspect_receipts: bool,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     let balances = RwSignal::new(initial_balances);
@@ -56,6 +51,10 @@ pub fn QuantityHoldsWorkbench(
     let hold_filter = RwSignal::new(String::new());
     let selected_balance = RwSignal::new(None::<InventoryBalanceResponse>);
     let release_candidate = RwSignal::new(None::<InventoryHoldResponse>);
+    let inspection_candidate = RwSignal::new(None::<InventoryHoldResponse>);
+    let inspection_outcome = RwSignal::new(InboundInspectionOutcome::Approved);
+    let inspection_note = RwSignal::new(String::new());
+    let inspection_attempt = RwSignal::new(None::<InspectionAttempt>);
     let quantity = RwSignal::new("1".to_owned());
     let reason = RwSignal::new(InventoryHoldReason::QualityInspection);
     let note = RwSignal::new(String::new());
@@ -81,6 +80,7 @@ pub fn QuantityHoldsWorkbench(
         let available = balance.quantity.available;
         selected_balance.set(Some(balance));
         release_candidate.set(None);
+        inspection_candidate.set(None);
         quantity.set(if available > 0 { "1" } else { "0" }.to_owned());
         reason.set(InventoryHoldReason::QualityInspection);
         note.set(String::new());
@@ -309,6 +309,99 @@ pub fn QuantityHoldsWorkbench(
         });
     };
 
+    let confirm_inspection = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        let Some(hold) = inspection_candidate.get_untracked() else {
+            return;
+        };
+        if command_pending.get_untracked() {
+            return;
+        }
+        let attempt = match inspection_attempt.get_untracked() {
+            Some(attempt) => attempt,
+            None => {
+                let request = match inspection_request(
+                    inspection_outcome.get_untracked(),
+                    &inspection_note.get_untracked(),
+                ) {
+                    Ok(request) => request,
+                    Err(message) => {
+                        command_error.set(Some(message.to_owned()));
+                        return;
+                    }
+                };
+                InspectionAttempt {
+                    request,
+                    idempotency_key: api::new_idempotency_key(),
+                }
+            }
+        };
+        inspection_attempt.set(Some(attempt.clone()));
+        command_pending.set(true);
+        command_error.set(None);
+        leptos::task::spawn_local(async move {
+            match api::dispose_inbound_inspection(
+                hold.id,
+                &attempt.request,
+                &attempt.idempotency_key,
+            )
+            .await
+            {
+                Ok(result) => {
+                    inspection_candidate.set(None);
+                    inspection_attempt.set(None);
+                    match reload(InventoryHoldStatus::Active).await {
+                        Ok((balance_page, hold_page)) => {
+                            balances.set(balance_page.items);
+                            balance_cursor.set(balance_page.next_cursor);
+                            holds.set(hold_page.items);
+                            hold_cursor.set(hold_page.next_cursor);
+                            hold_status.set(InventoryHoldStatus::Active);
+                            let action = match result.outcome {
+                                InboundInspectionOutcome::Approved => "approved",
+                                InboundInspectionOutcome::Damaged => "marked damaged",
+                            };
+                            toasts.success(format!(
+                                "Hold #{} inspected; {} {} {}.",
+                                result.inventory_hold_id,
+                                format_quantity(result.quantity),
+                                result.uom,
+                                action
+                            ));
+                        }
+                        Err(error) if error.unauthorized => on_unauthorized.run(()),
+                        Err(error) => {
+                            let message = format!(
+                                "Inspection #{} committed, but the workbench could not refresh: {}",
+                                result.disposition_id, error.message
+                            );
+                            command_error.set(Some(message.clone()));
+                            toasts.error(message);
+                        }
+                    }
+                    command_pending.set(false);
+                }
+                Err(error) if error.unauthorized => {
+                    command_pending.set(false);
+                    on_unauthorized.run(());
+                }
+                Err(error) => {
+                    if !retain_inspection_attempt(error.ambiguous_outcome) {
+                        inspection_attempt.set(None);
+                    }
+                    let message = if error.ambiguous_outcome {
+                        format!("{} Retry to resolve the saved command.", error.message)
+                    } else {
+                        error.message
+                    };
+                    toasts.error(message.clone());
+                    command_error.set(Some(message));
+                    command_pending.set(false);
+                }
+            }
+        });
+    };
+
     view! {
         <section class="holds-workbench">
             <div class="holds-position-grid">
@@ -469,7 +562,31 @@ pub fn QuantityHoldsWorkbench(
 
                 <aside class="command-panel" aria-labelledby="hold-command-title">
                     {move || {
-                        if let Some(hold) = release_candidate.get() {
+                        if let Some(hold) = inspection_candidate.get() {
+                            view! {
+                                <InspectionPanel
+                                    hold
+                                    outcome=inspection_outcome
+                                    note=inspection_note
+                                    pending=command_pending
+                                    error=command_error
+                                    retry_retained=Signal::derive(move || {
+                                        inspection_attempt.get().is_some()
+                                    })
+                                    on_change=Callback::new(move |_| {
+                                        inspection_attempt.set(None);
+                                        command_error.set(None);
+                                    })
+                                    on_confirm=Callback::new(confirm_inspection)
+                                    on_cancel=Callback::new(move |_| {
+                                        inspection_candidate.set(None);
+                                        inspection_attempt.set(None);
+                                        command_error.set(None);
+                                    })
+                                />
+                            }
+                                .into_any()
+                        } else if let Some(hold) = release_candidate.get() {
                             view! {
                                 <ReleasePanel
                                     hold
@@ -783,7 +900,10 @@ pub fn QuantityHoldsWorkbench(
                                         .into_iter()
                                         .map(|hold| {
                                             let release_hold = hold.clone();
-                                            let can_release = hold.status == InventoryHoldStatus::Active;
+                                            let inspection_hold = is_receipt_inspection_hold(&hold);
+                                            let can_release = hold.status == InventoryHoldStatus::Active
+                                                && !inspection_hold;
+                                            let inspect_hold = hold.clone();
                                             view! {
                                                 <tr>
                                                     <td><strong>{format!("#{}", hold.id)}</strong></td>
@@ -814,13 +934,37 @@ pub fn QuantityHoldsWorkbench(
                                                         <small class="uom-detail">{hold.uom.clone()}</small>
                                                     </td>
                                                     <td class="action-column">
-                                                        {can_release.then(|| {
+                                                        {if inspection_hold && can_inspect_receipts {
+                                                            view! {
+                                                                <button
+                                                                    class="button table-action inspection-action"
+                                                                    type="button"
+                                                                    on:click=move |_| {
+                                                                        inspection_candidate.set(Some(inspect_hold.clone()));
+                                                                        release_candidate.set(None);
+                                                                        selected_balance.set(None);
+                                                                        inspection_outcome.set(InboundInspectionOutcome::Approved);
+                                                                        inspection_note.set(String::new());
+                                                                        inspection_attempt.set(None);
+                                                                        command_error.set(None);
+                                                                    }
+                                                                >
+                                                                    <Icon icon=UiIcon::Disposition/>
+                                                                    <span>"Inspect"</span>
+                                                                </button>
+                                                            }
+                                                                .into_any()
+                                                        } else if inspection_hold {
+                                                            view! { <span class="cell-detail">"Supervisor"</span> }
+                                                                .into_any()
+                                                        } else if can_release {
                                                             view! {
                                                                 <button
                                                                     class="button table-action danger"
                                                                     type="button"
                                                                     on:click=move |_| {
                                                                         release_candidate.set(Some(release_hold.clone()));
+                                                                        inspection_candidate.set(None);
                                                                         selected_balance.set(None);
                                                                         command_key.set(Some(api::new_idempotency_key()));
                                                                         command_error.set(None);
@@ -829,7 +973,10 @@ pub fn QuantityHoldsWorkbench(
                                                                     "Release"
                                                                 </button>
                                                             }
-                                                        })}
+                                                                .into_any()
+                                                        } else {
+                                                            ().into_any()
+                                                        }}
                                                     </td>
                                                 </tr>
                                             }
@@ -865,63 +1012,6 @@ pub fn QuantityHoldsWorkbench(
                 </div>
             </section>
         </section>
-    }
-}
-
-#[component]
-fn ReleasePanel(
-    hold: InventoryHoldResponse,
-    pending: RwSignal<bool>,
-    error: RwSignal<Option<String>>,
-    on_confirm: Callback<leptos::ev::MouseEvent>,
-    on_cancel: Callback<leptos::ev::MouseEvent>,
-) -> impl IntoView {
-    view! {
-        <div class="release-panel">
-            <div class="command-panel-heading danger">
-                <span class="command-icon"><Icon icon=UiIcon::Alert/></span>
-                <div>
-                    <p class="eyebrow">"Release quantity hold"</p>
-                    <h2 id="hold-command-title">{format!("Hold #{}", hold.id)}</h2>
-                </div>
-            </div>
-            <dl class="position-facts">
-                <div><dt>"Item"</dt><dd>{hold_item_label(&hold)}</dd></div>
-                <div><dt>"Client"</dt><dd>{hold.inventory_owner_name.clone()}</dd></div>
-                <div><dt>"Position"</dt><dd>{hold_location_label(&hold)}</dd></div>
-                <div>
-                    <dt>"Quantity"</dt>
-                    <dd>{format!("{} {}", format_quantity(hold.quantity), hold.uom)}</dd>
-                </div>
-                <div class="wide"><dt>"Reason"</dt><dd>{reason_label(hold.reason)}</dd></div>
-            </dl>
-            <p class="confirmation-copy">
-                "This returns the held quantity to the position's available inventory."
-            </p>
-            {move || {
-                error.get().map(|message| {
-                    view! { <div class="inline-command-error" role="alert">{message}</div> }
-                })
-            }}
-            <div class="command-actions">
-                <button
-                    class="button quiet-action"
-                    type="button"
-                    on:click=move |event| on_cancel.run(event)
-                    disabled=move || pending.get()
-                >
-                    "Cancel"
-                </button>
-                <button
-                    class="button danger-action"
-                    type="button"
-                    on:click=move |event| on_confirm.run(event)
-                    disabled=move || pending.get()
-                >
-                    {move || if pending.get() { "Releasing" } else { "Release hold" }}
-                </button>
-            </div>
-        </div>
     }
 }
 
@@ -985,172 +1075,6 @@ fn reason_label(reason: InventoryHoldReason) -> &'static str {
         InventoryHoldReason::CustomerRequest => "Customer request",
         InventoryHoldReason::Other => "Other",
     }
-}
-
-fn item_label(balance: &InventoryBalanceResponse) -> String {
-    balance
-        .primary_sku
-        .clone()
-        .or_else(|| balance.item_description.clone())
-        .unwrap_or_else(|| format!("Item #{}", balance.item_id))
-}
-
-fn balance_item_detail(balance: &InventoryBalanceResponse) -> Option<String> {
-    balance
-        .primary_sku
-        .as_ref()
-        .and(balance.item_description.clone())
-}
-
-fn sort_positions(balances: &mut [InventoryBalanceResponse], spec: SortSpec<PositionSort>) {
-    balances.sort_by(|left, right| {
-        let ordering = match spec.key {
-            PositionSort::Item => item_label(left)
-                .to_ascii_lowercase()
-                .cmp(&item_label(right).to_ascii_lowercase()),
-            PositionSort::Client => left
-                .inventory_owner_name
-                .to_ascii_lowercase()
-                .cmp(&right.inventory_owner_name.to_ascii_lowercase()),
-            PositionSort::Facility => facility_label(left)
-                .to_ascii_lowercase()
-                .cmp(&facility_label(right).to_ascii_lowercase())
-                .then_with(|| {
-                    location_label(left)
-                        .to_ascii_lowercase()
-                        .cmp(&location_label(right).to_ascii_lowercase())
-                })
-                .then_with(|| {
-                    item_label(left)
-                        .to_ascii_lowercase()
-                        .cmp(&item_label(right).to_ascii_lowercase())
-                }),
-            PositionSort::Location => location_label(left)
-                .to_ascii_lowercase()
-                .cmp(&location_label(right).to_ascii_lowercase()),
-            PositionSort::Available => left.quantity.available.cmp(&right.quantity.available),
-        }
-        .then_with(|| left.id.cmp(&right.id));
-        if spec.direction == SortDirection::Ascending {
-            ordering
-        } else {
-            ordering.reverse()
-        }
-    });
-}
-
-fn sort_holds(holds: &mut [InventoryHoldResponse], spec: SortSpec<HoldSort>) {
-    holds.sort_by(|left, right| {
-        let ordering = match spec.key {
-            HoldSort::Id => left.id.cmp(&right.id),
-            HoldSort::Item => hold_item_label(left)
-                .to_ascii_lowercase()
-                .cmp(&hold_item_label(right).to_ascii_lowercase()),
-            HoldSort::Client => left
-                .inventory_owner_name
-                .to_ascii_lowercase()
-                .cmp(&right.inventory_owner_name.to_ascii_lowercase()),
-            HoldSort::Position => hold_facility_label(left)
-                .to_ascii_lowercase()
-                .cmp(&hold_facility_label(right).to_ascii_lowercase())
-                .then_with(|| {
-                    hold_location_label(left)
-                        .to_ascii_lowercase()
-                        .cmp(&hold_location_label(right).to_ascii_lowercase())
-                }),
-            HoldSort::Reason => reason_label(left.reason).cmp(reason_label(right.reason)),
-            HoldSort::Created => left.created_at.cmp(&right.created_at),
-            HoldSort::Quantity => left.quantity.cmp(&right.quantity),
-        }
-        .then_with(|| left.id.cmp(&right.id));
-        if spec.direction == SortDirection::Ascending {
-            ordering
-        } else {
-            ordering.reverse()
-        }
-    });
-}
-
-fn facility_label(balance: &InventoryBalanceResponse) -> String {
-    balance
-        .facility_name
-        .clone()
-        .unwrap_or_else(|| format!("Facility #{}", balance.facility_id))
-}
-
-fn location_label(balance: &InventoryBalanceResponse) -> String {
-    balance
-        .location_barcode
-        .clone()
-        .or_else(|| balance.location_name.clone())
-        .unwrap_or_else(|| format!("Location #{}", balance.location_id))
-}
-
-fn balance_matches(balance: &InventoryBalanceResponse, query: &str) -> bool {
-    query.is_empty()
-        || [
-            balance.inventory_owner_name.as_str(),
-            balance.facility_name.as_deref().unwrap_or_default(),
-            balance.location_name.as_deref().unwrap_or_default(),
-            balance.location_barcode.as_deref().unwrap_or_default(),
-            balance.license_plate_barcode.as_deref().unwrap_or_default(),
-            balance.item_description.as_deref().unwrap_or_default(),
-            balance.primary_sku.as_deref().unwrap_or_default(),
-            balance.lot.as_deref().unwrap_or_default(),
-            balance.serial.as_deref().unwrap_or_default(),
-        ]
-        .iter()
-        .any(|value| value.to_ascii_lowercase().contains(query))
-}
-
-fn hold_item_label(hold: &InventoryHoldResponse) -> String {
-    hold.item_description
-        .clone()
-        .unwrap_or_else(|| format!("Item #{}", hold.item_id))
-}
-
-fn hold_facility_label(hold: &InventoryHoldResponse) -> String {
-    hold.facility_name
-        .clone()
-        .unwrap_or_else(|| format!("Facility #{}", hold.facility_id))
-}
-
-fn hold_location_label(hold: &InventoryHoldResponse) -> String {
-    hold.location_barcode
-        .clone()
-        .or_else(|| hold.location_name.clone())
-        .unwrap_or_else(|| format!("Location #{}", hold.location_id))
-}
-
-fn tracking_label(hold: &InventoryHoldResponse) -> Option<String> {
-    match (&hold.lot, &hold.serial) {
-        (Some(lot), Some(serial)) => Some(format!("Lot {lot} / Serial {serial}")),
-        (Some(lot), None) => Some(format!("Lot {lot}")),
-        (None, Some(serial)) => Some(format!("Serial {serial}")),
-        (None, None) => hold
-            .license_plate_barcode
-            .as_ref()
-            .map(|barcode| format!("LPN {barcode}")),
-    }
-}
-
-fn hold_matches(hold: &InventoryHoldResponse, query: &str) -> bool {
-    query.is_empty()
-        || [
-            hold.inventory_owner_name.as_str(),
-            hold.facility_name.as_deref().unwrap_or_default(),
-            hold.location_name.as_deref().unwrap_or_default(),
-            hold.location_barcode.as_deref().unwrap_or_default(),
-            hold.license_plate_barcode.as_deref().unwrap_or_default(),
-            hold.item_description.as_deref().unwrap_or_default(),
-            hold.lot.as_deref().unwrap_or_default(),
-            hold.serial.as_deref().unwrap_or_default(),
-            hold.note.as_deref().unwrap_or_default(),
-            reason_label(hold.reason),
-        ]
-        .iter()
-        .any(|value| value.to_ascii_lowercase().contains(query))
-        || hold.id.to_string().contains(query)
 }
 
 fn compact_timestamp(timestamp: &str) -> String {

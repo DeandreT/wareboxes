@@ -7,6 +7,7 @@ mod error;
 pub mod facility_shipping_origin;
 pub mod idempotency;
 pub mod identity;
+pub mod inbound_inspection;
 pub mod integration;
 pub mod inventory;
 pub mod item_substitution;

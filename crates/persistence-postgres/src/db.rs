@@ -482,6 +482,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'unexpected_receipts_tenant_isolation'
                 ),
                 (
+                    'inbound_inspection_dispositions',
+                    'inbound_inspection_dispositions_tenant_isolation'
+                ),
+                (
                     'shipment_address_snapshots',
                     'shipment_address_snapshots_tenant_isolation'
                 ),

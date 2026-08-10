@@ -79,6 +79,16 @@
   color: #8c3035;
 }
 
+.table-action.inspection-action {
+  border-color: #9ebcaf;
+  color: #116348;
+}
+
+.table-action.inspection-action .ui-icon {
+  width: 13px;
+  height: 13px;
+}
+
 .uom-detail {
   display: inline;
   margin-left: 3px;
@@ -202,6 +212,10 @@
 .hold-form > textarea {
   min-height: 64px;
   resize: vertical;
+}
+
+.inspection-panel > textarea {
+  min-height: 84px;
 }
 
 .hold-form > input:focus,
@@ -387,5 +401,40 @@
 
   .holds-table {
     min-width: 720px;
+  }
+}
+
+@media (max-height: 820px) and (min-width: 1101px) {
+  .command-panel {
+    min-height: 360px;
+    height: 360px;
+  }
+
+  .hold-form,
+  .release-panel,
+  .command-placeholder {
+    padding: 8px 12px;
+  }
+
+  .hold-form,
+  .release-panel {
+    gap: 5px;
+  }
+
+  .position-facts {
+    margin: 4px 0 6px;
+  }
+
+  .position-facts div {
+    padding: 4px 7px;
+  }
+
+  .inspection-panel > textarea {
+    min-height: 44px;
+  }
+
+  .command-actions {
+    margin-top: 2px;
+    padding-top: 5px;
   }
 }

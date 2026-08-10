@@ -9,8 +9,9 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    ErrorReason, ErrorResponse, ExpectedReceivingLoadStatus, InventoryBalanceStatus,
-    UnexpectedReceiptConfirmationResponse, UnexpectedReceiptReason,
+    DisposeInboundInspectionResponse, ErrorReason, ErrorResponse, ExpectedReceivingLoadStatus,
+    InboundInspectionOutcome, InventoryBalanceStatus, UnexpectedReceiptConfirmationResponse,
+    UnexpectedReceiptReason,
 };
 
 fn init_test_tracing() {
@@ -31,6 +32,26 @@ fn command_request(
         .method(Method::POST)
         .uri(format!(
             "/api/v1/expected-receiving/loads/{load_id}/unexpected-receipts"
+        ))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .header(IDEMPOTENCY_KEY_HEADER, key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn inspection_request(
+    token: &str,
+    tenant_id: TenantId,
+    hold_id: i64,
+    key: &str,
+    body: &Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/api/v1/inbound-inspections/{hold_id}/dispositions"
         ))
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(TENANT_ID_HEADER, tenant_id.to_string())
@@ -65,6 +86,48 @@ struct Setup {
 async fn setup(fixture: &Fixture, email: &str) -> Setup {
     let operator = fixture.wms_user(email).await;
     let tenant_id = tenant_for_user(&fixture.db, operator.id).await;
+    let role = wareboxes_persistence_postgres::roles::add_role(
+        &fixture.db,
+        tenant_id,
+        &format!("unexpected-inspector-{}", operator.id),
+        Some("Inspect unexpected inbound receipts"),
+    )
+    .await
+    .unwrap();
+    let permission = match wareboxes_persistence_postgres::permissions::find_by_name(
+        &fixture.db,
+        tenant_id,
+        "wms_supervisor",
+    )
+    .await
+    .unwrap()
+    {
+        Some(permission) => permission.id,
+        None => wareboxes_persistence_postgres::permissions::add_permission(
+            &fixture.db,
+            tenant_id,
+            "wms_supervisor",
+            Some("Supervise warehouse exceptions"),
+        )
+        .await
+        .unwrap(),
+    };
+    wareboxes_persistence_postgres::roles::add_role_permission(
+        &fixture.db,
+        tenant_id,
+        role,
+        permission,
+    )
+    .await
+    .unwrap();
+    wareboxes_persistence_postgres::roles::add_role_to_user(
+        &fixture.db,
+        tenant_id,
+        operator.id,
+        role,
+    )
+    .await
+    .unwrap();
     let facility_id = fixture.facility(tenant_id, "Unexpected Receipt DC").await;
     let owner_id = fixture
         .inventory_owner(tenant_id, "Unexpected Receipt Owner")
@@ -290,19 +353,63 @@ async fn unexpected_receipt_is_quarantined_held_audited_and_replay_safe() {
         result
     );
     assert_error(
-        app.oneshot(command_request(
-            &token,
-            setup.tenant_id,
-            setup.load_id,
-            "unexpected-success",
-            &body("UNEXPECTED-CASE-01", "unexpected_item", 2),
-        ))
-        .await
-        .unwrap(),
+        app.clone()
+            .oneshot(command_request(
+                &token,
+                setup.tenant_id,
+                setup.load_id,
+                "unexpected-success",
+                &body("UNEXPECTED-CASE-01", "unexpected_item", 2),
+            ))
+            .await
+            .unwrap(),
         StatusCode::CONFLICT,
         ErrorReason::IdempotencyKeyReused,
     )
     .await;
+
+    let inspection = app
+        .oneshot(inspection_request(
+            &token,
+            setup.tenant_id,
+            result.inventory_hold_id,
+            "unexpected-damage-inspection",
+            &json!({
+                "outcome": "damaged",
+                "note": "Mis-shipped cases failed inbound inspection"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(inspection.status(), StatusCode::OK);
+    let inspection: DisposeInboundInspectionResponse = response_json(inspection).await;
+    assert_eq!(inspection.outcome, InboundInspectionOutcome::Damaged);
+    assert_eq!(inspection.target_status, InventoryBalanceStatus::Damaged);
+    assert_eq!(inspection.quantity, 3);
+    assert_eq!(inspection.inventory_hold_id, result.inventory_hold_id);
+
+    let mut tx = tenant_tx(&fixture.db, setup.tenant_id).await;
+    let disposition_reference: (String, i64, String, i64) = sqlx::query_as(
+        r#"
+        SELECT source_reference_type, source_reference_id, target_status, quantity
+        FROM inbound_inspection_dispositions
+        WHERE id=$1
+        "#,
+    )
+    .bind(inspection.disposition_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(
+        disposition_reference,
+        (
+            "unexpected_receipt".into(),
+            result.unexpected_receipt_id,
+            "damaged".into(),
+            3
+        )
+    );
+    tx.rollback().await.unwrap();
 }
 
 #[tokio::test]

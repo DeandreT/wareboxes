@@ -37,6 +37,8 @@ pub use item_substitution::{
     configure_item_substitution_policy, item_substitution_policies,
     retire_item_substitution_policy, substitute_pick_shortage,
 };
+mod inbound_inspection;
+pub use inbound_inspection::dispose_inbound_inspection;
 mod order;
 pub use order::{
     amend_fulfillment_order, create_fulfillment_order, order_entry_items,
