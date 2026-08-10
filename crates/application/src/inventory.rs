@@ -13,6 +13,42 @@ pub enum InventoryBalanceStatus {
     Quarantine,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryBalanceSort {
+    Position,
+    Facility,
+    Client,
+    Location,
+    Item,
+    Tracking,
+    LicensePlate,
+    Status,
+    OnHand,
+    Reserved,
+    Held,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryBalanceSortDirection {
+    Ascending,
+    Descending,
+}
+
+impl InventoryBalanceSortDirection {
+    pub const fn is_ascending(self) -> bool {
+        matches!(self, Self::Ascending)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventoryBalancePageQuery {
+    pub offset: u64,
+    pub limit: u16,
+    pub query: Option<String>,
+    pub sort: InventoryBalanceSort,
+    pub direction: InventoryBalanceSortDirection,
+}
+
 impl InventoryBalanceStatus {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -113,7 +149,7 @@ pub struct InventoryBalanceReadModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryBalancePage {
     pub items: Vec<InventoryBalanceReadModel>,
-    pub next_after_id: Option<i64>,
+    pub next_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

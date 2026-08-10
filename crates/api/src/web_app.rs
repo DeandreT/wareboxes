@@ -122,9 +122,17 @@ async fn workspace_bootstrap(
             };
             let load_balances = async {
                 if has_permission(session, "wms") {
-                    routes::v1::inventory_balances::page_for_access(state, access, None, 100, None)
-                        .await
-                        .map(Some)
+                    routes::v1::inventory_balances::page_for_access(
+                        state,
+                        access,
+                        0,
+                        100,
+                        None,
+                        wareboxes_api_contract::v1::InventoryBalanceSort::Position,
+                        wareboxes_api_contract::v1::InventorySortDirection::Ascending,
+                    )
+                    .await
+                    .map(Some)
                 } else {
                     Ok(None)
                 }
@@ -298,9 +306,16 @@ async fn workspace_bootstrap(
             if !has_permission(session, "wms") {
                 return Ok(WorkspaceBootstrapData::default());
             }
-            let page =
-                routes::v1::inventory_balances::page_for_access(state, access, None, 100, None)
-                    .await?;
+            let page = routes::v1::inventory_balances::page_for_access(
+                state,
+                access,
+                0,
+                100,
+                None,
+                wareboxes_api_contract::v1::InventoryBalanceSort::Position,
+                wareboxes_api_contract::v1::InventorySortDirection::Ascending,
+            )
+            .await?;
             Ok(WorkspaceBootstrapData {
                 balances: page.items,
                 balance_next_cursor: page.next_cursor,

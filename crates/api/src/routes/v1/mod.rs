@@ -8,6 +8,7 @@ mod facility_shipping_origins;
 mod inbound_inspections;
 pub(crate) mod inventory_balances;
 mod inventory_holds;
+mod inventory_integrity;
 mod inventory_relocation;
 mod inventory_rollups;
 mod inventory_status_transitions;
@@ -94,6 +95,11 @@ pub fn router() -> Router<AppState> {
             post(cycle_count::confirm),
         )
         .route("/inventory/balances", get(inventory_balances::list))
+        .route("/inventory/journal", get(inventory_integrity::journal))
+        .route(
+            "/inventory/integrity-issues",
+            get(inventory_integrity::issues),
+        )
         .route(
             "/inventory/rollups/by-location",
             get(inventory_rollups::list_by_location),

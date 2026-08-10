@@ -1,5 +1,8 @@
 use leptos::prelude::*;
-use wareboxes_api_contract::v1::{InventoryBalanceResponse, InventoryBalanceStatus, OpaqueCursor};
+use wareboxes_api_contract::v1::{
+    InventoryBalanceResponse, InventoryBalanceSort as ApiInventoryBalanceSort,
+    InventoryBalanceStatus, InventorySortDirection as ApiInventorySortDirection, OpaqueCursor,
+};
 
 use crate::api;
 use crate::components::SearchField;
@@ -120,6 +123,7 @@ const fn select_if(selected: bool) -> Option<&'static str> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InventorySort {
+    Position,
     Facility,
     Client,
     Location,
@@ -132,58 +136,95 @@ enum InventorySort {
     Held,
 }
 
+#[derive(Clone, Copy)]
+struct InventoryTableSignals {
+    balances: RwSignal<Vec<InventoryBalanceResponse>>,
+    next_cursor: RwSignal<Option<OpaqueCursor>>,
+    filter: RwSignal<String>,
+    applied_filter: RwSignal<String>,
+    loading: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    generation: RwSignal<u64>,
+    sort: RwSignal<SortSpec<InventorySort>>,
+}
+
 #[component]
 pub fn InventoryTable(
     initial_balances: Vec<InventoryBalanceResponse>,
     initial_cursor: Option<OpaqueCursor>,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
-    let balances = RwSignal::new(initial_balances);
-    let next_cursor = RwSignal::new(initial_cursor);
-    let filter = RwSignal::new(String::new());
-    let loading_more = RwSignal::new(false);
-    let page_error = RwSignal::new(None::<String>);
-    let sort = RwSignal::new(SortSpec {
-        key: InventorySort::Facility,
-        direction: SortDirection::Ascending,
-    });
+    let signals = InventoryTableSignals {
+        balances: RwSignal::new(initial_balances),
+        next_cursor: RwSignal::new(initial_cursor),
+        filter: RwSignal::new(String::new()),
+        applied_filter: RwSignal::new(String::new()),
+        loading: RwSignal::new(false),
+        error: RwSignal::new(None),
+        generation: RwSignal::new(0),
+        sort: RwSignal::new(SortSpec {
+            key: InventorySort::Position,
+            direction: SortDirection::Ascending,
+        }),
+    };
     let load_more = move |_| {
-        let Some(cursor) = next_cursor.get_untracked() else {
+        let Some(cursor) = signals.next_cursor.get_untracked() else {
             return;
         };
-        if loading_more.get_untracked() {
+        if signals.loading.get_untracked() {
             return;
         }
-        loading_more.set(true);
-        page_error.set(None);
+        signals.loading.set(true);
+        signals.error.set(None);
+        let generation = signals.generation.get_untracked() + 1;
+        signals.generation.set(generation);
+        let query = signals.applied_filter.get_untracked();
+        let spec = signals.sort.get_untracked();
         leptos::task::spawn_local(async move {
-            match api::balances(Some(&cursor)).await {
-                Ok(page) => {
-                    balances.update(|current| current.extend(page.items));
-                    next_cursor.set(page.next_cursor);
-                    loading_more.set(false);
+            match api::sorted_balances(
+                (!query.is_empty()).then_some(query.as_str()),
+                map_inventory_sort(spec.key),
+                map_inventory_direction(spec.direction),
+                Some(&cursor),
+            )
+            .await
+            {
+                Ok(page) if signals.generation.get_untracked() == generation => {
+                    signals
+                        .balances
+                        .update(|current| current.extend(page.items));
+                    signals.next_cursor.set(page.next_cursor);
+                    signals.loading.set(false);
                 }
                 Err(error) if error.unauthorized => on_unauthorized.run(()),
-                Err(error) => {
-                    page_error.set(Some(error.message));
-                    loading_more.set(false);
+                Err(error) if signals.generation.get_untracked() == generation => {
+                    signals.error.set(Some(error.message));
+                    signals.loading.set(false);
                 }
+                _ => {}
             }
         });
+    };
+    let apply_filter = move |_| {
+        signals
+            .applied_filter
+            .set(signals.filter.get_untracked().trim().to_owned());
+        request_inventory_page(signals, on_unauthorized);
     };
 
     view! {
         <section class="data-section page-data">
             <div class="table-toolbar">
                 <div class="toolbar-summary">
-                    <strong>{move || format_quantity(balances.get().len() as i64)}</strong>
+                    <strong>{move || format_quantity(signals.balances.get().len() as i64)}</strong>
                     <span>"positions loaded"</span>
                 </div>
                 <SearchField
-                    label="Filter loaded inventory positions".to_owned()
+                    label="Search all inventory positions".to_owned()
                     placeholder="Filter positions"
-                    value=filter
+                    value=signals.filter
                 />
+                <button type="button" class="button secondary-action" disabled=move || signals.loading.get() on:click=apply_filter>"Apply"</button>
             </div>
             <div class="table-scroll">
                 <table class="data-table">
@@ -192,84 +233,84 @@ pub fn InventoryTable(
                         <tr>
                             <SortableHeader
                                 label="Facility"
-                                active=move || sort.get().key == InventorySort::Facility
-                                direction=move || sort.get().direction
+                                active=move || signals.sort.get().key == InventorySort::Facility
+                                direction=move || signals.sort.get().direction
                                 on_sort=Callback::new(move |_| {
-                                    SortSpec::select(sort, InventorySort::Facility)
+                                    select_inventory_sort(signals, InventorySort::Facility, on_unauthorized)
                                 })
                             />
                             <SortableHeader
                                 label="Client"
-                                active=move || sort.get().key == InventorySort::Client
-                                direction=move || sort.get().direction
+                                active=move || signals.sort.get().key == InventorySort::Client
+                                direction=move || signals.sort.get().direction
                                 on_sort=Callback::new(move |_| {
-                                    SortSpec::select(sort, InventorySort::Client)
+                                    select_inventory_sort(signals, InventorySort::Client, on_unauthorized)
                                 })
                             />
                             <SortableHeader
                                 label="Location"
-                                active=move || sort.get().key == InventorySort::Location
-                                direction=move || sort.get().direction
+                                active=move || signals.sort.get().key == InventorySort::Location
+                                direction=move || signals.sort.get().direction
                                 on_sort=Callback::new(move |_| {
-                                    SortSpec::select(sort, InventorySort::Location)
+                                    select_inventory_sort(signals, InventorySort::Location, on_unauthorized)
                                 })
                             />
                             <SortableHeader
                                 label="Item"
-                                active=move || sort.get().key == InventorySort::Item
-                                direction=move || sort.get().direction
+                                active=move || signals.sort.get().key == InventorySort::Item
+                                direction=move || signals.sort.get().direction
                                 on_sort=Callback::new(move |_| {
-                                    SortSpec::select(sort, InventorySort::Item)
+                                    select_inventory_sort(signals, InventorySort::Item, on_unauthorized)
                                 })
                             />
                             <SortableHeader
                                 label="Lot / serial"
-                                active=move || sort.get().key == InventorySort::Tracking
-                                direction=move || sort.get().direction
+                                active=move || signals.sort.get().key == InventorySort::Tracking
+                                direction=move || signals.sort.get().direction
                                 on_sort=Callback::new(move |_| {
-                                    SortSpec::select(sort, InventorySort::Tracking)
+                                    select_inventory_sort(signals, InventorySort::Tracking, on_unauthorized)
                                 })
                             />
                             <SortableHeader
                                 label="License plate"
-                                active=move || sort.get().key == InventorySort::LicensePlate
-                                direction=move || sort.get().direction
+                                active=move || signals.sort.get().key == InventorySort::LicensePlate
+                                direction=move || signals.sort.get().direction
                                 on_sort=Callback::new(move |_| {
-                                    SortSpec::select(sort, InventorySort::LicensePlate)
+                                    select_inventory_sort(signals, InventorySort::LicensePlate, on_unauthorized)
                                 })
                             />
                             <SortableHeader
                                 label="Status"
-                                active=move || sort.get().key == InventorySort::Status
-                                direction=move || sort.get().direction
+                                active=move || signals.sort.get().key == InventorySort::Status
+                                direction=move || signals.sort.get().direction
                                 on_sort=Callback::new(move |_| {
-                                    SortSpec::select(sort, InventorySort::Status)
+                                    select_inventory_sort(signals, InventorySort::Status, on_unauthorized)
                                 })
                             />
                             <SortableHeader
                                 label="On hand"
-                                active=move || sort.get().key == InventorySort::OnHand
-                                direction=move || sort.get().direction
+                                active=move || signals.sort.get().key == InventorySort::OnHand
+                                direction=move || signals.sort.get().direction
                                 on_sort=Callback::new(move |_| {
-                                    SortSpec::select(sort, InventorySort::OnHand)
+                                    select_inventory_sort(signals, InventorySort::OnHand, on_unauthorized)
                                 })
                                 numeric=true
                             />
                             <SortableHeader
                                 label="Reserved"
-                                active=move || sort.get().key == InventorySort::Reserved
-                                direction=move || sort.get().direction
+                                active=move || signals.sort.get().key == InventorySort::Reserved
+                                direction=move || signals.sort.get().direction
                                 on_sort=Callback::new(move |_| {
-                                    SortSpec::select(sort, InventorySort::Reserved)
+                                    select_inventory_sort(signals, InventorySort::Reserved, on_unauthorized)
                                 })
                                 numeric=true
                             />
                             <SortableHeader
                                 label="Held"
-                                active=move || sort.get().key == InventorySort::Held
-                                direction=move || sort.get().direction
+                                active=move || signals.sort.get().key == InventorySort::Held
+                                direction=move || signals.sort.get().direction
                                 on_sort=Callback::new(move |_| {
-                                    SortSpec::select(sort, InventorySort::Held)
+                                    select_inventory_sort(signals, InventorySort::Held, on_unauthorized)
                                 })
                                 numeric=true
                             />
@@ -277,28 +318,16 @@ pub fn InventoryTable(
                     </thead>
                     <tbody>
                         {move || {
-                            let query = filter.get().trim().to_ascii_lowercase();
-                            let all_balances = balances.get();
-                            let is_empty = all_balances.is_empty();
-                            let mut matching = all_balances
-                                .into_iter()
-                                .filter(|balance| balance_matches(balance, &query))
-                                .collect::<Vec<_>>();
-                            sort_balances(&mut matching, sort.get());
-                            if matching.is_empty() {
-                                let message = if is_empty {
-                                    "No inventory balances are currently in scope."
-                                } else {
-                                    "No loaded positions match this filter."
-                                };
+                            let rows = signals.balances.get();
+                            if rows.is_empty() {
                                 view! {
                                     <tr>
-                                        <td class="table-empty-row" colspan="10">{message}</td>
+                                        <td class="table-empty-row" colspan="10">"No inventory positions match this server-side view."</td>
                                     </tr>
                                 }
                                     .into_any()
                             } else {
-                                matching
+                                rows
                                     .into_iter()
                                     .map(|balance| {
                                         let location = location_label(&balance);
@@ -348,13 +377,13 @@ pub fn InventoryTable(
             <div class="table-footer">
                 <span>
                     {move || {
-                        next_cursor
+                        signals.next_cursor
                             .get()
                             .map_or("All positions loaded", |_| "More positions available")
                     }}
                 </span>
                 {move || {
-                    page_error.get().map(|message| {
+                    signals.error.get().map(|message| {
                         view! { <span class="inline-error" role="alert">{message}</span> }
                     })
                 }}
@@ -362,66 +391,76 @@ pub fn InventoryTable(
                     class="button secondary-action"
                     type="button"
                     on:click=load_more
-                    disabled=move || next_cursor.get().is_none() || loading_more.get()
+                    disabled=move || signals.next_cursor.get().is_none() || signals.loading.get()
                 >
-                    {move || if loading_more.get() { "Loading" } else { "Load more" }}
+                    {move || if signals.loading.get() { "Loading" } else { "Load more" }}
                 </button>
             </div>
         </section>
     }
 }
 
-fn sort_balances(balances: &mut [InventoryBalanceResponse], spec: SortSpec<InventorySort>) {
-    balances.sort_by(|left, right| {
-        let ordering = match spec.key {
-            InventorySort::Facility => facility_label(left)
-                .to_ascii_lowercase()
-                .cmp(&facility_label(right).to_ascii_lowercase())
-                .then_with(|| {
-                    location_label(left)
-                        .to_ascii_lowercase()
-                        .cmp(&location_label(right).to_ascii_lowercase())
-                })
-                .then_with(|| {
-                    item_label(left)
-                        .to_ascii_lowercase()
-                        .cmp(&item_label(right).to_ascii_lowercase())
-                }),
-            InventorySort::Client => left
-                .inventory_owner_name
-                .to_ascii_lowercase()
-                .cmp(&right.inventory_owner_name.to_ascii_lowercase()),
-            InventorySort::Location => location_label(left)
-                .to_ascii_lowercase()
-                .cmp(&location_label(right).to_ascii_lowercase()),
-            InventorySort::Item => item_label(left)
-                .to_ascii_lowercase()
-                .cmp(&item_label(right).to_ascii_lowercase()),
-            InventorySort::Tracking => tracking_label(left)
-                .to_ascii_lowercase()
-                .cmp(&tracking_label(right).to_ascii_lowercase()),
-            InventorySort::LicensePlate => license_plate_label(left)
-                .to_ascii_lowercase()
-                .cmp(&license_plate_label(right).to_ascii_lowercase()),
-            InventorySort::Status => status_label(left.status).cmp(status_label(right.status)),
-            InventorySort::OnHand => left.quantity.on_hand.cmp(&right.quantity.on_hand),
-            InventorySort::Reserved => left.quantity.reserved.cmp(&right.quantity.reserved),
-            InventorySort::Held => left.quantity.held.cmp(&right.quantity.held),
-        }
-        .then_with(|| left.id.cmp(&right.id));
-        if spec.direction == SortDirection::Ascending {
-            ordering
-        } else {
-            ordering.reverse()
+fn select_inventory_sort(
+    signals: InventoryTableSignals,
+    key: InventorySort,
+    on_unauthorized: Callback<()>,
+) {
+    SortSpec::select(signals.sort, key);
+    request_inventory_page(signals, on_unauthorized);
+}
+
+fn request_inventory_page(signals: InventoryTableSignals, on_unauthorized: Callback<()>) {
+    let generation = signals.generation.get_untracked() + 1;
+    signals.generation.set(generation);
+    signals.loading.set(true);
+    signals.error.set(None);
+    let query = signals.applied_filter.get_untracked();
+    let spec = signals.sort.get_untracked();
+    leptos::task::spawn_local(async move {
+        match api::sorted_balances(
+            (!query.is_empty()).then_some(query.as_str()),
+            map_inventory_sort(spec.key),
+            map_inventory_direction(spec.direction),
+            None,
+        )
+        .await
+        {
+            Ok(page) if signals.generation.get_untracked() == generation => {
+                signals.balances.set(page.items);
+                signals.next_cursor.set(page.next_cursor);
+                signals.loading.set(false);
+            }
+            Err(error) if error.unauthorized => on_unauthorized.run(()),
+            Err(error) if signals.generation.get_untracked() == generation => {
+                signals.error.set(Some(error.message));
+                signals.loading.set(false);
+            }
+            _ => {}
         }
     });
 }
 
-fn facility_label(balance: &InventoryBalanceResponse) -> String {
-    balance
-        .facility_name
-        .clone()
-        .unwrap_or_else(|| format!("Facility {}", balance.facility_id))
+fn map_inventory_sort(value: InventorySort) -> ApiInventoryBalanceSort {
+    match value {
+        InventorySort::Position => ApiInventoryBalanceSort::Position,
+        InventorySort::Facility => ApiInventoryBalanceSort::Facility,
+        InventorySort::Client => ApiInventoryBalanceSort::Client,
+        InventorySort::Location => ApiInventoryBalanceSort::Location,
+        InventorySort::Item => ApiInventoryBalanceSort::Item,
+        InventorySort::Tracking => ApiInventoryBalanceSort::Tracking,
+        InventorySort::LicensePlate => ApiInventoryBalanceSort::LicensePlate,
+        InventorySort::Status => ApiInventoryBalanceSort::Status,
+        InventorySort::OnHand => ApiInventoryBalanceSort::OnHand,
+        InventorySort::Reserved => ApiInventoryBalanceSort::Reserved,
+        InventorySort::Held => ApiInventoryBalanceSort::Held,
+    }
+}
+
+fn map_inventory_direction(value: SortDirection) -> ApiInventorySortDirection {
+    match value {
+        SortDirection::Ascending => ApiInventorySortDirection::Ascending,
+        SortDirection::Descending => ApiInventorySortDirection::Descending,
+    }
 }
 
 fn location_label(balance: &InventoryBalanceResponse) -> String {
@@ -479,31 +518,4 @@ fn tracking_label(balance: &InventoryBalanceResponse) -> String {
         (None, Some(serial)) => serial.clone(),
         (None, None) => "-".to_owned(),
     }
-}
-
-fn balance_matches(balance: &InventoryBalanceResponse, query: &str) -> bool {
-    query.is_empty()
-        || [
-            balance.inventory_owner_name.as_str(),
-            balance.facility_name.as_deref().unwrap_or_default(),
-            balance.location_name.as_deref().unwrap_or_default(),
-            balance.location_barcode.as_deref().unwrap_or_default(),
-            balance.license_plate_barcode.as_deref().unwrap_or_default(),
-            balance.item_description.as_deref().unwrap_or_default(),
-            balance.primary_sku.as_deref().unwrap_or_default(),
-            balance.lot.as_deref().unwrap_or_default(),
-            balance.serial.as_deref().unwrap_or_default(),
-            balance.uom.as_str(),
-            status_label(balance.status),
-        ]
-        .iter()
-        .any(|value| value.to_ascii_lowercase().contains(query))
-        || [
-            balance.id,
-            balance.location_id,
-            balance.item_id,
-            balance.item_batch_id,
-        ]
-        .iter()
-        .any(|value| value.to_string().contains(query))
 }

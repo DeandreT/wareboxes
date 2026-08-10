@@ -1,11 +1,11 @@
-//! Scope-safe keyset reads for operational inventory balances.
+//! Scope-safe cursor-paginated reads for operational inventory balances.
 
 use sqlx::postgres::PgRow;
 use sqlx::Row;
 use wareboxes_application::inventory::{
-    InventoryBalancePage, InventoryBalanceReadModel, InventoryBalanceStatus,
-    InventoryQuantityProjection, MAX_INVENTORY_BALANCE_PAGE_SIZE,
-    MAX_INVENTORY_BALANCE_QUERY_LENGTH,
+    InventoryBalancePage, InventoryBalancePageQuery, InventoryBalanceReadModel,
+    InventoryBalanceSort, InventoryBalanceStatus, InventoryQuantityProjection,
+    MAX_INVENTORY_BALANCE_PAGE_SIZE, MAX_INVENTORY_BALANCE_QUERY_LENGTH,
 };
 use wareboxes_domain::{FacilityId, InventoryOwnerId, OwnerScope, SiteScope, TenantId};
 
@@ -17,11 +17,9 @@ pub async fn get_inventory_balance_page(
     tenant_id: TenantId,
     site_scope: &SiteScope,
     owner_scope: &OwnerScope,
-    after_id: Option<i64>,
-    limit: u16,
-    query: Option<&str>,
+    request: &InventoryBalancePageQuery,
 ) -> PersistenceResult<InventoryBalancePage> {
-    validate_page_request(after_id, limit, query)?;
+    validate_page_request(request.offset, request.limit, request.query.as_deref())?;
     let facility_ids = site_scope
         .facility_ids
         .iter()
@@ -32,8 +30,12 @@ pub async fn get_inventory_balance_page(
         .iter()
         .map(|id| id.get())
         .collect::<Vec<_>>();
-    let fetch_limit = i64::from(limit) + 1;
-    let query_id = query
+    let fetch_limit = i64::from(request.limit) + 1;
+    let offset_i64 = i64::try_from(request.offset)
+        .map_err(|_| PersistenceError::invalid_input("inventory balance cursor is out of range"))?;
+    let query_id = request
+        .query
+        .as_deref()
         .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
         .and_then(|value| value.parse::<i64>().ok())
         .filter(|value| *value > 0);
@@ -82,76 +84,86 @@ pub async fn get_inventory_balance_page(
         ) sku ON TRUE
         WHERE balance.tenant_id = $1
           AND balance.deleted IS NULL
-          AND ($2::BIGINT IS NULL OR balance.id > $2)
-          AND ($3 OR balance.facility_id = ANY($4))
-          AND ($5 OR balance.inventory_owner_id = ANY($6))
+          AND ($2 OR balance.facility_id = ANY($3))
+          AND ($4 OR balance.inventory_owner_id = ANY($5))
           AND (
-              $7::TEXT IS NULL
-              OR STRPOS(LOWER(COALESCE(location.name, '')), LOWER($7)) > 0
-              OR STRPOS(LOWER(COALESCE(location.barcode, '')), LOWER($7)) > 0
-              OR STRPOS(LOWER(COALESCE(license_plate.barcode, '')), LOWER($7)) > 0
-              OR STRPOS(LOWER(COALESCE(sku.name, '')), LOWER($7)) > 0
-              OR STRPOS(LOWER(COALESCE(item.description, '')), LOWER($7)) > 0
-              OR STRPOS(LOWER(COALESCE(batch.lot, '')), LOWER($7)) > 0
-              OR STRPOS(LOWER(COALESCE(batch.serial, '')), LOWER($7)) > 0
+              $6::TEXT IS NULL
+              OR STRPOS(LOWER(COALESCE(location.name, '')), LOWER($6)) > 0
+              OR STRPOS(LOWER(COALESCE(location.barcode, '')), LOWER($6)) > 0
+              OR STRPOS(LOWER(COALESCE(license_plate.barcode, '')), LOWER($6)) > 0
+              OR STRPOS(LOWER(COALESCE(sku.name, '')), LOWER($6)) > 0
+              OR STRPOS(LOWER(COALESCE(item.description, '')), LOWER($6)) > 0
+              OR STRPOS(LOWER(COALESCE(batch.lot, '')), LOWER($6)) > 0
+              OR STRPOS(LOWER(COALESCE(batch.serial, '')), LOWER($6)) > 0
               OR (
-                  $8::BIGINT IS NOT NULL
+                  $7::BIGINT IS NOT NULL
                   AND (
-                      balance.id = $8
-                      OR balance.inventory_owner_id = $8
-                      OR balance.facility_id = $8
-                      OR balance.location_id = $8
-                      OR balance.license_plate_id = $8
-                      OR balance.item_batch_id = $8
-                      OR balance.item_id = $8
+                      balance.id = $7
+                      OR balance.inventory_owner_id = $7
+                      OR balance.facility_id = $7
+                      OR balance.location_id = $7
+                      OR balance.license_plate_id = $7
+                      OR balance.item_batch_id = $7
+                      OR balance.item_id = $7
                   )
               )
           )
-        ORDER BY balance.id
-        LIMIT $9
+        ORDER BY
+          CASE WHEN $8='position' AND $9 THEN balance.id END ASC,
+          CASE WHEN $8='position' AND NOT $9 THEN balance.id END DESC,
+          CASE WHEN $8='facility' AND $9 THEN LOWER(facility.name) END ASC,
+          CASE WHEN $8='facility' AND NOT $9 THEN LOWER(facility.name) END DESC,
+          CASE WHEN $8='client' AND $9 THEN LOWER(owner.name) END ASC,
+          CASE WHEN $8='client' AND NOT $9 THEN LOWER(owner.name) END DESC,
+          CASE WHEN $8='location' AND $9 THEN LOWER(COALESCE(location.barcode,location.name,'')) END ASC,
+          CASE WHEN $8='location' AND NOT $9 THEN LOWER(COALESCE(location.barcode,location.name,'')) END DESC,
+          CASE WHEN $8='item' AND $9 THEN LOWER(COALESCE(sku.name,item.description,'')) END ASC,
+          CASE WHEN $8='item' AND NOT $9 THEN LOWER(COALESCE(sku.name,item.description,'')) END DESC,
+          CASE WHEN $8='tracking' AND $9 THEN LOWER(CONCAT_WS('/',batch.lot,batch.serial)) END ASC,
+          CASE WHEN $8='tracking' AND NOT $9 THEN LOWER(CONCAT_WS('/',batch.lot,batch.serial)) END DESC,
+          CASE WHEN $8='license_plate' AND $9 THEN LOWER(COALESCE(license_plate.barcode,'')) END ASC,
+          CASE WHEN $8='license_plate' AND NOT $9 THEN LOWER(COALESCE(license_plate.barcode,'')) END DESC,
+          CASE WHEN $8='status' AND $9 THEN balance.status END ASC,
+          CASE WHEN $8='status' AND NOT $9 THEN balance.status END DESC,
+          CASE WHEN $8='on_hand' AND $9 THEN balance.qty_on_hand END ASC,
+          CASE WHEN $8='on_hand' AND NOT $9 THEN balance.qty_on_hand END DESC,
+          CASE WHEN $8='reserved' AND $9 THEN balance.qty_reserved END ASC,
+          CASE WHEN $8='reserved' AND NOT $9 THEN balance.qty_reserved END DESC,
+          CASE WHEN $8='held' AND $9 THEN balance.qty_held END ASC,
+          CASE WHEN $8='held' AND NOT $9 THEN balance.qty_held END DESC,
+          balance.id ASC
+        OFFSET $10 LIMIT $11
         "#,
     )
     .bind(tenant_id.get())
-    .bind(after_id)
     .bind(site_scope.all_facilities)
     .bind(&facility_ids)
     .bind(owner_scope.all_inventory_owners)
     .bind(&inventory_owner_ids)
-    .bind(query)
+    .bind(request.query.as_deref())
     .bind(query_id)
+    .bind(sort_key(request.sort))
+    .bind(request.direction.is_ascending())
+    .bind(offset_i64)
     .bind(fetch_limit)
     .fetch_all(&mut *tx)
     .await?;
 
-    let has_more = rows.len() > usize::from(limit);
+    let has_more = rows.len() > usize::from(request.limit);
     let items = rows
         .iter()
-        .take(usize::from(limit))
+        .take(usize::from(request.limit))
         .map(map_balance)
         .collect::<PersistenceResult<Vec<_>>>()?;
-    let next_after_id = if has_more {
-        items.last().map(|balance| balance.id)
-    } else {
-        None
-    };
+    let next_offset = has_more.then_some(request.offset + u64::from(request.limit));
     tx.commit().await?;
 
-    Ok(InventoryBalancePage {
-        items,
-        next_after_id,
-    })
+    Ok(InventoryBalancePage { items, next_offset })
 }
 
-fn validate_page_request(
-    after_id: Option<i64>,
-    limit: u16,
-    query: Option<&str>,
-) -> PersistenceResult<()> {
-    if after_id.is_some_and(|id| id <= 0) {
-        return Err(PersistenceError::invalid_input(
-            "inventory balance cursor ID must be positive",
-        ));
-    }
+fn validate_page_request(offset: u64, limit: u16, query: Option<&str>) -> PersistenceResult<()> {
+    let _ = i64::try_from(offset)
+        .map_err(|_| PersistenceError::invalid_input("inventory balance cursor is out of range"))?;
     if !(1..=MAX_INVENTORY_BALANCE_PAGE_SIZE).contains(&limit) {
         return Err(PersistenceError::invalid_input(format!(
             "inventory balance page size must be between 1 and {MAX_INVENTORY_BALANCE_PAGE_SIZE}"
@@ -180,6 +192,22 @@ fn validate_page_request(
         }
     }
     Ok(())
+}
+
+fn sort_key(sort: InventoryBalanceSort) -> &'static str {
+    match sort {
+        InventoryBalanceSort::Position => "position",
+        InventoryBalanceSort::Facility => "facility",
+        InventoryBalanceSort::Client => "client",
+        InventoryBalanceSort::Location => "location",
+        InventoryBalanceSort::Item => "item",
+        InventoryBalanceSort::Tracking => "tracking",
+        InventoryBalanceSort::LicensePlate => "license_plate",
+        InventoryBalanceSort::Status => "status",
+        InventoryBalanceSort::OnHand => "on_hand",
+        InventoryBalanceSort::Reserved => "reserved",
+        InventoryBalanceSort::Held => "held",
+    }
 }
 
 fn map_balance(row: &PgRow) -> PersistenceResult<InventoryBalanceReadModel> {
@@ -235,26 +263,22 @@ mod tests {
 
     #[test]
     fn page_request_validation_rejects_untrusted_direct_inputs() {
-        assert!(validate_page_request(None, 1, Some("SKU-1")).is_ok());
+        assert!(validate_page_request(0, 1, Some("SKU-1")).is_ok());
         assert!(matches!(
-            validate_page_request(Some(0), 1, None),
+            validate_page_request(0, 0, None),
             Err(PersistenceError::InvalidInput(_))
         ));
         assert!(matches!(
-            validate_page_request(None, 0, None),
+            validate_page_request(0, MAX_INVENTORY_BALANCE_PAGE_SIZE + 1, None),
             Err(PersistenceError::InvalidInput(_))
         ));
         assert!(matches!(
-            validate_page_request(None, MAX_INVENTORY_BALANCE_PAGE_SIZE + 1, None),
-            Err(PersistenceError::InvalidInput(_))
-        ));
-        assert!(matches!(
-            validate_page_request(None, 1, Some(" SKU-1")),
+            validate_page_request(0, 1, Some(" SKU-1")),
             Err(PersistenceError::InvalidInput(_))
         ));
         assert!(matches!(
             validate_page_request(
-                None,
+                0,
                 1,
                 Some(&"x".repeat(MAX_INVENTORY_BALANCE_QUERY_LENGTH + 1))
             ),

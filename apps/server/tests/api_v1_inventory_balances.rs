@@ -175,7 +175,7 @@ async fn receive_searchable_plate_balance(
 }
 
 #[tokio::test]
-async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
+async fn inventory_balance_v1_contract_is_scoped_sorted_paginated_and_stable() {
     let fixture = Fixture::new().await;
     let administrator = fixture.user("v1-balances-admin@test.com").await;
     let operator = fixture.user("v1-balances-operator@test.com").await;
@@ -507,6 +507,54 @@ async fn inventory_balance_v1_contract_is_scoped_keyset_paginated_and_stable() {
         .items
         .iter()
         .any(|balance| balance.item_id == denied_item));
+
+    let reserved_ascending = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            "/api/v1/inventory/balances?sort=reserved&direction=ascending&limit=1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reserved_ascending.status(), StatusCode::OK);
+    let reserved_ascending: InventoryBalancePage =
+        serde_json::from_slice(&body_bytes(reserved_ascending).await).unwrap();
+    assert_eq!(reserved_ascending.items[0].item_id, second_item);
+    assert_eq!(reserved_ascending.items[0].quantity.reserved, 0);
+    let reserved_cursor = reserved_ascending.next_cursor.unwrap();
+    let reserved_next = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!(
+                "/api/v1/inventory/balances?sort=reserved&direction=ascending&limit=1&cursor={reserved_cursor}"
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(reserved_next.status(), StatusCode::OK);
+    let reserved_next: InventoryBalancePage =
+        serde_json::from_slice(&body_bytes(reserved_next).await).unwrap();
+    assert_eq!(reserved_next.items[0].item_id, first_item);
+    assert_eq!(reserved_next.items[0].quantity.reserved, 2);
+
+    let changed_sort_cursor = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!(
+                "/api/v1/inventory/balances?sort=reserved&direction=descending&limit=1&cursor={reserved_cursor}"
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(changed_sort_cursor.status(), StatusCode::BAD_REQUEST);
+    let error: ErrorResponse =
+        serde_json::from_slice(&body_bytes(changed_sort_cursor).await).unwrap();
+    assert_eq!(error.reason, ErrorReason::InvalidCursor);
 
     for query in [
         "mezzanine",

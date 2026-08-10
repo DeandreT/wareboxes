@@ -4,7 +4,7 @@ use std::str::FromStr;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
-use super::{CursorPage, OpaqueCursor, PageLimit};
+use super::{CursorPage, InventorySortDirection, OpaqueCursor, PageLimit};
 
 /// Maximum accepted inventory-balance search length.
 pub const MAX_INVENTORY_BALANCE_QUERY_LENGTH: usize = 200;
@@ -139,7 +139,7 @@ pub struct InventoryBalanceResponse {
 }
 
 /// Cursor query for the version 1 inventory-balance collection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InventoryBalancePageRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,6 +148,43 @@ pub struct InventoryBalancePageRequest {
     pub limit: PageLimit,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<InventoryBalanceSearchQuery>,
+    #[serde(default)]
+    pub sort: InventoryBalanceSort,
+    #[serde(default = "default_balance_direction")]
+    pub direction: InventorySortDirection,
+}
+
+impl Default for InventoryBalancePageRequest {
+    fn default() -> Self {
+        Self {
+            cursor: None,
+            limit: PageLimit::default(),
+            query: None,
+            sort: InventoryBalanceSort::Position,
+            direction: default_balance_direction(),
+        }
+    }
+}
+
+const fn default_balance_direction() -> InventorySortDirection {
+    InventorySortDirection::Ascending
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryBalanceSort {
+    #[default]
+    Position,
+    Facility,
+    Client,
+    Location,
+    Item,
+    Tracking,
+    LicensePlate,
+    Status,
+    OnHand,
+    Reserved,
+    Held,
 }
 
 /// Cursor page returned by the version 1 inventory-balance collection.
@@ -201,6 +238,8 @@ mod tests {
         assert!(request.cursor.is_none());
         assert_eq!(request.limit, PageLimit::default());
         assert!(request.query.is_none());
+        assert_eq!(request.sort, InventoryBalanceSort::Position);
+        assert_eq!(request.direction, InventorySortDirection::Ascending);
         assert!(serde_json::from_str::<InventoryBalancePageRequest>(r#"{"limit":1001}"#).is_err());
     }
 

@@ -6,16 +6,16 @@ use wareboxes_api_contract::v1::{
     CancelReplenishmentWorkRequest, CloseCartonRequest, CloseCartonResponse,
     ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,
     ConfigureReplenishmentPolicyRequest, ConfigureReplenishmentPolicyResponse, CreateCartonRequest,
-    CreateCartonResponse, InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
-    InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
-    OpenPackSessionResponse, OrderAllocationReadinessResponse, PackPickedAllocationRequest,
-    PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage,
-    PickConfirmationHistoryPage, PickShortagePage, PickShortageResponse, PickShortageStatus,
-    PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
-    PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
-    PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
-    ReallocatePickShortageResponse, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
-    ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
+    CreateCartonResponse, InventoryBalancePage, InventoryBalanceSort, InventoryHoldPage,
+    InventoryHoldStatus, InventorySortDirection, InventoryStatusTransitionResponse, OpaqueCursor,
+    OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
+    PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
+    PackingQueuePage, PickConfirmationHistoryPage, PickShortagePage, PickShortageResponse,
+    PickShortageStatus, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
+    PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
+    PlanOrderAllocationResponse, PlanReplenishmentRequest, PlanReplenishmentResponse,
+    ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleaseInventoryHoldResponse,
+    ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
     RemovePackedContentRequest, RemovePackedContentResponse, ReopenCartonRequest,
     ReopenCartonResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
     ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
@@ -44,6 +44,10 @@ pub use item_substitution::{
 };
 mod inbound_inspection;
 pub use inbound_inspection::dispose_inbound_inspection;
+mod inventory_integrity;
+pub use inventory_integrity::{
+    inventory_integrity_issues, inventory_journal, IntegrityFilters, JournalFilters,
+};
 mod order;
 pub use order::{
     amend_fulfillment_order, create_fulfillment_order, order_entry_items,
@@ -89,10 +93,10 @@ mod browser {
         ConfigureReplenishmentPolicyRequest, ConfigureReplenishmentPolicyResponse,
         CreateCartonRequest, CreateCartonResponse, CreateInventoryRelocationTaskRequest,
         CreateInventoryRelocationTaskResponse, CreateInventoryStatusTransitionRequest,
-        InventoryBalancePage, InventoryHoldPage, InventoryHoldStatus,
-        InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
-        OpenPackSessionResponse, OrderAllocationReadinessResponse, OrderPage,
-        PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
+        InventoryBalancePage, InventoryBalanceSort, InventoryHoldPage, InventoryHoldStatus,
+        InventorySortDirection, InventoryStatusTransitionResponse, OpaqueCursor,
+        OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
+        OrderPage, PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
         PackingQueuePage, PickConfirmationHistoryPage, PickShortagePage, PickShortageResponse,
         PickShortageStatus, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
         PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
@@ -149,7 +153,12 @@ mod browser {
     }
 
     pub async fn balances(cursor: Option<&OpaqueCursor>) -> Result<InventoryBalancePage, ApiError> {
-        let path = balance_page_path(None, cursor);
+        let path = balance_page_path(
+            None,
+            InventoryBalanceSort::Position,
+            InventorySortDirection::Ascending,
+            cursor,
+        );
         get(&path).await
     }
 
@@ -157,8 +166,22 @@ mod browser {
         query: &str,
         cursor: Option<&OpaqueCursor>,
     ) -> Result<InventoryBalancePage, ApiError> {
-        let path = balance_page_path(Some(query), cursor);
+        let path = balance_page_path(
+            Some(query),
+            InventoryBalanceSort::Position,
+            InventorySortDirection::Ascending,
+            cursor,
+        );
         get(&path).await
+    }
+
+    pub async fn sorted_balances(
+        query: Option<&str>,
+        sort: InventoryBalanceSort,
+        direction: InventorySortDirection,
+        cursor: Option<&OpaqueCursor>,
+    ) -> Result<InventoryBalancePage, ApiError> {
+        get(&balance_page_path(query, sort, direction, cursor)).await
     }
 
     pub async fn access() -> Result<AccessScopeWorkspace, ApiError> {
@@ -704,8 +727,17 @@ mod browser {
         path.to_owned()
     }
 
-    fn balance_page_path(query: Option<&str>, cursor: Option<&OpaqueCursor>) -> String {
-        let mut path = "/api/v1/inventory/balances?limit=100".to_owned();
+    fn balance_page_path(
+        query: Option<&str>,
+        sort: InventoryBalanceSort,
+        direction: InventorySortDirection,
+        cursor: Option<&OpaqueCursor>,
+    ) -> String {
+        let mut path = format!(
+            "/api/v1/inventory/balances?limit=100&sort={}&direction={}",
+            inventory_balance_sort_wire(sort),
+            inventory_sort_direction_wire(direction)
+        );
         if let Some(query) = query.filter(|query| !query.is_empty()) {
             path.push_str("&query=");
             path.push_str(&urlencoding::encode(query));
@@ -715,6 +747,29 @@ mod browser {
             path.push_str(cursor.as_str());
         }
         path
+    }
+
+    const fn inventory_balance_sort_wire(sort: InventoryBalanceSort) -> &'static str {
+        match sort {
+            InventoryBalanceSort::Position => "position",
+            InventoryBalanceSort::Facility => "facility",
+            InventoryBalanceSort::Client => "client",
+            InventoryBalanceSort::Location => "location",
+            InventoryBalanceSort::Item => "item",
+            InventoryBalanceSort::Tracking => "tracking",
+            InventoryBalanceSort::LicensePlate => "license_plate",
+            InventoryBalanceSort::Status => "status",
+            InventoryBalanceSort::OnHand => "on_hand",
+            InventoryBalanceSort::Reserved => "reserved",
+            InventoryBalanceSort::Held => "held",
+        }
+    }
+
+    const fn inventory_sort_direction_wire(direction: InventorySortDirection) -> &'static str {
+        match direction {
+            InventorySortDirection::Ascending => "ascending",
+            InventorySortDirection::Descending => "descending",
+        }
     }
 
     fn append_i64_query(path: &mut String, name: &str, value: Option<i64>) {
@@ -769,6 +824,16 @@ pub async fn balances(_cursor: Option<&OpaqueCursor>) -> Result<InventoryBalance
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn search_balances(
     _query: &str,
+    _cursor: Option<&OpaqueCursor>,
+) -> Result<InventoryBalancePage, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn sorted_balances(
+    _query: Option<&str>,
+    _sort: InventoryBalanceSort,
+    _direction: InventorySortDirection,
     _cursor: Option<&OpaqueCursor>,
 ) -> Result<InventoryBalancePage, ApiError> {
     Err(ApiError::unavailable())

@@ -16402,6 +16402,12 @@ CREATE INDEX idx_inventory_entries_dimensions ON public.inventory_entries USING 
 
 CREATE INDEX idx_inventory_entries_transaction ON public.inventory_entries USING btree (tenant_id, transaction_id, id);
 
+CREATE INDEX idx_inventory_entries_trace_batch ON public.inventory_entries USING btree (tenant_id, inventory_owner_id, item_batch_id, transaction_id);
+
+CREATE INDEX idx_inventory_entries_trace_item ON public.inventory_entries USING btree (tenant_id, inventory_owner_id, item_id, transaction_id);
+
+CREATE INDEX idx_inventory_entries_trace_license_plate ON public.inventory_entries USING btree (tenant_id, inventory_owner_id, license_plate_id, transaction_id) WHERE (license_plate_id IS NOT NULL);
+
 
 --
 -- Name: idx_inventory_owner_facilities_facility_id; Type: INDEX; Schema: public; Owner: -
@@ -16422,6 +16428,8 @@ CREATE INDEX idx_inventory_owner_facilities_inventory_owner_id ON public.invento
 --
 
 CREATE INDEX idx_inventory_transactions_reference ON public.inventory_transactions USING btree (tenant_id, inventory_owner_id, reference_type, reference_id) WHERE ((reference_type IS NOT NULL) AND (reference_id IS NOT NULL));
+
+CREATE INDEX idx_inventory_transactions_scope_created ON public.inventory_transactions USING btree (tenant_id, inventory_owner_id, created DESC, id DESC);
 
 
 --

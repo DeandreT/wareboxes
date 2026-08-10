@@ -2,10 +2,14 @@ use axum::extract::{Query, State};
 use axum::Json;
 use wareboxes_api_contract::v1::{
     InventoryBalancePage, InventoryBalancePageRequest, InventoryBalanceResponse,
-    InventoryBalanceStatus, InventoryQuantity, OpaqueCursor,
+    InventoryBalanceSort, InventoryBalanceStatus, InventoryQuantity, InventorySortDirection,
+    OpaqueCursor,
 };
 use wareboxes_application::inventory::{
-    InventoryBalanceReadModel, InventoryBalanceStatus as ApplicationInventoryBalanceStatus,
+    InventoryBalancePageQuery, InventoryBalanceReadModel,
+    InventoryBalanceSort as ApplicationInventoryBalanceSort,
+    InventoryBalanceSortDirection as ApplicationSortDirection,
+    InventoryBalanceStatus as ApplicationInventoryBalanceStatus,
 };
 
 use super::error::{V1Error, V1Result};
@@ -14,7 +18,7 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 const PERMISSION: &str = "wms";
-const CURSOR_PREFIX: &str = "ib1.";
+const CURSOR_PREFIX: &str = "ib2.";
 
 pub async fn list(
     State(state): State<AppState>,
@@ -22,14 +26,16 @@ pub async fn list(
     Query(query): Query<InventoryBalancePageRequest>,
 ) -> V1Result<Json<InventoryBalancePage>> {
     user.require_permission(&state.db, PERMISSION).await?;
-    let after_id = query.cursor.as_ref().map(decode_cursor).transpose()?;
+    let offset = decode_bound_cursor(&query)?;
     Ok(Json(
         page_for_access(
             &state,
             &user.tenant,
-            after_id,
+            offset,
             query.limit.get(),
             query.query.as_ref().map(|query| query.as_str()),
+            query.sort,
+            query.direction,
         )
         .await?,
     ))
@@ -38,42 +44,134 @@ pub async fn list(
 pub(crate) async fn page_for_access(
     state: &AppState,
     access: &wareboxes_core::models::TenantAccess,
-    after_id: Option<i64>,
+    offset: u64,
     limit: u16,
     query: Option<&str>,
+    sort: InventoryBalanceSort,
+    direction: InventorySortDirection,
 ) -> AppResult<InventoryBalancePage> {
     let page = wareboxes_persistence_postgres::inventory_balances::get_inventory_balance_page(
         &state.db,
         access.tenant_id,
         &access.site_scope,
         &access.owner_scope,
-        after_id,
-        limit,
-        query,
+        &InventoryBalancePageQuery {
+            offset,
+            limit,
+            query: query.map(str::to_owned),
+            sort: map_sort(sort),
+            direction: map_direction(direction),
+        },
     )
     .await?;
     let items = page.items.into_iter().map(map_balance).collect();
-    let next_cursor = page.next_after_id.map(encode_cursor).transpose()?;
+    let next_cursor = page
+        .next_offset
+        .map(|offset| encode_cursor(query, sort, direction, offset))
+        .transpose()?;
 
     Ok(InventoryBalancePage::new(items, next_cursor))
 }
 
-fn decode_cursor(cursor: &OpaqueCursor) -> V1Result<i64> {
+fn decode_bound_cursor(query: &InventoryBalancePageRequest) -> V1Result<u64> {
+    let Some(cursor) = query.cursor.as_ref() else {
+        return Ok(0);
+    };
     let encoded = cursor
         .as_str()
         .strip_prefix(CURSOR_PREFIX)
-        .filter(|encoded| encoded.len() == 16)
         .ok_or_else(V1Error::invalid_cursor)?;
-    let id = i64::from_str_radix(encoded, 16).map_err(|_| V1Error::invalid_cursor())?;
-    if id <= 0 {
+    let (filter, offset) = encoded
+        .rsplit_once('.')
+        .ok_or_else(V1Error::invalid_cursor)?;
+    if filter
+        != cursor_filter(
+            query.query.as_ref().map(|value| value.as_str()),
+            query.sort,
+            query.direction,
+        )
+        || offset.len() != 16
+    {
         return Err(V1Error::invalid_cursor());
     }
-    Ok(id)
+    u64::from_str_radix(offset, 16).map_err(|_| V1Error::invalid_cursor())
 }
 
-fn encode_cursor(id: i64) -> AppResult<OpaqueCursor> {
-    OpaqueCursor::new(format!("{CURSOR_PREFIX}{id:016x}"))
-        .map_err(|_| AppError::internal("generated an invalid inventory balance cursor"))
+fn encode_cursor(
+    query: Option<&str>,
+    sort: InventoryBalanceSort,
+    direction: InventorySortDirection,
+    offset: u64,
+) -> AppResult<OpaqueCursor> {
+    OpaqueCursor::new(format!(
+        "{CURSOR_PREFIX}{}.{offset:016x}",
+        cursor_filter(query, sort, direction)
+    ))
+    .map_err(|_| AppError::internal("generated an invalid inventory balance cursor"))
+}
+
+fn cursor_filter(
+    query: Option<&str>,
+    sort: InventoryBalanceSort,
+    direction: InventorySortDirection,
+) -> String {
+    let query = query.map_or_else(
+        || "-".to_owned(),
+        |value| {
+            value
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        },
+    );
+    format!("{}.{}.{}", sort_key(sort), direction_key(direction), query)
+}
+
+fn map_sort(value: InventoryBalanceSort) -> ApplicationInventoryBalanceSort {
+    match value {
+        InventoryBalanceSort::Position => ApplicationInventoryBalanceSort::Position,
+        InventoryBalanceSort::Facility => ApplicationInventoryBalanceSort::Facility,
+        InventoryBalanceSort::Client => ApplicationInventoryBalanceSort::Client,
+        InventoryBalanceSort::Location => ApplicationInventoryBalanceSort::Location,
+        InventoryBalanceSort::Item => ApplicationInventoryBalanceSort::Item,
+        InventoryBalanceSort::Tracking => ApplicationInventoryBalanceSort::Tracking,
+        InventoryBalanceSort::LicensePlate => ApplicationInventoryBalanceSort::LicensePlate,
+        InventoryBalanceSort::Status => ApplicationInventoryBalanceSort::Status,
+        InventoryBalanceSort::OnHand => ApplicationInventoryBalanceSort::OnHand,
+        InventoryBalanceSort::Reserved => ApplicationInventoryBalanceSort::Reserved,
+        InventoryBalanceSort::Held => ApplicationInventoryBalanceSort::Held,
+    }
+}
+
+fn map_direction(value: InventorySortDirection) -> ApplicationSortDirection {
+    match value {
+        InventorySortDirection::Ascending => ApplicationSortDirection::Ascending,
+        InventorySortDirection::Descending => ApplicationSortDirection::Descending,
+    }
+}
+
+fn sort_key(value: InventoryBalanceSort) -> &'static str {
+    match value {
+        InventoryBalanceSort::Position => "position",
+        InventoryBalanceSort::Facility => "facility",
+        InventoryBalanceSort::Client => "client",
+        InventoryBalanceSort::Location => "location",
+        InventoryBalanceSort::Item => "item",
+        InventoryBalanceSort::Tracking => "tracking",
+        InventoryBalanceSort::LicensePlate => "license_plate",
+        InventoryBalanceSort::Status => "status",
+        InventoryBalanceSort::OnHand => "on_hand",
+        InventoryBalanceSort::Reserved => "reserved",
+        InventoryBalanceSort::Held => "held",
+    }
+}
+
+fn direction_key(value: InventorySortDirection) -> &'static str {
+    match value {
+        InventorySortDirection::Ascending => "asc",
+        InventorySortDirection::Descending => "desc",
+    }
 }
 
 fn map_balance(row: InventoryBalanceReadModel) -> InventoryBalanceResponse {

@@ -10,6 +10,7 @@ mod idempotency;
 mod inbound_inspection;
 mod inventory;
 mod inventory_hold;
+mod inventory_integrity;
 mod inventory_relocation;
 mod inventory_rollup;
 mod inventory_status_transition;
@@ -81,13 +82,19 @@ pub use inbound_inspection::{
 };
 pub use inventory::{
     InventoryBalancePage, InventoryBalancePageRequest, InventoryBalanceResponse,
-    InventoryBalanceSearchQuery, InventoryBalanceSearchQueryError, InventoryBalanceStatus,
-    InventoryQuantity, MAX_INVENTORY_BALANCE_QUERY_LENGTH,
+    InventoryBalanceSearchQuery, InventoryBalanceSearchQueryError, InventoryBalanceSort,
+    InventoryBalanceStatus, InventoryQuantity, MAX_INVENTORY_BALANCE_QUERY_LENGTH,
 };
 pub use inventory_hold::{
     InventoryHoldPage, InventoryHoldPageRequest, InventoryHoldReason, InventoryHoldResponse,
     InventoryHoldStatus, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
     ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
+};
+pub use inventory_integrity::{
+    InventoryIntegrityIssueKind, InventoryIntegrityIssueResponse, InventoryIntegrityPage,
+    InventoryIntegrityPageRequest, InventoryIntegritySort, InventoryJournalEntryResponse,
+    InventoryJournalPage, InventoryJournalPageRequest, InventoryJournalSort,
+    InventoryJournalTransactionResponse, InventorySortDirection,
 };
 pub use inventory_relocation::{
     ClaimInventoryRelocationByIdRequest, ClaimNextInventoryRelocationRequest,
