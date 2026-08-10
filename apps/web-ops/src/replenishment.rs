@@ -16,9 +16,9 @@ mod work_queue;
 
 use command_dialog::PolicyCommandDialog;
 use model::{
-    planning_outcome_class, planning_outcome_label, CommandSignals, PolicyCommandResult,
-    PolicyDialogMode, PolicyPageSignals, PolicySort, ReplenishmentReferenceData, ReplenishmentTab,
-    ScopeFilters, WorkPageSignals, WorkSort,
+    item_label, location_label, planning_outcome_class, planning_outcome_label, CommandSignals,
+    PolicyCommandResult, PolicyDialogMode, PolicyPageSignals, PolicySort,
+    ReplenishmentReferenceData, ReplenishmentTab, ScopeFilters, WorkPageSignals, WorkSort,
 };
 use policies::PoliciesPanel;
 use work_cancellation::WorkCancellationDialog;
@@ -123,6 +123,13 @@ pub(crate) fn ReplenishmentWorkspace(
             requests,
             work.current_cursor.get_untracked(),
             work.cursor_history.get_untracked(),
+        );
+        request_references(
+            references,
+            references_loading,
+            references_error,
+            references_generation,
+            on_unauthorized,
         );
     };
     let policy_previous = Callback::new(move |()| {
@@ -254,13 +261,16 @@ pub(crate) fn ReplenishmentWorkspace(
 
         <form class="replenishment-toolbar" on:submit=apply_filters>
             <div class="segmented-control replenishment-tabs" role="tablist" aria-label="Replenishment views">
-                <button type="button" role="tab" class:active=move || tab.get() == ReplenishmentTab::Policies aria-selected=move || tab.get() == ReplenishmentTab::Policies on:click=move |_| tab.set(ReplenishmentTab::Policies)>"Policies"</button>
-                <button type="button" role="tab" class:active=move || tab.get() == ReplenishmentTab::Work aria-selected=move || tab.get() == ReplenishmentTab::Work on:click=move |_| tab.set(ReplenishmentTab::Work)>"Work queue"</button>
+                <button type="button" role="tab" class:active=move || tab.get() == ReplenishmentTab::Policies aria-selected=move || (tab.get() == ReplenishmentTab::Policies).to_string() on:click=move |_| tab.set(ReplenishmentTab::Policies)>"Policies"</button>
+                <button type="button" role="tab" class:active=move || tab.get() == ReplenishmentTab::Work aria-selected=move || (tab.get() == ReplenishmentTab::Work).to_string() on:click=move |_| tab.set(ReplenishmentTab::Work)>"Work queue"</button>
             </div>
             <div class="replenishment-filter-fields">
                 <label>
                     <span class="sr-only">"Facility"</span>
-                    <select aria-label="Facility" prop:value=move || filters.facility_id.get() on:change=move |event| filters.facility_id.set(event_target_value(&event))>
+                    <select aria-label="Facility" prop:value=move || filters.facility_id.get() on:change=move |event| {
+                        filters.facility_id.set(event_target_value(&event));
+                        filters.pick_face_location_id.set(String::new());
+                    }>
                         <option value="">"All facilities"</option>
                         {scoped_access.get_value().facilities.into_iter().map(|facility| view! { <option value=facility.id.to_string()>{facility.name}</option> }).collect_view()}
                     </select>
@@ -272,8 +282,39 @@ pub(crate) fn ReplenishmentWorkspace(
                         {scoped_access.get_value().inventory_owners.into_iter().map(|owner| view! { <option value=owner.id.to_string()>{owner.name}</option> }).collect_view()}
                     </select>
                 </label>
-                <label><span class="sr-only">"Item ID"</span><input type="number" min="1" step="1" placeholder="Item ID" aria-label="Item ID" prop:value=move || filters.item_id.get() on:input=move |event| filters.item_id.set(event_target_value(&event))/></label>
-                <label><span class="sr-only">"Pick face ID"</span><input type="number" min="1" step="1" placeholder="Pick face ID" aria-label="Pick face ID" prop:value=move || filters.pick_face_location_id.get() on:input=move |event| filters.pick_face_location_id.set(event_target_value(&event))/></label>
+                <label>
+                    <span class="sr-only">"Item"</span>
+                    <select
+                        aria-label="Item"
+                        disabled=move || references_loading.get()
+                        prop:value=move || filters.item_id.get()
+                        on:change=move |event| filters.item_id.set(event_target_value(&event))
+                    >
+                        <option value="">{move || if references_loading.get() { "Loading items" } else { "All items" }}</option>
+                        {move || sorted_filter_items(references.get().items).into_iter().map(|item| {
+                            let item_id = item.id;
+                            view! { <option value=item_id.to_string()>{item_label(&item)}</option> }
+                        }).collect_view()}
+                    </select>
+                </label>
+                <label>
+                    <span class="sr-only">"Pick face"</span>
+                    <select
+                        aria-label="Pick face"
+                        disabled=move || references_loading.get()
+                        prop:value=move || filters.pick_face_location_id.get()
+                        on:change=move |event| filters.pick_face_location_id.set(event_target_value(&event))
+                    >
+                        <option value="">{move || if references_loading.get() { "Loading pick faces" } else { "All pick faces" }}</option>
+                        {move || eligible_filter_pick_faces(
+                            references.get().locations,
+                            filters.facility_id.get().parse::<i64>().ok().filter(|value| *value > 0),
+                        ).into_iter().map(|location| {
+                            let location_id = location.id;
+                            view! { <option value=location_id.to_string()>{pick_face_filter_label(&location)}</option> }
+                        }).collect_view()}
+                    </select>
+                </label>
                 <Show when=move || tab.get() == ReplenishmentTab::Work>
                     <label>
                         <span class="sr-only">"Work status"</span>
@@ -291,6 +332,9 @@ pub(crate) fn ReplenishmentWorkspace(
         </form>
         <Show when=move || filter_error.get().is_some()>
             <p class="inline-command-error replenishment-filter-error" role="alert">{move || filter_error.get().unwrap_or_default()}</p>
+        </Show>
+        <Show when=move || references_error.get().is_some()>
+            <p class="inline-command-error replenishment-filter-error" role="alert">{move || references_error.get().unwrap_or_default()}</p>
         </Show>
 
         <Show when=move || last_plan.get().is_some()>
@@ -345,6 +389,34 @@ pub(crate) fn ReplenishmentWorkspace(
             })}
         </Show>
     }
+}
+
+fn sorted_filter_items(mut items: Vec<Item>) -> Vec<Item> {
+    items.sort_by_cached_key(|item| item_label(item).to_ascii_lowercase());
+    items
+}
+
+fn eligible_filter_pick_faces(
+    mut locations: Vec<Location>,
+    facility_id: Option<i64>,
+) -> Vec<Location> {
+    locations.retain(|location| {
+        location.deleted.is_none()
+            && location.active
+            && location.pickable
+            && !location.receivable
+            && location.barcode.is_some()
+            && facility_id.is_none_or(|facility_id| location.facility_id == facility_id)
+    });
+    locations.sort_by_cached_key(|location| pick_face_filter_label(location).to_ascii_lowercase());
+    locations
+}
+
+fn pick_face_filter_label(location: &Location) -> String {
+    location.facility_name.as_ref().map_or_else(
+        || location_label(location),
+        |facility| format!("{facility} / {}", location_label(location)),
+    )
 }
 
 #[component]
@@ -614,6 +686,33 @@ mod tests {
         assert!(plan_result_summary(&plan).contains("8 each planned, 4 remaining (partial)"));
     }
 
+    #[test]
+    fn pick_face_filter_uses_current_facility_and_execution_eligibility() {
+        let choices = eligible_filter_pick_faces(
+            vec![
+                location(1, 10, true, true, false, true),
+                location(2, 10, true, false, false, true),
+                location(3, 20, true, true, false, true),
+                location(4, 10, false, true, false, true),
+                location(5, 10, true, true, true, true),
+                location(6, 10, true, true, false, false),
+            ],
+            Some(10),
+        );
+
+        assert_eq!(
+            choices
+                .iter()
+                .map(|location| location.id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(
+            pick_face_filter_label(&choices[0]),
+            "Facility 10 / Pick face 1 / PF-1"
+        );
+    }
+
     fn plan_result(
         outcome: ReplenishmentPlanningOutcome,
         planned_quantity: i64,
@@ -644,5 +743,31 @@ mod tests {
             planned_by: 11,
             planned_at: "2026-08-08T12:00:00Z".into(),
         }
+    }
+
+    fn location(
+        id: i64,
+        facility_id: i64,
+        active: bool,
+        pickable: bool,
+        receivable: bool,
+        scannable: bool,
+    ) -> Location {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "tenant_id": 1,
+            "created": "2026-08-10T12:00:00Z",
+            "deleted": null,
+            "facility_id": facility_id,
+            "facility_name": format!("Facility {facility_id}"),
+            "parent_location_id": null,
+            "barcode": scannable.then(|| format!("PF-{id}")),
+            "name": format!("Pick face {id}"),
+            "type": "pick_face",
+            "active": active,
+            "pickable": pickable,
+            "receivable": receivable
+        }))
+        .unwrap()
     }
 }
