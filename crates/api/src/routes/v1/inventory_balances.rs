@@ -31,24 +31,32 @@ pub async fn list(
         page_for_access(
             &state,
             &user.tenant,
-            offset,
-            query.limit.get(),
-            query.query.as_ref().map(|query| query.as_str()),
-            query.sort,
-            query.direction,
+            &BalancePageOptions {
+                offset,
+                limit: query.limit.get(),
+                query: query.query.as_ref().map(|query| query.as_str()),
+                sort: query.sort,
+                direction: query.direction,
+                movable_only: query.movable_only,
+            },
         )
         .await?,
     ))
 }
 
+pub(crate) struct BalancePageOptions<'a> {
+    pub offset: u64,
+    pub limit: u16,
+    pub query: Option<&'a str>,
+    pub sort: InventoryBalanceSort,
+    pub direction: InventorySortDirection,
+    pub movable_only: bool,
+}
+
 pub(crate) async fn page_for_access(
     state: &AppState,
     access: &wareboxes_core::models::TenantAccess,
-    offset: u64,
-    limit: u16,
-    query: Option<&str>,
-    sort: InventoryBalanceSort,
-    direction: InventorySortDirection,
+    options: &BalancePageOptions<'_>,
 ) -> AppResult<InventoryBalancePage> {
     let page = wareboxes_persistence_postgres::inventory_balances::get_inventory_balance_page(
         &state.db,
@@ -56,18 +64,27 @@ pub(crate) async fn page_for_access(
         &access.site_scope,
         &access.owner_scope,
         &InventoryBalancePageQuery {
-            offset,
-            limit,
-            query: query.map(str::to_owned),
-            sort: map_sort(sort),
-            direction: map_direction(direction),
+            offset: options.offset,
+            limit: options.limit,
+            query: options.query.map(str::to_owned),
+            sort: map_sort(options.sort),
+            direction: map_direction(options.direction),
+            movable_only: options.movable_only,
         },
     )
     .await?;
     let items = page.items.into_iter().map(map_balance).collect();
     let next_cursor = page
         .next_offset
-        .map(|offset| encode_cursor(query, sort, direction, offset))
+        .map(|offset| {
+            encode_cursor(
+                options.query,
+                options.sort,
+                options.direction,
+                options.movable_only,
+                offset,
+            )
+        })
         .transpose()?;
 
     Ok(InventoryBalancePage::new(items, next_cursor))
@@ -89,6 +106,7 @@ fn decode_bound_cursor(query: &InventoryBalancePageRequest) -> V1Result<u64> {
             query.query.as_ref().map(|value| value.as_str()),
             query.sort,
             query.direction,
+            query.movable_only,
         )
         || offset.len() != 16
     {
@@ -101,11 +119,12 @@ fn encode_cursor(
     query: Option<&str>,
     sort: InventoryBalanceSort,
     direction: InventorySortDirection,
+    movable_only: bool,
     offset: u64,
 ) -> AppResult<OpaqueCursor> {
     OpaqueCursor::new(format!(
         "{CURSOR_PREFIX}{}.{offset:016x}",
-        cursor_filter(query, sort, direction)
+        cursor_filter(query, sort, direction, movable_only)
     ))
     .map_err(|_| AppError::internal("generated an invalid inventory balance cursor"))
 }
@@ -114,6 +133,7 @@ fn cursor_filter(
     query: Option<&str>,
     sort: InventoryBalanceSort,
     direction: InventorySortDirection,
+    movable_only: bool,
 ) -> String {
     let query = query.map_or_else(
         || "-".to_owned(),
@@ -125,7 +145,13 @@ fn cursor_filter(
                 .collect()
         },
     );
-    format!("{}.{}.{}", sort_key(sort), direction_key(direction), query)
+    format!(
+        "{}.{}.{}.{}",
+        sort_key(sort),
+        direction_key(direction),
+        u8::from(movable_only),
+        query
+    )
 }
 
 fn map_sort(value: InventoryBalanceSort) -> ApplicationInventoryBalanceSort {
@@ -141,6 +167,7 @@ fn map_sort(value: InventoryBalanceSort) -> ApplicationInventoryBalanceSort {
         InventoryBalanceSort::OnHand => ApplicationInventoryBalanceSort::OnHand,
         InventoryBalanceSort::Reserved => ApplicationInventoryBalanceSort::Reserved,
         InventoryBalanceSort::Held => ApplicationInventoryBalanceSort::Held,
+        InventoryBalanceSort::Available => ApplicationInventoryBalanceSort::Available,
     }
 }
 
@@ -164,6 +191,7 @@ fn sort_key(value: InventoryBalanceSort) -> &'static str {
         InventoryBalanceSort::OnHand => "on_hand",
         InventoryBalanceSort::Reserved => "reserved",
         InventoryBalanceSort::Held => "held",
+        InventoryBalanceSort::Available => "available",
     }
 }
 

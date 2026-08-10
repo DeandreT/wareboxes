@@ -3,6 +3,10 @@ use wareboxes_api_contract::v1::{
     CreateInventoryStatusTransitionRequest, InventoryBalanceResponse, InventoryBalanceStatus,
     InventoryStatusTransitionReason, OpaqueCursor,
 };
+#[cfg(target_arch = "wasm32")]
+use wareboxes_api_contract::v1::{
+    InventoryBalanceSort as ApiBalanceSort, InventorySortDirection as ApiSortDirection,
+};
 
 use crate::api;
 use crate::components::{Icon, SearchField, UiIcon};
@@ -41,6 +45,20 @@ enum DispositionSort {
     Movable,
 }
 
+#[derive(Clone, Copy)]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    expect(dead_code, reason = "hydration consumes disposition list state")
+)]
+struct DispositionListSignals {
+    balances: RwSignal<Vec<InventoryBalanceResponse>>,
+    next_cursor: RwSignal<Option<OpaqueCursor>>,
+    pending: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    generation: RwSignal<u64>,
+    on_unauthorized: Callback<()>,
+}
+
 #[component]
 pub fn InventoryDispositionWorkbench(
     initial_balances: Vec<InventoryBalanceResponse>,
@@ -50,6 +68,7 @@ pub fn InventoryDispositionWorkbench(
     let balances = RwSignal::new(initial_balances);
     let next_cursor = RwSignal::new(initial_cursor);
     let filter = RwSignal::new(String::new());
+    let applied_filter = RwSignal::new(String::new());
     let selected = RwSignal::new(None::<InventoryBalanceResponse>);
     let quantity = RwSignal::new("1".to_owned());
     let target_status = RwSignal::new(InventoryBalanceStatus::Quarantine);
@@ -62,11 +81,32 @@ pub fn InventoryDispositionWorkbench(
     let load_pending = RwSignal::new(false);
     let command_error = RwSignal::new(None::<String>);
     let list_error = RwSignal::new(None::<String>);
+    let list_generation = RwSignal::new(0_u64);
     let sort = RwSignal::new(SortSpec {
         key: DispositionSort::Facility,
         direction: SortDirection::Ascending,
     });
     let toasts = use_toast_bus();
+    let list_signals = DispositionListSignals {
+        balances,
+        next_cursor,
+        pending: load_pending,
+        error: list_error,
+        generation: list_generation,
+        on_unauthorized,
+    };
+
+    let reload = move || {
+        request_positions(
+            list_signals,
+            applied_filter.get_untracked(),
+            sort.get_untracked(),
+            None,
+        );
+    };
+
+    #[cfg(target_arch = "wasm32")]
+    reload();
 
     let select_position = move |balance: InventoryBalanceResponse| {
         let target = default_target(balance.status);
@@ -100,22 +140,25 @@ pub fn InventoryDispositionWorkbench(
         if load_pending.get_untracked() {
             return;
         }
-        load_pending.set(true);
-        list_error.set(None);
-        leptos::task::spawn_local(async move {
-            match api::balances(Some(&cursor)).await {
-                Ok(page) => {
-                    balances.update(|current| current.extend(page.items));
-                    next_cursor.set(page.next_cursor);
-                    load_pending.set(false);
-                }
-                Err(error) if error.unauthorized => on_unauthorized.run(()),
-                Err(error) => {
-                    list_error.set(Some(error.message));
-                    load_pending.set(false);
-                }
-            }
-        });
+        request_positions(
+            list_signals,
+            applied_filter.get_untracked(),
+            sort.get_untracked(),
+            Some(cursor),
+        );
+    };
+
+    let apply_filter = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        applied_filter.set(filter.get_untracked().trim().to_owned());
+        selected.set(None);
+        reload();
+    };
+
+    let change_sort = move |key: DispositionSort| {
+        SortSpec::select(sort, key);
+        selected.set(None);
+        reload();
     };
 
     let submit = move |event: leptos::ev::SubmitEvent| {
@@ -182,33 +225,25 @@ pub fn InventoryDispositionWorkbench(
         command_error.set(None);
         leptos::task::spawn_local(async move {
             match api::transition_inventory_status(balance.id, &request, &key).await {
-                Ok(result) => match api::balances(None).await {
-                    Ok(page) => {
-                        balances.set(page.items);
-                        next_cursor.set(page.next_cursor);
-                        selected.set(None);
-                        command_key.set(None);
-                        toasts.success(format!(
-                            "{} {} moved from {} to {}. Transaction #{}.",
-                            format_quantity(result.quantity),
-                            balance.uom,
-                            status_label(result.from_status),
-                            status_label(result.to_status),
-                            result.inventory_transaction_id
-                        ));
-                        command_pending.set(false);
-                    }
-                    Err(error) if error.unauthorized => on_unauthorized.run(()),
-                    Err(error) => {
-                        let message = format!(
-                            "Transaction #{} committed, but positions could not refresh: {}",
-                            result.inventory_transaction_id, error.message
-                        );
-                        command_error.set(Some(message.clone()));
-                        toasts.error(message);
-                        command_pending.set(false);
-                    }
-                },
+                Ok(result) => {
+                    selected.set(None);
+                    command_key.set(None);
+                    request_positions(
+                        list_signals,
+                        applied_filter.get_untracked(),
+                        sort.get_untracked(),
+                        None,
+                    );
+                    toasts.success(format!(
+                        "{} {} moved from {} to {}. Transaction #{}.",
+                        format_quantity(result.quantity),
+                        balance.uom,
+                        status_label(result.from_status),
+                        status_label(result.to_status),
+                        result.inventory_transaction_id
+                    ));
+                    command_pending.set(false);
+                }
                 Err(error) if error.unauthorized => on_unauthorized.run(()),
                 Err(error) => {
                     toasts.error(error.message.clone());
@@ -222,17 +257,20 @@ pub fn InventoryDispositionWorkbench(
     view! {
         <div class="disposition-workbench">
             <section class="data-section disposition-browser">
-                <div class="table-toolbar">
+                <form class="table-toolbar" on:submit=apply_filter>
                     <div class="toolbar-summary">
                         <strong>{move || format_quantity(balances.get().len() as i64)}</strong>
                         <span>"positions loaded"</span>
                     </div>
                     <SearchField
-                        label="Filter loaded disposition positions".to_owned()
-                        placeholder="Filter positions"
+                        label="Search disposition positions".to_owned()
+                        placeholder="Search all positions"
                         value=filter
                     />
-                </div>
+                    <button class="button secondary-action" type="submit" disabled=move || load_pending.get()>
+                        "Apply"
+                    </button>
+                </form>
                 <div class="table-scroll">
                     <table class="data-table disposition-table">
                         <caption class="sr-only">"Inventory positions available for disposition changes"</caption>
@@ -242,49 +280,37 @@ pub fn InventoryDispositionWorkbench(
                                     label="Item"
                                     active=move || sort.get().key == DispositionSort::Item
                                     direction=move || sort.get().direction
-                                    on_sort=Callback::new(move |_| {
-                                        SortSpec::select(sort, DispositionSort::Item)
-                                    })
+                                    on_sort=Callback::new(move |_| change_sort(DispositionSort::Item))
                                 />
                                 <SortableHeader
                                     label="Client"
                                     active=move || sort.get().key == DispositionSort::Client
                                     direction=move || sort.get().direction
-                                    on_sort=Callback::new(move |_| {
-                                        SortSpec::select(sort, DispositionSort::Client)
-                                    })
+                                    on_sort=Callback::new(move |_| change_sort(DispositionSort::Client))
                                 />
                                 <SortableHeader
                                     label="Facility"
                                     active=move || sort.get().key == DispositionSort::Facility
                                     direction=move || sort.get().direction
-                                    on_sort=Callback::new(move |_| {
-                                        SortSpec::select(sort, DispositionSort::Facility)
-                                    })
+                                    on_sort=Callback::new(move |_| change_sort(DispositionSort::Facility))
                                 />
                                 <SortableHeader
                                     label="Location"
                                     active=move || sort.get().key == DispositionSort::Location
                                     direction=move || sort.get().direction
-                                    on_sort=Callback::new(move |_| {
-                                        SortSpec::select(sort, DispositionSort::Location)
-                                    })
+                                    on_sort=Callback::new(move |_| change_sort(DispositionSort::Location))
                                 />
                                 <SortableHeader
                                     label="Status"
                                     active=move || sort.get().key == DispositionSort::Status
                                     direction=move || sort.get().direction
-                                    on_sort=Callback::new(move |_| {
-                                        SortSpec::select(sort, DispositionSort::Status)
-                                    })
+                                    on_sort=Callback::new(move |_| change_sort(DispositionSort::Status))
                                 />
                                 <SortableHeader
                                     label="Movable"
                                     active=move || sort.get().key == DispositionSort::Movable
                                     direction=move || sort.get().direction
-                                    on_sort=Callback::new(move |_| {
-                                        SortSpec::select(sort, DispositionSort::Movable)
-                                    })
+                                    on_sort=Callback::new(move |_| change_sort(DispositionSort::Movable))
                                     numeric=true
                                 />
                                 <th scope="col" class="action-column">"Action"</th>
@@ -292,16 +318,7 @@ pub fn InventoryDispositionWorkbench(
                         </thead>
                         <tbody>
                             {move || {
-                                let query = filter.get().trim().to_ascii_lowercase();
-                                let mut matching = balances
-                                    .get()
-                                    .into_iter()
-                                    .filter(|balance| {
-                                        movable_quantity(balance) > 0
-                                            && balance_matches(balance, &query)
-                                    })
-                                    .collect::<Vec<_>>();
-                                sort_positions(&mut matching, sort.get());
+                                let matching = balances.get();
                                 if matching.is_empty() {
                                     view! {
                                         <tr>
@@ -586,54 +603,74 @@ pub fn InventoryDispositionWorkbench(
     }
 }
 
-fn sort_positions(balances: &mut [InventoryBalanceResponse], spec: SortSpec<DispositionSort>) {
-    balances.sort_by(|left, right| {
-        let ordering = match spec.key {
-            DispositionSort::Item => item_label(left)
-                .to_ascii_lowercase()
-                .cmp(&item_label(right).to_ascii_lowercase()),
-            DispositionSort::Client => left
-                .inventory_owner_name
-                .to_ascii_lowercase()
-                .cmp(&right.inventory_owner_name.to_ascii_lowercase()),
-            DispositionSort::Facility => facility_label(left)
-                .to_ascii_lowercase()
-                .cmp(&facility_label(right).to_ascii_lowercase())
-                .then_with(|| {
-                    location_label(left)
-                        .to_ascii_lowercase()
-                        .cmp(&location_label(right).to_ascii_lowercase())
-                }),
-            DispositionSort::Location => location_label(left)
-                .to_ascii_lowercase()
-                .cmp(&location_label(right).to_ascii_lowercase()),
-            DispositionSort::Status => status_label(left.status).cmp(status_label(right.status)),
-            DispositionSort::Movable => movable_quantity(left).cmp(&movable_quantity(right)),
+#[cfg(target_arch = "wasm32")]
+fn request_positions(
+    signals: DispositionListSignals,
+    query: String,
+    sort: SortSpec<DispositionSort>,
+    cursor: Option<OpaqueCursor>,
+) {
+    let append = cursor.is_some();
+    let request_generation = signals.generation.get_untracked().wrapping_add(1);
+    signals.generation.set(request_generation);
+    signals.pending.set(true);
+    signals.error.set(None);
+    leptos::task::spawn_local(async move {
+        let result = api::sorted_movable_balances(
+            (!query.is_empty()).then_some(query.as_str()),
+            api_balance_sort(sort.key),
+            api_sort_direction(sort.direction),
+            cursor.as_ref(),
+        )
+        .await;
+        if signals.generation.get_untracked() != request_generation {
+            return;
         }
-        .then_with(|| left.id.cmp(&right.id));
-        if spec.direction == SortDirection::Ascending {
-            ordering
-        } else {
-            ordering.reverse()
+        match result {
+            Ok(page) if append => {
+                signals
+                    .balances
+                    .update(|current| current.extend(page.items));
+                signals.next_cursor.set(page.next_cursor);
+            }
+            Ok(page) => {
+                signals.balances.set(page.items);
+                signals.next_cursor.set(page.next_cursor);
+            }
+            Err(error) if error.unauthorized => signals.on_unauthorized.run(()),
+            Err(error) => signals.error.set(Some(error.message)),
         }
+        signals.pending.set(false);
     });
 }
 
-fn balance_matches(balance: &InventoryBalanceResponse, query: &str) -> bool {
-    query.is_empty()
-        || [
-            balance.inventory_owner_name.as_str(),
-            balance.facility_name.as_deref().unwrap_or_default(),
-            balance.location_name.as_deref().unwrap_or_default(),
-            balance.location_barcode.as_deref().unwrap_or_default(),
-            balance.item_description.as_deref().unwrap_or_default(),
-            balance.primary_sku.as_deref().unwrap_or_default(),
-            balance.lot.as_deref().unwrap_or_default(),
-            balance.serial.as_deref().unwrap_or_default(),
-            status_label(balance.status),
-        ]
-        .iter()
-        .any(|value| value.to_ascii_lowercase().contains(query))
+#[cfg(not(target_arch = "wasm32"))]
+fn request_positions(
+    _signals: DispositionListSignals,
+    _query: String,
+    _sort: SortSpec<DispositionSort>,
+    _cursor: Option<OpaqueCursor>,
+) {
+}
+
+#[cfg(target_arch = "wasm32")]
+const fn api_balance_sort(sort: DispositionSort) -> ApiBalanceSort {
+    match sort {
+        DispositionSort::Item => ApiBalanceSort::Item,
+        DispositionSort::Client => ApiBalanceSort::Client,
+        DispositionSort::Facility => ApiBalanceSort::Facility,
+        DispositionSort::Location => ApiBalanceSort::Location,
+        DispositionSort::Status => ApiBalanceSort::Status,
+        DispositionSort::Movable => ApiBalanceSort::Available,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+const fn api_sort_direction(direction: SortDirection) -> ApiSortDirection {
+    match direction {
+        SortDirection::Ascending => ApiSortDirection::Ascending,
+        SortDirection::Descending => ApiSortDirection::Descending,
+    }
 }
 
 fn movable_quantity(balance: &InventoryBalanceResponse) -> i64 {

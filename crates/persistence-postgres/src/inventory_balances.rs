@@ -86,8 +86,10 @@ pub async fn get_inventory_balance_page(
           AND balance.deleted IS NULL
           AND ($2 OR balance.facility_id = ANY($3))
           AND ($4 OR balance.inventory_owner_id = ANY($5))
-          AND (
+              AND (
               $6::TEXT IS NULL
+              OR STRPOS(LOWER(owner.name), LOWER($6)) > 0
+              OR STRPOS(LOWER(facility.name), LOWER($6)) > 0
               OR STRPOS(LOWER(COALESCE(location.name, '')), LOWER($6)) > 0
               OR STRPOS(LOWER(COALESCE(location.barcode, '')), LOWER($6)) > 0
               OR STRPOS(LOWER(COALESCE(license_plate.barcode, '')), LOWER($6)) > 0
@@ -95,6 +97,7 @@ pub async fn get_inventory_balance_page(
               OR STRPOS(LOWER(COALESCE(item.description, '')), LOWER($6)) > 0
               OR STRPOS(LOWER(COALESCE(batch.lot, '')), LOWER($6)) > 0
               OR STRPOS(LOWER(COALESCE(batch.serial, '')), LOWER($6)) > 0
+              OR STRPOS(LOWER(balance.status), LOWER($6)) > 0
               OR (
                   $7::BIGINT IS NOT NULL
                   AND (
@@ -108,6 +111,7 @@ pub async fn get_inventory_balance_page(
                   )
               )
           )
+          AND (NOT $12 OR balance.qty_on_hand - balance.qty_reserved - balance.qty_held > 0)
         ORDER BY
           CASE WHEN $8='position' AND $9 THEN balance.id END ASC,
           CASE WHEN $8='position' AND NOT $9 THEN balance.id END DESC,
@@ -131,6 +135,8 @@ pub async fn get_inventory_balance_page(
           CASE WHEN $8='reserved' AND NOT $9 THEN balance.qty_reserved END DESC,
           CASE WHEN $8='held' AND $9 THEN balance.qty_held END ASC,
           CASE WHEN $8='held' AND NOT $9 THEN balance.qty_held END DESC,
+          CASE WHEN $8='available' AND $9 THEN balance.qty_on_hand - balance.qty_reserved - balance.qty_held END ASC,
+          CASE WHEN $8='available' AND NOT $9 THEN balance.qty_on_hand - balance.qty_reserved - balance.qty_held END DESC,
           balance.id ASC
         OFFSET $10 LIMIT $11
         "#,
@@ -146,6 +152,7 @@ pub async fn get_inventory_balance_page(
     .bind(request.direction.is_ascending())
     .bind(offset_i64)
     .bind(fetch_limit)
+    .bind(request.movable_only)
     .fetch_all(&mut *tx)
     .await?;
 
@@ -207,6 +214,7 @@ fn sort_key(sort: InventoryBalanceSort) -> &'static str {
         InventoryBalanceSort::OnHand => "on_hand",
         InventoryBalanceSort::Reserved => "reserved",
         InventoryBalanceSort::Held => "held",
+        InventoryBalanceSort::Available => "available",
     }
 }
 

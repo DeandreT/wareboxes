@@ -152,6 +152,8 @@ pub struct InventoryBalancePageRequest {
     pub sort: InventoryBalanceSort,
     #[serde(default = "default_balance_direction")]
     pub direction: InventorySortDirection,
+    #[serde(default)]
+    pub movable_only: bool,
 }
 
 impl Default for InventoryBalancePageRequest {
@@ -162,6 +164,7 @@ impl Default for InventoryBalancePageRequest {
             query: None,
             sort: InventoryBalanceSort::Position,
             direction: default_balance_direction(),
+            movable_only: false,
         }
     }
 }
@@ -185,6 +188,7 @@ pub enum InventoryBalanceSort {
     OnHand,
     Reserved,
     Held,
+    Available,
 }
 
 /// Cursor page returned by the version 1 inventory-balance collection.
@@ -240,6 +244,13 @@ mod tests {
         assert!(request.query.is_none());
         assert_eq!(request.sort, InventoryBalanceSort::Position);
         assert_eq!(request.direction, InventorySortDirection::Ascending);
+        assert!(!request.movable_only);
+        let movable = serde_json::from_str::<InventoryBalancePageRequest>(
+            r#"{"sort":"available","movable_only":true}"#,
+        )
+        .unwrap();
+        assert_eq!(movable.sort, InventoryBalanceSort::Available);
+        assert!(movable.movable_only);
         assert!(serde_json::from_str::<InventoryBalancePageRequest>(r#"{"limit":1001}"#).is_err());
     }
 

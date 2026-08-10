@@ -125,11 +125,15 @@ async fn workspace_bootstrap(
                     routes::v1::inventory_balances::page_for_access(
                         state,
                         access,
-                        0,
-                        100,
-                        None,
-                        wareboxes_api_contract::v1::InventoryBalanceSort::Position,
-                        wareboxes_api_contract::v1::InventorySortDirection::Ascending,
+                        &routes::v1::inventory_balances::BalancePageOptions {
+                            offset: 0,
+                            limit: 100,
+                            query: None,
+                            sort: wareboxes_api_contract::v1::InventoryBalanceSort::Position,
+                            direction:
+                                wareboxes_api_contract::v1::InventorySortDirection::Ascending,
+                            movable_only: false,
+                        },
                     )
                     .await
                     .map(Some)
@@ -309,11 +313,14 @@ async fn workspace_bootstrap(
             let page = routes::v1::inventory_balances::page_for_access(
                 state,
                 access,
-                0,
-                100,
-                None,
-                wareboxes_api_contract::v1::InventoryBalanceSort::Position,
-                wareboxes_api_contract::v1::InventorySortDirection::Ascending,
+                &routes::v1::inventory_balances::BalancePageOptions {
+                    offset: 0,
+                    limit: 100,
+                    query: None,
+                    sort: wareboxes_api_contract::v1::InventoryBalanceSort::Position,
+                    direction: wareboxes_api_contract::v1::InventorySortDirection::Ascending,
+                    movable_only: false,
+                },
             )
             .await?;
             Ok(WorkspaceBootstrapData {

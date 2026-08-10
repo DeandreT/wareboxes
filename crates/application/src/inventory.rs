@@ -26,6 +26,7 @@ pub enum InventoryBalanceSort {
     OnHand,
     Reserved,
     Held,
+    Available,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +48,7 @@ pub struct InventoryBalancePageQuery {
     pub query: Option<String>,
     pub sort: InventoryBalanceSort,
     pub direction: InventoryBalanceSortDirection,
+    pub movable_only: bool,
 }
 
 impl InventoryBalanceStatus {

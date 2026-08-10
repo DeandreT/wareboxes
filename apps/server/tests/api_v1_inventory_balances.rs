@@ -540,6 +540,39 @@ async fn inventory_balance_v1_contract_is_scoped_sorted_paginated_and_stable() {
     assert_eq!(reserved_next.items[0].item_id, first_item);
     assert_eq!(reserved_next.items[0].quantity.reserved, 2);
 
+    let movable_descending = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            "/api/v1/inventory/balances?movable_only=true&sort=available&direction=descending&limit=1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(movable_descending.status(), StatusCode::OK);
+    let movable_descending: InventoryBalancePage =
+        serde_json::from_slice(&body_bytes(movable_descending).await).unwrap();
+    assert_eq!(movable_descending.items[0].item_id, second_item);
+    assert_eq!(
+        movable_descending.items[0].quantity.on_hand
+            - movable_descending.items[0].quantity.reserved
+            - movable_descending.items[0].quantity.held,
+        7
+    );
+    let movable_cursor = movable_descending.next_cursor.unwrap();
+    let changed_movable_filter = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            &format!(
+                "/api/v1/inventory/balances?sort=available&direction=descending&limit=1&cursor={movable_cursor}"
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(changed_movable_filter.status(), StatusCode::BAD_REQUEST);
+
     let changed_sort_cursor = app
         .clone()
         .oneshot(request(
@@ -586,6 +619,21 @@ async fn inventory_balance_v1_contract_is_scoped_sorted_paginated_and_stable() {
             "query: {query}"
         );
     }
+
+    let status_search = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            "/api/v1/inventory/balances?query=damaged",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(status_search.status(), StatusCode::OK);
+    let status_page: InventoryBalancePage =
+        serde_json::from_slice(&body_bytes(status_search).await).unwrap();
+    assert_eq!(status_page.items.len(), 1);
+    assert_eq!(status_page.items[0].item_id, second_item);
 
     let id_response = app
         .clone()

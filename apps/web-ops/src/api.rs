@@ -170,6 +170,7 @@ mod browser {
             InventoryBalanceSort::Position,
             InventorySortDirection::Ascending,
             cursor,
+            false,
         );
         get(&path).await
     }
@@ -183,6 +184,7 @@ mod browser {
             InventoryBalanceSort::Position,
             InventorySortDirection::Ascending,
             cursor,
+            false,
         );
         get(&path).await
     }
@@ -193,7 +195,16 @@ mod browser {
         direction: InventorySortDirection,
         cursor: Option<&OpaqueCursor>,
     ) -> Result<InventoryBalancePage, ApiError> {
-        get(&balance_page_path(query, sort, direction, cursor)).await
+        get(&balance_page_path(query, sort, direction, cursor, false)).await
+    }
+
+    pub async fn sorted_movable_balances(
+        query: Option<&str>,
+        sort: InventoryBalanceSort,
+        direction: InventorySortDirection,
+        cursor: Option<&OpaqueCursor>,
+    ) -> Result<InventoryBalancePage, ApiError> {
+        get(&balance_page_path(query, sort, direction, cursor, true)).await
     }
 
     pub async fn access() -> Result<AccessScopeWorkspace, ApiError> {
@@ -744,12 +755,16 @@ mod browser {
         sort: InventoryBalanceSort,
         direction: InventorySortDirection,
         cursor: Option<&OpaqueCursor>,
+        movable_only: bool,
     ) -> String {
         let mut path = format!(
             "/api/v1/inventory/balances?limit=100&sort={}&direction={}",
             inventory_balance_sort_wire(sort),
             inventory_sort_direction_wire(direction)
         );
+        if movable_only {
+            path.push_str("&movable_only=true");
+        }
         if let Some(query) = query.filter(|query| !query.is_empty()) {
             path.push_str("&query=");
             path.push_str(&urlencoding::encode(query));
@@ -774,6 +789,7 @@ mod browser {
             InventoryBalanceSort::OnHand => "on_hand",
             InventoryBalanceSort::Reserved => "reserved",
             InventoryBalanceSort::Held => "held",
+            InventoryBalanceSort::Available => "available",
         }
     }
 
@@ -843,6 +859,16 @@ pub async fn search_balances(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn sorted_balances(
+    _query: Option<&str>,
+    _sort: InventoryBalanceSort,
+    _direction: InventorySortDirection,
+    _cursor: Option<&OpaqueCursor>,
+) -> Result<InventoryBalancePage, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn sorted_movable_balances(
     _query: Option<&str>,
     _sort: InventoryBalanceSort,
     _direction: InventorySortDirection,
