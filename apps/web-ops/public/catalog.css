@@ -1153,6 +1153,10 @@
   font-size: 9px;
 }
 
+.license-plate-print-label {
+  display: none;
+}
+
 .mono,
 code {
   font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
@@ -1164,11 +1168,84 @@ code {
     visibility: hidden;
   }
 
-  .plate-editor,
-  .plate-editor *,
+  .license-plate-print-label,
+  .license-plate-print-label *,
   .barcode-row.print-target,
   .barcode-row.print-target * {
     visibility: visible;
+  }
+
+  .license-plate-print-label {
+    position: absolute;
+    inset: 0 auto auto 0;
+    display: grid;
+    width: 4in;
+    height: 2in;
+    grid-template: auto 0.82in auto auto / 1fr;
+    gap: 0.04in;
+    padding: 0.12in;
+    overflow: hidden;
+    border: 1px solid #000;
+    background: #fff;
+    color: #000;
+  }
+
+  .license-plate-print-label header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    border-bottom: 2px solid #000;
+    font: 11px Arial, sans-serif;
+  }
+
+  .license-plate-print-label header strong {
+    font-size: 18px;
+  }
+
+  .license-plate-print-symbol {
+    display: grid;
+    min-height: 0;
+    place-items: center;
+    overflow: hidden;
+  }
+
+  .license-plate-print-symbol svg {
+    display: block;
+    width: auto;
+    max-width: 100%;
+    height: 0.8in;
+  }
+
+  .license-plate-print-label > code {
+    text-align: center;
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .license-plate-print-label dl {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr 1fr 0.55fr;
+    gap: 0.04in;
+    margin: 0;
+    border-top: 1px solid #000;
+    padding-top: 0.03in;
+    font: 8px Arial, sans-serif;
+  }
+
+  .license-plate-print-label dl div {
+    min-width: 0;
+  }
+
+  .license-plate-print-label dt {
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .license-plate-print-label dd {
+    margin: 1px 0 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .barcode-row.print-target {
@@ -1196,13 +1273,6 @@ code {
     max-width: 100%;
     height: auto;
     max-height: 90vh;
-  }
-
-  .plate-editor {
-    position: absolute;
-    inset: 0;
-    overflow: visible;
-    color: #000;
   }
 
   .print-hide {

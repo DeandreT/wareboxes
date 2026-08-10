@@ -5,7 +5,7 @@ use wareboxes_core::dto::{AddLicensePlate, LicensePlateIdRequest, LicensePlateUp
 use wareboxes_core::models::{Facility, InventoryOwner, LicensePlate, Location};
 
 use crate::api;
-use crate::components::SearchField;
+use crate::components::{Icon, SearchField, UiIcon};
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::toast::{use_toast_bus, ToastBus};
 use crate::view_model::format_quantity;
@@ -416,6 +416,19 @@ fn PlateDetail(
         || "Not placed".to_owned(),
         |location_id| location_label(&locations, location_id),
     );
+    let printable_label = plate
+        .barcode
+        .as_deref()
+        .map(|barcode| {
+            license_plate_label(barcode, &client, &facility, &location, plate_units(&plate))
+        })
+        .transpose();
+    let can_print = printable_label.as_ref().is_ok_and(Option::is_some);
+    let print_title = if can_print {
+        "Print license plate label"
+    } else {
+        "A scanner-ready Code 128 value is required"
+    };
 
     view! {
         <div class="catalog-detail">
@@ -441,7 +454,16 @@ fn PlateDetail(
                 <div class="catalog-form-actions split">
                     <div>
                         <button class="button primary-action compact" type="submit" disabled=move || pending.get() || inactive>"Save code"</button>
-                        <button class="button quiet-action compact print-hide" type="button" on:click=move |_| print_page()>"Print"</button>
+                        <button
+                            class="icon-button print-hide"
+                            type="button"
+                            title=print_title
+                            aria-label="Print license plate label"
+                            disabled=!can_print
+                            on:click=move |_| print_page()
+                        >
+                            <Icon icon=UiIcon::Print/>
+                        </button>
                     </div>
                     <button
                         class=if inactive { "button secondary-action compact" } else { "button danger-action compact" }
@@ -495,6 +517,19 @@ fn PlateDetail(
                     </table>
                 </div>
             </section>
+            {printable_label.ok().flatten().map(|label| view! {
+                <article class="license-plate-print-label" aria-hidden="true">
+                    <header><strong>"LPN"</strong><span>"Wareboxes"</span></header>
+                    <div class="license-plate-print-symbol" inner_html=label.svg></div>
+                    <code>{label.barcode}</code>
+                    <dl>
+                        <div><dt>"Client"</dt><dd>{label.client}</dd></div>
+                        <div><dt>"Facility"</dt><dd>{label.facility}</dd></div>
+                        <div><dt>"Location"</dt><dd>{label.location}</dd></div>
+                        <div><dt>"On hand"</dt><dd>{format_quantity(label.quantity)}</dd></div>
+                    </dl>
+                </article>
+            })}
         </div>
     }
 }
@@ -686,6 +721,37 @@ fn encode_path_segment(value: &str) -> String {
     encoded
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LicensePlateLabel {
+    barcode: String,
+    svg: String,
+    client: String,
+    facility: String,
+    location: String,
+    quantity: i64,
+}
+
+fn license_plate_label(
+    barcode: &str,
+    client: &str,
+    facility: &str,
+    location: &str,
+    quantity: i64,
+) -> Result<LicensePlateLabel, String> {
+    let barcode = wareboxes_barcodes::normalized_value("code128", barcode)
+        .map_err(|error| format!("License plate cannot be scanned: {error}."))?;
+    let svg = wareboxes_barcodes::svg("code128", &barcode)
+        .map_err(|error| format!("License plate cannot be rendered: {error}."))?;
+    Ok(LicensePlateLabel {
+        barcode,
+        svg,
+        client: client.to_owned(),
+        facility: facility.to_owned(),
+        location: location.to_owned(),
+        quantity,
+    })
+}
+
 #[cfg(target_arch = "wasm32")]
 fn print_page() {
     if let Some(window) = web_sys::window() {
@@ -698,11 +764,25 @@ fn print_page() {}
 
 #[cfg(test)]
 mod tests {
-    use super::encode_path_segment;
+    use super::{encode_path_segment, license_plate_label};
 
     #[test]
     fn barcode_lookup_encodes_one_url_path_segment() {
         assert_eq!(encode_path_segment("LP/A 1"), "LP%2FA%201");
         assert_eq!(encode_path_segment("ABC-123_9"), "ABC-123_9");
+    }
+
+    #[test]
+    fn printable_license_plate_label_preserves_operational_context() {
+        let label = license_plate_label(" LP-00041 ", "Northstar", "PDX", "RECV-01", 24)
+            .expect("valid Code 128 label");
+
+        assert_eq!(label.barcode, "LP-00041");
+        assert_eq!(label.client, "Northstar");
+        assert_eq!(label.facility, "PDX");
+        assert_eq!(label.location, "RECV-01");
+        assert_eq!(label.quantity, 24);
+        assert!(label.svg.contains("LP-00041"));
+        assert!(license_plate_label("LP-\u{00e9}", "Client", "PDX", "RECV", 1).is_err());
     }
 }
