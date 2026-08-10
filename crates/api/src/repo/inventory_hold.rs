@@ -444,6 +444,79 @@ pub(crate) async fn place_composed_inventory_hold_tx(
     insert_hold_tx(tx, tenant_id, actor_user_id, now, &balance, command).await
 }
 
+pub(crate) async fn release_composed_inventory_hold_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    actor_user_id: i64,
+    now: Timestamp,
+    hold_id: i64,
+    expected_reference_type: &str,
+    expected_reference_id: i64,
+) -> AppResult<i64> {
+    let hold = lock_hold(tx, tenant_id, hold_id).await?;
+    if hold.status != InventoryHoldStatus::Active.as_str() {
+        return Err(AppError::conflict("inventory hold is not active"));
+    }
+    if hold.reference_type.as_deref() != Some(expected_reference_type)
+        || hold.reference_id != Some(expected_reference_id)
+    {
+        return Err(AppError::conflict(
+            "inventory hold does not belong to the composed workflow",
+        ));
+    }
+    let updated = sqlx::query(
+        r#"
+        UPDATE inventory_holds
+        SET modified = $1, deleted = $1, released_by = $2,
+            released_at = $1, status = 'released'
+        WHERE tenant_id = $3 AND id = $4
+          AND deleted IS NULL AND status = 'active'
+        "#,
+    )
+    .bind(now)
+    .bind(actor_user_id)
+    .bind(tenant_id.get())
+    .bind(hold_id)
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(AppError::conflict("inventory hold could not be released"));
+    }
+    let payload = serde_json::json!({
+        "hold_id": hold_id,
+        "inventory_balance_id": hold.inventory_balance_id,
+        "inventory_owner_id": hold.inventory_owner_id,
+        "facility_id": hold.facility_id,
+        "location_id": hold.location_id,
+        "license_plate_id": hold.license_plate_id,
+        "item_batch_id": hold.item_batch_id,
+        "item_id": hold.item_id,
+        "uom": hold.uom,
+        "inventory_status": hold.inventory_status,
+        "released_quantity": hold.qty,
+        "reason": hold.reason_code,
+        "note": hold.note,
+        "reference_type": hold.reference_type,
+        "reference_id": hold.reference_id,
+    });
+    enqueue_hold_event(
+        tx,
+        hold_id,
+        hold.inventory_owner_id,
+        hold.facility_id,
+        InventoryHoldEventContext {
+            tenant_id,
+            actor_user_id,
+            transition: "released",
+            aggregate_sequence: 2,
+            occurred_at: now,
+        },
+        &payload,
+    )
+    .await?;
+    Ok(hold.qty)
+}
+
 pub async fn get_inventory_holds_in_scope(
     db: &Db,
     access: &TenantAccess,
@@ -624,10 +697,10 @@ pub async fn release_inventory_hold(
     }
     if matches!(
         hold.reference_type.as_deref(),
-        Some("expected_receipt_line" | "unexpected_receipt")
+        Some("expected_receipt_line" | "unexpected_receipt" | "inventory_recall")
     ) {
         return Err(AppError::conflict(
-            "inbound receipt quarantine holds require an inspection disposition",
+            "workflow-managed inventory holds require their owning resolution command",
         ));
     }
     if hold.status != InventoryHoldStatus::Active.as_str() {

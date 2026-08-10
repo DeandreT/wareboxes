@@ -58,7 +58,7 @@
 }
 
 .integrity-tabs button {
-  min-width: 112px;
+  min-width: 104px;
   padding: 0 12px;
   border: 0;
   border-right: 1px solid var(--line);
@@ -67,6 +67,176 @@
   font-size: 11px;
   font-weight: 700;
   cursor: pointer;
+}
+
+.aging-recall-action,
+.recall-release-action {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.recall-table {
+  min-width: 850px;
+}
+
+.recall-table th.icon-column,
+.recall-table td.icon-column {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  box-shadow: -1px 0 var(--line);
+}
+
+.recall-table th.icon-column {
+  z-index: 2;
+  background: var(--surface-raised);
+}
+
+.recall-table td.icon-column {
+  background: var(--surface);
+}
+
+.recall-table tbody tr:hover td.icon-column {
+  background: var(--row-hover);
+}
+
+.recall-table tbody tr.selected td.icon-column {
+  background: var(--blue-soft);
+}
+
+.recall-detail {
+  min-width: 0;
+  overflow: auto;
+  padding: 10px;
+  border-left: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.recall-create-form,
+.recall-case-detail {
+  display: grid;
+  gap: 9px;
+}
+
+.recall-create-form > header,
+.recall-case-detail > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.recall-create-form h2,
+.recall-case-detail h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.recall-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.recall-form-grid label {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.recall-form-grid label > span {
+  color: var(--ink-soft);
+  font-size: 8px;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+
+.recall-form-grid input,
+.recall-form-grid select,
+.recall-form-grid textarea {
+  width: 100%;
+}
+
+.recall-form-grid textarea {
+  min-height: 70px;
+  padding: 6px 8px;
+  resize: vertical;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+.recall-form-grid .recall-note {
+  grid-column: 1 / -1;
+}
+
+.recall-create-form footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.recall-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--line);
+}
+
+.recall-metrics > div {
+  display: grid;
+  gap: 2px;
+  padding: 7px 9px;
+  border-right: 1px solid var(--line);
+}
+
+.recall-metrics > div:last-child {
+  border-right: 0;
+}
+
+.recall-metrics span {
+  color: var(--ink-soft);
+  font-size: 8px;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+
+.recall-metrics strong {
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.recall-release-confirm {
+  display: grid;
+  gap: 5px;
+  padding: 9px;
+  border: 1px solid var(--danger-ink);
+  background: var(--red-soft);
+}
+
+.recall-release-confirm p {
+  margin: 0;
+  font-size: 10px;
+}
+
+.recall-release-confirm > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.recall-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.recall-control-stack {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
 }
 
 .integrity-tabs button:last-child {
@@ -226,6 +396,10 @@
 
 .integrity-query-bar.aging {
   grid-template-columns: minmax(260px, 1fr) 150px 84px auto minmax(130px, 1fr) auto;
+}
+
+.integrity-query-bar.recall {
+  grid-template-columns: 140px 90px 90px auto auto minmax(120px, 1fr) auto;
 }
 
 .aging-table {

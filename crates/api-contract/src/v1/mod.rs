@@ -11,6 +11,7 @@ mod inbound_inspection;
 mod inventory;
 mod inventory_hold;
 mod inventory_integrity;
+mod inventory_recall;
 mod inventory_relocation;
 mod inventory_rollup;
 mod inventory_status_transition;
@@ -96,6 +97,11 @@ pub use inventory_integrity::{
     InventoryIntegrityPage, InventoryIntegrityPageRequest, InventoryIntegritySort,
     InventoryJournalEntryResponse, InventoryJournalPage, InventoryJournalPageRequest,
     InventoryJournalSort, InventoryJournalTransactionResponse, InventorySortDirection,
+};
+pub use inventory_recall::{
+    CreateInventoryRecallRequest, InventoryRecallPage, InventoryRecallPageRequest,
+    InventoryRecallReason, InventoryRecallResponse, InventoryRecallStatus,
+    ReleaseInventoryRecallRequest,
 };
 pub use inventory_relocation::{
     ClaimInventoryRelocationByIdRequest, ClaimNextInventoryRelocationRequest,

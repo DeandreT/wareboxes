@@ -46,8 +46,8 @@ mod inbound_inspection;
 pub use inbound_inspection::dispose_inbound_inspection;
 mod inventory_integrity;
 pub use inventory_integrity::{
-    inventory_aging, inventory_integrity_issues, inventory_journal, AgingFilters, IntegrityFilters,
-    JournalFilters,
+    create_inventory_recall, inventory_aging, inventory_integrity_issues, inventory_journal,
+    inventory_recalls, release_inventory_recall, AgingFilters, IntegrityFilters, JournalFilters,
 };
 mod order;
 pub use order::{

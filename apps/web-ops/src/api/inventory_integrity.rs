@@ -1,10 +1,11 @@
 use wareboxes_api_contract::v1::{
-    InventoryAgingBucket, InventoryAgingPage, InventoryAgingSort, InventoryIntegrityIssueKind,
-    InventoryIntegrityPage, InventoryIntegritySort, InventoryJournalPage, InventoryJournalSort,
-    InventorySortDirection, OpaqueCursor,
+    CreateInventoryRecallRequest, InventoryAgingBucket, InventoryAgingPage, InventoryAgingSort,
+    InventoryIntegrityIssueKind, InventoryIntegrityPage, InventoryIntegritySort,
+    InventoryJournalPage, InventoryJournalSort, InventoryRecallPage, InventoryRecallResponse,
+    InventoryRecallStatus, InventorySortDirection, OpaqueCursor, ReleaseInventoryRecallRequest,
 };
 
-use super::{internal_get, ApiError};
+use super::{internal_get, internal_post_idempotent, ApiError};
 
 #[derive(Clone, Default)]
 pub struct JournalFilters {
@@ -59,6 +60,41 @@ pub async fn inventory_aging(
     cursor: Option<&OpaqueCursor>,
 ) -> Result<InventoryAgingPage, ApiError> {
     internal_get(&aging_path(&filters, sort, direction, cursor)).await
+}
+
+pub async fn inventory_recalls(
+    facility_id: Option<i64>,
+    inventory_owner_id: Option<i64>,
+    status: Option<InventoryRecallStatus>,
+    cursor: Option<&OpaqueCursor>,
+) -> Result<InventoryRecallPage, ApiError> {
+    internal_get(&recall_path(
+        facility_id,
+        inventory_owner_id,
+        status,
+        cursor,
+    ))
+    .await
+}
+
+pub async fn create_inventory_recall(
+    request: &CreateInventoryRecallRequest,
+    idempotency_key: &str,
+) -> Result<InventoryRecallResponse, ApiError> {
+    internal_post_idempotent("/api/v1/inventory/recalls", request, idempotency_key).await
+}
+
+pub async fn release_inventory_recall(
+    recall_id: i64,
+    request: &ReleaseInventoryRecallRequest,
+    idempotency_key: &str,
+) -> Result<InventoryRecallResponse, ApiError> {
+    internal_post_idempotent(
+        &format!("/api/v1/inventory/recalls/{recall_id}/releases"),
+        request,
+        idempotency_key,
+    )
+    .await
 }
 
 fn journal_path(
@@ -142,6 +178,30 @@ fn aging_path(
         params.push(format!("cursor={}", urlencoding::encode(cursor.as_str())));
     }
     format!("/api/v1/inventory/aging?{}", params.join("&"))
+}
+
+fn recall_path(
+    facility_id: Option<i64>,
+    inventory_owner_id: Option<i64>,
+    status: Option<InventoryRecallStatus>,
+    cursor: Option<&OpaqueCursor>,
+) -> String {
+    let mut params = vec!["limit=100".to_owned()];
+    push_id(&mut params, "facility_id", facility_id);
+    push_id(&mut params, "inventory_owner_id", inventory_owner_id);
+    if let Some(status) = status {
+        params.push(format!(
+            "status={}",
+            match status {
+                InventoryRecallStatus::Active => "active",
+                InventoryRecallStatus::Released => "released",
+            }
+        ));
+    }
+    if let Some(cursor) = cursor {
+        params.push(format!("cursor={}", urlencoding::encode(cursor.as_str())));
+    }
+    format!("/api/v1/inventory/recalls?{}", params.join("&"))
 }
 
 fn push_text(params: &mut Vec<String>, key: &str, value: Option<&str>) {
@@ -253,5 +313,20 @@ mod tests {
         assert!(path.contains("facility_id=7"));
         assert!(path.contains("bucket=due_within_30_days"));
         assert!(path.contains("sort=expiration&direction=ascending"));
+    }
+
+    #[test]
+    fn recall_paths_bind_scope_status_and_cursor() {
+        let cursor = OpaqueCursor::new("ir1.cursor").unwrap();
+        let path = recall_path(
+            Some(7),
+            Some(8),
+            Some(InventoryRecallStatus::Active),
+            Some(&cursor),
+        );
+        assert_eq!(
+            path,
+            "/api/v1/inventory/recalls?limit=100&facility_id=7&inventory_owner_id=8&status=active&cursor=ir1.cursor"
+        );
     }
 }

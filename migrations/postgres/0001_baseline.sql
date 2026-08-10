@@ -32510,6 +32510,331 @@ REVOKE ALL ON FUNCTION public.guard_cycle_count_policy_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_cycle_count_variance_case_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_cycle_count_variance_decision_mutation() FROM PUBLIC;
 
+-- Facility-scoped item-batch recalls and exact hold evidence.
+CREATE TABLE public.inventory_recall_cases (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    lot text,
+    expiration timestamp with time zone,
+    serial text,
+    state text NOT NULL DEFAULT 'active',
+    revision bigint NOT NULL DEFAULT 1,
+    reason_code text NOT NULL,
+    note text,
+    affected_position_count integer NOT NULL,
+    held_qty bigint NOT NULL,
+    created_by_user_id bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    modified_at timestamp with time zone NOT NULL,
+    released_by_user_id bigint,
+    released_at timestamp with time zone,
+    CONSTRAINT inventory_recall_cases_state_check
+        CHECK (state IN ('active', 'released')),
+    CONSTRAINT inventory_recall_cases_revision_check CHECK (revision > 0),
+    CONSTRAINT inventory_recall_cases_reason_check
+        CHECK (reason_code IN ('regulatory', 'supplier_notice', 'customer_request', 'quality_concern', 'other')),
+    CONSTRAINT inventory_recall_cases_note_check
+        CHECK (note IS NULL OR (btrim(note) = note AND note <> '' AND char_length(note) <= 500)),
+    CONSTRAINT inventory_recall_cases_other_note_check
+        CHECK (reason_code <> 'other' OR note IS NOT NULL),
+    CONSTRAINT inventory_recall_cases_position_count_check CHECK (affected_position_count > 0),
+    CONSTRAINT inventory_recall_cases_held_qty_check CHECK (held_qty > 0),
+    CONSTRAINT inventory_recall_cases_lifecycle_check CHECK (
+        (state = 'active' AND revision = 1 AND released_by_user_id IS NULL AND released_at IS NULL)
+        OR
+        (state = 'released' AND revision = 2 AND released_by_user_id IS NOT NULL
+         AND released_at IS NOT NULL AND modified_at = released_at)
+    ),
+    CONSTRAINT inventory_recall_cases_scope_unique
+        UNIQUE (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT inventory_recall_cases_tenant_id_id_unique UNIQUE (tenant_id, id),
+    CONSTRAINT inventory_recall_cases_owner_facility_fk
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id)
+        REFERENCES public.inventory_owner_facilities (tenant_id, inventory_owner_id, facility_id),
+    CONSTRAINT inventory_recall_cases_batch_fk
+        FOREIGN KEY (tenant_id, inventory_owner_id, item_batch_id)
+        REFERENCES public.item_batches (tenant_id, inventory_owner_id, id),
+    CONSTRAINT inventory_recall_cases_item_fk
+        FOREIGN KEY (tenant_id, item_id) REFERENCES public.items (tenant_id, id),
+    CONSTRAINT inventory_recall_cases_created_by_fk
+        FOREIGN KEY (tenant_id, created_by_user_id)
+        REFERENCES public.tenant_memberships (tenant_id, user_id),
+    CONSTRAINT inventory_recall_cases_released_by_fk
+        FOREIGN KEY (tenant_id, released_by_user_id)
+        REFERENCES public.tenant_memberships (tenant_id, user_id)
+);
+
+CREATE UNIQUE INDEX inventory_recall_cases_active_batch_idx
+ON public.inventory_recall_cases (tenant_id, inventory_owner_id, facility_id, item_batch_id)
+WHERE state = 'active';
+CREATE INDEX inventory_recall_cases_queue_idx
+ON public.inventory_recall_cases (tenant_id, state, id DESC);
+
+CREATE TABLE public.inventory_recall_case_holds (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    recall_case_id bigint NOT NULL,
+    inventory_hold_id bigint NOT NULL,
+    inventory_balance_id bigint NOT NULL,
+    held_qty bigint NOT NULL CHECK (held_qty > 0),
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT inventory_recall_case_holds_case_balance_unique
+        UNIQUE (tenant_id, recall_case_id, inventory_balance_id),
+    CONSTRAINT inventory_recall_case_holds_hold_unique
+        UNIQUE (tenant_id, inventory_hold_id),
+    CONSTRAINT inventory_recall_case_holds_case_fk
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, recall_case_id)
+        REFERENCES public.inventory_recall_cases (tenant_id, inventory_owner_id, facility_id, id),
+    CONSTRAINT inventory_recall_case_holds_hold_fk
+        FOREIGN KEY (tenant_id, inventory_owner_id, inventory_hold_id)
+        REFERENCES public.inventory_holds (tenant_id, inventory_owner_id, id),
+    CONSTRAINT inventory_recall_case_holds_balance_fk
+        FOREIGN KEY (tenant_id, inventory_owner_id, inventory_balance_id)
+        REFERENCES public.inventory_balances (tenant_id, inventory_owner_id, id)
+);
+
+CREATE FUNCTION public.lock_inventory_recall_natural_key() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    row_tenant bigint;
+    row_facility bigint;
+    row_batch bigint;
+BEGIN
+    row_tenant := COALESCE(NEW.tenant_id, OLD.tenant_id);
+    row_facility := COALESCE(NEW.facility_id, OLD.facility_id);
+    row_batch := COALESCE(NEW.item_batch_id, OLD.item_batch_id);
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        row_tenant::text || ':' || row_facility::text || ':' || row_batch::text,
+        774211
+    ));
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+CREATE FUNCTION public.validate_inventory_recall_case() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    batch_row RECORD;
+BEGIN
+    SELECT item_id, uom, lot, expiration, serial, deleted
+    INTO batch_row
+    FROM public.item_batches
+    WHERE tenant_id = NEW.tenant_id
+      AND inventory_owner_id = NEW.inventory_owner_id
+      AND id = NEW.item_batch_id
+    FOR SHARE;
+    IF NOT FOUND OR batch_row.deleted IS NOT NULL
+       OR batch_row.item_id IS DISTINCT FROM NEW.item_id
+       OR batch_row.uom IS DISTINCT FROM NEW.uom
+       OR batch_row.lot IS DISTINCT FROM NEW.lot
+       OR batch_row.expiration IS DISTINCT FROM NEW.expiration
+       OR batch_row.serial IS DISTINCT FROM NEW.serial
+    THEN
+        RAISE EXCEPTION 'inventory recall does not match the active item batch'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.guard_inventory_recall_case_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'inventory recall cases cannot be deleted' USING ERRCODE = '55000';
+    END IF;
+    IF NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+       OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+       OR NEW.facility_id IS DISTINCT FROM OLD.facility_id
+       OR NEW.item_batch_id IS DISTINCT FROM OLD.item_batch_id
+       OR NEW.item_id IS DISTINCT FROM OLD.item_id
+       OR NEW.uom IS DISTINCT FROM OLD.uom
+       OR NEW.lot IS DISTINCT FROM OLD.lot
+       OR NEW.expiration IS DISTINCT FROM OLD.expiration
+       OR NEW.serial IS DISTINCT FROM OLD.serial
+       OR NEW.reason_code IS DISTINCT FROM OLD.reason_code
+       OR NEW.note IS DISTINCT FROM OLD.note
+       OR NEW.affected_position_count IS DISTINCT FROM OLD.affected_position_count
+       OR NEW.held_qty IS DISTINCT FROM OLD.held_qty
+       OR NEW.created_by_user_id IS DISTINCT FROM OLD.created_by_user_id
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+       OR OLD.state <> 'active' OR NEW.state <> 'released'
+       OR NEW.revision <> OLD.revision + 1
+       OR NEW.released_by_user_id IS NULL OR NEW.released_at IS NULL
+       OR NEW.modified_at IS DISTINCT FROM NEW.released_at
+    THEN
+        RAISE EXCEPTION 'inventory recall case mutation is invalid' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.reject_inventory_recall_case_hold_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION 'inventory recall hold evidence is immutable' USING ERRCODE = '55000';
+END;
+$$;
+
+CREATE FUNCTION public.require_inventory_recall_consistency() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    case_row public.inventory_recall_cases%ROWTYPE;
+    balance_count bigint;
+    balance_qty bigint;
+    reserved_qty bigint;
+    evidence_count bigint;
+    evidence_qty bigint;
+    invalid_evidence_count bigint;
+BEGIN
+    IF TG_TABLE_NAME = 'inventory_recall_cases' THEN
+        SELECT * INTO case_row FROM public.inventory_recall_cases
+        WHERE tenant_id = COALESCE(NEW.tenant_id, OLD.tenant_id)
+          AND id = COALESCE(NEW.id, OLD.id);
+    ELSIF TG_TABLE_NAME = 'inventory_recall_case_holds' THEN
+        SELECT * INTO case_row FROM public.inventory_recall_cases
+        WHERE tenant_id = COALESCE(NEW.tenant_id, OLD.tenant_id)
+          AND id = COALESCE(NEW.recall_case_id, OLD.recall_case_id);
+    ELSIF TG_TABLE_NAME = 'inventory_holds' THEN
+        SELECT recall.* INTO case_row
+        FROM public.inventory_recall_case_holds link
+        JOIN public.inventory_recall_cases recall
+          ON recall.tenant_id = link.tenant_id AND recall.id = link.recall_case_id
+        WHERE link.tenant_id = COALESCE(NEW.tenant_id, OLD.tenant_id)
+          AND link.inventory_hold_id = COALESCE(NEW.id, OLD.id);
+    ELSE
+        SELECT recall.* INTO case_row
+        FROM public.inventory_recall_cases recall
+        WHERE recall.tenant_id = COALESCE(NEW.tenant_id, OLD.tenant_id)
+          AND recall.inventory_owner_id = COALESCE(NEW.inventory_owner_id, OLD.inventory_owner_id)
+          AND recall.facility_id = COALESCE(NEW.facility_id, OLD.facility_id)
+          AND recall.item_batch_id = COALESCE(NEW.item_batch_id, OLD.item_batch_id)
+          AND recall.state = 'active';
+    END IF;
+    IF NOT FOUND THEN
+        RETURN COALESCE(NEW, OLD);
+    END IF;
+
+    SELECT COUNT(*), COALESCE(SUM(qty_on_hand), 0), COALESCE(SUM(qty_reserved), 0)
+    INTO balance_count, balance_qty, reserved_qty
+    FROM public.inventory_balances
+    WHERE tenant_id = case_row.tenant_id
+      AND inventory_owner_id = case_row.inventory_owner_id
+      AND facility_id = case_row.facility_id
+      AND item_batch_id = case_row.item_batch_id
+      AND deleted IS NULL AND qty_on_hand > 0;
+
+    SELECT COUNT(*), COALESCE(SUM(link.held_qty), 0), COUNT(*) FILTER (
+        WHERE hold.id IS NULL
+           OR hold.inventory_balance_id <> link.inventory_balance_id
+           OR hold.facility_id <> case_row.facility_id
+           OR hold.item_batch_id <> case_row.item_batch_id
+           OR hold.qty <> link.held_qty
+           OR hold.reference_type <> 'inventory_recall'
+           OR hold.reference_id <> case_row.id
+           OR (case_row.state = 'active' AND (
+                balance.id IS NULL
+                OR balance.deleted IS NOT NULL
+                OR balance.qty_on_hand <> link.held_qty
+                OR balance.qty_held <> balance.qty_on_hand
+                OR balance.qty_reserved <> 0
+                OR hold.status <> 'active'
+                OR hold.deleted IS NOT NULL
+           ))
+           OR (case_row.state = 'released' AND (hold.status <> 'released' OR hold.deleted IS NULL))
+    )
+    INTO evidence_count, evidence_qty, invalid_evidence_count
+    FROM public.inventory_recall_case_holds link
+    LEFT JOIN public.inventory_holds hold
+      ON hold.tenant_id = link.tenant_id AND hold.id = link.inventory_hold_id
+    LEFT JOIN public.inventory_balances balance
+      ON balance.tenant_id = link.tenant_id AND balance.id = link.inventory_balance_id
+    WHERE link.tenant_id = case_row.tenant_id AND link.recall_case_id = case_row.id;
+
+    IF evidence_count <> case_row.affected_position_count
+       OR evidence_qty <> case_row.held_qty
+       OR invalid_evidence_count <> 0
+       OR (case_row.state = 'active' AND (
+            balance_count <> case_row.affected_position_count
+            OR balance_qty <> case_row.held_qty
+            OR reserved_qty <> 0
+       ))
+    THEN
+        RAISE EXCEPTION 'inventory recall does not exactly cover current batch positions'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+CREATE TRIGGER inventory_recall_cases_lock_natural_key
+BEFORE INSERT OR UPDATE OR DELETE ON public.inventory_recall_cases
+FOR EACH ROW EXECUTE FUNCTION public.lock_inventory_recall_natural_key();
+CREATE TRIGGER inventory_balances_lock_recall_natural_key
+BEFORE INSERT OR UPDATE OR DELETE ON public.inventory_balances
+FOR EACH ROW EXECUTE FUNCTION public.lock_inventory_recall_natural_key();
+CREATE TRIGGER inventory_recall_cases_validate
+BEFORE INSERT ON public.inventory_recall_cases
+FOR EACH ROW EXECUTE FUNCTION public.validate_inventory_recall_case();
+CREATE TRIGGER inventory_recall_cases_guard
+BEFORE UPDATE OR DELETE ON public.inventory_recall_cases
+FOR EACH ROW EXECUTE FUNCTION public.guard_inventory_recall_case_mutation();
+CREATE TRIGGER inventory_recall_case_holds_immutable
+BEFORE UPDATE OR DELETE ON public.inventory_recall_case_holds
+FOR EACH ROW EXECUTE FUNCTION public.reject_inventory_recall_case_hold_mutation();
+
+CREATE CONSTRAINT TRIGGER inventory_recall_cases_consistent
+AFTER INSERT OR UPDATE ON public.inventory_recall_cases DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_inventory_recall_consistency();
+CREATE CONSTRAINT TRIGGER inventory_recall_case_holds_consistent
+AFTER INSERT OR UPDATE OR DELETE ON public.inventory_recall_case_holds DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_inventory_recall_consistency();
+CREATE CONSTRAINT TRIGGER inventory_recall_holds_consistent
+AFTER INSERT OR UPDATE OR DELETE ON public.inventory_holds DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_inventory_recall_consistency();
+CREATE CONSTRAINT TRIGGER inventory_recall_balances_consistent
+AFTER INSERT OR UPDATE OR DELETE ON public.inventory_balances DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_inventory_recall_consistency();
+
+ALTER TABLE public.inventory_recall_cases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.inventory_recall_cases FORCE ROW LEVEL SECURITY;
+CREATE POLICY inventory_recall_cases_tenant_isolation ON public.inventory_recall_cases
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+ALTER TABLE public.inventory_recall_case_holds ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.inventory_recall_case_holds FORCE ROW LEVEL SECURITY;
+CREATE POLICY inventory_recall_case_holds_tenant_isolation ON public.inventory_recall_case_holds
+USING (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint)
+WITH CHECK (tenant_id = NULLIF(current_setting('wareboxes.tenant_id', true), '')::bigint);
+
+GRANT SELECT, INSERT ON public.inventory_recall_cases TO wareboxes_app;
+GRANT UPDATE (state, revision, modified_at, released_by_user_id, released_at)
+ON public.inventory_recall_cases TO wareboxes_app;
+GRANT SELECT, INSERT ON public.inventory_recall_case_holds TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.inventory_recall_cases_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.inventory_recall_case_holds_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.lock_inventory_recall_natural_key() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_inventory_recall_case() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_inventory_recall_case_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_inventory_recall_case_hold_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_inventory_recall_consistency() FROM PUBLIC;
+
 -- PostgreSQL database dump complete
 --
 

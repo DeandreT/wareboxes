@@ -9,6 +9,7 @@ mod inbound_inspections;
 pub(crate) mod inventory_balances;
 mod inventory_holds;
 mod inventory_integrity;
+mod inventory_recalls;
 mod inventory_relocation;
 mod inventory_rollups;
 mod inventory_status_transitions;
@@ -97,6 +98,14 @@ pub fn router() -> Router<AppState> {
         .route("/inventory/balances", get(inventory_balances::list))
         .route("/inventory/journal", get(inventory_integrity::journal))
         .route("/inventory/aging", get(inventory_integrity::aging))
+        .route(
+            "/inventory/recalls",
+            get(inventory_recalls::list).post(inventory_recalls::create),
+        )
+        .route(
+            "/inventory/recalls/{recall_id}/releases",
+            post(inventory_recalls::release),
+        )
         .route(
             "/inventory/integrity-issues",
             get(inventory_integrity::issues),

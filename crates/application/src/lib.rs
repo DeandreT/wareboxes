@@ -13,6 +13,7 @@ pub mod inbound_inspection;
 pub mod integration;
 pub mod inventory;
 pub mod inventory_integrity;
+pub mod inventory_recall;
 pub mod item_substitution;
 pub mod order_allocation;
 pub mod order_amendment;

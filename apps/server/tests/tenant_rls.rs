@@ -460,6 +460,14 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "cycle_count_variance_decisions_tenant_isolation",
         ),
         (
+            "inventory_recall_cases",
+            "inventory_recall_cases_tenant_isolation",
+        ),
+        (
+            "inventory_recall_case_holds",
+            "inventory_recall_case_holds_tenant_isolation",
+        ),
+        (
             "cycle_count_location_tasks",
             "cycle_count_location_tasks_tenant_isolation",
         ),

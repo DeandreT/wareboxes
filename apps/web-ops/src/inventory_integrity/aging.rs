@@ -69,7 +69,11 @@ impl AgingSignals {
 }
 
 #[component]
-pub(super) fn AgingView(on_unauthorized: Callback<()>) -> impl IntoView {
+pub(super) fn AgingView(
+    on_unauthorized: Callback<()>,
+    on_recall: Callback<(i64, i64)>,
+    can_manage_recalls: bool,
+) -> impl IntoView {
     let signals = AgingSignals::new();
     let layout = SplitPaneState::new("inventory-aging", 820);
     Effect::new(move || request_aging(signals, on_unauthorized));
@@ -204,7 +208,9 @@ pub(super) fn AgingView(on_unauthorized: Callback<()>) -> impl IntoView {
                 <aside class="data-section split-detail journal-detail">
                     {move || signals.selected.get().map_or_else(
                         || view! { <div class="journal-detail-empty"><h2>"Aging detail"</h2><p>"Select a position to inspect age, expiry, commitments, and trace identity."</p></div> }.into_any(),
-                        |position| view! { <AgingDetail position/> }.into_any(),
+                        |position| {
+                            view! { <AgingDetail position on_recall can_manage_recalls/> }.into_any()
+                        },
                     )}
                 </aside>
             </div>
@@ -258,7 +264,11 @@ fn aging_rows(signals: AgingSignals, layout: SplitPaneState) -> AnyView {
 }
 
 #[component]
-fn AgingDetail(position: InventoryAgingResponse) -> impl IntoView {
+fn AgingDetail(
+    position: InventoryAgingResponse,
+    on_recall: Callback<(i64, i64)>,
+    can_manage_recalls: bool,
+) -> impl IntoView {
     let item = item_label(&position);
     let trace = trace_label(&position);
     let location = position
@@ -271,6 +281,9 @@ fn AgingDetail(position: InventoryAgingResponse) -> impl IntoView {
         .clone()
         .unwrap_or_else(|| "Loose stock".into());
     let expiration = expiration_label(&position);
+    let facility_id = position.facility_id;
+    let item_batch_id = position.item_batch_id;
+    let recall_eligible = position.reserved_quantity == 0 && position.held_quantity == 0;
     view! {
         <div class="inventory-trace-detail aging-detail">
             <header>
@@ -293,6 +306,17 @@ fn AgingDetail(position: InventoryAgingResponse) -> impl IntoView {
                 <div><span>"Held"</span><strong>{format_quantity(position.held_quantity)}</strong></div>
                 <div><span>"Available"</span><strong>{format_quantity(position.available_quantity)}</strong></div>
             </div>
+            {can_manage_recalls.then(|| view! {
+                <button
+                    type="button"
+                    class="button danger-action aging-recall-action"
+                    disabled=!recall_eligible
+                    title=if recall_eligible { "Open a facility batch recall" } else { "Recall requires unreserved and unheld positions" }
+                    on:click=move |_| on_recall.run((facility_id, item_batch_id))
+                >
+                    "Open batch recall"
+                </button>
+            })}
             <p class="detail-note">{format!("Balance #{} · Batch #{} · {}",position.inventory_balance_id,position.item_batch_id,status_label(position.status))}</p>
         </div>
     }

@@ -746,6 +746,14 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'cycle_count_variance_decisions_tenant_isolation'
                 ),
                 (
+                    'inventory_recall_cases',
+                    'inventory_recall_cases_tenant_isolation'
+                ),
+                (
+                    'inventory_recall_case_holds',
+                    'inventory_recall_case_holds_tenant_isolation'
+                ),
+                (
                     'cycle_count_location_tasks',
                     'cycle_count_location_tasks_tenant_isolation'
                 ),

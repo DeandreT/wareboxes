@@ -1343,6 +1343,8 @@ fn InventoryDisposition(data: WorkspaceData, on_unauthorized: Callback<()>) -> i
 
 #[component]
 fn InventoryIntegrity(on_unauthorized: Callback<()>) -> impl IntoView {
+    let session = expect_context::<WebSessionContext>();
+    let can_manage_recalls = has_permission(&session, "wms_supervisor");
     view! {
         <section class="page-heading">
             <div>
@@ -1351,7 +1353,7 @@ fn InventoryIntegrity(on_unauthorized: Callback<()>) -> impl IntoView {
                 <p>"Trace stock age, reconcile projections, and direct scanner-confirmed facility moves."</p>
             </div>
         </section>
-        <InventoryIntegrityWorkbench on_unauthorized/>
+        <InventoryIntegrityWorkbench on_unauthorized can_manage_recalls/>
     }
 }
 

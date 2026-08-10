@@ -5,6 +5,7 @@ mod backorder;
 mod cycle_count;
 mod facility;
 mod inbound_inspection;
+mod inventory_recall;
 mod item_substitution;
 mod order;
 mod order_amendment;
@@ -49,6 +50,11 @@ pub use facility::{
 pub use inbound_inspection::{
     decide_inbound_inspection, InboundInspectionError, InboundInspectionNote,
     InboundInspectionOutcome, InboundInspectionTargetStatus, MAX_INBOUND_INSPECTION_NOTE_LENGTH,
+};
+pub use inventory_recall::{
+    release_inventory_recall, InventoryRecallDetails, InventoryRecallError, InventoryRecallNote,
+    InventoryRecallReason, InventoryRecallRevision, InventoryRecallStatus,
+    MAX_INVENTORY_RECALL_NOTE_LENGTH,
 };
 pub use item_substitution::{
     substitute_pick_shortage, ItemSubstitutionDefinition, ItemSubstitutionDetails,
@@ -245,6 +251,7 @@ positive_id!(
     "pick shortage reallocation run ID"
 );
 positive_id!(InventoryHoldId, "inventory hold ID");
+positive_id!(InventoryRecallId, "inventory recall ID");
 positive_id!(
     InboundInspectionDispositionId,
     "inbound inspection disposition ID"

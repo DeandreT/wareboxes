@@ -10,6 +10,7 @@ use crate::{api, toast::use_toast_bus, view_model::format_quantity};
 mod aging;
 mod move_planner;
 mod read_views;
+mod recall;
 
 use move_planner::{movable_quantity, MovePlanner};
 
@@ -38,14 +39,19 @@ enum IntegrityState {
 enum IntegrityTab {
     Journal,
     Aging,
+    Recall,
     Reconciliation,
     MovePlanning,
 }
 
 #[component]
-pub fn InventoryIntegrityWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
+pub fn InventoryIntegrityWorkbench(
+    on_unauthorized: Callback<()>,
+    can_manage_recalls: bool,
+) -> impl IntoView {
     let state = RwSignal::new(IntegrityState::Loading);
     let tab = RwSignal::new(IntegrityTab::Journal);
+    let recall_target = RwSignal::new(None::<(i64, i64)>);
     let selected_balance_id = RwSignal::new(String::new());
     let selected_balance = RwSignal::new(None::<InventoryBalanceResponse>);
     let destination_location_id = RwSignal::new(String::new());
@@ -54,6 +60,10 @@ pub fn InventoryIntegrityWorkbench(on_unauthorized: Callback<()>) -> impl IntoVi
     let task_pending = RwSignal::new(false);
     let task_error = RwSignal::new(None::<String>);
     let toasts = use_toast_bus();
+    let open_recall = Callback::new(move |target: (i64, i64)| {
+        recall_target.set(Some(target));
+        tab.set(IntegrityTab::Recall);
+    });
 
     #[cfg(target_arch = "wasm32")]
     request_integrity(state, on_unauthorized);
@@ -218,6 +228,17 @@ pub fn InventoryIntegrityWorkbench(on_unauthorized: Callback<()>) -> impl IntoVi
                             >
                                 "Aging"
                             </button>
+                            {can_manage_recalls.then(|| view! {
+                                <button
+                                    type="button"
+                                    role="tab"
+                                    aria-selected=move || (tab.get() == IntegrityTab::Recall).to_string()
+                                    class:active=move || tab.get() == IntegrityTab::Recall
+                                    on:click=move |_| tab.set(IntegrityTab::Recall)
+                                >
+                                    "Recalls"
+                                </button>
+                            })}
                             <button
                                 type="button"
                                 role="tab"
@@ -247,7 +268,17 @@ pub fn InventoryIntegrityWorkbench(on_unauthorized: Callback<()>) -> impl IntoVi
                                 view! { <read_views::JournalView on_unauthorized/> }.into_any()
                             }
                             IntegrityTab::Aging => {
-                                view! { <aging::AgingView on_unauthorized/> }.into_any()
+                                view! {
+                                    <aging::AgingView
+                                        on_unauthorized
+                                        on_recall=open_recall
+                                        can_manage_recalls
+                                    />
+                                }
+                                .into_any()
+                            }
+                            IntegrityTab::Recall => {
+                                view! { <recall::RecallView on_unauthorized target=recall_target/> }.into_any()
                             }
                             IntegrityTab::Reconciliation => {
                                 view! { <read_views::ReconciliationView on_unauthorized/> }.into_any()

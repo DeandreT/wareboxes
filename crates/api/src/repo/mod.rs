@@ -18,6 +18,7 @@ pub mod inventory_integrity;
 pub(crate) mod inventory_journal;
 mod inventory_locking;
 pub mod inventory_owners;
+pub mod inventory_recall;
 mod inventory_status_change;
 pub mod item_substitution;
 pub mod items;
