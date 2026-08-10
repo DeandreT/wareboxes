@@ -10,12 +10,13 @@ use wareboxes_api_contract::v1::{
     InventoryHoldStatus, InventorySortDirection, InventoryStatusTransitionResponse, OpaqueCursor,
     OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
     PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
-    PackingQueuePage, PickConfirmationHistoryPage, PickShortagePage, PickShortageResponse,
-    PickShortageStatus, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
-    PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
-    PlanOrderAllocationResponse, PlanReplenishmentRequest, PlanReplenishmentResponse,
-    ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleaseInventoryHoldResponse,
-    ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
+    PackingQueuePage, PickConfirmationHistoryPage, PickShortagePage, PickShortageQueueSort,
+    PickShortageQueueSortDirection, PickShortageResponse, PickShortageStatus,
+    PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
+    PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
+    PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
+    ReallocatePickShortageResponse, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
+    ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
     RemovePackedContentRequest, RemovePackedContentResponse, ReopenCartonRequest,
     ReopenCartonResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
     ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
@@ -109,18 +110,19 @@ mod browser {
         InventorySortDirection, InventoryStatusTransitionResponse, OpaqueCursor,
         OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
         OrderPage, PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
-        PackingQueuePage, PickConfirmationHistoryPage, PickShortagePage, PickShortageResponse,
-        PickShortageStatus, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
-        PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
-        PlanOrderAllocationResponse, PlanReplenishmentRequest, PlanReplenishmentResponse,
-        ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleaseInventoryHoldRequest,
-        ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
-        ReleaseOrderRequest, ReleaseOrderResponse, RemovePackedContentRequest,
-        RemovePackedContentResponse, ReopenCartonRequest, ReopenCartonResponse,
-        ReplenishmentPolicyPage, ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse,
-        ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest,
-        RetireReplenishmentPolicyResponse, ReversePickConfirmationRequest,
-        ReversePickConfirmationResponse, VoidCartonRequest, VoidCartonResponse, WebSessionContext,
+        PackingQueuePage, PickConfirmationHistoryPage, PickShortagePage, PickShortageQueueSort,
+        PickShortageQueueSortDirection, PickShortageResponse, PickShortageStatus,
+        PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
+        PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
+        PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
+        ReallocatePickShortageResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
+        ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest,
+        ReleaseOrderResponse, RemovePackedContentRequest, RemovePackedContentResponse,
+        ReopenCartonRequest, ReopenCartonResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
+        ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
+        RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
+        ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
+        VoidCartonResponse, WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -533,9 +535,15 @@ mod browser {
         inventory_owner_id: Option<i64>,
         order_id: Option<i64>,
         status: Option<PickShortageStatus>,
+        sort: PickShortageQueueSort,
+        direction: PickShortageQueueSortDirection,
         cursor: Option<&OpaqueCursor>,
     ) -> Result<PickShortagePage, ApiError> {
-        let mut path = "/api/v1/pick-shortages?limit=100".to_owned();
+        let mut path = format!(
+            "/api/v1/pick-shortages?limit=100&sort={}&direction={}",
+            pick_shortage_sort_wire(sort),
+            pick_shortage_sort_direction_wire(direction),
+        );
         append_i64_query(&mut path, "facility_id", facility_id);
         append_i64_query(&mut path, "inventory_owner_id", inventory_owner_id);
         append_i64_query(&mut path, "order_id", order_id);
@@ -814,6 +822,28 @@ mod browser {
             PickShortageStatus::AwaitingInventory => "awaiting_inventory",
             PickShortageStatus::RecoveryInProgress => "recovery_in_progress",
             PickShortageStatus::Resolved => "resolved",
+        }
+    }
+
+    const fn pick_shortage_sort_wire(sort: PickShortageQueueSort) -> &'static str {
+        match sort {
+            PickShortageQueueSort::Reported => "reported",
+            PickShortageQueueSort::Order => "order",
+            PickShortageQueueSort::Status => "status",
+            PickShortageQueueSort::ShortQuantity => "short_quantity",
+            PickShortageQueueSort::RemainingQuantity => "remaining_quantity",
+            PickShortageQueueSort::InventoryOwner => "inventory_owner",
+            PickShortageQueueSort::Item => "item",
+            PickShortageQueueSort::Facility => "facility",
+        }
+    }
+
+    const fn pick_shortage_sort_direction_wire(
+        direction: PickShortageQueueSortDirection,
+    ) -> &'static str {
+        match direction {
+            PickShortageQueueSortDirection::Ascending => "ascending",
+            PickShortageQueueSortDirection::Descending => "descending",
         }
     }
 }
@@ -1118,6 +1148,8 @@ pub async fn pick_shortages(
     _inventory_owner_id: Option<i64>,
     _order_id: Option<i64>,
     _status: Option<PickShortageStatus>,
+    _sort: PickShortageQueueSort,
+    _direction: PickShortageQueueSortDirection,
     _cursor: Option<&OpaqueCursor>,
 ) -> Result<PickShortagePage, ApiError> {
     Err(ApiError::unavailable())

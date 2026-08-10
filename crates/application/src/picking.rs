@@ -477,13 +477,6 @@ pub struct PickShortageQuery {
     pub shortage_id: PickShortageId,
 }
 
-/// Stable keyset boundary for the shortage work queue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PickShortageCursor {
-    pub reported_at: Timestamp,
-    pub shortage_id: PickShortageId,
-}
-
 /// Scoped filters for the shortage work queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PickShortagePageQuery {
@@ -492,8 +485,49 @@ pub struct PickShortagePageQuery {
     pub order_id: Option<OrderId>,
     /// `None` selects unresolved shortage work rather than historical rows.
     pub status: Option<PickShortageStatus>,
-    pub cursor: Option<PickShortageCursor>,
+    pub offset: u64,
     pub limit: u16,
+    pub sort: PickShortageQueueSort,
+    pub direction: PickShortageQueueSortDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickShortageQueueSort {
+    Reported,
+    Order,
+    Status,
+    ShortQuantity,
+    RemainingQuantity,
+    InventoryOwner,
+    Item,
+    Facility,
+}
+
+impl PickShortageQueueSort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reported => "reported",
+            Self::Order => "order",
+            Self::Status => "status",
+            Self::ShortQuantity => "short_quantity",
+            Self::RemainingQuantity => "remaining_quantity",
+            Self::InventoryOwner => "inventory_owner",
+            Self::Item => "item",
+            Self::Facility => "facility",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickShortageQueueSortDirection {
+    Ascending,
+    Descending,
+}
+
+impl PickShortageQueueSortDirection {
+    pub const fn is_ascending(self) -> bool {
+        matches!(self, Self::Ascending)
+    }
 }
 
 /// Supervisor-facing shortage state and recovery progress.
@@ -642,7 +676,7 @@ fn recovery_quantities_are_consistent(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickShortagePage {
     pub items: Vec<PickShortageReadModel>,
-    pub next_cursor: Option<PickShortageCursor>,
+    pub next_offset: Option<u64>,
 }
 
 #[cfg(test)]

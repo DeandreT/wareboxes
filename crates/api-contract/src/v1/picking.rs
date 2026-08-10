@@ -518,6 +518,29 @@ pub struct AcceptPickShortageAsShortShipResponse {
 }
 
 /// Scoped filters for the supervisor shortage work queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PickShortageQueueSort {
+    #[default]
+    Reported,
+    Order,
+    Status,
+    ShortQuantity,
+    RemainingQuantity,
+    InventoryOwner,
+    Item,
+    Facility,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PickShortageQueueSortDirection {
+    Ascending,
+    #[default]
+    Descending,
+}
+
+/// Scoped filters for the supervisor shortage work queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct PickShortagePageRequest {
@@ -534,6 +557,10 @@ pub struct PickShortagePageRequest {
     pub cursor: Option<OpaqueCursor>,
     #[serde(default)]
     pub limit: PageLimit,
+    #[serde(default)]
+    pub sort: PickShortageQueueSort,
+    #[serde(default)]
+    pub direction: PickShortageQueueSortDirection,
 }
 
 /// Supervisor-facing shortage state and recovery progress.
@@ -861,6 +888,8 @@ mod tests {
         .unwrap();
         assert_eq!(page.order_id, Some(5));
         assert_eq!(page.limit.get(), 25);
+        assert_eq!(page.sort, PickShortageQueueSort::Reported);
+        assert_eq!(page.direction, PickShortageQueueSortDirection::Descending);
         assert!(serde_json::from_value::<PickShortagePageRequest>(json!({
             "limit": 1001
         }))

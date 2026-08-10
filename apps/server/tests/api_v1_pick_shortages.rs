@@ -706,6 +706,7 @@ async fn shortage_queue_cursor_pages_without_duplicates_and_rejects_filter_reuse
     let first_page = expect_status(first_page, StatusCode::OK, "first shortage page").await;
     let first_page: PickShortagePage = response_json(first_page).await;
     assert_eq!(first_page.items.len(), 1);
+    assert_eq!(first_page.items[0].shortage_id, second.shortage_id);
     let cursor = first_page
         .next_cursor
         .as_ref()
@@ -730,6 +731,44 @@ async fn shortage_queue_cursor_pages_without_duplicates_and_rejects_filter_reuse
     let mut expected_ids = vec![first.shortage_id, second.shortage_id];
     expected_ids.sort_unstable();
     assert_eq!(actual_ids, expected_ids);
+
+    let quantity_sorted = shortage
+        .request(
+            Method::GET,
+            &format!("/api/v1/pick-shortages?{filters}&sort=short_quantity&direction=descending"),
+            None,
+            None,
+        )
+        .await;
+    let quantity_sorted = expect_status(
+        quantity_sorted,
+        StatusCode::OK,
+        "globally quantity-sorted shortage page",
+    )
+    .await;
+    let quantity_sorted: PickShortagePage = response_json(quantity_sorted).await;
+    assert_eq!(quantity_sorted.items[0].shortage_id, second.shortage_id);
+    let quantity_cursor = quantity_sorted.next_cursor.as_ref().unwrap();
+    let sort_mismatch = shortage
+        .request(
+            Method::GET,
+            &format!(
+                "/api/v1/pick-shortages?{filters}&sort=short_quantity&direction=ascending&cursor={quantity_cursor}"
+            ),
+            None,
+            None,
+        )
+        .await;
+    let sort_mismatch = expect_status(
+        sort_mismatch,
+        StatusCode::BAD_REQUEST,
+        "shortage cursor sort mismatch",
+    )
+    .await;
+    assert_eq!(
+        response_json::<ErrorResponse>(sort_mismatch).await.reason,
+        ErrorReason::InvalidCursor
+    );
 
     for path in [
         format!(

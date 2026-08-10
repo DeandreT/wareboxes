@@ -1,8 +1,8 @@
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
-    OpaqueCursor, OrderAllocationStrategy, PickShortagePage, PickShortageReason,
-    PickShortageResolution, PickShortageResponse, PickShortageStatus,
-    ReallocatePickShortageRequest,
+    OpaqueCursor, OrderAllocationStrategy, PickShortagePage, PickShortageQueueSort,
+    PickShortageQueueSortDirection, PickShortageReason, PickShortageResolution,
+    PickShortageResponse, PickShortageStatus, ReallocatePickShortageRequest,
 };
 use wareboxes_api_contract::web::access::AccessScopeResource;
 
@@ -52,6 +52,7 @@ struct QueueSignals {
     inventory_owner_id: RwSignal<String>,
     order_id: RwSignal<String>,
     status: RwSignal<String>,
+    sort: RwSignal<SortSpec<ShortageSort>>,
     on_unauthorized: Callback<()>,
 }
 
@@ -143,6 +144,7 @@ pub(super) fn PickShortageWorkbench(
         inventory_owner_id,
         order_id,
         status,
+        sort,
         on_unauthorized,
     };
     let detail = DetailSignals {
@@ -340,23 +342,20 @@ pub(super) fn PickShortageWorkbench(
                         <caption class="sr-only">"Pick shortages matching the active scope filters"</caption>
                         <thead>
                             <tr>
-                                <SortableHeader label="Reported" active=move || sort.get().key == ShortageSort::Reported direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, ShortageSort::Reported))/>
-                                <SortableHeader label="Order" active=move || sort.get().key == ShortageSort::Order direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, ShortageSort::Order))/>
-                                <SortableHeader label="Status" active=move || sort.get().key == ShortageSort::Status direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, ShortageSort::Status))/>
-                                <SortableHeader label="Short" active=move || sort.get().key == ShortageSort::Short direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, ShortageSort::Short)) numeric=true/>
-                                <SortableHeader label="Open" active=move || sort.get().key == ShortageSort::Remaining direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, ShortageSort::Remaining)) numeric=true/>
-                                <SortableHeader label="Client" active=move || sort.get().key == ShortageSort::Client direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, ShortageSort::Client))/>
-                                <SortableHeader label="Item" active=move || sort.get().key == ShortageSort::Item direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, ShortageSort::Item))/>
-                                <SortableHeader label="Facility" active=move || sort.get().key == ShortageSort::Facility direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, ShortageSort::Facility))/>
+                                <SortableHeader label="Reported" active=move || sort.get().key == ShortageSort::Reported direction=move || sort.get().direction on_sort=Callback::new(move |_| change_queue_sort(queue, ShortageSort::Reported))/>
+                                <SortableHeader label="Order" active=move || sort.get().key == ShortageSort::Order direction=move || sort.get().direction on_sort=Callback::new(move |_| change_queue_sort(queue, ShortageSort::Order))/>
+                                <SortableHeader label="Status" active=move || sort.get().key == ShortageSort::Status direction=move || sort.get().direction on_sort=Callback::new(move |_| change_queue_sort(queue, ShortageSort::Status))/>
+                                <SortableHeader label="Short" active=move || sort.get().key == ShortageSort::Short direction=move || sort.get().direction on_sort=Callback::new(move |_| change_queue_sort(queue, ShortageSort::Short)) numeric=true/>
+                                <SortableHeader label="Open" active=move || sort.get().key == ShortageSort::Remaining direction=move || sort.get().direction on_sort=Callback::new(move |_| change_queue_sort(queue, ShortageSort::Remaining)) numeric=true/>
+                                <SortableHeader label="Client" active=move || sort.get().key == ShortageSort::Client direction=move || sort.get().direction on_sort=Callback::new(move |_| change_queue_sort(queue, ShortageSort::Client))/>
+                                <SortableHeader label="Item" active=move || sort.get().key == ShortageSort::Item direction=move || sort.get().direction on_sort=Callback::new(move |_| change_queue_sort(queue, ShortageSort::Item))/>
+                                <SortableHeader label="Facility" active=move || sort.get().key == ShortageSort::Facility direction=move || sort.get().direction on_sort=Callback::new(move |_| change_queue_sort(queue, ShortageSort::Facility))/>
                             </tr>
                         </thead>
                         <tbody>
                             {move || {
-                                let spec = sort.get();
                                 let selected_id = selected.get().map(|value| value.shortage_id);
-                                let mut shortages = page.get().map_or_else(Vec::new, |value| value.items);
-                                shortages.sort_by(|left, right| shortage_ordering(left, right, spec));
-                                shortages
+                                page.get().map_or_else(Vec::new, |value| value.items)
                                     .into_iter()
                                     .map(|shortage| {
                                         let row_shortage = shortage.clone();
@@ -680,6 +679,7 @@ fn request_queue(
     let inventory_owner_id = parse_filter_id(&signals.inventory_owner_id.get_untracked());
     let order_id = parse_filter_id(&signals.order_id.get_untracked());
     let status = parse_shortage_status(&signals.status.get_untracked());
+    let sort = signals.sort.get_untracked();
     signals.loading.set(true);
     signals.error.set(None);
 
@@ -689,6 +689,8 @@ fn request_queue(
             inventory_owner_id,
             order_id,
             status,
+            map_shortage_sort(sort.key),
+            map_sort_direction(sort.direction),
             cursor.as_ref(),
         )
         .await;
@@ -876,39 +878,28 @@ fn refresh_after_command(shortage_id: i64, signals: DetailSignals) {
     }
 }
 
-fn shortage_ordering(
-    left: &PickShortageResponse,
-    right: &PickShortageResponse,
-    spec: SortSpec<ShortageSort>,
-) -> std::cmp::Ordering {
-    let ordering = match spec.key {
-        ShortageSort::Reported => left.reported_at.cmp(&right.reported_at),
-        ShortageSort::Order => left
-            .order_key
-            .to_ascii_lowercase()
-            .cmp(&right.order_key.to_ascii_lowercase()),
-        ShortageSort::Client => left
-            .inventory_owner_name
-            .to_ascii_lowercase()
-            .cmp(&right.inventory_owner_name.to_ascii_lowercase()),
-        ShortageSort::Facility => left
-            .facility_name
-            .to_ascii_lowercase()
-            .cmp(&right.facility_name.to_ascii_lowercase()),
-        ShortageSort::Item => left.item_id.cmp(&right.item_id),
-        ShortageSort::Short => left.quantities.short.cmp(&right.quantities.short),
-        ShortageSort::Remaining => left
-            .remaining_to_allocate_quantity
-            .cmp(&right.remaining_to_allocate_quantity),
-        ShortageSort::Status => {
-            shortage_status_wire(left.status).cmp(shortage_status_wire(right.status))
-        }
+fn change_queue_sort(signals: QueueSignals, key: ShortageSort) {
+    SortSpec::select(signals.sort, key);
+    request_queue(signals, None, Vec::new());
+}
+
+const fn map_shortage_sort(sort: ShortageSort) -> PickShortageQueueSort {
+    match sort {
+        ShortageSort::Reported => PickShortageQueueSort::Reported,
+        ShortageSort::Order => PickShortageQueueSort::Order,
+        ShortageSort::Status => PickShortageQueueSort::Status,
+        ShortageSort::Short => PickShortageQueueSort::ShortQuantity,
+        ShortageSort::Remaining => PickShortageQueueSort::RemainingQuantity,
+        ShortageSort::Client => PickShortageQueueSort::InventoryOwner,
+        ShortageSort::Item => PickShortageQueueSort::Item,
+        ShortageSort::Facility => PickShortageQueueSort::Facility,
     }
-    .then_with(|| left.shortage_id.cmp(&right.shortage_id));
-    if spec.direction == SortDirection::Ascending {
-        ordering
-    } else {
-        ordering.reverse()
+}
+
+const fn map_sort_direction(direction: SortDirection) -> PickShortageQueueSortDirection {
+    match direction {
+        SortDirection::Ascending => PickShortageQueueSortDirection::Ascending,
+        SortDirection::Descending => PickShortageQueueSortDirection::Descending,
     }
 }
 
@@ -931,14 +922,6 @@ fn parse_shortage_status(value: &str) -> Option<PickShortageStatus> {
         "recovery_in_progress" => Some(PickShortageStatus::RecoveryInProgress),
         "resolved" => Some(PickShortageStatus::Resolved),
         _ => None,
-    }
-}
-
-const fn shortage_status_wire(status: PickShortageStatus) -> &'static str {
-    match status {
-        PickShortageStatus::AwaitingInventory => "awaiting_inventory",
-        PickShortageStatus::RecoveryInProgress => "recovery_in_progress",
-        PickShortageStatus::Resolved => "resolved",
     }
 }
 
@@ -1064,8 +1047,8 @@ mod tests {
         );
         assert_eq!(parse_shortage_status(""), None);
         assert_eq!(
-            shortage_status_wire(PickShortageStatus::AwaitingInventory),
-            "awaiting_inventory"
+            map_shortage_sort(ShortageSort::Remaining),
+            PickShortageQueueSort::RemainingQuantity
         );
         assert_eq!(
             shortage_status_label(

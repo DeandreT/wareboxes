@@ -1,7 +1,7 @@
 use sqlx::Row;
 use wareboxes_application::picking::{
-    PickShortageCursor, PickShortageHoldResult, PickShortagePage, PickShortagePageQuery,
-    PickShortageQuery, PickShortageReadModel,
+    PickShortageHoldResult, PickShortagePage, PickShortagePageQuery, PickShortageQuery,
+    PickShortageReadModel,
 };
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
@@ -104,11 +104,8 @@ pub async fn list_shortages(
             "pick shortage page limit must be between 1 and 100",
         ));
     }
-    if query.cursor.is_some_and(|cursor| {
-        cursor.shortage_id.get() <= 0 || cursor.reported_at.timestamp_micros() == i64::MAX
-    }) {
-        return Err(AppError::bad_request("pick shortage cursor is invalid"));
-    }
+    let offset = i64::try_from(query.offset)
+        .map_err(|_| AppError::bad_request("pick shortage page offset is invalid"))?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, access.user_id.get()).await?;
@@ -137,9 +134,26 @@ pub async fn list_shortages(
           AND ($7::BIGINT IS NULL OR shortage.inventory_owner_id = $7)
           AND ($8::BIGINT IS NULL OR shortage.order_id = $8)
           AND (($9::TEXT IS NULL AND shortage.status <> 'resolved') OR shortage.status = $9)
-          AND ($10::TIMESTAMPTZ IS NULL OR (shortage.reported_at, shortage.id) > ($10, $11))
-        ORDER BY shortage.reported_at, shortage.id
-        LIMIT $12"#
+        ORDER BY
+          CASE WHEN $10='reported' AND $11 THEN shortage.reported_at END ASC,
+          CASE WHEN $10='reported' AND NOT $11 THEN shortage.reported_at END DESC,
+          CASE WHEN $10='order' AND $11 THEN LOWER(order_header.order_key) END ASC,
+          CASE WHEN $10='order' AND NOT $11 THEN LOWER(order_header.order_key) END DESC,
+          CASE WHEN $10='status' AND $11 THEN shortage.status END ASC,
+          CASE WHEN $10='status' AND NOT $11 THEN shortage.status END DESC,
+          CASE WHEN $10='short_quantity' AND $11 THEN shortage.short_qty END ASC,
+          CASE WHEN $10='short_quantity' AND NOT $11 THEN shortage.short_qty END DESC,
+          CASE WHEN $10='remaining_quantity' AND $11 THEN shortage.remaining_to_allocate_qty END ASC,
+          CASE WHEN $10='remaining_quantity' AND NOT $11 THEN shortage.remaining_to_allocate_qty END DESC,
+          CASE WHEN $10='inventory_owner' AND $11 THEN LOWER(inventory_owner.name) END ASC,
+          CASE WHEN $10='inventory_owner' AND NOT $11 THEN LOWER(inventory_owner.name) END DESC,
+          CASE WHEN $10='item' AND $11 THEN LOWER(COALESCE(item.description, '')) END ASC,
+          CASE WHEN $10='item' AND NOT $11 THEN LOWER(COALESCE(item.description, '')) END DESC,
+          CASE WHEN $10='facility' AND $11 THEN LOWER(facility.name) END ASC,
+          CASE WHEN $10='facility' AND NOT $11 THEN LOWER(facility.name) END DESC,
+          CASE WHEN $11 THEN shortage.id END ASC,
+          CASE WHEN NOT $11 THEN shortage.id END DESC
+        OFFSET $12 LIMIT $13"#
     );
     let fetch_limit = i64::from(query.limit) + 1;
     let rows = sqlx::query(&sql)
@@ -152,8 +166,9 @@ pub async fn list_shortages(
         .bind(query.inventory_owner_id.map(|id| id.get()))
         .bind(query.order_id.map(|id| id.get()))
         .bind(query.status.map(PickShortageStatus::as_str))
-        .bind(query.cursor.map(|cursor| cursor.reported_at))
-        .bind(query.cursor.map(|cursor| cursor.shortage_id.get()))
+        .bind(query.sort.as_str())
+        .bind(query.direction.is_ascending())
+        .bind(offset)
         .bind(fetch_limit)
         .fetch_all(&mut *tx)
         .await?;
@@ -165,16 +180,9 @@ pub async fn list_shortages(
     if has_more {
         items.pop();
     }
-    let next_cursor = has_more
-        .then(|| {
-            items.last().map(|item| PickShortageCursor {
-                reported_at: item.reported_at,
-                shortage_id: item.shortage_id,
-            })
-        })
-        .flatten();
+    let next_offset = has_more.then(|| query.offset + u64::from(query.limit));
     tx.commit().await?;
-    Ok(PickShortagePage { items, next_cursor })
+    Ok(PickShortagePage { items, next_offset })
 }
 
 fn map_shortage(

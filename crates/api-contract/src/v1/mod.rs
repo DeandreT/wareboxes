@@ -222,11 +222,12 @@ pub use picking::{
     PickOrderStatus, PickReversalHistoryResponse, PickReversalReason, PickShortShipReason,
     PickShortageAllocationResponse, PickShortageDetails, PickShortageHoldResponse,
     PickShortageMovementResponse, PickShortagePage, PickShortagePageRequest,
-    PickShortageQuantitiesResponse, PickShortageReason, PickShortageResolution,
-    PickShortageResponse, PickShortageStatus, PickShortageTaskResponse,
-    ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleasePickClaimRequest,
-    ReportPickShortageOutcome, ReportPickShortageRequest, ReportPickShortageResponse,
-    ReversePickConfirmationRequest, ReversePickConfirmationResponse, ShortShipDemandResponse,
+    PickShortageQuantitiesResponse, PickShortageQueueSort, PickShortageQueueSortDirection,
+    PickShortageReason, PickShortageResolution, PickShortageResponse, PickShortageStatus,
+    PickShortageTaskResponse, ReallocatePickShortageRequest, ReallocatePickShortageResponse,
+    ReleasePickClaimRequest, ReportPickShortageOutcome, ReportPickShortageRequest,
+    ReportPickShortageResponse, ReversePickConfirmationRequest, ReversePickConfirmationResponse,
+    ShortShipDemandResponse,
 };
 pub use putaway::{
     ConfirmPutawayRequest, CreatePutawayTaskRequest, CreatePutawayTaskResponse,

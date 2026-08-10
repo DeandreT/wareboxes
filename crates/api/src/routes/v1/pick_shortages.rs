@@ -6,25 +6,28 @@ use wareboxes_api_contract::v1::{
     OrderAllocationStrategy, PickOrderStatus, PickShortShipReason as ApiShortShipReason,
     PickShortageAllocationResponse, PickShortageDetails as ApiShortageDetails,
     PickShortageHoldResponse, PickShortageMovementResponse, PickShortagePage as ApiShortagePage,
-    PickShortagePageRequest, PickShortageQuantitiesResponse,
-    PickShortageReason as ApiShortageReason, PickShortageResolution as ApiShortageResolution,
-    PickShortageResponse, PickShortageStatus as ApiShortageStatus, PickShortageTaskResponse,
+    PickShortagePageRequest, PickShortageQuantitiesResponse, PickShortageQueueSort,
+    PickShortageQueueSortDirection, PickShortageReason as ApiShortageReason,
+    PickShortageResolution as ApiShortageResolution, PickShortageResponse,
+    PickShortageStatus as ApiShortageStatus, PickShortageTaskResponse,
     ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReportPickShortageOutcome,
     ReportPickShortageRequest, ReportPickShortageResponse, Revision, ShortShipDemandResponse,
 };
 use wareboxes_application::picking::{
     AcceptPickShortageAsShortShipCommand, AcceptPickShortageAsShortShipResult,
-    PickShortageAllocationReadModel, PickShortageCursor, PickShortagePageQuery, PickShortageQuery,
-    PickShortageReadModel, PickShortageTaskReadModel, ReallocatePickShortageCommand,
-    ReallocatePickShortageResult, ReportPickShortageCommand,
-    ReportPickShortageOutcome as AppShortageOutcome, ReportPickShortageResult,
+    PickShortageAllocationReadModel, PickShortagePageQuery, PickShortageQuery,
+    PickShortageQueueSort as ApplicationQueueSort,
+    PickShortageQueueSortDirection as ApplicationSortDirection, PickShortageReadModel,
+    PickShortageTaskReadModel, ReallocatePickShortageCommand, ReallocatePickShortageResult,
+    ReportPickShortageCommand, ReportPickShortageOutcome as AppShortageOutcome,
+    ReportPickShortageResult,
 };
 use wareboxes_domain::{
     AllocationExecutionStage, AllocationOutcome, AllocationStrategy, FacilityId, InventoryOwnerId,
     OrderId, OrderRevision, OrderStatus, PickContentId, PickQuantity, PickScanValue,
     PickShortShipNote, PickShortShipReason, PickShortageDetails, PickShortageId, PickShortageNote,
     PickShortageReason, PickShortageResolution, PickShortageRevision, PickShortageStatus,
-    PickTaskId, ShortShipDemandQuantities, Timestamp,
+    PickTaskId, ShortShipDemandQuantities,
 };
 
 use super::error::{V1Error, V1Result};
@@ -36,7 +39,7 @@ use crate::state::AppState;
 
 const OPERATOR_PERMISSION: &str = "wms";
 const SUPERVISOR_PERMISSION: &str = "wms_supervisor";
-const CURSOR_PREFIX: &str = "ps1.";
+const CURSOR_PREFIX: &str = "ps2.";
 
 pub async fn report(
     State(state): State<AppState>,
@@ -140,7 +143,6 @@ pub async fn list(
 ) -> V1Result<Json<ApiShortagePage>> {
     user.require_permission(&state.db, SUPERVISOR_PERMISSION)
         .await?;
-    let cursor = query.cursor.as_ref().map(decode_cursor).transpose()?;
     let facility_id = query
         .facility_id
         .map(FacilityId::new)
@@ -162,14 +164,15 @@ pub async fn list(
             AppError::bad_request("pick shortage page limit must be between 1 and 100").into(),
         );
     }
-    if cursor.as_ref().is_some_and(|cursor| {
-        cursor.facility_id != facility_id.map(|id| id.get())
-            || cursor.inventory_owner_id != inventory_owner_id.map(|id| id.get())
-            || cursor.order_id != order_id.map(|id| id.get())
-            || cursor.status != status
-    }) {
-        return Err(V1Error::invalid_cursor_for("pick shortages"));
-    }
+    let filters = CursorFilters {
+        facility_id: facility_id.map(FacilityId::get),
+        inventory_owner_id: inventory_owner_id.map(InventoryOwnerId::get),
+        order_id: order_id.map(OrderId::get),
+        status,
+        sort: query.sort,
+        direction: query.direction,
+    };
+    let offset = decode_bound_cursor(query.cursor.as_ref(), filters)?;
     let page = repo::picking::list_shortages(
         &state.db,
         &user.tenant,
@@ -178,8 +181,10 @@ pub async fn list(
             inventory_owner_id,
             order_id,
             status,
-            cursor: cursor.map(|cursor| cursor.cursor),
+            offset,
             limit: query.limit.get(),
+            sort: map_queue_sort(query.sort),
+            direction: map_queue_direction(query.direction),
         },
     )
     .await?;
@@ -189,16 +194,8 @@ pub async fn list(
         .map(map_shortage)
         .collect::<V1Result<Vec<_>>>()?;
     let next_cursor = page
-        .next_cursor
-        .map(|cursor| {
-            encode_cursor(ScopedCursor {
-                facility_id: facility_id.map(|id| id.get()),
-                inventory_owner_id: inventory_owner_id.map(|id| id.get()),
-                order_id: order_id.map(|id| id.get()),
-                status,
-                cursor,
-            })
-        })
+        .next_offset
+        .map(|offset| encode_cursor(BoundCursor { filters, offset }))
         .transpose()?;
     Ok(Json(ApiShortagePage::new(items, next_cursor)))
 }
@@ -581,62 +578,66 @@ fn revision(value: i64) -> V1Result<Revision> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ScopedCursor {
+struct CursorFilters {
     facility_id: Option<i64>,
     inventory_owner_id: Option<i64>,
     order_id: Option<i64>,
     status: Option<PickShortageStatus>,
-    cursor: PickShortageCursor,
+    sort: PickShortageQueueSort,
+    direction: PickShortageQueueSortDirection,
 }
 
-fn decode_cursor(cursor: &OpaqueCursor) -> V1Result<ScopedCursor> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BoundCursor {
+    filters: CursorFilters,
+    offset: u64,
+}
+
+fn decode_cursor(cursor: &OpaqueCursor) -> V1Result<BoundCursor> {
     let encoded = cursor
         .as_str()
         .strip_prefix(CURSOR_PREFIX)
         .ok_or_else(|| V1Error::invalid_cursor_for("pick shortages"))?;
     let parts = encoded.split('.').collect::<Vec<_>>();
-    if parts.len() != 6 {
+    if parts.len() != 7 {
         return Err(V1Error::invalid_cursor_for("pick shortages"));
     }
-    let status = match parts[3] {
-        "a" => None,
-        "w" => Some(PickShortageStatus::AwaitingInventory),
-        "p" => Some(PickShortageStatus::RecoveryInProgress),
-        "r" => Some(PickShortageStatus::Resolved),
-        _ => return Err(V1Error::invalid_cursor_for("pick shortages")),
-    };
-    let sortable = parse_time_hex(parts[4])?;
-    let micros = (sortable ^ (1_u64 << 63)) as i64;
-    let reported_at = Timestamp::from_timestamp_micros(micros)
-        .ok_or_else(|| V1Error::invalid_cursor_for("pick shortages"))?;
-    Ok(ScopedCursor {
-        facility_id: parse_optional_id(parts[0])?,
-        inventory_owner_id: parse_optional_id(parts[1])?,
-        order_id: parse_optional_id(parts[2])?,
-        status,
-        cursor: PickShortageCursor {
-            reported_at,
-            shortage_id: shortage_id_value(parse_id_hex(parts[5])?)?,
+    Ok(BoundCursor {
+        filters: CursorFilters {
+            facility_id: parse_optional_id(parts[0])?,
+            inventory_owner_id: parse_optional_id(parts[1])?,
+            order_id: parse_optional_id(parts[2])?,
+            status: parse_status_code(parts[3])?,
+            sort: parse_queue_sort_code(parts[4])?,
+            direction: parse_queue_direction_code(parts[5])?,
         },
+        offset: parse_offset(parts[6])?,
     })
 }
 
-fn encode_cursor(cursor: ScopedCursor) -> AppResult<OpaqueCursor> {
-    let status = match cursor.status {
-        None => "a",
-        Some(PickShortageStatus::AwaitingInventory) => "w",
-        Some(PickShortageStatus::RecoveryInProgress) => "p",
-        Some(PickShortageStatus::Resolved) => "r",
-    };
-    let sortable = (cursor.cursor.reported_at.timestamp_micros() as u64) ^ (1_u64 << 63);
+fn encode_cursor(cursor: BoundCursor) -> AppResult<OpaqueCursor> {
     OpaqueCursor::new(format!(
-        "{CURSOR_PREFIX}{}.{}.{}.{status}.{sortable:016x}.{:016x}",
-        encode_optional_id(cursor.facility_id),
-        encode_optional_id(cursor.inventory_owner_id),
-        encode_optional_id(cursor.order_id),
-        cursor.cursor.shortage_id.get(),
+        "{CURSOR_PREFIX}{}.{}.{}.{}.{}.{}.{:016x}",
+        encode_optional_id(cursor.filters.facility_id),
+        encode_optional_id(cursor.filters.inventory_owner_id),
+        encode_optional_id(cursor.filters.order_id),
+        status_code(cursor.filters.status),
+        queue_sort_code(cursor.filters.sort),
+        queue_direction_code(cursor.filters.direction),
+        cursor.offset,
     ))
     .map_err(|_| AppError::internal("generated an invalid pick shortage cursor"))
+}
+
+fn decode_bound_cursor(cursor: Option<&OpaqueCursor>, filters: CursorFilters) -> V1Result<u64> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    let decoded = decode_cursor(cursor)?;
+    if decoded.filters != filters {
+        return Err(V1Error::invalid_cursor_for("pick shortages"));
+    }
+    Ok(decoded.offset)
 }
 
 fn parse_optional_id(encoded: &str) -> V1Result<Option<i64>> {
@@ -656,7 +657,7 @@ fn parse_id_hex(encoded: &str) -> V1Result<i64> {
         .ok_or_else(|| V1Error::invalid_cursor_for("pick shortages"))
 }
 
-fn parse_time_hex(encoded: &str) -> V1Result<u64> {
+fn parse_offset(encoded: &str) -> V1Result<u64> {
     if encoded.len() != 16 {
         return Err(V1Error::invalid_cursor_for("pick shortages"));
     }
@@ -665,6 +666,89 @@ fn parse_time_hex(encoded: &str) -> V1Result<u64> {
 
 fn encode_optional_id(value: Option<i64>) -> String {
     value.map_or_else(|| "a".to_owned(), |value| format!("{value:016x}"))
+}
+
+const fn status_code(status: Option<PickShortageStatus>) -> &'static str {
+    match status {
+        None => "a",
+        Some(PickShortageStatus::AwaitingInventory) => "w",
+        Some(PickShortageStatus::RecoveryInProgress) => "p",
+        Some(PickShortageStatus::Resolved) => "r",
+    }
+}
+
+fn parse_status_code(value: &str) -> V1Result<Option<PickShortageStatus>> {
+    match value {
+        "a" => Ok(None),
+        "w" => Ok(Some(PickShortageStatus::AwaitingInventory)),
+        "p" => Ok(Some(PickShortageStatus::RecoveryInProgress)),
+        "r" => Ok(Some(PickShortageStatus::Resolved)),
+        _ => Err(V1Error::invalid_cursor_for("pick shortages")),
+    }
+}
+
+const fn queue_sort_code(sort: PickShortageQueueSort) -> &'static str {
+    match sort {
+        PickShortageQueueSort::Reported => "r",
+        PickShortageQueueSort::Order => "o",
+        PickShortageQueueSort::Status => "s",
+        PickShortageQueueSort::ShortQuantity => "q",
+        PickShortageQueueSort::RemainingQuantity => "m",
+        PickShortageQueueSort::InventoryOwner => "c",
+        PickShortageQueueSort::Item => "i",
+        PickShortageQueueSort::Facility => "f",
+    }
+}
+
+fn parse_queue_sort_code(value: &str) -> V1Result<PickShortageQueueSort> {
+    match value {
+        "r" => Ok(PickShortageQueueSort::Reported),
+        "o" => Ok(PickShortageQueueSort::Order),
+        "s" => Ok(PickShortageQueueSort::Status),
+        "q" => Ok(PickShortageQueueSort::ShortQuantity),
+        "m" => Ok(PickShortageQueueSort::RemainingQuantity),
+        "c" => Ok(PickShortageQueueSort::InventoryOwner),
+        "i" => Ok(PickShortageQueueSort::Item),
+        "f" => Ok(PickShortageQueueSort::Facility),
+        _ => Err(V1Error::invalid_cursor_for("pick shortages")),
+    }
+}
+
+const fn queue_direction_code(direction: PickShortageQueueSortDirection) -> &'static str {
+    match direction {
+        PickShortageQueueSortDirection::Ascending => "a",
+        PickShortageQueueSortDirection::Descending => "d",
+    }
+}
+
+fn parse_queue_direction_code(value: &str) -> V1Result<PickShortageQueueSortDirection> {
+    match value {
+        "a" => Ok(PickShortageQueueSortDirection::Ascending),
+        "d" => Ok(PickShortageQueueSortDirection::Descending),
+        _ => Err(V1Error::invalid_cursor_for("pick shortages")),
+    }
+}
+
+const fn map_queue_sort(sort: PickShortageQueueSort) -> ApplicationQueueSort {
+    match sort {
+        PickShortageQueueSort::Reported => ApplicationQueueSort::Reported,
+        PickShortageQueueSort::Order => ApplicationQueueSort::Order,
+        PickShortageQueueSort::Status => ApplicationQueueSort::Status,
+        PickShortageQueueSort::ShortQuantity => ApplicationQueueSort::ShortQuantity,
+        PickShortageQueueSort::RemainingQuantity => ApplicationQueueSort::RemainingQuantity,
+        PickShortageQueueSort::InventoryOwner => ApplicationQueueSort::InventoryOwner,
+        PickShortageQueueSort::Item => ApplicationQueueSort::Item,
+        PickShortageQueueSort::Facility => ApplicationQueueSort::Facility,
+    }
+}
+
+const fn map_queue_direction(
+    direction: PickShortageQueueSortDirection,
+) -> ApplicationSortDirection {
+    match direction {
+        PickShortageQueueSortDirection::Ascending => ApplicationSortDirection::Ascending,
+        PickShortageQueueSortDirection::Descending => ApplicationSortDirection::Descending,
+    }
 }
 
 fn domain_validation(error: impl std::fmt::Display) -> V1Error {
@@ -676,16 +760,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shortage_cursor_round_trips_filters_time_and_identity() {
-        let expected = ScopedCursor {
-            facility_id: Some(3),
-            inventory_owner_id: Some(5),
-            order_id: Some(7),
-            status: Some(PickShortageStatus::RecoveryInProgress),
-            cursor: PickShortageCursor {
-                reported_at: "2026-08-08T21:30:00Z".parse().unwrap(),
-                shortage_id: PickShortageId::new(11).unwrap(),
+    fn shortage_cursor_round_trips_filters_sort_and_offset() {
+        let expected = BoundCursor {
+            filters: CursorFilters {
+                facility_id: Some(3),
+                inventory_owner_id: Some(5),
+                order_id: Some(7),
+                status: Some(PickShortageStatus::RecoveryInProgress),
+                sort: PickShortageQueueSort::RemainingQuantity,
+                direction: PickShortageQueueSortDirection::Ascending,
             },
+            offset: 100,
         };
 
         let encoded = encode_cursor(expected).unwrap();
@@ -696,12 +781,37 @@ mod tests {
     fn shortage_cursor_rejects_other_resources_and_invalid_identities() {
         for value in [
             "sq1.a.a.a.a.8000000000000000.0000000000000001",
-            "ps1.a.a.a.x.8000000000000000.0000000000000001",
-            "ps1.a.a.a.a.8000000000000000.0000000000000000",
+            "ps2.a.a.a.x.r.d.0000000000000001",
+            "ps2.a.a.a.a.x.d.0000000000000001",
+            "ps2.a.a.a.a.r.x.0000000000000001",
+            "ps2.a.a.a.a.r.d.not-an-offset",
         ] {
             let cursor = OpaqueCursor::new(value).unwrap();
             assert!(decode_cursor(&cursor).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn shortage_cursor_rejects_a_different_sort() {
+        let filters = CursorFilters {
+            facility_id: None,
+            inventory_owner_id: None,
+            order_id: None,
+            status: None,
+            sort: PickShortageQueueSort::Reported,
+            direction: PickShortageQueueSortDirection::Descending,
+        };
+        let cursor = encode_cursor(BoundCursor {
+            filters,
+            offset: 100,
+        })
+        .unwrap();
+        let changed = CursorFilters {
+            sort: PickShortageQueueSort::Order,
+            ..filters
+        };
+
+        assert!(decode_bound_cursor(Some(&cursor), changed).is_err());
     }
 
     #[test]
