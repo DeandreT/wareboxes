@@ -81,8 +81,10 @@ DECLARE
   ];
   statuses text[] := ARRAY['available', 'hold', 'damaged', 'quarantine'];
   position_no text;
+  location_code text;
   item_index integer;
   location_index integer;
+  required_location_count integer;
   quantity bigint;
   inventory_status text;
   i integer;
@@ -140,6 +142,30 @@ BEGIN
     location_ids := array_append(location_ids, location);
   END LOOP;
 
+  required_location_count := greatest(
+    array_length(location_codes, 1),
+    ceil(seed_count::numeric / array_length(item_names, 1))::integer
+  );
+  IF required_location_count > array_length(location_codes, 1) THEN
+    FOR i IN (array_length(location_codes, 1) + 1)..required_location_count LOOP
+      location_code := 'SEED-BULK-' || lpad(i::text, 4, '0');
+      INSERT INTO locations
+          (tenant_id, created, facility_id, barcode, name, type, active, pickable, receivable)
+      VALUES (
+        tenant, now(), facility, location_code, location_code,
+        'rack', true, true, false
+      )
+      ON CONFLICT (tenant_id, barcode) DO UPDATE
+      SET deleted = NULL,
+          active = true,
+          name = EXCLUDED.name,
+          pickable = true,
+          receivable = false
+      RETURNING id INTO location;
+      location_ids := array_append(location_ids, location);
+    END LOOP;
+  END IF;
+
   FOREACH inventory_status IN ARRAY item_names LOOP
     SELECT id INTO item
     FROM items
@@ -171,7 +197,7 @@ BEGIN
     END IF;
 
     item_index := ((i - 1) % array_length(item_ids, 1)) + 1;
-    location_index := ((i * 7 - 1) % array_length(location_ids, 1)) + 1;
+    location_index := ((i - 1) / array_length(item_ids, 1)) + 1;
     item := item_ids[item_index];
     location := location_ids[location_index];
     inventory_status := statuses[((i - 1) % array_length(statuses, 1)) + 1];
