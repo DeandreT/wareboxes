@@ -18,7 +18,8 @@ use wareboxes_api_contract::v1::{
     ReallocatePickShortageResponse, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
     ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
     RemovePackedContentRequest, RemovePackedContentResponse, ReopenCartonRequest,
-    ReopenCartonResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
+    ReopenCartonResponse, ReplenishmentPolicyPage, ReplenishmentPolicySort,
+    ReplenishmentPolicySortDirection, ReplenishmentQueuePage,
     ReplenishmentWorkCancellationResponse, ReplenishmentWorkSort, ReplenishmentWorkSortDirection,
     ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
     ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
@@ -88,6 +89,29 @@ pub struct ReplenishmentQueueFilters {
     pub status: Option<ReplenishmentWorkStatus>,
     pub sort: ReplenishmentWorkSort,
     pub direction: ReplenishmentWorkSortDirection,
+}
+
+#[derive(Clone, Copy)]
+pub struct ReplenishmentPolicyFilters {
+    pub facility_id: Option<i64>,
+    pub inventory_owner_id: Option<i64>,
+    pub item_id: Option<i64>,
+    pub pick_face_location_id: Option<i64>,
+    pub sort: ReplenishmentPolicySort,
+    pub direction: ReplenishmentPolicySortDirection,
+}
+
+impl Default for ReplenishmentPolicyFilters {
+    fn default() -> Self {
+        Self {
+            facility_id: None,
+            inventory_owner_id: None,
+            item_id: None,
+            pick_face_location_id: None,
+            sort: ReplenishmentPolicySort::TargetGap,
+            direction: ReplenishmentPolicySortDirection::Descending,
+        }
+    }
 }
 
 impl Default for ReplenishmentQueueFilters {
@@ -613,20 +637,10 @@ mod browser {
     }
 
     pub async fn replenishment_policies(
-        facility_id: Option<i64>,
-        inventory_owner_id: Option<i64>,
-        item_id: Option<i64>,
-        pick_face_location_id: Option<i64>,
+        filters: super::ReplenishmentPolicyFilters,
         cursor: Option<&OpaqueCursor>,
     ) -> Result<ReplenishmentPolicyPage, ApiError> {
-        get(&super::replenishment_policy_page_path(
-            facility_id,
-            inventory_owner_id,
-            item_id,
-            pick_face_location_id,
-            cursor,
-        ))
-        .await
+        get(&super::replenishment_policy_page_path(filters, cursor)).await
     }
 
     pub async fn replenishment_queue(
@@ -1192,10 +1206,7 @@ pub async fn accept_pick_shortage_as_short_ship(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn replenishment_policies(
-    _facility_id: Option<i64>,
-    _inventory_owner_id: Option<i64>,
-    _item_id: Option<i64>,
-    _pick_face_location_id: Option<i64>,
+    _filters: ReplenishmentPolicyFilters,
     _cursor: Option<&OpaqueCursor>,
 ) -> Result<ReplenishmentPolicyPage, ApiError> {
     Err(ApiError::unavailable())
@@ -1268,17 +1279,22 @@ pub fn new_idempotency_key() -> String {
 
 #[cfg(any(target_arch = "wasm32", test))]
 fn replenishment_policy_page_path(
-    facility_id: Option<i64>,
-    inventory_owner_id: Option<i64>,
-    item_id: Option<i64>,
-    pick_face_location_id: Option<i64>,
+    filters: ReplenishmentPolicyFilters,
     cursor: Option<&OpaqueCursor>,
 ) -> String {
-    let mut path = "/api/v1/replenishment-policies?limit=100".to_owned();
-    append_optional_id(&mut path, "facility_id", facility_id);
-    append_optional_id(&mut path, "inventory_owner_id", inventory_owner_id);
-    append_optional_id(&mut path, "item_id", item_id);
-    append_optional_id(&mut path, "pick_face_location_id", pick_face_location_id);
+    let mut path = format!(
+        "/api/v1/replenishment-policies?limit=100&sort={}&direction={}",
+        replenishment_policy_sort_wire(filters.sort),
+        replenishment_policy_sort_direction_wire(filters.direction),
+    );
+    append_optional_id(&mut path, "facility_id", filters.facility_id);
+    append_optional_id(&mut path, "inventory_owner_id", filters.inventory_owner_id);
+    append_optional_id(&mut path, "item_id", filters.item_id);
+    append_optional_id(
+        &mut path,
+        "pick_face_location_id",
+        filters.pick_face_location_id,
+    );
     append_cursor(&mut path, cursor);
     path
 }
@@ -1355,6 +1371,32 @@ const fn replenishment_work_status_wire(status: ReplenishmentWorkStatus) -> &'st
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
+const fn replenishment_policy_sort_wire(sort: ReplenishmentPolicySort) -> &'static str {
+    match sort {
+        ReplenishmentPolicySort::InventoryOwner => "inventory_owner",
+        ReplenishmentPolicySort::Facility => "facility",
+        ReplenishmentPolicySort::Item => "item",
+        ReplenishmentPolicySort::PickFace => "pick_face",
+        ReplenishmentPolicySort::Projected => "projected",
+        ReplenishmentPolicySort::Demand => "demand",
+        ReplenishmentPolicySort::Reserve => "reserve",
+        ReplenishmentPolicySort::TargetGap => "target_gap",
+        ReplenishmentPolicySort::Outcome => "outcome",
+        ReplenishmentPolicySort::ActiveWork => "active_work",
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+const fn replenishment_policy_sort_direction_wire(
+    direction: ReplenishmentPolicySortDirection,
+) -> &'static str {
+    match direction {
+        ReplenishmentPolicySortDirection::Ascending => "ascending",
+        ReplenishmentPolicySortDirection::Descending => "descending",
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 const fn replenishment_work_sort_wire(sort: ReplenishmentWorkSort) -> &'static str {
     match sort {
         ReplenishmentWorkSort::Created => "created",
@@ -1386,10 +1428,20 @@ mod tests {
 
     #[test]
     fn replenishment_policy_cursor_is_encoded_and_filters_are_stable() {
-        let cursor = OpaqueCursor::new("rp1.a.2.a.a.0000000000000007".to_owned()).unwrap();
+        let cursor = OpaqueCursor::new("rp2.a.2.a.a.g.d.0000000000000001".to_owned()).unwrap();
         assert_eq!(
-            replenishment_policy_page_path(Some(3), Some(4), Some(5), Some(6), Some(&cursor)),
-            "/api/v1/replenishment-policies?limit=100&facility_id=3&inventory_owner_id=4&item_id=5&pick_face_location_id=6&cursor=rp1.a.2.a.a.0000000000000007"
+            replenishment_policy_page_path(
+                ReplenishmentPolicyFilters {
+                    facility_id: Some(3),
+                    inventory_owner_id: Some(4),
+                    item_id: Some(5),
+                    pick_face_location_id: Some(6),
+                    sort: ReplenishmentPolicySort::Outcome,
+                    direction: ReplenishmentPolicySortDirection::Ascending,
+                },
+                Some(&cursor),
+            ),
+            "/api/v1/replenishment-policies?limit=100&sort=outcome&direction=ascending&facility_id=3&inventory_owner_id=4&item_id=5&pick_face_location_id=6&cursor=rp2.a.2.a.a.g.d.0000000000000001"
         );
     }
 

@@ -244,7 +244,7 @@ async fn policies_are_typed_versioned_replay_safe_paginated_and_retirable() {
     let first_page = rig
         .request(
             Method::GET,
-            "/api/v1/replenishment-policies?limit=1",
+            "/api/v1/replenishment-policies?limit=1&sort=target_gap&direction=descending",
             None,
             None,
         )
@@ -257,7 +257,7 @@ async fn policies_are_typed_versioned_replay_safe_paginated_and_retirable() {
         .request(
             Method::GET,
             &format!(
-                "/api/v1/replenishment-policies?limit=1&cursor={}",
+                "/api/v1/replenishment-policies?limit=1&sort=target_gap&direction=descending&cursor={}",
                 cursor.as_str()
             ),
             None,
@@ -271,12 +271,15 @@ async fn policies_are_typed_versioned_replay_safe_paginated_and_retirable() {
         second_page_result.items[0].policy_id,
         first_page.items[0].policy_id
     );
+    assert!(
+        first_page.items[0].target_gap >= second_page_result.items[0].target_gap,
+        "target gap sort must be applied before pagination"
+    );
     let mismatch = rig
         .request(
             Method::GET,
             &format!(
-                "/api/v1/replenishment-policies?limit=1&item_id={}&cursor={}",
-                second.item_id,
+                "/api/v1/replenishment-policies?limit=1&sort=target_gap&direction=ascending&cursor={}",
                 cursor.as_str()
             ),
             None,

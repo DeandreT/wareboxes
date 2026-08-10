@@ -701,8 +701,10 @@ async fn load_workspace(
         }
         Section::InventoryIntegrity if has_permission(session, "wms") => {}
         Section::Replenishment if has_permission(session, "wms_supervisor") => {
-            data.replenishment_policies =
-                Some(api::replenishment_policies(None, None, None, None, None).await?);
+            data.replenishment_policies = Some(
+                api::replenishment_policies(api::ReplenishmentPolicyFilters::default(), None)
+                    .await?,
+            );
             data.replenishment_queue = Some(
                 api::replenishment_queue(api::ReplenishmentQueueFilters::default(), None).await?,
             );

@@ -19,6 +19,20 @@ pub(super) enum ReplenishmentTab {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PolicySort {
+    Client,
+    Facility,
+    Item,
+    PickFace,
+    Projected,
+    Demand,
+    Reserve,
+    Gap,
+    Outcome,
+    Work,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum WorkSort {
     Created,
     Priority,
@@ -99,6 +113,7 @@ pub(super) struct PolicyPageSignals {
     pub loading: RwSignal<bool>,
     pub error: RwSignal<Option<String>>,
     pub generation: RwSignal<u64>,
+    pub sort: RwSignal<SortSpec<PolicySort>>,
 }
 
 impl PolicyPageSignals {
@@ -110,6 +125,10 @@ impl PolicyPageSignals {
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
             generation: RwSignal::new(0),
+            sort: RwSignal::new(SortSpec {
+                key: PolicySort::Gap,
+                direction: SortDirection::Descending,
+            }),
         }
     }
 }

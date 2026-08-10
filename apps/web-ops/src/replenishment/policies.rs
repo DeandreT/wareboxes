@@ -1,5 +1,3 @@
-use std::cmp::Ordering;
-
 use leptos::prelude::*;
 use lucide_leptos::{ArchiveX, Pencil, Play, Plus};
 use wareboxes_api_contract::v1::{
@@ -8,23 +6,10 @@ use wareboxes_api_contract::v1::{
 
 use super::model::{
     compact_timestamp, planning_outcome_class, planning_outcome_label, PolicyPageSignals,
+    PolicySort,
 };
-use crate::sorting::{SortDirection, SortSpec, SortableHeader};
+use crate::sorting::SortableHeader;
 use crate::view_model::format_quantity;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PolicySort {
-    Client,
-    Facility,
-    Item,
-    PickFace,
-    Projected,
-    Demand,
-    Reserve,
-    Gap,
-    Outcome,
-    Work,
-}
 
 #[component]
 pub(super) fn PoliciesPanel(
@@ -35,12 +20,8 @@ pub(super) fn PoliciesPanel(
     on_retire: Callback<ReplenishmentPolicyReadinessEntryResponse>,
     on_previous: Callback<()>,
     on_next: Callback<()>,
+    on_sort: Callback<PolicySort>,
 ) -> impl IntoView {
-    let sort = RwSignal::new(SortSpec {
-        key: PolicySort::Gap,
-        direction: SortDirection::Descending,
-    });
-
     view! {
         <section class="data-section replenishment-policy-section">
             <div class="replenishment-summary-strip" aria-label="Policy page summary">
@@ -75,25 +56,23 @@ pub(super) fn PoliciesPanel(
                     <caption class="sr-only">"Active replenishment policies and live readiness"</caption>
                     <thead>
                         <tr>
-                            <SortableHeader label="Client" active=move || sort.get().key == PolicySort::Client direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PolicySort::Client))/>
-                            <SortableHeader label="Facility" active=move || sort.get().key == PolicySort::Facility direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PolicySort::Facility))/>
-                            <SortableHeader label="Item" active=move || sort.get().key == PolicySort::Item direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PolicySort::Item))/>
-                            <SortableHeader label="Pick face" active=move || sort.get().key == PolicySort::PickFace direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PolicySort::PickFace))/>
+                            <SortableHeader label="Client" active=move || signals.sort.get().key == PolicySort::Client direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::Client))/>
+                            <SortableHeader label="Facility" active=move || signals.sort.get().key == PolicySort::Facility direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::Facility))/>
+                            <SortableHeader label="Item" active=move || signals.sort.get().key == PolicySort::Item direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::Item))/>
+                            <SortableHeader label="Pick face" active=move || signals.sort.get().key == PolicySort::PickFace direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::PickFace))/>
                             <th class="numeric">"Min / Target"</th>
-                            <SortableHeader label="Projected" active=move || sort.get().key == PolicySort::Projected direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PolicySort::Projected)) numeric=true/>
-                            <SortableHeader label="Demand" active=move || sort.get().key == PolicySort::Demand direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PolicySort::Demand)) numeric=true/>
-                            <SortableHeader label="Reserve" active=move || sort.get().key == PolicySort::Reserve direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PolicySort::Reserve)) numeric=true/>
-                            <SortableHeader label="Gap / Plan" active=move || sort.get().key == PolicySort::Gap direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PolicySort::Gap)) numeric=true/>
-                            <SortableHeader label="State" active=move || sort.get().key == PolicySort::Outcome direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PolicySort::Outcome))/>
-                            <SortableHeader label="Work" active=move || sort.get().key == PolicySort::Work direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, PolicySort::Work)) numeric=true/>
+                            <SortableHeader label="Projected" active=move || signals.sort.get().key == PolicySort::Projected direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::Projected)) numeric=true/>
+                            <SortableHeader label="Demand" active=move || signals.sort.get().key == PolicySort::Demand direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::Demand)) numeric=true/>
+                            <SortableHeader label="Reserve" active=move || signals.sort.get().key == PolicySort::Reserve direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::Reserve)) numeric=true/>
+                            <SortableHeader label="Gap / Plan" active=move || signals.sort.get().key == PolicySort::Gap direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::Gap)) numeric=true/>
+                            <SortableHeader label="State" active=move || signals.sort.get().key == PolicySort::Outcome direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::Outcome))/>
+                            <SortableHeader label="Work" active=move || signals.sort.get().key == PolicySort::Work direction=move || signals.sort.get().direction on_sort=Callback::new(move |_| on_sort.run(PolicySort::Work)) numeric=true/>
                             <th class="replenishment-actions-heading"><span class="sr-only">"Policy actions"</span></th>
                         </tr>
                     </thead>
                     <tbody>
                         {move || {
-                            let spec = sort.get();
-                            let mut policies = signals.page.get().map_or_else(Vec::new, |page| page.items);
-                            policies.sort_by(|left, right| policy_ordering(left, right, spec));
+                            let policies = signals.page.get().map_or_else(Vec::new, |page| page.items);
                             if policies.is_empty() && !signals.loading.get() {
                                 view! {
                                     <tr><td class="table-empty-row" colspan="12">"No active policies match this scope."</td></tr>
@@ -189,58 +168,6 @@ fn inbound_text(pick_face_free: i64, active_inbound: i64) -> String {
     }
 }
 
-fn policy_ordering(
-    left: &ReplenishmentPolicyReadinessEntryResponse,
-    right: &ReplenishmentPolicyReadinessEntryResponse,
-    spec: SortSpec<PolicySort>,
-) -> Ordering {
-    let ordering = match spec.key {
-        PolicySort::Client => left
-            .inventory_owner_name
-            .to_ascii_lowercase()
-            .cmp(&right.inventory_owner_name.to_ascii_lowercase()),
-        PolicySort::Facility => left
-            .facility_name
-            .to_ascii_lowercase()
-            .cmp(&right.facility_name.to_ascii_lowercase()),
-        PolicySort::Item => left.item_id.cmp(&right.item_id),
-        PolicySort::PickFace => left
-            .pick_face
-            .barcode
-            .to_ascii_lowercase()
-            .cmp(&right.pick_face.barcode.to_ascii_lowercase()),
-        PolicySort::Projected => left
-            .snapshot
-            .projected_free
-            .cmp(&right.snapshot.projected_free),
-        PolicySort::Demand => left
-            .snapshot
-            .unallocated_demand
-            .cmp(&right.snapshot.unallocated_demand),
-        PolicySort::Reserve => left.snapshot.reserve_free.cmp(&right.snapshot.reserve_free),
-        PolicySort::Gap => left.target_gap.cmp(&right.target_gap),
-        PolicySort::Outcome => {
-            outcome_rank(left.suggested_outcome).cmp(&outcome_rank(right.suggested_outcome))
-        }
-        PolicySort::Work => left.active_work_quantity.cmp(&right.active_work_quantity),
-    }
-    .then_with(|| left.policy_id.cmp(&right.policy_id));
-    if spec.direction == SortDirection::Ascending {
-        ordering
-    } else {
-        ordering.reverse()
-    }
-}
-
-const fn outcome_rank(outcome: ReplenishmentPlanningOutcome) -> u8 {
-    match outcome {
-        ReplenishmentPlanningOutcome::InsufficientReserve => 0,
-        ReplenishmentPlanningOutcome::PartiallyPlanned => 1,
-        ReplenishmentPlanningOutcome::FullyPlanned => 2,
-        ReplenishmentPlanningOutcome::NotNeeded => 3,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,17 +176,5 @@ mod tests {
     fn inbound_copy_makes_projection_conservation_visible() {
         assert_eq!(inbound_text(4, 0), "4 free / no inbound");
         assert_eq!(inbound_text(4, 6), "4 free + 6 inbound");
-    }
-
-    #[test]
-    fn exception_outcomes_sort_before_ready_states() {
-        assert!(
-            outcome_rank(ReplenishmentPlanningOutcome::InsufficientReserve)
-                < outcome_rank(ReplenishmentPlanningOutcome::FullyPlanned)
-        );
-        assert!(
-            outcome_rank(ReplenishmentPlanningOutcome::PartiallyPlanned)
-                < outcome_rank(ReplenishmentPlanningOutcome::NotNeeded)
-        );
     }
 }

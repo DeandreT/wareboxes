@@ -1,8 +1,9 @@
 use leptos::prelude::*;
 use lucide_leptos::X;
 use wareboxes_api_contract::v1::{
-    OpaqueCursor, PlanReplenishmentResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
-    ReplenishmentWorkSort, ReplenishmentWorkSortDirection,
+    OpaqueCursor, PlanReplenishmentResponse, ReplenishmentPolicyPage, ReplenishmentPolicySort,
+    ReplenishmentPolicySortDirection, ReplenishmentQueuePage, ReplenishmentWorkSort,
+    ReplenishmentWorkSortDirection,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 use wareboxes_core::models::{Item, Location};
@@ -16,7 +17,7 @@ mod work_queue;
 use command_dialog::PolicyCommandDialog;
 use model::{
     planning_outcome_class, planning_outcome_label, CommandSignals, PolicyCommandResult,
-    PolicyDialogMode, PolicyPageSignals, ReplenishmentReferenceData, ReplenishmentTab,
+    PolicyDialogMode, PolicyPageSignals, PolicySort, ReplenishmentReferenceData, ReplenishmentTab,
     ScopeFilters, WorkPageSignals, WorkSort,
 };
 use policies::PoliciesPanel;
@@ -170,6 +171,10 @@ pub(crate) fn ReplenishmentWorkspace(
         SortSpec::select(work.sort, key);
         request_work_page(requests, None, Vec::new());
     });
+    let policy_sort = Callback::new(move |key| {
+        SortSpec::select(policies.sort, key);
+        request_policy_page(requests, None, Vec::new());
+    });
     let open_configure = Callback::new(move |policy| {
         let current_references = references.get_untracked();
         if !references_loading.get_untracked()
@@ -303,6 +308,7 @@ pub(crate) fn ReplenishmentWorkspace(
                 on_retire=open_retire
                 on_previous=policy_previous
                 on_next=policy_next
+                on_sort=policy_sort
             />
         </Show>
         <Show when=move || tab.get() == ReplenishmentTab::Work>
@@ -378,14 +384,19 @@ fn request_policy_page(
         .generation
         .update(|generation| *generation = generation.saturating_add(1));
     let generation = context.policies.generation.get_untracked();
+    let sort = context.policies.sort.get_untracked();
     context.policies.loading.set(true);
     context.policies.error.set(None);
     leptos::task::spawn_local(async move {
         let response = api::replenishment_policies(
-            context.filters.facility(),
-            context.filters.owner(),
-            context.filters.item(),
-            context.filters.pick_face(),
+            api::ReplenishmentPolicyFilters {
+                facility_id: context.filters.facility(),
+                inventory_owner_id: context.filters.owner(),
+                item_id: context.filters.item(),
+                pick_face_location_id: context.filters.pick_face(),
+                sort: map_policy_sort(sort.key),
+                direction: map_policy_sort_direction(sort.direction),
+            },
             cursor.as_ref(),
         )
         .await;
@@ -446,6 +457,28 @@ fn request_work_page(
             Err(error) => context.work.error.set(Some(error.message)),
         }
     });
+}
+
+const fn map_policy_sort(sort: PolicySort) -> ReplenishmentPolicySort {
+    match sort {
+        PolicySort::Client => ReplenishmentPolicySort::InventoryOwner,
+        PolicySort::Facility => ReplenishmentPolicySort::Facility,
+        PolicySort::Item => ReplenishmentPolicySort::Item,
+        PolicySort::PickFace => ReplenishmentPolicySort::PickFace,
+        PolicySort::Projected => ReplenishmentPolicySort::Projected,
+        PolicySort::Demand => ReplenishmentPolicySort::Demand,
+        PolicySort::Reserve => ReplenishmentPolicySort::Reserve,
+        PolicySort::Gap => ReplenishmentPolicySort::TargetGap,
+        PolicySort::Outcome => ReplenishmentPolicySort::Outcome,
+        PolicySort::Work => ReplenishmentPolicySort::ActiveWork,
+    }
+}
+
+const fn map_policy_sort_direction(direction: SortDirection) -> ReplenishmentPolicySortDirection {
+    match direction {
+        SortDirection::Ascending => ReplenishmentPolicySortDirection::Ascending,
+        SortDirection::Descending => ReplenishmentPolicySortDirection::Descending,
+    }
 }
 
 const fn map_work_sort(sort: WorkSort) -> ReplenishmentWorkSort {

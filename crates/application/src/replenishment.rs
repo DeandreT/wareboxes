@@ -154,8 +154,53 @@ pub struct ReplenishmentPolicyPageFilter {
     pub inventory_owner_id: Option<InventoryOwnerId>,
     pub item_id: Option<CatalogItemId>,
     pub pick_face_location_id: Option<LocationId>,
-    pub after_policy_id: Option<ReplenishmentPolicyId>,
+    pub offset: u64,
     pub limit: u16,
+    pub sort: ReplenishmentPolicySort,
+    pub direction: ReplenishmentPolicySortDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplenishmentPolicySort {
+    InventoryOwner,
+    Facility,
+    Item,
+    PickFace,
+    Projected,
+    Demand,
+    Reserve,
+    TargetGap,
+    Outcome,
+    ActiveWork,
+}
+
+impl ReplenishmentPolicySort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InventoryOwner => "inventory_owner",
+            Self::Facility => "facility",
+            Self::Item => "item",
+            Self::PickFace => "pick_face",
+            Self::Projected => "projected",
+            Self::Demand => "demand",
+            Self::Reserve => "reserve",
+            Self::TargetGap => "target_gap",
+            Self::Outcome => "outcome",
+            Self::ActiveWork => "active_work",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplenishmentPolicySortDirection {
+    Ascending,
+    Descending,
+}
+
+impl ReplenishmentPolicySortDirection {
+    pub const fn is_ascending(self) -> bool {
+        matches!(self, Self::Ascending)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,7 +253,7 @@ impl ReplenishmentPolicyReadinessReadModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplenishmentPolicyPage {
     pub items: Vec<ReplenishmentPolicyReadinessReadModel>,
-    pub next_after_policy_id: Option<ReplenishmentPolicyId>,
+    pub next_offset: Option<u64>,
 }
 
 /// Stable filters decoded from a cursor-bound execution-monitor query.

@@ -264,6 +264,34 @@ pub struct ReplenishmentPolicyPageRequest {
     pub cursor: Option<OpaqueCursor>,
     #[serde(default)]
     pub limit: PageLimit,
+    #[serde(default)]
+    pub sort: ReplenishmentPolicySort,
+    #[serde(default)]
+    pub direction: ReplenishmentPolicySortDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplenishmentPolicySort {
+    InventoryOwner,
+    Facility,
+    Item,
+    PickFace,
+    Projected,
+    Demand,
+    Reserve,
+    #[default]
+    TargetGap,
+    Outcome,
+    ActiveWork,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplenishmentPolicySortDirection {
+    Ascending,
+    #[default]
+    Descending,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -673,6 +701,12 @@ mod tests {
 
     #[test]
     fn policy_readiness_page_is_independent_of_execution_work() {
+        let query = serde_json::from_value::<ReplenishmentPolicyPageRequest>(json!({})).unwrap();
+        assert_eq!(query.sort, ReplenishmentPolicySort::TargetGap);
+        assert_eq!(
+            query.direction,
+            ReplenishmentPolicySortDirection::Descending
+        );
         let page = ReplenishmentPolicyPage::new(
             vec![ReplenishmentPolicyReadinessEntryResponse {
                 policy_id: 1,

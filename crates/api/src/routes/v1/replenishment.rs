@@ -15,7 +15,8 @@ use wareboxes_api_contract::v1::{
     ReplenishmentPlannedWorkResponse, ReplenishmentPlanningOutcome as ApiPlanningOutcome,
     ReplenishmentPlanningSnapshotResponse, ReplenishmentPolicyLatestPlanResponse,
     ReplenishmentPolicyPage as ApiPolicyPage, ReplenishmentPolicyPageRequest,
-    ReplenishmentPolicyReadinessEntryResponse, ReplenishmentPolicyStatus as ApiPolicyStatus,
+    ReplenishmentPolicyReadinessEntryResponse, ReplenishmentPolicySort,
+    ReplenishmentPolicySortDirection, ReplenishmentPolicyStatus as ApiPolicyStatus,
     ReplenishmentQueueEntryResponse, ReplenishmentQueuePage as ApiWorkPage,
     ReplenishmentQueuePageRequest, ReplenishmentReserveSourceLocationIds, ReplenishmentWorkSort,
     ReplenishmentWorkSortDirection, ReplenishmentWorkStatus as ApiWorkStatus,
@@ -29,10 +30,12 @@ use wareboxes_application::replenishment::{
     ReleaseReplenishmentClaimCommand, ReplenishmentClaim, ReplenishmentClaimHeartbeatResult,
     ReplenishmentClaimReleaseResult, ReplenishmentLatestPlanReadModel,
     ReplenishmentLocationReadModel, ReplenishmentPolicyPage, ReplenishmentPolicyPageFilter,
-    ReplenishmentPolicyReadinessReadModel, ReplenishmentWorkPage, ReplenishmentWorkPageFilter,
-    ReplenishmentWorkReadModel, ReplenishmentWorkSort as ApplicationWorkSort,
-    ReplenishmentWorkSortDirection as ApplicationSortDirection, RetireReplenishmentPolicyCommand,
-    RetireReplenishmentPolicyResult,
+    ReplenishmentPolicyReadinessReadModel, ReplenishmentPolicySort as ApplicationPolicySort,
+    ReplenishmentPolicySortDirection as ApplicationPolicySortDirection, ReplenishmentWorkPage,
+    ReplenishmentWorkPageFilter, ReplenishmentWorkReadModel,
+    ReplenishmentWorkSort as ApplicationWorkSort,
+    ReplenishmentWorkSortDirection as ApplicationWorkSortDirection,
+    RetireReplenishmentPolicyCommand, RetireReplenishmentPolicyResult,
 };
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
@@ -53,7 +56,7 @@ use crate::state::AppState;
 
 const OPERATOR_PERMISSION: &str = "wms";
 const SUPERVISOR_PERMISSION: &str = "wms_supervisor";
-const POLICY_CURSOR_PREFIX: &str = "rp1.";
+const POLICY_CURSOR_PREFIX: &str = "rp2.";
 const WORK_CURSOR_PREFIX: &str = "rw2.";
 const MAX_PAGE_LIMIT: u16 = 100;
 const MAX_RELEASE_NOTE_LENGTH: usize = 500;
@@ -144,6 +147,8 @@ pub async fn policy_page(
         inventory_owner_id,
         item_id,
         pick_face_location_id,
+        sort: query.sort,
+        direction: query.direction,
     };
     if decoded
         .as_ref()
@@ -159,8 +164,10 @@ pub async fn policy_page(
             inventory_owner_id,
             item_id,
             pick_face_location_id,
-            after_policy_id: decoded.map(|cursor| cursor.after_policy_id),
+            offset: decoded.map_or(0, |cursor| cursor.offset),
             limit: query.limit.get(),
+            sort: map_policy_sort(query.sort),
+            direction: map_policy_sort_direction(query.direction),
         },
     )
     .await?;
@@ -235,6 +242,8 @@ pub(crate) async fn pages_for_access(
         inventory_owner_id: None,
         item_id: None,
         pick_face_location_id: None,
+        sort: ReplenishmentPolicySort::TargetGap,
+        direction: ReplenishmentPolicySortDirection::Descending,
     };
     let work_filters = WorkCursorFilters {
         facility_id: None,
@@ -254,8 +263,10 @@ pub(crate) async fn pages_for_access(
                 inventory_owner_id: None,
                 item_id: None,
                 pick_face_location_id: None,
-                after_policy_id: None,
+                offset: 0,
                 limit,
+                sort: ApplicationPolicySort::TargetGap,
+                direction: ApplicationPolicySortDirection::Descending,
             },
         ),
         repo::replenishment::work_page(
@@ -270,7 +281,7 @@ pub(crate) async fn pages_for_access(
                 offset: 0,
                 limit,
                 sort: ApplicationWorkSort::Priority,
-                direction: ApplicationSortDirection::Descending,
+                direction: ApplicationWorkSortDirection::Descending,
             },
         ),
     )?;
@@ -536,13 +547,8 @@ fn map_policy_page(
         .map(map_policy_readiness)
         .collect::<V1Result<Vec<_>>>()?;
     let next_cursor = page
-        .next_after_policy_id
-        .map(|after_policy_id| {
-            encode_policy_cursor(PolicyCursor {
-                filters,
-                after_policy_id,
-            })
-        })
+        .next_offset
+        .map(|offset| encode_policy_cursor(PolicyCursor { filters, offset }))
         .transpose()?;
     Ok(ApiPolicyPage::new(items, next_cursor))
 }
@@ -908,17 +914,19 @@ struct PolicyCursorFilters {
     inventory_owner_id: Option<InventoryOwnerId>,
     item_id: Option<CatalogItemId>,
     pick_face_location_id: Option<LocationId>,
+    sort: ReplenishmentPolicySort,
+    direction: ReplenishmentPolicySortDirection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PolicyCursor {
     filters: PolicyCursorFilters,
-    after_policy_id: ReplenishmentPolicyId,
+    offset: u64,
 }
 
 fn decode_policy_cursor(cursor: &OpaqueCursor) -> V1Result<PolicyCursor> {
     const RESOURCE: &str = "replenishment policies";
-    let parts = cursor_parts(cursor, POLICY_CURSOR_PREFIX, 5, RESOURCE)?;
+    let parts = cursor_parts(cursor, POLICY_CURSOR_PREFIX, 7, RESOURCE)?;
     Ok(PolicyCursor {
         filters: PolicyCursorFilters {
             facility_id: parse_optional_cursor_id(parts[0], FacilityId::new, RESOURCE)?,
@@ -929,14 +937,16 @@ fn decode_policy_cursor(cursor: &OpaqueCursor) -> V1Result<PolicyCursor> {
             )?,
             item_id: parse_optional_cursor_id(parts[2], CatalogItemId::new, RESOURCE)?,
             pick_face_location_id: parse_optional_cursor_id(parts[3], LocationId::new, RESOURCE)?,
+            sort: parse_policy_sort_code(parts[4])?,
+            direction: parse_policy_direction_code(parts[5])?,
         },
-        after_policy_id: parse_cursor_id(parts[4], ReplenishmentPolicyId::new, RESOURCE)?,
+        offset: parse_cursor_offset(parts[6], RESOURCE)?,
     })
 }
 
 fn encode_policy_cursor(cursor: PolicyCursor) -> AppResult<OpaqueCursor> {
     OpaqueCursor::new(format!(
-        "{POLICY_CURSOR_PREFIX}{}.{}.{}.{}.{:016x}",
+        "{POLICY_CURSOR_PREFIX}{}.{}.{}.{}.{}.{}.{:016x}",
         encode_optional_id(cursor.filters.facility_id.map(|value| value.get())),
         encode_optional_id(cursor.filters.inventory_owner_id.map(|value| value.get())),
         encode_optional_id(cursor.filters.item_id.map(|value| value.get())),
@@ -946,7 +956,9 @@ fn encode_policy_cursor(cursor: PolicyCursor) -> AppResult<OpaqueCursor> {
                 .pick_face_location_id
                 .map(|value| value.get())
         ),
-        cursor.after_policy_id.get(),
+        policy_sort_code(cursor.filters.sort),
+        policy_direction_code(cursor.filters.direction),
+        cursor.offset,
     ))
     .map_err(|_| AppError::internal("generated an invalid replenishment policy cursor"))
 }
@@ -1030,6 +1042,52 @@ fn parse_cursor_offset(encoded: &str, resource: &str) -> V1Result<u64> {
     u64::from_str_radix(encoded, 16).map_err(|_| V1Error::invalid_cursor_for(resource))
 }
 
+const fn policy_sort_code(sort: ReplenishmentPolicySort) -> &'static str {
+    match sort {
+        ReplenishmentPolicySort::InventoryOwner => "o",
+        ReplenishmentPolicySort::Facility => "f",
+        ReplenishmentPolicySort::Item => "i",
+        ReplenishmentPolicySort::PickFace => "p",
+        ReplenishmentPolicySort::Projected => "j",
+        ReplenishmentPolicySort::Demand => "d",
+        ReplenishmentPolicySort::Reserve => "r",
+        ReplenishmentPolicySort::TargetGap => "g",
+        ReplenishmentPolicySort::Outcome => "t",
+        ReplenishmentPolicySort::ActiveWork => "w",
+    }
+}
+
+fn parse_policy_sort_code(value: &str) -> V1Result<ReplenishmentPolicySort> {
+    match value {
+        "o" => Ok(ReplenishmentPolicySort::InventoryOwner),
+        "f" => Ok(ReplenishmentPolicySort::Facility),
+        "i" => Ok(ReplenishmentPolicySort::Item),
+        "p" => Ok(ReplenishmentPolicySort::PickFace),
+        "j" => Ok(ReplenishmentPolicySort::Projected),
+        "d" => Ok(ReplenishmentPolicySort::Demand),
+        "r" => Ok(ReplenishmentPolicySort::Reserve),
+        "g" => Ok(ReplenishmentPolicySort::TargetGap),
+        "t" => Ok(ReplenishmentPolicySort::Outcome),
+        "w" => Ok(ReplenishmentPolicySort::ActiveWork),
+        _ => Err(V1Error::invalid_cursor_for("replenishment policies")),
+    }
+}
+
+const fn policy_direction_code(direction: ReplenishmentPolicySortDirection) -> &'static str {
+    match direction {
+        ReplenishmentPolicySortDirection::Ascending => "a",
+        ReplenishmentPolicySortDirection::Descending => "d",
+    }
+}
+
+fn parse_policy_direction_code(value: &str) -> V1Result<ReplenishmentPolicySortDirection> {
+    match value {
+        "a" => Ok(ReplenishmentPolicySortDirection::Ascending),
+        "d" => Ok(ReplenishmentPolicySortDirection::Descending),
+        _ => Err(V1Error::invalid_cursor_for("replenishment policies")),
+    }
+}
+
 const fn work_sort_code(sort: ReplenishmentWorkSort) -> &'static str {
     match sort {
         ReplenishmentWorkSort::Created => "c",
@@ -1076,6 +1134,30 @@ fn parse_work_direction_code(value: &str) -> V1Result<ReplenishmentWorkSortDirec
     }
 }
 
+const fn map_policy_sort(sort: ReplenishmentPolicySort) -> ApplicationPolicySort {
+    match sort {
+        ReplenishmentPolicySort::InventoryOwner => ApplicationPolicySort::InventoryOwner,
+        ReplenishmentPolicySort::Facility => ApplicationPolicySort::Facility,
+        ReplenishmentPolicySort::Item => ApplicationPolicySort::Item,
+        ReplenishmentPolicySort::PickFace => ApplicationPolicySort::PickFace,
+        ReplenishmentPolicySort::Projected => ApplicationPolicySort::Projected,
+        ReplenishmentPolicySort::Demand => ApplicationPolicySort::Demand,
+        ReplenishmentPolicySort::Reserve => ApplicationPolicySort::Reserve,
+        ReplenishmentPolicySort::TargetGap => ApplicationPolicySort::TargetGap,
+        ReplenishmentPolicySort::Outcome => ApplicationPolicySort::Outcome,
+        ReplenishmentPolicySort::ActiveWork => ApplicationPolicySort::ActiveWork,
+    }
+}
+
+const fn map_policy_sort_direction(
+    direction: ReplenishmentPolicySortDirection,
+) -> ApplicationPolicySortDirection {
+    match direction {
+        ReplenishmentPolicySortDirection::Ascending => ApplicationPolicySortDirection::Ascending,
+        ReplenishmentPolicySortDirection::Descending => ApplicationPolicySortDirection::Descending,
+    }
+}
+
 const fn map_work_sort(sort: ReplenishmentWorkSort) -> ApplicationWorkSort {
     match sort {
         ReplenishmentWorkSort::Created => ApplicationWorkSort::Created,
@@ -1093,10 +1175,10 @@ const fn map_work_sort(sort: ReplenishmentWorkSort) -> ApplicationWorkSort {
 
 const fn map_work_sort_direction(
     direction: ReplenishmentWorkSortDirection,
-) -> ApplicationSortDirection {
+) -> ApplicationWorkSortDirection {
     match direction {
-        ReplenishmentWorkSortDirection::Ascending => ApplicationSortDirection::Ascending,
-        ReplenishmentWorkSortDirection::Descending => ApplicationSortDirection::Descending,
+        ReplenishmentWorkSortDirection::Ascending => ApplicationWorkSortDirection::Ascending,
+        ReplenishmentWorkSortDirection::Descending => ApplicationWorkSortDirection::Descending,
     }
 }
 
@@ -1197,8 +1279,10 @@ mod tests {
                 inventory_owner_id: Some(InventoryOwnerId::new(4).unwrap()),
                 item_id: Some(CatalogItemId::new(5).unwrap()),
                 pick_face_location_id: Some(LocationId::new(6).unwrap()),
+                sort: ReplenishmentPolicySort::Outcome,
+                direction: ReplenishmentPolicySortDirection::Ascending,
             },
-            after_policy_id: ReplenishmentPolicyId::new(7).unwrap(),
+            offset: 7,
         };
         let cursor = encode_policy_cursor(expected).unwrap();
         assert_eq!(decode_policy_cursor(&cursor).unwrap(), expected);

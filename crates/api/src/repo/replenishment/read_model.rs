@@ -24,6 +24,8 @@ pub async fn policy_page(
     access: &TenantAccess,
     filter: ReplenishmentPolicyPageFilter,
 ) -> AppResult<ReplenishmentPolicyPage> {
+    let offset = i64::try_from(filter.offset)
+        .map_err(|_| AppError::bad_request("replenishment policy page offset is invalid"))?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, access.user_id.get()).await?;
@@ -37,6 +39,7 @@ pub async fn policy_page(
     let fetch_limit = i64::from(filter.limit) + 1;
     let rows = sqlx::query(
         r#"
+        WITH readiness AS (
         SELECT policy.id, policy.tenant_id, policy.inventory_owner_id, policy.facility_id,
                policy.pick_face_location_id, policy.item_id, policy.uom,
                policy.minimum_qty, policy.target_qty, policy.revision,
@@ -154,9 +157,56 @@ pub async fn policy_page(
           AND ($7::bigint IS NULL OR policy.inventory_owner_id=$7)
           AND ($8::bigint IS NULL OR policy.item_id=$8)
           AND ($9::bigint IS NULL OR policy.pick_face_location_id=$9)
-          AND ($10::bigint IS NULL OR policy.id>$10)
-        ORDER BY policy.id
-        LIMIT $11
+        ), decision AS (
+          SELECT readiness.*,
+                 readiness.pick_face_free+readiness.active_inbound AS projected_free,
+                 GREATEST(readiness.target_qty,readiness.unallocated_demand) AS required_level
+          FROM readiness
+        ), sortable AS (
+          SELECT decision.*,
+                 CASE
+                   WHEN decision.projected_free < decision.minimum_qty
+                     OR decision.projected_free < decision.unallocated_demand
+                   THEN GREATEST(decision.required_level-decision.projected_free,0)
+                   ELSE 0
+                 END AS target_gap_sort
+          FROM decision
+        ), ranked AS (
+          SELECT sortable.*,
+               CASE
+                 WHEN sortable.target_gap_sort=0 THEN 3
+                 WHEN LEAST(sortable.target_gap_sort,sortable.reserve_free)=0 THEN 0
+                 WHEN LEAST(sortable.target_gap_sort,sortable.reserve_free)<sortable.target_gap_sort THEN 1
+                 ELSE 2
+               END AS outcome_sort
+          FROM sortable
+        )
+        SELECT ranked.*
+        FROM ranked
+        ORDER BY
+          CASE WHEN $10='inventory_owner' AND $11 THEN LOWER(ranked.inventory_owner_name) END ASC,
+          CASE WHEN $10='inventory_owner' AND NOT $11 THEN LOWER(ranked.inventory_owner_name) END DESC,
+          CASE WHEN $10='facility' AND $11 THEN LOWER(ranked.facility_name) END ASC,
+          CASE WHEN $10='facility' AND NOT $11 THEN LOWER(ranked.facility_name) END DESC,
+          CASE WHEN $10='item' AND $11 THEN ranked.item_id END ASC,
+          CASE WHEN $10='item' AND NOT $11 THEN ranked.item_id END DESC,
+          CASE WHEN $10='pick_face' AND $11 THEN LOWER(ranked.pick_face_barcode) END ASC,
+          CASE WHEN $10='pick_face' AND NOT $11 THEN LOWER(ranked.pick_face_barcode) END DESC,
+          CASE WHEN $10='projected' AND $11 THEN ranked.projected_free END ASC,
+          CASE WHEN $10='projected' AND NOT $11 THEN ranked.projected_free END DESC,
+          CASE WHEN $10='demand' AND $11 THEN ranked.unallocated_demand END ASC,
+          CASE WHEN $10='demand' AND NOT $11 THEN ranked.unallocated_demand END DESC,
+          CASE WHEN $10='reserve' AND $11 THEN ranked.reserve_free END ASC,
+          CASE WHEN $10='reserve' AND NOT $11 THEN ranked.reserve_free END DESC,
+          CASE WHEN $10='target_gap' AND $11 THEN ranked.target_gap_sort END ASC,
+          CASE WHEN $10='target_gap' AND NOT $11 THEN ranked.target_gap_sort END DESC,
+          CASE WHEN $10='outcome' AND $11 THEN ranked.outcome_sort END ASC,
+          CASE WHEN $10='outcome' AND NOT $11 THEN ranked.outcome_sort END DESC,
+          CASE WHEN $10='active_work' AND $11 THEN ranked.active_work_quantity END ASC,
+          CASE WHEN $10='active_work' AND NOT $11 THEN ranked.active_work_quantity END DESC,
+          CASE WHEN $11 THEN ranked.id END ASC,
+          CASE WHEN NOT $11 THEN ranked.id END DESC
+        OFFSET $12 LIMIT $13
         "#,
     )
     .bind(access.tenant_id.get())
@@ -168,7 +218,9 @@ pub async fn policy_page(
     .bind(filter.inventory_owner_id.map(|id| id.get()))
     .bind(filter.item_id.map(|id| id.get()))
     .bind(filter.pick_face_location_id.map(|id| id.get()))
-    .bind(filter.after_policy_id.map(|id| id.get()))
+    .bind(filter.sort.as_str())
+    .bind(filter.direction.is_ascending())
+    .bind(offset)
     .bind(fetch_limit)
     .fetch_all(&mut *tx)
     .await?;
@@ -213,14 +265,9 @@ pub async fn policy_page(
             latest_plan: latest_plan_from_row(&row)?,
         });
     }
-    let next_after_policy_id = has_more
-        .then(|| items.last().map(|item| item.policy_id))
-        .flatten();
+    let next_offset = has_more.then(|| filter.offset + u64::from(filter.limit));
     tx.commit().await?;
-    Ok(ReplenishmentPolicyPage {
-        items,
-        next_after_policy_id,
-    })
+    Ok(ReplenishmentPolicyPage { items, next_offset })
 }
 
 pub async fn work_page(

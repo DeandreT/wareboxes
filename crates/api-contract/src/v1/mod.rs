@@ -253,11 +253,12 @@ pub use replenishment::{
     ReplenishmentPlannedWorkResponse, ReplenishmentPlanningOutcome,
     ReplenishmentPlanningSnapshotResponse, ReplenishmentPolicyLatestPlanResponse,
     ReplenishmentPolicyPage, ReplenishmentPolicyPageRequest,
-    ReplenishmentPolicyReadinessEntryResponse, ReplenishmentPolicyStatus,
-    ReplenishmentQueueEntryResponse, ReplenishmentQueuePage, ReplenishmentQueuePageRequest,
-    ReplenishmentReserveSourceLocationIds, ReplenishmentWorkCancellationReason,
-    ReplenishmentWorkCancellationResponse, ReplenishmentWorkSort, ReplenishmentWorkSortDirection,
-    ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
+    ReplenishmentPolicyReadinessEntryResponse, ReplenishmentPolicySort,
+    ReplenishmentPolicySortDirection, ReplenishmentPolicyStatus, ReplenishmentQueueEntryResponse,
+    ReplenishmentQueuePage, ReplenishmentQueuePageRequest, ReplenishmentReserveSourceLocationIds,
+    ReplenishmentWorkCancellationReason, ReplenishmentWorkCancellationResponse,
+    ReplenishmentWorkSort, ReplenishmentWorkSortDirection, ReplenishmentWorkStatus,
+    RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
 };
 pub use revision::{Revision, RevisionError, RevisionPrecondition};
 pub use rf_session::{
