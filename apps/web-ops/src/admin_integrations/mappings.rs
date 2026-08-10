@@ -116,7 +116,7 @@ impl MappingDraft {
 }
 
 #[component]
-pub(super) fn IntegrationMappingsWorkspace(on_unauthorized: Callback<()>) -> impl IntoView {
+pub(super) fn IntegrationItemMappingsWorkspace(on_unauthorized: Callback<()>) -> impl IntoView {
     let signals = MappingSignals::new(on_unauthorized);
     let draft = MappingDraft::new();
     load_access(signals);

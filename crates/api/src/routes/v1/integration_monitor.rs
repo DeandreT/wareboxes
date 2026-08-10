@@ -315,6 +315,16 @@ fn map_inbound(value: InboundIntegrationReceiptReadModel) -> InboundIntegrationR
         id: value.id,
         inventory_owner_id: value.inventory_owner_id.map(InventoryOwnerId::get),
         inventory_owner_name: value.inventory_owner_name,
+        external_inventory_owner_key: value
+            .external_inventory_owner_key
+            .map(|key| key.as_str().to_owned()),
+        owner_mapping_id: value.owner_mapping_id.map(|id| id.get()),
+        owner_mapping_revision: value
+            .owner_mapping_revision
+            .map(|revision| wareboxes_api_contract::v1::Revision::new(revision.get()))
+            .transpose()
+            .ok()
+            .flatten(),
         facility_id: value.facility_id.map(FacilityId::get),
         facility_name: value.facility_name,
         received_at: value.received_at.to_rfc3339(),

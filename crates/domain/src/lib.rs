@@ -64,9 +64,12 @@ pub use integration::{
     MAX_INTEGRATION_PROCESSING_ERROR_MESSAGE_LENGTH, MAX_OUTBOX_DEAD_LETTER_DISCARD_REASON_LENGTH,
 };
 pub use integration_mapping::{
-    ExternalItemKey, ExternalItemUom, IntegrationMappedUom, IntegrationMappingError,
-    IntegrationOrderItemMappingDefinition, IntegrationOrderItemMappingRevision,
-    IntegrationOrderItemMappingStatus, IntegrationSourceKey, MAX_EXTERNAL_ITEM_KEY_LENGTH,
+    ExternalInventoryOwnerKey, ExternalItemKey, ExternalItemUom, IntegrationMappedUom,
+    IntegrationMappingError, IntegrationOrderItemMappingDefinition,
+    IntegrationOrderItemMappingRevision, IntegrationOrderItemMappingStatus,
+    IntegrationOrderOwnerMappingDefinition, IntegrationOrderOwnerMappingRevision,
+    IntegrationOrderOwnerMappingStatus, IntegrationSourceKey,
+    MAX_EXTERNAL_INVENTORY_OWNER_KEY_LENGTH, MAX_EXTERNAL_ITEM_KEY_LENGTH,
     MAX_EXTERNAL_ITEM_UOM_LENGTH, MAX_INTEGRATION_SOURCE_KEY_LENGTH,
 };
 pub use inventory_recall::{
@@ -314,6 +317,10 @@ positive_id!(
 positive_id!(
     IntegrationOrderItemMappingId,
     "integration order item mapping ID"
+);
+positive_id!(
+    IntegrationOrderOwnerMappingId,
+    "integration order owner mapping ID"
 );
 positive_id!(PackSessionId, "pack session ID");
 positive_id!(CartonId, "carton ID");

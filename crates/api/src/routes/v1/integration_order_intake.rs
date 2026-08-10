@@ -12,17 +12,16 @@ use wareboxes_api_contract::v1::{
 };
 use wareboxes_application::integration::{
     CorrectIntegrationOrderCommand, IntegrationInboxReceipt, IntegrationOrderEnvelope,
-    IntegrationOrderEnvelopeLine, IntegrationOrderProcessingResult, NewIntegrationInboxReceipt,
+    IntegrationOrderEnvelopeLine, IntegrationOrderProcessingResult,
     ReprocessIntegrationOrderCommand,
 };
 use wareboxes_application::{ApplicationError, CommandContext};
 use wareboxes_domain::{
-    ExternalItemKey, ExternalItemUom, IntegrationInboxCorrectionReason,
+    ExternalInventoryOwnerKey, ExternalItemKey, ExternalItemUom, IntegrationInboxCorrectionReason,
     IntegrationInboxProcessingRevision, IntegrationInboxProcessingStatus, IntegrationSourceKey,
     InventoryOwnerId, OrderKey, OrderLineKey, OrderQuantity, ShippingDestination,
     ShippingRecipient,
 };
-use wareboxes_persistence_postgres::integration_inbox;
 
 use super::error::{V1Error, V1Result};
 use super::orders;
@@ -41,31 +40,35 @@ pub async fn receive_order(
     State(state): State<AppState>,
     user: CurrentTenant,
     idempotency_key: IdempotencyKey,
-    Path((source_key, inventory_owner_id)): Path<(String, i64)>,
+    Path((source_key, external_inventory_owner_key)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
 ) -> V1Result<(StatusCode, Json<IntegrationOrderIntakeResponse>)> {
     user.require_permission(&state.db, PERMISSION).await?;
-    let inventory_owner_id = user.require_inventory_owner(inventory_owner_id)?;
     let source_key = IntegrationSourceKey::new(source_key)
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let external_inventory_owner_key = ExternalInventoryOwnerKey::new(external_inventory_owner_key)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
     let content_type = json_content_type(&headers)?;
     let request_id = current_request_id_or_new();
-    let received = integration_inbox::receive(
+    let received = repo::integration_order_intake::receive_external_order(
         &state.db,
-        &NewIntegrationInboxReceipt {
-            tenant_id: user.tenant.tenant_id,
-            inventory_owner_id: Some(inventory_owner_id),
-            facility_id: None,
-            source_key: source_key.as_str(),
+        &user.tenant,
+        user.tenant.user_id,
+        repo::integration_order_intake::ExternalOrderReceipt {
+            source_key: &source_key,
+            external_inventory_owner_key: &external_inventory_owner_key,
             deduplication_key: idempotency_key.as_str(),
             content_type,
             raw_payload: &body,
-            request_id: Some(&request_id),
+            request_id: &request_id,
         },
     )
-    .await
-    .map_err(AppError::from)?;
+    .await?;
+    let inventory_owner_id = received
+        .receipt
+        .inventory_owner_id
+        .ok_or_else(|| AppError::internal("mapped order receipt has no inventory owner"))?;
     let context = user.command_context(&idempotency_key);
     let input = repo::integration_order_intake::ProcessingInput::retained(&received.receipt)?;
     let result = process_payload(

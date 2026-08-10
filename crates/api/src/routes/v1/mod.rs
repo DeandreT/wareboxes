@@ -115,7 +115,7 @@ pub fn router() -> Router<AppState> {
             get(integration_monitor::download_inbound_payload),
         )
         .route(
-            "/integrations/order-intake/{source_key}/inventory-owners/{inventory_owner_id}/orders",
+            "/integrations/order-intake/{source_key}/inventory-owners/{external_inventory_owner_key}/orders",
             post(integration_order_intake::receive_order),
         )
         .route(
@@ -133,6 +133,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/integration-order-item-mappings/{mapping_id}/retirements",
             post(integration_mappings::retire),
+        )
+        .route(
+            "/integration-order-owner-mappings",
+            get(integration_mappings::list_owners).post(integration_mappings::configure_owner),
+        )
+        .route(
+            "/integration-order-owner-mappings/{mapping_id}/retirements",
+            post(integration_mappings::retire_owner),
         )
         .route(
             "/integration-monitor/outbound",

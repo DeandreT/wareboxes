@@ -88,9 +88,12 @@ pub use inbound_inspection::{
     DisposeInboundInspectionRequest, DisposeInboundInspectionResponse, InboundInspectionOutcome,
 };
 pub use integration_mapping::{
-    ConfigureIntegrationOrderItemMappingRequest, IntegrationOrderItemMappingPage,
-    IntegrationOrderItemMappingPageRequest, IntegrationOrderItemMappingResponse,
-    IntegrationOrderItemMappingStatus, RetireIntegrationOrderItemMappingRequest,
+    ConfigureIntegrationOrderItemMappingRequest, ConfigureIntegrationOrderOwnerMappingRequest,
+    IntegrationOrderItemMappingPage, IntegrationOrderItemMappingPageRequest,
+    IntegrationOrderItemMappingResponse, IntegrationOrderItemMappingStatus,
+    IntegrationOrderOwnerMappingPage, IntegrationOrderOwnerMappingPageRequest,
+    IntegrationOrderOwnerMappingResponse, IntegrationOrderOwnerMappingStatus,
+    RetireIntegrationOrderItemMappingRequest, RetireIntegrationOrderOwnerMappingRequest,
 };
 pub use integration_monitor::{
     DiscardOutboxDeadLetterRequest, DiscardOutboxDeadLetterResponse,

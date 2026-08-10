@@ -2,6 +2,8 @@
 mod correction;
 #[path = "admin_integrations/mappings.rs"]
 mod mappings;
+#[path = "admin_integrations/owner_mappings.rs"]
+mod owner_mappings;
 
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
@@ -17,13 +19,20 @@ use crate::components::{Icon, SearchField, UiIcon};
 use crate::sorting::{SortDirection, SortableHeader};
 use crate::workspace_layout::{PaneControls, SplitPaneHandle, SplitPaneState};
 use correction::CorrectionPanel;
-use mappings::IntegrationMappingsWorkspace;
+use mappings::IntegrationItemMappingsWorkspace;
+use owner_mappings::IntegrationOwnerMappingsWorkspace;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MonitorTab {
     Inbound,
     Outbound,
     Mappings,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MappingTab {
+    Owners,
+    Items,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -187,7 +196,7 @@ pub fn IntegrationsWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                         aria-selected=move || (signals.tab.get() == MonitorTab::Mappings).to_string()
                         class:active=move || signals.tab.get() == MonitorTab::Mappings
                         on:click=move |_| signals.tab.set(MonitorTab::Mappings)
-                    >"Item mappings"</button>
+                    >"Mappings"</button>
                 </div>
                 <Show when=move || signals.tab.get() != MonitorTab::Mappings>
                 <form class="integration-filters" on:submit=apply>
@@ -287,6 +296,26 @@ pub fn IntegrationsWorkbench(on_unauthorized: Callback<()>) -> impl IntoView {
                 }
             >
                 <IntegrationMappingsWorkspace on_unauthorized/>
+            </Show>
+        </section>
+    }
+}
+
+#[component]
+fn IntegrationMappingsWorkspace(on_unauthorized: Callback<()>) -> impl IntoView {
+    let tab = RwSignal::new(MappingTab::Owners);
+    view! {
+        <section class="integration-mappings-shell">
+            <nav class="segmented-control integration-mapping-tabs" role="tablist" aria-label="Order integration mappings">
+                <button type="button" role="tab" aria-selected=move || (tab.get() == MappingTab::Owners).to_string() class:active=move || tab.get() == MappingTab::Owners on:click=move |_| tab.set(MappingTab::Owners)>
+                    "Owner identities"
+                </button>
+                <button type="button" role="tab" aria-selected=move || (tab.get() == MappingTab::Items).to_string() class:active=move || tab.get() == MappingTab::Items on:click=move |_| tab.set(MappingTab::Items)>
+                    "Item identities"
+                </button>
+            </nav>
+            <Show when=move || tab.get() == MappingTab::Owners fallback=move || view! { <IntegrationItemMappingsWorkspace on_unauthorized/> }>
+                <IntegrationOwnerMappingsWorkspace on_unauthorized/>
             </Show>
         </section>
     }
@@ -509,6 +538,7 @@ fn inbound_detail_view(
                 <div><dt>"Content type"</dt><dd>{receipt.content_type}</dd></div>
                 <div><dt>"Payload"</dt><dd>{format_bytes(receipt.payload_bytes)}</dd></div>
                 <div><dt>"Scope"</dt><dd>{scope_label(receipt.inventory_owner_name.as_deref(),receipt.facility_name.as_deref())}</dd></div>
+                {receipt.external_inventory_owner_key.map(|external_key| view! { <div class="wide"><dt>"Partner owner identity"</dt><dd class="mono">{format!("{} · mapping #{} r{}", external_key, receipt.owner_mapping_id.unwrap_or_default(), receipt.owner_mapping_revision.map(|revision| revision.get()).unwrap_or_default())}</dd></div> })}
                 <div class="wide"><dt>"Deduplication key"</dt><dd class="mono">{receipt.deduplication_key}</dd></div>
                 <div class="wide"><dt>"Request ID"</dt><dd class="mono">{receipt.request_id.unwrap_or_else(|| "Not supplied".into())}</dd></div>
                 <div class="wide"><dt>"SHA-256"</dt><dd class="mono wrap-anywhere">{receipt.payload_sha256}</dd></div>

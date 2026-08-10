@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
-    ExternalItemKey, ExternalItemUom, FacilityId, IntegrationInboxCorrectionId,
-    IntegrationInboxCorrectionReason, IntegrationInboxProcessingAttemptId,
-    IntegrationInboxProcessingId, IntegrationInboxProcessingRevision,
-    IntegrationInboxProcessingStatus, InventoryOwnerId, OrderId, OrderKey, OrderLineKey,
-    OrderQuantity, OrderRevision, ShippingDestination, TenantId, Timestamp, UserId,
+    ExternalInventoryOwnerKey, ExternalItemKey, ExternalItemUom, FacilityId,
+    IntegrationInboxCorrectionId, IntegrationInboxCorrectionReason,
+    IntegrationInboxProcessingAttemptId, IntegrationInboxProcessingId,
+    IntegrationInboxProcessingRevision, IntegrationInboxProcessingStatus,
+    IntegrationOrderOwnerMappingId, IntegrationOrderOwnerMappingRevision, InventoryOwnerId,
+    OrderId, OrderKey, OrderLineKey, OrderQuantity, OrderRevision, ShippingDestination, TenantId,
+    Timestamp, UserId,
 };
 
 pub const STANDARD_ORDER_INTAKE_ADAPTER: &str = "wareboxes.fulfillment_order";
@@ -164,10 +166,18 @@ pub struct IntegrationOrderProcessingResult {
     pub processed_at: Option<Timestamp>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationInboxOwnerMappingEvidence {
+    pub external_inventory_owner_key: ExternalInventoryOwnerKey,
+    pub mapping_id: IntegrationOrderOwnerMappingId,
+    pub mapping_revision: IntegrationOrderOwnerMappingRevision,
+}
+
 pub struct NewIntegrationInboxReceipt<'a> {
     pub tenant_id: TenantId,
     pub inventory_owner_id: Option<InventoryOwnerId>,
     pub facility_id: Option<FacilityId>,
+    pub owner_mapping: Option<&'a IntegrationInboxOwnerMappingEvidence>,
     pub source_key: &'a str,
     pub deduplication_key: &'a str,
     pub content_type: &'a str,
@@ -188,6 +198,7 @@ pub struct IntegrationInboxReceipt {
     pub tenant_id: TenantId,
     pub inventory_owner_id: Option<InventoryOwnerId>,
     pub facility_id: Option<FacilityId>,
+    pub owner_mapping: Option<IntegrationInboxOwnerMappingEvidence>,
     pub received_at: Timestamp,
     pub source_key: String,
     pub deduplication_key: String,

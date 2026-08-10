@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::{CatalogItemId, InventoryOwnerId, TenantId};
 
 pub const MAX_INTEGRATION_SOURCE_KEY_LENGTH: usize = 200;
+pub const MAX_EXTERNAL_INVENTORY_OWNER_KEY_LENGTH: usize = 200;
 pub const MAX_EXTERNAL_ITEM_KEY_LENGTH: usize = 200;
 pub const MAX_EXTERNAL_ITEM_UOM_LENGTH: usize = 32;
 
@@ -65,6 +66,11 @@ mapping_text!(
     "external item key"
 );
 mapping_text!(
+    ExternalInventoryOwnerKey,
+    MAX_EXTERNAL_INVENTORY_OWNER_KEY_LENGTH,
+    "external inventory owner key"
+);
+mapping_text!(
     ExternalItemUom,
     MAX_EXTERNAL_ITEM_UOM_LENGTH,
     "external item UOM"
@@ -78,6 +84,13 @@ mapping_text!(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IntegrationOrderItemMappingStatus {
+    Active,
+    Retired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationOrderOwnerMappingStatus {
     Active,
     Retired,
 }
@@ -116,6 +129,40 @@ impl<'de> Deserialize<'de> for IntegrationOrderItemMappingRevision {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct IntegrationOrderOwnerMappingRevision(i64);
+
+impl IntegrationOrderOwnerMappingRevision {
+    pub const fn new(value: i64) -> Result<Self, IntegrationMappingError> {
+        if value > 0 {
+            Ok(Self(value))
+        } else {
+            Err(IntegrationMappingError::InvalidOwnerMappingRevision { value })
+        }
+    }
+
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+
+    pub const fn checked_next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for IntegrationOrderOwnerMappingRevision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(i64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntegrationOrderItemMappingDefinition {
     pub tenant_id: TenantId,
@@ -125,6 +172,14 @@ pub struct IntegrationOrderItemMappingDefinition {
     pub external_uom: ExternalItemUom,
     pub item_id: CatalogItemId,
     pub requested_uom: IntegrationMappedUom,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationOrderOwnerMappingDefinition {
+    pub tenant_id: TenantId,
+    pub source_key: IntegrationSourceKey,
+    pub external_inventory_owner_key: ExternalInventoryOwnerKey,
+    pub inventory_owner_id: InventoryOwnerId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -138,6 +193,8 @@ pub enum IntegrationMappingError {
     },
     #[error("integration order item mapping revision must be positive, got {value}")]
     InvalidRevision { value: i64 },
+    #[error("integration order owner mapping revision must be positive, got {value}")]
+    InvalidOwnerMappingRevision { value: i64 },
 }
 
 #[cfg(test)]
@@ -152,6 +209,8 @@ mod tests {
         assert!(ExternalItemKey::new(" client-sku").is_err());
         assert!(ExternalItemKey::new("client\nsku").is_err());
         assert!(ExternalItemKey::new("x".repeat(MAX_EXTERNAL_ITEM_KEY_LENGTH + 1)).is_err());
+        assert!(ExternalInventoryOwnerKey::new("northstar-retail").is_ok());
+        assert!(ExternalInventoryOwnerKey::new(" northstar").is_err());
     }
 
     #[test]
@@ -159,5 +218,8 @@ mod tests {
         let revision = IntegrationOrderItemMappingRevision::new(1).unwrap();
         assert_eq!(revision.checked_next().unwrap().get(), 2);
         assert!(IntegrationOrderItemMappingRevision::new(0).is_err());
+        let owner_revision = IntegrationOrderOwnerMappingRevision::new(1).unwrap();
+        assert_eq!(owner_revision.checked_next().unwrap().get(), 2);
+        assert!(IntegrationOrderOwnerMappingRevision::new(0).is_err());
     }
 }

@@ -20,12 +20,13 @@ use wareboxes_application::outbox::DeliveryAttemptOutcome;
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    CatalogItemId, FacilityId, IntegrationInboxCorrectionId, IntegrationInboxProcessingAttemptId,
-    IntegrationInboxProcessingId, IntegrationInboxProcessingRevision,
-    IntegrationInboxProcessingStatus, IntegrationOrderItemMappingId,
-    IntegrationOrderItemMappingRevision, InventoryOwnerId, OrderId, OrderRevision,
-    OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason, OutboxDeadLetterReplayId, Timestamp,
-    UserId,
+    CatalogItemId, ExternalInventoryOwnerKey, FacilityId, IntegrationInboxCorrectionId,
+    IntegrationInboxProcessingAttemptId, IntegrationInboxProcessingId,
+    IntegrationInboxProcessingRevision, IntegrationInboxProcessingStatus,
+    IntegrationOrderItemMappingId, IntegrationOrderItemMappingRevision,
+    IntegrationOrderOwnerMappingId, IntegrationOrderOwnerMappingRevision, InventoryOwnerId,
+    OrderId, OrderRevision, OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason,
+    OutboxDeadLetterReplayId, Timestamp, UserId,
 };
 use wareboxes_persistence_postgres::db::bind_tenant_context;
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
@@ -92,6 +93,21 @@ fn map_inbound(row: &PgRow) -> AppResult<InboundIntegrationReceiptReadModel> {
         id: row.try_get("id")?,
         inventory_owner_id: optional_owner(row)?,
         inventory_owner_name: row.try_get("inventory_owner_name")?,
+        external_inventory_owner_key: row
+            .try_get::<Option<String>, _>("external_inventory_owner_key")?
+            .map(ExternalInventoryOwnerKey::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        owner_mapping_id: row
+            .try_get::<Option<i64>, _>("owner_mapping_id")?
+            .map(IntegrationOrderOwnerMappingId::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        owner_mapping_revision: row
+            .try_get::<Option<i64>, _>("owner_mapping_revision")?
+            .map(IntegrationOrderOwnerMappingRevision::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
         facility_id: optional_facility(row)?,
         facility_name: row.try_get("facility_name")?,
         received_at: row.try_get("received_at")?,
@@ -388,6 +404,8 @@ pub async fn inbound_page(
     let sql = format!(
         r#"
         SELECT receipt.id, receipt.inventory_owner_id, owner.name AS inventory_owner_name,
+               receipt.external_inventory_owner_key,receipt.owner_mapping_id,
+               receipt.owner_mapping_revision,
                receipt.facility_id, facility.name AS facility_name, receipt.received_at,
                receipt.source_key, receipt.deduplication_key, receipt.content_type,
                octet_length(receipt.raw_payload)::BIGINT AS payload_bytes,
@@ -593,6 +611,8 @@ pub async fn inbound_detail(
     let row = sqlx::query(
         r#"
         SELECT receipt.id, receipt.inventory_owner_id, owner.name AS inventory_owner_name,
+               receipt.external_inventory_owner_key,receipt.owner_mapping_id,
+               receipt.owner_mapping_revision,
                receipt.facility_id, facility.name AS facility_name, receipt.received_at,
                receipt.source_key, receipt.deduplication_key, receipt.content_type,
                octet_length(receipt.raw_payload)::BIGINT AS payload_bytes,

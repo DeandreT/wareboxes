@@ -17,6 +17,8 @@ use wareboxes_api_contract::v1::{
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
+const EXTERNAL_OWNER_KEY: &str = "NORTHSTAR";
+
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("wareboxes_api=debug")
@@ -204,6 +206,37 @@ async fn configure_mapping(
     tx.commit().await.unwrap();
 }
 
+async fn configure_owner_mapping(
+    fixture: &Fixture,
+    tenant_id: TenantId,
+    user_id: i64,
+    owner_id: i64,
+    source_key: &str,
+    external_owner_key: &str,
+) -> i64 {
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let mapping_id = sqlx::query_scalar(
+        r#"
+        INSERT INTO integration_order_owner_mappings
+            (tenant_id,source_key,external_inventory_owner_key,inventory_owner_id,
+             revision,effective_from,configured_by_user_id,configured_at)
+        SELECT $1,$2,$3,$4,1,clock.moment,$5,clock.moment
+        FROM (SELECT clock_timestamp() AS moment) clock
+        RETURNING id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(source_key)
+    .bind(external_owner_key)
+    .bind(owner_id)
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    mapping_id
+}
+
 #[tokio::test]
 async fn retained_order_envelope_quarantines_recovers_and_replays_exactly() {
     init_tracing();
@@ -216,10 +249,20 @@ async fn retained_order_envelope_quarantines_recovers_and_replays_exactly() {
         .inventory_owner(tenant_id, "Integration Order Client")
         .await;
     let item_id = fixture.item(tenant_id, "Integration Case", "case").await;
+    let owner_mapping_id = configure_owner_mapping(
+        &fixture,
+        tenant_id,
+        user.id,
+        owner_id,
+        "partner-api",
+        EXTERNAL_OWNER_KEY,
+    )
+    .await;
     let token = auth::create_session(&fixture.db, user.id).await.unwrap();
     let app = routes::app(AppState::new(fixture.db.clone()));
-    let intake_uri =
-        format!("/api/v1/integrations/order-intake/partner-api/inventory-owners/{owner_id}/orders");
+    let intake_uri = format!(
+        "/api/v1/integrations/order-intake/partner-api/inventory-owners/{EXTERNAL_OWNER_KEY}/orders"
+    );
     let payload = external_order("INTAKE-100");
 
     let quarantined_response = app
@@ -327,6 +370,55 @@ async fn retained_order_envelope_quarantines_recovers_and_replays_exactly() {
         processed
     );
 
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    sqlx::query(
+        r#"
+        UPDATE integration_order_owner_mappings
+        SET effective_to=GREATEST(clock_timestamp(),effective_from+INTERVAL '1 microsecond'),
+            retired_by_user_id=$3
+        WHERE tenant_id=$1 AND id=$2
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(owner_mapping_id)
+    .bind(user.id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let replay_after_retirement = app
+        .clone()
+        .oneshot(request(
+            &token,
+            tenant_id,
+            Method::POST,
+            &intake_uri,
+            Some("partner-message-100"),
+            &payload,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay_after_retirement.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        response::<IntegrationOrderIntakeResponse>(replay_after_retirement).await,
+        processed
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(request(
+                &token,
+                tenant_id,
+                Method::POST,
+                &intake_uri,
+                Some("partner-message-after-retirement"),
+                &external_order("INTAKE-AFTER-RETIREMENT"),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
     let detail_response = app
         .clone()
         .oneshot(
@@ -344,6 +436,18 @@ async fn retained_order_envelope_quarantines_recovers_and_replays_exactly() {
         .unwrap();
     assert_eq!(detail_response.status(), StatusCode::OK);
     let detail: InboundIntegrationDetailResponse = response(detail_response).await;
+    assert_eq!(
+        detail.receipt.external_inventory_owner_key.as_deref(),
+        Some(EXTERNAL_OWNER_KEY)
+    );
+    assert_eq!(detail.receipt.owner_mapping_id, Some(owner_mapping_id));
+    assert_eq!(
+        detail
+            .receipt
+            .owner_mapping_revision
+            .map(|revision| revision.get()),
+        Some(1)
+    );
     let processing = detail.processing.unwrap();
     assert_eq!(
         processing.status,
@@ -381,8 +485,25 @@ async fn retained_order_envelope_quarantines_recovers_and_replays_exactly() {
     .fetch_one(&mut *tx)
     .await
     .unwrap();
-    tx.rollback().await.unwrap();
     assert_eq!(counts, (1, 1, 2, 1, 1));
+
+    let owner_evidence: (String, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT external_inventory_owner_key,owner_mapping_id,owner_mapping_revision,
+               inventory_owner_id
+        FROM integration_inbox_receipts
+        WHERE id=$1
+        "#,
+    )
+    .bind(processed.receipt_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(
+        owner_evidence,
+        (EXTERNAL_OWNER_KEY.into(), owner_mapping_id, 1, owner_id)
+    );
+    tx.rollback().await.unwrap();
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let evidence: (String, String, i64, i64, String) = sqlx::query_as(
@@ -435,8 +556,18 @@ async fn intake_rejects_key_reuse_and_conceals_scoped_receipts() {
     .unwrap());
     let token = auth::create_session(&fixture.db, user.id).await.unwrap();
     let app = routes::app(AppState::new(fixture.db.clone()));
-    let uri =
-        format!("/api/v1/integrations/order-intake/source-a/inventory-owners/{owner_id}/orders");
+    let uri = format!(
+        "/api/v1/integrations/order-intake/source-a/inventory-owners/{EXTERNAL_OWNER_KEY}/orders"
+    );
+    configure_owner_mapping(
+        &fixture,
+        tenant_id,
+        user.id,
+        owner_id,
+        "source-a",
+        EXTERNAL_OWNER_KEY,
+    )
+    .await;
     configure_mapping(&fixture, tenant_id, user.id, owner_id, item_id, "source-a").await;
     let payload = external_order("INTAKE-SCOPE");
     let first = app
@@ -473,21 +604,29 @@ async fn intake_rejects_key_reuse_and_conceals_scoped_receipts() {
         ErrorReason::Conflict
     );
 
-    let denied_uri = format!(
-        "/api/v1/integrations/order-intake/source-b/inventory-owners/{other_owner_id}/orders"
-    );
+    configure_owner_mapping(
+        &fixture,
+        tenant_id,
+        user.id,
+        other_owner_id,
+        "source-b",
+        "OTHER-CLIENT",
+    )
+    .await;
+    let denied_uri =
+        "/api/v1/integrations/order-intake/source-b/inventory-owners/OTHER-CLIENT/orders";
     let denied = app
         .oneshot(request(
             &token,
             tenant_id,
             Method::POST,
-            &denied_uri,
+            denied_uri,
             Some("denied-message"),
             &external_order("DENIED"),
         ))
         .await
         .unwrap();
-    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    assert_eq!(denied.status(), StatusCode::NOT_FOUND);
 
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
     let attempts: i64 = sqlx::query_scalar(
@@ -516,11 +655,21 @@ async fn processing_ledgers_are_forced_rls_minimally_granted_and_immutable() {
         .item(tenant_id, "Integration Ledger Item", "case")
         .await;
     link_item(&fixture, tenant_id, owner_id, item_id).await;
+    configure_owner_mapping(
+        &fixture,
+        tenant_id,
+        user.id,
+        owner_id,
+        "ledger",
+        EXTERNAL_OWNER_KEY,
+    )
+    .await;
     configure_mapping(&fixture, tenant_id, user.id, owner_id, item_id, "ledger").await;
     let token = auth::create_session(&fixture.db, user.id).await.unwrap();
     let app = routes::app(AppState::new(fixture.db.clone()));
-    let uri =
-        format!("/api/v1/integrations/order-intake/ledger/inventory-owners/{owner_id}/orders");
+    let uri = format!(
+        "/api/v1/integrations/order-intake/ledger/inventory-owners/{EXTERNAL_OWNER_KEY}/orders"
+    );
     let quarantined: IntegrationOrderIntakeResponse = success(
         app.oneshot(request(
             &token,
@@ -539,8 +688,9 @@ async fn processing_ledgers_are_forced_rls_minimally_granted_and_immutable() {
         quarantined.status,
         IntegrationOrderProcessingStatus::Quarantined
     );
-    let mapped_uri =
-        format!("/api/v1/integrations/order-intake/ledger/inventory-owners/{owner_id}/orders");
+    let mapped_uri = format!(
+        "/api/v1/integrations/order-intake/ledger/inventory-owners/{EXTERNAL_OWNER_KEY}/orders"
+    );
     let mapped: IntegrationOrderIntakeResponse = success(
         routes::app(AppState::new(fixture.db.clone()))
             .oneshot(request(
@@ -696,10 +846,20 @@ async fn corrected_envelope_is_immutable_replayable_and_drives_later_reprocessin
     let item_id = fixture
         .item(tenant_id, "Integration Correction Item", "case")
         .await;
+    configure_owner_mapping(
+        &fixture,
+        tenant_id,
+        user.id,
+        owner_id,
+        "correction",
+        EXTERNAL_OWNER_KEY,
+    )
+    .await;
     let token = auth::create_session(&fixture.db, user.id).await.unwrap();
     let app = routes::app(AppState::new(fixture.db.clone()));
-    let intake_uri =
-        format!("/api/v1/integrations/order-intake/correction/inventory-owners/{owner_id}/orders");
+    let intake_uri = format!(
+        "/api/v1/integrations/order-intake/correction/inventory-owners/{EXTERNAL_OWNER_KEY}/orders"
+    );
     let initial: IntegrationOrderIntakeResponse = success(
         app.clone()
             .oneshot(request(
@@ -938,10 +1098,20 @@ async fn concurrent_reprocess_with_stale_revision_has_one_winner() {
     let item_id = fixture
         .item(tenant_id, "Integration Race Item", "case")
         .await;
+    configure_owner_mapping(
+        &fixture,
+        tenant_id,
+        user.id,
+        owner_id,
+        "race",
+        EXTERNAL_OWNER_KEY,
+    )
+    .await;
     let token = auth::create_session(&fixture.db, user.id).await.unwrap();
     let app = routes::app(AppState::new(fixture.db.clone()));
-    let intake_uri =
-        format!("/api/v1/integrations/order-intake/race/inventory-owners/{owner_id}/orders");
+    let intake_uri = format!(
+        "/api/v1/integrations/order-intake/race/inventory-owners/{EXTERNAL_OWNER_KEY}/orders"
+    );
     let payload = external_order("INTAKE-RACE");
     let quarantined: IntegrationOrderIntakeResponse = success(
         app.clone()

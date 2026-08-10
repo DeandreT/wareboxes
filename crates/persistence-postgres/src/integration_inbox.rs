@@ -3,10 +3,13 @@
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use wareboxes_application::integration::{
-    IntegrationInboxReadScope, IntegrationInboxReceipt, NewIntegrationInboxReceipt,
-    ReceiveIntegrationInboxResult,
+    IntegrationInboxOwnerMappingEvidence, IntegrationInboxReadScope, IntegrationInboxReceipt,
+    NewIntegrationInboxReceipt, ReceiveIntegrationInboxResult,
 };
-use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId};
+use wareboxes_domain::{
+    ExternalInventoryOwnerKey, FacilityId, IntegrationOrderOwnerMappingId,
+    IntegrationOrderOwnerMappingRevision, InventoryOwnerId, TenantId,
+};
 
 use crate::db::{bind_tenant_context, Db};
 use crate::{PersistenceError, PersistenceResult};
@@ -45,6 +48,30 @@ fn map_optional_facility(row: &sqlx::postgres::PgRow) -> PersistenceResult<Optio
         .map_err(|error| PersistenceError::invalid_data(error.to_string()))
 }
 
+fn map_owner_mapping(
+    row: &sqlx::postgres::PgRow,
+) -> PersistenceResult<Option<IntegrationInboxOwnerMappingEvidence>> {
+    let external_key: Option<String> = row.try_get("external_inventory_owner_key")?;
+    let mapping_id: Option<i64> = row.try_get("owner_mapping_id")?;
+    let mapping_revision: Option<i64> = row.try_get("owner_mapping_revision")?;
+    match (external_key, mapping_id, mapping_revision) {
+        (None, None, None) => Ok(None),
+        (Some(external_key), Some(mapping_id), Some(mapping_revision)) => {
+            Ok(Some(IntegrationInboxOwnerMappingEvidence {
+                external_inventory_owner_key: ExternalInventoryOwnerKey::new(external_key)
+                    .map_err(|error| PersistenceError::invalid_data(error.to_string()))?,
+                mapping_id: IntegrationOrderOwnerMappingId::new(mapping_id)
+                    .map_err(|error| PersistenceError::invalid_data(error.to_string()))?,
+                mapping_revision: IntegrationOrderOwnerMappingRevision::new(mapping_revision)
+                    .map_err(|error| PersistenceError::invalid_data(error.to_string()))?,
+            }))
+        }
+        _ => Err(PersistenceError::invalid_data(
+            "integration inbox owner mapping evidence is incomplete",
+        )),
+    }
+}
+
 fn map_receipt(row: &sqlx::postgres::PgRow) -> PersistenceResult<IntegrationInboxReceipt> {
     Ok(IntegrationInboxReceipt {
         id: row.try_get("id")?,
@@ -52,6 +79,7 @@ fn map_receipt(row: &sqlx::postgres::PgRow) -> PersistenceResult<IntegrationInbo
             .map_err(|error| PersistenceError::invalid_data(error.to_string()))?,
         inventory_owner_id: map_optional_owner(row)?,
         facility_id: map_optional_facility(row)?,
+        owner_mapping: map_owner_mapping(row)?,
         received_at: row.try_get("received_at")?,
         source_key: row.try_get("source_key")?,
         deduplication_key: row.try_get("deduplication_key")?,
@@ -63,13 +91,15 @@ fn map_receipt(row: &sqlx::postgres::PgRow) -> PersistenceResult<IntegrationInbo
 }
 
 const RECEIPT_COLUMNS: &str = r#"
-    id, tenant_id, inventory_owner_id, facility_id, received_at, source_key,
+    id, tenant_id, inventory_owner_id, facility_id, external_inventory_owner_key,
+    owner_mapping_id, owner_mapping_revision, received_at, source_key,
     deduplication_key, content_type, raw_payload, payload_sha256, request_id
 "#;
 
 fn same_envelope(
     inventory_owner_id: Option<InventoryOwnerId>,
     facility_id: Option<FacilityId>,
+    owner_mapping: Option<IntegrationInboxOwnerMappingEvidence>,
     content_type: &str,
     existing_payload_sha256: &[u8],
     candidate: &NewIntegrationInboxReceipt<'_>,
@@ -77,12 +107,24 @@ fn same_envelope(
 ) -> bool {
     inventory_owner_id == candidate.inventory_owner_id
         && facility_id == candidate.facility_id
+        && owner_mapping.as_ref() == candidate.owner_mapping
         && content_type == candidate.content_type
         && existing_payload_sha256 == payload_sha256
 }
 
 pub async fn receive(
     db: &Db,
+    receipt: &NewIntegrationInboxReceipt<'_>,
+) -> PersistenceResult<ReceiveIntegrationInboxResult> {
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, receipt.tenant_id).await?;
+    let result = receive_tx(&mut tx, receipt).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub async fn receive_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     receipt: &NewIntegrationInboxReceipt<'_>,
 ) -> PersistenceResult<ReceiveIntegrationInboxResult> {
     validate_key(
@@ -114,20 +156,19 @@ pub async fn receive(
     }
 
     let payload_sha256 = Sha256::digest(receipt.raw_payload).to_vec();
-    let mut tx = db.begin().await?;
-    bind_tenant_context(&mut tx, receipt.tenant_id).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
             "integration-inbox:{}:{}:{}",
             receipt.tenant_id, receipt.source_key, receipt.deduplication_key
         ))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     let existing_key = sqlx::query(
         r#"
-        SELECT receipt_id, inventory_owner_id, facility_id, content_type,
-               payload_sha256
+        SELECT receipt_id,inventory_owner_id,facility_id,
+               external_inventory_owner_key,owner_mapping_id,owner_mapping_revision,
+               content_type,payload_sha256
         FROM integration_inbox_keys
         WHERE tenant_id = $1
           AND source_key = $2
@@ -137,16 +178,18 @@ pub async fn receive(
     .bind(receipt.tenant_id.get())
     .bind(receipt.source_key)
     .bind(receipt.deduplication_key)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
     if let Some(key) = existing_key {
         let inventory_owner_id = map_optional_owner(&key)?;
         let facility_id = map_optional_facility(&key)?;
+        let owner_mapping = map_owner_mapping(&key)?;
         let content_type: String = key.try_get("content_type")?;
         let existing_payload_sha256: Vec<u8> = key.try_get("payload_sha256")?;
         if !same_envelope(
             inventory_owner_id,
             facility_id,
+            owner_mapping,
             &content_type,
             &existing_payload_sha256,
             receipt,
@@ -157,7 +200,7 @@ pub async fn receive(
             ));
         }
         let receipt_id: i64 = key.try_get("receipt_id")?;
-        let existing = get_in_transaction(&mut tx, receipt.tenant_id, receipt_id)
+        let existing = get_in_transaction(tx, receipt.tenant_id, receipt_id)
             .await?
             .ok_or_else(|| {
                 PersistenceError::conflict(
@@ -169,7 +212,6 @@ pub async fn receive(
                 "integration deduplication key payload hash collision detected",
             ));
         }
-        tx.commit().await?;
         return Ok(ReceiveIntegrationInboxResult {
             receipt: existing,
             replayed: true,
@@ -179,10 +221,10 @@ pub async fn receive(
     let insert_sql = format!(
         r#"
         INSERT INTO integration_inbox_receipts
-            (tenant_id, inventory_owner_id, facility_id, received_at, source_key,
-             deduplication_key, content_type, raw_payload, payload_sha256,
-             request_id)
-        VALUES ($1, $2, $3, clock_timestamp(), $4, $5, $6, $7, $8, $9)
+            (tenant_id,inventory_owner_id,facility_id,external_inventory_owner_key,
+             owner_mapping_id,owner_mapping_revision,received_at,source_key,
+             deduplication_key,content_type,raw_payload,payload_sha256,request_id)
+        VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp(),$7,$8,$9,$10,$11,$12)
         RETURNING {RECEIPT_COLUMNS}
         "#
     );
@@ -190,13 +232,28 @@ pub async fn receive(
         .bind(receipt.tenant_id.get())
         .bind(receipt.inventory_owner_id.map(InventoryOwnerId::get))
         .bind(receipt.facility_id.map(FacilityId::get))
+        .bind(
+            receipt
+                .owner_mapping
+                .map(|evidence| evidence.external_inventory_owner_key.as_str()),
+        )
+        .bind(
+            receipt
+                .owner_mapping
+                .map(|evidence| evidence.mapping_id.get()),
+        )
+        .bind(
+            receipt
+                .owner_mapping
+                .map(|evidence| evidence.mapping_revision.get()),
+        )
         .bind(receipt.source_key)
         .bind(receipt.deduplication_key)
         .bind(receipt.content_type)
         .bind(receipt.raw_payload)
         .bind(&payload_sha256)
         .bind(receipt.request_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     let stored = map_receipt(&row)?;
 
@@ -204,8 +261,9 @@ pub async fn receive(
         r#"
         INSERT INTO integration_inbox_keys
             (tenant_id, source_key, deduplication_key, created_at, receipt_id,
-             inventory_owner_id, facility_id, content_type, payload_sha256)
-        VALUES ($1, $2, $3, clock_timestamp(), $4, $5, $6, $7, $8)
+             inventory_owner_id,facility_id,external_inventory_owner_key,
+             owner_mapping_id,owner_mapping_revision,content_type,payload_sha256)
+        VALUES ($1,$2,$3,clock_timestamp(),$4,$5,$6,$7,$8,$9,$10,$11)
         "#,
     )
     .bind(receipt.tenant_id.get())
@@ -214,12 +272,26 @@ pub async fn receive(
     .bind(stored.id)
     .bind(receipt.inventory_owner_id.map(InventoryOwnerId::get))
     .bind(receipt.facility_id.map(FacilityId::get))
+    .bind(
+        receipt
+            .owner_mapping
+            .map(|evidence| evidence.external_inventory_owner_key.as_str()),
+    )
+    .bind(
+        receipt
+            .owner_mapping
+            .map(|evidence| evidence.mapping_id.get()),
+    )
+    .bind(
+        receipt
+            .owner_mapping
+            .map(|evidence| evidence.mapping_revision.get()),
+    )
     .bind(receipt.content_type)
     .bind(&payload_sha256)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
-    tx.commit().await?;
     Ok(ReceiveIntegrationInboxResult {
         receipt: stored,
         replayed: false,

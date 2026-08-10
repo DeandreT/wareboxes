@@ -9,9 +9,11 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{repo, routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    ConfigureIntegrationOrderItemMappingRequest, IntegrationOrderItemMappingPage,
-    IntegrationOrderItemMappingResponse, IntegrationOrderItemMappingStatus,
-    RetireIntegrationOrderItemMappingRequest, Revision,
+    ConfigureIntegrationOrderItemMappingRequest, ConfigureIntegrationOrderOwnerMappingRequest,
+    IntegrationOrderItemMappingPage, IntegrationOrderItemMappingResponse,
+    IntegrationOrderItemMappingStatus, IntegrationOrderOwnerMappingPage,
+    IntegrationOrderOwnerMappingResponse, IntegrationOrderOwnerMappingStatus,
+    RetireIntegrationOrderItemMappingRequest, RetireIntegrationOrderOwnerMappingRequest, Revision,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
@@ -116,6 +118,7 @@ struct Rig {
     token: String,
     app: axum::Router,
     owner_id: i64,
+    replacement_owner_id: i64,
     item_id: i64,
     replacement_item_id: i64,
 }
@@ -128,6 +131,9 @@ impl Rig {
         grant_admin(&fixture, tenant_id, user.id).await;
         let owner_id = fixture
             .inventory_owner(tenant_id, "Mapped Retail Client")
+            .await;
+        let replacement_owner_id = fixture
+            .inventory_owner(tenant_id, "Replacement Retail Client")
             .await;
         let item_id = fixture.item(tenant_id, "Mapped Case A", "case").await;
         let replacement_item_id = fixture.item(tenant_id, "Mapped Case B", "case").await;
@@ -144,6 +150,7 @@ impl Rig {
             token,
             app,
             owner_id,
+            replacement_owner_id,
             item_id,
             replacement_item_id,
         }
@@ -184,6 +191,207 @@ impl Rig {
             .await
             .unwrap()
     }
+
+    fn configure_owner_body(
+        &self,
+        external_owner_key: &str,
+        owner_id: i64,
+        expected_revision: Option<i64>,
+    ) -> ConfigureIntegrationOrderOwnerMappingRequest {
+        ConfigureIntegrationOrderOwnerMappingRequest {
+            source_key: "retail-edi".into(),
+            external_inventory_owner_key: external_owner_key.into(),
+            inventory_owner_id: owner_id,
+            expected_revision: expected_revision.map(|value| Revision::new(value).unwrap()),
+        }
+    }
+
+    async fn configure_owner(
+        &self,
+        key: &str,
+        body: &ConfigureIntegrationOrderOwnerMappingRequest,
+    ) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(request(
+                &self.token,
+                self.tenant_id,
+                Method::POST,
+                "/api/v1/integration-order-owner-mappings",
+                Some(key),
+                Some(body),
+            ))
+            .await
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn owner_mapping_versions_page_retire_reenable_and_conceal_replay() {
+    let rig = Rig::new().await;
+    let initial_body = rig.configure_owner_body("CLIENT-A", rig.owner_id, None);
+    let initial: IntegrationOrderOwnerMappingResponse = json_response(
+        rig.configure_owner("owner-mapping-initial", &initial_body)
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(initial.revision.get(), 1);
+    assert_eq!(initial.status, IntegrationOrderOwnerMappingStatus::Active);
+    assert_eq!(initial.inventory_owner_id, rig.owner_id);
+
+    let replay: IntegrationOrderOwnerMappingResponse = json_response(
+        rig.configure_owner("owner-mapping-initial", &initial_body)
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(replay, initial);
+    let changed = rig.configure_owner_body("CLIENT-A", rig.replacement_owner_id, None);
+    assert_eq!(
+        rig.configure_owner("owner-mapping-initial", &changed)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+
+    let replacement_body = rig.configure_owner_body("CLIENT-A", rig.replacement_owner_id, Some(1));
+    let replacement: IntegrationOrderOwnerMappingResponse = json_response(
+        rig.configure_owner("owner-mapping-replacement", &replacement_body)
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(replacement.revision.get(), 2);
+    assert_eq!(replacement.inventory_owner_id, rig.replacement_owner_id);
+
+    let second_body = rig.configure_owner_body("CLIENT-B", rig.owner_id, None);
+    let second: IntegrationOrderOwnerMappingResponse = json_response(
+        rig.configure_owner("owner-mapping-second", &second_body)
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    let first_page: IntegrationOrderOwnerMappingPage = json_response(
+        rig.app
+            .clone()
+            .oneshot(request::<serde_json::Value>(
+                &rig.token,
+                rig.tenant_id,
+                Method::GET,
+                "/api/v1/integration-order-owner-mappings?source_key=retail-edi&limit=1",
+                None,
+                None,
+            ))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(first_page.items.len(), 1);
+    let cursor = first_page.next_cursor.unwrap();
+    let second_page: IntegrationOrderOwnerMappingPage = json_response(
+        rig.app
+            .clone()
+            .oneshot(request::<serde_json::Value>(
+                &rig.token,
+                rig.tenant_id,
+                Method::GET,
+                &format!(
+                    "/api/v1/integration-order-owner-mappings?source_key=retail-edi&limit=1&cursor={}",
+                    cursor.as_str()
+                ),
+                None,
+                None,
+            ))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(second_page.items, vec![second]);
+    assert_eq!(
+        rig.app
+            .clone()
+            .oneshot(request::<serde_json::Value>(
+                &rig.token,
+                rig.tenant_id,
+                Method::GET,
+                &format!(
+                    "/api/v1/integration-order-owner-mappings?source_key=changed&limit=1&cursor={}",
+                    cursor.as_str()
+                ),
+                None,
+                None,
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    let retired: IntegrationOrderOwnerMappingResponse = json_response(
+        rig.app
+            .clone()
+            .oneshot(request(
+                &rig.token,
+                rig.tenant_id,
+                Method::POST,
+                &format!(
+                    "/api/v1/integration-order-owner-mappings/{}/retirements",
+                    replacement.mapping_id
+                ),
+                Some("owner-mapping-retire"),
+                Some(&RetireIntegrationOrderOwnerMappingRequest {
+                    expected_revision: Revision::new(2).unwrap(),
+                }),
+            ))
+            .await
+            .unwrap(),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(retired.status, IntegrationOrderOwnerMappingStatus::Retired);
+    let reenabled: IntegrationOrderOwnerMappingResponse = json_response(
+        rig.configure_owner("owner-mapping-reenable", &changed)
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(reenabled.revision.get(), 3);
+
+    assert!(repo::tenants::update_user_access_scope(
+        &rig.fixture.db,
+        rig.tenant_id,
+        &UpdateUserAccessScope {
+            user_id: rig.user_id,
+            all_inventory_owners: false,
+            all_facilities: true,
+            inventory_owner_ids: vec![],
+            facility_ids: vec![],
+        },
+    )
+    .await
+    .unwrap());
+    let refreshed_token = wareboxes_api::auth::create_session(&rig.fixture.db, rig.user_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        rig.app
+            .clone()
+            .oneshot(request(
+                &refreshed_token,
+                rig.tenant_id,
+                Method::POST,
+                "/api/v1/integration-order-owner-mappings",
+                Some("owner-mapping-initial"),
+                Some(&initial_body),
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -439,35 +647,57 @@ async fn mapping_ledger_is_forced_rls_minimally_granted_and_immutable() {
     let body = rig.configure_body("LEDGER-SKU", rig.item_id, None);
     let mapped: IntegrationOrderItemMappingResponse =
         json_response(rig.configure("mapping-ledger", &body).await, StatusCode::OK).await;
+    let owner_body = rig.configure_owner_body("LEDGER-OWNER", rig.owner_id, None);
+    let mapped_owner: IntegrationOrderOwnerMappingResponse = json_response(
+        rig.configure_owner("owner-mapping-ledger", &owner_body)
+            .await,
+        StatusCode::OK,
+    )
+    .await;
     let admin = admin_db_for(&rig.fixture.db).await;
-    let rls: (bool, bool) = sqlx::query_as(
-        "SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid='integration_order_item_mappings'::regclass",
-    )
-    .fetch_one(&admin)
-    .await
-    .unwrap();
-    assert_eq!(rls, (true, true));
-    let policy: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pg_policies WHERE tablename='integration_order_item_mappings' AND policyname='integration_order_item_mappings_tenant_isolation')",
-    )
-    .fetch_one(&admin)
-    .await
-    .unwrap();
-    assert!(policy);
-    let grants: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
-        r#"
-        SELECT has_table_privilege('wareboxes_app','integration_order_item_mappings','SELECT'),
-               has_table_privilege('wareboxes_app','integration_order_item_mappings','INSERT'),
-               has_table_privilege('wareboxes_app','integration_order_item_mappings','UPDATE'),
-               has_column_privilege('wareboxes_app','integration_order_item_mappings','effective_to','UPDATE'),
-               has_table_privilege('wareboxes_app','integration_order_item_mappings','DELETE'),
-               has_sequence_privilege('wareboxes_app','integration_order_item_mappings_id_seq','USAGE')
-        "#,
-    )
-    .fetch_one(&admin)
-    .await
-    .unwrap();
-    assert_eq!(grants, (true, true, false, true, false, true));
+    for (table, sequence) in [
+        (
+            "integration_order_item_mappings",
+            "integration_order_item_mappings_id_seq",
+        ),
+        (
+            "integration_order_owner_mappings",
+            "integration_order_owner_mappings_id_seq",
+        ),
+    ] {
+        let rls: (bool, bool) = sqlx::query_as(
+            "SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid=$1::regclass",
+        )
+        .bind(table)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert_eq!(rls, (true, true));
+        let policy: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_policies WHERE tablename=$1 AND policyname=$1 || '_tenant_isolation')",
+        )
+        .bind(table)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert!(policy);
+        let grants: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+            r#"
+            SELECT has_table_privilege('wareboxes_app',$1,'SELECT'),
+                   has_table_privilege('wareboxes_app',$1,'INSERT'),
+                   has_table_privilege('wareboxes_app',$1,'UPDATE'),
+                   has_column_privilege('wareboxes_app',$1,'effective_to','UPDATE'),
+                   has_table_privilege('wareboxes_app',$1,'DELETE'),
+                   has_sequence_privilege('wareboxes_app',$2,'USAGE')
+            "#,
+        )
+        .bind(table)
+        .bind(sequence)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+        assert_eq!(grants, (true, true, false, true, false, true));
+    }
 
     let mutation = sqlx::query(
         "UPDATE integration_order_item_mappings SET external_item_key='FORGED' WHERE id=$1",
@@ -481,14 +711,23 @@ async fn mapping_ledger_is_forced_rls_minimally_granted_and_immutable() {
         .execute(&admin)
         .await;
     assert!(deletion.is_err());
+    let owner_mutation = sqlx::query(
+        "UPDATE integration_order_owner_mappings SET external_inventory_owner_key='FORGED' WHERE id=$1",
+    )
+    .bind(mapped_owner.mapping_id)
+    .execute(&admin)
+    .await;
+    assert!(owner_mutation.is_err());
 
     let other = rig.fixture.user("mapping-other-tenant@test.local").await;
     let other_tenant = tenant_for_user(&rig.fixture.db, other.id).await;
     let mut other_tx = tenant_tx(&rig.fixture.db, other_tenant).await;
-    let visible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM integration_order_item_mappings")
-        .fetch_one(&mut *other_tx)
-        .await
-        .unwrap();
-    assert_eq!(visible, 0);
+    let visible: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM integration_order_item_mappings),(SELECT COUNT(*) FROM integration_order_owner_mappings)",
+    )
+    .fetch_one(&mut *other_tx)
+    .await
+    .unwrap();
+    assert_eq!(visible, (0, 0));
     other_tx.commit().await.unwrap();
 }

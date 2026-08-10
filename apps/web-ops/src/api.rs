@@ -57,8 +57,10 @@ pub use integration_monitor::{
 };
 mod integration_mapping;
 pub use integration_mapping::{
-    configure_integration_order_item_mapping, integration_order_item_mappings,
-    retire_integration_order_item_mapping, IntegrationMappingFilters,
+    configure_integration_order_item_mapping, configure_integration_order_owner_mapping,
+    integration_order_item_mappings, integration_order_owner_mappings,
+    retire_integration_order_item_mapping, retire_integration_order_owner_mapping,
+    IntegrationMappingFilters, IntegrationOwnerMappingFilters,
 };
 mod inventory_integrity;
 pub use inventory_integrity::{

@@ -500,6 +500,24 @@
   grid-template-rows: auto auto auto minmax(0, 1fr);
 }
 
+.integration-mappings-shell {
+  display: grid;
+  min-width: 0;
+  min-height: 480px;
+  height: calc(100vh - 205px);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.integration-mapping-tabs {
+  width: max-content;
+  margin: 4px 6px 0;
+}
+
+.integration-mappings-shell .integration-mapping-workspace {
+  min-height: 0;
+  height: auto;
+}
+
 .integration-mapping-toolbar {
   display: flex;
   min-width: 0;
@@ -564,6 +582,14 @@
 
 .integration-mapping-table {
   min-width: 840px;
+}
+
+.owner-mapping-table {
+  min-width: 680px;
+}
+
+.owner-mapping-editor fieldset .wide {
+  grid-column: 1 / -1;
 }
 
 .integration-mapping-detail {

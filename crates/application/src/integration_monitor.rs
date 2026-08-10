@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wareboxes_domain::{
-    CatalogItemId, FacilityId, IntegrationInboxCorrectionId, IntegrationInboxProcessingAttemptId,
-    IntegrationInboxProcessingId, IntegrationInboxProcessingRevision,
-    IntegrationInboxProcessingStatus, IntegrationOrderItemMappingId,
-    IntegrationOrderItemMappingRevision, InventoryOwnerId, OrderId, OrderRevision,
-    OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason, OutboxDeadLetterReplayId, Timestamp,
-    UserId,
+    CatalogItemId, ExternalInventoryOwnerKey, FacilityId, IntegrationInboxCorrectionId,
+    IntegrationInboxProcessingAttemptId, IntegrationInboxProcessingId,
+    IntegrationInboxProcessingRevision, IntegrationInboxProcessingStatus,
+    IntegrationOrderItemMappingId, IntegrationOrderItemMappingRevision,
+    IntegrationOrderOwnerMappingId, IntegrationOrderOwnerMappingRevision, InventoryOwnerId,
+    OrderId, OrderRevision, OutboxDeadLetterDiscardId, OutboxDeadLetterDiscardReason,
+    OutboxDeadLetterReplayId, Timestamp, UserId,
 };
 
 use crate::outbox::DeliveryAttemptOutcome;
@@ -191,6 +192,9 @@ pub struct InboundIntegrationReceiptReadModel {
     pub id: i64,
     pub inventory_owner_id: Option<InventoryOwnerId>,
     pub inventory_owner_name: Option<String>,
+    pub external_inventory_owner_key: Option<ExternalInventoryOwnerKey>,
+    pub owner_mapping_id: Option<IntegrationOrderOwnerMappingId>,
+    pub owner_mapping_revision: Option<IntegrationOrderOwnerMappingRevision>,
     pub facility_id: Option<FacilityId>,
     pub facility_name: Option<String>,
     pub received_at: Timestamp,

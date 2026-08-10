@@ -1,8 +1,10 @@
 //! Durable standard-order inbox processing and quarantine evidence.
 
 mod correction;
+mod receipt;
 
 pub(crate) use correction::{correct, quarantine_correction, CorrectionInput};
+pub(crate) use receipt::{receive_external_order, ExternalOrderReceipt};
 
 use sqlx::postgres::PgRow;
 use sqlx::{Acquire, Row};
@@ -978,6 +980,8 @@ pub(crate) async fn receipt_for_reprocessing(
                receipt.facility_id,receipt.received_at,receipt.source_key,
                receipt.deduplication_key,receipt.content_type,receipt.raw_payload,
                receipt.payload_sha256,receipt.request_id,
+               receipt.external_inventory_owner_key,receipt.owner_mapping_id,
+               receipt.owner_mapping_revision,
                COALESCE(correction.corrected_payload,receipt.raw_payload) AS input_payload,
                COALESCE(correction.payload_sha256,receipt.payload_sha256) AS input_payload_sha256,
                processing.last_correction_id
@@ -1011,6 +1015,34 @@ pub(crate) async fn receipt_for_reprocessing(
                     .transpose()
                     .map_err(|error| AppError::internal(error.to_string()))?,
                 facility_id: None,
+                owner_mapping: match (
+                    row.try_get::<Option<String>, _>("external_inventory_owner_key")?,
+                    row.try_get::<Option<i64>, _>("owner_mapping_id")?,
+                    row.try_get::<Option<i64>, _>("owner_mapping_revision")?,
+                ) {
+                    (None, None, None) => None,
+                    (Some(external_key), Some(mapping_id), Some(mapping_revision)) => Some(
+                        wareboxes_application::integration::IntegrationInboxOwnerMappingEvidence {
+                            external_inventory_owner_key:
+                                wareboxes_domain::ExternalInventoryOwnerKey::new(external_key)
+                                    .map_err(|error| AppError::internal(error.to_string()))?,
+                            mapping_id: wareboxes_domain::IntegrationOrderOwnerMappingId::new(
+                                mapping_id,
+                            )
+                            .map_err(|error| AppError::internal(error.to_string()))?,
+                            mapping_revision:
+                                wareboxes_domain::IntegrationOrderOwnerMappingRevision::new(
+                                    mapping_revision,
+                                )
+                                .map_err(|error| AppError::internal(error.to_string()))?,
+                        },
+                    ),
+                    _ => {
+                        return Err(AppError::internal(
+                            "integration inbox owner mapping evidence is incomplete",
+                        ));
+                    }
+                },
                 received_at: row.try_get("received_at")?,
                 source_key: row.try_get("source_key")?,
                 deduplication_key: row.try_get("deduplication_key")?,

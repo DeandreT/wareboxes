@@ -8362,6 +8362,11 @@ BEGIN
           AND receipt.inventory_owner_id
                 IS NOT DISTINCT FROM NEW.inventory_owner_id
           AND receipt.facility_id IS NOT DISTINCT FROM NEW.facility_id
+          AND receipt.external_inventory_owner_key
+                IS NOT DISTINCT FROM NEW.external_inventory_owner_key
+          AND receipt.owner_mapping_id IS NOT DISTINCT FROM NEW.owner_mapping_id
+          AND receipt.owner_mapping_revision
+                IS NOT DISTINCT FROM NEW.owner_mapping_revision
           AND receipt.content_type = NEW.content_type
           AND receipt.payload_sha256 = NEW.payload_sha256
     ) THEN
@@ -10783,13 +10788,25 @@ CREATE TABLE public.integration_inbox_keys (
     receipt_id bigint NOT NULL,
     inventory_owner_id bigint,
     facility_id bigint,
+    external_inventory_owner_key text,
+    owner_mapping_id bigint,
+    owner_mapping_revision bigint,
     content_type text NOT NULL,
     payload_sha256 bytea NOT NULL,
     CONSTRAINT integration_inbox_keys_content_type_check CHECK (((content_type = btrim(content_type)) AND ((char_length(content_type) >= 1) AND (char_length(content_type) <= 255)))),
     CONSTRAINT integration_inbox_keys_deduplication_key_check CHECK (((deduplication_key = btrim(deduplication_key)) AND ((char_length(deduplication_key) >= 1) AND (char_length(deduplication_key) <= 500)))),
     CONSTRAINT integration_inbox_keys_payload_sha256_check CHECK ((octet_length(payload_sha256) = 32)),
     CONSTRAINT integration_inbox_keys_receipt_id_check CHECK ((receipt_id > 0)),
-    CONSTRAINT integration_inbox_keys_source_key_check CHECK (((source_key = btrim(source_key)) AND ((char_length(source_key) >= 1) AND (char_length(source_key) <= 200))))
+    CONSTRAINT integration_inbox_keys_source_key_check CHECK (((source_key = btrim(source_key)) AND ((char_length(source_key) >= 1) AND (char_length(source_key) <= 200)))),
+    CONSTRAINT integration_inbox_keys_owner_mapping_check CHECK (
+        (external_inventory_owner_key IS NULL AND owner_mapping_id IS NULL
+            AND owner_mapping_revision IS NULL)
+        OR (inventory_owner_id IS NOT NULL AND external_inventory_owner_key IS NOT NULL
+            AND external_inventory_owner_key=btrim(external_inventory_owner_key)
+            AND external_inventory_owner_key<>''
+            AND char_length(external_inventory_owner_key)<=200
+            AND external_inventory_owner_key!~'[[:cntrl:]]'
+            AND owner_mapping_id>0 AND owner_mapping_revision>0))
 );
 
 ALTER TABLE ONLY public.integration_inbox_keys FORCE ROW LEVEL SECURITY;
@@ -10804,6 +10821,9 @@ CREATE TABLE public.integration_inbox_receipts (
     tenant_id bigint NOT NULL,
     inventory_owner_id bigint,
     facility_id bigint,
+    external_inventory_owner_key text,
+    owner_mapping_id bigint,
+    owner_mapping_revision bigint,
     received_at timestamp with time zone NOT NULL,
     source_key text NOT NULL,
     deduplication_key text NOT NULL,
@@ -10816,7 +10836,16 @@ CREATE TABLE public.integration_inbox_receipts (
     CONSTRAINT integration_inbox_receipts_payload_sha256_check CHECK ((octet_length(payload_sha256) = 32)),
     CONSTRAINT integration_inbox_receipts_raw_payload_check CHECK ((octet_length(raw_payload) <= 16777216)),
     CONSTRAINT integration_inbox_receipts_request_id_check CHECK (((request_id IS NULL) OR ((request_id = btrim(request_id)) AND ((char_length(request_id) >= 1) AND (char_length(request_id) <= 128))))),
-    CONSTRAINT integration_inbox_receipts_source_key_check CHECK (((source_key = btrim(source_key)) AND ((char_length(source_key) >= 1) AND (char_length(source_key) <= 200))))
+    CONSTRAINT integration_inbox_receipts_source_key_check CHECK (((source_key = btrim(source_key)) AND ((char_length(source_key) >= 1) AND (char_length(source_key) <= 200)))),
+    CONSTRAINT integration_inbox_receipts_owner_mapping_check CHECK (
+        (external_inventory_owner_key IS NULL AND owner_mapping_id IS NULL
+            AND owner_mapping_revision IS NULL)
+        OR (inventory_owner_id IS NOT NULL AND external_inventory_owner_key IS NOT NULL
+            AND external_inventory_owner_key=btrim(external_inventory_owner_key)
+            AND external_inventory_owner_key<>''
+            AND char_length(external_inventory_owner_key)<=200
+            AND external_inventory_owner_key!~'[[:cntrl:]]'
+            AND owner_mapping_id>0 AND owner_mapping_revision>0))
 );
 
 ALTER TABLE ONLY public.integration_inbox_receipts FORCE ROW LEVEL SECURITY;
@@ -34530,6 +34559,208 @@ GRANT USAGE ON SEQUENCE public.outbox_dead_letter_discards_id_seq TO wareboxes_a
 REVOKE ALL ON FUNCTION public.validate_outbox_dead_letter_discard() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_outbox_dead_letter_discard_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_outbox_discard_evidence() FROM PUBLIC;
+
+-- Versioned source identities map partner owner keys to tenant inventory owners
+-- without exposing internal IDs to partner systems.
+CREATE TABLE public.integration_order_owner_mappings (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    source_key text NOT NULL,
+    external_inventory_owner_key text NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    revision bigint NOT NULL,
+    supersedes_mapping_id bigint,
+    effective_from timestamptz NOT NULL,
+    effective_to timestamptz,
+    configured_by_user_id bigint NOT NULL,
+    configured_at timestamptz NOT NULL,
+    retired_by_user_id bigint,
+    CONSTRAINT integration_order_owner_mappings_scope_id_unique
+        UNIQUE (tenant_id,inventory_owner_id,id),
+    CONSTRAINT integration_order_owner_mappings_tenant_id_unique
+        UNIQUE (tenant_id,id),
+    CONSTRAINT integration_order_owner_mappings_natural_revision_unique
+        UNIQUE (tenant_id,source_key,external_inventory_owner_key,revision),
+    CONSTRAINT integration_order_owner_mappings_source_check CHECK (
+        source_key=btrim(source_key) AND source_key<>'' AND char_length(source_key)<=200
+        AND source_key!~'[[:cntrl:]]'),
+    CONSTRAINT integration_order_owner_mappings_external_owner_check CHECK (
+        external_inventory_owner_key=btrim(external_inventory_owner_key)
+        AND external_inventory_owner_key<>''
+        AND char_length(external_inventory_owner_key)<=200
+        AND external_inventory_owner_key!~'[[:cntrl:]]'),
+    CONSTRAINT integration_order_owner_mappings_revision_check CHECK (
+        revision>0 AND ((revision=1 AND supersedes_mapping_id IS NULL)
+            OR (revision>1 AND supersedes_mapping_id IS NOT NULL))),
+    CONSTRAINT integration_order_owner_mappings_effective_check CHECK (
+        configured_at=effective_from AND (
+            (effective_to IS NULL AND retired_by_user_id IS NULL)
+            OR (effective_to>effective_from AND retired_by_user_id IS NOT NULL))),
+    CONSTRAINT integration_order_owner_mappings_owner_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id,id),
+    CONSTRAINT integration_order_owner_mappings_supersedes_fkey
+        FOREIGN KEY (tenant_id,supersedes_mapping_id)
+        REFERENCES public.integration_order_owner_mappings(tenant_id,id),
+    CONSTRAINT integration_order_owner_mappings_configured_by_fkey
+        FOREIGN KEY (tenant_id,configured_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id),
+    CONSTRAINT integration_order_owner_mappings_retired_by_fkey
+        FOREIGN KEY (tenant_id,retired_by_user_id)
+        REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE UNIQUE INDEX integration_order_owner_mappings_one_active_idx
+ON public.integration_order_owner_mappings
+    (tenant_id,source_key,external_inventory_owner_key)
+WHERE effective_to IS NULL;
+CREATE INDEX integration_order_owner_mappings_page_idx
+ON public.integration_order_owner_mappings (tenant_id,id);
+CREATE INDEX integration_order_owner_mappings_history_idx
+ON public.integration_order_owner_mappings
+    (tenant_id,source_key,external_inventory_owner_key,revision DESC);
+
+CREATE FUNCTION public.integration_order_owner_mapping_lock_key(
+    mapping_tenant_id bigint,
+    mapping_source_key text,
+    mapping_external_owner_key text
+) RETURNS text
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+RETURN 'integration-order-owner-mapping:' || mapping_tenant_id::text || ':' ||
+    octet_length(mapping_source_key)::text || ':' || mapping_source_key || ':' ||
+    octet_length(mapping_external_owner_key)::text || ':' || mapping_external_owner_key;
+
+CREATE FUNCTION public.guard_integration_order_owner_mapping() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+DECLARE
+    predecessor public.integration_order_owner_mappings%ROWTYPE;
+BEGIN
+    IF TG_OP='DELETE' THEN
+        RAISE EXCEPTION 'integration order owner mapping evidence is immutable'
+            USING ERRCODE='55000';
+    END IF;
+    IF TG_OP='UPDATE' THEN
+        IF NEW.tenant_id<>OLD.tenant_id
+           OR NEW.source_key<>OLD.source_key
+           OR NEW.external_inventory_owner_key<>OLD.external_inventory_owner_key
+           OR NEW.inventory_owner_id<>OLD.inventory_owner_id
+           OR NEW.revision<>OLD.revision
+           OR NEW.supersedes_mapping_id IS DISTINCT FROM OLD.supersedes_mapping_id
+           OR NEW.effective_from<>OLD.effective_from
+           OR NEW.configured_by_user_id<>OLD.configured_by_user_id
+           OR NEW.configured_at<>OLD.configured_at
+           OR OLD.effective_to IS NOT NULL
+           OR NEW.effective_to IS NULL
+           OR NEW.effective_to<=OLD.effective_from
+           OR NEW.retired_by_user_id IS NULL
+        THEN
+            RAISE EXCEPTION 'integration order owner mapping mutation is invalid'
+                USING ERRCODE='55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        public.integration_order_owner_mapping_lock_key(
+            NEW.tenant_id,NEW.source_key,NEW.external_inventory_owner_key),0));
+    PERFORM 1 FROM public.inventory_owners owner
+    WHERE owner.tenant_id=NEW.tenant_id AND owner.id=NEW.inventory_owner_id
+      AND owner.deleted IS NULL
+    FOR SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'integration order owner mapping target is not active'
+            USING ERRCODE='55000';
+    END IF;
+
+    IF NEW.supersedes_mapping_id IS NULL THEN
+        IF NEW.revision<>1 OR EXISTS (
+            SELECT 1 FROM public.integration_order_owner_mappings existing
+            WHERE existing.tenant_id=NEW.tenant_id
+              AND existing.source_key=NEW.source_key
+              AND existing.external_inventory_owner_key=NEW.external_inventory_owner_key)
+        THEN
+            RAISE EXCEPTION 'initial integration order owner mapping revision is invalid'
+                USING ERRCODE='55000';
+        END IF;
+    ELSE
+        SELECT * INTO predecessor FROM public.integration_order_owner_mappings
+        WHERE tenant_id=NEW.tenant_id AND id=NEW.supersedes_mapping_id
+        FOR UPDATE;
+        IF NOT FOUND
+           OR predecessor.source_key<>NEW.source_key
+           OR predecessor.external_inventory_owner_key<>NEW.external_inventory_owner_key
+           OR NEW.revision<>predecessor.revision+1
+           OR predecessor.effective_to IS NULL
+           OR predecessor.effective_to>NEW.effective_from
+        THEN
+            RAISE EXCEPTION 'integration order owner mapping predecessor is invalid'
+                USING ERRCODE='55000';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.validate_integration_inbox_receipt_owner_mapping() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+BEGIN
+    IF NEW.owner_mapping_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        public.integration_order_owner_mapping_lock_key(
+            NEW.tenant_id,NEW.source_key,NEW.external_inventory_owner_key),0));
+    IF NOT EXISTS (
+        SELECT 1 FROM public.integration_order_owner_mappings mapping
+        WHERE mapping.tenant_id=NEW.tenant_id
+          AND mapping.id=NEW.owner_mapping_id
+          AND mapping.inventory_owner_id=NEW.inventory_owner_id
+          AND mapping.source_key=NEW.source_key
+          AND mapping.external_inventory_owner_key=NEW.external_inventory_owner_key
+          AND mapping.revision=NEW.owner_mapping_revision
+          AND mapping.effective_from<=NEW.received_at
+          AND (mapping.effective_to IS NULL OR mapping.effective_to>NEW.received_at)
+    ) THEN
+        RAISE EXCEPTION 'integration inbox receipt owner mapping snapshot is invalid'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER integration_order_owner_mappings_guard
+BEFORE INSERT OR UPDATE OR DELETE ON public.integration_order_owner_mappings
+FOR EACH ROW EXECUTE FUNCTION public.guard_integration_order_owner_mapping();
+CREATE TRIGGER integration_inbox_receipts_validate_owner_mapping
+BEFORE INSERT ON public.integration_inbox_receipts
+FOR EACH ROW EXECUTE FUNCTION public.validate_integration_inbox_receipt_owner_mapping();
+
+ALTER TABLE public.integration_inbox_receipts
+    ADD CONSTRAINT integration_inbox_receipts_owner_mapping_fkey
+    FOREIGN KEY (tenant_id,inventory_owner_id,owner_mapping_id)
+    REFERENCES public.integration_order_owner_mappings(tenant_id,inventory_owner_id,id);
+ALTER TABLE public.integration_inbox_keys
+    ADD CONSTRAINT integration_inbox_keys_owner_mapping_fkey
+    FOREIGN KEY (tenant_id,inventory_owner_id,owner_mapping_id)
+    REFERENCES public.integration_order_owner_mappings(tenant_id,inventory_owner_id,id);
+
+ALTER TABLE public.integration_order_owner_mappings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.integration_order_owner_mappings FORCE ROW LEVEL SECURITY;
+CREATE POLICY integration_order_owner_mappings_tenant_isolation
+ON public.integration_order_owner_mappings
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT,UPDATE(effective_to,retired_by_user_id)
+ON public.integration_order_owner_mappings TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.integration_order_owner_mappings_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.integration_order_owner_mapping_lock_key(bigint,text,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_integration_order_owner_mapping() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_integration_inbox_receipt_owner_mapping() FROM PUBLIC;
 
 -- Versioned client source identities map external order item/UOM values to
 -- tenant catalog items without exposing internal IDs to partner systems.
