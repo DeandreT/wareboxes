@@ -32,6 +32,8 @@ use wareboxes_core::dto::{OrderPage, WebSessionContext};
 
 mod backorder;
 pub use backorder::{configure_backorder_policy, split_order_backorder};
+mod cycle_count;
+pub use cycle_count::{create_cycle_count_task, cycle_count_candidates, cycle_count_work};
 mod item_substitution;
 pub use item_substitution::{
     configure_item_substitution_policy, item_substitution_policies,

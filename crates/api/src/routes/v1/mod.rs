@@ -1,7 +1,7 @@
 //! Version 1 public HTTP routes.
 
 mod backorders;
-mod cycle_count;
+pub(crate) mod cycle_count;
 mod error;
 mod expected_receiving;
 mod facility_shipping_origins;
@@ -60,6 +60,11 @@ pub fn router() -> Router<AppState> {
         .route(
             "/facilities/{facility_id}/shipping-origin-configurations",
             post(facility_shipping_origins::configure),
+        )
+        .route("/cycle-count-candidates", get(cycle_count::candidates))
+        .route(
+            "/cycle-count-tasks",
+            get(cycle_count::list).post(cycle_count::create),
         )
         .route("/cycle-count-claims/next", post(cycle_count::claim_next))
         .route("/cycle-count-claims/current", get(cycle_count::current))

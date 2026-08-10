@@ -6,6 +6,7 @@ pub mod app;
 mod app_frame;
 mod catalog;
 mod components;
+mod cycle_count;
 pub mod facility_shipping_origin;
 mod fulfillment;
 mod fulfillment_load_detail;

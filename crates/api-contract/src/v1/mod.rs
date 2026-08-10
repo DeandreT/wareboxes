@@ -46,9 +46,13 @@ pub use cursor::{
 };
 pub use cycle_count::{
     ClaimCycleCountByIdRequest, ClaimNextCycleCountRequest, ConfirmCycleCountRequest,
+    CreateCycleCountTaskRequest, CreateCycleCountTaskResponse, CycleCountCandidatePage,
+    CycleCountCandidatePageRequest, CycleCountCandidateResponse, CycleCountCandidateSort,
     CycleCountClaimHeartbeatResponse, CycleCountClaimReleaseReason, CycleCountClaimReleaseResponse,
     CycleCountClaimResponse, CycleCountConfirmationResponse, CycleCountItem, CycleCountLocation,
-    CycleCountStock, HeartbeatCycleCountClaimRequest, ReleaseCycleCountClaimRequest,
+    CycleCountQuantityResponse, CycleCountSortDirection, CycleCountStock, CycleCountWorkPage,
+    CycleCountWorkPageRequest, CycleCountWorkResponse, CycleCountWorkSort, CycleCountWorkStatus,
+    HeartbeatCycleCountClaimRequest, ReleaseCycleCountClaimRequest,
 };
 pub use error::{ErrorReason, ErrorResponse, FieldViolation};
 pub use expected_receiving::{

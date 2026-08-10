@@ -1,6 +1,158 @@
 use serde::{Deserialize, Serialize};
 
-use super::InventoryBalanceStatus;
+use super::{CursorPage, InventoryBalanceStatus, OpaqueCursor, PageLimit};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateCycleCountTaskRequest {
+    pub inventory_balance_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateCycleCountTaskResponse {
+    pub task_id: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CycleCountWorkStatus {
+    Pending,
+    Claimed,
+    Completed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CycleCountCandidateSort {
+    #[default]
+    LastCounted,
+    Client,
+    Facility,
+    Location,
+    Item,
+    Quantity,
+    InventoryStatus,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CycleCountWorkSort {
+    Priority,
+    #[default]
+    CreatedAt,
+    Client,
+    Facility,
+    Location,
+    Item,
+    Quantity,
+    Variance,
+    Status,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CycleCountSortDirection {
+    #[default]
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CycleCountCandidatePageRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facility_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_owner_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_status: Option<InventoryBalanceStatus>,
+    #[serde(default)]
+    pub sort: CycleCountCandidateSort,
+    #[serde(default)]
+    pub direction: CycleCountSortDirection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<OpaqueCursor>,
+    #[serde(default)]
+    pub limit: PageLimit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CycleCountWorkPageRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facility_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_owner_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<CycleCountWorkStatus>,
+    #[serde(default)]
+    pub sort: CycleCountWorkSort,
+    #[serde(default)]
+    pub direction: CycleCountSortDirection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<OpaqueCursor>,
+    #[serde(default)]
+    pub limit: PageLimit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CycleCountQuantityResponse {
+    pub on_hand: i64,
+    pub reserved: i64,
+    pub held: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CycleCountCandidateResponse {
+    pub inventory_owner_id: i64,
+    pub inventory_owner_name: String,
+    pub facility_id: i64,
+    pub facility_name: String,
+    pub location: CycleCountLocation,
+    pub item: CycleCountItem,
+    pub stock: CycleCountStock,
+    pub quantity: CycleCountQuantityResponse,
+    pub last_counted_at: Option<String>,
+    pub last_variance_quantity: Option<i64>,
+}
+
+pub type CycleCountCandidatePage = CursorPage<CycleCountCandidateResponse>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CycleCountWorkResponse {
+    pub task_id: i64,
+    pub status: CycleCountWorkStatus,
+    pub inventory_owner_id: i64,
+    pub inventory_owner_name: String,
+    pub facility_id: i64,
+    pub facility_name: String,
+    pub location: CycleCountLocation,
+    pub item: CycleCountItem,
+    pub stock: CycleCountStock,
+    pub current_quantity: Option<CycleCountQuantityResponse>,
+    pub system_quantity: Option<CycleCountQuantityResponse>,
+    pub counted_quantity: Option<i64>,
+    pub variance_quantity: Option<i64>,
+    pub inventory_transaction_id: Option<i64>,
+    pub priority: i64,
+    pub note: Option<String>,
+    pub assigned_user_id: Option<i64>,
+    pub lease_expires_at: Option<String>,
+    pub due_at: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+    pub confirmed_by: Option<i64>,
+    pub confirmed_at: Option<String>,
+}
+
+pub type CycleCountWorkPage = CursorPage<CycleCountWorkResponse>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -170,5 +322,32 @@ mod tests {
         let value = serde_json::to_value(claim).unwrap();
         assert!(value.get("expected_quantity").is_none());
         assert!(value["stock"].get("quantity").is_none());
+    }
+
+    #[test]
+    fn supervisor_pages_are_strict_and_sortable() {
+        let request = serde_json::from_str::<CycleCountCandidatePageRequest>(
+            r#"{"inventory_status":"quarantine","sort":"quantity","direction":"desc"}"#,
+        )
+        .unwrap();
+        assert_eq!(request.sort, CycleCountCandidateSort::Quantity);
+        assert_eq!(request.direction, CycleCountSortDirection::Desc);
+        assert!(serde_json::from_str::<CycleCountWorkPageRequest>(
+            r#"{"status":"completed","unknown":true}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn task_creation_accepts_only_the_server_derived_balance_target() {
+        let request = serde_json::from_str::<CreateCycleCountTaskRequest>(
+            r#"{"inventory_balance_id":41,"note":"Quarterly blind count"}"#,
+        )
+        .unwrap();
+        assert_eq!(request.inventory_balance_id, 41);
+        assert!(serde_json::from_str::<CreateCycleCountTaskRequest>(
+            r#"{"inventory_balance_id":41,"location_id":9}"#
+        )
+        .is_err());
     }
 }

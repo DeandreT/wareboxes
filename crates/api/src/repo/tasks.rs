@@ -18,6 +18,7 @@ use references::{
 mod cycle_count;
 mod cycle_count_claim;
 mod cycle_count_claim_lifecycle;
+mod cycle_count_read_model;
 mod execution;
 mod inventory_relocation;
 mod inventory_relocation_claim;
@@ -35,6 +36,7 @@ mod references;
 pub use cycle_count::*;
 pub use cycle_count_claim::*;
 pub use cycle_count_claim_lifecycle::*;
+pub use cycle_count_read_model::*;
 pub use execution::*;
 pub use inventory_relocation::*;
 pub use inventory_relocation_claim::*;
@@ -361,15 +363,52 @@ async fn create_item_location_cycle_count_task_with_scope(
     {
         return Err(AppError::not_found("task references"));
     }
+    let task_id = create_item_location_cycle_count_task_tx(
+        &mut tx,
+        tenant_id,
+        user_id,
+        location_id,
+        item_id,
+        inventory_balance_id,
+        dimensions,
+        source,
+        order_id,
+        order_item_id,
+        note,
+    )
+    .await?;
+    match prepared {
+        Some(prepared) => Ok(prepared.commit(tx, task_id).await?),
+        None => {
+            tx.commit().await?;
+            Ok(task_id)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_item_location_cycle_count_task_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    user_id: i64,
+    location_id: i64,
+    item_id: i64,
+    inventory_balance_id: i64,
+    dimensions: TaskDimensions,
+    source: Option<&str>,
+    order_id: Option<i64>,
+    order_item_id: Option<i64>,
+    note: Option<&str>,
+) -> AppResult<i64> {
     let facility_id = dimensions
         .facility_id
         .ok_or_else(|| AppError::internal("cycle count task is missing a facility"))?;
-    ensure_active_item_tx(&mut tx, tenant_id, item_id).await?;
+    ensure_active_item_tx(tx, tenant_id, item_id).await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::TEXT || ':' || $2::TEXT || ':' || $3::TEXT, 0))")
         .bind(tenant_id.get())
         .bind(location_id)
         .bind(item_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     let existing: Option<i64> = sqlx::query_scalar(
@@ -396,26 +435,20 @@ async fn create_item_location_cycle_count_task_with_scope(
     .bind(dimensions.facility_id)
     .bind(dimensions.inventory_owner_id)
     .bind(inventory_balance_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
     if let Some(existing) = existing {
         sqlx::query("UPDATE work_tasks SET modified = $1 WHERE tenant_id = $2 AND id = $3")
             .bind(now_iso())
             .bind(tenant_id.get())
             .bind(existing)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-        return match prepared {
-            Some(prepared) => Ok(prepared.commit(tx, existing).await?),
-            None => {
-                tx.commit().await?;
-                Ok(existing)
-            }
-        };
+        return Ok(existing);
     }
 
     let task_id = insert_task_tx(
-        &mut tx,
+        tx,
         tenant_id,
         NewWorkTask {
             facility_id: dimensions.facility_id,
@@ -454,15 +487,9 @@ async fn create_item_location_cycle_count_task_with_scope(
     .bind(order_item_id)
     .bind(source)
     .bind(note)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-    match prepared {
-        Some(prepared) => Ok(prepared.commit(tx, task_id).await?),
-        None => {
-            tx.commit().await?;
-            Ok(task_id)
-        }
-    }
+    Ok(task_id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -494,6 +521,99 @@ pub async fn create_item_location_cycle_count_task_in_scope(
         Some(command),
     )
     .await
+}
+
+/// Creates a blind count from a server-derived active inventory balance target.
+pub async fn create_inventory_balance_cycle_count_task_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    command: &CommandContext,
+    inventory_balance_id: i64,
+    note: Option<&str>,
+) -> AppResult<i64> {
+    command.require_actor(access.tenant_id, access.user_id)?;
+    let prepared = PreparedCommand::new_v1(
+        command,
+        "task.create_inventory_balance_cycle_count.v1",
+        &(inventory_balance_id, note),
+    )?;
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    let scope =
+        lock_current_task_scope_tx(&mut tx, access.tenant_id, command.actor_id.get(), None).await?;
+    if let Some(task_id) = prepared.replayed::<i64>(&mut tx).await? {
+        require_replayed_task_visible_tx(&mut tx, access.tenant_id, task_id, &scope).await?;
+        tx.commit().await?;
+        return Ok(task_id);
+    }
+
+    let row = sqlx::query(
+        r#"
+        SELECT balance.location_id,
+               balance.item_id,
+               balance.facility_id,
+               balance.inventory_owner_id
+        FROM inventory_balances balance
+        JOIN locations location
+          ON location.tenant_id=balance.tenant_id
+         AND location.facility_id=balance.facility_id
+         AND location.id=balance.location_id
+         AND location.deleted IS NULL
+         AND location.active
+        JOIN items item
+          ON item.tenant_id=balance.tenant_id
+         AND item.id=balance.item_id
+         AND item.deleted IS NULL
+        JOIN item_batches batch
+          ON batch.tenant_id=balance.tenant_id
+         AND batch.inventory_owner_id=balance.inventory_owner_id
+         AND batch.id=balance.item_batch_id
+         AND batch.deleted IS NULL
+        JOIN inventory_owners owner
+          ON owner.tenant_id=balance.tenant_id
+         AND owner.id=balance.inventory_owner_id
+         AND owner.deleted IS NULL
+        JOIN facilities facility
+          ON facility.tenant_id=balance.tenant_id
+         AND facility.id=balance.facility_id
+         AND facility.deleted IS NULL
+        WHERE balance.tenant_id=$1
+          AND balance.id=$2
+          AND balance.deleted IS NULL
+          AND balance.qty_on_hand>0
+        FOR SHARE OF balance,location,item,batch,owner,facility
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(inventory_balance_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::not_found("cycle-count inventory balance"))?;
+    let location_id: i64 = row.try_get("location_id")?;
+    let item_id: i64 = row.try_get("item_id")?;
+    let dimensions = TaskDimensions {
+        facility_id: Some(row.try_get("facility_id")?),
+        inventory_owner_id: Some(row.try_get("inventory_owner_id")?),
+    };
+    if !dimensions.is_allowed_by(&scope) {
+        return Err(AppError::not_found("cycle-count inventory balance"));
+    }
+
+    let task_id = create_item_location_cycle_count_task_tx(
+        &mut tx,
+        access.tenant_id,
+        command.actor_id.get(),
+        location_id,
+        item_id,
+        inventory_balance_id,
+        dimensions,
+        Some("supervisor_planned"),
+        None,
+        None,
+        note,
+    )
+    .await?;
+    Ok(prepared.commit(tx, task_id).await?)
 }
 
 #[allow(clippy::too_many_arguments)]

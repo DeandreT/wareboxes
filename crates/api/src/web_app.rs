@@ -94,6 +94,7 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
         "/shipping" | "/shipping/" => Some(WorkspaceBootstrapSection::Shipping),
         "/outbound-loads" | "/outbound-loads/" => Some(WorkspaceBootstrapSection::OutboundLoads),
         "/putaway" | "/putaway/" => Some(WorkspaceBootstrapSection::Putaway),
+        "/cycle-counts" | "/cycle-counts/" => Some(WorkspaceBootstrapSection::CycleCounts),
         "/replenishment" | "/replenishment/" => Some(WorkspaceBootstrapSection::Replenishment),
         "/inventory" | "/inventory/" => Some(WorkspaceBootstrapSection::Inventory),
         "/access" | "/access/" => Some(WorkspaceBootstrapSection::Access),
@@ -140,6 +141,8 @@ async fn workspace_bootstrap(
                 outbound_load_queue: None,
                 putaway_candidates: None,
                 putaway_work: None,
+                cycle_count_candidates: None,
+                cycle_count_work: None,
                 replenishment_policies: None,
                 replenishment_queue: None,
                 balances,
@@ -267,6 +270,21 @@ async fn workspace_bootstrap(
                 ..WorkspaceBootstrapData::default()
             })
         }
+        WorkspaceBootstrapSection::CycleCounts => {
+            if !has_permission(session, "wms_supervisor") {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            let ((cycle_count_candidates, cycle_count_work), access_workspace) = tokio::try_join!(
+                routes::v1::cycle_count::pages_for_access(state, access, 100),
+                routes::access::workspace_for_access(state, access),
+            )?;
+            Ok(WorkspaceBootstrapData {
+                cycle_count_candidates: Some(cycle_count_candidates),
+                cycle_count_work: Some(cycle_count_work),
+                access: access_workspace,
+                ..WorkspaceBootstrapData::default()
+            })
+        }
         WorkspaceBootstrapSection::Inventory => {
             if !has_permission(session, "wms") {
                 return Ok(WorkspaceBootstrapData::default());
@@ -342,6 +360,10 @@ mod tests {
         assert_eq!(
             section_for_path("/putaway"),
             Some(WorkspaceBootstrapSection::Putaway)
+        );
+        assert_eq!(
+            section_for_path("/cycle-counts"),
+            Some(WorkspaceBootstrapSection::CycleCounts)
         );
         assert_eq!(
             section_for_path("/replenishment"),

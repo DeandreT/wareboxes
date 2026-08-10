@@ -3,6 +3,7 @@
 pub mod authorization;
 pub mod backorder;
 mod context;
+pub mod cycle_count;
 mod error;
 pub mod facility_shipping_origin;
 pub mod idempotency;

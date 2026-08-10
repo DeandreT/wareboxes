@@ -198,6 +198,12 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                     {can_supervise_wms.then(|| {
                         view! {
                             <NavItem
+                                href="/cycle-counts"
+                                label="Cycle counts"
+                                icon=UiIcon::Inventory
+                                active=section == Section::CycleCounts
+                            />
+                            <NavItem
                                 href="/replenishment"
                                 label="Replenishment"
                                 icon=UiIcon::Replenishment

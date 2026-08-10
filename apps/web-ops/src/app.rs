@@ -4,9 +4,10 @@ use leptos_router::{
     StaticSegment,
 };
 use wareboxes_api_contract::v1::{
-    InventoryBalanceResponse, InventoryHoldResponse, InventoryHoldStatus, OpaqueCursor,
-    OutboundLoadQueuePage, PackingQueuePage, PickWavePage, PutawayCandidatePage, PutawayWorkPage,
-    ReplenishmentPolicyPage, ReplenishmentQueuePage, ShippingQueuePage,
+    CycleCountCandidatePage, CycleCountWorkPage, InventoryBalanceResponse, InventoryHoldResponse,
+    InventoryHoldStatus, OpaqueCursor, OutboundLoadQueuePage, PackingQueuePage, PickWavePage,
+    PutawayCandidatePage, PutawayWorkPage, ReplenishmentPolicyPage, ReplenishmentQueuePage,
+    ShippingQueuePage,
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 use wareboxes_core::dto::{OrderPage, WebSessionContext};
@@ -17,6 +18,7 @@ use crate::api;
 use crate::app_frame::{Brand, PageFrame};
 use crate::catalog::CatalogWorkbench;
 use crate::components::{Icon, SearchField, UiIcon};
+use crate::cycle_count::CycleCountWorkspace;
 use crate::fulfillment::{LoadsWorkbench, OrdersWorkbench};
 use crate::inventory::InventoryWorkspace;
 use crate::inventory_disposition::InventoryDispositionWorkbench;
@@ -53,6 +55,7 @@ pub enum WorkspaceBootstrapSection {
     Shipping,
     OutboundLoads,
     Putaway,
+    CycleCounts,
     Inventory,
     Replenishment,
     Access,
@@ -67,6 +70,8 @@ pub struct WorkspaceBootstrapData {
     pub outbound_load_queue: Option<OutboundLoadQueuePage>,
     pub putaway_candidates: Option<PutawayCandidatePage>,
     pub putaway_work: Option<PutawayWorkPage>,
+    pub cycle_count_candidates: Option<CycleCountCandidatePage>,
+    pub cycle_count_work: Option<CycleCountWorkPage>,
     pub replenishment_policies: Option<ReplenishmentPolicyPage>,
     pub replenishment_queue: Option<ReplenishmentQueuePage>,
     pub balances: Vec<InventoryBalanceResponse>,
@@ -103,6 +108,8 @@ struct WorkspaceData {
     outbound_load_queue: Option<OutboundLoadQueuePage>,
     putaway_candidates: Option<PutawayCandidatePage>,
     putaway_work: Option<PutawayWorkPage>,
+    cycle_count_candidates: Option<CycleCountCandidatePage>,
+    cycle_count_work: Option<CycleCountWorkPage>,
     replenishment_policies: Option<ReplenishmentPolicyPage>,
     replenishment_queue: Option<ReplenishmentQueuePage>,
     balances: Vec<InventoryBalanceResponse>,
@@ -125,6 +132,8 @@ impl From<WorkspaceBootstrapData> for WorkspaceData {
             outbound_load_queue: bootstrap.outbound_load_queue,
             putaway_candidates: bootstrap.putaway_candidates,
             putaway_work: bootstrap.putaway_work,
+            cycle_count_candidates: bootstrap.cycle_count_candidates,
+            cycle_count_work: bootstrap.cycle_count_work,
             replenishment_policies: bootstrap.replenishment_policies,
             replenishment_queue: bootstrap.replenishment_queue,
             balances: bootstrap.balances,
@@ -153,6 +162,7 @@ pub(crate) enum Section {
     Shipping,
     OutboundLoads,
     Putaway,
+    CycleCounts,
     Loads,
     Catalog,
     Inventory,
@@ -174,6 +184,7 @@ impl Section {
             Self::Shipping => Some(WorkspaceBootstrapSection::Shipping),
             Self::OutboundLoads => Some(WorkspaceBootstrapSection::OutboundLoads),
             Self::Putaway => Some(WorkspaceBootstrapSection::Putaway),
+            Self::CycleCounts => Some(WorkspaceBootstrapSection::CycleCounts),
             Self::Inventory => Some(WorkspaceBootstrapSection::Inventory),
             Self::Replenishment => Some(WorkspaceBootstrapSection::Replenishment),
             Self::Access => Some(WorkspaceBootstrapSection::Access),
@@ -229,6 +240,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/outbound-loads.css"/>
                 <link rel="stylesheet" href="/replenishment.css"/>
                 <link rel="stylesheet" href="/putaway.css"/>
+                <link rel="stylesheet" href="/cycle-count.css"/>
                 <link rel="stylesheet" href="/catalog.css"/>
                 <link rel="stylesheet" href="/administration.css"/>
                 <script src="/presentation-init.js"></script>
@@ -277,6 +289,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("shipping") view=ShippingPage/>
                     <Route path=StaticSegment("outbound-loads") view=OutboundLoadsPage/>
                     <Route path=StaticSegment("putaway") view=PutawayPage/>
+                    <Route path=StaticSegment("cycle-counts") view=CycleCountsPage/>
                     <Route path=StaticSegment("loads") view=LoadsPage/>
                     <Route path=StaticSegment("catalog") view=CatalogPage/>
                     <Route path=StaticSegment("inventory") view=InventoryPage/>
@@ -629,6 +642,31 @@ async fn load_workspace(
             data.access = api::access().await?;
             data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
         }
+        Section::CycleCounts if has_permission(session, "wms_supervisor") => {
+            data.cycle_count_candidates = Some(
+                api::cycle_count_candidates(
+                    None,
+                    None,
+                    None,
+                    wareboxes_api_contract::v1::CycleCountCandidateSort::default(),
+                    wareboxes_api_contract::v1::CycleCountSortDirection::default(),
+                    None,
+                )
+                .await?,
+            );
+            data.cycle_count_work = Some(
+                api::cycle_count_work(
+                    None,
+                    None,
+                    None,
+                    wareboxes_api_contract::v1::CycleCountWorkSort::default(),
+                    wareboxes_api_contract::v1::CycleCountSortDirection::Desc,
+                    None,
+                )
+                .await?,
+            );
+            data.access = api::access().await?;
+        }
         Section::Loads if has_permission(session, "wms") => {
             data.loads = api::internal_get("/api/loads?offset=0&limit=500").await?;
             data.access = api::access().await?;
@@ -672,6 +710,7 @@ async fn load_workspace(
         | Section::Shipping
         | Section::OutboundLoads
         | Section::Putaway
+        | Section::CycleCounts
         | Section::Loads
         | Section::Catalog
         | Section::Inventory
@@ -717,6 +756,11 @@ fn OutboundLoadsPage() -> impl IntoView {
 #[component]
 fn PutawayPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::Putaway/> }
+}
+
+#[component]
+fn CycleCountsPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::CycleCounts/> }
 }
 
 #[component]
@@ -864,6 +908,17 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                         .unwrap_or_else(|| PutawayWorkPage::new(Vec::new(), None))
                     access=data.access
                     locations=data.locations
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::CycleCounts if has_permission(&session, "wms_supervisor") => view! {
+                <CycleCountWorkspace
+                    initial_candidates=data.cycle_count_candidates
+                        .unwrap_or_else(|| CycleCountCandidatePage::new(Vec::new(), None))
+                    initial_work=data.cycle_count_work
+                        .unwrap_or_else(|| CycleCountWorkPage::new(Vec::new(), None))
+                    access=data.access
                     on_unauthorized=session_expired_callback()
                 />
             }
