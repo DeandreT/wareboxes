@@ -1,8 +1,9 @@
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
-    CreateInventoryRelocationTaskRequest, InventoryBalanceResponse, InventoryRelocationWorkRequest,
-    OpaqueCursor,
+    CreateInventoryRelocationTaskRequest, InventoryAgingResponse, InventoryBalanceResponse,
+    InventoryRelocationWorkRequest, OpaqueCursor,
 };
+use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 use wareboxes_core::models::Location;
 
 use crate::{api, toast::use_toast_bus, view_model::format_quantity};
@@ -46,12 +47,14 @@ enum IntegrityTab {
 
 #[component]
 pub fn InventoryIntegrityWorkbench(
+    access: AccessScopeWorkspace,
     on_unauthorized: Callback<()>,
     can_manage_recalls: bool,
 ) -> impl IntoView {
+    let access = StoredValue::new(access);
     let state = RwSignal::new(IntegrityState::Loading);
     let tab = RwSignal::new(IntegrityTab::Journal);
-    let recall_target = RwSignal::new(None::<(i64, i64)>);
+    let recall_target = RwSignal::new(None::<InventoryAgingResponse>);
     let selected_balance_id = RwSignal::new(String::new());
     let selected_balance = RwSignal::new(None::<InventoryBalanceResponse>);
     let destination_location_id = RwSignal::new(String::new());
@@ -60,7 +63,7 @@ pub fn InventoryIntegrityWorkbench(
     let task_pending = RwSignal::new(false);
     let task_error = RwSignal::new(None::<String>);
     let toasts = use_toast_bus();
-    let open_recall = Callback::new(move |target: (i64, i64)| {
+    let open_recall = Callback::new(move |target: InventoryAgingResponse| {
         recall_target.set(Some(target));
         tab.set(IntegrityTab::Recall);
     });
@@ -278,7 +281,7 @@ pub fn InventoryIntegrityWorkbench(
                                 .into_any()
                             }
                             IntegrityTab::Recall => {
-                                view! { <recall::RecallView on_unauthorized target=recall_target/> }.into_any()
+                                view! { <recall::RecallView access=access.get_value() on_unauthorized target=recall_target/> }.into_any()
                             }
                             IntegrityTab::Reconciliation => {
                                 view! { <read_views::ReconciliationView on_unauthorized/> }.into_any()

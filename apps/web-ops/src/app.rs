@@ -57,6 +57,7 @@ pub enum WorkspaceBootstrapSection {
     Putaway,
     CycleCounts,
     Inventory,
+    InventoryIntegrity,
     Replenishment,
     Access,
 }
@@ -192,6 +193,7 @@ impl Section {
             Self::Putaway => Some(WorkspaceBootstrapSection::Putaway),
             Self::CycleCounts => Some(WorkspaceBootstrapSection::CycleCounts),
             Self::Inventory => Some(WorkspaceBootstrapSection::Inventory),
+            Self::InventoryIntegrity => Some(WorkspaceBootstrapSection::InventoryIntegrity),
             Self::Replenishment => Some(WorkspaceBootstrapSection::Replenishment),
             Self::Access => Some(WorkspaceBootstrapSection::Access),
             _ => None,
@@ -699,7 +701,9 @@ async fn load_workspace(
             data.balances = page.items;
             data.balance_next_cursor = page.next_cursor;
         }
-        Section::InventoryIntegrity if has_permission(session, "wms") => {}
+        Section::InventoryIntegrity if has_permission(session, "wms") => {
+            data.access = api::access().await?;
+        }
         Section::Replenishment if has_permission(session, "wms_supervisor") => {
             data.replenishment_policies = Some(
                 api::replenishment_policies(api::ReplenishmentPolicyFilters::default(), None)
@@ -978,7 +982,7 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                         "Your session ended. Sign in to continue.".to_owned(),
                     )));
                 });
-                view! { <InventoryIntegrity on_unauthorized/> }.into_any()
+                view! { <InventoryIntegrity access=data.access on_unauthorized/> }.into_any()
             }
             Section::Replenishment if has_permission(&session, "wms_supervisor") => view! {
                 <ReplenishmentWorkspace
@@ -1343,7 +1347,10 @@ fn InventoryDisposition(data: WorkspaceData, on_unauthorized: Callback<()>) -> i
 }
 
 #[component]
-fn InventoryIntegrity(on_unauthorized: Callback<()>) -> impl IntoView {
+fn InventoryIntegrity(
+    access: AccessScopeWorkspace,
+    on_unauthorized: Callback<()>,
+) -> impl IntoView {
     let session = expect_context::<WebSessionContext>();
     let can_manage_recalls = has_permission(&session, "wms_supervisor");
     view! {
@@ -1354,7 +1361,7 @@ fn InventoryIntegrity(on_unauthorized: Callback<()>) -> impl IntoView {
                 <p>"Trace stock age, reconcile projections, and direct scanner-confirmed facility moves."</p>
             </div>
         </section>
-        <InventoryIntegrityWorkbench on_unauthorized can_manage_recalls/>
+        <InventoryIntegrityWorkbench access on_unauthorized can_manage_recalls/>
     }
 }
 

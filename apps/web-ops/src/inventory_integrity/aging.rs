@@ -71,7 +71,7 @@ impl AgingSignals {
 #[component]
 pub(super) fn AgingView(
     on_unauthorized: Callback<()>,
-    on_recall: Callback<(i64, i64)>,
+    on_recall: Callback<InventoryAgingResponse>,
     can_manage_recalls: bool,
 ) -> impl IntoView {
     let signals = AgingSignals::new();
@@ -266,7 +266,7 @@ fn aging_rows(signals: AgingSignals, layout: SplitPaneState) -> AnyView {
 #[component]
 fn AgingDetail(
     position: InventoryAgingResponse,
-    on_recall: Callback<(i64, i64)>,
+    on_recall: Callback<InventoryAgingResponse>,
     can_manage_recalls: bool,
 ) -> impl IntoView {
     let item = item_label(&position);
@@ -281,8 +281,7 @@ fn AgingDetail(
         .clone()
         .unwrap_or_else(|| "Loose stock".into());
     let expiration = expiration_label(&position);
-    let facility_id = position.facility_id;
-    let item_batch_id = position.item_batch_id;
+    let recall_target = position.clone();
     let recall_eligible = position.reserved_quantity == 0 && position.held_quantity == 0;
     view! {
         <div class="inventory-trace-detail aging-detail">
@@ -312,7 +311,7 @@ fn AgingDetail(
                     class="button danger-action aging-recall-action"
                     disabled=!recall_eligible
                     title=if recall_eligible { "Open a facility batch recall" } else { "Recall requires unreserved and unheld positions" }
-                    on:click=move |_| on_recall.run((facility_id, item_batch_id))
+                    on:click=move |_| on_recall.run(recall_target.clone())
                 >
                     "Open batch recall"
                 </button>

@@ -97,6 +97,9 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
         "/cycle-counts" | "/cycle-counts/" => Some(WorkspaceBootstrapSection::CycleCounts),
         "/replenishment" | "/replenishment/" => Some(WorkspaceBootstrapSection::Replenishment),
         "/inventory" | "/inventory/" => Some(WorkspaceBootstrapSection::Inventory),
+        "/inventory/control" | "/inventory/control/" => {
+            Some(WorkspaceBootstrapSection::InventoryIntegrity)
+        }
         "/access" | "/access/" => Some(WorkspaceBootstrapSection::Access),
         _ => None,
     }
@@ -329,6 +332,15 @@ async fn workspace_bootstrap(
                 ..WorkspaceBootstrapData::default()
             })
         }
+        WorkspaceBootstrapSection::InventoryIntegrity => {
+            if !has_permission(session, "wms") {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            Ok(WorkspaceBootstrapData {
+                access: routes::access::workspace_for_access(state, access).await?,
+                ..WorkspaceBootstrapData::default()
+            })
+        }
         WorkspaceBootstrapSection::Replenishment => {
             if !has_permission(session, "wms_supervisor") {
                 return Ok(WorkspaceBootstrapData::default());
@@ -399,6 +411,10 @@ mod tests {
         assert_eq!(
             section_for_path("/replenishment"),
             Some(WorkspaceBootstrapSection::Replenishment)
+        );
+        assert_eq!(
+            section_for_path("/inventory/control"),
+            Some(WorkspaceBootstrapSection::InventoryIntegrity)
         );
         assert_eq!(
             section_for_path("/inventory/holds"),
