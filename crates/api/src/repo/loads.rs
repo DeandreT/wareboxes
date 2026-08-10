@@ -17,6 +17,79 @@ use crate::repo::orders;
 
 const MAX_EXECUTION_BARCODE_LENGTH: usize = 200;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadSummarySort {
+    Id,
+    LoadType,
+    Reference,
+    InventoryOwner,
+    Facility,
+    Status,
+    Appointment,
+}
+
+impl LoadSummarySort {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Id => "id",
+            Self::LoadType => "type",
+            Self::Reference => "reference",
+            Self::InventoryOwner => "inventory_owner",
+            Self::Facility => "facility",
+            Self::Status => "status",
+            Self::Appointment => "appointment",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadSummaryDirection {
+    Ascending,
+    Descending,
+}
+
+impl LoadSummaryDirection {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ascending => "asc",
+            Self::Descending => "desc",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadSummaryQuery {
+    pub show_deleted: bool,
+    pub search: Option<String>,
+    pub status: Option<LoadStatus>,
+    pub load_type: Option<LoadType>,
+    pub inventory_owner_id: Option<i64>,
+    pub facility_id: Option<i64>,
+    pub appointment_date: Option<chrono::NaiveDate>,
+    pub sort: LoadSummarySort,
+    pub direction: LoadSummaryDirection,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+impl LoadSummaryQuery {
+    pub fn operational(limit: i64, offset: i64) -> Self {
+        Self {
+            show_deleted: false,
+            search: None,
+            status: None,
+            load_type: None,
+            inventory_owner_id: None,
+            facility_id: None,
+            appointment_date: None,
+            sort: LoadSummarySort::Id,
+            direction: LoadSummaryDirection::Descending,
+            limit,
+            offset,
+        }
+    }
+}
+
 pub fn normalize_execution_barcode(value: &str) -> AppResult<String> {
     let normalized = value.trim();
     let mut characters = normalized.bytes();
@@ -275,15 +348,9 @@ pub async fn get_load_summaries(
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<Load>> {
-    get_load_summaries_with_scope(
-        db,
-        tenant_id,
-        &ScopeBindings::unrestricted(),
-        show_deleted,
-        limit,
-        offset,
-    )
-    .await
+    let mut query = LoadSummaryQuery::operational(limit, offset);
+    query.show_deleted = show_deleted;
+    get_load_summaries_with_scope(db, tenant_id, &ScopeBindings::unrestricted(), &query).await
 }
 
 pub async fn get_load_summaries_in_scope(
@@ -293,17 +360,25 @@ pub async fn get_load_summaries_in_scope(
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<Load>> {
+    let mut query = LoadSummaryQuery::operational(limit, offset);
+    query.show_deleted = show_deleted;
+    get_load_summaries_page_in_scope(db, access, &query).await
+}
+
+pub async fn get_load_summaries_page_in_scope(
+    db: &Db,
+    access: &TenantAccess,
+    query: &LoadSummaryQuery,
+) -> AppResult<Vec<Load>> {
     let scope = ScopeBindings::for_access(access);
-    get_load_summaries_with_scope(db, access.tenant_id, &scope, show_deleted, limit, offset).await
+    get_load_summaries_with_scope(db, access.tenant_id, &scope, query).await
 }
 
 async fn get_load_summaries_with_scope(
     db: &Db,
     tenant_id: TenantId,
     scope: &ScopeBindings,
-    show_deleted: bool,
-    limit: i64,
-    offset: i64,
+    query: &LoadSummaryQuery,
 ) -> AppResult<Vec<Load>> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
@@ -323,18 +398,57 @@ async fn get_load_summaries_with_scope(
           AND ($2 OR l.deleted IS NULL)
           AND ($3 OR l.facility_id = ANY($4))
           AND ($5 OR l.inventory_owner_id = ANY($6))
-        ORDER BY l.created DESC, l.id DESC
-        LIMIT $7 OFFSET $8
+          AND ($7::TEXT IS NULL OR
+               STRPOS(LOWER(l.id::TEXT), LOWER($7)) > 0 OR
+               STRPOS(LOWER(l.execution_barcode), LOWER($7)) > 0 OR
+               STRPOS(LOWER(COALESCE(l.reference_number, '')), LOWER($7)) > 0 OR
+               STRPOS(LOWER(COALESCE(l.invoice_number, '')), LOWER($7)) > 0 OR
+               STRPOS(LOWER(COALESCE(l.carrier, '')), LOWER($7)) > 0 OR
+               STRPOS(LOWER(COALESCE(l.trailer_number, '')), LOWER($7)) > 0 OR
+               STRPOS(LOWER(COALESCE(l.seal_number, '')), LOWER($7)) > 0 OR
+               STRPOS(LOWER(COALESCE(a.name, '')), LOWER($7)) > 0 OR
+               STRPOS(LOWER(COALESCE(facility.name, '')), LOWER($7)) > 0)
+          AND ($8::TEXT IS NULL OR l.status = $8)
+          AND ($9::TEXT IS NULL OR l.type = $9)
+          AND ($10::BIGINT IS NULL OR l.inventory_owner_id = $10)
+          AND ($11::BIGINT IS NULL OR l.facility_id = $11)
+          AND ($12::DATE IS NULL OR COALESCE(l.appointment_time, l.expected_time, l.created)::DATE = $12)
+        ORDER BY
+          CASE WHEN $13 = 'id' AND $14 = 'asc' THEN l.id END ASC,
+          CASE WHEN $13 = 'id' AND $14 = 'desc' THEN l.id END DESC,
+          CASE WHEN $13 = 'type' AND $14 = 'asc' THEN l.type END ASC,
+          CASE WHEN $13 = 'type' AND $14 = 'desc' THEN l.type END DESC,
+          CASE WHEN $13 = 'reference' AND $14 = 'asc' THEN LOWER(l.reference_number) END ASC NULLS LAST,
+          CASE WHEN $13 = 'reference' AND $14 = 'desc' THEN LOWER(l.reference_number) END DESC NULLS LAST,
+          CASE WHEN $13 = 'inventory_owner' AND $14 = 'asc' THEN LOWER(a.name) END ASC,
+          CASE WHEN $13 = 'inventory_owner' AND $14 = 'desc' THEN LOWER(a.name) END DESC,
+          CASE WHEN $13 = 'facility' AND $14 = 'asc' THEN LOWER(facility.name) END ASC,
+          CASE WHEN $13 = 'facility' AND $14 = 'desc' THEN LOWER(facility.name) END DESC,
+          CASE WHEN $13 = 'status' AND $14 = 'asc' THEN l.status END ASC,
+          CASE WHEN $13 = 'status' AND $14 = 'desc' THEN l.status END DESC,
+          CASE WHEN $13 = 'appointment' AND $14 = 'asc' THEN COALESCE(l.appointment_time, l.expected_time, l.created) END ASC,
+          CASE WHEN $13 = 'appointment' AND $14 = 'desc' THEN COALESCE(l.appointment_time, l.expected_time, l.created) END DESC,
+          CASE WHEN $14 = 'asc' THEN l.id END ASC,
+          l.id DESC
+        LIMIT $15 OFFSET $16
         "#,
     )
         .bind(tenant_id.get())
-        .bind(show_deleted)
+        .bind(query.show_deleted)
         .bind(scope.all_facilities)
         .bind(&scope.facility_ids)
         .bind(scope.all_inventory_owners)
         .bind(&scope.inventory_owner_ids)
-        .bind(limit)
-        .bind(offset)
+        .bind(query.search.as_deref())
+        .bind(query.status.map(|value| value.as_str()))
+        .bind(query.load_type.map(|value| value.as_str()))
+        .bind(query.inventory_owner_id)
+        .bind(query.facility_id)
+        .bind(query.appointment_date)
+        .bind(query.sort.as_str())
+        .bind(query.direction.as_str())
+        .bind(query.limit)
+        .bind(query.offset)
         .fetch_all(&mut *tx)
         .await?;
     let load_ids = rows

@@ -65,6 +65,88 @@ pub struct LoadListQuery {
     pub show_deleted: bool,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    pub search: Option<String>,
+    pub status: Option<String>,
+    pub load_type: Option<String>,
+    pub inventory_owner_id: Option<i64>,
+    pub facility_id: Option<i64>,
+    pub appointment_date: Option<String>,
+    pub sort: Option<String>,
+    pub direction: Option<String>,
+}
+
+fn load_summary_query(query: LoadListQuery) -> AppResult<repo::loads::LoadSummaryQuery> {
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_LOAD_LIMIT)
+        .clamp(1, MAX_LOAD_LIMIT);
+    let offset = query.offset.unwrap_or(0).max(0);
+    let search = query
+        .search
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if search
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 200)
+    {
+        return Err(AppError::bad_request(
+            "load search must not exceed 200 characters",
+        ));
+    }
+    let status = query
+        .status
+        .map(|value| {
+            LoadStatus::parse(&value).ok_or_else(|| AppError::bad_request("invalid load status"))
+        })
+        .transpose()?;
+    let load_type = query
+        .load_type
+        .map(|value| {
+            LoadType::parse(&value).ok_or_else(|| AppError::bad_request("invalid load type"))
+        })
+        .transpose()?;
+    if query.inventory_owner_id.is_some_and(|value| value <= 0)
+        || query.facility_id.is_some_and(|value| value <= 0)
+    {
+        return Err(AppError::bad_request(
+            "inventory_owner_id and facility_id must be positive",
+        ));
+    }
+    let appointment_date = query
+        .appointment_date
+        .map(|value| {
+            chrono::NaiveDate::parse_from_str(&value, "%Y-%m-%d")
+                .map_err(|_| AppError::bad_request("appointment_date must use YYYY-MM-DD"))
+        })
+        .transpose()?;
+    let sort = match query.sort.as_deref().unwrap_or("id") {
+        "id" => repo::loads::LoadSummarySort::Id,
+        "type" => repo::loads::LoadSummarySort::LoadType,
+        "reference" => repo::loads::LoadSummarySort::Reference,
+        "inventory_owner" => repo::loads::LoadSummarySort::InventoryOwner,
+        "facility" => repo::loads::LoadSummarySort::Facility,
+        "status" => repo::loads::LoadSummarySort::Status,
+        "appointment" => repo::loads::LoadSummarySort::Appointment,
+        _ => return Err(AppError::bad_request("invalid load sort")),
+    };
+    let direction = match query.direction.as_deref().unwrap_or("desc") {
+        "asc" => repo::loads::LoadSummaryDirection::Ascending,
+        "desc" => repo::loads::LoadSummaryDirection::Descending,
+        _ => return Err(AppError::bad_request("invalid load sort direction")),
+    };
+    Ok(repo::loads::LoadSummaryQuery {
+        show_deleted: query.show_deleted,
+        search,
+        status,
+        load_type,
+        inventory_owner_id: query.inventory_owner_id,
+        facility_id: query.facility_id,
+        appointment_date,
+        sort,
+        direction,
+        limit,
+        offset,
+    })
 }
 
 pub async fn list(
@@ -73,20 +155,9 @@ pub async fn list(
     Query(q): Query<LoadListQuery>,
 ) -> AppResult<Json<Vec<Load>>> {
     user.require_permission(&state.db, PERM).await?;
-    let limit = q
-        .limit
-        .unwrap_or(DEFAULT_LOAD_LIMIT)
-        .clamp(1, MAX_LOAD_LIMIT);
-    let offset = q.offset.unwrap_or(0).max(0);
+    let query = load_summary_query(q)?;
     Ok(Json(
-        repo::loads::get_load_summaries_in_scope(
-            &state.db,
-            &user.tenant,
-            q.show_deleted,
-            limit,
-            offset,
-        )
-        .await?,
+        repo::loads::get_load_summaries_page_in_scope(&state.db, &user.tenant, &query).await?,
     ))
 }
 
@@ -110,13 +181,11 @@ pub async fn mobile_inbound_list(
     user: CurrentTenant,
 ) -> AppResult<Json<Vec<Load>>> {
     user.require_permission(&state.db, PERM).await?;
-    let loads =
-        repo::loads::get_load_summaries_in_scope(&state.db, &user.tenant, false, MAX_LOAD_LIMIT, 0)
-            .await?
-            .into_iter()
-            .filter(|load| load.r#type == LoadType::Inbound)
-            .collect();
-    Ok(Json(loads))
+    let mut query = repo::loads::LoadSummaryQuery::operational(MAX_LOAD_LIMIT, 0);
+    query.load_type = Some(LoadType::Inbound);
+    Ok(Json(
+        repo::loads::get_load_summaries_page_in_scope(&state.db, &user.tenant, &query).await?,
+    ))
 }
 
 pub async fn mobile_inbound_get(
@@ -437,4 +506,69 @@ pub async fn delete_file(
         repo::loads::delete_file(&state.db, user.tenant.tenant_id, user.user.id, body.file_id)
             .await?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request() -> LoadListQuery {
+        LoadListQuery {
+            show_deleted: false,
+            limit: Some(100),
+            offset: Some(0),
+            search: None,
+            status: None,
+            load_type: None,
+            inventory_owner_id: None,
+            facility_id: None,
+            appointment_date: None,
+            sort: None,
+            direction: None,
+        }
+    }
+
+    #[test]
+    fn load_list_query_maps_all_server_sort_and_filter_fields() {
+        let mut request = request();
+        request.search = Some("  TRAILER-7  ".to_owned());
+        request.status = Some("arrived".to_owned());
+        request.load_type = Some("inbound".to_owned());
+        request.inventory_owner_id = Some(2);
+        request.facility_id = Some(3);
+        request.appointment_date = Some("2026-08-10".to_owned());
+        request.sort = Some("appointment".to_owned());
+        request.direction = Some("asc".to_owned());
+
+        let query = load_summary_query(request).unwrap();
+        assert_eq!(query.search.as_deref(), Some("TRAILER-7"));
+        assert_eq!(query.status, Some(LoadStatus::Arrived));
+        assert_eq!(query.load_type, Some(LoadType::Inbound));
+        assert_eq!(query.inventory_owner_id, Some(2));
+        assert_eq!(query.facility_id, Some(3));
+        assert_eq!(
+            query.appointment_date,
+            chrono::NaiveDate::from_ymd_opt(2026, 8, 10)
+        );
+        assert_eq!(query.sort, repo::loads::LoadSummarySort::Appointment);
+        assert_eq!(
+            query.direction,
+            repo::loads::LoadSummaryDirection::Ascending
+        );
+    }
+
+    #[test]
+    fn load_list_query_rejects_invalid_server_sort_and_filters() {
+        let invalid: [fn(&mut LoadListQuery); 4] = [
+            |request: &mut LoadListQuery| request.sort = Some("unknown".to_owned()),
+            |request: &mut LoadListQuery| request.direction = Some("sideways".to_owned()),
+            |request: &mut LoadListQuery| request.facility_id = Some(0),
+            |request: &mut LoadListQuery| request.appointment_date = Some("08/10/2026".to_owned()),
+        ];
+        for mutate in invalid {
+            let mut request = request();
+            mutate(&mut request);
+            assert!(load_summary_query(request).is_err());
+        }
+    }
 }

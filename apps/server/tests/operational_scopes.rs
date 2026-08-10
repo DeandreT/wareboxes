@@ -346,6 +346,77 @@ async fn order_and_load_workflows_enforce_owner_and_facility_scopes() {
     assert_eq!(loads.len(), 1);
     assert_eq!(loads[0].id, allowed_load);
 
+    let alpha_load = repo::loads::add_load(
+        &db,
+        tenant_id,
+        administrator.id,
+        allowed_facility,
+        allowed_owner,
+        LoadType::Inbound,
+        Some("ALPHA-SCOPED-LOAD"),
+        None,
+        None,
+        None,
+        None,
+        Some(allowed_location),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let zulu_load = repo::loads::add_load(
+        &db,
+        tenant_id,
+        administrator.id,
+        allowed_facility,
+        allowed_owner,
+        LoadType::Inbound,
+        Some("ZULU-SCOPED-LOAD"),
+        None,
+        None,
+        None,
+        None,
+        Some(allowed_location),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    for (offset, expected_load) in [(0, alpha_load), (1, allowed_load), (2, zulu_load)] {
+        let response = app
+            .clone()
+            .oneshot(api_request(
+                &token,
+                tenant_id,
+                Method::GET,
+                &format!("/api/loads?limit=1&offset={offset}&sort=reference&direction=asc"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page = response_json::<Vec<Load>>(response).await;
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].id, expected_load);
+    }
+
+    let response = app
+        .clone()
+        .oneshot(api_request(
+            &token,
+            tenant_id,
+            Method::GET,
+            "/api/loads?limit=1&search=zulu-scoped&sort=reference&direction=asc",
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let filtered_loads = response_json::<Vec<Load>>(response).await;
+    assert_eq!(filtered_loads.len(), 1);
+    assert_eq!(filtered_loads[0].id, zulu_load);
+
     let response = app
         .clone()
         .oneshot(api_request(

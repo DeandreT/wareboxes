@@ -202,11 +202,7 @@ impl Section {
     fn supports_workspace_refresh(self) -> bool {
         matches!(
             self,
-            Self::Overview
-                | Self::Loads
-                | Self::Inventory
-                | Self::InventoryDisposition
-                | Self::Access
+            Self::Overview | Self::Inventory | Self::InventoryDisposition | Self::Access
         )
     }
 }
@@ -677,7 +673,9 @@ async fn load_workspace(
             data.access = api::access().await?;
         }
         Section::Loads if has_permission(session, "wms") => {
-            data.loads = api::internal_get("/api/loads?offset=0&limit=500").await?;
+            data.loads =
+                api::internal_get("/api/loads?offset=0&limit=100&sort=appointment&direction=asc")
+                    .await?;
             data.access = api::access().await?;
             data.catalog_items = api::internal_get("/api/items?show_deleted=false").await?;
             data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
@@ -1604,6 +1602,7 @@ mod tests {
         assert!(!Section::Orders.supports_workspace_refresh());
         assert!(!Section::Packing.supports_workspace_refresh());
         assert!(!Section::Shipping.supports_workspace_refresh());
+        assert!(!Section::Loads.supports_workspace_refresh());
         assert!(!Section::Catalog.supports_workspace_refresh());
         assert!(
             !Section::Administration(crate::administration::AdministrationArea::Users)

@@ -1,5 +1,3 @@
-use std::cmp::Ordering;
-
 use wareboxes_core::models::{LoadStatus, Order, OrderStatus, Timestamp};
 
 pub(super) fn optional_text(value: &str) -> Option<String> {
@@ -87,12 +85,6 @@ pub(super) fn load_status_class(status: LoadStatus) -> &'static str {
         LoadStatus::Arrived | LoadStatus::Receiving => "status processing",
         LoadStatus::Planned | LoadStatus::Scheduled => "status open",
     }
-}
-
-pub(super) fn cmp_option_str(left: Option<&str>, right: Option<&str>) -> Ordering {
-    left.unwrap_or_default()
-        .to_ascii_lowercase()
-        .cmp(&right.unwrap_or_default().to_ascii_lowercase())
 }
 
 #[cfg(test)]
