@@ -566,6 +566,43 @@ async fn planning_uses_live_demand_inbound_projection_and_deterministic_fefo() {
     .await;
     assert_eq!(second_queue.items.len(), 1);
     assert_ne!(second_queue.items[0].work_id, first_queue.items[0].work_id);
+
+    let quantity_queue = rig
+        .request(
+            Method::GET,
+            "/api/v1/replenishment-queue?limit=1&sort=quantity&direction=descending",
+            None,
+            None,
+        )
+        .await;
+    let quantity_queue: ReplenishmentQueuePage = response_json(
+        expect_status(
+            quantity_queue,
+            StatusCode::OK,
+            "quantity-sorted replenishment queue",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(quantity_queue.items[0].quantity, 6);
+    let quantity_cursor = quantity_queue.next_cursor.as_ref().unwrap();
+    let sort_mismatch = rig
+        .request(
+            Method::GET,
+            &format!(
+                "/api/v1/replenishment-queue?limit=1&sort=quantity&direction=ascending&cursor={quantity_cursor}"
+            ),
+            None,
+            None,
+        )
+        .await;
+    assert_error_reason(
+        sort_mismatch,
+        StatusCode::BAD_REQUEST,
+        ErrorReason::InvalidCursor,
+        "queue cursor sort mismatch",
+    )
+    .await;
     let mismatch = rig
         .request(
             Method::GET,

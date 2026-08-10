@@ -228,6 +228,8 @@ pub async fn work_page(
     access: &TenantAccess,
     filter: ReplenishmentWorkPageFilter,
 ) -> AppResult<ReplenishmentWorkPage> {
+    let offset = i64::try_from(filter.offset)
+        .map_err(|_| AppError::bad_request("replenishment work page offset is invalid"))?;
     let mut tx = db.begin().await?;
     bind_tenant_context(&mut tx, access.tenant_id).await?;
     let scope = lock_current_scope_tx(&mut tx, access.tenant_id, access.user_id.get()).await?;
@@ -277,10 +279,33 @@ pub async fn work_page(
           AND ($8::bigint IS NULL OR detail.item_id=$8)
           AND ($9::bigint IS NULL OR detail.destination_location_id=$9)
           AND ($10::text[] IS NULL OR work.status=ANY($10))
-          AND ($11::bigint IS NULL OR work.id>$11)
           AND ($10::text[] IS NOT NULL OR work.status IN ('open','assigned','in_progress'))
-        ORDER BY work.id
-        LIMIT $12
+        ORDER BY
+          CASE WHEN $11='created' AND $12 THEN work.created END ASC,
+          CASE WHEN $11='created' AND NOT $12 THEN work.created END DESC,
+          CASE WHEN $11='priority' AND $12 THEN work.priority END ASC,
+          CASE WHEN $11='priority' AND NOT $12 THEN work.priority END DESC,
+          CASE WHEN $11='inventory_owner' AND $12 THEN LOWER(owner.name) END ASC,
+          CASE WHEN $11='inventory_owner' AND NOT $12 THEN LOWER(owner.name) END DESC,
+          CASE WHEN $11='facility' AND $12 THEN LOWER(facility.name) END ASC,
+          CASE WHEN $11='facility' AND NOT $12 THEN LOWER(facility.name) END DESC,
+          CASE WHEN $11='item' AND $12 THEN LOWER(COALESCE(item.description,'')) END ASC,
+          CASE WHEN $11='item' AND NOT $12 THEN LOWER(COALESCE(item.description,'')) END DESC,
+          CASE WHEN $11='source' AND $12 THEN LOWER(source.barcode) END ASC,
+          CASE WHEN $11='source' AND NOT $12 THEN LOWER(source.barcode) END DESC,
+          CASE WHEN $11='destination' AND $12 THEN LOWER(destination.barcode) END ASC,
+          CASE WHEN $11='destination' AND NOT $12 THEN LOWER(destination.barcode) END DESC,
+          CASE WHEN $11='quantity' AND $12 THEN detail.planned_qty END ASC,
+          CASE WHEN $11='quantity' AND NOT $12 THEN detail.planned_qty END DESC,
+          CASE WHEN $11='status' AND $12 THEN work.status END ASC,
+          CASE WHEN $11='status' AND NOT $12 THEN work.status END DESC,
+          CASE WHEN $11='lease' AND $12 THEN COALESCE(work.lease_expires_at,work.due_at) END ASC NULLS LAST,
+          CASE WHEN $11='lease' AND NOT $12 THEN COALESCE(work.lease_expires_at,work.due_at) END DESC NULLS LAST,
+          CASE WHEN $12 THEN detail.travel_sequence END ASC,
+          CASE WHEN NOT $12 THEN detail.travel_sequence END DESC,
+          CASE WHEN $12 THEN work.id END ASC,
+          CASE WHEN NOT $12 THEN work.id END DESC
+        OFFSET $13 LIMIT $14
         "#,
     )
     .bind(access.tenant_id.get())
@@ -290,11 +315,13 @@ pub async fn work_page(
     .bind(&scope.inventory_owner_ids)
     .bind(filter.facility_id.map(|id| id.get()))
     .bind(filter.inventory_owner_id.map(|id| id.get()))
-    .bind(filter.item_id.map(|id| id.get()))
-    .bind(filter.pick_face_location_id.map(|id| id.get()))
-    .bind(status)
-    .bind(filter.after_work_id.map(|id| id.get()))
-    .bind(fetch_limit)
+        .bind(filter.item_id.map(|id| id.get()))
+        .bind(filter.pick_face_location_id.map(|id| id.get()))
+        .bind(status)
+        .bind(filter.sort.as_str())
+        .bind(filter.direction.is_ascending())
+        .bind(offset)
+        .bind(fetch_limit)
     .fetch_all(&mut *tx)
     .await?;
     let has_more = rows.len() > usize::from(filter.limit);
@@ -303,14 +330,9 @@ pub async fn work_page(
         .take(usize::from(filter.limit))
         .map(map_work_row)
         .collect::<AppResult<Vec<_>>>()?;
-    let next_after_work_id = has_more
-        .then(|| items.last().map(|item| item.work_id))
-        .flatten();
+    let next_offset = has_more.then(|| filter.offset + u64::from(filter.limit));
     tx.commit().await?;
-    Ok(ReplenishmentWorkPage {
-        items,
-        next_after_work_id,
-    })
+    Ok(ReplenishmentWorkPage { items, next_offset })
 }
 
 fn latest_plan_from_row(

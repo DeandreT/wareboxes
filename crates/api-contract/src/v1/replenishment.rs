@@ -309,6 +309,30 @@ pub struct ReplenishmentPolicyReadinessEntryResponse {
 
 pub type ReplenishmentPolicyPage = CursorPage<ReplenishmentPolicyReadinessEntryResponse>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplenishmentWorkSort {
+    Created,
+    #[default]
+    Priority,
+    InventoryOwner,
+    Facility,
+    Item,
+    Source,
+    Destination,
+    Quantity,
+    Status,
+    Lease,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplenishmentWorkSortDirection {
+    Ascending,
+    #[default]
+    Descending,
+}
+
 /// Queue filters. Omitted status returns open pending and claimed work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -327,6 +351,10 @@ pub struct ReplenishmentQueuePageRequest {
     pub cursor: Option<OpaqueCursor>,
     #[serde(default)]
     pub limit: PageLimit,
+    #[serde(default)]
+    pub sort: ReplenishmentWorkSort,
+    #[serde(default)]
+    pub direction: ReplenishmentWorkSortDirection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -621,6 +649,8 @@ mod tests {
         .unwrap();
         assert_eq!(query.limit.get(), 25);
         assert_eq!(query.status, Some(ReplenishmentWorkStatus::Claimed));
+        assert_eq!(query.sort, ReplenishmentWorkSort::Priority);
+        assert_eq!(query.direction, ReplenishmentWorkSortDirection::Descending);
         assert!(
             serde_json::from_value::<ReplenishmentQueuePageRequest>(json!({
                 "limit": 0

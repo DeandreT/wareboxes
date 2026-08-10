@@ -2,6 +2,7 @@ use leptos::prelude::*;
 use lucide_leptos::X;
 use wareboxes_api_contract::v1::{
     OpaqueCursor, PlanReplenishmentResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
+    ReplenishmentWorkSort, ReplenishmentWorkSortDirection,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 use wareboxes_core::models::{Item, Location};
@@ -16,7 +17,7 @@ use command_dialog::PolicyCommandDialog;
 use model::{
     planning_outcome_class, planning_outcome_label, CommandSignals, PolicyCommandResult,
     PolicyDialogMode, PolicyPageSignals, ReplenishmentReferenceData, ReplenishmentTab,
-    ScopeFilters, WorkPageSignals,
+    ScopeFilters, WorkPageSignals, WorkSort,
 };
 use policies::PoliciesPanel;
 use work_cancellation::WorkCancellationDialog;
@@ -24,6 +25,7 @@ use work_queue::WorkQueuePanel;
 
 use crate::api;
 use crate::components::{Icon, UiIcon};
+use crate::sorting::{SortDirection, SortSpec};
 use crate::toast::use_toast_bus;
 use crate::view_model::format_quantity;
 
@@ -163,6 +165,10 @@ pub(crate) fn ReplenishmentWorkspace(
             history.push(work.current_cursor.get_untracked());
             request_work_page(requests, Some(next), history);
         }
+    });
+    let work_sort = Callback::new(move |key| {
+        SortSpec::select(work.sort, key);
+        request_work_page(requests, None, Vec::new());
     });
     let open_configure = Callback::new(move |policy| {
         let current_references = references.get_untracked();
@@ -305,6 +311,7 @@ pub(crate) fn ReplenishmentWorkspace(
                 on_previous=work_previous
                 on_next=work_next
                 on_cancel=open_cancellation
+                on_sort=work_sort
             />
         </Show>
 
@@ -408,15 +415,20 @@ fn request_work_page(
         .generation
         .update(|generation| *generation = generation.saturating_add(1));
     let generation = context.work.generation.get_untracked();
+    let sort = context.work.sort.get_untracked();
     context.work.loading.set(true);
     context.work.error.set(None);
     leptos::task::spawn_local(async move {
         let response = api::replenishment_queue(
-            context.filters.facility(),
-            context.filters.owner(),
-            context.filters.item(),
-            context.filters.pick_face(),
-            context.filters.status(),
+            api::ReplenishmentQueueFilters {
+                facility_id: context.filters.facility(),
+                inventory_owner_id: context.filters.owner(),
+                item_id: context.filters.item(),
+                pick_face_location_id: context.filters.pick_face(),
+                status: context.filters.status(),
+                sort: map_work_sort(sort.key),
+                direction: map_work_sort_direction(sort.direction),
+            },
             cursor.as_ref(),
         )
         .await;
@@ -434,6 +446,28 @@ fn request_work_page(
             Err(error) => context.work.error.set(Some(error.message)),
         }
     });
+}
+
+const fn map_work_sort(sort: WorkSort) -> ReplenishmentWorkSort {
+    match sort {
+        WorkSort::Created => ReplenishmentWorkSort::Created,
+        WorkSort::Priority => ReplenishmentWorkSort::Priority,
+        WorkSort::Client => ReplenishmentWorkSort::InventoryOwner,
+        WorkSort::Facility => ReplenishmentWorkSort::Facility,
+        WorkSort::Item => ReplenishmentWorkSort::Item,
+        WorkSort::Source => ReplenishmentWorkSort::Source,
+        WorkSort::Destination => ReplenishmentWorkSort::Destination,
+        WorkSort::Quantity => ReplenishmentWorkSort::Quantity,
+        WorkSort::Status => ReplenishmentWorkSort::Status,
+        WorkSort::Lease => ReplenishmentWorkSort::Lease,
+    }
+}
+
+const fn map_work_sort_direction(direction: SortDirection) -> ReplenishmentWorkSortDirection {
+    match direction {
+        SortDirection::Ascending => ReplenishmentWorkSortDirection::Ascending,
+        SortDirection::Descending => ReplenishmentWorkSortDirection::Descending,
+    }
 }
 
 fn request_references(

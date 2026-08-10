@@ -256,8 +256,8 @@ pub use replenishment::{
     ReplenishmentPolicyReadinessEntryResponse, ReplenishmentPolicyStatus,
     ReplenishmentQueueEntryResponse, ReplenishmentQueuePage, ReplenishmentQueuePageRequest,
     ReplenishmentReserveSourceLocationIds, ReplenishmentWorkCancellationReason,
-    ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
-    RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
+    ReplenishmentWorkCancellationResponse, ReplenishmentWorkSort, ReplenishmentWorkSortDirection,
+    ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
 };
 pub use revision::{Revision, RevisionError, RevisionPrecondition};
 pub use rf_session::{

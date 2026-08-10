@@ -1,26 +1,12 @@
-use std::cmp::Ordering;
-
 use leptos::prelude::*;
 use lucide_leptos::{ArchiveX, Eye};
 use wareboxes_api_contract::v1::{ReplenishmentQueueEntryResponse, ReplenishmentWorkStatus};
 
-use super::model::{compact_timestamp, work_status_class, work_status_label, WorkPageSignals};
-use crate::sorting::{SortDirection, SortSpec, SortableHeader};
+use super::model::{
+    compact_timestamp, work_status_class, work_status_label, WorkPageSignals, WorkSort,
+};
+use crate::sorting::SortableHeader;
 use crate::view_model::format_quantity;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum WorkSort {
-    Created,
-    Priority,
-    Client,
-    Facility,
-    Item,
-    Source,
-    Destination,
-    Quantity,
-    Status,
-    Lease,
-}
 
 #[component]
 pub(super) fn WorkQueuePanel(
@@ -28,11 +14,9 @@ pub(super) fn WorkQueuePanel(
     on_previous: Callback<()>,
     on_next: Callback<()>,
     on_cancel: Callback<ReplenishmentQueueEntryResponse>,
+    on_sort: Callback<WorkSort>,
 ) -> impl IntoView {
-    let sort = RwSignal::new(SortSpec {
-        key: WorkSort::Priority,
-        direction: SortDirection::Descending,
-    });
+    let sort = signals.sort;
     let selected_id = RwSignal::new(None::<i64>);
     let selected = move || {
         let selected_id = selected_id.get()?;
@@ -58,25 +42,23 @@ pub(super) fn WorkQueuePanel(
                     <caption class="sr-only">"Replenishment execution work matching the active scope"</caption>
                     <thead>
                         <tr>
-                            <SortableHeader label="Created" active=move || sort.get().key == WorkSort::Created direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, WorkSort::Created))/>
-                            <SortableHeader label="Pri" active=move || sort.get().key == WorkSort::Priority direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, WorkSort::Priority)) numeric=true/>
-                            <SortableHeader label="Client" active=move || sort.get().key == WorkSort::Client direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, WorkSort::Client))/>
-                            <SortableHeader label="Facility" active=move || sort.get().key == WorkSort::Facility direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, WorkSort::Facility))/>
-                            <SortableHeader label="Item" active=move || sort.get().key == WorkSort::Item direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, WorkSort::Item))/>
-                            <SortableHeader label="Source" active=move || sort.get().key == WorkSort::Source direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, WorkSort::Source))/>
-                            <SortableHeader label="Pick face" active=move || sort.get().key == WorkSort::Destination direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, WorkSort::Destination))/>
-                            <SortableHeader label="Qty" active=move || sort.get().key == WorkSort::Quantity direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, WorkSort::Quantity)) numeric=true/>
+                            <SortableHeader label="Created" active=move || sort.get().key == WorkSort::Created direction=move || sort.get().direction on_sort=Callback::new(move |_| on_sort.run(WorkSort::Created))/>
+                            <SortableHeader label="Pri" active=move || sort.get().key == WorkSort::Priority direction=move || sort.get().direction on_sort=Callback::new(move |_| on_sort.run(WorkSort::Priority)) numeric=true/>
+                            <SortableHeader label="Client" active=move || sort.get().key == WorkSort::Client direction=move || sort.get().direction on_sort=Callback::new(move |_| on_sort.run(WorkSort::Client))/>
+                            <SortableHeader label="Facility" active=move || sort.get().key == WorkSort::Facility direction=move || sort.get().direction on_sort=Callback::new(move |_| on_sort.run(WorkSort::Facility))/>
+                            <SortableHeader label="Item" active=move || sort.get().key == WorkSort::Item direction=move || sort.get().direction on_sort=Callback::new(move |_| on_sort.run(WorkSort::Item))/>
+                            <SortableHeader label="Source" active=move || sort.get().key == WorkSort::Source direction=move || sort.get().direction on_sort=Callback::new(move |_| on_sort.run(WorkSort::Source))/>
+                            <SortableHeader label="Pick face" active=move || sort.get().key == WorkSort::Destination direction=move || sort.get().direction on_sort=Callback::new(move |_| on_sort.run(WorkSort::Destination))/>
+                            <SortableHeader label="Qty" active=move || sort.get().key == WorkSort::Quantity direction=move || sort.get().direction on_sort=Callback::new(move |_| on_sort.run(WorkSort::Quantity)) numeric=true/>
                             <th>"Trace"</th>
-                            <SortableHeader label="Status" active=move || sort.get().key == WorkSort::Status direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, WorkSort::Status))/>
-                            <SortableHeader label="Lease / due" active=move || sort.get().key == WorkSort::Lease direction=move || sort.get().direction on_sort=Callback::new(move |_| SortSpec::select(sort, WorkSort::Lease))/>
+                            <SortableHeader label="Status" active=move || sort.get().key == WorkSort::Status direction=move || sort.get().direction on_sort=Callback::new(move |_| on_sort.run(WorkSort::Status))/>
+                            <SortableHeader label="Lease / due" active=move || sort.get().key == WorkSort::Lease direction=move || sort.get().direction on_sort=Callback::new(move |_| on_sort.run(WorkSort::Lease))/>
                         </tr>
                     </thead>
                     <tbody>
                         {move || {
-                            let spec = sort.get();
                             let current_selected = selected_id.get();
-                            let mut work = signals.page.get().map_or_else(Vec::new, |page| page.items);
-                            work.sort_by(|left, right| work_ordering(left, right, spec));
+                            let work = signals.page.get().map_or_else(Vec::new, |page| page.items);
                             if work.is_empty() && !signals.loading.get() {
                                 view! {
                                     <tr><td class="table-empty-row" colspan="11">"No replenishment work matches this scope."</td></tr>
@@ -241,62 +223,9 @@ fn lease_label(entry: &ReplenishmentQueueEntryResponse) -> String {
     )
 }
 
-fn work_ordering(
-    left: &ReplenishmentQueueEntryResponse,
-    right: &ReplenishmentQueueEntryResponse,
-    spec: SortSpec<WorkSort>,
-) -> Ordering {
-    let ordering = match spec.key {
-        WorkSort::Created => left.created_at.cmp(&right.created_at),
-        WorkSort::Priority => left.priority.cmp(&right.priority),
-        WorkSort::Client => left
-            .inventory_owner_name
-            .to_ascii_lowercase()
-            .cmp(&right.inventory_owner_name.to_ascii_lowercase()),
-        WorkSort::Facility => left
-            .facility_name
-            .to_ascii_lowercase()
-            .cmp(&right.facility_name.to_ascii_lowercase()),
-        WorkSort::Item => left.item_id.cmp(&right.item_id),
-        WorkSort::Source => left
-            .source_location
-            .barcode
-            .cmp(&right.source_location.barcode),
-        WorkSort::Destination => left
-            .destination_pick_face
-            .barcode
-            .cmp(&right.destination_pick_face.barcode),
-        WorkSort::Quantity => left.quantity.cmp(&right.quantity),
-        WorkSort::Status => work_status_rank(left.status).cmp(&work_status_rank(right.status)),
-        WorkSort::Lease => left.lease_expires_at.cmp(&right.lease_expires_at),
-    }
-    .then_with(|| left.sequence.cmp(&right.sequence))
-    .then_with(|| left.work_id.cmp(&right.work_id));
-    if spec.direction == SortDirection::Ascending {
-        ordering
-    } else {
-        ordering.reverse()
-    }
-}
-
-const fn work_status_rank(status: ReplenishmentWorkStatus) -> u8 {
-    match status {
-        ReplenishmentWorkStatus::Claimed => 0,
-        ReplenishmentWorkStatus::Pending => 1,
-        ReplenishmentWorkStatus::Completed => 2,
-        ReplenishmentWorkStatus::Cancelled => 3,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn active_work_sorts_before_terminal_work() {
-        assert_eq!(work_status_rank(ReplenishmentWorkStatus::Claimed), 0);
-        assert_eq!(work_status_rank(ReplenishmentWorkStatus::Cancelled), 3);
-    }
 
     #[test]
     fn short_timestamps_are_safe_for_live_partial_values() {

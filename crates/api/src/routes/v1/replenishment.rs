@@ -17,9 +17,9 @@ use wareboxes_api_contract::v1::{
     ReplenishmentPolicyPage as ApiPolicyPage, ReplenishmentPolicyPageRequest,
     ReplenishmentPolicyReadinessEntryResponse, ReplenishmentPolicyStatus as ApiPolicyStatus,
     ReplenishmentQueueEntryResponse, ReplenishmentQueuePage as ApiWorkPage,
-    ReplenishmentQueuePageRequest, ReplenishmentReserveSourceLocationIds,
-    ReplenishmentWorkStatus as ApiWorkStatus, RetireReplenishmentPolicyRequest,
-    RetireReplenishmentPolicyResponse, Revision,
+    ReplenishmentQueuePageRequest, ReplenishmentReserveSourceLocationIds, ReplenishmentWorkSort,
+    ReplenishmentWorkSortDirection, ReplenishmentWorkStatus as ApiWorkStatus,
+    RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse, Revision,
 };
 use wareboxes_application::replenishment::{
     ClaimNextReplenishmentWorkCommand, ClaimReplenishmentWorkByIdCommand,
@@ -30,7 +30,9 @@ use wareboxes_application::replenishment::{
     ReplenishmentClaimReleaseResult, ReplenishmentLatestPlanReadModel,
     ReplenishmentLocationReadModel, ReplenishmentPolicyPage, ReplenishmentPolicyPageFilter,
     ReplenishmentPolicyReadinessReadModel, ReplenishmentWorkPage, ReplenishmentWorkPageFilter,
-    ReplenishmentWorkReadModel, RetireReplenishmentPolicyCommand, RetireReplenishmentPolicyResult,
+    ReplenishmentWorkReadModel, ReplenishmentWorkSort as ApplicationWorkSort,
+    ReplenishmentWorkSortDirection as ApplicationSortDirection, RetireReplenishmentPolicyCommand,
+    RetireReplenishmentPolicyResult,
 };
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
@@ -52,7 +54,7 @@ use crate::state::AppState;
 const OPERATOR_PERMISSION: &str = "wms";
 const SUPERVISOR_PERMISSION: &str = "wms_supervisor";
 const POLICY_CURSOR_PREFIX: &str = "rp1.";
-const WORK_CURSOR_PREFIX: &str = "rw1.";
+const WORK_CURSOR_PREFIX: &str = "rw2.";
 const MAX_PAGE_LIMIT: u16 = 100;
 const MAX_RELEASE_NOTE_LENGTH: usize = 500;
 
@@ -194,6 +196,8 @@ pub async fn work_page(
         item_id,
         pick_face_location_id,
         status,
+        sort: query.sort,
+        direction: query.direction,
     };
     if decoded
         .as_ref()
@@ -210,8 +214,10 @@ pub async fn work_page(
             item_id,
             pick_face_location_id,
             status,
-            after_work_id: decoded.map(|cursor| cursor.after_work_id),
+            offset: decoded.map_or(0, |cursor| cursor.offset),
             limit: query.limit.get(),
+            sort: map_work_sort(query.sort),
+            direction: map_work_sort_direction(query.direction),
         },
     )
     .await?;
@@ -236,6 +242,8 @@ pub(crate) async fn pages_for_access(
         item_id: None,
         pick_face_location_id: None,
         status: None,
+        sort: ReplenishmentWorkSort::Priority,
+        direction: ReplenishmentWorkSortDirection::Descending,
     };
     let (policies, work) = tokio::try_join!(
         repo::replenishment::policy_page(
@@ -259,8 +267,10 @@ pub(crate) async fn pages_for_access(
                 item_id: None,
                 pick_face_location_id: None,
                 status: None,
-                after_work_id: None,
+                offset: 0,
                 limit,
+                sort: ApplicationWorkSort::Priority,
+                direction: ApplicationSortDirection::Descending,
             },
         ),
     )?;
@@ -597,13 +607,8 @@ fn map_work_page(page: ReplenishmentWorkPage, filters: WorkCursorFilters) -> V1R
         .map(map_work)
         .collect::<V1Result<Vec<_>>>()?;
     let next_cursor = page
-        .next_after_work_id
-        .map(|after_work_id| {
-            encode_work_cursor(WorkCursor {
-                filters,
-                after_work_id,
-            })
-        })
+        .next_offset
+        .map(|offset| encode_work_cursor(WorkCursor { filters, offset }))
         .transpose()?;
     Ok(ApiWorkPage::new(items, next_cursor))
 }
@@ -953,17 +958,19 @@ struct WorkCursorFilters {
     item_id: Option<CatalogItemId>,
     pick_face_location_id: Option<LocationId>,
     status: Option<ReplenishmentWorkStatus>,
+    sort: ReplenishmentWorkSort,
+    direction: ReplenishmentWorkSortDirection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WorkCursor {
     filters: WorkCursorFilters,
-    after_work_id: ReplenishmentWorkId,
+    offset: u64,
 }
 
 fn decode_work_cursor(cursor: &OpaqueCursor) -> V1Result<WorkCursor> {
     const RESOURCE: &str = "replenishment queue";
-    let parts = cursor_parts(cursor, WORK_CURSOR_PREFIX, 6, RESOURCE)?;
+    let parts = cursor_parts(cursor, WORK_CURSOR_PREFIX, 8, RESOURCE)?;
     let status = match parts[4] {
         "a" => None,
         "p" => Some(ReplenishmentWorkStatus::Pending),
@@ -983,8 +990,10 @@ fn decode_work_cursor(cursor: &OpaqueCursor) -> V1Result<WorkCursor> {
             item_id: parse_optional_cursor_id(parts[2], CatalogItemId::new, RESOURCE)?,
             pick_face_location_id: parse_optional_cursor_id(parts[3], LocationId::new, RESOURCE)?,
             status,
+            sort: parse_work_sort_code(parts[5])?,
+            direction: parse_work_direction_code(parts[6])?,
         },
-        after_work_id: parse_cursor_id(parts[5], ReplenishmentWorkId::new, RESOURCE)?,
+        offset: parse_cursor_offset(parts[7], RESOURCE)?,
     })
 }
 
@@ -997,7 +1006,7 @@ fn encode_work_cursor(cursor: WorkCursor) -> AppResult<OpaqueCursor> {
         Some(ReplenishmentWorkStatus::Cancelled) => "x",
     };
     OpaqueCursor::new(format!(
-        "{WORK_CURSOR_PREFIX}{}.{}.{}.{}.{status}.{:016x}",
+        "{WORK_CURSOR_PREFIX}{}.{}.{}.{}.{status}.{}.{}.{:016x}",
         encode_optional_id(cursor.filters.facility_id.map(|value| value.get())),
         encode_optional_id(cursor.filters.inventory_owner_id.map(|value| value.get())),
         encode_optional_id(cursor.filters.item_id.map(|value| value.get())),
@@ -1007,9 +1016,88 @@ fn encode_work_cursor(cursor: WorkCursor) -> AppResult<OpaqueCursor> {
                 .pick_face_location_id
                 .map(|value| value.get())
         ),
-        cursor.after_work_id.get(),
+        work_sort_code(cursor.filters.sort),
+        work_direction_code(cursor.filters.direction),
+        cursor.offset,
     ))
     .map_err(|_| AppError::internal("generated an invalid replenishment queue cursor"))
+}
+
+fn parse_cursor_offset(encoded: &str, resource: &str) -> V1Result<u64> {
+    if encoded.len() != 16 {
+        return Err(V1Error::invalid_cursor_for(resource));
+    }
+    u64::from_str_radix(encoded, 16).map_err(|_| V1Error::invalid_cursor_for(resource))
+}
+
+const fn work_sort_code(sort: ReplenishmentWorkSort) -> &'static str {
+    match sort {
+        ReplenishmentWorkSort::Created => "c",
+        ReplenishmentWorkSort::Priority => "p",
+        ReplenishmentWorkSort::InventoryOwner => "o",
+        ReplenishmentWorkSort::Facility => "f",
+        ReplenishmentWorkSort::Item => "i",
+        ReplenishmentWorkSort::Source => "s",
+        ReplenishmentWorkSort::Destination => "d",
+        ReplenishmentWorkSort::Quantity => "q",
+        ReplenishmentWorkSort::Status => "t",
+        ReplenishmentWorkSort::Lease => "l",
+    }
+}
+
+fn parse_work_sort_code(value: &str) -> V1Result<ReplenishmentWorkSort> {
+    match value {
+        "c" => Ok(ReplenishmentWorkSort::Created),
+        "p" => Ok(ReplenishmentWorkSort::Priority),
+        "o" => Ok(ReplenishmentWorkSort::InventoryOwner),
+        "f" => Ok(ReplenishmentWorkSort::Facility),
+        "i" => Ok(ReplenishmentWorkSort::Item),
+        "s" => Ok(ReplenishmentWorkSort::Source),
+        "d" => Ok(ReplenishmentWorkSort::Destination),
+        "q" => Ok(ReplenishmentWorkSort::Quantity),
+        "t" => Ok(ReplenishmentWorkSort::Status),
+        "l" => Ok(ReplenishmentWorkSort::Lease),
+        _ => Err(V1Error::invalid_cursor_for("replenishment queue")),
+    }
+}
+
+const fn work_direction_code(direction: ReplenishmentWorkSortDirection) -> &'static str {
+    match direction {
+        ReplenishmentWorkSortDirection::Ascending => "a",
+        ReplenishmentWorkSortDirection::Descending => "d",
+    }
+}
+
+fn parse_work_direction_code(value: &str) -> V1Result<ReplenishmentWorkSortDirection> {
+    match value {
+        "a" => Ok(ReplenishmentWorkSortDirection::Ascending),
+        "d" => Ok(ReplenishmentWorkSortDirection::Descending),
+        _ => Err(V1Error::invalid_cursor_for("replenishment queue")),
+    }
+}
+
+const fn map_work_sort(sort: ReplenishmentWorkSort) -> ApplicationWorkSort {
+    match sort {
+        ReplenishmentWorkSort::Created => ApplicationWorkSort::Created,
+        ReplenishmentWorkSort::Priority => ApplicationWorkSort::Priority,
+        ReplenishmentWorkSort::InventoryOwner => ApplicationWorkSort::InventoryOwner,
+        ReplenishmentWorkSort::Facility => ApplicationWorkSort::Facility,
+        ReplenishmentWorkSort::Item => ApplicationWorkSort::Item,
+        ReplenishmentWorkSort::Source => ApplicationWorkSort::Source,
+        ReplenishmentWorkSort::Destination => ApplicationWorkSort::Destination,
+        ReplenishmentWorkSort::Quantity => ApplicationWorkSort::Quantity,
+        ReplenishmentWorkSort::Status => ApplicationWorkSort::Status,
+        ReplenishmentWorkSort::Lease => ApplicationWorkSort::Lease,
+    }
+}
+
+const fn map_work_sort_direction(
+    direction: ReplenishmentWorkSortDirection,
+) -> ApplicationSortDirection {
+    match direction {
+        ReplenishmentWorkSortDirection::Ascending => ApplicationSortDirection::Ascending,
+        ReplenishmentWorkSortDirection::Descending => ApplicationSortDirection::Descending,
+    }
 }
 
 fn cursor_parts<'a>(
@@ -1125,8 +1213,10 @@ mod tests {
                 item_id: Some(CatalogItemId::new(5).unwrap()),
                 pick_face_location_id: None,
                 status: Some(ReplenishmentWorkStatus::Claimed),
+                sort: ReplenishmentWorkSort::Quantity,
+                direction: ReplenishmentWorkSortDirection::Ascending,
             },
-            after_work_id: ReplenishmentWorkId::new(8).unwrap(),
+            offset: 100,
         };
         let cursor = encode_work_cursor(expected).unwrap();
         assert_eq!(decode_work_cursor(&cursor).unwrap(), expected);
@@ -1134,7 +1224,9 @@ mod tests {
         for value in [
             "rp1.a.a.a.a.0000000000000001",
             "rw1.a.a.a.a.q.0000000000000001",
-            "rw1.a.a.a.a.a.0000000000000000",
+            "rw2.a.a.a.a.a.x.a.0000000000000001",
+            "rw2.a.a.a.a.a.q.x.0000000000000001",
+            "rw2.a.a.a.a.a.q.a.not-an-offset",
         ] {
             assert!(decode_work_cursor(&OpaqueCursor::new(value).unwrap()).is_err());
         }

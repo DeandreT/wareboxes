@@ -9,12 +9,27 @@ use wareboxes_api_contract::v1::{
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 use wareboxes_core::models::{Item, Location};
 
+use crate::sorting::{SortDirection, SortSpec};
 use crate::toast::ToastBus;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReplenishmentTab {
     Policies,
     Work,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkSort {
+    Created,
+    Priority,
+    Client,
+    Facility,
+    Item,
+    Source,
+    Destination,
+    Quantity,
+    Status,
+    Lease,
 }
 
 #[derive(Clone, Copy)]
@@ -107,6 +122,7 @@ pub(super) struct WorkPageSignals {
     pub loading: RwSignal<bool>,
     pub error: RwSignal<Option<String>>,
     pub generation: RwSignal<u64>,
+    pub sort: RwSignal<SortSpec<WorkSort>>,
 }
 
 impl WorkPageSignals {
@@ -118,6 +134,10 @@ impl WorkPageSignals {
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
             generation: RwSignal::new(0),
+            sort: RwSignal::new(SortSpec {
+                key: WorkSort::Priority,
+                direction: SortDirection::Descending,
+            }),
         }
     }
 }

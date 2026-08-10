@@ -19,8 +19,8 @@ use wareboxes_api_contract::v1::{
     ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
     RemovePackedContentRequest, RemovePackedContentResponse, ReopenCartonRequest,
     ReopenCartonResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
-    ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
-    RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
+    ReplenishmentWorkCancellationResponse, ReplenishmentWorkSort, ReplenishmentWorkSortDirection,
+    ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
     ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
     VoidCartonResponse,
 };
@@ -79,6 +79,31 @@ pub struct ApiError {
     pub ambiguous_outcome: bool,
 }
 
+#[derive(Clone, Copy)]
+pub struct ReplenishmentQueueFilters {
+    pub facility_id: Option<i64>,
+    pub inventory_owner_id: Option<i64>,
+    pub item_id: Option<i64>,
+    pub pick_face_location_id: Option<i64>,
+    pub status: Option<ReplenishmentWorkStatus>,
+    pub sort: ReplenishmentWorkSort,
+    pub direction: ReplenishmentWorkSortDirection,
+}
+
+impl Default for ReplenishmentQueueFilters {
+    fn default() -> Self {
+        Self {
+            facility_id: None,
+            inventory_owner_id: None,
+            item_id: None,
+            pick_face_location_id: None,
+            status: None,
+            sort: ReplenishmentWorkSort::Priority,
+            direction: ReplenishmentWorkSortDirection::Descending,
+        }
+    }
+}
+
 impl ApiError {
     #[cfg(not(target_arch = "wasm32"))]
     fn unavailable() -> Self {
@@ -119,10 +144,9 @@ mod browser {
         ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest,
         ReleaseOrderResponse, RemovePackedContentRequest, RemovePackedContentResponse,
         ReopenCartonRequest, ReopenCartonResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
-        ReplenishmentWorkCancellationResponse, ReplenishmentWorkStatus,
-        RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
-        ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
-        VoidCartonResponse, WebSessionContext,
+        ReplenishmentWorkCancellationResponse, RetireReplenishmentPolicyRequest,
+        RetireReplenishmentPolicyResponse, ReversePickConfirmationRequest,
+        ReversePickConfirmationResponse, VoidCartonRequest, VoidCartonResponse, WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -606,22 +630,10 @@ mod browser {
     }
 
     pub async fn replenishment_queue(
-        facility_id: Option<i64>,
-        inventory_owner_id: Option<i64>,
-        item_id: Option<i64>,
-        pick_face_location_id: Option<i64>,
-        status: Option<ReplenishmentWorkStatus>,
+        filters: super::ReplenishmentQueueFilters,
         cursor: Option<&OpaqueCursor>,
     ) -> Result<ReplenishmentQueuePage, ApiError> {
-        get(&super::replenishment_queue_page_path(
-            facility_id,
-            inventory_owner_id,
-            item_id,
-            pick_face_location_id,
-            status,
-            cursor,
-        ))
-        .await
+        get(&super::replenishment_queue_page_path(filters, cursor)).await
     }
 
     pub async fn configure_replenishment_policy(
@@ -1191,11 +1203,7 @@ pub async fn replenishment_policies(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn replenishment_queue(
-    _facility_id: Option<i64>,
-    _inventory_owner_id: Option<i64>,
-    _item_id: Option<i64>,
-    _pick_face_location_id: Option<i64>,
-    _status: Option<ReplenishmentWorkStatus>,
+    _filters: ReplenishmentQueueFilters,
     _cursor: Option<&OpaqueCursor>,
 ) -> Result<ReplenishmentQueuePage, ApiError> {
     Err(ApiError::unavailable())
@@ -1277,19 +1285,23 @@ fn replenishment_policy_page_path(
 
 #[cfg(any(target_arch = "wasm32", test))]
 fn replenishment_queue_page_path(
-    facility_id: Option<i64>,
-    inventory_owner_id: Option<i64>,
-    item_id: Option<i64>,
-    pick_face_location_id: Option<i64>,
-    status: Option<ReplenishmentWorkStatus>,
+    filters: ReplenishmentQueueFilters,
     cursor: Option<&OpaqueCursor>,
 ) -> String {
-    let mut path = "/api/v1/replenishment-queue?limit=100".to_owned();
-    append_optional_id(&mut path, "facility_id", facility_id);
-    append_optional_id(&mut path, "inventory_owner_id", inventory_owner_id);
-    append_optional_id(&mut path, "item_id", item_id);
-    append_optional_id(&mut path, "pick_face_location_id", pick_face_location_id);
-    if let Some(status) = status {
+    let mut path = format!(
+        "/api/v1/replenishment-queue?limit=100&sort={}&direction={}",
+        replenishment_work_sort_wire(filters.sort),
+        replenishment_work_sort_direction_wire(filters.direction),
+    );
+    append_optional_id(&mut path, "facility_id", filters.facility_id);
+    append_optional_id(&mut path, "inventory_owner_id", filters.inventory_owner_id);
+    append_optional_id(&mut path, "item_id", filters.item_id);
+    append_optional_id(
+        &mut path,
+        "pick_face_location_id",
+        filters.pick_face_location_id,
+    );
+    if let Some(status) = filters.status {
         path.push_str("&status=");
         path.push_str(replenishment_work_status_wire(status));
     }
@@ -1342,6 +1354,32 @@ const fn replenishment_work_status_wire(status: ReplenishmentWorkStatus) -> &'st
     }
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+const fn replenishment_work_sort_wire(sort: ReplenishmentWorkSort) -> &'static str {
+    match sort {
+        ReplenishmentWorkSort::Created => "created",
+        ReplenishmentWorkSort::Priority => "priority",
+        ReplenishmentWorkSort::InventoryOwner => "inventory_owner",
+        ReplenishmentWorkSort::Facility => "facility",
+        ReplenishmentWorkSort::Item => "item",
+        ReplenishmentWorkSort::Source => "source",
+        ReplenishmentWorkSort::Destination => "destination",
+        ReplenishmentWorkSort::Quantity => "quantity",
+        ReplenishmentWorkSort::Status => "status",
+        ReplenishmentWorkSort::Lease => "lease",
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+const fn replenishment_work_sort_direction_wire(
+    direction: ReplenishmentWorkSortDirection,
+) -> &'static str {
+    match direction {
+        ReplenishmentWorkSortDirection::Ascending => "ascending",
+        ReplenishmentWorkSortDirection::Descending => "descending",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1358,18 +1396,20 @@ mod tests {
     #[test]
     fn replenishment_queue_omits_status_for_the_open_work_default() {
         assert_eq!(
-            replenishment_queue_page_path(None, None, None, None, None, None),
-            "/api/v1/replenishment-queue?limit=100"
+            replenishment_queue_page_path(ReplenishmentQueueFilters::default(), None,),
+            "/api/v1/replenishment-queue?limit=100&sort=priority&direction=descending"
         );
-        assert!(replenishment_queue_page_path(
+        let claimed = replenishment_queue_page_path(
+            ReplenishmentQueueFilters {
+                status: Some(ReplenishmentWorkStatus::Claimed),
+                sort: ReplenishmentWorkSort::Lease,
+                direction: ReplenishmentWorkSortDirection::Ascending,
+                ..ReplenishmentQueueFilters::default()
+            },
             None,
-            None,
-            None,
-            None,
-            Some(ReplenishmentWorkStatus::Claimed),
-            None
-        )
-        .ends_with("&status=claimed"));
+        );
+        assert!(claimed.contains("sort=lease&direction=ascending"));
+        assert!(claimed.ends_with("&status=claimed"));
     }
 
     #[test]

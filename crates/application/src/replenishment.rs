@@ -219,8 +219,53 @@ pub struct ReplenishmentWorkPageFilter {
     pub item_id: Option<CatalogItemId>,
     pub pick_face_location_id: Option<LocationId>,
     pub status: Option<ReplenishmentWorkStatus>,
-    pub after_work_id: Option<ReplenishmentWorkId>,
+    pub offset: u64,
     pub limit: u16,
+    pub sort: ReplenishmentWorkSort,
+    pub direction: ReplenishmentWorkSortDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplenishmentWorkSort {
+    Created,
+    Priority,
+    InventoryOwner,
+    Facility,
+    Item,
+    Source,
+    Destination,
+    Quantity,
+    Status,
+    Lease,
+}
+
+impl ReplenishmentWorkSort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Priority => "priority",
+            Self::InventoryOwner => "inventory_owner",
+            Self::Facility => "facility",
+            Self::Item => "item",
+            Self::Source => "source",
+            Self::Destination => "destination",
+            Self::Quantity => "quantity",
+            Self::Status => "status",
+            Self::Lease => "lease",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplenishmentWorkSortDirection {
+    Ascending,
+    Descending,
+}
+
+impl ReplenishmentWorkSortDirection {
+    pub const fn is_ascending(self) -> bool {
+        matches!(self, Self::Ascending)
+    }
 }
 
 /// Supervisor execution-monitor row independent of RF claim mutation contracts.
@@ -259,7 +304,7 @@ pub struct ReplenishmentWorkReadModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplenishmentWorkPage {
     pub items: Vec<ReplenishmentWorkReadModel>,
-    pub next_after_work_id: Option<ReplenishmentWorkId>,
+    pub next_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

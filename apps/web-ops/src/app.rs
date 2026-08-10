@@ -703,8 +703,9 @@ async fn load_workspace(
         Section::Replenishment if has_permission(session, "wms_supervisor") => {
             data.replenishment_policies =
                 Some(api::replenishment_policies(None, None, None, None, None).await?);
-            data.replenishment_queue =
-                Some(api::replenishment_queue(None, None, None, None, None, None).await?);
+            data.replenishment_queue = Some(
+                api::replenishment_queue(api::ReplenishmentQueueFilters::default(), None).await?,
+            );
             data.access = api::access().await?;
         }
         Section::Access => {
