@@ -20,6 +20,7 @@ use crate::catalog::CatalogWorkbench;
 use crate::components::{Icon, SearchField, UiIcon};
 use crate::cycle_count::CycleCountWorkspace;
 use crate::fulfillment::{LoadsWorkbench, OrdersWorkbench};
+use crate::inbound_asns::InboundAsnWorkspace;
 use crate::inventory::InventoryWorkspace;
 use crate::inventory_disposition::InventoryDispositionWorkbench;
 use crate::inventory_holds::QuantityHoldsWorkbench;
@@ -171,6 +172,7 @@ pub(crate) enum Section {
     Putaway,
     CycleCounts,
     Loads,
+    InboundAsns,
     Catalog,
     Inventory,
     InventoryHolds,
@@ -236,6 +238,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/inventory-integrity.css"/>
                 <link rel="stylesheet" href="/inventory-rollups.css"/>
                 <link rel="stylesheet" href="/fulfillment.css"/>
+                <link rel="stylesheet" href="/inbound-asns.css"/>
                 <link rel="stylesheet" href="/pick-shortages.css"/>
                 <link rel="stylesheet" href="/order-allocation.css"/>
                 <link rel="stylesheet" href="/packing.css"/>
@@ -296,6 +299,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("putaway") view=PutawayPage/>
                     <Route path=StaticSegment("cycle-counts") view=CycleCountsPage/>
                     <Route path=StaticSegment("loads") view=LoadsPage/>
+                    <Route path=StaticSegment("inbound-asns") view=InboundAsnsPage/>
                     <Route path=StaticSegment("catalog") view=CatalogPage/>
                     <Route path=StaticSegment("inventory") view=InventoryPage/>
                     <Route path=StaticSegment("replenishment") view=ReplenishmentPage/>
@@ -687,6 +691,10 @@ async fn load_workspace(
             data.catalog_items = api::internal_get("/api/items?show_deleted=false").await?;
             data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
         }
+        Section::InboundAsns if has_permission(session, "wms") => {
+            data.access = api::access().await?;
+            data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
+        }
         Section::Catalog if has_permission(session, "wms") => {}
         Section::Inventory if has_permission(session, "wms") => {
             let page = api::balances(None).await?;
@@ -731,6 +739,7 @@ async fn load_workspace(
         | Section::Putaway
         | Section::CycleCounts
         | Section::Loads
+        | Section::InboundAsns
         | Section::Catalog
         | Section::Inventory
         | Section::InventoryHolds
@@ -785,6 +794,11 @@ fn CycleCountsPage() -> impl IntoView {
 #[component]
 fn LoadsPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::Loads/> }
+}
+
+#[component]
+fn InboundAsnsPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::InboundAsns/> }
 }
 
 #[component]
@@ -956,6 +970,14 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
             Section::Loads if has_permission(&session, "wms") => {
                 view! { <Loads data on_unauthorized=session_expired_callback()/> }.into_any()
             }
+            Section::InboundAsns if has_permission(&session, "wms") => view! {
+                <InboundAsnWorkspace
+                    access=data.access
+                    locations=data.locations
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
             Section::Catalog if has_permission(&session, "wms") => {
                 view! { <CatalogWorkbench on_unauthorized=session_expired_callback() can_supervise=has_permission(&session,"wms_supervisor")/> }.into_any()
             }

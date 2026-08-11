@@ -158,6 +158,12 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                 active=section == Section::Loads
                             />
                             <NavItem
+                                href="/inbound-asns"
+                                label="Inbound ASNs"
+                                icon=UiIcon::Loads
+                                active=section == Section::InboundAsns
+                            />
+                            <NavItem
                                 href="/putaway"
                                 label="Putaway"
                                 icon=UiIcon::Putaway

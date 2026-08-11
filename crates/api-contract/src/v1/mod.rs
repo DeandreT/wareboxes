@@ -7,6 +7,7 @@ mod error;
 mod expected_receiving;
 mod facility_shipping_origin;
 mod idempotency;
+mod inbound_asn;
 mod inbound_inspection;
 mod inbound_load;
 mod integration_mapping;
@@ -84,6 +85,12 @@ pub use facility_shipping_origin::{
 };
 pub use idempotency::{
     IdempotencyKey, IdempotencyKeyError, IDEMPOTENCY_KEY_HEADER, MAX_IDEMPOTENCY_KEY_LENGTH,
+};
+pub use inbound_asn::{
+    CreateInboundAsnLineRequest, CreateInboundAsnRequest, CreateInboundAsnResponse,
+    CreatedInboundAsnLineResponse, InboundAsnDetailResponse, InboundAsnLineResponse,
+    InboundAsnPage, InboundAsnPageRequest, InboundAsnStatus, InboundAsnSummaryResponse,
+    PlanInboundAsnLoadRequest, PlanInboundAsnLoadResponse, PlannedInboundAsnLoadLineResponse,
 };
 pub use inbound_inspection::{
     DisposeInboundInspectionRequest, DisposeInboundInspectionResponse, InboundInspectionOutcome,

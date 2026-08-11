@@ -5,6 +5,7 @@ pub(crate) mod cycle_count;
 mod error;
 mod expected_receiving;
 mod facility_shipping_origins;
+mod inbound_asns;
 mod inbound_inspections;
 mod inbound_loads;
 mod integration_mappings;
@@ -49,6 +50,12 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/inbound-asns", get(inbound_asns::list).post(inbound_asns::create))
+        .route("/inbound-asns/{asn_id}", get(inbound_asns::get))
+        .route(
+            "/inbound-asns/{asn_id}/load-plans",
+            post(inbound_asns::plan_load),
+        )
         .route("/inbound-loads", post(inbound_loads::plan))
         .route(
             "/inbound-loads/{load_id}/appointments",

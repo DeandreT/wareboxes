@@ -4,6 +4,7 @@ mod allocation;
 mod backorder;
 mod cycle_count;
 mod facility;
+mod inbound_asn;
 mod inbound_inspection;
 mod inbound_load;
 mod integration;
@@ -52,6 +53,12 @@ pub use facility::{
     MAX_FACILITY_ORIGIN_COUNTRY_LENGTH, MAX_FACILITY_ORIGIN_EMAIL_LENGTH,
     MAX_FACILITY_ORIGIN_NAME_LENGTH, MAX_FACILITY_ORIGIN_PHONE_LENGTH,
     MAX_FACILITY_ORIGIN_POSTAL_CODE_LENGTH, MAX_FACILITY_ORIGIN_STATE_LENGTH,
+};
+pub use inbound_asn::{
+    plan_inbound_asn, InboundAsnError, InboundAsnLineDefinition, InboundAsnLoadPlanDetails,
+    InboundAsnNumber, InboundAsnQuantity, InboundAsnRevision, InboundAsnStatus, InboundAsnSupplier,
+    NewInboundAsn, MAX_INBOUND_ASN_IDENTITY_LENGTH, MAX_INBOUND_ASN_NUMBER_LENGTH,
+    MAX_INBOUND_ASN_SUPPLIER_LENGTH,
 };
 pub use inbound_inspection::{
     decide_inbound_inspection, InboundInspectionError, InboundInspectionNote,
@@ -324,6 +331,9 @@ positive_id!(
 positive_id!(InventoryHoldId, "inventory hold ID");
 positive_id!(InventoryRecallId, "inventory recall ID");
 positive_id!(StorageZoneId, "storage zone ID");
+positive_id!(InboundAsnId, "inbound ASN ID");
+positive_id!(InboundAsnLineId, "inbound ASN line ID");
+positive_id!(InboundAsnLoadPlanId, "inbound ASN load plan ID");
 positive_id!(
     InboundInspectionDispositionId,
     "inbound inspection disposition ID"

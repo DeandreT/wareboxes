@@ -116,6 +116,24 @@ BEGIN
         WHERE rejection.tenant_id=load.tenant_id AND rejection.load_id=load.id
       )
   ) THEN missing := array_append(missing, 'typed inbound rejection evidence'); END IF;
+  IF NOT EXISTS (SELECT 1 FROM inbound_asns WHERE status='open') THEN
+    missing := array_append(missing, 'open advance shipping notices');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM inbound_asns WHERE status='planned') THEN
+    missing := array_append(missing, 'planned advance shipping notices');
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM inbound_asns asn
+    WHERE asn.status='planned'
+      AND (
+        (SELECT COUNT(*) FROM inbound_asn_lines line
+         WHERE line.tenant_id=asn.tenant_id AND line.asn_id=asn.id)
+        <>
+        (SELECT COUNT(*) FROM inbound_asn_load_plan_lines mapping
+         WHERE mapping.tenant_id=asn.tenant_id AND mapping.asn_id=asn.id)
+      )
+  ) THEN missing := array_append(missing, 'exact ASN load mappings'); END IF;
   IF cardinality(missing) > 0 THEN
     RAISE EXCEPTION 'core demo coverage is incomplete: %', array_to_string(missing, ', ');
   END IF;
@@ -190,6 +208,7 @@ report_coverage() {
       ('Inventory', (SELECT COUNT(*) FROM inventory_balances WHERE deleted IS NULL)),
       ('Orders', (SELECT COUNT(*) FROM orders WHERE deleted IS NULL)),
       ('Legacy loads', (SELECT COUNT(*) FROM loads WHERE deleted IS NULL)),
+      ('Advance shipping notices', (SELECT COUNT(*) FROM inbound_asns)),
       ('Pick waves', (SELECT COUNT(*) FROM pick_waves)),
       ('Packing sessions', (SELECT COUNT(*) FROM packing_sessions)),
       ('Shipments', (SELECT COUNT(*) FROM shipments)),

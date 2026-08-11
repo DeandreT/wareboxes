@@ -71,6 +71,11 @@ DECLARE
   owner bigint;
   item bigint;
   v_load_id bigint;
+  v_asn_id bigint;
+  v_asn_line_id bigint;
+  v_asn_plan_id bigint;
+  v_load_line_id bigint;
+  v_asn_owner bigint;
   v_arrival_id bigint;
   v_file_id bigint;
   removable_load_ids bigint[] := ARRAY[]::bigint[];
@@ -91,6 +96,7 @@ DECLARE
   load_status text;
   load_type text;
   created_at timestamptz;
+  v_asn_planned_at timestamptz;
   expected_qty bigint;
   received_qty bigint;
   rejected_qty bigint;
@@ -396,6 +402,92 @@ BEGIN
 
     INSERT INTO load_activity (tenant_id, created, load_id, user_id, action, message)
     VALUES (tenant, created_at, v_load_id, actor, 'load_created', 'Seed load created');
+  END LOOP;
+
+  FOR i IN 1..8 LOOP
+    seed_no := lpad(i::text, 6, '0');
+    v_asn_owner := owner_ids[((i - 1) % array_length(owner_ids, 1)) + 1];
+    IF EXISTS (
+      SELECT 1 FROM inbound_asns
+      WHERE tenant_id=tenant AND inventory_owner_id=v_asn_owner
+        AND number='WB-SEED-ASN-' || seed_no
+    ) THEN
+      CONTINUE;
+    END IF;
+
+    created_at := now() - ((9 - i) || ' days')::interval;
+    INSERT INTO inbound_asns
+        (tenant_id,inventory_owner_id,facility_id,number,supplier,expected_at,
+         status,revision,line_count,total_expected_quantity,created_by_user_id,created_at)
+    VALUES (
+      tenant,v_asn_owner,facility,'WB-SEED-ASN-' || seed_no,
+      CASE (i % 3) WHEN 0 THEN 'North Freight Foods' WHEN 1 THEN 'Riverside Supply' ELSE 'Pacific Wholesale' END,
+      now() + ((i + 1) || ' days')::interval,
+      'open',1,2,28 + (i * 2),actor,created_at
+    )
+    RETURNING id INTO v_asn_id;
+
+    INSERT INTO inbound_asn_lines
+        (tenant_id,inventory_owner_id,facility_id,asn_id,sequence,item_id,uom,
+         expected_quantity,lot,serial,expiration)
+    VALUES
+      (tenant,v_asn_owner,facility,v_asn_id,1,
+       item_ids[((i - 1) % array_length(item_ids, 1)) + 1],
+       'case',20 + i,'ASN-LOT-' || seed_no || '-A',NULL,now() + interval '180 days'),
+      (tenant,v_asn_owner,facility,v_asn_id,2,
+       item_ids[(i % array_length(item_ids, 1)) + 1],
+       'case',8 + i,'ASN-LOT-' || seed_no || '-B',NULL,now() + interval '240 days');
+
+    IF i % 2 = 0 THEN
+      v_asn_planned_at := created_at + interval '1 hour';
+      INSERT INTO loads
+          (tenant_id,created,facility_id,inventory_owner_id,execution_barcode,status,type,
+           reference_number,carrier,trailer_number,seal_number,dock_door_location_id,
+           expected_time,receive_completed)
+      VALUES (
+        tenant,v_asn_planned_at,facility,v_asn_owner,'WB-SEED-ASN-LOAD-' || seed_no,
+        'planned','inbound','WB-SEED-ASN-' || seed_no,'ASN Freight',
+        'ASN-TRL-' || (8000 + i),'ASN-SEAL-' || (9000 + i),dock,
+        now() + ((i + 1) || ' days')::interval,false
+      )
+      RETURNING id INTO v_load_id;
+
+      INSERT INTO inbound_asn_load_plans
+          (tenant_id,inventory_owner_id,facility_id,asn_id,load_id,receiving_location_id,
+           expected_asn_revision,resulting_asn_revision,line_count,total_expected_quantity,
+           planned_by_user_id,planned_at)
+      VALUES (tenant,v_asn_owner,facility,v_asn_id,v_load_id,dock,1,2,2,28 + (i * 2),actor,v_asn_planned_at)
+      RETURNING id INTO v_asn_plan_id;
+
+      FOR j IN 1..2 LOOP
+        SELECT id INTO v_asn_line_id
+        FROM inbound_asn_lines
+        WHERE tenant_id=tenant AND asn_id=v_asn_id AND sequence=j;
+        INSERT INTO load_lines
+            (tenant_id,created,load_id,item_id,expected_qty,lot,serial,expiration,status)
+        SELECT tenant,v_asn_planned_at,v_load_id,item_id,expected_quantity,lot,serial,expiration,'pending'
+        FROM inbound_asn_lines
+        WHERE tenant_id=tenant AND asn_id=v_asn_id AND id=v_asn_line_id
+        RETURNING id INTO v_load_line_id;
+        INSERT INTO inbound_asn_load_plan_lines
+            (tenant_id,inventory_owner_id,facility_id,asn_id,plan_id,load_id,
+             asn_line_id,load_line_id,sequence,item_id,expected_quantity,lot,serial,expiration)
+        SELECT tenant,v_asn_owner,facility,v_asn_id,v_asn_plan_id,v_load_id,
+               id,v_load_line_id,sequence,item_id,expected_quantity,lot,serial,expiration
+        FROM inbound_asn_lines
+        WHERE tenant_id=tenant AND asn_id=v_asn_id AND id=v_asn_line_id;
+      END LOOP;
+
+      UPDATE inbound_asns
+      SET status='planned',revision=2,load_id=v_load_id,
+          planned_by_user_id=actor,planned_at=v_asn_planned_at
+      WHERE tenant_id=tenant AND id=v_asn_id AND status='open' AND revision=1;
+      INSERT INTO load_activity (tenant_id,created,load_id,user_id,action,message)
+      VALUES (tenant,v_asn_planned_at,v_load_id,actor,'load_created','Planned from seeded ASN source');
+    END IF;
+
+    SET CONSTRAINTS ALL IMMEDIATE;
+    SET CONSTRAINTS ALL DEFERRED;
   END LOOP;
 
   SELECT id INTO v_load_id

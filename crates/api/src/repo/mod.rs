@@ -9,6 +9,7 @@ pub mod backorder;
 pub mod employees;
 pub mod expected_receiving;
 pub mod facility_shipping_origin;
+pub mod inbound_asn;
 pub mod inbound_inspection;
 pub mod inbound_load;
 pub mod inbound_receipt;
