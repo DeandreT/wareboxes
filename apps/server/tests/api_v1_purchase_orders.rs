@@ -488,9 +488,13 @@ async fn released_order_sources_multiple_asns_with_exact_conservation_and_replay
         .unwrap();
     let detail = json_body::<PurchaseOrderDetailResponse>(detail).await;
     assert_eq!(detail.summary.total_ordered_quantity, 20);
-    assert_eq!(detail.summary.total_asn_expected_quantity, 20);
-    assert_eq!(detail.summary.total_remaining_quantity, 0);
-    assert!(detail.lines.iter().all(|line| line.remaining_quantity == 0));
+    assert_eq!(detail.summary.total_historical_asn_quantity, 20);
+    assert_eq!(detail.summary.total_active_inbound_quantity, 20);
+    assert_eq!(detail.summary.total_available_to_notify_quantity, 0);
+    assert!(detail
+        .lines
+        .iter()
+        .all(|line| line.available_to_notify_quantity == 0));
     let asn_detail = app
         .clone()
         .oneshot(get_request(
@@ -551,7 +555,10 @@ async fn released_order_sources_multiple_asns_with_exact_conservation_and_replay
     assert_eq!(progress.summary.total_received_quantity, 5);
     assert_eq!(progress.summary.total_rejected_quantity, 1);
     assert_eq!(progress.summary.total_missing_quantity, 1);
-    assert_eq!(progress.summary.total_open_receipt_quantity, 13);
+    assert_eq!(progress.summary.total_historical_asn_quantity, 20);
+    assert_eq!(progress.summary.total_active_inbound_quantity, 13);
+    assert_eq!(progress.summary.total_available_to_notify_quantity, 2);
+    assert_eq!(progress.summary.total_open_receipt_quantity, 15);
     let beans = progress
         .lines
         .iter()
@@ -560,7 +567,9 @@ async fn released_order_sources_multiple_asns_with_exact_conservation_and_replay
     assert_eq!(beans.received_quantity, 3);
     assert_eq!(beans.rejected_quantity, 1);
     assert_eq!(beans.missing_quantity, 0);
-    assert_eq!(beans.open_receipt_quantity, 8);
+    assert_eq!(beans.active_inbound_quantity, 8);
+    assert_eq!(beans.available_to_notify_quantity, 1);
+    assert_eq!(beans.open_receipt_quantity, 9);
     let towels = progress
         .lines
         .iter()
@@ -569,7 +578,47 @@ async fn released_order_sources_multiple_asns_with_exact_conservation_and_replay
     assert_eq!(towels.received_quantity, 2);
     assert_eq!(towels.rejected_quantity, 0);
     assert_eq!(towels.missing_quantity, 1);
-    assert_eq!(towels.open_receipt_quantity, 5);
+    assert_eq!(towels.active_inbound_quantity, 5);
+    assert_eq!(towels.available_to_notify_quantity, 1);
+    assert_eq!(towels.open_receipt_quantity, 6);
+
+    let replacement = app
+        .clone()
+        .oneshot(command_request(
+            &context,
+            &path,
+            "po-asn-replacement",
+            &asn_body(&order, "ASN-PO-100-REPLACEMENT", 1, 1),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replacement.status(), StatusCode::OK);
+    let replacement = json_body::<CreatePurchaseOrderAsnResponse>(replacement).await;
+    let replaced = app
+        .clone()
+        .oneshot(get_request(
+            &context,
+            &format!("purchase-orders/{}", order.purchase_order_id),
+        ))
+        .await
+        .unwrap();
+    let replaced = json_body::<PurchaseOrderDetailResponse>(replaced).await;
+    assert_eq!(replaced.summary.total_historical_asn_quantity, 22);
+    assert_eq!(replaced.summary.total_active_inbound_quantity, 15);
+    assert_eq!(replaced.summary.total_available_to_notify_quantity, 0);
+    assert_eq!(replaced.summary.total_received_quantity, 5);
+    assert_eq!(replaced.summary.total_open_receipt_quantity, 15);
+    let excess_replacement = app
+        .clone()
+        .oneshot(command_request(
+            &context,
+            &path,
+            "po-asn-excess-replacement",
+            &asn_body(&order, "ASN-PO-100-EXCESS", 1, 1),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(excess_replacement.status(), StatusCode::CONFLICT);
 
     let first_progress = app
         .clone()
@@ -595,9 +644,9 @@ async fn released_order_sources_multiple_asns_with_exact_conservation_and_replay
         SELECT
           (SELECT COUNT(*) FROM purchase_order_asn_sources WHERE purchase_order_id=$1),
           (SELECT COUNT(*) FROM purchase_order_asn_source_lines WHERE purchase_order_id=$1),
-          (SELECT COUNT(*) FROM inbound_asns WHERE id IN ($2,$3)),
+          (SELECT COUNT(*) FROM inbound_asns WHERE id IN ($2,$3,$4)),
           (SELECT COUNT(*) FROM outbox_events WHERE event_type='inbound.asn.created'
-             AND aggregate_id IN ($2::TEXT,$3::TEXT)),
+             AND aggregate_id IN ($2::TEXT,$3::TEXT,$4::TEXT)),
           (SELECT COUNT(*) FROM command_idempotency_records
              WHERE operation='inbound.purchase_order.asn.create.v1'
                AND (result_json->>'purchase_order_id')::BIGINT=$1)
@@ -606,10 +655,11 @@ async fn released_order_sources_multiple_asns_with_exact_conservation_and_replay
     .bind(order.purchase_order_id)
     .bind(first.asn_id)
     .bind(second.asn_id)
+    .bind(replacement.asn_id)
     .fetch_one(&mut *tx)
     .await
     .unwrap();
-    assert_eq!(effects, (2, 4, 2, 2, 2));
+    assert_eq!(effects, (3, 6, 3, 3, 3));
     let immutable = sqlx::query(
         "UPDATE purchase_order_asn_source_lines SET expected_quantity=1 WHERE purchase_order_id=$1",
     )
@@ -828,5 +878,18 @@ async fn pages_replays_and_ledgers_are_scope_bound_with_minimal_grants() {
     .await
     .unwrap();
     assert_eq!(privileges, (false, false, false));
+    let progress_view: (bool, bool) = sqlx::query_as(
+        r#"
+        SELECT has_table_privilege(
+                   'wareboxes_app','purchase_order_line_inbound_progress','SELECT'),
+               COALESCE('security_invoker=true'=ANY(reloptions),false)
+        FROM pg_class
+        WHERE oid='purchase_order_line_inbound_progress'::regclass
+        "#,
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    assert_eq!(progress_view, (true, true));
     admin.close().await;
 }

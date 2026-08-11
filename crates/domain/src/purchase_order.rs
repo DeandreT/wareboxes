@@ -25,6 +25,10 @@ pub enum PurchaseOrderError {
     RevisionExhausted,
     #[error("only a draft purchase order can be released")]
     InvalidReleaseStatus,
+    #[error(
+        "purchase-order demand coverage must satisfy 0 <= received + active inbound <= ordered"
+    )]
+    InvalidDemandCoverage,
 }
 
 fn required_text(
@@ -139,6 +143,44 @@ impl PurchaseOrderQuantity {
 
     pub const fn get(self) -> i64 {
         self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurchaseOrderDemandCoverage {
+    ordered_quantity: i64,
+    received_quantity: i64,
+    active_inbound_quantity: i64,
+}
+
+impl PurchaseOrderDemandCoverage {
+    pub fn new(
+        ordered_quantity: i64,
+        received_quantity: i64,
+        active_inbound_quantity: i64,
+    ) -> Result<Self, PurchaseOrderError> {
+        if ordered_quantity <= 0
+            || received_quantity < 0
+            || active_inbound_quantity < 0
+            || received_quantity
+                .checked_add(active_inbound_quantity)
+                .is_none_or(|covered| covered > ordered_quantity)
+        {
+            return Err(PurchaseOrderError::InvalidDemandCoverage);
+        }
+        Ok(Self {
+            ordered_quantity,
+            received_quantity,
+            active_inbound_quantity,
+        })
+    }
+
+    pub const fn open_receipt_quantity(self) -> i64 {
+        self.ordered_quantity - self.received_quantity
+    }
+
+    pub const fn available_to_notify_quantity(self) -> i64 {
+        self.ordered_quantity - self.received_quantity - self.active_inbound_quantity
     }
 }
 
@@ -288,5 +330,13 @@ mod tests {
         assert!(PurchaseOrderNumber::new(" PO-100").is_err());
         assert!(PurchaseOrderSupplier::new("Northstar\nFoods").is_err());
         assert!(PurchaseOrderQuantity::new(0).is_err());
+    }
+
+    #[test]
+    fn receipt_exceptions_restore_notification_capacity_without_reducing_open_demand() {
+        let progress = PurchaseOrderDemandCoverage::new(22, 2, 19).unwrap();
+        assert_eq!(progress.available_to_notify_quantity(), 1);
+        assert_eq!(progress.open_receipt_quantity(), 20);
+        assert!(PurchaseOrderDemandCoverage::new(22, 2, 21).is_err());
     }
 }

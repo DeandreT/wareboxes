@@ -42,7 +42,7 @@ struct DraftAsnLine {
     purchase_order_line_id: i64,
     description: String,
     uom: String,
-    remaining_quantity: i64,
+    available_to_notify_quantity: i64,
     expected_quantity: String,
     lot: String,
     serial: String,
@@ -155,8 +155,8 @@ pub(crate) fn PurchaseOrdersWorkspace(
                 </form>
                 <div class="table-scroll">
                     <table class="dense-table purchase-order-table">
-                        <thead><tr><th>"PO"</th><th>"Status"</th><th class="numeric">"Ordered"</th><th class="numeric">"Notified"</th><th class="numeric">"Received"</th><th class="numeric">"Open"</th><th>"Due"</th><th>"Supplier"</th><th>"Client"</th><th>"Facility"</th><th class="numeric">"Lines"</th></tr></thead>
-                        <tbody>{move || page.get().map(|current| current.items.into_iter().map(|entry| { let id=entry.purchase_order_id; let active=selected_id.get()==Some(id) && !create_open.get(); view! { <tr class:active-row=active><td><button type="button" class="row-link" on:click=move |_| load_detail(id)>{entry.number}</button></td><td><span class=status_class(entry.status)>{status_label(entry.status)}</span></td><td class="numeric">{format_quantity(entry.total_ordered_quantity)}</td><td class="numeric">{format_quantity(entry.total_asn_expected_quantity)}</td><td class="numeric">{format_quantity(entry.total_received_quantity)}</td><td class="numeric"><strong>{format_quantity(entry.total_open_receipt_quantity)}</strong></td><td>{entry.expected_by.as_deref().map(short_timestamp).unwrap_or_else(|| "Not supplied".into())}</td><td>{entry.supplier}</td><td>{entry.inventory_owner_name}</td><td>{entry.facility_name}</td><td class="numeric">{entry.line_count}</td></tr> } }).collect_view())}</tbody>
+                        <thead><tr><th>"PO"</th><th>"Status"</th><th class="numeric">"Ordered"</th><th class="numeric">"Inbound"</th><th class="numeric">"Available"</th><th class="numeric">"Received"</th><th class="numeric">"Open"</th><th>"Due"</th><th>"Supplier"</th><th>"Client"</th><th>"Facility"</th><th class="numeric">"Lines"</th></tr></thead>
+                        <tbody>{move || page.get().map(|current| current.items.into_iter().map(|entry| { let id=entry.purchase_order_id; let active=selected_id.get()==Some(id) && !create_open.get(); view! { <tr class:active-row=active><td><button type="button" class="row-link" on:click=move |_| load_detail(id)>{entry.number}</button></td><td><span class=status_class(entry.status)>{status_label(entry.status)}</span></td><td class="numeric">{format_quantity(entry.total_ordered_quantity)}</td><td class="numeric">{format_quantity(entry.total_active_inbound_quantity)}</td><td class="numeric">{format_quantity(entry.total_available_to_notify_quantity)}</td><td class="numeric">{format_quantity(entry.total_received_quantity)}</td><td class="numeric"><strong>{format_quantity(entry.total_open_receipt_quantity)}</strong></td><td>{entry.expected_by.as_deref().map(short_timestamp).unwrap_or_else(|| "Not supplied".into())}</td><td>{entry.supplier}</td><td>{entry.inventory_owner_name}</td><td>{entry.facility_name}</td><td class="numeric">{entry.line_count}</td></tr> } }).collect_view())}</tbody>
                     </table>
                     <Show when=move || !loading.get() && page.get().is_some_and(|value| value.items.is_empty())><p class="empty-state">"No purchase orders match these filters."</p></Show>
                 </div>
@@ -195,8 +195,8 @@ fn PurchaseOrderDetail(
     let asn_open = RwSignal::new(false);
     let purchase_order_id = summary.purchase_order_id;
     let can_release = summary.status == PurchaseOrderStatus::Draft;
-    let can_create_asn =
-        summary.status == PurchaseOrderStatus::Released && summary.total_remaining_quantity > 0;
+    let can_create_asn = summary.status == PurchaseOrderStatus::Released
+        && summary.total_available_to_notify_quantity > 0;
     let release = move |_| {
         if pending.get_untracked() {
             return;
@@ -246,9 +246,9 @@ fn PurchaseOrderDetail(
         </Show>
         <div class="purchase-order-detail-content" style:display=move || if asn_open.get() { "none" } else { "grid" }>
             <header class="detail-heading"><div><span class="eyebrow">{format!("Purchase order #{}", summary.purchase_order_id)}</span><h2>{summary.number.clone()}</h2><p>{summary.supplier.clone()}</p></div><span class=status_class(summary.status)>{status_label(summary.status)}</span></header>
-            <dl class="summary-grid"><div><dt>"Client"</dt><dd>{summary.inventory_owner_name}</dd></div><div><dt>"Facility"</dt><dd>{summary.facility_name}</dd></div><div><dt>"Expected"</dt><dd>{summary.expected_by.as_deref().map(short_timestamp).unwrap_or_else(|| "Not supplied".into())}</dd></div><div><dt>"Ordered"</dt><dd>{format_quantity(summary.total_ordered_quantity)}</dd></div><div><dt>"Notified"</dt><dd>{format_quantity(summary.total_asn_expected_quantity)}</dd></div><div><dt>"Unnotified"</dt><dd>{format_quantity(summary.total_remaining_quantity)}</dd></div><div><dt>"Received"</dt><dd>{format_quantity(summary.total_received_quantity)}</dd></div><div><dt>"Exceptions"</dt><dd>{format_quantity(summary.total_rejected_quantity + summary.total_missing_quantity)}</dd></div><div><dt>"Open receipt"</dt><dd><strong>{format_quantity(summary.total_open_receipt_quantity)}</strong></dd></div></dl>
+            <dl class="summary-grid"><div><dt>"Client"</dt><dd>{summary.inventory_owner_name}</dd></div><div><dt>"Facility"</dt><dd>{summary.facility_name}</dd></div><div><dt>"Expected"</dt><dd>{summary.expected_by.as_deref().map(short_timestamp).unwrap_or_else(|| "Not supplied".into())}</dd></div><div><dt>"Ordered"</dt><dd>{format_quantity(summary.total_ordered_quantity)}</dd></div><div><dt>"ASN history"</dt><dd>{format_quantity(summary.total_historical_asn_quantity)}</dd></div><div><dt>"Active inbound"</dt><dd>{format_quantity(summary.total_active_inbound_quantity)}</dd></div><div><dt>"Available to notify"</dt><dd><strong>{format_quantity(summary.total_available_to_notify_quantity)}</strong></dd></div><div><dt>"Received"</dt><dd>{format_quantity(summary.total_received_quantity)}</dd></div><div><dt>"Exceptions"</dt><dd>{format_quantity(summary.total_rejected_quantity + summary.total_missing_quantity)}</dd></div><div class="summary-emphasis"><dt>"Open receipt"</dt><dd><strong>{format_quantity(summary.total_open_receipt_quantity)}</strong></dd></div></dl>
             <div class="detail-section-heading"><h3>"Ordered items"</h3><span>{format!("{} lines", detail.lines.len())}</span></div>
-            <div class="table-scroll"><table class="dense-table document-progress-table"><thead><tr><th>"Item"</th><th>"Supply"</th><th>"Receipt"</th></tr></thead><tbody>{detail.lines.into_iter().map(|line| { let exceptions=line.rejected_quantity+line.missing_quantity; view! { <tr><td><strong>{line.item_description}</strong><small>{format!("Item #{} · {}", line.item_id, line.uom)}</small></td><td><dl class="line-metrics"><div><dt>"Ordered"</dt><dd>{format_quantity(line.ordered_quantity)}</dd></div><div><dt>"Notified"</dt><dd>{format_quantity(line.asn_expected_quantity)}</dd></div><div><dt>"Unnotified"</dt><dd>{format_quantity(line.remaining_quantity)}</dd></div></dl></td><td><dl class="line-metrics"><div><dt>"Received"</dt><dd>{format_quantity(line.received_quantity)}</dd></div><div><dt>"Exceptions"</dt><dd>{format_quantity(exceptions)}</dd></div><div><dt>"Open"</dt><dd><strong>{format_quantity(line.open_receipt_quantity)}</strong></dd></div></dl></td></tr> } }).collect_view()}</tbody></table></div>
+            <div class="table-scroll"><table class="dense-table document-progress-table"><thead><tr><th>"Item"</th><th>"Supply"</th><th>"Receipt"</th></tr></thead><tbody>{detail.lines.into_iter().map(|line| { let exceptions=line.rejected_quantity+line.missing_quantity; view! { <tr><td><strong>{line.item_description}</strong><small>{format!("Item #{} · {}", line.item_id, line.uom)}</small></td><td><dl class="line-metrics"><div><dt>"ASN history"</dt><dd>{format_quantity(line.historical_asn_quantity)}</dd></div><div><dt>"Active inbound"</dt><dd>{format_quantity(line.active_inbound_quantity)}</dd></div><div><dt>"Available"</dt><dd><strong>{format_quantity(line.available_to_notify_quantity)}</strong></dd></div></dl></td><td><dl class="line-metrics"><div><dt>"Ordered"</dt><dd>{format_quantity(line.ordered_quantity)}</dd></div><div><dt>"Received"</dt><dd>{format_quantity(line.received_quantity)}</dd></div><div><dt>"Exceptions"</dt><dd>{format_quantity(exceptions)}</dd></div><div><dt>"Open"</dt><dd><strong>{format_quantity(line.open_receipt_quantity)}</strong></dd></div></dl></td></tr> } }).collect_view()}</tbody></table></div>
             <Show when=move || error.get().is_some()>{move || error.get().map(|message| view! { <p class="inline-command-error">{message}</p> })}</Show>
             <footer class="detail-actions"><a class="button quiet-action" href="/inbound-asns">"Open inbound ASNs"</a>{can_release.then(|| view! { <button class="button primary-action" type="button" disabled=move || pending.get() on:click=release><Icon icon=UiIcon::Orders/><span>{move || if pending.get() { "Releasing..." } else { "Release PO" }}</span></button> })}{can_create_asn.then(|| view! { <button class="button primary-action" type="button" on:click=move |_| asn_open.set(true)><Icon icon=UiIcon::Add/><span>"Create ASN"</span></button> })}</footer>
         </div>
@@ -268,13 +268,13 @@ fn CreatePurchaseOrderAsnPanel(
     let lines = RwSignal::new(
         lines
             .into_iter()
-            .filter(|line| line.remaining_quantity > 0)
+            .filter(|line| line.available_to_notify_quantity > 0)
             .map(|line| DraftAsnLine {
                 purchase_order_line_id: line.line_id,
                 description: line.item_description,
                 uom: line.uom,
-                remaining_quantity: line.remaining_quantity,
-                expected_quantity: line.remaining_quantity.to_string(),
+                available_to_notify_quantity: line.available_to_notify_quantity,
+                expected_quantity: line.available_to_notify_quantity.to_string(),
                 lot: String::new(),
                 serial: String::new(),
                 expiration: String::new(),
@@ -308,11 +308,11 @@ fn CreatePurchaseOrderAsnPanel(
         for line in lines.get_untracked() {
             let quantity = match line.expected_quantity.trim().parse::<i64>() {
                 Ok(0) => continue,
-                Ok(value) if value > 0 && value <= line.remaining_quantity => value,
+                Ok(value) if value > 0 && value <= line.available_to_notify_quantity => value,
                 _ => {
                     error.set(Some(format!(
                         "{} quantity must be between 0 and {}.",
-                        line.description, line.remaining_quantity
+                        line.description, line.available_to_notify_quantity
                     )));
                     return;
                 }
@@ -373,9 +373,9 @@ fn CreatePurchaseOrderAsnPanel(
     };
     view! {
         <form class="purchase-order-form po-asn-form" on:submit=submit>
-            <header class="detail-heading"><div><span class="eyebrow">{format!("{} · {} remaining", summary.number, format_quantity(summary.total_remaining_quantity))}</span><h2>"Create ASN from PO"</h2><p>{summary.supplier}</p></div><button class="text-button" type="button" on:click=move |_| on_close.run(())>"Close"</button></header>
+            <header class="detail-heading"><div><span class="eyebrow">{format!("{} · {} available to notify", summary.number, format_quantity(summary.total_available_to_notify_quantity))}</span><h2>"Create ASN from PO"</h2><p>{summary.supplier}</p></div><button class="text-button" type="button" on:click=move |_| on_close.run(())>"Close"</button></header>
             <div class="form-grid two-column"><label><span>"ASN number"</span><input required maxlength="120" autofocus prop:value=move || number.get() on:input=move |event| number.set(event_target_value(&event))/></label><label><span>"Expected arrival"</span><input type="datetime-local" prop:value=move || expected.get() on:input=move |event| expected.set(event_target_value(&event))/></label></div>
-            <section class="po-line-builder"><div class="detail-section-heading"><h3>"Expected freight"</h3><span>"0 excludes a line"</span></div><div class="table-scroll"><table class="dense-table po-asn-lines"><thead><tr><th>"Item"</th><th class="numeric">"Remaining"</th><th class="numeric">"ASN qty"</th><th>"Lot"</th><th>"Serial"</th><th>"Expiration"</th></tr></thead><tbody>{move || lines.get().into_iter().enumerate().map(|(index, line)| view! { <tr><td><strong>{line.description}</strong><small>{line.uom}</small></td><td class="numeric">{format_quantity(line.remaining_quantity)}</td><td><input aria-label="Expected quantity" class="compact-number" type="number" min="0" max=line.remaining_quantity prop:value=line.expected_quantity on:input=move |event| lines.update(|values| values[index].expected_quantity=event_target_value(&event))/></td><td><input aria-label="Lot" placeholder="Optional" prop:value=line.lot on:input=move |event| lines.update(|values| values[index].lot=event_target_value(&event))/></td><td><input aria-label="Serial" placeholder="Optional" prop:value=line.serial on:input=move |event| lines.update(|values| values[index].serial=event_target_value(&event))/></td><td><input aria-label="Expiration" type="datetime-local" prop:value=line.expiration on:input=move |event| lines.update(|values| values[index].expiration=event_target_value(&event))/></td></tr> }).collect_view()}</tbody></table></div></section>
+            <section class="po-line-builder"><div class="detail-section-heading"><h3>"Expected freight"</h3><span>"0 excludes a line"</span></div><div class="table-scroll"><table class="dense-table po-asn-lines"><thead><tr><th>"Item"</th><th class="numeric">"Available"</th><th class="numeric">"ASN qty"</th><th>"Lot"</th><th>"Serial"</th><th>"Expiration"</th></tr></thead><tbody>{move || lines.get().into_iter().enumerate().map(|(index, line)| view! { <tr><td><strong>{line.description}</strong><small>{line.uom}</small></td><td class="numeric">{format_quantity(line.available_to_notify_quantity)}</td><td><input aria-label="Expected quantity" class="compact-number" type="number" min="0" max=line.available_to_notify_quantity prop:value=line.expected_quantity on:input=move |event| lines.update(|values| values[index].expected_quantity=event_target_value(&event))/></td><td><input aria-label="Lot" placeholder="Optional" prop:value=line.lot on:input=move |event| lines.update(|values| values[index].lot=event_target_value(&event))/></td><td><input aria-label="Serial" placeholder="Optional" prop:value=line.serial on:input=move |event| lines.update(|values| values[index].serial=event_target_value(&event))/></td><td><input aria-label="Expiration" type="datetime-local" prop:value=line.expiration on:input=move |event| lines.update(|values| values[index].expiration=event_target_value(&event))/></td></tr> }).collect_view()}</tbody></table></div></section>
             <Show when=move || error.get().is_some()>{move || error.get().map(|message| view! { <p class="inline-command-error">{message}</p> })}</Show>
             <footer class="detail-actions"><button class="button quiet-action" type="button" on:click=move |_| on_close.run(())>"Cancel"</button><button class="button primary-action" type="submit" disabled=move || pending.get()><Icon icon=UiIcon::Add/><span>{move || if pending.get() { "Creating..." } else { "Create ASN" }}</span></button></footer>
         </form>

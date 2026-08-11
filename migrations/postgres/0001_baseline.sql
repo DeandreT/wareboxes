@@ -37545,6 +37545,57 @@ CREATE INDEX purchase_order_asn_source_lines_order_line_idx
 ON public.purchase_order_asn_source_lines(
     tenant_id,purchase_order_id,purchase_order_line_id,source_id,id);
 
+-- Historical ASN quantities remain immutable evidence. Executable coverage is
+-- different: rejected/missing units and cancelled/rejected loads may be placed on
+-- a replacement ASN, while received and still-active inbound quantities continue
+-- to consume purchase-order demand.
+CREATE VIEW public.purchase_order_line_inbound_progress
+WITH (security_invoker=true) AS
+SELECT line.tenant_id,
+       line.inventory_owner_id,
+       line.facility_id,
+       line.purchase_order_id,
+       line.id AS purchase_order_line_id,
+       line.ordered_quantity,
+       COALESCE(SUM(mapping.expected_quantity),0)::bigint AS historical_asn_quantity,
+       COALESCE(SUM(COALESCE(load_line.received_qty,0)),0)::bigint
+           AS received_quantity,
+       COALESCE(SUM(COALESCE(load_line.rejected_qty,0)),0)::bigint
+           AS rejected_quantity,
+       COALESCE(SUM(COALESCE(load_line.missing_qty,0)),0)::bigint
+           AS missing_quantity,
+       COALESCE(SUM(
+           CASE
+               WHEN mapping.id IS NULL THEN 0
+               WHEN asn.status='open' THEN mapping.expected_quantity
+               WHEN load.status IN ('cancelled','rejected') THEN 0
+               ELSE GREATEST(
+                   mapping.expected_quantity
+                       - COALESCE(load_line.received_qty,0)
+                       - COALESCE(load_line.rejected_qty,0)
+                       - COALESCE(load_line.missing_qty,0),
+                   0)
+           END),0)::bigint AS active_inbound_quantity
+FROM public.purchase_order_lines line
+LEFT JOIN public.purchase_order_asn_source_lines mapping
+  ON mapping.tenant_id=line.tenant_id
+ AND mapping.purchase_order_line_id=line.id
+LEFT JOIN public.inbound_asns asn
+  ON asn.tenant_id=mapping.tenant_id AND asn.id=mapping.asn_id
+LEFT JOIN public.inbound_asn_load_plan_lines plan_line
+  ON plan_line.tenant_id=mapping.tenant_id
+ AND plan_line.asn_line_id=mapping.asn_line_id
+LEFT JOIN public.load_lines load_line
+  ON load_line.tenant_id=plan_line.tenant_id
+ AND load_line.id=plan_line.load_line_id
+ AND load_line.deleted IS NULL
+LEFT JOIN public.loads load
+  ON load.tenant_id=plan_line.tenant_id
+ AND load.id=plan_line.load_id
+ AND load.deleted IS NULL
+GROUP BY line.tenant_id,line.inventory_owner_id,line.facility_id,
+         line.purchase_order_id,line.id,line.ordered_quantity;
+
 CREATE FUNCTION public.validate_purchase_order_asn_source() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -37660,14 +37711,11 @@ BEGIN
            HAVING COUNT(mapping.id) <> 1)
        OR EXISTS (
            SELECT 1
-           FROM public.purchase_order_lines order_line
-           LEFT JOIN public.purchase_order_asn_source_lines mapping
-             ON mapping.tenant_id=order_line.tenant_id
-            AND mapping.purchase_order_line_id=order_line.id
-           WHERE order_line.tenant_id=target_tenant_id
-             AND order_line.purchase_order_id=source_row.purchase_order_id
-           GROUP BY order_line.id,order_line.ordered_quantity
-           HAVING COALESCE(SUM(mapping.expected_quantity),0) > order_line.ordered_quantity) THEN
+           FROM public.purchase_order_line_inbound_progress progress
+           WHERE progress.tenant_id=target_tenant_id
+             AND progress.purchase_order_id=source_row.purchase_order_id
+             AND progress.received_quantity + progress.active_inbound_quantity
+                   > progress.ordered_quantity) THEN
         RAISE EXCEPTION 'purchase-order ASN source lines do not conserve ordered demand'
             USING ERRCODE='55000';
     END IF;
@@ -37721,6 +37769,7 @@ WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bi
 
 GRANT SELECT,INSERT ON public.purchase_order_asn_sources TO wareboxes_app;
 GRANT SELECT,INSERT ON public.purchase_order_asn_source_lines TO wareboxes_app;
+GRANT SELECT ON public.purchase_order_line_inbound_progress TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.purchase_order_asn_sources_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.purchase_order_asn_source_lines_id_seq TO wareboxes_app;
 

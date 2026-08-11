@@ -76,8 +76,12 @@ pub struct PurchaseOrderLineResponse {
     pub item_description: String,
     pub uom: String,
     pub ordered_quantity: i64,
-    pub asn_expected_quantity: i64,
-    pub remaining_quantity: i64,
+    /// Total quantity across every ASN ever created from this PO line.
+    pub historical_asn_quantity: i64,
+    /// Quantity still physically expected on open or executable inbound loads.
+    pub active_inbound_quantity: i64,
+    /// Quantity that may be placed on a new ASN without exceeding PO demand.
+    pub available_to_notify_quantity: i64,
     pub received_quantity: i64,
     pub rejected_quantity: i64,
     pub missing_quantity: i64,
@@ -99,8 +103,9 @@ pub struct PurchaseOrderSummaryResponse {
     pub revision: Revision,
     pub line_count: i64,
     pub total_ordered_quantity: i64,
-    pub total_asn_expected_quantity: i64,
-    pub total_remaining_quantity: i64,
+    pub total_historical_asn_quantity: i64,
+    pub total_active_inbound_quantity: i64,
+    pub total_available_to_notify_quantity: i64,
     pub total_received_quantity: i64,
     pub total_rejected_quantity: i64,
     pub total_missing_quantity: i64,
@@ -173,5 +178,30 @@ mod tests {
         let mut invalid = request;
         invalid["status"] = serde_json::json!("released");
         assert!(serde_json::from_value::<ReleasePurchaseOrderRequest>(invalid).is_err());
+    }
+
+    #[test]
+    fn demand_progress_distinguishes_history_from_executable_coverage() {
+        let value = serde_json::json!({
+            "line_id": 9,
+            "sequence": 1,
+            "item_id": 7,
+            "item_description": "Canned beans",
+            "uom": "case",
+            "ordered_quantity": 22,
+            "historical_asn_quantity": 23,
+            "active_inbound_quantity": 19,
+            "available_to_notify_quantity": 1,
+            "received_quantity": 2,
+            "rejected_quantity": 1,
+            "missing_quantity": 0,
+            "open_receipt_quantity": 20
+        });
+        let line = serde_json::from_value::<PurchaseOrderLineResponse>(value.clone()).unwrap();
+        assert_eq!(line.historical_asn_quantity, 23);
+        assert_eq!(line.available_to_notify_quantity, 1);
+        let mut invalid = value;
+        invalid["remaining_quantity"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<PurchaseOrderLineResponse>(invalid).is_err());
     }
 }

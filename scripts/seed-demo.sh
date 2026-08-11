@@ -167,6 +167,20 @@ BEGIN
   ) THEN
     missing := array_append(missing, 'purchase-order receipt progress');
   END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM purchase_orders purchase
+    INNER JOIN purchase_order_line_inbound_progress progress
+      ON progress.tenant_id=purchase.tenant_id
+     AND progress.purchase_order_id=purchase.id
+    GROUP BY purchase.id,purchase.total_ordered_quantity
+    HAVING SUM(progress.historical_asn_quantity) > purchase.total_ordered_quantity
+       AND SUM(progress.received_quantity+progress.active_inbound_quantity)
+             = purchase.total_ordered_quantity
+       AND SUM(progress.rejected_quantity+progress.missing_quantity) > 0
+  ) THEN
+    missing := array_append(missing, 'purchase-order exception renotification');
+  END IF;
   IF cardinality(missing) > 0 THEN
     RAISE EXCEPTION 'core demo coverage is incomplete: %', array_to_string(missing, ', ');
   END IF;

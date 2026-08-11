@@ -189,9 +189,10 @@ pub use picking::{
     MAX_PICK_SCAN_VALUE_LENGTH, MAX_PICK_SHORTAGE_NOTE_LENGTH, MAX_PICK_SHORT_SHIP_NOTE_LENGTH,
 };
 pub use purchase_order::{
-    release_purchase_order, NewPurchaseOrder, PurchaseOrderError, PurchaseOrderLineDefinition,
-    PurchaseOrderNumber, PurchaseOrderQuantity, PurchaseOrderRevision, PurchaseOrderStatus,
-    PurchaseOrderSupplier, MAX_PURCHASE_ORDER_NUMBER_LENGTH, MAX_PURCHASE_ORDER_SUPPLIER_LENGTH,
+    release_purchase_order, NewPurchaseOrder, PurchaseOrderDemandCoverage, PurchaseOrderError,
+    PurchaseOrderLineDefinition, PurchaseOrderNumber, PurchaseOrderQuantity, PurchaseOrderRevision,
+    PurchaseOrderStatus, PurchaseOrderSupplier, MAX_PURCHASE_ORDER_NUMBER_LENGTH,
+    MAX_PURCHASE_ORDER_SUPPLIER_LENGTH,
 };
 pub use replenishment::{
     assess_replenishment_source, plan_replenishment, select_replenishment_sources,

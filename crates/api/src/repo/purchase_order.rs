@@ -19,8 +19,9 @@ use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     release_purchase_order, CatalogItemId, FacilityId, InboundAsnId, InboundAsnLineId,
     InboundAsnRevision, InboundAsnStatus, InventoryOwnerId, PurchaseOrderAsnSourceId,
-    PurchaseOrderAsnSourceLineId, PurchaseOrderId, PurchaseOrderLineId, PurchaseOrderReleaseId,
-    PurchaseOrderRevision, PurchaseOrderStatus, Timestamp, UserId,
+    PurchaseOrderAsnSourceLineId, PurchaseOrderDemandCoverage, PurchaseOrderId,
+    PurchaseOrderLineId, PurchaseOrderReleaseId, PurchaseOrderRevision, PurchaseOrderStatus,
+    Timestamp, UserId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::{insert_result, PostgresPreparedCommandExt};
@@ -376,7 +377,7 @@ pub async fn create_asn(
     let source_rows = sqlx::query(
         r#"
         SELECT line.id,line.item_id,line.uom,line.ordered_quantity,
-               COALESCE(SUM(mapping.expected_quantity),0)::BIGINT AS asn_expected_quantity
+               progress.received_quantity,progress.active_inbound_quantity
         FROM purchase_order_lines line
         INNER JOIN items item
           ON item.tenant_id=line.tenant_id AND item.id=line.item_id AND item.deleted IS NULL
@@ -384,10 +385,10 @@ pub async fn create_asn(
           ON owner_item.tenant_id=line.tenant_id
          AND owner_item.inventory_owner_id=line.inventory_owner_id
          AND owner_item.item_id=line.item_id AND owner_item.deleted IS NULL
-        LEFT JOIN purchase_order_asn_source_lines mapping
-          ON mapping.tenant_id=line.tenant_id AND mapping.purchase_order_line_id=line.id
+        INNER JOIN purchase_order_line_inbound_progress progress
+          ON progress.tenant_id=line.tenant_id
+         AND progress.purchase_order_line_id=line.id
         WHERE line.tenant_id=$1 AND line.purchase_order_id=$2 AND line.id=ANY($3)
-        GROUP BY line.id,line.item_id,line.uom,line.ordered_quantity
         ORDER BY line.id
         "#,
     )
@@ -405,7 +406,8 @@ pub async fn create_asn(
                     row.try_get::<i64, _>("item_id")?,
                     row.try_get::<String, _>("uom")?,
                     row.try_get::<i64, _>("ordered_quantity")?,
-                    row.try_get::<i64, _>("asn_expected_quantity")?,
+                    row.try_get::<i64, _>("received_quantity")?,
+                    row.try_get::<i64, _>("active_inbound_quantity")?,
                 ),
             ))
         })
@@ -428,13 +430,12 @@ pub async fn create_asn(
             .ok_or_else(|| AppError::bad_request("ASN expected quantity exceeds i64"))?;
     }
     for (line_id, requested) in &requested_by_line {
-        let (_, _, ordered, already_expected) = source_lines
+        let (_, _, ordered, received, active_inbound) = source_lines
             .get(line_id)
             .ok_or_else(|| AppError::conflict("purchase order line is no longer available"))?;
-        if already_expected
-            .checked_add(*requested)
-            .is_none_or(|total| total > *ordered)
-        {
+        let coverage = PurchaseOrderDemandCoverage::new(*ordered, *received, *active_inbound)
+            .map_err(|error| AppError::internal(error.to_string()))?;
+        if *requested > coverage.available_to_notify_quantity() {
             return Err(AppError::conflict(
                 "ASN quantities exceed the purchase order's remaining demand",
             ));
@@ -502,7 +503,7 @@ pub async fn create_asn(
     for (index, line) in notice.lines().iter().enumerate() {
         let sequence = i64::try_from(index + 1)
             .map_err(|_| AppError::bad_request("ASN line sequence exceeds i64"))?;
-        let (item_id, uom, _, _) = source_lines
+        let (item_id, uom, _, _, _) = source_lines
             .get(&line.purchase_order_line_id().get())
             .ok_or_else(|| AppError::conflict("purchase order line is no longer available"))?;
         let asn_line_id = InboundAsnLineId::new(
@@ -611,18 +612,19 @@ pub async fn page(
                purchase.facility_id,facility.name AS facility_name,purchase.number,
                purchase.supplier,purchase.expected_by,purchase.status,purchase.revision,
                purchase.line_count,purchase.total_ordered_quantity,
-               COALESCE(progress.total_expected_quantity,0)::BIGINT
-                   AS total_asn_expected_quantity,
+               COALESCE(progress.historical_asn_quantity,0)::BIGINT
+                   AS total_historical_asn_quantity,
+               COALESCE(progress.active_inbound_quantity,0)::BIGINT
+                   AS total_active_inbound_quantity,
                purchase.total_ordered_quantity
-                   - COALESCE(progress.total_expected_quantity,0)::BIGINT
-                   AS total_remaining_quantity,
+                   - COALESCE(progress.received_quantity,0)::BIGINT
+                   - COALESCE(progress.active_inbound_quantity,0)::BIGINT
+                   AS total_available_to_notify_quantity,
                COALESCE(progress.received_quantity,0)::BIGINT AS total_received_quantity,
                COALESCE(progress.rejected_quantity,0)::BIGINT AS total_rejected_quantity,
                COALESCE(progress.missing_quantity,0)::BIGINT AS total_missing_quantity,
                purchase.total_ordered_quantity
                    - COALESCE(progress.received_quantity,0)::BIGINT
-                   - COALESCE(progress.rejected_quantity,0)::BIGINT
-                   - COALESCE(progress.missing_quantity,0)::BIGINT
                    AS total_open_receipt_quantity,
                purchase.created_by_user_id,purchase.created_at,
                purchase.released_by_user_id,purchase.released_at
@@ -632,19 +634,16 @@ pub async fn page(
         INNER JOIN facilities facility
           ON facility.tenant_id=purchase.tenant_id AND facility.id=purchase.facility_id
         LEFT JOIN LATERAL (
-            SELECT SUM(mapping.expected_quantity)::BIGINT AS total_expected_quantity,
-                   SUM(COALESCE(load_line.received_qty,0))::BIGINT AS received_quantity,
-                   SUM(COALESCE(load_line.rejected_qty,0))::BIGINT AS rejected_quantity,
-                   SUM(COALESCE(load_line.missing_qty,0))::BIGINT AS missing_quantity
-            FROM purchase_order_asn_source_lines mapping
-            LEFT JOIN inbound_asn_load_plan_lines plan_line
-              ON plan_line.tenant_id=mapping.tenant_id
-             AND plan_line.asn_line_id=mapping.asn_line_id
-            LEFT JOIN load_lines load_line
-              ON load_line.tenant_id=plan_line.tenant_id
-             AND load_line.id=plan_line.load_line_id AND load_line.deleted IS NULL
-            WHERE mapping.tenant_id=purchase.tenant_id
-              AND mapping.purchase_order_id=purchase.id
+            SELECT SUM(line_progress.historical_asn_quantity)::BIGINT
+                       AS historical_asn_quantity,
+                   SUM(line_progress.active_inbound_quantity)::BIGINT
+                       AS active_inbound_quantity,
+                   SUM(line_progress.received_quantity)::BIGINT AS received_quantity,
+                   SUM(line_progress.rejected_quantity)::BIGINT AS rejected_quantity,
+                   SUM(line_progress.missing_quantity)::BIGINT AS missing_quantity
+            FROM purchase_order_line_inbound_progress line_progress
+            WHERE line_progress.tenant_id=purchase.tenant_id
+              AND line_progress.purchase_order_id=purchase.id
         ) progress ON TRUE
         WHERE purchase.tenant_id=$1
           AND ($2 OR purchase.facility_id=ANY($3))
@@ -699,18 +698,19 @@ pub async fn detail(
                purchase.facility_id,facility.name AS facility_name,purchase.number,
                purchase.supplier,purchase.expected_by,purchase.status,purchase.revision,
                purchase.line_count,purchase.total_ordered_quantity,
-               COALESCE(progress.total_expected_quantity,0)::BIGINT
-                   AS total_asn_expected_quantity,
+               COALESCE(progress.historical_asn_quantity,0)::BIGINT
+                   AS total_historical_asn_quantity,
+               COALESCE(progress.active_inbound_quantity,0)::BIGINT
+                   AS total_active_inbound_quantity,
                purchase.total_ordered_quantity
-                   - COALESCE(progress.total_expected_quantity,0)::BIGINT
-                   AS total_remaining_quantity,
+                   - COALESCE(progress.received_quantity,0)::BIGINT
+                   - COALESCE(progress.active_inbound_quantity,0)::BIGINT
+                   AS total_available_to_notify_quantity,
                COALESCE(progress.received_quantity,0)::BIGINT AS total_received_quantity,
                COALESCE(progress.rejected_quantity,0)::BIGINT AS total_rejected_quantity,
                COALESCE(progress.missing_quantity,0)::BIGINT AS total_missing_quantity,
                purchase.total_ordered_quantity
                    - COALESCE(progress.received_quantity,0)::BIGINT
-                   - COALESCE(progress.rejected_quantity,0)::BIGINT
-                   - COALESCE(progress.missing_quantity,0)::BIGINT
                    AS total_open_receipt_quantity,
                purchase.created_by_user_id,purchase.created_at,
                purchase.released_by_user_id,purchase.released_at
@@ -720,19 +720,16 @@ pub async fn detail(
         INNER JOIN facilities facility
           ON facility.tenant_id=purchase.tenant_id AND facility.id=purchase.facility_id
         LEFT JOIN LATERAL (
-            SELECT SUM(mapping.expected_quantity)::BIGINT AS total_expected_quantity,
-                   SUM(COALESCE(load_line.received_qty,0))::BIGINT AS received_quantity,
-                   SUM(COALESCE(load_line.rejected_qty,0))::BIGINT AS rejected_quantity,
-                   SUM(COALESCE(load_line.missing_qty,0))::BIGINT AS missing_quantity
-            FROM purchase_order_asn_source_lines mapping
-            LEFT JOIN inbound_asn_load_plan_lines plan_line
-              ON plan_line.tenant_id=mapping.tenant_id
-             AND plan_line.asn_line_id=mapping.asn_line_id
-            LEFT JOIN load_lines load_line
-              ON load_line.tenant_id=plan_line.tenant_id
-             AND load_line.id=plan_line.load_line_id AND load_line.deleted IS NULL
-            WHERE mapping.tenant_id=purchase.tenant_id
-              AND mapping.purchase_order_id=purchase.id
+            SELECT SUM(line_progress.historical_asn_quantity)::BIGINT
+                       AS historical_asn_quantity,
+                   SUM(line_progress.active_inbound_quantity)::BIGINT
+                       AS active_inbound_quantity,
+                   SUM(line_progress.received_quantity)::BIGINT AS received_quantity,
+                   SUM(line_progress.rejected_quantity)::BIGINT AS rejected_quantity,
+                   SUM(line_progress.missing_quantity)::BIGINT AS missing_quantity
+            FROM purchase_order_line_inbound_progress line_progress
+            WHERE line_progress.tenant_id=purchase.tenant_id
+              AND line_progress.purchase_order_id=purchase.id
         ) progress ON TRUE
         WHERE purchase.tenant_id=$1 AND purchase.id=$2
           AND ($3 OR purchase.facility_id=ANY($4))
@@ -757,28 +754,22 @@ pub async fn detail(
         SELECT line.id,line.sequence,line.item_id,
                COALESCE(item.description,'Item #' || item.id) AS item_description,
                line.uom,line.ordered_quantity,
-               COALESCE(SUM(mapping.expected_quantity),0)::BIGINT AS asn_expected_quantity,
-               line.ordered_quantity - COALESCE(SUM(mapping.expected_quantity),0)::BIGINT
-                   AS remaining_quantity,
-               COALESCE(SUM(load_line.received_qty),0)::BIGINT AS received_quantity,
-               COALESCE(SUM(load_line.rejected_qty),0)::BIGINT AS rejected_quantity,
-               COALESCE(SUM(load_line.missing_qty),0)::BIGINT AS missing_quantity,
+               progress.historical_asn_quantity,
+               progress.active_inbound_quantity,
                line.ordered_quantity
-                   - COALESCE(SUM(load_line.received_qty),0)::BIGINT
-                   - COALESCE(SUM(load_line.rejected_qty),0)::BIGINT
-                   - COALESCE(SUM(load_line.missing_qty),0)::BIGINT AS open_receipt_quantity
+                   - progress.received_quantity
+                   - progress.active_inbound_quantity AS available_to_notify_quantity,
+               progress.received_quantity,
+               progress.rejected_quantity,
+               progress.missing_quantity,
+               line.ordered_quantity
+                   - progress.received_quantity AS open_receipt_quantity
         FROM purchase_order_lines line
         INNER JOIN items item ON item.tenant_id=line.tenant_id AND item.id=line.item_id
-        LEFT JOIN purchase_order_asn_source_lines mapping
-          ON mapping.tenant_id=line.tenant_id AND mapping.purchase_order_line_id=line.id
-        LEFT JOIN inbound_asn_load_plan_lines plan_line
-          ON plan_line.tenant_id=mapping.tenant_id AND plan_line.asn_line_id=mapping.asn_line_id
-        LEFT JOIN load_lines load_line
-          ON load_line.tenant_id=plan_line.tenant_id AND load_line.id=plan_line.load_line_id
-         AND load_line.deleted IS NULL
+        INNER JOIN purchase_order_line_inbound_progress progress
+          ON progress.tenant_id=line.tenant_id
+         AND progress.purchase_order_line_id=line.id
         WHERE line.tenant_id=$1 AND line.purchase_order_id=$2
-        GROUP BY line.id,line.sequence,line.item_id,item.description,item.id,
-                 line.uom,line.ordered_quantity
         ORDER BY line.sequence,line.id
         "#,
     )
@@ -798,8 +789,9 @@ pub async fn detail(
                 item_description: line.try_get("item_description")?,
                 uom: line.try_get("uom")?,
                 ordered_quantity: line.try_get("ordered_quantity")?,
-                asn_expected_quantity: line.try_get("asn_expected_quantity")?,
-                remaining_quantity: line.try_get("remaining_quantity")?,
+                historical_asn_quantity: line.try_get("historical_asn_quantity")?,
+                active_inbound_quantity: line.try_get("active_inbound_quantity")?,
+                available_to_notify_quantity: line.try_get("available_to_notify_quantity")?,
                 received_quantity: line.try_get("received_quantity")?,
                 rejected_quantity: line.try_get("rejected_quantity")?,
                 missing_quantity: line.try_get("missing_quantity")?,
@@ -999,8 +991,9 @@ fn map_header(row: &sqlx::postgres::PgRow) -> AppResult<PurchaseOrderReadModel> 
         revision: revision(row.try_get("revision")?)?,
         line_count: row.try_get("line_count")?,
         total_ordered_quantity: row.try_get("total_ordered_quantity")?,
-        total_asn_expected_quantity: row.try_get("total_asn_expected_quantity")?,
-        total_remaining_quantity: row.try_get("total_remaining_quantity")?,
+        total_historical_asn_quantity: row.try_get("total_historical_asn_quantity")?,
+        total_active_inbound_quantity: row.try_get("total_active_inbound_quantity")?,
+        total_available_to_notify_quantity: row.try_get("total_available_to_notify_quantity")?,
         total_received_quantity: row.try_get("total_received_quantity")?,
         total_rejected_quantity: row.try_get("total_rejected_quantity")?,
         total_missing_quantity: row.try_get("total_missing_quantity")?,

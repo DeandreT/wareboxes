@@ -171,6 +171,7 @@ async fn seed_purchase_order_receipt_progress(context: &SeedContext) -> anyhow::
         return Ok(());
     };
     if status != "open" {
+        seed_purchase_order_follow_up_asn(context, asn_id).await?;
         return Ok(());
     }
 
@@ -263,6 +264,78 @@ async fn seed_purchase_order_receipt_progress(context: &SeedContext) -> anyhow::
                 .await?;
         }
     }
+    seed_purchase_order_follow_up_asn(context, asn_id).await?;
+    Ok(())
+}
+
+async fn seed_purchase_order_follow_up_asn(
+    context: &SeedContext,
+    source_asn_id: i64,
+) -> anyhow::Result<()> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM inbound_asns WHERE tenant_id=$1 AND number='WB-DEMO-ASN-FROM-PO-0002')",
+    )
+    .bind(context.tenant_id.get())
+    .fetch_one(&context.admin)
+    .await?;
+    if exists {
+        return Ok(());
+    }
+    let order: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT source.purchase_order_id,purchase.revision
+        FROM purchase_order_asn_sources source
+        INNER JOIN purchase_orders purchase
+          ON purchase.tenant_id=source.tenant_id AND purchase.id=source.purchase_order_id
+        WHERE source.tenant_id=$1 AND source.asn_id=$2
+        "#,
+    )
+    .bind(context.tenant_id.get())
+    .bind(source_asn_id)
+    .fetch_one(&context.admin)
+    .await?;
+    let lines = sqlx::query_as::<_, (i64, i64)>(
+        r#"
+        SELECT purchase_order_line_id,
+               ordered_quantity-received_quantity-active_inbound_quantity AS available_quantity
+        FROM purchase_order_line_inbound_progress
+        WHERE tenant_id=$1 AND purchase_order_id=$2
+          AND ordered_quantity-received_quantity-active_inbound_quantity > 0
+        ORDER BY purchase_order_line_id
+        "#,
+    )
+    .bind(context.tenant_id.get())
+    .bind(order.0)
+    .fetch_all(&context.admin)
+    .await?;
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let lines = lines
+        .into_iter()
+        .map(|(line_id, quantity)| {
+            json!({
+                "purchase_order_line_id": line_id,
+                "expected_quantity": quantity,
+                "lot": null,
+                "serial": null,
+                "expiration": null
+            })
+        })
+        .collect::<Vec<_>>();
+    let _: CreatePurchaseOrderAsnResponse = context
+        .command(
+            Method::POST,
+            &format!("/api/v1/purchase-orders/{}/asns", order.0),
+            "demo-purchase-order-follow-up-asn",
+            json!({
+                "expected_purchase_order_revision": order.1,
+                "number": "WB-DEMO-ASN-FROM-PO-0002",
+                "expected_at": "2027-08-15T14:00:00Z",
+                "lines": lines
+            }),
+        )
+        .await?;
     Ok(())
 }
 
