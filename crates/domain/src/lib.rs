@@ -58,17 +58,21 @@ pub use inbound_inspection::{
     InboundInspectionOutcome, InboundInspectionTargetStatus, MAX_INBOUND_INSPECTION_NOTE_LENGTH,
 };
 pub use inbound_load::{
-    validate_inbound_load_appointment, validate_inbound_load_arrival,
-    validate_inbound_load_closure, validate_inbound_load_unloading_start, InboundExpectedQuantity,
-    InboundLoadAppointmentError, InboundLoadArrivalError, InboundLoadCancellationDetails,
-    InboundLoadCancellationError, InboundLoadCancellationNote, InboundLoadCancellationReason,
-    InboundLoadClosureError, InboundLoadField, InboundLoadPlanLine, InboundLoadPlanningError,
-    InboundLoadPreArrivalStatus, InboundLoadReference, InboundLoadRejectionDetails,
-    InboundLoadRejectionError, InboundLoadRejectionNote, InboundLoadRejectionReason,
-    InboundLoadScanValue, InboundLoadUnloadingError, NewInboundLoadPlan,
-    MAX_INBOUND_LOAD_CANCELLATION_NOTE_LENGTH, MAX_INBOUND_LOAD_IDENTITY_LENGTH,
-    MAX_INBOUND_LOAD_REFERENCE_LENGTH, MAX_INBOUND_LOAD_REJECTION_NOTE_LENGTH,
-    MAX_INBOUND_LOAD_SCAN_VALUE_LENGTH, MAX_INBOUND_LOAD_TEXT_LENGTH,
+    validate_inbound_load_appointment, validate_inbound_load_appointment_reschedule,
+    validate_inbound_load_arrival, validate_inbound_load_closure,
+    validate_inbound_load_unloading_start, InboundExpectedQuantity, InboundLoadAppointmentError,
+    InboundLoadAppointmentRescheduleDetails, InboundLoadAppointmentRescheduleError,
+    InboundLoadAppointmentRescheduleNote, InboundLoadAppointmentRescheduleReason,
+    InboundLoadArrivalError, InboundLoadCancellationDetails, InboundLoadCancellationError,
+    InboundLoadCancellationNote, InboundLoadCancellationReason, InboundLoadClosureError,
+    InboundLoadField, InboundLoadPlanLine, InboundLoadPlanningError, InboundLoadPreArrivalStatus,
+    InboundLoadReference, InboundLoadRejectionDetails, InboundLoadRejectionError,
+    InboundLoadRejectionNote, InboundLoadRejectionReason, InboundLoadScanValue,
+    InboundLoadUnloadingError, NewInboundLoadPlan,
+    MAX_INBOUND_LOAD_APPOINTMENT_RESCHEDULE_NOTE_LENGTH, MAX_INBOUND_LOAD_CANCELLATION_NOTE_LENGTH,
+    MAX_INBOUND_LOAD_IDENTITY_LENGTH, MAX_INBOUND_LOAD_REFERENCE_LENGTH,
+    MAX_INBOUND_LOAD_REJECTION_NOTE_LENGTH, MAX_INBOUND_LOAD_SCAN_VALUE_LENGTH,
+    MAX_INBOUND_LOAD_TEXT_LENGTH,
 };
 pub use integration::{
     IntegrationInboxCorrectionReason, IntegrationInboxCorrectionReasonError,
@@ -272,6 +276,10 @@ positive_id!(InboundLoadId, "inbound load ID");
 positive_id!(InboundLoadLineId, "inbound load line ID");
 positive_id!(InboundLoadArrivalId, "inbound load arrival ID");
 positive_id!(InboundLoadAppointmentId, "inbound load appointment ID");
+positive_id!(
+    InboundLoadAppointmentRescheduleId,
+    "inbound load appointment reschedule ID"
+);
 positive_id!(InboundLoadCancellationId, "inbound load cancellation ID");
 positive_id!(InboundLoadRejectionId, "inbound load rejection ID");
 positive_id!(InboundLoadClosureId, "inbound load closure ID");

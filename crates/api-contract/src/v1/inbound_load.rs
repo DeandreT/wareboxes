@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_INBOUND_LOAD_CANCELLATION_NOTE_LENGTH: usize = 500;
 pub const MAX_INBOUND_LOAD_REJECTION_NOTE_LENGTH: usize = 500;
+pub const MAX_INBOUND_LOAD_APPOINTMENT_RESCHEDULE_NOTE_LENGTH: usize = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -96,6 +97,78 @@ pub struct ScheduleInboundLoadResponse {
     pub scheduled_for: String,
     pub scheduled_by: i64,
     pub scheduled_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadAppointmentRescheduleReason {
+    CarrierDelay,
+    SupplierChange,
+    DockCapacity,
+    Weather,
+    Correction,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RescheduleInboundLoadAppointmentRequest {
+    pub expected_scheduled_for: String,
+    pub scheduled_for: String,
+    pub reason: InboundLoadAppointmentRescheduleReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for RescheduleInboundLoadAppointmentRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            expected_scheduled_for: String,
+            scheduled_for: String,
+            reason: InboundLoadAppointmentRescheduleReason,
+            #[serde(default)]
+            note: Option<String>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.note.as_ref().is_some_and(|note| {
+            note.is_empty()
+                || note.trim() != note
+                || note.chars().count() > MAX_INBOUND_LOAD_APPOINTMENT_RESCHEDULE_NOTE_LENGTH
+                || note.chars().any(char::is_control)
+        }) || (raw.reason == InboundLoadAppointmentRescheduleReason::Other && raw.note.is_none())
+        {
+            return Err(serde::de::Error::custom(
+                "inbound load appointment reschedule note is invalid",
+            ));
+        }
+        Ok(Self {
+            expected_scheduled_for: raw.expected_scheduled_for,
+            scheduled_for: raw.scheduled_for,
+            reason: raw.reason,
+            note: raw.note,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RescheduleInboundLoadAppointmentResponse {
+    pub reschedule_id: i64,
+    pub appointment_id: i64,
+    pub load_id: i64,
+    pub status: InboundLoadScheduledStatus,
+    pub sequence: i64,
+    pub previous_scheduled_for: String,
+    pub scheduled_for: String,
+    pub reason: InboundLoadAppointmentRescheduleReason,
+    pub note: Option<String>,
+    pub rescheduled_by: i64,
+    pub rescheduled_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,6 +556,36 @@ mod tests {
         let mut changed = request;
         changed["status"] = json!("scheduled");
         assert!(serde_json::from_value::<ScheduleInboundLoadRequest>(changed).is_err());
+    }
+
+    #[test]
+    fn appointment_reschedule_request_is_optimistic_reasoned_and_strict() {
+        let request = json!({
+            "expected_scheduled_for":"2027-08-12T17:00:00Z",
+            "scheduled_for":"2027-08-12T19:00:00Z",
+            "reason":"carrier_delay",
+            "note":"tractor delayed"
+        });
+        let decoded =
+            serde_json::from_value::<RescheduleInboundLoadAppointmentRequest>(request.clone())
+                .unwrap();
+        assert_eq!(
+            decoded.reason,
+            InboundLoadAppointmentRescheduleReason::CarrierDelay
+        );
+        let mut unknown = request;
+        unknown["tenant_id"] = json!(99);
+        assert!(
+            serde_json::from_value::<RescheduleInboundLoadAppointmentRequest>(unknown).is_err()
+        );
+        assert!(
+            serde_json::from_value::<RescheduleInboundLoadAppointmentRequest>(json!({
+                "expected_scheduled_for":"2027-08-12T17:00:00Z",
+                "scheduled_for":"2027-08-12T19:00:00Z",
+                "reason":"other"
+            }))
+            .is_err()
+        );
     }
 
     #[test]

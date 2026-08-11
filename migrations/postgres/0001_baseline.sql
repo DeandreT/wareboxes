@@ -35976,6 +35976,8 @@ CREATE TABLE public.inbound_load_appointments (
     scheduled_at timestamp with time zone NOT NULL,
     CONSTRAINT inbound_load_appointments_time_check CHECK (scheduled_for > scheduled_at),
     CONSTRAINT inbound_load_appointments_tenant_load_unique UNIQUE (tenant_id, load_id),
+    CONSTRAINT inbound_load_appointments_scope_identity_unique
+        UNIQUE (tenant_id, inventory_owner_id, facility_id, load_id, id),
     CONSTRAINT inbound_load_appointments_owner_fkey
         FOREIGN KEY (tenant_id, inventory_owner_id)
         REFERENCES public.inventory_owners(tenant_id, id),
@@ -36041,14 +36043,27 @@ $$;
 CREATE FUNCTION public.require_scheduled_inbound_load_evidence() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-    IF NEW.type='inbound' AND NEW.status='scheduled' AND NOT EXISTS (
-        SELECT 1 FROM public.inbound_load_appointments appointment
-        WHERE appointment.tenant_id=NEW.tenant_id
-          AND appointment.inventory_owner_id=NEW.inventory_owner_id
-          AND appointment.facility_id=NEW.facility_id
-          AND appointment.load_id=NEW.id
-          AND appointment.scheduled_for=NEW.appointment_time
-    ) THEN
+    IF NEW.type='inbound' AND NEW.status='scheduled' AND NEW.appointment_time IS DISTINCT FROM
+       COALESCE(
+           (
+               SELECT reschedule.scheduled_for
+               FROM public.inbound_load_appointment_reschedules reschedule
+               WHERE reschedule.tenant_id=NEW.tenant_id
+                 AND reschedule.inventory_owner_id=NEW.inventory_owner_id
+                 AND reschedule.facility_id=NEW.facility_id
+                 AND reschedule.load_id=NEW.id
+               ORDER BY reschedule.sequence DESC
+               LIMIT 1
+           ),
+           (
+               SELECT appointment.scheduled_for
+               FROM public.inbound_load_appointments appointment
+               WHERE appointment.tenant_id=NEW.tenant_id
+                 AND appointment.inventory_owner_id=NEW.inventory_owner_id
+                 AND appointment.facility_id=NEW.facility_id
+                 AND appointment.load_id=NEW.id
+           )
+       ) THEN
         RAISE EXCEPTION 'scheduled inbound load lacks immutable appointment evidence'
             USING ERRCODE='23514';
     END IF;
@@ -36067,7 +36082,7 @@ AFTER INSERT ON public.inbound_load_appointments
 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
 EXECUTE FUNCTION public.require_inbound_load_appointment_consistency();
 CREATE CONSTRAINT TRIGGER loads_require_inbound_appointment_evidence
-AFTER UPDATE OF status, appointment_time ON public.loads
+AFTER INSERT OR UPDATE OF status, appointment_time ON public.loads
 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
 EXECUTE FUNCTION public.require_scheduled_inbound_load_evidence();
 
@@ -36083,6 +36098,149 @@ GRANT USAGE ON SEQUENCE public.inbound_load_appointments_id_seq TO wareboxes_app
 REVOKE ALL ON FUNCTION public.validate_inbound_load_appointment() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_inbound_load_appointment_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_scheduled_inbound_load_evidence() FROM PUBLIC;
+
+CREATE TABLE public.inbound_load_appointment_reschedules (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    load_id bigint NOT NULL,
+    appointment_id bigint NOT NULL,
+    sequence bigint NOT NULL,
+    previous_scheduled_for timestamp with time zone NOT NULL,
+    scheduled_for timestamp with time zone NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    rescheduled_by_user_id bigint NOT NULL,
+    rescheduled_at timestamp with time zone NOT NULL,
+    CONSTRAINT inbound_load_appointment_reschedules_sequence_check CHECK (sequence > 0),
+    CONSTRAINT inbound_load_appointment_reschedules_time_check CHECK (
+        scheduled_for > rescheduled_at
+        AND scheduled_for <> previous_scheduled_for
+    ),
+    CONSTRAINT inbound_load_appointment_reschedules_reason_check CHECK (reason_code IN (
+        'carrier_delay','supplier_change','dock_capacity','weather','correction','other'
+    )),
+    CONSTRAINT inbound_load_appointment_reschedules_note_check CHECK (
+        note IS NULL OR (
+            note=BTRIM(note)
+            AND OCTET_LENGTH(note) BETWEEN 1 AND 2000
+            AND LENGTH(note) <= 500
+            AND note !~ '[[:cntrl:]]'
+        )
+    ),
+    CONSTRAINT inbound_load_appointment_reschedules_other_note_check CHECK (
+        reason_code <> 'other' OR note IS NOT NULL
+    ),
+    CONSTRAINT inbound_load_appointment_reschedules_load_sequence_unique
+        UNIQUE (tenant_id, load_id, sequence),
+    CONSTRAINT inbound_load_appointment_reschedules_scope_identity_unique
+        UNIQUE (tenant_id, inventory_owner_id, facility_id, load_id, id),
+    CONSTRAINT inbound_load_appointment_reschedules_owner_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    CONSTRAINT inbound_load_appointment_reschedules_facility_fkey
+        FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities(tenant_id, id),
+    CONSTRAINT inbound_load_appointment_reschedules_load_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, load_id)
+        REFERENCES public.loads(tenant_id, inventory_owner_id, id),
+    CONSTRAINT inbound_load_appointment_reschedules_appointment_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, load_id, appointment_id)
+        REFERENCES public.inbound_load_appointments
+            (tenant_id, inventory_owner_id, facility_id, load_id, id),
+    CONSTRAINT inbound_load_appointment_reschedules_actor_fkey
+        FOREIGN KEY (rescheduled_by_user_id) REFERENCES public.users(id)
+);
+
+CREATE INDEX inbound_load_appointment_reschedules_scope_idx
+ON public.inbound_load_appointment_reschedules
+    (tenant_id, facility_id, inventory_owner_id, load_id, sequence DESC, id DESC);
+
+CREATE FUNCTION public.validate_inbound_load_appointment_reschedule() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    load_row record;
+    expected_sequence bigint;
+BEGIN
+    SELECT type, status, facility_id, appointment_time
+    INTO load_row
+    FROM public.loads
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND id=NEW.load_id
+      AND deleted IS NULL
+    FOR UPDATE;
+    SELECT COALESCE(MAX(reschedule.sequence),0)+1
+    INTO expected_sequence
+    FROM public.inbound_load_appointment_reschedules reschedule
+    WHERE reschedule.tenant_id=NEW.tenant_id
+      AND reschedule.load_id=NEW.load_id;
+    IF load_row IS NULL
+       OR load_row.type <> 'inbound'
+       OR load_row.status <> 'scheduled'
+       OR load_row.facility_id <> NEW.facility_id
+       OR load_row.appointment_time IS DISTINCT FROM NEW.previous_scheduled_for
+       OR NEW.sequence <> expected_sequence
+       OR NEW.rescheduled_at > clock_timestamp()
+       OR NEW.scheduled_for <= NEW.rescheduled_at
+       OR NEW.scheduled_for = NEW.previous_scheduled_for THEN
+        RAISE EXCEPTION 'inbound appointment reschedule does not match the current scheduled load'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.require_inbound_load_appointment_reschedule_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    load_row record;
+    latest_row record;
+BEGIN
+    SELECT status, appointment_time
+    INTO load_row
+    FROM public.loads
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.load_id;
+    SELECT sequence, scheduled_for
+    INTO latest_row
+    FROM public.inbound_load_appointment_reschedules
+    WHERE tenant_id=NEW.tenant_id AND load_id=NEW.load_id
+    ORDER BY sequence DESC
+    LIMIT 1;
+    IF load_row IS NULL
+       OR load_row.status <> 'scheduled'
+       OR latest_row IS NULL
+       OR load_row.appointment_time IS DISTINCT FROM latest_row.scheduled_for THEN
+        RAISE EXCEPTION 'appointment reschedule evidence does not match resulting load state'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE TRIGGER inbound_load_appointment_reschedules_validate
+BEFORE INSERT ON public.inbound_load_appointment_reschedules
+FOR EACH ROW EXECUTE FUNCTION public.validate_inbound_load_appointment_reschedule();
+CREATE TRIGGER inbound_load_appointment_reschedules_are_immutable
+BEFORE UPDATE OR DELETE ON public.inbound_load_appointment_reschedules
+FOR EACH ROW EXECUTE FUNCTION public.reject_inbound_load_arrival_mutation();
+CREATE CONSTRAINT TRIGGER inbound_load_appointment_reschedules_require_consistency
+AFTER INSERT ON public.inbound_load_appointment_reschedules
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_inbound_load_appointment_reschedule_consistency();
+
+ALTER TABLE public.inbound_load_appointment_reschedules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.inbound_load_appointment_reschedules FORCE ROW LEVEL SECURITY;
+CREATE POLICY inbound_load_appointment_reschedules_tenant_isolation
+ON public.inbound_load_appointment_reschedules
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.inbound_load_appointment_reschedules TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.inbound_load_appointment_reschedules_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_inbound_load_appointment_reschedule() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_inbound_load_appointment_reschedule_consistency() FROM PUBLIC;
 
 CREATE TABLE public.inbound_load_cancellations (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

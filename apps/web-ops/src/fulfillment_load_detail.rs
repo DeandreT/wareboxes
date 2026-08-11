@@ -1690,9 +1690,10 @@ fn manager_actions(
             (LoadStatus::Scheduled, "Schedule", false),
             (LoadStatus::Cancelled, "Cancel load", true),
         ],
-        (LoadStatus::Scheduled, LoadType::Inbound) => {
-            vec![(LoadStatus::Cancelled, "Cancel load", true)]
-        }
+        (LoadStatus::Scheduled, LoadType::Inbound) => vec![
+            (LoadStatus::Scheduled, "Reschedule", false),
+            (LoadStatus::Cancelled, "Cancel load", true),
+        ],
         (LoadStatus::Planned, LoadType::Outbound) => vec![
             (LoadStatus::Scheduled, "Schedule", false),
             (LoadStatus::Arrived, "Mark at dock", false),
@@ -1795,6 +1796,14 @@ mod tests {
         assert_eq!(arrived.len(), 1);
         assert_eq!(arrived[0].0, LoadStatus::Rejected);
         assert!(manager_actions(LoadStatus::Rejected, LoadType::Inbound).is_empty());
+    }
+
+    #[test]
+    fn scheduled_inbound_loads_expose_typed_rescheduling() {
+        let actions = manager_actions(LoadStatus::Scheduled, LoadType::Inbound);
+        assert!(actions.iter().any(|(status, label, danger)| {
+            *status == LoadStatus::Scheduled && *label == "Reschedule" && !danger
+        }));
     }
 
     #[test]

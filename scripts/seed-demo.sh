@@ -86,6 +86,22 @@ BEGIN
   ) THEN missing := array_append(missing, 'schedulable inbound load'); END IF;
   IF EXISTS (
     SELECT 1 FROM loads load
+    WHERE load.deleted IS NULL AND load.type='inbound' AND load.status='scheduled'
+      AND NOT EXISTS (
+        SELECT 1 FROM inbound_load_appointments appointment
+        WHERE appointment.tenant_id=load.tenant_id AND appointment.load_id=load.id
+      )
+  ) THEN missing := array_append(missing, 'typed inbound appointment evidence'); END IF;
+  IF EXISTS (
+    SELECT 1 FROM loads load
+    WHERE load.deleted IS NULL AND load.type='inbound' AND load.status='scheduled'
+      AND NOT EXISTS (
+        SELECT 1 FROM inbound_load_appointment_reschedules reschedule
+        WHERE reschedule.tenant_id=load.tenant_id AND reschedule.load_id=load.id
+      )
+  ) THEN missing := array_append(missing, 'typed inbound appointment reschedule evidence'); END IF;
+  IF EXISTS (
+    SELECT 1 FROM loads load
     WHERE load.deleted IS NULL AND load.type='inbound' AND load.status='cancelled'
       AND NOT EXISTS (
         SELECT 1 FROM inbound_load_cancellations cancellation

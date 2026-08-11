@@ -1,14 +1,18 @@
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
-    InboundLoadAppointmentId, InboundLoadArrivalId, InboundLoadCancellationDetails,
-    InboundLoadCancellationId, InboundLoadCancellationReason, InboundLoadClosureId, InboundLoadId,
-    InboundLoadLineId, InboundLoadPreArrivalStatus, InboundLoadRejectionDetails,
-    InboundLoadRejectionId, InboundLoadRejectionReason, InboundLoadScanValue,
-    InboundLoadUnloadingStartId, LocationId, NewInboundLoadPlan, Timestamp, UserId,
+    InboundLoadAppointmentId, InboundLoadAppointmentRescheduleDetails,
+    InboundLoadAppointmentRescheduleId, InboundLoadAppointmentRescheduleReason,
+    InboundLoadArrivalId, InboundLoadCancellationDetails, InboundLoadCancellationId,
+    InboundLoadCancellationReason, InboundLoadClosureId, InboundLoadId, InboundLoadLineId,
+    InboundLoadPreArrivalStatus, InboundLoadRejectionDetails, InboundLoadRejectionId,
+    InboundLoadRejectionReason, InboundLoadScanValue, InboundLoadUnloadingStartId, LocationId,
+    NewInboundLoadPlan, Timestamp, UserId,
 };
 
 pub const PLAN_INBOUND_LOAD_OPERATION: &str = "inbound.load.plan.v1";
 pub const SCHEDULE_INBOUND_LOAD_OPERATION: &str = "inbound.load.appointment.schedule.v1";
+pub const RESCHEDULE_INBOUND_LOAD_APPOINTMENT_OPERATION: &str =
+    "inbound.load.appointment.reschedule.v1";
 pub const CANCEL_INBOUND_LOAD_OPERATION: &str = "inbound.load.cancel.v1";
 pub const REJECT_INBOUND_LOAD_OPERATION: &str = "inbound.load.reject.v1";
 pub const ARRIVE_INBOUND_LOAD_OPERATION: &str = "inbound.load.arrive.v1";
@@ -99,6 +103,61 @@ pub struct ScheduleInboundLoadResult {
     pub scheduled_for: Timestamp,
     pub scheduled_by: UserId,
     pub scheduled_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RescheduleInboundLoadAppointmentCommand {
+    load_id: InboundLoadId,
+    expected_scheduled_for: Timestamp,
+    scheduled_for: Timestamp,
+    details: InboundLoadAppointmentRescheduleDetails,
+}
+
+impl RescheduleInboundLoadAppointmentCommand {
+    pub const fn new(
+        load_id: InboundLoadId,
+        expected_scheduled_for: Timestamp,
+        scheduled_for: Timestamp,
+        details: InboundLoadAppointmentRescheduleDetails,
+    ) -> Self {
+        Self {
+            load_id,
+            expected_scheduled_for,
+            scheduled_for,
+            details,
+        }
+    }
+
+    pub const fn load_id(&self) -> InboundLoadId {
+        self.load_id
+    }
+
+    pub const fn expected_scheduled_for(&self) -> Timestamp {
+        self.expected_scheduled_for
+    }
+
+    pub const fn scheduled_for(&self) -> Timestamp {
+        self.scheduled_for
+    }
+
+    pub const fn details(&self) -> &InboundLoadAppointmentRescheduleDetails {
+        &self.details
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RescheduleInboundLoadAppointmentResult {
+    pub reschedule_id: InboundLoadAppointmentRescheduleId,
+    pub appointment_id: InboundLoadAppointmentId,
+    pub load_id: InboundLoadId,
+    pub status: InboundLoadScheduledStatus,
+    pub sequence: i64,
+    pub previous_scheduled_for: Timestamp,
+    pub scheduled_for: Timestamp,
+    pub reason: InboundLoadAppointmentRescheduleReason,
+    pub note: Option<String>,
+    pub rescheduled_by: UserId,
+    pub rescheduled_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -477,6 +536,31 @@ mod tests {
         .unwrap();
         assert_eq!(value["load_id"], json!(12));
         assert_eq!(value["scheduled_for"], json!("2027-08-12T17:00:00Z"));
+    }
+
+    #[test]
+    fn appointment_reschedule_hash_contains_both_times_and_reason() {
+        let details = InboundLoadAppointmentRescheduleDetails::new(
+            InboundLoadAppointmentRescheduleReason::CarrierDelay,
+            Some(
+                wareboxes_domain::InboundLoadAppointmentRescheduleNote::new("tractor delayed")
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+        let value = serde_json::to_value(RescheduleInboundLoadAppointmentCommand::new(
+            InboundLoadId::new(12).unwrap(),
+            "2027-08-12T17:00:00Z".parse().unwrap(),
+            "2027-08-12T19:00:00Z".parse().unwrap(),
+            details,
+        ))
+        .unwrap();
+        assert_eq!(
+            value["expected_scheduled_for"],
+            json!("2027-08-12T17:00:00Z")
+        );
+        assert_eq!(value["scheduled_for"], json!("2027-08-12T19:00:00Z"));
+        assert_eq!(value["details"]["reason"], json!("carrier_delay"));
     }
 
     #[test]

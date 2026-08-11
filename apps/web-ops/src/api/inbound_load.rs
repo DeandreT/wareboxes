@@ -2,7 +2,8 @@ use wareboxes_api_contract::v1::{
     ArriveInboundLoadRequest, ArriveInboundLoadResponse, CancelInboundLoadRequest,
     CancelInboundLoadResponse, CloseInboundLoadRequest, CloseInboundLoadResponse,
     InboundLoadEntryItemResponse, PlanInboundLoadRequest, PlanInboundLoadResponse,
-    RejectInboundLoadRequest, RejectInboundLoadResponse, ScheduleInboundLoadRequest,
+    RejectInboundLoadRequest, RejectInboundLoadResponse, RescheduleInboundLoadAppointmentRequest,
+    RescheduleInboundLoadAppointmentResponse, ScheduleInboundLoadRequest,
     ScheduleInboundLoadResponse, StartInboundLoadUnloadingRequest,
     StartInboundLoadUnloadingResponse,
 };
@@ -42,6 +43,20 @@ pub async fn schedule_inbound_load(
 ) -> Result<ScheduleInboundLoadResponse, ApiError> {
     super::browser::post(
         &format!("/api/v1/inbound-loads/{load_id}/appointments"),
+        request,
+        idempotency_key,
+    )
+    .await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn reschedule_inbound_load_appointment(
+    load_id: i64,
+    request: &RescheduleInboundLoadAppointmentRequest,
+    idempotency_key: &str,
+) -> Result<RescheduleInboundLoadAppointmentResponse, ApiError> {
+    super::browser::post(
+        &format!("/api/v1/inbound-loads/{load_id}/appointment-reschedules"),
         request,
         idempotency_key,
     )
@@ -100,6 +115,15 @@ pub async fn schedule_inbound_load(
     _request: &ScheduleInboundLoadRequest,
     _idempotency_key: &str,
 ) -> Result<ScheduleInboundLoadResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn reschedule_inbound_load_appointment(
+    _load_id: i64,
+    _request: &RescheduleInboundLoadAppointmentRequest,
+    _idempotency_key: &str,
+) -> Result<RescheduleInboundLoadAppointmentResponse, ApiError> {
     Err(ApiError::unavailable())
 }
 

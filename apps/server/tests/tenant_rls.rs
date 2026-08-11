@@ -347,6 +347,10 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "inbound_load_appointments_tenant_isolation",
         ),
         (
+            "inbound_load_appointment_reschedules",
+            "inbound_load_appointment_reschedules_tenant_isolation",
+        ),
+        (
             "inbound_load_cancellations",
             "inbound_load_cancellations_tenant_isolation",
         ),

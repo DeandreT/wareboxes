@@ -11,6 +11,7 @@ pub const MAX_INBOUND_LOAD_IDENTITY_LENGTH: usize = 200;
 pub const MAX_INBOUND_LOAD_SCAN_VALUE_LENGTH: usize = 200;
 pub const MAX_INBOUND_LOAD_CANCELLATION_NOTE_LENGTH: usize = 500;
 pub const MAX_INBOUND_LOAD_REJECTION_NOTE_LENGTH: usize = 500;
+pub const MAX_INBOUND_LOAD_APPOINTMENT_RESCHEDULE_NOTE_LENGTH: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboundLoadField {
@@ -70,6 +71,111 @@ pub enum InboundLoadAppointmentError {
     InvalidStatus,
     #[error("inbound load appointment must be in the future")]
     AppointmentNotFuture,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InboundLoadAppointmentRescheduleError {
+    #[error("inbound load appointment must be in the future")]
+    AppointmentNotFuture,
+    #[error("the rescheduled appointment must differ from the current appointment")]
+    AppointmentUnchanged,
+    #[error("appointment reschedule note must be nonblank, trimmed, control-free, and at most {MAX_INBOUND_LOAD_APPOINTMENT_RESCHEDULE_NOTE_LENGTH} characters")]
+    InvalidNote,
+    #[error("an appointment reschedule note is required when the reason is other")]
+    MissingOtherNote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadAppointmentRescheduleReason {
+    CarrierDelay,
+    SupplierChange,
+    DockCapacity,
+    Weather,
+    Correction,
+    Other,
+}
+
+impl InboundLoadAppointmentRescheduleReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CarrierDelay => "carrier_delay",
+            Self::SupplierChange => "supplier_change",
+            Self::DockCapacity => "dock_capacity",
+            Self::Weather => "weather",
+            Self::Correction => "correction",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "carrier_delay" => Some(Self::CarrierDelay),
+            "supplier_change" => Some(Self::SupplierChange),
+            "dock_capacity" => Some(Self::DockCapacity),
+            "weather" => Some(Self::Weather),
+            "correction" => Some(Self::Correction),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct InboundLoadAppointmentRescheduleNote(String);
+
+impl InboundLoadAppointmentRescheduleNote {
+    pub fn new(value: impl Into<String>) -> Result<Self, InboundLoadAppointmentRescheduleError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.trim() != value
+            || value.chars().count() > MAX_INBOUND_LOAD_APPOINTMENT_RESCHEDULE_NOTE_LENGTH
+            || value.chars().any(char::is_control)
+        {
+            return Err(InboundLoadAppointmentRescheduleError::InvalidNote);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for InboundLoadAppointmentRescheduleNote {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundLoadAppointmentRescheduleDetails {
+    reason: InboundLoadAppointmentRescheduleReason,
+    note: Option<InboundLoadAppointmentRescheduleNote>,
+}
+
+impl InboundLoadAppointmentRescheduleDetails {
+    pub fn new(
+        reason: InboundLoadAppointmentRescheduleReason,
+        note: Option<InboundLoadAppointmentRescheduleNote>,
+    ) -> Result<Self, InboundLoadAppointmentRescheduleError> {
+        if reason == InboundLoadAppointmentRescheduleReason::Other && note.is_none() {
+            return Err(InboundLoadAppointmentRescheduleError::MissingOtherNote);
+        }
+        Ok(Self { reason, note })
+    }
+
+    pub const fn reason(&self) -> InboundLoadAppointmentRescheduleReason {
+        self.reason
+    }
+
+    pub fn note(&self) -> Option<&InboundLoadAppointmentRescheduleNote> {
+        self.note.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -304,6 +410,20 @@ pub fn validate_inbound_load_appointment(
 ) -> Result<(), InboundLoadAppointmentError> {
     if scheduled_for <= current_time {
         Err(InboundLoadAppointmentError::AppointmentNotFuture)
+    } else {
+        Ok(())
+    }
+}
+
+pub fn validate_inbound_load_appointment_reschedule(
+    current_scheduled_for: Timestamp,
+    scheduled_for: Timestamp,
+    current_time: Timestamp,
+) -> Result<(), InboundLoadAppointmentRescheduleError> {
+    if scheduled_for <= current_time {
+        Err(InboundLoadAppointmentRescheduleError::AppointmentNotFuture)
+    } else if scheduled_for == current_scheduled_for {
+        Err(InboundLoadAppointmentRescheduleError::AppointmentUnchanged)
     } else {
         Ok(())
     }
@@ -700,6 +820,43 @@ mod tests {
         );
         assert!(InboundLoadCancellationNote::new(" untrimmed").is_err());
         assert!(InboundLoadCancellationNote::new("x".repeat(501)).is_err());
+    }
+
+    #[test]
+    fn appointment_reschedule_requires_changed_future_time_and_bounded_evidence() {
+        let now = "2027-08-10T12:00:00Z".parse::<Timestamp>().unwrap();
+        let current = "2027-08-11T12:00:00Z".parse::<Timestamp>().unwrap();
+        let rescheduled = "2027-08-12T12:00:00Z".parse::<Timestamp>().unwrap();
+
+        assert_eq!(
+            validate_inbound_load_appointment_reschedule(current, now, now),
+            Err(InboundLoadAppointmentRescheduleError::AppointmentNotFuture)
+        );
+        assert_eq!(
+            validate_inbound_load_appointment_reschedule(current, current, now),
+            Err(InboundLoadAppointmentRescheduleError::AppointmentUnchanged)
+        );
+        assert!(validate_inbound_load_appointment_reschedule(current, rescheduled, now).is_ok());
+
+        assert!(matches!(
+            InboundLoadAppointmentRescheduleDetails::new(
+                InboundLoadAppointmentRescheduleReason::Other,
+                None,
+            ),
+            Err(InboundLoadAppointmentRescheduleError::MissingOtherNote)
+        ));
+        let details = InboundLoadAppointmentRescheduleDetails::new(
+            InboundLoadAppointmentRescheduleReason::CarrierDelay,
+            Some(InboundLoadAppointmentRescheduleNote::new("traffic disruption").unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            details.reason(),
+            InboundLoadAppointmentRescheduleReason::CarrierDelay
+        );
+        assert_eq!(details.note().unwrap().as_str(), "traffic disruption");
+        assert!(InboundLoadAppointmentRescheduleNote::new(" untrimmed").is_err());
+        assert!(InboundLoadAppointmentRescheduleNote::new("x".repeat(501)).is_err());
     }
 
     #[test]

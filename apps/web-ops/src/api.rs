@@ -51,7 +51,8 @@ pub use inbound_inspection::dispose_inbound_inspection;
 mod inbound_load;
 pub use inbound_load::{
     arrive_inbound_load, cancel_inbound_load, close_inbound_load, inbound_load_entry_items,
-    plan_inbound_load, reject_inbound_load, schedule_inbound_load, start_inbound_load_unloading,
+    plan_inbound_load, reject_inbound_load, reschedule_inbound_load_appointment,
+    schedule_inbound_load, start_inbound_load_unloading,
 };
 mod integration_monitor;
 pub use integration_monitor::{

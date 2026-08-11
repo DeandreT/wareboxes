@@ -5,6 +5,7 @@ use wareboxes_api_contract::v1::{
     ArriveInboundLoadRequest, ArriveInboundLoadResponse,
     ArrivedInboundLoadStatus as ContractArrivedStatus, CancelInboundLoadRequest,
     CancelInboundLoadResponse, CloseInboundLoadRequest, CloseInboundLoadResponse,
+    InboundLoadAppointmentRescheduleReason as ContractAppointmentRescheduleReason,
     InboundLoadArrivedStatus as ContractInboundArrivedStatus,
     InboundLoadCancellationReason as ContractCancellationReason,
     InboundLoadCancelledStatus as ContractCancelledStatus,
@@ -17,7 +18,8 @@ use wareboxes_api_contract::v1::{
     InboundLoadRejectionReason as ContractRejectionReason,
     InboundLoadScheduledStatus as ContractScheduledStatus, PlanInboundLoadRequest,
     PlanInboundLoadResponse, PlannedInboundLoadLineResponse, PlannedInboundLoadStatus,
-    RejectInboundLoadRequest, RejectInboundLoadResponse, ScheduleInboundLoadRequest,
+    RejectInboundLoadRequest, RejectInboundLoadResponse, RescheduleInboundLoadAppointmentRequest,
+    RescheduleInboundLoadAppointmentResponse, ScheduleInboundLoadRequest,
     ScheduleInboundLoadResponse, StartInboundLoadUnloadingRequest,
     StartInboundLoadUnloadingResponse,
 };
@@ -28,16 +30,18 @@ use wareboxes_application::inbound_load::{
     InboundLoadArrivedStatus as ApplicationInboundArrivedStatus,
     InboundLoadRejectedStatus as ApplicationRejectedStatus, PlanInboundLoadCommand,
     PlanInboundLoadResult, PlannedInboundLoadStatus as ApplicationStatus, RejectInboundLoadCommand,
-    RejectInboundLoadResult, ScheduleInboundLoadCommand, ScheduleInboundLoadResult,
+    RejectInboundLoadResult, RescheduleInboundLoadAppointmentCommand,
+    RescheduleInboundLoadAppointmentResult, ScheduleInboundLoadCommand, ScheduleInboundLoadResult,
     StartInboundLoadUnloadingCommand, StartInboundLoadUnloadingResult,
 };
 use wareboxes_application::ApplicationError;
 use wareboxes_domain::{
-    CatalogItemId, FacilityId, InboundExpectedQuantity, InboundLoadCancellationDetails,
-    InboundLoadCancellationNote, InboundLoadCancellationReason, InboundLoadId, InboundLoadPlanLine,
-    InboundLoadPreArrivalStatus, InboundLoadReference, InboundLoadRejectionDetails,
-    InboundLoadRejectionNote, InboundLoadRejectionReason, InboundLoadScanValue, InventoryOwnerId,
-    LocationId, NewInboundLoadPlan, Timestamp,
+    CatalogItemId, FacilityId, InboundExpectedQuantity, InboundLoadAppointmentRescheduleDetails,
+    InboundLoadAppointmentRescheduleNote, InboundLoadAppointmentRescheduleReason,
+    InboundLoadCancellationDetails, InboundLoadCancellationNote, InboundLoadCancellationReason,
+    InboundLoadId, InboundLoadPlanLine, InboundLoadPreArrivalStatus, InboundLoadReference,
+    InboundLoadRejectionDetails, InboundLoadRejectionNote, InboundLoadRejectionReason,
+    InboundLoadScanValue, InventoryOwnerId, LocationId, NewInboundLoadPlan, Timestamp,
 };
 
 use super::error::{V1Error, V1Result};
@@ -157,6 +161,41 @@ pub async fn schedule(
     )
     .await?;
     Ok(Json(appointment_response(result)))
+}
+
+pub async fn reschedule_appointment(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(load_id): Path<i64>,
+    idempotency_key: IdempotencyKey,
+    Json(body): Json<RescheduleInboundLoadAppointmentRequest>,
+) -> V1Result<Json<RescheduleInboundLoadAppointmentResponse>> {
+    user.require_permission(&state.db, "wms").await?;
+    let expected_scheduled_for =
+        parse_required_timestamp(&body.expected_scheduled_for, "expected_scheduled_for")?;
+    let scheduled_for = parse_required_timestamp(&body.scheduled_for, "scheduled_for")?;
+    let details = InboundLoadAppointmentRescheduleDetails::new(
+        appointment_reschedule_reason(body.reason),
+        body.note
+            .map(InboundLoadAppointmentRescheduleNote::new)
+            .transpose()
+            .map_err(invalid)?,
+    )
+    .map_err(invalid)?;
+    let command = RescheduleInboundLoadAppointmentCommand::new(
+        InboundLoadId::new(load_id).map_err(invalid)?,
+        expected_scheduled_for,
+        scheduled_for,
+        details,
+    );
+    let result = repo::inbound_load::reschedule_inbound_load_appointment(
+        &state.db,
+        &user.tenant,
+        &user.command_context(&idempotency_key),
+        &command,
+    )
+    .await?;
+    Ok(Json(appointment_reschedule_response(result)))
 }
 
 pub async fn cancel(
@@ -363,6 +402,70 @@ fn appointment_response(result: ScheduleInboundLoadResult) -> ScheduleInboundLoa
     }
 }
 
+fn appointment_reschedule_response(
+    result: RescheduleInboundLoadAppointmentResult,
+) -> RescheduleInboundLoadAppointmentResponse {
+    RescheduleInboundLoadAppointmentResponse {
+        reschedule_id: result.reschedule_id.get(),
+        appointment_id: result.appointment_id.get(),
+        load_id: result.load_id.get(),
+        status: match result.status {
+            wareboxes_application::inbound_load::InboundLoadScheduledStatus::Scheduled => {
+                ContractScheduledStatus::Scheduled
+            }
+        },
+        sequence: result.sequence,
+        previous_scheduled_for: result.previous_scheduled_for.to_rfc3339(),
+        scheduled_for: result.scheduled_for.to_rfc3339(),
+        reason: match result.reason {
+            InboundLoadAppointmentRescheduleReason::CarrierDelay => {
+                ContractAppointmentRescheduleReason::CarrierDelay
+            }
+            InboundLoadAppointmentRescheduleReason::SupplierChange => {
+                ContractAppointmentRescheduleReason::SupplierChange
+            }
+            InboundLoadAppointmentRescheduleReason::DockCapacity => {
+                ContractAppointmentRescheduleReason::DockCapacity
+            }
+            InboundLoadAppointmentRescheduleReason::Weather => {
+                ContractAppointmentRescheduleReason::Weather
+            }
+            InboundLoadAppointmentRescheduleReason::Correction => {
+                ContractAppointmentRescheduleReason::Correction
+            }
+            InboundLoadAppointmentRescheduleReason::Other => {
+                ContractAppointmentRescheduleReason::Other
+            }
+        },
+        note: result.note,
+        rescheduled_by: result.rescheduled_by.get(),
+        rescheduled_at: result.rescheduled_at.to_rfc3339(),
+    }
+}
+
+const fn appointment_reschedule_reason(
+    reason: ContractAppointmentRescheduleReason,
+) -> InboundLoadAppointmentRescheduleReason {
+    match reason {
+        ContractAppointmentRescheduleReason::CarrierDelay => {
+            InboundLoadAppointmentRescheduleReason::CarrierDelay
+        }
+        ContractAppointmentRescheduleReason::SupplierChange => {
+            InboundLoadAppointmentRescheduleReason::SupplierChange
+        }
+        ContractAppointmentRescheduleReason::DockCapacity => {
+            InboundLoadAppointmentRescheduleReason::DockCapacity
+        }
+        ContractAppointmentRescheduleReason::Weather => {
+            InboundLoadAppointmentRescheduleReason::Weather
+        }
+        ContractAppointmentRescheduleReason::Correction => {
+            InboundLoadAppointmentRescheduleReason::Correction
+        }
+        ContractAppointmentRescheduleReason::Other => InboundLoadAppointmentRescheduleReason::Other,
+    }
+}
+
 const fn cancellation_reason(reason: ContractCancellationReason) -> InboundLoadCancellationReason {
     match reason {
         ContractCancellationReason::CarrierCancelled => {
@@ -512,6 +615,14 @@ fn parse_timestamp(value: Option<&str>, field: &str) -> V1Result<Option<Timestam
             })
         })
         .transpose()
+}
+
+fn parse_required_timestamp(value: &str, field: &str) -> V1Result<Timestamp> {
+    value.parse::<Timestamp>().map_err(|_| {
+        invalid(format!(
+            "{field} must be an RFC 3339 timestamp with an explicit offset"
+        ))
+    })
 }
 
 fn invalid(error: impl std::fmt::Display) -> V1Error {

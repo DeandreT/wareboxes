@@ -26,10 +26,12 @@ use super::access::{lock_current_scope_tx, require_permission_tx};
 use crate::error::{AppError, AppResult};
 
 mod appointment;
+mod appointment_reschedule;
 mod cancellation;
 mod closure;
 mod rejection;
 pub use appointment::schedule_inbound_load;
+pub use appointment_reschedule::reschedule_inbound_load_appointment;
 pub use cancellation::cancel_inbound_load;
 pub use closure::close_inbound_load;
 pub use rejection::reject_inbound_load;

@@ -131,6 +131,10 @@ BEGIN
       AND NOT EXISTS (
         SELECT 1 FROM inbound_load_rejections rejection
         WHERE rejection.tenant_id=load.tenant_id AND rejection.load_id=load.id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM inbound_load_appointments appointment
+        WHERE appointment.tenant_id=load.tenant_id AND appointment.load_id=load.id
       );
     DELETE FROM load_orders
     WHERE tenant_id=tenant AND load_id=ANY(removable_load_ids);
@@ -241,7 +245,7 @@ BEGIN
       owner_ids[((i - 1) % array_length(owner_ids, 1)) + 1],
       'WB-SEED-LOAD-' || seed_no,
       CASE
-        WHEN load_type = 'inbound' AND load_status IN ('arrived', 'cancelled', 'rejected') THEN 'planned'
+        WHEN load_type = 'inbound' AND load_status IN ('scheduled', 'arrived', 'cancelled', 'rejected') THEN 'planned'
         ELSE load_status
       END,
       load_type,
@@ -253,7 +257,7 @@ BEGIN
       dock,
       created_at + interval '18 hours',
       CASE
-        WHEN load_type = 'inbound' AND load_status IN ('planned', 'cancelled', 'rejected') THEN NULL
+        WHEN load_type = 'inbound' AND load_status IN ('planned', 'scheduled', 'cancelled', 'rejected') THEN NULL
         ELSE created_at + interval '20 hours'
       END,
       CASE WHEN load_status IN ('arrived', 'receiving', 'received', 'rejected', 'closed') AND NOT (load_type='inbound' AND load_status IN ('arrived', 'rejected')) THEN created_at + interval '21 hours' END,
@@ -265,6 +269,47 @@ BEGIN
       CASE WHEN load_status = 'closed' THEN actor END
     )
     RETURNING id INTO v_load_id;
+
+    IF load_type = 'inbound' AND load_status = 'scheduled' THEN
+      INSERT INTO inbound_load_appointments
+          (tenant_id, inventory_owner_id, facility_id, load_id, scheduled_for,
+           scheduled_by_user_id, scheduled_at)
+      VALUES (
+        tenant,
+        owner_ids[((i - 1) % array_length(owner_ids, 1)) + 1],
+        facility,
+        v_load_id,
+        created_at + interval '20 hours',
+        actor,
+        created_at + interval '1 hour'
+      );
+      UPDATE loads
+      SET status='scheduled', appointment_time=created_at + interval '20 hours'
+      WHERE tenant_id=tenant AND id=v_load_id AND status='planned';
+      SET CONSTRAINTS ALL IMMEDIATE;
+      SET CONSTRAINTS ALL DEFERRED;
+      INSERT INTO inbound_load_appointment_reschedules
+          (tenant_id, inventory_owner_id, facility_id, load_id, appointment_id,
+           sequence, previous_scheduled_for, scheduled_for, reason_code, note,
+           rescheduled_by_user_id, rescheduled_at)
+      SELECT tenant,
+             owner_ids[((i - 1) % array_length(owner_ids, 1)) + 1],
+             facility,
+             v_load_id,
+             appointment.id,
+             1,
+             created_at + interval '20 hours',
+             created_at + interval '22 hours',
+             'carrier_delay',
+             'Seeded typed appointment reschedule evidence',
+             actor,
+             created_at + interval '2 hours'
+      FROM inbound_load_appointments appointment
+      WHERE appointment.tenant_id=tenant AND appointment.load_id=v_load_id;
+      UPDATE loads
+      SET appointment_time=created_at + interval '22 hours'
+      WHERE tenant_id=tenant AND id=v_load_id AND status='scheduled';
+    END IF;
 
     IF load_type = 'inbound' AND load_status = 'cancelled' THEN
       INSERT INTO inbound_load_cancellations
