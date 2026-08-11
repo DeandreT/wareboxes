@@ -6,9 +6,9 @@ use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
 use wareboxes_application::inbound_asn::{
     CreateInboundAsnCommand, CreateInboundAsnResult, CreatedInboundAsnLineResult,
-    InboundAsnLineReadModel, InboundAsnPage, InboundAsnPageFilter, InboundAsnReadModel,
-    PlanInboundAsnLoadCommand, PlanInboundAsnLoadResult, PlannedInboundAsnLoadLineResult,
-    CREATE_INBOUND_ASN_OPERATION, PLAN_INBOUND_ASN_LOAD_OPERATION,
+    InboundAsnExecutionStatus, InboundAsnLineReadModel, InboundAsnPage, InboundAsnPageFilter,
+    InboundAsnReadModel, PlanInboundAsnLoadCommand, PlanInboundAsnLoadResult,
+    PlannedInboundAsnLoadLineResult, CREATE_INBOUND_ASN_OPERATION, PLAN_INBOUND_ASN_LOAD_OPERATION,
 };
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
@@ -449,7 +449,16 @@ pub async fn page(
         SELECT asn.id,asn.inventory_owner_id,owner.name AS inventory_owner_name,
                asn.facility_id,facility.name AS facility_name,asn.number,asn.supplier,
                asn.expected_at,asn.status,asn.revision,asn.line_count,
-               asn.total_expected_quantity,asn.load_id,asn.created_by_user_id,asn.created_at,
+               asn.total_expected_quantity,
+               COALESCE(receipt.received_quantity,0)::BIGINT AS total_received_quantity,
+               COALESCE(receipt.rejected_quantity,0)::BIGINT AS total_rejected_quantity,
+               COALESCE(receipt.missing_quantity,0)::BIGINT AS total_missing_quantity,
+               asn.total_expected_quantity
+                   - COALESCE(receipt.received_quantity,0)::BIGINT
+                   - COALESCE(receipt.rejected_quantity,0)::BIGINT
+                   - COALESCE(receipt.missing_quantity,0)::BIGINT AS total_remaining_quantity,
+               asn.load_id,load.status AS execution_status,
+               asn.created_by_user_id,asn.created_at,
                asn.planned_by_user_id,asn.planned_at,
                po_source.id AS purchase_order_source_id,
                po_source.purchase_order_id,purchase.number AS purchase_order_number
@@ -463,6 +472,18 @@ pub async fn page(
         LEFT JOIN purchase_orders purchase
           ON purchase.tenant_id=po_source.tenant_id
          AND purchase.id=po_source.purchase_order_id
+        LEFT JOIN loads load
+          ON load.tenant_id=asn.tenant_id AND load.id=asn.load_id AND load.deleted IS NULL
+        LEFT JOIN LATERAL (
+            SELECT SUM(line.received_qty)::BIGINT AS received_quantity,
+                   SUM(line.rejected_qty)::BIGINT AS rejected_quantity,
+                   SUM(line.missing_qty)::BIGINT AS missing_quantity
+            FROM inbound_asn_load_plan_lines mapping
+            INNER JOIN load_lines line
+              ON line.tenant_id=mapping.tenant_id AND line.id=mapping.load_line_id
+             AND line.deleted IS NULL
+            WHERE mapping.tenant_id=asn.tenant_id AND mapping.asn_id=asn.id
+        ) receipt ON TRUE
         WHERE asn.tenant_id=$1
           AND ($2 OR asn.facility_id=ANY($3))
           AND ($4 OR asn.inventory_owner_id=ANY($5))
@@ -516,7 +537,16 @@ pub async fn detail(
         SELECT asn.id,asn.inventory_owner_id,owner.name AS inventory_owner_name,
                asn.facility_id,facility.name AS facility_name,asn.number,asn.supplier,
                asn.expected_at,asn.status,asn.revision,asn.line_count,
-               asn.total_expected_quantity,asn.load_id,asn.created_by_user_id,asn.created_at,
+               asn.total_expected_quantity,
+               COALESCE(receipt.received_quantity,0)::BIGINT AS total_received_quantity,
+               COALESCE(receipt.rejected_quantity,0)::BIGINT AS total_rejected_quantity,
+               COALESCE(receipt.missing_quantity,0)::BIGINT AS total_missing_quantity,
+               asn.total_expected_quantity
+                   - COALESCE(receipt.received_quantity,0)::BIGINT
+                   - COALESCE(receipt.rejected_quantity,0)::BIGINT
+                   - COALESCE(receipt.missing_quantity,0)::BIGINT AS total_remaining_quantity,
+               asn.load_id,load.status AS execution_status,
+               asn.created_by_user_id,asn.created_at,
                asn.planned_by_user_id,asn.planned_at,
                po_source.id AS purchase_order_source_id,
                po_source.purchase_order_id,purchase.number AS purchase_order_number
@@ -530,6 +560,18 @@ pub async fn detail(
         LEFT JOIN purchase_orders purchase
           ON purchase.tenant_id=po_source.tenant_id
          AND purchase.id=po_source.purchase_order_id
+        LEFT JOIN loads load
+          ON load.tenant_id=asn.tenant_id AND load.id=asn.load_id AND load.deleted IS NULL
+        LEFT JOIN LATERAL (
+            SELECT SUM(line.received_qty)::BIGINT AS received_quantity,
+                   SUM(line.rejected_qty)::BIGINT AS rejected_quantity,
+                   SUM(line.missing_qty)::BIGINT AS missing_quantity
+            FROM inbound_asn_load_plan_lines mapping
+            INNER JOIN load_lines line
+              ON line.tenant_id=mapping.tenant_id AND line.id=mapping.load_line_id
+             AND line.deleted IS NULL
+            WHERE mapping.tenant_id=asn.tenant_id AND mapping.asn_id=asn.id
+        ) receipt ON TRUE
         WHERE asn.tenant_id=$1 AND asn.id=$2
           AND ($3 OR asn.facility_id=ANY($4))
           AND ($5 OR asn.inventory_owner_id=ANY($6))
@@ -551,9 +593,22 @@ pub async fn detail(
     let rows = sqlx::query(
         r#"
         SELECT line.id,line.sequence,line.item_id,COALESCE(item.description,'Item #' || item.id) AS item_description,
-               line.uom,line.expected_quantity,line.lot,line.serial,line.expiration
+               line.uom,line.expected_quantity,
+               COALESCE(load_line.received_qty,0)::BIGINT AS received_quantity,
+               COALESCE(load_line.rejected_qty,0)::BIGINT AS rejected_quantity,
+               COALESCE(load_line.missing_qty,0)::BIGINT AS missing_quantity,
+               line.expected_quantity
+                   - COALESCE(load_line.received_qty,0)::BIGINT
+                   - COALESCE(load_line.rejected_qty,0)::BIGINT
+                   - COALESCE(load_line.missing_qty,0)::BIGINT AS remaining_quantity,
+               line.lot,line.serial,line.expiration
         FROM inbound_asn_lines line
         INNER JOIN items item ON item.tenant_id=line.tenant_id AND item.id=line.item_id
+        LEFT JOIN inbound_asn_load_plan_lines mapping
+          ON mapping.tenant_id=line.tenant_id AND mapping.asn_line_id=line.id
+        LEFT JOIN load_lines load_line
+          ON load_line.tenant_id=mapping.tenant_id AND load_line.id=mapping.load_line_id
+         AND load_line.deleted IS NULL
         WHERE line.tenant_id=$1 AND line.asn_id=$2
         ORDER BY line.sequence,line.id
         "#,
@@ -574,6 +629,10 @@ pub async fn detail(
                 item_description: row.try_get("item_description")?,
                 uom: row.try_get("uom")?,
                 expected_quantity: row.try_get("expected_quantity")?,
+                received_quantity: row.try_get("received_quantity")?,
+                rejected_quantity: row.try_get("rejected_quantity")?,
+                missing_quantity: row.try_get("missing_quantity")?,
+                remaining_quantity: row.try_get("remaining_quantity")?,
                 lot: row.try_get("lot")?,
                 serial: row.try_get("serial")?,
                 expiration: row.try_get("expiration")?,
@@ -771,11 +830,19 @@ fn map_header(row: &sqlx::postgres::PgRow) -> AppResult<InboundAsnReadModel> {
         revision: revision(row.try_get("revision")?)?,
         line_count: row.try_get("line_count")?,
         total_expected_quantity: row.try_get("total_expected_quantity")?,
+        total_received_quantity: row.try_get("total_received_quantity")?,
+        total_rejected_quantity: row.try_get("total_rejected_quantity")?,
+        total_missing_quantity: row.try_get("total_missing_quantity")?,
+        total_remaining_quantity: row.try_get("total_remaining_quantity")?,
         load_id: row
             .try_get::<Option<i64>, _>("load_id")?
             .map(InboundLoadId::new)
             .transpose()
             .map_err(|error| AppError::internal(error.to_string()))?,
+        execution_status: row
+            .try_get::<Option<String>, _>("execution_status")?
+            .map(|status| parse_execution_status(&status))
+            .transpose()?,
         created_by: UserId::new(row.try_get("created_by_user_id")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
         created_at: row.try_get("created_at")?,
@@ -802,6 +869,20 @@ fn map_header(row: &sqlx::postgres::PgRow) -> AppResult<InboundAsnReadModel> {
 
 fn parse_status(value: &str) -> AppResult<InboundAsnStatus> {
     InboundAsnStatus::parse(value).ok_or_else(|| AppError::internal("stored ASN status is invalid"))
+}
+
+fn parse_execution_status(value: &str) -> AppResult<InboundAsnExecutionStatus> {
+    match value {
+        "planned" => Ok(InboundAsnExecutionStatus::Planned),
+        "scheduled" => Ok(InboundAsnExecutionStatus::Scheduled),
+        "arrived" => Ok(InboundAsnExecutionStatus::Arrived),
+        "receiving" => Ok(InboundAsnExecutionStatus::Receiving),
+        "received" => Ok(InboundAsnExecutionStatus::Received),
+        "rejected" => Ok(InboundAsnExecutionStatus::Rejected),
+        "closed" => Ok(InboundAsnExecutionStatus::Closed),
+        "cancelled" => Ok(InboundAsnExecutionStatus::Cancelled),
+        _ => Err(AppError::internal("stored ASN load status is invalid")),
+    }
 }
 
 fn revision(value: i64) -> AppResult<InboundAsnRevision> {

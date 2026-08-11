@@ -9,6 +9,19 @@ pub enum InboundAsnStatus {
     Planned,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundAsnExecutionStatus {
+    Planned,
+    Scheduled,
+    Arrived,
+    Receiving,
+    Received,
+    Rejected,
+    Closed,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateInboundAsnLineRequest {
@@ -143,6 +156,10 @@ pub struct InboundAsnLineResponse {
     pub item_description: String,
     pub uom: String,
     pub expected_quantity: i64,
+    pub received_quantity: i64,
+    pub rejected_quantity: i64,
+    pub missing_quantity: i64,
+    pub remaining_quantity: i64,
     pub lot: Option<String>,
     pub serial: Option<String>,
     pub expiration: Option<String>,
@@ -163,7 +180,12 @@ pub struct InboundAsnSummaryResponse {
     pub revision: Revision,
     pub line_count: i64,
     pub total_expected_quantity: i64,
+    pub total_received_quantity: i64,
+    pub total_rejected_quantity: i64,
+    pub total_missing_quantity: i64,
+    pub total_remaining_quantity: i64,
     pub load_id: Option<i64>,
+    pub execution_status: Option<InboundAsnExecutionStatus>,
     pub created_by: i64,
     pub created_at: String,
     pub planned_by: Option<i64>,

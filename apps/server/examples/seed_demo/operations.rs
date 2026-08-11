@@ -7,8 +7,8 @@ use wareboxes_api_contract::v1::{
     ConfigureReplenishmentPolicyResponse, CreateCycleCountTaskResponse,
     CreatePurchaseOrderAsnResponse, CreatePurchaseOrderResponse, CreatePutawayTaskResponse,
     IntegrationOrderIntakeResponse, IntegrationOrderOwnerMappingResponse, PickWaveResponse,
-    PlaceInventoryHoldResponse, PlanOrderAllocationResponse, PlanReplenishmentResponse,
-    ReleasePurchaseOrderResponse,
+    PlaceInventoryHoldResponse, PlanInboundAsnLoadResponse, PlanOrderAllocationResponse,
+    PlanReplenishmentResponse, ReleasePurchaseOrderResponse,
 };
 
 use crate::support::SeedContext;
@@ -151,8 +151,147 @@ async fn seed_purchase_orders(context: &SeedContext) -> anyhow::Result<()> {
             )
             .await?;
     }
+    seed_purchase_order_receipt_progress(context).await?;
     println!("seeded draft and released purchase orders with PO-sourced ASN demand");
     Ok(())
+}
+
+async fn seed_purchase_order_receipt_progress(context: &SeedContext) -> anyhow::Result<()> {
+    let source: Option<(i64, i64, String)> = sqlx::query_as(
+        r#"
+        SELECT asn.id,asn.revision,asn.status
+        FROM inbound_asns asn
+        WHERE asn.tenant_id=$1 AND asn.number='WB-DEMO-ASN-FROM-PO-0001'
+        "#,
+    )
+    .bind(context.tenant_id.get())
+    .fetch_optional(&context.admin)
+    .await?;
+    let Some((asn_id, revision, status)) = source else {
+        return Ok(());
+    };
+    if status != "open" {
+        return Ok(());
+    }
+
+    let receiving_barcode = "WB-DEMO-PO-RECV-01";
+    let receiving_location_id = context
+        .location(receiving_barcode, "dock", false, true)
+        .await?;
+    let plan: PlanInboundAsnLoadResponse = context
+        .command(
+            Method::POST,
+            &format!("/api/v1/inbound-asns/{asn_id}/load-plans"),
+            "demo-purchase-order-asn-load-plan",
+            json!({
+                "expected_revision": revision,
+                "receiving_location_id": receiving_location_id,
+                "carrier": "Cascade Inbound Freight",
+                "trailer_number": "WB-DEMO-PO-TRL-01",
+                "seal_number": "WB-DEMO-PO-SEAL-01"
+            }),
+        )
+        .await?;
+    let _: serde_json::Value = context
+        .command(
+            Method::POST,
+            &format!("/api/v1/inbound-loads/{}/arrivals", plan.load_id),
+            "demo-purchase-order-asn-arrival",
+            json!({
+                "load_scan": plan.execution_barcode,
+                "receiving_location_scan": receiving_barcode,
+                "arrived_at": null
+            }),
+        )
+        .await?;
+    let _: serde_json::Value = context
+        .command(
+            Method::POST,
+            &format!("/api/v1/inbound-loads/{}/unloading-starts", plan.load_id),
+            "demo-purchase-order-asn-unloading-start",
+            json!({
+                "load_scan": plan.execution_barcode,
+                "receiving_location_scan": receiving_barcode,
+                "seal_scan": "WB-DEMO-PO-SEAL-01",
+                "started_at": null
+            }),
+        )
+        .await?;
+
+    for (index, line) in plan.lines.iter().enumerate() {
+        if index == 0 {
+            let barcode =
+                ensure_seed_item_barcode(context, line.item_id, "WB-DEMO-PO-ITEM").await?;
+            let quantity = std::cmp::max(line.expected_quantity / 2, 1);
+            let _: serde_json::Value = context
+                .command(
+                    Method::POST,
+                    &format!(
+                        "/api/v1/expected-receiving/lines/{}/confirmations",
+                        line.load_line_id
+                    ),
+                    "demo-purchase-order-asn-receive-partial",
+                    json!({
+                        "disposition": "received",
+                        "item_barcode": barcode,
+                        "receiving_location_barcode": receiving_barcode,
+                        "quantity": quantity,
+                        "license_plate_barcode": "WB-DEMO-PO-RECEIPT-LP-01",
+                        "lot": "WB-DEMO-PO-LOT-01",
+                        "serial": null,
+                        "expiration": "2028-08-12T00:00:00Z"
+                    }),
+                )
+                .await?;
+        } else {
+            let _: serde_json::Value = context
+                .command(
+                    Method::POST,
+                    &format!(
+                        "/api/v1/expected-receiving/lines/{}/confirmations",
+                        line.load_line_id
+                    ),
+                    "demo-purchase-order-asn-reject-partial",
+                    json!({
+                        "disposition": "rejected",
+                        "item_barcode": ensure_seed_item_barcode(context, line.item_id, "WB-DEMO-PO-ITEM").await?,
+                        "quantity": 1,
+                        "reason": "damaged",
+                        "note": "Visible demo receiving exception"
+                    }),
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_seed_item_barcode(
+    context: &SeedContext,
+    item_id: i64,
+    prefix: &str,
+) -> anyhow::Result<String> {
+    if let Some(barcode) = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM barcodes WHERE tenant_id=$1 AND item_id=$2 AND deleted IS NULL ORDER BY id LIMIT 1",
+    )
+    .bind(context.tenant_id.get())
+    .bind(item_id)
+    .fetch_optional(&context.admin)
+    .await?
+    {
+        return Ok(barcode);
+    }
+    let barcode = format!("{prefix}-{item_id}");
+    repo::items::add_barcode(
+        &context.db,
+        context.tenant_id,
+        item_id,
+        &barcode,
+        "code128",
+        Some("Demo receiving barcode"),
+    )
+    .await?;
+    Ok(barcode)
 }
 
 async fn seed_inventory_hold(context: &SeedContext) -> anyhow::Result<()> {

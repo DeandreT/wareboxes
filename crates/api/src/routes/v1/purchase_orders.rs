@@ -214,6 +214,10 @@ pub async fn get(
                 ordered_quantity: line.ordered_quantity,
                 asn_expected_quantity: line.asn_expected_quantity,
                 remaining_quantity: line.remaining_quantity,
+                received_quantity: line.received_quantity,
+                rejected_quantity: line.rejected_quantity,
+                missing_quantity: line.missing_quantity,
+                open_receipt_quantity: line.open_receipt_quantity,
             })
             .collect(),
     }))
@@ -305,6 +309,10 @@ fn map_summary(value: PurchaseOrderReadModel) -> V1Result<PurchaseOrderSummaryRe
         total_ordered_quantity: value.total_ordered_quantity,
         total_asn_expected_quantity: value.total_asn_expected_quantity,
         total_remaining_quantity: value.total_remaining_quantity,
+        total_received_quantity: value.total_received_quantity,
+        total_rejected_quantity: value.total_rejected_quantity,
+        total_missing_quantity: value.total_missing_quantity,
+        total_open_receipt_quantity: value.total_open_receipt_quantity,
         created_by: value.created_by.get(),
         created_at: value.created_at.to_rfc3339(),
         released_by: value.released_by.map(wareboxes_domain::UserId::get),

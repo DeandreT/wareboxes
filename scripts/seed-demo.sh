@@ -148,6 +148,25 @@ BEGIN
   ) THEN
     missing := array_append(missing, 'purchase-order sourced ASN demand');
   END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM purchase_order_asn_sources source
+    INNER JOIN inbound_asns asn
+      ON asn.tenant_id=source.tenant_id AND asn.id=source.asn_id
+    INNER JOIN purchase_order_asn_source_lines source_line
+      ON source_line.tenant_id=source.tenant_id AND source_line.source_id=source.id
+    INNER JOIN inbound_asn_load_plan_lines plan_line
+      ON plan_line.tenant_id=source_line.tenant_id
+     AND plan_line.asn_line_id=source_line.asn_line_id
+    INNER JOIN load_lines load_line
+      ON load_line.tenant_id=plan_line.tenant_id AND load_line.id=plan_line.load_line_id
+    WHERE asn.status='planned'
+    GROUP BY source.id
+    HAVING SUM(load_line.received_qty)>0
+       AND SUM(load_line.rejected_qty+load_line.missing_qty)>0
+  ) THEN
+    missing := array_append(missing, 'purchase-order receipt progress');
+  END IF;
   IF cardinality(missing) > 0 THEN
     RAISE EXCEPTION 'core demo coverage is incomplete: %', array_to_string(missing, ', ');
   END IF;

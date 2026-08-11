@@ -3,14 +3,15 @@ use axum::Json;
 use sha2::{Digest, Sha256};
 use wareboxes_api_contract::v1::{
     CreateInboundAsnRequest, CreateInboundAsnResponse, CreatedInboundAsnLineResponse,
-    InboundAsnDetailResponse, InboundAsnLineResponse, InboundAsnPage as ApiPage,
-    InboundAsnPageRequest, InboundAsnStatus as ApiStatus, InboundAsnSummaryResponse, OpaqueCursor,
+    InboundAsnDetailResponse, InboundAsnExecutionStatus as ApiExecutionStatus,
+    InboundAsnLineResponse, InboundAsnPage as ApiPage, InboundAsnPageRequest,
+    InboundAsnStatus as ApiStatus, InboundAsnSummaryResponse, OpaqueCursor,
     PlanInboundAsnLoadRequest, PlanInboundAsnLoadResponse, PlannedInboundAsnLoadLineResponse,
     Revision,
 };
 use wareboxes_application::inbound_asn::{
-    CreateInboundAsnCommand, CreateInboundAsnResult, InboundAsnPageFilter, InboundAsnReadModel,
-    PlanInboundAsnLoadCommand, PlanInboundAsnLoadResult,
+    CreateInboundAsnCommand, CreateInboundAsnResult, InboundAsnExecutionStatus,
+    InboundAsnPageFilter, InboundAsnReadModel, PlanInboundAsnLoadCommand, PlanInboundAsnLoadResult,
 };
 use wareboxes_domain::{
     CatalogItemId, FacilityId, InboundAsnId, InboundAsnLineDefinition, InboundAsnLoadPlanDetails,
@@ -170,6 +171,10 @@ pub async fn get(
                 item_description: line.item_description,
                 uom: line.uom,
                 expected_quantity: line.expected_quantity,
+                received_quantity: line.received_quantity,
+                rejected_quantity: line.rejected_quantity,
+                missing_quantity: line.missing_quantity,
+                remaining_quantity: line.remaining_quantity,
                 lot: line.lot,
                 serial: line.serial,
                 expiration: line.expiration.map(|value| value.to_rfc3339()),
@@ -237,7 +242,12 @@ fn map_summary(value: InboundAsnReadModel) -> V1Result<InboundAsnSummaryResponse
         revision: Revision::new(value.revision.get()).map_err(invalid_result)?,
         line_count: value.line_count,
         total_expected_quantity: value.total_expected_quantity,
+        total_received_quantity: value.total_received_quantity,
+        total_rejected_quantity: value.total_rejected_quantity,
+        total_missing_quantity: value.total_missing_quantity,
+        total_remaining_quantity: value.total_remaining_quantity,
         load_id: value.load_id.map(|id| id.get()),
+        execution_status: value.execution_status.map(map_execution_status),
         created_by: value.created_by.get(),
         created_at: value.created_at.to_rfc3339(),
         planned_by: value.planned_by.map(|id| id.get()),
@@ -246,6 +256,19 @@ fn map_summary(value: InboundAsnReadModel) -> V1Result<InboundAsnSummaryResponse
         purchase_order_id: value.purchase_order_id.map(|id| id.get()),
         purchase_order_number: value.purchase_order_number,
     })
+}
+
+const fn map_execution_status(value: InboundAsnExecutionStatus) -> ApiExecutionStatus {
+    match value {
+        InboundAsnExecutionStatus::Planned => ApiExecutionStatus::Planned,
+        InboundAsnExecutionStatus::Scheduled => ApiExecutionStatus::Scheduled,
+        InboundAsnExecutionStatus::Arrived => ApiExecutionStatus::Arrived,
+        InboundAsnExecutionStatus::Receiving => ApiExecutionStatus::Receiving,
+        InboundAsnExecutionStatus::Received => ApiExecutionStatus::Received,
+        InboundAsnExecutionStatus::Rejected => ApiExecutionStatus::Rejected,
+        InboundAsnExecutionStatus::Closed => ApiExecutionStatus::Closed,
+        InboundAsnExecutionStatus::Cancelled => ApiExecutionStatus::Cancelled,
+    }
 }
 
 const fn map_status(value: ApiStatus) -> InboundAsnStatus {

@@ -1,8 +1,8 @@
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
-    CreateInboundAsnLineRequest, CreateInboundAsnRequest, InboundAsnDetailResponse, InboundAsnPage,
-    InboundAsnStatus, OpaqueCursor, PlanInboundAsnLoadRequest, PlanInboundAsnLoadResponse,
-    Revision,
+    CreateInboundAsnLineRequest, CreateInboundAsnRequest, InboundAsnDetailResponse,
+    InboundAsnExecutionStatus, InboundAsnPage, InboundAsnStatus, OpaqueCursor,
+    PlanInboundAsnLoadRequest, PlanInboundAsnLoadResponse, Revision,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 use wareboxes_core::models::Location;
@@ -168,12 +168,12 @@ pub(crate) fn InboundAsnWorkspace(
                 </form>
                 <div class="table-scroll">
                     <table class="dense-table inbound-asn-table">
-                        <thead><tr><th>"ASN"</th><th>"Source PO"</th><th>"Status"</th><th class="numeric">"Expected"</th><th>"Due"</th><th>"Supplier"</th><th>"Client"</th><th>"Facility"</th><th class="numeric">"Lines"</th></tr></thead>
+                        <thead><tr><th>"ASN"</th><th>"Source PO"</th><th>"Document"</th><th>"Execution"</th><th class="numeric">"Expected"</th><th class="numeric">"Received"</th><th class="numeric">"Open"</th><th>"Due"</th><th>"Supplier"</th><th>"Client"</th><th>"Facility"</th><th class="numeric">"Lines"</th></tr></thead>
                         <tbody>
                             {move || page.get().map(|current| current.items.into_iter().map(|entry| {
                                 let asn_id = entry.asn_id;
                                 let active = selected_id.get() == Some(asn_id) && !create_open.get();
-                                view! { <tr class:active-row=active><td><button type="button" class="row-link" on:click=move |_| open_detail(asn_id)>{entry.number}</button></td><td>{entry.purchase_order_number.unwrap_or_else(|| "Independent".into())}</td><td><span class=status_class(entry.status)>{status_label(entry.status)}</span></td><td class="numeric">{format_quantity(entry.total_expected_quantity)}</td><td>{entry.expected_at.as_deref().map(short_wire_timestamp).unwrap_or_else(|| "Not supplied".into())}</td><td>{entry.supplier}</td><td>{entry.inventory_owner_name}</td><td>{entry.facility_name}</td><td class="numeric">{entry.line_count}</td></tr> }
+                                view! { <tr class:active-row=active><td><button type="button" class="row-link" on:click=move |_| open_detail(asn_id)>{entry.number}</button></td><td>{entry.purchase_order_number.unwrap_or_else(|| "Independent".into())}</td><td><span class=status_class(entry.status)>{status_label(entry.status)}</span></td><td>{entry.execution_status.map(execution_status_label).unwrap_or("Not planned")}</td><td class="numeric">{format_quantity(entry.total_expected_quantity)}</td><td class="numeric">{format_quantity(entry.total_received_quantity)}</td><td class="numeric"><strong>{format_quantity(entry.total_remaining_quantity)}</strong></td><td>{entry.expected_at.as_deref().map(short_wire_timestamp).unwrap_or_else(|| "Not supplied".into())}</td><td>{entry.supplier}</td><td>{entry.inventory_owner_name}</td><td>{entry.facility_name}</td><td class="numeric">{entry.line_count}</td></tr> }
                             }).collect_view())}
                         </tbody>
                     </table>
@@ -205,9 +205,9 @@ fn AsnDetail(detail: InboundAsnDetailResponse, on_plan: Callback<()>) -> impl In
     view! {
         <div class="inbound-asn-detail-content">
             <header class="detail-heading"><div><span class="eyebrow">{format!("ASN #{}", detail.summary.asn_id)}</span><h2>{detail.summary.number.clone()}</h2><p>{detail.summary.supplier.clone()}</p></div><span class=status_class(detail.summary.status)>{status_label(detail.summary.status)}</span></header>
-            <dl class="summary-grid"><div><dt>"Client"</dt><dd>{detail.summary.inventory_owner_name}</dd></div><div><dt>"Facility"</dt><dd>{detail.summary.facility_name}</dd></div><div><dt>"Source"</dt><dd>{detail.summary.purchase_order_number.map(|number| format!("Purchase order {number}")).unwrap_or_else(|| "Independent ASN".into())}</dd></div><div><dt>"Expected"</dt><dd>{detail.summary.expected_at.as_deref().map(short_wire_timestamp).unwrap_or_else(|| "Not supplied".into())}</dd></div><div><dt>"Total quantity"</dt><dd>{format_quantity(detail.summary.total_expected_quantity)}</dd></div></dl>
+            <dl class="summary-grid"><div><dt>"Client"</dt><dd>{detail.summary.inventory_owner_name}</dd></div><div><dt>"Facility"</dt><dd>{detail.summary.facility_name}</dd></div><div><dt>"Source"</dt><dd>{detail.summary.purchase_order_number.map(|number| format!("Purchase order {number}")).unwrap_or_else(|| "Independent ASN".into())}</dd></div><div><dt>"Due"</dt><dd>{detail.summary.expected_at.as_deref().map(short_wire_timestamp).unwrap_or_else(|| "Not supplied".into())}</dd></div><div><dt>"Load state"</dt><dd>{detail.summary.execution_status.map(execution_status_label).unwrap_or("Not planned")}</dd></div><div><dt>"Expected"</dt><dd>{format_quantity(detail.summary.total_expected_quantity)}</dd></div><div><dt>"Received"</dt><dd>{format_quantity(detail.summary.total_received_quantity)}</dd></div><div><dt>"Exceptions"</dt><dd>{format_quantity(detail.summary.total_rejected_quantity + detail.summary.total_missing_quantity)}</dd></div><div><dt>"Open"</dt><dd><strong>{format_quantity(detail.summary.total_remaining_quantity)}</strong></dd></div></dl>
             <div class="detail-section-heading"><h3>"Expected freight"</h3><span>{format!("{} lines", detail.lines.len())}</span></div>
-            <div class="table-scroll"><table class="dense-table"><thead><tr><th>"Item"</th><th>"Identity"</th><th class="numeric">"Quantity"</th></tr></thead><tbody>{detail.lines.into_iter().map(|line| view! { <tr><td><strong>{line.item_description}</strong><small>{format!("Item #{} · {}", line.item_id, line.uom)}</small></td><td>{identity_label(line.lot.as_deref(), line.serial.as_deref(), line.expiration.as_deref())}</td><td class="numeric">{format_quantity(line.expected_quantity)}</td></tr> }).collect_view()}</tbody></table></div>
+            <div class="table-scroll"><table class="dense-table document-progress-table"><thead><tr><th>"Item"</th><th>"Identity"</th><th>"Receipt"</th></tr></thead><tbody>{detail.lines.into_iter().map(|line| { let exceptions=line.rejected_quantity+line.missing_quantity; view! { <tr><td><strong>{line.item_description}</strong><small>{format!("Item #{} · {}", line.item_id, line.uom)}</small></td><td>{identity_label(line.lot.as_deref(), line.serial.as_deref(), line.expiration.as_deref())}</td><td><dl class="line-metrics"><div><dt>"Expected"</dt><dd>{format_quantity(line.expected_quantity)}</dd></div><div><dt>"Received"</dt><dd>{format_quantity(line.received_quantity)}</dd></div><div><dt>"Exceptions"</dt><dd>{format_quantity(exceptions)}</dd></div><div><dt>"Open"</dt><dd><strong>{format_quantity(line.remaining_quantity)}</strong></dd></div></dl></td></tr> } }).collect_view()}</tbody></table></div>
             <footer class="detail-actions"><a class="button quiet-action" href="/loads">"Open inbound loads"</a>{can_plan.then(|| view! { <button class="button primary-action" type="button" on:click=move |_| on_plan.run(())><Icon icon=UiIcon::Loads/><span>"Plan load"</span></button> })}</footer>
         </div>
     }
@@ -582,6 +582,18 @@ fn status_class(status: InboundAsnStatus) -> &'static str {
     match status {
         InboundAsnStatus::Open => "status-chip info",
         InboundAsnStatus::Planned => "status-chip success",
+    }
+}
+fn execution_status_label(status: InboundAsnExecutionStatus) -> &'static str {
+    match status {
+        InboundAsnExecutionStatus::Planned => "Planned",
+        InboundAsnExecutionStatus::Scheduled => "Scheduled",
+        InboundAsnExecutionStatus::Arrived => "Arrived",
+        InboundAsnExecutionStatus::Receiving => "Receiving",
+        InboundAsnExecutionStatus::Received => "Received",
+        InboundAsnExecutionStatus::Rejected => "Rejected",
+        InboundAsnExecutionStatus::Closed => "Closed",
+        InboundAsnExecutionStatus::Cancelled => "Cancelled",
     }
 }
 fn short_wire_timestamp(value: &str) -> String {

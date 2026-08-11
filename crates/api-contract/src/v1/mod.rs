@@ -91,9 +91,10 @@ pub use inbound_asn::{
     CreateInboundAsnLineRequest, CreateInboundAsnRequest, CreateInboundAsnResponse,
     CreatePurchaseOrderAsnLineRequest, CreatePurchaseOrderAsnRequest,
     CreatePurchaseOrderAsnResponse, CreatedInboundAsnLineResponse,
-    CreatedPurchaseOrderAsnLineResponse, InboundAsnDetailResponse, InboundAsnLineResponse,
-    InboundAsnPage, InboundAsnPageRequest, InboundAsnStatus, InboundAsnSummaryResponse,
-    PlanInboundAsnLoadRequest, PlanInboundAsnLoadResponse, PlannedInboundAsnLoadLineResponse,
+    CreatedPurchaseOrderAsnLineResponse, InboundAsnDetailResponse, InboundAsnExecutionStatus,
+    InboundAsnLineResponse, InboundAsnPage, InboundAsnPageRequest, InboundAsnStatus,
+    InboundAsnSummaryResponse, PlanInboundAsnLoadRequest, PlanInboundAsnLoadResponse,
+    PlannedInboundAsnLoadLineResponse,
 };
 pub use inbound_inspection::{
     DisposeInboundInspectionRequest, DisposeInboundInspectionResponse, InboundInspectionOutcome,

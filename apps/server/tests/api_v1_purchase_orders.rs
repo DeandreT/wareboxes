@@ -10,7 +10,8 @@ use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     CreatePurchaseOrderAsnResponse, CreatePurchaseOrderResponse, ErrorReason, ErrorResponse,
-    InboundAsnDetailResponse, PurchaseOrderDetailResponse, PurchaseOrderPage, PurchaseOrderStatus,
+    InboundAsnDetailResponse, InboundAsnExecutionStatus, PlanInboundAsnLoadResponse,
+    PurchaseOrderDetailResponse, PurchaseOrderPage, PurchaseOrderStatus,
     ReleasePurchaseOrderResponse,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
@@ -432,6 +433,39 @@ async fn released_order_sources_multiple_asns_with_exact_conservation_and_replay
     let second = json_body::<CreatePurchaseOrderAsnResponse>(second).await;
     assert_eq!(second.total_expected_quantity, 12);
 
+    let dock_id = wareboxes_persistence_postgres::locations::add_location(
+        &context.fixture.db,
+        context.tenant_id,
+        context.facility_id,
+        None,
+        Some("PO-ASN-RECV-01"),
+        Some("Purchase order receiving dock"),
+        "dock",
+        true,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+    let plan = app
+        .clone()
+        .oneshot(command_request(
+            &context,
+            &format!("inbound-asns/{}/load-plans", first.asn_id),
+            "po-asn-first-load",
+            &json!({
+                "expected_revision": first.revision.get(),
+                "receiving_location_id": dock_id,
+                "carrier": "Parity Freight",
+                "trailer_number": "PO-ASN-TRL-1",
+                "seal_number": "PO-ASN-SEAL-1"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(plan.status(), StatusCode::OK);
+    let plan = json_body::<PlanInboundAsnLoadResponse>(plan).await;
+
     let over = app
         .clone()
         .oneshot(command_request(
@@ -458,6 +492,7 @@ async fn released_order_sources_multiple_asns_with_exact_conservation_and_replay
     assert_eq!(detail.summary.total_remaining_quantity, 0);
     assert!(detail.lines.iter().all(|line| line.remaining_quantity == 0));
     let asn_detail = app
+        .clone()
         .oneshot(get_request(
             &context,
             &format!("inbound-asns/{}", second.asn_id),
@@ -473,6 +508,86 @@ async fn released_order_sources_multiple_asns_with_exact_conservation_and_replay
         asn_detail.summary.purchase_order_number.as_deref(),
         Some("PO-ASN-100")
     );
+
+    let mut progress_tx = tenant_tx(&context.fixture.db, context.tenant_id).await;
+    sqlx::query("UPDATE loads SET status='receiving' WHERE id=$1")
+        .bind(plan.load_id)
+        .execute(&mut *progress_tx)
+        .await
+        .unwrap();
+    for line in &plan.lines {
+        if line.item_id == context.item_id {
+            sqlx::query(
+                "UPDATE load_lines SET received_qty=3,rejected_qty=1,status='partial' WHERE id=$1",
+            )
+            .bind(line.load_line_id)
+            .execute(&mut *progress_tx)
+            .await
+            .unwrap();
+        } else {
+            sqlx::query(
+                "UPDATE load_lines SET received_qty=2,missing_qty=1,missing_confirmed_by=$1,missing_confirmed_at=$2,status='missing' WHERE id=$3",
+            )
+            .bind(context.actor_id)
+            .bind(db::now_iso())
+            .bind(line.load_line_id)
+            .execute(&mut *progress_tx)
+            .await
+            .unwrap();
+        }
+    }
+    progress_tx.commit().await.unwrap();
+
+    let progress = app
+        .clone()
+        .oneshot(get_request(
+            &context,
+            &format!("purchase-orders/{}", order.purchase_order_id),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(progress.status(), StatusCode::OK);
+    let progress = json_body::<PurchaseOrderDetailResponse>(progress).await;
+    assert_eq!(progress.summary.total_received_quantity, 5);
+    assert_eq!(progress.summary.total_rejected_quantity, 1);
+    assert_eq!(progress.summary.total_missing_quantity, 1);
+    assert_eq!(progress.summary.total_open_receipt_quantity, 13);
+    let beans = progress
+        .lines
+        .iter()
+        .find(|line| line.item_id == context.item_id)
+        .unwrap();
+    assert_eq!(beans.received_quantity, 3);
+    assert_eq!(beans.rejected_quantity, 1);
+    assert_eq!(beans.missing_quantity, 0);
+    assert_eq!(beans.open_receipt_quantity, 8);
+    let towels = progress
+        .lines
+        .iter()
+        .find(|line| line.item_id == context.second_item_id)
+        .unwrap();
+    assert_eq!(towels.received_quantity, 2);
+    assert_eq!(towels.rejected_quantity, 0);
+    assert_eq!(towels.missing_quantity, 1);
+    assert_eq!(towels.open_receipt_quantity, 5);
+
+    let first_progress = app
+        .clone()
+        .oneshot(get_request(
+            &context,
+            &format!("inbound-asns/{}", first.asn_id),
+        ))
+        .await
+        .unwrap();
+    let first_progress = json_body::<InboundAsnDetailResponse>(first_progress).await;
+    assert_eq!(
+        first_progress.summary.execution_status,
+        Some(InboundAsnExecutionStatus::Receiving)
+    );
+    assert_eq!(first_progress.summary.total_received_quantity, 5);
+    assert_eq!(first_progress.summary.total_rejected_quantity, 1);
+    assert_eq!(first_progress.summary.total_missing_quantity, 1);
+    assert_eq!(first_progress.summary.total_remaining_quantity, 1);
 
     let mut tx = tenant_tx(&context.fixture.db, context.tenant_id).await;
     let effects: (i64, i64, i64, i64, i64) = sqlx::query_as(

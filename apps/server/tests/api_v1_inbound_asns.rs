@@ -9,8 +9,8 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    CreateInboundAsnResponse, ErrorReason, ErrorResponse, InboundAsnDetailResponse, InboundAsnPage,
-    InboundAsnStatus, PlanInboundAsnLoadResponse,
+    CreateInboundAsnResponse, ErrorReason, ErrorResponse, InboundAsnDetailResponse,
+    InboundAsnExecutionStatus, InboundAsnPage, InboundAsnStatus, PlanInboundAsnLoadResponse,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
@@ -303,7 +303,16 @@ async fn planning_copies_the_exact_source_once_and_races_to_one_load() {
     assert_eq!(detail.status(), StatusCode::OK);
     let detail = json_body::<InboundAsnDetailResponse>(detail).await;
     assert_eq!(detail.summary.load_id, Some(winner.load_id));
+    assert_eq!(
+        detail.summary.execution_status,
+        Some(InboundAsnExecutionStatus::Planned)
+    );
+    assert_eq!(detail.summary.total_received_quantity, 0);
+    assert_eq!(detail.summary.total_rejected_quantity, 0);
+    assert_eq!(detail.summary.total_missing_quantity, 0);
+    assert_eq!(detail.summary.total_remaining_quantity, 12);
     assert_eq!(detail.lines.len(), 1);
+    assert_eq!(detail.lines[0].remaining_quantity, 12);
 
     let mut tx = tenant_tx(&context.fixture.db, context.tenant_id).await;
     let evidence: (i64, i64, i64, i64, i64, i64, String) = sqlx::query_as(
@@ -333,6 +342,45 @@ async fn planning_copies_the_exact_source_once_and_races_to_one_load() {
         .unwrap_err();
     assert!(bypass.to_string().contains("typed load planning"));
     tx.rollback().await.unwrap();
+
+    let mut tx = tenant_tx(&context.fixture.db, context.tenant_id).await;
+    sqlx::query("UPDATE loads SET status='receiving' WHERE id=$1")
+        .bind(winner.load_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE load_lines SET received_qty=5,rejected_qty=2,missing_qty=1,missing_confirmed_by=$1,missing_confirmed_at=$2,status='partial' WHERE id=$3",
+    )
+    .bind(context.actor_id)
+    .bind(db::now_iso())
+    .bind(winner.lines[0].load_line_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let progress = routes::app(AppState::new(context.fixture.db.clone()))
+        .oneshot(get_request(
+            &context,
+            &format!("inbound-asns/{}", created.asn_id),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(progress.status(), StatusCode::OK);
+    let progress = json_body::<InboundAsnDetailResponse>(progress).await;
+    assert_eq!(
+        progress.summary.execution_status,
+        Some(InboundAsnExecutionStatus::Receiving)
+    );
+    assert_eq!(progress.summary.total_received_quantity, 5);
+    assert_eq!(progress.summary.total_rejected_quantity, 2);
+    assert_eq!(progress.summary.total_missing_quantity, 1);
+    assert_eq!(progress.summary.total_remaining_quantity, 4);
+    assert_eq!(progress.lines[0].received_quantity, 5);
+    assert_eq!(progress.lines[0].rejected_quantity, 2);
+    assert_eq!(progress.lines[0].missing_quantity, 1);
+    assert_eq!(progress.lines[0].remaining_quantity, 4);
 }
 
 #[tokio::test]

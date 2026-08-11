@@ -95,6 +95,19 @@ pub struct PlanInboundAsnLoadResult {
     pub planned_at: Timestamp,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundAsnExecutionStatus {
+    Planned,
+    Scheduled,
+    Arrived,
+    Receiving,
+    Received,
+    Rejected,
+    Closed,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboundAsnLineReadModel {
     pub line_id: InboundAsnLineId,
@@ -103,6 +116,10 @@ pub struct InboundAsnLineReadModel {
     pub item_description: String,
     pub uom: String,
     pub expected_quantity: i64,
+    pub received_quantity: i64,
+    pub rejected_quantity: i64,
+    pub missing_quantity: i64,
+    pub remaining_quantity: i64,
     pub lot: Option<String>,
     pub serial: Option<String>,
     pub expiration: Option<Timestamp>,
@@ -122,7 +139,12 @@ pub struct InboundAsnReadModel {
     pub revision: InboundAsnRevision,
     pub line_count: i64,
     pub total_expected_quantity: i64,
+    pub total_received_quantity: i64,
+    pub total_rejected_quantity: i64,
+    pub total_missing_quantity: i64,
+    pub total_remaining_quantity: i64,
     pub load_id: Option<InboundLoadId>,
+    pub execution_status: Option<InboundAsnExecutionStatus>,
     pub created_by: UserId,
     pub created_at: Timestamp,
     pub planned_by: Option<UserId>,

@@ -78,6 +78,10 @@ pub struct PurchaseOrderLineResponse {
     pub ordered_quantity: i64,
     pub asn_expected_quantity: i64,
     pub remaining_quantity: i64,
+    pub received_quantity: i64,
+    pub rejected_quantity: i64,
+    pub missing_quantity: i64,
+    pub open_receipt_quantity: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +101,10 @@ pub struct PurchaseOrderSummaryResponse {
     pub total_ordered_quantity: i64,
     pub total_asn_expected_quantity: i64,
     pub total_remaining_quantity: i64,
+    pub total_received_quantity: i64,
+    pub total_rejected_quantity: i64,
+    pub total_missing_quantity: i64,
+    pub total_open_receipt_quantity: i64,
     pub created_by: i64,
     pub created_at: String,
     pub released_by: Option<i64>,
