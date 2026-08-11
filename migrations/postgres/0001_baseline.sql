@@ -39328,3 +39328,384 @@ REVOKE ALL ON FUNCTION public.validate_transfer_order_receipt() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_transfer_order_receipt_line() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_transfer_order_execution_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_transfer_order_transition_consistency() FROM PUBLIC;
+
+-- Customer return authorizations are typed inbound source documents layered on
+-- the proven ASN-to-load execution path. The mappings preserve return-specific
+-- reason evidence while the linked ASN, load, and load lines remain the single
+-- inbound execution state machine.
+CREATE TABLE public.customer_returns (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    inbound_asn_id bigint NOT NULL,
+    customer_reference text NOT NULL,
+    CONSTRAINT customer_returns_reference_check CHECK (
+        customer_reference=btrim(customer_reference)
+        AND char_length(customer_reference) BETWEEN 1 AND 200
+        AND customer_reference !~ '[[:cntrl:]]'),
+    CONSTRAINT customer_returns_asn_unique UNIQUE (tenant_id,inbound_asn_id),
+    CONSTRAINT customer_returns_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,facility_id,id,inbound_asn_id),
+    CONSTRAINT customer_returns_asn_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,inbound_asn_id)
+        REFERENCES public.inbound_asns(tenant_id,inventory_owner_id,facility_id,id)
+);
+
+CREATE TABLE public.customer_return_lines (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    customer_return_id bigint NOT NULL,
+    inbound_asn_id bigint NOT NULL,
+    inbound_asn_line_id bigint NOT NULL,
+    sequence bigint NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    CONSTRAINT customer_return_lines_sequence_check CHECK (sequence > 0),
+    CONSTRAINT customer_return_lines_reason_check CHECK (
+        reason_code IN ('customer_request','damaged','refused_delivery','recall','warranty','other')),
+    CONSTRAINT customer_return_lines_note_check CHECK (
+        note IS NULL OR (
+            note=btrim(note) AND char_length(note) BETWEEN 1 AND 500
+            AND note !~ '[[:cntrl:]]')),
+    CONSTRAINT customer_return_lines_other_note_check CHECK (
+        reason_code <> 'other' OR note IS NOT NULL),
+    CONSTRAINT customer_return_lines_sequence_unique
+        UNIQUE (tenant_id,customer_return_id,sequence),
+    CONSTRAINT customer_return_lines_asn_line_unique
+        UNIQUE (tenant_id,inbound_asn_line_id),
+    CONSTRAINT customer_return_lines_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,facility_id,customer_return_id,id),
+    CONSTRAINT customer_return_lines_return_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,
+                     customer_return_id,inbound_asn_id)
+        REFERENCES public.customer_returns(
+            tenant_id,inventory_owner_id,facility_id,id,inbound_asn_id),
+    CONSTRAINT customer_return_lines_asn_line_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,
+                     inbound_asn_id,inbound_asn_line_id)
+        REFERENCES public.inbound_asn_lines(
+            tenant_id,inventory_owner_id,facility_id,asn_id,id)
+);
+
+CREATE TABLE public.customer_return_load_plans (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    customer_return_id bigint NOT NULL,
+    inbound_asn_id bigint NOT NULL,
+    inbound_asn_load_plan_id bigint NOT NULL,
+    load_id bigint NOT NULL,
+    receiving_location_id bigint NOT NULL,
+    expected_return_revision bigint NOT NULL,
+    resulting_return_revision bigint NOT NULL,
+    planned_by_user_id bigint NOT NULL,
+    planned_at timestamp with time zone NOT NULL,
+    CONSTRAINT customer_return_load_plans_revision_check CHECK (
+        expected_return_revision > 0
+        AND resulting_return_revision=expected_return_revision+1),
+    CONSTRAINT customer_return_load_plans_return_unique
+        UNIQUE (tenant_id,customer_return_id),
+    CONSTRAINT customer_return_load_plans_asn_plan_unique
+        UNIQUE (tenant_id,inbound_asn_load_plan_id),
+    CONSTRAINT customer_return_load_plans_load_unique UNIQUE (tenant_id,load_id),
+    CONSTRAINT customer_return_load_plans_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,facility_id,customer_return_id,id),
+    CONSTRAINT customer_return_load_plans_return_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,
+                     customer_return_id,inbound_asn_id)
+        REFERENCES public.customer_returns(
+            tenant_id,inventory_owner_id,facility_id,id,inbound_asn_id),
+    CONSTRAINT customer_return_load_plans_asn_plan_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,
+                     inbound_asn_id,load_id,inbound_asn_load_plan_id)
+        REFERENCES public.inbound_asn_load_plans(
+            tenant_id,inventory_owner_id,facility_id,asn_id,load_id,id),
+    CONSTRAINT customer_return_load_plans_location_fkey
+        FOREIGN KEY (tenant_id,facility_id,receiving_location_id)
+        REFERENCES public.locations(tenant_id,facility_id,id),
+    CONSTRAINT customer_return_load_plans_actor_fkey
+        FOREIGN KEY (planned_by_user_id) REFERENCES public.users(id)
+);
+
+CREATE TABLE public.customer_return_cancellations (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    customer_return_id bigint NOT NULL,
+    inbound_asn_id bigint NOT NULL,
+    inbound_asn_cancellation_id bigint NOT NULL,
+    expected_return_revision bigint NOT NULL,
+    resulting_return_revision bigint NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    cancelled_by_user_id bigint NOT NULL,
+    cancelled_at timestamp with time zone NOT NULL,
+    CONSTRAINT customer_return_cancellations_revision_check CHECK (
+        expected_return_revision > 0
+        AND resulting_return_revision=expected_return_revision+1),
+    CONSTRAINT customer_return_cancellations_reason_check CHECK (
+        reason_code IN ('customer_cancelled','duplicate_authorization',
+                        'return_window_expired','other')),
+    CONSTRAINT customer_return_cancellations_note_check CHECK (
+        note IS NULL OR (
+            note=btrim(note) AND char_length(note) BETWEEN 1 AND 500
+            AND note !~ '[[:cntrl:]]')),
+    CONSTRAINT customer_return_cancellations_other_note_check CHECK (
+        reason_code <> 'other' OR note IS NOT NULL),
+    CONSTRAINT customer_return_cancellations_return_unique
+        UNIQUE (tenant_id,customer_return_id),
+    CONSTRAINT customer_return_cancellations_asn_cancellation_unique
+        UNIQUE (tenant_id,inbound_asn_cancellation_id),
+    CONSTRAINT customer_return_cancellations_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,facility_id,customer_return_id,id),
+    CONSTRAINT customer_return_cancellations_return_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,
+                     customer_return_id,inbound_asn_id)
+        REFERENCES public.customer_returns(
+            tenant_id,inventory_owner_id,facility_id,id,inbound_asn_id),
+    CONSTRAINT customer_return_cancellations_asn_cancellation_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,
+                     inbound_asn_id,inbound_asn_cancellation_id)
+        REFERENCES public.inbound_asn_cancellations(
+            tenant_id,inventory_owner_id,facility_id,asn_id,id),
+    CONSTRAINT customer_return_cancellations_actor_fkey
+        FOREIGN KEY (cancelled_by_user_id) REFERENCES public.users(id)
+);
+
+CREATE INDEX customer_returns_queue_idx
+ON public.customer_returns(tenant_id,facility_id,inventory_owner_id,id DESC);
+CREATE INDEX customer_return_lines_return_idx
+ON public.customer_return_lines(tenant_id,customer_return_id,sequence,id);
+
+CREATE FUNCTION public.validate_customer_return() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    asn_row record;
+BEGIN
+    SELECT status,revision INTO asn_row
+    FROM public.inbound_asns
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.facility_id
+      AND id=NEW.inbound_asn_id
+    FOR SHARE;
+    IF asn_row IS NULL OR asn_row.status <> 'open' OR asn_row.revision <> 1 THEN
+        RAISE EXCEPTION 'customer return must reference a new open inbound source document'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.validate_customer_return_line() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    source_sequence bigint;
+BEGIN
+    SELECT sequence INTO source_sequence
+    FROM public.inbound_asn_lines
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.facility_id
+      AND asn_id=NEW.inbound_asn_id AND id=NEW.inbound_asn_line_id;
+    IF source_sequence IS NULL OR source_sequence <> NEW.sequence THEN
+        RAISE EXCEPTION 'customer return line must match its immutable inbound source line'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.require_customer_return_line_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    target_tenant_id bigint;
+    target_return_id bigint;
+    return_asn_id bigint;
+    source_count bigint;
+    mapped_count bigint;
+BEGIN
+    target_tenant_id := NEW.tenant_id;
+    IF TG_TABLE_NAME='customer_returns' THEN
+        target_return_id := NEW.id;
+    ELSE
+        target_return_id := NEW.customer_return_id;
+    END IF;
+    SELECT inbound_asn_id INTO return_asn_id
+    FROM public.customer_returns
+    WHERE tenant_id=target_tenant_id AND id=target_return_id;
+    SELECT COUNT(*) INTO source_count FROM public.inbound_asn_lines
+    WHERE tenant_id=target_tenant_id AND asn_id=return_asn_id;
+    SELECT COUNT(*) INTO mapped_count FROM public.customer_return_lines
+    WHERE tenant_id=target_tenant_id AND customer_return_id=target_return_id;
+    IF return_asn_id IS NULL OR source_count=0 OR source_count <> mapped_count
+       OR EXISTS (
+           SELECT 1 FROM public.inbound_asn_lines source
+           WHERE source.tenant_id=target_tenant_id AND source.asn_id=return_asn_id
+             AND NOT EXISTS (
+                 SELECT 1 FROM public.customer_return_lines mapping
+                 WHERE mapping.tenant_id=source.tenant_id
+                   AND mapping.customer_return_id=target_return_id
+                   AND mapping.inbound_asn_line_id=source.id)) THEN
+        RAISE EXCEPTION 'customer return line evidence does not match its inbound source'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.validate_customer_return_load_plan() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    source_row record;
+BEGIN
+    SELECT asn.status,asn.revision,asn.load_id,
+           plan.id AS plan_id,plan.receiving_location_id,
+           plan.expected_asn_revision,plan.resulting_asn_revision,
+           plan.planned_by_user_id,plan.planned_at
+    INTO source_row
+    FROM public.customer_returns customer_return
+    INNER JOIN public.inbound_asns asn
+      ON asn.tenant_id=customer_return.tenant_id
+     AND asn.id=customer_return.inbound_asn_id
+    INNER JOIN public.inbound_asn_load_plans plan
+      ON plan.tenant_id=asn.tenant_id AND plan.asn_id=asn.id
+    WHERE customer_return.tenant_id=NEW.tenant_id
+      AND customer_return.inventory_owner_id=NEW.inventory_owner_id
+      AND customer_return.facility_id=NEW.facility_id
+      AND customer_return.id=NEW.customer_return_id
+      AND customer_return.inbound_asn_id=NEW.inbound_asn_id
+      AND plan.id=NEW.inbound_asn_load_plan_id AND plan.load_id=NEW.load_id;
+    IF source_row IS NULL OR source_row.status <> 'planned'
+       OR source_row.revision <> NEW.resulting_return_revision
+       OR source_row.load_id <> NEW.load_id
+       OR source_row.receiving_location_id <> NEW.receiving_location_id
+       OR source_row.expected_asn_revision <> NEW.expected_return_revision
+       OR source_row.resulting_asn_revision <> NEW.resulting_return_revision
+       OR source_row.planned_by_user_id <> NEW.planned_by_user_id
+       OR source_row.planned_at <> NEW.planned_at THEN
+        RAISE EXCEPTION 'customer return load plan does not match its inbound execution plan'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.validate_customer_return_cancellation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    source_row record;
+BEGIN
+    SELECT asn.status,asn.revision,cancellation.id AS cancellation_id,
+           cancellation.expected_asn_revision,cancellation.resulting_asn_revision,
+           cancellation.cancelled_by_user_id,cancellation.cancelled_at
+    INTO source_row
+    FROM public.customer_returns customer_return
+    INNER JOIN public.inbound_asns asn
+      ON asn.tenant_id=customer_return.tenant_id
+     AND asn.id=customer_return.inbound_asn_id
+    INNER JOIN public.inbound_asn_cancellations cancellation
+      ON cancellation.tenant_id=asn.tenant_id AND cancellation.asn_id=asn.id
+    WHERE customer_return.tenant_id=NEW.tenant_id
+      AND customer_return.inventory_owner_id=NEW.inventory_owner_id
+      AND customer_return.facility_id=NEW.facility_id
+      AND customer_return.id=NEW.customer_return_id
+      AND customer_return.inbound_asn_id=NEW.inbound_asn_id
+      AND cancellation.id=NEW.inbound_asn_cancellation_id;
+    IF source_row IS NULL OR source_row.status <> 'cancelled'
+       OR source_row.revision <> NEW.resulting_return_revision
+       OR source_row.expected_asn_revision <> NEW.expected_return_revision
+       OR source_row.resulting_asn_revision <> NEW.resulting_return_revision
+       OR source_row.cancelled_by_user_id <> NEW.cancelled_by_user_id
+       OR source_row.cancelled_at <> NEW.cancelled_at THEN
+        RAISE EXCEPTION 'customer return cancellation does not match its inbound source transition'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.reject_customer_return_ledger_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'customer return authorization evidence is immutable'
+        USING ERRCODE='55000';
+END
+$$;
+
+CREATE TRIGGER customer_returns_validate
+BEFORE INSERT ON public.customer_returns
+FOR EACH ROW EXECUTE FUNCTION public.validate_customer_return();
+CREATE TRIGGER customer_returns_are_immutable
+BEFORE UPDATE OR DELETE ON public.customer_returns
+FOR EACH ROW EXECUTE FUNCTION public.reject_customer_return_ledger_mutation();
+CREATE TRIGGER customer_return_lines_validate
+BEFORE INSERT ON public.customer_return_lines
+FOR EACH ROW EXECUTE FUNCTION public.validate_customer_return_line();
+CREATE TRIGGER customer_return_lines_are_immutable
+BEFORE UPDATE OR DELETE ON public.customer_return_lines
+FOR EACH ROW EXECUTE FUNCTION public.reject_customer_return_ledger_mutation();
+CREATE TRIGGER customer_return_load_plans_validate
+BEFORE INSERT ON public.customer_return_load_plans
+FOR EACH ROW EXECUTE FUNCTION public.validate_customer_return_load_plan();
+CREATE TRIGGER customer_return_load_plans_are_immutable
+BEFORE UPDATE OR DELETE ON public.customer_return_load_plans
+FOR EACH ROW EXECUTE FUNCTION public.reject_customer_return_ledger_mutation();
+CREATE TRIGGER customer_return_cancellations_validate
+BEFORE INSERT ON public.customer_return_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.validate_customer_return_cancellation();
+CREATE TRIGGER customer_return_cancellations_are_immutable
+BEFORE UPDATE OR DELETE ON public.customer_return_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.reject_customer_return_ledger_mutation();
+
+CREATE CONSTRAINT TRIGGER customer_returns_require_lines
+AFTER INSERT ON public.customer_returns
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_customer_return_line_consistency();
+CREATE CONSTRAINT TRIGGER customer_return_lines_require_source
+AFTER INSERT ON public.customer_return_lines
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_customer_return_line_consistency();
+
+ALTER TABLE public.customer_returns ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.customer_returns FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.customer_return_lines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.customer_return_lines FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.customer_return_load_plans ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.customer_return_load_plans FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.customer_return_cancellations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.customer_return_cancellations FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY customer_returns_tenant_isolation ON public.customer_returns
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY customer_return_lines_tenant_isolation ON public.customer_return_lines
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY customer_return_load_plans_tenant_isolation ON public.customer_return_load_plans
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY customer_return_cancellations_tenant_isolation ON public.customer_return_cancellations
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.customer_returns TO wareboxes_app;
+GRANT SELECT,INSERT ON public.customer_return_lines TO wareboxes_app;
+GRANT SELECT,INSERT ON public.customer_return_load_plans TO wareboxes_app;
+GRANT SELECT,INSERT ON public.customer_return_cancellations TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.customer_returns_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.customer_return_lines_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.customer_return_load_plans_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.customer_return_cancellations_id_seq TO wareboxes_app;
+
+REVOKE ALL ON FUNCTION public.validate_customer_return() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_customer_return_line() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_customer_return_line_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_customer_return_load_plan() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_customer_return_cancellation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_customer_return_ledger_mutation() FROM PUBLIC;

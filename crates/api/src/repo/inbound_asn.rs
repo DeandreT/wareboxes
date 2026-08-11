@@ -498,6 +498,10 @@ pub async fn page(
             WHERE mapping.tenant_id=asn.tenant_id AND mapping.asn_id=asn.id
         ) receipt ON TRUE
         WHERE asn.tenant_id=$1
+          AND NOT EXISTS (
+              SELECT 1 FROM customer_returns customer_return
+              WHERE customer_return.tenant_id=asn.tenant_id
+                AND customer_return.inbound_asn_id=asn.id)
           AND ($2 OR asn.facility_id=ANY($3))
           AND ($4 OR asn.inventory_owner_id=ANY($5))
           AND ($6::BIGINT IS NULL OR asn.facility_id=$6)
@@ -594,6 +598,10 @@ pub async fn detail(
             WHERE mapping.tenant_id=asn.tenant_id AND mapping.asn_id=asn.id
         ) receipt ON TRUE
         WHERE asn.tenant_id=$1 AND asn.id=$2
+          AND NOT EXISTS (
+              SELECT 1 FROM customer_returns customer_return
+              WHERE customer_return.tenant_id=asn.tenant_id
+                AND customer_return.inbound_asn_id=asn.id)
           AND ($3 OR asn.facility_id=ANY($4))
           AND ($5 OR asn.inventory_owner_id=ANY($6))
         "#,

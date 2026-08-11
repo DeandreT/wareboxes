@@ -326,6 +326,7 @@ report_coverage() {
       ('Orders', (SELECT COUNT(*) FROM orders WHERE deleted IS NULL)),
       ('Legacy loads', (SELECT COUNT(*) FROM loads WHERE deleted IS NULL)),
       ('Advance shipping notices', (SELECT COUNT(*) FROM inbound_asns)),
+      ('Customer returns', (SELECT COUNT(*) FROM customer_returns)),
       ('Purchase orders', (SELECT COUNT(*) FROM purchase_orders)),
       ('Transfer orders', (SELECT COUNT(*) FROM transfer_orders)),
       ('Pick waves', (SELECT COUNT(*) FROM pick_waves)),

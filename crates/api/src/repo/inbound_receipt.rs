@@ -730,6 +730,23 @@ async fn execute_expected_receipt(
         return Ok(result);
     }
 
+    let is_customer_return: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM customer_return_load_plans
+            WHERE tenant_id=$1 AND load_id=$2)
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(load_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if is_customer_return && receipt.received_qty > 0 && receipt.quarantine_reason.is_none() {
+        return Err(AppError::conflict(
+            "returned inventory must be received into quarantine for inspection",
+        ));
+    }
+
     inventory_journal::lock_active_owner_facility_tx(&mut tx, access.tenant_id, owner_facility)
         .await?;
     if line_row

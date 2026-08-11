@@ -18,6 +18,7 @@ use crate::api;
 use crate::app_frame::{Brand, PageFrame};
 use crate::catalog::CatalogWorkbench;
 use crate::components::{Icon, SearchField, UiIcon};
+use crate::customer_returns::CustomerReturnsWorkspace;
 use crate::cycle_count::CycleCountWorkspace;
 use crate::fulfillment::{LoadsWorkbench, OrdersWorkbench};
 use crate::inbound_asns::InboundAsnWorkspace;
@@ -177,6 +178,7 @@ pub(crate) enum Section {
     PurchaseOrders,
     TransferOrders,
     InboundAsns,
+    CustomerReturns,
     Catalog,
     Inventory,
     InventoryHolds,
@@ -308,6 +310,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("purchase-orders") view=PurchaseOrdersPage/>
                     <Route path=StaticSegment("transfer-orders") view=TransferOrdersPage/>
                     <Route path=StaticSegment("inbound-asns") view=InboundAsnsPage/>
+                    <Route path=StaticSegment("customer-returns") view=CustomerReturnsPage/>
                     <Route path=StaticSegment("catalog") view=CatalogPage/>
                     <Route path=StaticSegment("inventory") view=InventoryPage/>
                     <Route path=StaticSegment("replenishment") view=ReplenishmentPage/>
@@ -703,6 +706,10 @@ async fn load_workspace(
             data.access = api::access().await?;
             data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
         }
+        Section::CustomerReturns if has_permission(session, "wms") => {
+            data.access = api::access().await?;
+            data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
+        }
         Section::PurchaseOrders if has_permission(session, "wms") => {
             data.access = api::access().await?;
         }
@@ -762,6 +769,7 @@ async fn load_workspace(
         | Section::PurchaseOrders
         | Section::TransferOrders
         | Section::InboundAsns
+        | Section::CustomerReturns
         | Section::Catalog
         | Section::Inventory
         | Section::InventoryHolds
@@ -821,6 +829,11 @@ fn LoadsPage() -> impl IntoView {
 #[component]
 fn InboundAsnsPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::InboundAsns/> }
+}
+
+#[component]
+fn CustomerReturnsPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::CustomerReturns/> }
 }
 
 #[component]
@@ -1004,6 +1017,14 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
             }
             Section::InboundAsns if has_permission(&session, "wms") => view! {
                 <InboundAsnWorkspace
+                    access=data.access
+                    locations=data.locations
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::CustomerReturns if has_permission(&session, "wms") => view! {
+                <CustomerReturnsWorkspace
                     access=data.access
                     locations=data.locations
                     on_unauthorized=session_expired_callback()

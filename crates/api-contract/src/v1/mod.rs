@@ -2,6 +2,7 @@
 
 mod backorder;
 mod cursor;
+mod customer_return;
 mod cycle_count;
 mod error;
 mod expected_receiving;
@@ -55,6 +56,15 @@ pub use backorder::{
 pub use cursor::{
     CursorPage, CursorPageRequest, OpaqueCursor, OpaqueCursorError, PageLimit, PageLimitError,
     DEFAULT_PAGE_LIMIT, MAX_CURSOR_LENGTH, MAX_PAGE_LIMIT,
+};
+pub use customer_return::{
+    CancelCustomerReturnRequest, CancelCustomerReturnResponse, CreateCustomerReturnLineRequest,
+    CreateCustomerReturnRequest, CreateCustomerReturnResponse, CreatedCustomerReturnLineResponse,
+    CustomerReturnCancellationReason, CustomerReturnDetailResponse, CustomerReturnExecutionStatus,
+    CustomerReturnLineResponse, CustomerReturnPage, CustomerReturnPageRequest,
+    CustomerReturnReason, CustomerReturnStatus, CustomerReturnSummaryResponse,
+    PlanCustomerReturnLoadRequest, PlanCustomerReturnLoadResponse,
+    PlannedCustomerReturnLoadLineResponse, MAX_CUSTOMER_RETURN_NOTE_LENGTH,
 };
 pub use cycle_count::{
     ClaimCycleCountByIdRequest, ClaimNextCycleCountRequest, ConfigureCycleCountPolicyRequest,

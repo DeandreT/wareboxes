@@ -40,6 +40,11 @@ pub use cycle_count::{
     configure_cycle_count_policy, create_cycle_count_task, cycle_count_candidates,
     cycle_count_policies, cycle_count_variances, cycle_count_work, decide_cycle_count_variance,
 };
+mod customer_return;
+pub use customer_return::{
+    cancel_customer_return, create_customer_return, customer_return_detail, customer_returns,
+    plan_customer_return_load, CustomerReturnFilters,
+};
 mod expected_receiving;
 pub use expected_receiving::expected_receiving_session;
 mod item_substitution;

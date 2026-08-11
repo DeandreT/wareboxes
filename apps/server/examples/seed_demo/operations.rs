@@ -4,19 +4,22 @@ use axum::http::{Method, StatusCode};
 use serde_json::json;
 use wareboxes_api::repo;
 use wareboxes_api_contract::v1::{
-    CancelInboundAsnResponse, CancelPurchaseOrderResponse, CancelTransferOrderResponse,
-    ConfigureReplenishmentPolicyResponse, CreateCycleCountTaskResponse,
-    CreatePurchaseOrderAsnResponse, CreatePurchaseOrderResponse, CreatePutawayTaskResponse,
-    CreateTransferOrderResponse, DispatchTransferOrderResponse, IntegrationOrderIntakeResponse,
+    CancelCustomerReturnResponse, CancelInboundAsnResponse, CancelPurchaseOrderResponse,
+    CancelTransferOrderResponse, ConfigureReplenishmentPolicyResponse,
+    CreateCustomerReturnResponse, CreateCycleCountTaskResponse, CreatePurchaseOrderAsnResponse,
+    CreatePurchaseOrderResponse, CreatePutawayTaskResponse, CreateTransferOrderResponse,
+    DispatchTransferOrderResponse, IntegrationOrderIntakeResponse,
     IntegrationOrderOwnerMappingResponse, PickWaveResponse, PlaceInventoryHoldResponse,
-    PlanInboundAsnLoadResponse, PlanOrderAllocationResponse, PlanReplenishmentResponse,
-    ReceiveTransferOrderResponse, ReleasePurchaseOrderResponse, ReleaseTransferOrderResponse,
+    PlanCustomerReturnLoadResponse, PlanInboundAsnLoadResponse, PlanOrderAllocationResponse,
+    PlanReplenishmentResponse, ReceiveTransferOrderResponse, ReleasePurchaseOrderResponse,
+    ReleaseTransferOrderResponse,
 };
 
 use crate::support::SeedContext;
 
 pub async fn seed(context: &SeedContext) -> anyhow::Result<()> {
     seed_purchase_orders(context).await?;
+    seed_customer_returns(context).await?;
     seed_transfer_orders(context).await?;
     seed_inventory_hold(context).await?;
     seed_cycle_count(context).await?;
@@ -24,6 +27,188 @@ pub async fn seed(context: &SeedContext) -> anyhow::Result<()> {
     seed_replenishment(context).await?;
     seed_pick_wave(context).await?;
     seed_integration_monitor(context).await?;
+    Ok(())
+}
+
+async fn seed_customer_returns(context: &SeedContext) -> anyhow::Result<()> {
+    let item_ids = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT owner_item.item_id
+        FROM inventory_owner_items owner_item
+        INNER JOIN items item
+          ON item.tenant_id=owner_item.tenant_id AND item.id=owner_item.item_id
+        WHERE owner_item.tenant_id=$1 AND owner_item.inventory_owner_id=$2
+          AND owner_item.deleted IS NULL AND item.deleted IS NULL
+        ORDER BY owner_item.item_id LIMIT 2
+        "#,
+    )
+    .bind(context.tenant_id.get())
+    .bind(context.inventory_owner_id)
+    .fetch_all(&context.admin)
+    .await?;
+    if item_ids.len() < 2 {
+        bail!("customer-return demo requires two client-eligible catalog items");
+    }
+    let receiving_barcode = "WB-DEMO-RETURN-DOCK";
+    let receiving_location_id = context
+        .location(receiving_barcode, "dock", false, true)
+        .await?;
+    for sequence in 1_i64..=4 {
+        let number = format!("WB-DEMO-RMA-{sequence:04}");
+        let existing: Option<(i64, i64, String, Option<i64>)> = sqlx::query_as(
+            r#"
+            SELECT customer_return.id,asn.revision,asn.status,asn.load_id
+            FROM customer_returns customer_return
+            INNER JOIN inbound_asns asn
+              ON asn.tenant_id=customer_return.tenant_id
+             AND asn.id=customer_return.inbound_asn_id
+            WHERE customer_return.tenant_id=$1 AND asn.number=$2
+            "#,
+        )
+        .bind(context.tenant_id.get())
+        .bind(&number)
+        .fetch_optional(&context.admin)
+        .await?;
+        let (return_id, revision, status, load_id) = match existing {
+            Some(value) => value,
+            None => {
+                let created: CreateCustomerReturnResponse = context
+                    .command(
+                        Method::POST,
+                        "/api/v1/customer-returns",
+                        &format!("demo-customer-return-create-{sequence}"),
+                        json!({
+                            "inventory_owner_id": context.inventory_owner_id,
+                            "facility_id": context.facility_id,
+                            "number": number,
+                            "customer_reference": format!("WB-DEMO-ORDER-{:04}", 20 + sequence),
+                            "expected_at": format!("2027-09-{:02}T15:00:00Z", 10 + sequence),
+                            "lines": [
+                                {
+                                    "item_id": item_ids[0],
+                                    "authorized_quantity": 3 + sequence,
+                                    "reason": if sequence % 2 == 0 { "damaged" } else { "customer_request" },
+                                    "note": if sequence % 2 == 0 { Some("Visible shipping damage") } else { None },
+                                    "lot": format!("WB-DEMO-RETURN-LOT-{sequence:02}"),
+                                    "serial": null
+                                },
+                                {
+                                    "item_id": item_ids[1],
+                                    "authorized_quantity": 1 + sequence,
+                                    "reason": "warranty",
+                                    "note": "Warranty return",
+                                    "lot": null,
+                                    "serial": null
+                                }
+                            ]
+                        }),
+                    )
+                    .await?;
+                (
+                    created.customer_return_id,
+                    created.revision.get(),
+                    "open".to_owned(),
+                    None,
+                )
+            }
+        };
+        if sequence == 2 && status == "open" {
+            let _: CancelCustomerReturnResponse = context
+                .command(
+                    Method::POST,
+                    &format!("/api/v1/customer-returns/{return_id}/cancellations"),
+                    "demo-customer-return-cancel-2",
+                    json!({
+                        "expected_revision": revision,
+                        "reason": "customer_cancelled",
+                        "note": "Customer withdrew the authorization"
+                    }),
+                )
+                .await?;
+            continue;
+        }
+        if sequence < 3 {
+            continue;
+        }
+        let plan = if status == "open" {
+            Some(
+                context
+                    .command::<PlanCustomerReturnLoadResponse>(
+                        Method::POST,
+                        &format!("/api/v1/customer-returns/{return_id}/load-plans"),
+                        &format!("demo-customer-return-plan-{sequence}"),
+                        json!({
+                            "expected_revision": revision,
+                            "receiving_location_id": receiving_location_id,
+                            "carrier": "Wareboxes Returns Freight",
+                            "trailer_number": format!("WB-RETURN-TRL-{sequence:02}"),
+                            "seal_number": format!("WB-RETURN-SEAL-{sequence:02}")
+                        }),
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
+        if sequence != 4 {
+            continue;
+        }
+        let (load_id, execution_barcode) = if let Some(plan) = plan {
+            (plan.load_id, plan.execution_barcode)
+        } else {
+            let load_id = load_id.context("planned return is missing its inbound load")?;
+            let execution_barcode: String = sqlx::query_scalar(
+                "SELECT execution_barcode FROM loads WHERE tenant_id=$1 AND id=$2",
+            )
+            .bind(context.tenant_id.get())
+            .bind(load_id)
+            .fetch_one(&context.admin)
+            .await?;
+            (load_id, execution_barcode)
+        };
+        let load_status: String =
+            sqlx::query_scalar("SELECT status FROM loads WHERE tenant_id=$1 AND id=$2")
+                .bind(context.tenant_id.get())
+                .bind(load_id)
+                .fetch_one(&context.admin)
+                .await?;
+        if load_status == "planned" || load_status == "scheduled" {
+            let _: serde_json::Value = context
+                .command(
+                    Method::POST,
+                    &format!("/api/v1/inbound-loads/{load_id}/arrivals"),
+                    "demo-customer-return-arrival-4",
+                    json!({
+                        "load_scan": execution_barcode,
+                        "receiving_location_scan": receiving_barcode,
+                        "arrived_at": null
+                    }),
+                )
+                .await?;
+        }
+        let load_status: String =
+            sqlx::query_scalar("SELECT status FROM loads WHERE tenant_id=$1 AND id=$2")
+                .bind(context.tenant_id.get())
+                .bind(load_id)
+                .fetch_one(&context.admin)
+                .await?;
+        if load_status == "arrived" {
+            let _: serde_json::Value = context
+                .command(
+                    Method::POST,
+                    &format!("/api/v1/inbound-loads/{load_id}/unloading-starts"),
+                    "demo-customer-return-unloading-4",
+                    json!({
+                        "load_scan": execution_barcode,
+                        "receiving_location_scan": receiving_barcode,
+                        "seal_scan": "WB-RETURN-SEAL-04",
+                        "started_at": null
+                    }),
+                )
+                .await?;
+        }
+    }
+    println!("seeded open, cancelled, planned, and receiving customer returns");
     Ok(())
 }
 

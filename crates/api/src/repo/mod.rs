@@ -6,6 +6,7 @@ pub mod access;
 pub mod address;
 pub mod audits;
 pub mod backorder;
+pub mod customer_return;
 pub mod employees;
 pub mod expected_receiving;
 pub mod facility_shipping_origin;

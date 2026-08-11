@@ -2,6 +2,7 @@
 
 mod allocation;
 mod backorder;
+mod customer_return;
 mod cycle_count;
 mod facility;
 mod inbound_asn;
@@ -40,6 +41,14 @@ pub use backorder::{
     split_current_allocation_shortage, BackorderDetails, BackorderError, BackorderLineSnapshot,
     BackorderNote, BackorderPolicyMode, BackorderPolicyRevision, BackorderReason,
     BackorderSplitLineTransition, BackorderSplitTransition, MAX_BACKORDER_NOTE_LENGTH,
+};
+pub use customer_return::{
+    cancel_customer_return, plan_customer_return, CustomerReturnCancellationDetails,
+    CustomerReturnCancellationReason, CustomerReturnError, CustomerReturnLineDefinition,
+    CustomerReturnLoadPlanDetails, CustomerReturnNumber, CustomerReturnQuantity,
+    CustomerReturnReason, CustomerReturnReference, CustomerReturnRevision, CustomerReturnStatus,
+    NewCustomerReturn, MAX_CUSTOMER_RETURN_IDENTITY_LENGTH, MAX_CUSTOMER_RETURN_NOTE_LENGTH,
+    MAX_CUSTOMER_RETURN_NUMBER_LENGTH, MAX_CUSTOMER_RETURN_REFERENCE_LENGTH,
 };
 pub use cycle_count::{
     decide_cycle_count_disposition, CycleCountDisposition, CycleCountError,
@@ -330,6 +339,13 @@ positive_id!(BackorderPolicyId, "backorder policy ID");
 positive_id!(BackorderSplitId, "backorder split ID");
 positive_id!(CycleCountPolicyId, "cycle count policy ID");
 positive_id!(CycleCountVarianceId, "cycle count variance ID");
+positive_id!(CustomerReturnId, "customer return ID");
+positive_id!(CustomerReturnLineId, "customer return line ID");
+positive_id!(CustomerReturnLoadPlanId, "customer return load plan ID");
+positive_id!(
+    CustomerReturnCancellationId,
+    "customer return cancellation ID"
+);
 positive_id!(
     CycleCountVarianceDecisionId,
     "cycle count variance decision ID"

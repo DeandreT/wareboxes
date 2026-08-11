@@ -1,6 +1,7 @@
 //! Version 1 public HTTP routes.
 
 mod backorders;
+mod customer_returns;
 pub(crate) mod cycle_count;
 mod error;
 mod expected_receiving;
@@ -61,6 +62,22 @@ pub fn router() -> Router<AppState> {
         .route(
             "/inbound-asns/{asn_id}/load-plans",
             post(inbound_asns::plan_load),
+        )
+        .route(
+            "/customer-returns",
+            get(customer_returns::list).post(customer_returns::create),
+        )
+        .route(
+            "/customer-returns/{customer_return_id}",
+            get(customer_returns::get),
+        )
+        .route(
+            "/customer-returns/{customer_return_id}/load-plans",
+            post(customer_returns::plan_load),
+        )
+        .route(
+            "/customer-returns/{customer_return_id}/cancellations",
+            post(customer_returns::cancel),
         )
         .route(
             "/purchase-orders",
