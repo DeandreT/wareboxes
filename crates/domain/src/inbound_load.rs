@@ -9,6 +9,7 @@ pub const MAX_INBOUND_LOAD_REFERENCE_LENGTH: usize = 200;
 pub const MAX_INBOUND_LOAD_TEXT_LENGTH: usize = 200;
 pub const MAX_INBOUND_LOAD_IDENTITY_LENGTH: usize = 200;
 pub const MAX_INBOUND_LOAD_SCAN_VALUE_LENGTH: usize = 200;
+pub const MAX_INBOUND_LOAD_CANCELLATION_NOTE_LENGTH: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboundLoadField {
@@ -68,6 +69,104 @@ pub enum InboundLoadAppointmentError {
     InvalidStatus,
     #[error("inbound load appointment must be in the future")]
     AppointmentNotFuture,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InboundLoadCancellationError {
+    #[error("inbound load cancellation note must be nonblank, trimmed, control-free, and at most {MAX_INBOUND_LOAD_CANCELLATION_NOTE_LENGTH} characters")]
+    InvalidNote,
+    #[error("a cancellation note is required when the reason is other")]
+    MissingOtherNote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadCancellationReason {
+    CarrierCancelled,
+    SupplierCancelled,
+    DuplicatePlan,
+    WarehouseCapacity,
+    Other,
+}
+
+impl InboundLoadCancellationReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CarrierCancelled => "carrier_cancelled",
+            Self::SupplierCancelled => "supplier_cancelled",
+            Self::DuplicatePlan => "duplicate_plan",
+            Self::WarehouseCapacity => "warehouse_capacity",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "carrier_cancelled" => Some(Self::CarrierCancelled),
+            "supplier_cancelled" => Some(Self::SupplierCancelled),
+            "duplicate_plan" => Some(Self::DuplicatePlan),
+            "warehouse_capacity" => Some(Self::WarehouseCapacity),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct InboundLoadCancellationNote(String);
+
+impl InboundLoadCancellationNote {
+    pub fn new(value: impl Into<String>) -> Result<Self, InboundLoadCancellationError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.trim() != value
+            || value.chars().count() > MAX_INBOUND_LOAD_CANCELLATION_NOTE_LENGTH
+            || value.chars().any(char::is_control)
+        {
+            return Err(InboundLoadCancellationError::InvalidNote);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for InboundLoadCancellationNote {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundLoadCancellationDetails {
+    reason: InboundLoadCancellationReason,
+    note: Option<InboundLoadCancellationNote>,
+}
+
+impl InboundLoadCancellationDetails {
+    pub fn new(
+        reason: InboundLoadCancellationReason,
+        note: Option<InboundLoadCancellationNote>,
+    ) -> Result<Self, InboundLoadCancellationError> {
+        if reason == InboundLoadCancellationReason::Other && note.is_none() {
+            return Err(InboundLoadCancellationError::MissingOtherNote);
+        }
+        Ok(Self { reason, note })
+    }
+
+    pub const fn reason(&self) -> InboundLoadCancellationReason {
+        self.reason
+    }
+
+    pub fn note(&self) -> Option<&InboundLoadCancellationNote> {
+        self.note.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -479,5 +578,25 @@ mod tests {
             Err(InboundLoadAppointmentError::AppointmentNotFuture)
         );
         assert!(validate_inbound_load_appointment(future, now).is_ok());
+    }
+
+    #[test]
+    fn cancellation_requires_bounded_reason_evidence() {
+        let note = InboundLoadCancellationNote::new("supplier withdrew the load").unwrap();
+        let details = InboundLoadCancellationDetails::new(
+            InboundLoadCancellationReason::SupplierCancelled,
+            Some(note),
+        )
+        .unwrap();
+        assert_eq!(
+            details.reason(),
+            InboundLoadCancellationReason::SupplierCancelled
+        );
+        assert!(
+            InboundLoadCancellationDetails::new(InboundLoadCancellationReason::Other, None,)
+                .is_err()
+        );
+        assert!(InboundLoadCancellationNote::new(" untrimmed").is_err());
+        assert!(InboundLoadCancellationNote::new("x".repeat(501)).is_err());
     }
 }

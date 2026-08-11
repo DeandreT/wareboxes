@@ -3,9 +3,12 @@ use axum::Json;
 use serde::Deserialize;
 use wareboxes_api_contract::v1::{
     ArriveInboundLoadRequest, ArriveInboundLoadResponse,
-    ArrivedInboundLoadStatus as ContractArrivedStatus, CloseInboundLoadRequest,
-    CloseInboundLoadResponse, InboundLoadClosedStatus as ContractClosedStatus,
-    InboundLoadEntryItemResponse, InboundLoadPlannedStatus as ContractPlannedStatus,
+    ArrivedInboundLoadStatus as ContractArrivedStatus, CancelInboundLoadRequest,
+    CancelInboundLoadResponse, CloseInboundLoadRequest, CloseInboundLoadResponse,
+    InboundLoadCancellationReason as ContractCancellationReason,
+    InboundLoadCancelledStatus as ContractCancelledStatus,
+    InboundLoadClosedStatus as ContractClosedStatus, InboundLoadEntryItemResponse,
+    InboundLoadPlannedStatus as ContractPlannedStatus,
     InboundLoadPreArrivalStatus as ContractPreviousStatus,
     InboundLoadReceivedStatus as ContractReceivedStatus,
     InboundLoadReceivingStatus as ContractReceivingStatus,
@@ -16,14 +19,16 @@ use wareboxes_api_contract::v1::{
 };
 use wareboxes_application::inbound_load::{
     ArriveInboundLoadCommand, ArriveInboundLoadResult,
-    ArrivedInboundLoadStatus as ApplicationArrivedStatus, CloseInboundLoadCommand,
-    CloseInboundLoadResult, PlanInboundLoadCommand, PlanInboundLoadResult,
-    PlannedInboundLoadStatus as ApplicationStatus, ScheduleInboundLoadCommand,
-    ScheduleInboundLoadResult, StartInboundLoadUnloadingCommand, StartInboundLoadUnloadingResult,
+    ArrivedInboundLoadStatus as ApplicationArrivedStatus, CancelInboundLoadCommand,
+    CancelInboundLoadResult, CloseInboundLoadCommand, CloseInboundLoadResult,
+    PlanInboundLoadCommand, PlanInboundLoadResult, PlannedInboundLoadStatus as ApplicationStatus,
+    ScheduleInboundLoadCommand, ScheduleInboundLoadResult, StartInboundLoadUnloadingCommand,
+    StartInboundLoadUnloadingResult,
 };
 use wareboxes_application::ApplicationError;
 use wareboxes_domain::{
-    CatalogItemId, FacilityId, InboundExpectedQuantity, InboundLoadId, InboundLoadPlanLine,
+    CatalogItemId, FacilityId, InboundExpectedQuantity, InboundLoadCancellationDetails,
+    InboundLoadCancellationNote, InboundLoadCancellationReason, InboundLoadId, InboundLoadPlanLine,
     InboundLoadPreArrivalStatus, InboundLoadReference, InboundLoadScanValue, InventoryOwnerId,
     LocationId, NewInboundLoadPlan, Timestamp,
 };
@@ -145,6 +150,35 @@ pub async fn schedule(
     )
     .await?;
     Ok(Json(appointment_response(result)))
+}
+
+pub async fn cancel(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(load_id): Path<i64>,
+    idempotency_key: IdempotencyKey,
+    Json(body): Json<CancelInboundLoadRequest>,
+) -> V1Result<Json<CancelInboundLoadResponse>> {
+    user.require_permission(&state.db, "wms").await?;
+    let reason = cancellation_reason(body.reason);
+    let details = InboundLoadCancellationDetails::new(
+        reason,
+        body.note
+            .map(InboundLoadCancellationNote::new)
+            .transpose()
+            .map_err(invalid)?,
+    )
+    .map_err(invalid)?;
+    let command =
+        CancelInboundLoadCommand::new(InboundLoadId::new(load_id).map_err(invalid)?, details);
+    let result = repo::inbound_load::cancel_inbound_load(
+        &state.db,
+        &user.tenant,
+        &user.command_context(&idempotency_key),
+        &command,
+    )
+    .await?;
+    Ok(Json(cancellation_response(result)))
 }
 
 pub async fn start_unloading(
@@ -290,6 +324,60 @@ fn appointment_response(result: ScheduleInboundLoadResult) -> ScheduleInboundLoa
     }
 }
 
+const fn cancellation_reason(reason: ContractCancellationReason) -> InboundLoadCancellationReason {
+    match reason {
+        ContractCancellationReason::CarrierCancelled => {
+            InboundLoadCancellationReason::CarrierCancelled
+        }
+        ContractCancellationReason::SupplierCancelled => {
+            InboundLoadCancellationReason::SupplierCancelled
+        }
+        ContractCancellationReason::DuplicatePlan => InboundLoadCancellationReason::DuplicatePlan,
+        ContractCancellationReason::WarehouseCapacity => {
+            InboundLoadCancellationReason::WarehouseCapacity
+        }
+        ContractCancellationReason::Other => InboundLoadCancellationReason::Other,
+    }
+}
+
+const fn contract_cancellation_reason(
+    reason: InboundLoadCancellationReason,
+) -> ContractCancellationReason {
+    match reason {
+        InboundLoadCancellationReason::CarrierCancelled => {
+            ContractCancellationReason::CarrierCancelled
+        }
+        InboundLoadCancellationReason::SupplierCancelled => {
+            ContractCancellationReason::SupplierCancelled
+        }
+        InboundLoadCancellationReason::DuplicatePlan => ContractCancellationReason::DuplicatePlan,
+        InboundLoadCancellationReason::WarehouseCapacity => {
+            ContractCancellationReason::WarehouseCapacity
+        }
+        InboundLoadCancellationReason::Other => ContractCancellationReason::Other,
+    }
+}
+
+fn cancellation_response(result: CancelInboundLoadResult) -> CancelInboundLoadResponse {
+    CancelInboundLoadResponse {
+        cancellation_id: result.cancellation_id.get(),
+        load_id: result.load_id.get(),
+        previous_status: match result.previous_status {
+            InboundLoadPreArrivalStatus::Planned => ContractPreviousStatus::Planned,
+            InboundLoadPreArrivalStatus::Scheduled => ContractPreviousStatus::Scheduled,
+        },
+        status: match result.status {
+            wareboxes_application::inbound_load::InboundLoadCancelledStatus::Cancelled => {
+                ContractCancelledStatus::Cancelled
+            }
+        },
+        reason: contract_cancellation_reason(result.reason),
+        note: result.note,
+        cancelled_by: result.cancelled_by.get(),
+        cancelled_at: result.cancelled_at.to_rfc3339(),
+    }
+}
+
 fn unloading_response(
     result: StartInboundLoadUnloadingResult,
 ) -> StartInboundLoadUnloadingResponse {
@@ -418,6 +506,28 @@ mod tests {
         });
         assert_eq!(response.unloading_start_id, 41);
         assert_eq!(response.status, ContractReceivingStatus::Receiving);
+    }
+
+    #[test]
+    fn cancellation_response_preserves_reason_and_previous_status() {
+        let response = cancellation_response(CancelInboundLoadResult {
+            cancellation_id: wareboxes_domain::InboundLoadCancellationId::new(51).unwrap(),
+            load_id: InboundLoadId::new(12).unwrap(),
+            previous_status: InboundLoadPreArrivalStatus::Scheduled,
+            status: wareboxes_application::inbound_load::InboundLoadCancelledStatus::Cancelled,
+            reason: InboundLoadCancellationReason::WarehouseCapacity,
+            note: Some("dock unavailable".to_owned()),
+            cancelled_by: wareboxes_domain::UserId::new(4).unwrap(),
+            cancelled_at: "2027-08-10T12:00:00Z".parse().unwrap(),
+        });
+        assert_eq!(response.cancellation_id, 51);
+        assert_eq!(response.previous_status, ContractPreviousStatus::Scheduled);
+        assert_eq!(response.status, ContractCancelledStatus::Cancelled);
+        assert_eq!(
+            response.reason,
+            ContractCancellationReason::WarehouseCapacity
+        );
+        assert_eq!(response.note.as_deref(), Some("dock unavailable"));
     }
 
     #[test]

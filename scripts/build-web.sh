@@ -17,6 +17,25 @@ cargo leptos build \
   --project wareboxes-web \
   --bin-cargo-args=--locked \
   --lib-cargo-args=--locked
+
+web_pkg_dir="$ROOT_DIR/target/site/pkg"
+web_js="$web_pkg_dir/wareboxes-web.js"
+referenced_wasm="$(
+  sed -n "s/.*new URL('\([^']*\.wasm\)'.*/\1/p" "$web_js" | head -n 1
+)"
+if [ -z "$referenced_wasm" ]; then
+  echo "Unable to determine the WASM asset referenced by $web_js" >&2
+  exit 1
+fi
+if [ ! -s "$web_pkg_dir/$referenced_wasm" ]; then
+  generated_wasm="$web_pkg_dir/wareboxes-web.wasm"
+  if [ ! -s "$generated_wasm" ]; then
+    echo "Missing browser WASM assets in $web_pkg_dir" >&2
+    exit 1
+  fi
+  cp "$generated_wasm" "$web_pkg_dir/$referenced_wasm"
+fi
+
 cargo build \
   --release \
   --locked \

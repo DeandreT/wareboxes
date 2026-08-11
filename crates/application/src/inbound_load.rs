@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
-    InboundLoadAppointmentId, InboundLoadArrivalId, InboundLoadClosureId, InboundLoadId,
+    InboundLoadAppointmentId, InboundLoadArrivalId, InboundLoadCancellationDetails,
+    InboundLoadCancellationId, InboundLoadCancellationReason, InboundLoadClosureId, InboundLoadId,
     InboundLoadLineId, InboundLoadPreArrivalStatus, InboundLoadScanValue,
     InboundLoadUnloadingStartId, LocationId, NewInboundLoadPlan, Timestamp, UserId,
 };
 
 pub const PLAN_INBOUND_LOAD_OPERATION: &str = "inbound.load.plan.v1";
 pub const SCHEDULE_INBOUND_LOAD_OPERATION: &str = "inbound.load.appointment.schedule.v1";
+pub const CANCEL_INBOUND_LOAD_OPERATION: &str = "inbound.load.cancel.v1";
 pub const ARRIVE_INBOUND_LOAD_OPERATION: &str = "inbound.load.arrive.v1";
 pub const START_INBOUND_LOAD_UNLOADING_OPERATION: &str = "inbound.load.unloading.start.v1";
 pub const CLOSE_INBOUND_LOAD_OPERATION: &str = "inbound.load.close.v1";
@@ -95,6 +97,44 @@ pub struct ScheduleInboundLoadResult {
     pub scheduled_for: Timestamp,
     pub scheduled_by: UserId,
     pub scheduled_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CancelInboundLoadCommand {
+    load_id: InboundLoadId,
+    details: InboundLoadCancellationDetails,
+}
+
+impl CancelInboundLoadCommand {
+    pub const fn new(load_id: InboundLoadId, details: InboundLoadCancellationDetails) -> Self {
+        Self { load_id, details }
+    }
+
+    pub const fn load_id(&self) -> InboundLoadId {
+        self.load_id
+    }
+
+    pub const fn details(&self) -> &InboundLoadCancellationDetails {
+        &self.details
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadCancelledStatus {
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelInboundLoadResult {
+    pub cancellation_id: InboundLoadCancellationId,
+    pub load_id: InboundLoadId,
+    pub previous_status: InboundLoadPreArrivalStatus,
+    pub status: InboundLoadCancelledStatus,
+    pub reason: InboundLoadCancellationReason,
+    pub note: Option<String>,
+    pub cancelled_by: UserId,
+    pub cancelled_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -309,6 +349,23 @@ mod tests {
         assert_eq!(value["plan"]["reference"], json!("ASN-100"));
         assert_eq!(value["plan"]["lines"][0]["expected_quantity"], json!(12));
         assert_eq!(value["plan"]["receiving_location_id"], json!(9));
+    }
+
+    #[test]
+    fn cancellation_hash_contains_reason_and_note() {
+        let details = wareboxes_domain::InboundLoadCancellationDetails::new(
+            wareboxes_domain::InboundLoadCancellationReason::WarehouseCapacity,
+            Some(wareboxes_domain::InboundLoadCancellationNote::new("dock unavailable").unwrap()),
+        )
+        .unwrap();
+        let value = serde_json::to_value(CancelInboundLoadCommand::new(
+            InboundLoadId::new(12).unwrap(),
+            details,
+        ))
+        .unwrap();
+        assert_eq!(value["load_id"], json!(12));
+        assert_eq!(value["details"]["reason"], json!("warehouse_capacity"));
+        assert_eq!(value["details"]["note"], json!("dock unavailable"));
     }
 
     #[test]

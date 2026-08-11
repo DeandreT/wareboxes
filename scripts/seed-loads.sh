@@ -261,7 +261,10 @@ BEGIN
       facility,
       owner_ids[((i - 1) % array_length(owner_ids, 1)) + 1],
       'WB-SEED-LOAD-' || seed_no,
-      load_status,
+      CASE
+        WHEN load_type = 'inbound' AND load_status = 'cancelled' THEN 'planned'
+        ELSE load_status
+      END,
       load_type,
       'WB-SEED-LOAD-' || seed_no,
       'WB-SEED-INVOICE-' || seed_no,
@@ -271,7 +274,7 @@ BEGIN
       dock,
       created_at + interval '18 hours',
       CASE
-        WHEN load_type = 'inbound' AND load_status = 'planned' THEN NULL
+        WHEN load_type = 'inbound' AND load_status IN ('planned', 'cancelled') THEN NULL
         ELSE created_at + interval '20 hours'
       END,
       CASE WHEN load_status IN ('arrived', 'receiving', 'received', 'rejected', 'closed') THEN created_at + interval '21 hours' END,
@@ -283,6 +286,26 @@ BEGIN
       CASE WHEN load_status = 'closed' THEN actor END
     )
     RETURNING id INTO v_load_id;
+
+    IF load_type = 'inbound' AND load_status = 'cancelled' THEN
+      INSERT INTO inbound_load_cancellations
+          (tenant_id, inventory_owner_id, facility_id, load_id, previous_status,
+           reason_code, note, cancelled_by_user_id, cancelled_at)
+      VALUES (
+        tenant,
+        owner_ids[((i - 1) % array_length(owner_ids, 1)) + 1],
+        facility,
+        v_load_id,
+        'planned',
+        'supplier_cancelled',
+        'Seeded typed cancellation evidence',
+        actor,
+        created_at + interval '1 hour'
+      );
+      UPDATE loads
+      SET status = 'cancelled'
+      WHERE tenant_id = tenant AND id = v_load_id AND status = 'planned';
+    END IF;
 
     INSERT INTO load_notes (tenant_id, created, load_id, note)
     VALUES (tenant, created_at, v_load_id, 'Seed load');

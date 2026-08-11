@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub const MAX_INBOUND_LOAD_CANCELLATION_NOTE_LENGTH: usize = 500;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InboundLoadEntryItemResponse {
@@ -93,6 +95,74 @@ pub struct ScheduleInboundLoadResponse {
     pub scheduled_for: String,
     pub scheduled_by: i64,
     pub scheduled_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadCancellationReason {
+    CarrierCancelled,
+    SupplierCancelled,
+    DuplicatePlan,
+    WarehouseCapacity,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CancelInboundLoadRequest {
+    pub reason: InboundLoadCancellationReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CancelInboundLoadRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            reason: InboundLoadCancellationReason,
+            #[serde(default)]
+            note: Option<String>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.note.as_ref().is_some_and(|note| {
+            note.is_empty()
+                || note.trim() != note
+                || note.chars().count() > MAX_INBOUND_LOAD_CANCELLATION_NOTE_LENGTH
+                || note.chars().any(char::is_control)
+        }) || (raw.reason == InboundLoadCancellationReason::Other && raw.note.is_none())
+        {
+            return Err(serde::de::Error::custom(
+                "inbound load cancellation note is invalid",
+            ));
+        }
+        Ok(Self {
+            reason: raw.reason,
+            note: raw.note,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadCancelledStatus {
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelInboundLoadResponse {
+    pub cancellation_id: i64,
+    pub load_id: i64,
+    pub previous_status: InboundLoadPreArrivalStatus,
+    pub status: InboundLoadCancelledStatus,
+    pub reason: InboundLoadCancellationReason,
+    pub note: Option<String>,
+    pub cancelled_by: i64,
+    pub cancelled_at: String,
 }
 
 /// Exact scanner evidence for transitioning a planned inbound load to arrived.
@@ -255,6 +325,33 @@ mod tests {
         let value = serde_json::to_value(response).unwrap();
         assert_eq!(value["lines"][0]["load_line_id"], json!(201));
         assert_eq!(value["status"], json!("planned"));
+    }
+
+    #[test]
+    fn cancellation_request_requires_exact_bounded_reason_evidence() {
+        let request = serde_json::json!({
+            "reason": "supplier_cancelled",
+            "note": "supplier withdrew the shipment"
+        });
+        let parsed = serde_json::from_value::<CancelInboundLoadRequest>(request).unwrap();
+        assert_eq!(
+            parsed.reason,
+            InboundLoadCancellationReason::SupplierCancelled
+        );
+
+        assert!(
+            serde_json::from_value::<CancelInboundLoadRequest>(serde_json::json!({
+                "reason": "other"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CancelInboundLoadRequest>(serde_json::json!({
+                "reason": "duplicate_plan",
+                "unknown": true
+            }))
+            .is_err()
+        );
     }
 
     #[test]

@@ -1,8 +1,9 @@
 use wareboxes_api_contract::v1::{
-    ArriveInboundLoadRequest, ArriveInboundLoadResponse, CloseInboundLoadRequest,
-    CloseInboundLoadResponse, InboundLoadEntryItemResponse, PlanInboundLoadRequest,
-    PlanInboundLoadResponse, ScheduleInboundLoadRequest, ScheduleInboundLoadResponse,
-    StartInboundLoadUnloadingRequest, StartInboundLoadUnloadingResponse,
+    ArriveInboundLoadRequest, ArriveInboundLoadResponse, CancelInboundLoadRequest,
+    CancelInboundLoadResponse, CloseInboundLoadRequest, CloseInboundLoadResponse,
+    InboundLoadEntryItemResponse, PlanInboundLoadRequest, PlanInboundLoadResponse,
+    ScheduleInboundLoadRequest, ScheduleInboundLoadResponse, StartInboundLoadUnloadingRequest,
+    StartInboundLoadUnloadingResponse,
 };
 
 use super::ApiError;
@@ -44,6 +45,29 @@ pub async fn schedule_inbound_load(
         idempotency_key,
     )
     .await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn cancel_inbound_load(
+    load_id: i64,
+    request: &CancelInboundLoadRequest,
+    idempotency_key: &str,
+) -> Result<CancelInboundLoadResponse, ApiError> {
+    super::browser::post(
+        &format!("/api/v1/inbound-loads/{load_id}/cancellations"),
+        request,
+        idempotency_key,
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn cancel_inbound_load(
+    _load_id: i64,
+    _request: &CancelInboundLoadRequest,
+    _idempotency_key: &str,
+) -> Result<CancelInboundLoadResponse, ApiError> {
+    Err(ApiError::unavailable())
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -90,13 +90,14 @@ pub use inbound_inspection::{
 };
 pub use inbound_load::{
     ArriveInboundLoadRequest, ArriveInboundLoadResponse, ArrivedInboundLoadStatus,
-    CloseInboundLoadRequest, CloseInboundLoadResponse, InboundLoadClosedStatus,
-    InboundLoadEntryItemResponse, InboundLoadPlannedStatus, InboundLoadPreArrivalStatus,
-    InboundLoadReceivedStatus, InboundLoadReceivingStatus, InboundLoadScheduledStatus,
-    PlanInboundLoadLineRequest, PlanInboundLoadRequest, PlanInboundLoadResponse,
-    PlannedInboundLoadLineResponse, PlannedInboundLoadStatus, ScheduleInboundLoadRequest,
-    ScheduleInboundLoadResponse, StartInboundLoadUnloadingRequest,
-    StartInboundLoadUnloadingResponse,
+    CancelInboundLoadRequest, CancelInboundLoadResponse, CloseInboundLoadRequest,
+    CloseInboundLoadResponse, InboundLoadCancellationReason, InboundLoadCancelledStatus,
+    InboundLoadClosedStatus, InboundLoadEntryItemResponse, InboundLoadPlannedStatus,
+    InboundLoadPreArrivalStatus, InboundLoadReceivedStatus, InboundLoadReceivingStatus,
+    InboundLoadScheduledStatus, PlanInboundLoadLineRequest, PlanInboundLoadRequest,
+    PlanInboundLoadResponse, PlannedInboundLoadLineResponse, PlannedInboundLoadStatus,
+    ScheduleInboundLoadRequest, ScheduleInboundLoadResponse, StartInboundLoadUnloadingRequest,
+    StartInboundLoadUnloadingResponse, MAX_INBOUND_LOAD_CANCELLATION_NOTE_LENGTH,
 };
 pub use integration_mapping::{
     ConfigureIntegrationOrderItemMappingRequest, ConfigureIntegrationOrderOwnerMappingRequest,

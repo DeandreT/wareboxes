@@ -305,6 +305,7 @@ pub async fn update(
                 | LoadStatus::Receiving
                 | LoadStatus::Received
                 | LoadStatus::Closed
+                | LoadStatus::Cancelled
         )
     }) || body.appointment_time.is_some();
     let load = repo::loads::get_load_in_scope(&state.db, &user.tenant, body.load_id, false)

@@ -26,8 +26,10 @@ use super::access::{lock_current_scope_tx, require_permission_tx};
 use crate::error::{AppError, AppResult};
 
 mod appointment;
+mod cancellation;
 mod closure;
 pub use appointment::schedule_inbound_load;
+pub use cancellation::cancel_inbound_load;
 pub use closure::close_inbound_load;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

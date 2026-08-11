@@ -15,9 +15,11 @@ use crate::toast::use_toast_bus;
 use crate::view_model::format_quantity;
 
 mod appointment;
+mod cancellation;
 mod closure;
 mod receiving;
 use appointment::InboundAppointmentConfirmation;
+use cancellation::InboundCancellationConfirmation;
 use closure::LoadClosureConfirmation;
 use receiving::ReceivingExecutionPanel;
 
@@ -66,6 +68,7 @@ pub fn LoadDetailPanel(
     let command_error = RwSignal::new(None::<String>);
     let arrival_open = RwSignal::new(false);
     let appointment_open = RwSignal::new(false);
+    let cancellation_open = RwSignal::new(false);
     let closure_open = RwSignal::new(false);
     let lifecycle_target = RwSignal::new(None::<LoadStatus>);
     let lifecycle_confirmation = NodeRef::<html::Section>::new();
@@ -229,6 +232,10 @@ pub fn LoadDetailPanel(
                                                     && load.get_value().r#type == LoadType::Inbound
                                                 {
                                                     appointment_open.set(true);
+                                                } else if target == LoadStatus::Cancelled
+                                                    && load.get_value().r#type == LoadType::Inbound
+                                                {
+                                                    cancellation_open.set(true);
                                                 } else if target == LoadStatus::Closed {
                                                     closure_open.set(true);
                                                 } else {
@@ -300,6 +307,16 @@ pub fn LoadDetailPanel(
                         pending=command_pending
                         error=command_error
                         on_close=Callback::new(move |_| appointment_open.set(false))
+                        on_refreshed
+                        on_unauthorized
+                    />
+                </Show>
+                <Show when=move || cancellation_open.get()>
+                    <InboundCancellationConfirmation
+                        load=load.get_value()
+                        pending=command_pending
+                        error=command_error
+                        on_close=Callback::new(move |_| cancellation_open.set(false))
                         on_refreshed
                         on_unauthorized
                     />
@@ -1668,11 +1685,14 @@ fn manager_actions(
             (LoadStatus::Arrived, "Mark at dock", false),
             (LoadStatus::Cancelled, "Cancel load", true),
         ],
-        (LoadStatus::Arrived, _) => vec![
+        (LoadStatus::Arrived, LoadType::Inbound) => {
+            vec![(LoadStatus::Rejected, "Reject load", true)]
+        }
+        (LoadStatus::Arrived, LoadType::Outbound) => vec![
             (LoadStatus::Rejected, "Reject load", true),
             (LoadStatus::Cancelled, "Cancel load", true),
         ],
-        (LoadStatus::Received | LoadStatus::Rejected, _) => {
+        (LoadStatus::Received, _) => {
             vec![(LoadStatus::Closed, "Close load", false)]
         }
         _ => Vec::new(),
@@ -1750,6 +1770,14 @@ mod tests {
     fn terminal_transitions_require_confirmation_copy() {
         assert!(transition_confirmation(LoadStatus::Cancelled).contains("terminal"));
         assert!(transition_confirmation(LoadStatus::Closed).contains("resolved"));
+    }
+
+    #[test]
+    fn typed_inbound_actions_hide_invalid_terminal_transitions() {
+        let arrived = manager_actions(LoadStatus::Arrived, LoadType::Inbound);
+        assert_eq!(arrived.len(), 1);
+        assert_eq!(arrived[0].0, LoadStatus::Rejected);
+        assert!(manager_actions(LoadStatus::Rejected, LoadType::Inbound).is_empty());
     }
 
     #[test]

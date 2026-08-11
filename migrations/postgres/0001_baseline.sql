@@ -36081,3 +36081,142 @@ GRANT USAGE ON SEQUENCE public.inbound_load_appointments_id_seq TO wareboxes_app
 REVOKE ALL ON FUNCTION public.validate_inbound_load_appointment() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_inbound_load_appointment_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_scheduled_inbound_load_evidence() FROM PUBLIC;
+
+CREATE TABLE public.inbound_load_cancellations (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    load_id bigint NOT NULL,
+    previous_status text NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    cancelled_by_user_id bigint NOT NULL,
+    cancelled_at timestamp with time zone NOT NULL,
+    CONSTRAINT inbound_load_cancellations_previous_status_check
+        CHECK (previous_status IN ('planned','scheduled')),
+    CONSTRAINT inbound_load_cancellations_reason_check
+        CHECK (reason_code IN (
+            'carrier_cancelled','supplier_cancelled','duplicate_plan','warehouse_capacity','other'
+        )),
+    CONSTRAINT inbound_load_cancellations_note_check CHECK (
+        note IS NULL OR (
+            octet_length(note) BETWEEN 1 AND 2000
+            AND char_length(note) <= 500
+            AND note=btrim(note)
+            AND note !~ '[[:cntrl:]]'
+        )
+    ),
+    CONSTRAINT inbound_load_cancellations_other_note_check
+        CHECK (reason_code <> 'other' OR note IS NOT NULL),
+    CONSTRAINT inbound_load_cancellations_tenant_load_unique UNIQUE (tenant_id, load_id),
+    CONSTRAINT inbound_load_cancellations_owner_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    CONSTRAINT inbound_load_cancellations_facility_fkey
+        FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities(tenant_id, id),
+    CONSTRAINT inbound_load_cancellations_load_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, load_id)
+        REFERENCES public.loads(tenant_id, inventory_owner_id, id),
+    CONSTRAINT inbound_load_cancellations_actor_fkey FOREIGN KEY (cancelled_by_user_id)
+        REFERENCES public.users(id)
+);
+
+CREATE INDEX inbound_load_cancellations_scope_idx
+ON public.inbound_load_cancellations
+    (tenant_id, facility_id, inventory_owner_id, cancelled_at DESC, id DESC);
+
+CREATE FUNCTION public.validate_inbound_load_cancellation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    load_row record;
+BEGIN
+    SELECT type, status, facility_id
+    INTO load_row
+    FROM public.loads
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND id=NEW.load_id
+      AND deleted IS NULL
+    FOR UPDATE;
+    IF load_row IS NULL
+       OR load_row.type <> 'inbound'
+       OR load_row.status NOT IN ('planned','scheduled')
+       OR load_row.status <> NEW.previous_status
+       OR load_row.facility_id <> NEW.facility_id
+       OR NEW.cancelled_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'inbound cancellation does not match a cancellable load'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.require_inbound_load_cancellation_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    load_status text;
+BEGIN
+    SELECT status INTO load_status
+    FROM public.loads
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.load_id;
+    IF load_status IS DISTINCT FROM 'cancelled' THEN
+        RAISE EXCEPTION 'inbound cancellation evidence does not match resulting load state'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.require_cancelled_inbound_load_evidence() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.type='inbound' AND NEW.status='cancelled' THEN
+        IF TG_OP <> 'UPDATE' THEN
+            RAISE EXCEPTION 'cancelled inbound load must be created through a typed transition'
+                USING ERRCODE='23514';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM public.inbound_load_cancellations cancellation
+            WHERE cancellation.tenant_id=NEW.tenant_id
+              AND cancellation.inventory_owner_id=NEW.inventory_owner_id
+              AND cancellation.facility_id=NEW.facility_id
+              AND cancellation.load_id=NEW.id
+              AND cancellation.previous_status=OLD.status
+        ) THEN
+            RAISE EXCEPTION 'cancelled inbound load lacks immutable cancellation evidence'
+                USING ERRCODE='23514';
+        END IF;
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE TRIGGER inbound_load_cancellations_validate
+BEFORE INSERT ON public.inbound_load_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.validate_inbound_load_cancellation();
+CREATE TRIGGER inbound_load_cancellations_are_immutable
+BEFORE UPDATE OR DELETE ON public.inbound_load_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.reject_inbound_load_arrival_mutation();
+CREATE CONSTRAINT TRIGGER inbound_load_cancellations_require_consistency
+AFTER INSERT ON public.inbound_load_cancellations
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_inbound_load_cancellation_consistency();
+CREATE CONSTRAINT TRIGGER loads_require_inbound_cancellation_evidence
+AFTER INSERT OR UPDATE OF status ON public.loads
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_cancelled_inbound_load_evidence();
+
+ALTER TABLE public.inbound_load_cancellations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.inbound_load_cancellations FORCE ROW LEVEL SECURITY;
+CREATE POLICY inbound_load_cancellations_tenant_isolation
+ON public.inbound_load_cancellations
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.inbound_load_cancellations TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.inbound_load_cancellations_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_inbound_load_cancellation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_inbound_load_cancellation_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_cancelled_inbound_load_evidence() FROM PUBLIC;
