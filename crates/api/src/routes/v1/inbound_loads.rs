@@ -2,16 +2,21 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
 use wareboxes_api_contract::v1::{
-    InboundLoadEntryItemResponse, PlanInboundLoadRequest, PlanInboundLoadResponse,
-    PlannedInboundLoadLineResponse, PlannedInboundLoadStatus,
+    ArriveInboundLoadRequest, ArriveInboundLoadResponse,
+    ArrivedInboundLoadStatus as ContractArrivedStatus, InboundLoadEntryItemResponse,
+    InboundLoadPreArrivalStatus as ContractPreviousStatus, PlanInboundLoadRequest,
+    PlanInboundLoadResponse, PlannedInboundLoadLineResponse, PlannedInboundLoadStatus,
 };
 use wareboxes_application::inbound_load::{
-    PlanInboundLoadCommand, PlanInboundLoadResult, PlannedInboundLoadStatus as ApplicationStatus,
+    ArriveInboundLoadCommand, ArriveInboundLoadResult,
+    ArrivedInboundLoadStatus as ApplicationArrivedStatus, PlanInboundLoadCommand,
+    PlanInboundLoadResult, PlannedInboundLoadStatus as ApplicationStatus,
 };
 use wareboxes_application::ApplicationError;
 use wareboxes_domain::{
-    CatalogItemId, FacilityId, InboundExpectedQuantity, InboundLoadPlanLine, InboundLoadReference,
-    InventoryOwnerId, LocationId, NewInboundLoadPlan, Timestamp,
+    CatalogItemId, FacilityId, InboundExpectedQuantity, InboundLoadId, InboundLoadPlanLine,
+    InboundLoadPreArrivalStatus, InboundLoadReference, InboundLoadScanValue, InventoryOwnerId,
+    LocationId, NewInboundLoadPlan, Timestamp,
 };
 
 use super::error::{V1Error, V1Result};
@@ -84,6 +89,30 @@ pub async fn plan(
     Ok(Json(plan_response(result)))
 }
 
+pub async fn arrive(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(load_id): Path<i64>,
+    idempotency_key: IdempotencyKey,
+    Json(body): Json<ArriveInboundLoadRequest>,
+) -> V1Result<Json<ArriveInboundLoadResponse>> {
+    user.require_permission(&state.db, "wms").await?;
+    let command = ArriveInboundLoadCommand::new(
+        InboundLoadId::new(load_id).map_err(invalid)?,
+        InboundLoadScanValue::new(body.load_scan).map_err(invalid)?,
+        InboundLoadScanValue::new(body.receiving_location_scan).map_err(invalid)?,
+        parse_timestamp(body.arrived_at.as_deref(), "arrived_at")?,
+    );
+    let result = repo::inbound_load::arrive_inbound_load(
+        &state.db,
+        &user.tenant,
+        &user.command_context(&idempotency_key),
+        &command,
+    )
+    .await?;
+    Ok(Json(arrival_response(result)))
+}
+
 pub(crate) fn plan_command(request: PlanInboundLoadRequest) -> V1Result<PlanInboundLoadCommand> {
     let lines = request
         .lines
@@ -136,6 +165,23 @@ fn plan_response(result: PlanInboundLoadResult) -> PlanInboundLoadResponse {
         total_expected_quantity: result.total_expected_quantity,
         planned_by: result.planned_by.get(),
         planned_at: result.planned_at.to_rfc3339(),
+    }
+}
+
+fn arrival_response(result: ArriveInboundLoadResult) -> ArriveInboundLoadResponse {
+    ArriveInboundLoadResponse {
+        arrival_id: result.arrival_id.get(),
+        load_id: result.load_id.get(),
+        previous_status: match result.previous_status {
+            InboundLoadPreArrivalStatus::Planned => ContractPreviousStatus::Planned,
+            InboundLoadPreArrivalStatus::Scheduled => ContractPreviousStatus::Scheduled,
+        },
+        status: match result.status {
+            ApplicationArrivedStatus::Arrived => ContractArrivedStatus::Arrived,
+        },
+        receiving_location_id: result.receiving_location_id.get(),
+        arrived_by: result.arrived_by.get(),
+        arrived_at: result.arrived_at.to_rfc3339(),
     }
 }
 
@@ -200,5 +246,22 @@ mod tests {
         let mut malformed = request();
         malformed.expected_at = Some("tomorrow".into());
         assert!(plan_command(malformed).is_err());
+    }
+
+    #[test]
+    fn arrival_response_preserves_transition_evidence() {
+        let arrived_at = "2027-08-10T12:00:00Z".parse::<Timestamp>().unwrap();
+        let response = arrival_response(ArriveInboundLoadResult {
+            arrival_id: wareboxes_domain::InboundLoadArrivalId::new(31).unwrap(),
+            load_id: InboundLoadId::new(12).unwrap(),
+            previous_status: InboundLoadPreArrivalStatus::Scheduled,
+            status: ApplicationArrivedStatus::Arrived,
+            receiving_location_id: LocationId::new(9).unwrap(),
+            arrived_by: wareboxes_domain::UserId::new(4).unwrap(),
+            arrived_at,
+        });
+        assert_eq!(response.arrival_id, 31);
+        assert_eq!(response.previous_status, ContractPreviousStatus::Scheduled);
+        assert_eq!(response.status, ContractArrivedStatus::Arrived);
     }
 }

@@ -330,6 +330,10 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "outbound_load_cancellations",
             "outbound_load_cancellations_tenant_isolation",
         ),
+        (
+            "inbound_load_arrivals",
+            "inbound_load_arrivals_tenant_isolation",
+        ),
         ("facilities", "facilities_tenant_isolation"),
         (
             "facility_shipping_origin_configurations",

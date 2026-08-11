@@ -35537,3 +35537,137 @@ REVOKE ALL ON TABLE public._sqlx_migrations FROM wareboxes_app;
 -- pg_dump clears the session search path while restoring fully qualified objects.
 -- SQLx records the migration with an unqualified journal table afterward.
 SELECT pg_catalog.set_config('search_path', 'public, pg_catalog', false);
+
+-- Typed inbound arrival evidence. This remains append-only even though the legacy
+-- load header is still shared with pre-v1 inbound administration.
+CREATE TABLE public.inbound_load_arrivals (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    load_id bigint NOT NULL,
+    receiving_location_id bigint NOT NULL,
+    previous_status text NOT NULL CHECK (previous_status IN ('planned','scheduled')),
+    observed_load_barcode text NOT NULL,
+    observed_receiving_location_barcode text NOT NULL,
+    arrived_by_user_id bigint NOT NULL,
+    arrived_at timestamp with time zone NOT NULL,
+    CONSTRAINT inbound_load_arrivals_load_scan_check CHECK (
+        observed_load_barcode = btrim(observed_load_barcode)
+        AND char_length(observed_load_barcode) BETWEEN 1 AND 200
+    ),
+    CONSTRAINT inbound_load_arrivals_location_scan_check CHECK (
+        observed_receiving_location_barcode = btrim(observed_receiving_location_barcode)
+        AND char_length(observed_receiving_location_barcode) BETWEEN 1 AND 200
+    ),
+    CONSTRAINT inbound_load_arrivals_tenant_load_unique UNIQUE (tenant_id, load_id),
+    CONSTRAINT inbound_load_arrivals_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    CONSTRAINT inbound_load_arrivals_facility_fkey FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities(tenant_id, id),
+    CONSTRAINT inbound_load_arrivals_load_fkey FOREIGN KEY (tenant_id, inventory_owner_id, load_id)
+        REFERENCES public.loads(tenant_id, inventory_owner_id, id),
+    CONSTRAINT inbound_load_arrivals_location_fkey
+        FOREIGN KEY (tenant_id, facility_id, receiving_location_id)
+        REFERENCES public.locations(tenant_id, facility_id, id),
+    CONSTRAINT inbound_load_arrivals_actor_fkey FOREIGN KEY (arrived_by_user_id)
+        REFERENCES public.users(id)
+);
+
+CREATE INDEX inbound_load_arrivals_scope_idx
+ON public.inbound_load_arrivals (tenant_id, facility_id, inventory_owner_id, arrived_at DESC, id DESC);
+
+CREATE FUNCTION public.validate_inbound_load_arrival() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    load_row record;
+    location_row record;
+BEGIN
+    SELECT type, status, facility_id, dock_door_location_id, execution_barcode
+    INTO load_row
+    FROM public.loads
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND id=NEW.load_id
+      AND deleted IS NULL;
+    IF load_row IS NULL
+       OR load_row.type <> 'inbound'
+       OR load_row.facility_id <> NEW.facility_id
+       OR load_row.dock_door_location_id IS DISTINCT FROM NEW.receiving_location_id
+       OR load_row.status <> NEW.previous_status THEN
+        RAISE EXCEPTION 'inbound arrival does not match the current planned load'
+            USING ERRCODE='23514';
+    END IF;
+
+    SELECT barcode, active, receivable, deleted
+    INTO location_row
+    FROM public.locations
+    WHERE tenant_id=NEW.tenant_id
+      AND facility_id=NEW.facility_id
+      AND id=NEW.receiving_location_id;
+    IF location_row IS NULL
+       OR location_row.deleted IS NOT NULL
+       OR NOT location_row.active
+       OR NOT location_row.receivable
+       OR location_row.barcode IS NULL
+       OR upper(btrim(location_row.barcode)) <> upper(NEW.observed_receiving_location_barcode)
+       OR upper(btrim(load_row.execution_barcode)) <> upper(NEW.observed_load_barcode)
+       OR NEW.arrived_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'inbound arrival scan or execution evidence is invalid'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.require_inbound_load_arrival_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    load_row record;
+BEGIN
+    SELECT status, arrival, checked_in_by, dock_door_location_id
+    INTO load_row
+    FROM public.loads
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.load_id;
+    IF load_row IS NULL
+       OR load_row.status <> 'arrived'
+       OR load_row.arrival IS DISTINCT FROM NEW.arrived_at
+       OR load_row.checked_in_by IS DISTINCT FROM NEW.arrived_by_user_id
+       OR load_row.dock_door_location_id IS DISTINCT FROM NEW.receiving_location_id THEN
+        RAISE EXCEPTION 'inbound arrival evidence does not match the resulting load state'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.reject_inbound_load_arrival_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'inbound load arrivals are immutable' USING ERRCODE='55000';
+END
+$$;
+
+CREATE TRIGGER inbound_load_arrivals_validate
+BEFORE INSERT ON public.inbound_load_arrivals
+FOR EACH ROW EXECUTE FUNCTION public.validate_inbound_load_arrival();
+CREATE TRIGGER inbound_load_arrivals_are_immutable
+BEFORE UPDATE OR DELETE ON public.inbound_load_arrivals
+FOR EACH ROW EXECUTE FUNCTION public.reject_inbound_load_arrival_mutation();
+CREATE CONSTRAINT TRIGGER inbound_load_arrivals_require_consistency
+AFTER INSERT ON public.inbound_load_arrivals
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_inbound_load_arrival_consistency();
+
+ALTER TABLE public.inbound_load_arrivals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.inbound_load_arrivals FORCE ROW LEVEL SECURITY;
+CREATE POLICY inbound_load_arrivals_tenant_isolation
+ON public.inbound_load_arrivals
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.inbound_load_arrivals TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.inbound_load_arrivals_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_inbound_load_arrival() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_inbound_load_arrival_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_inbound_load_arrival_mutation() FROM PUBLIC;

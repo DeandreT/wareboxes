@@ -65,6 +65,41 @@ pub struct PlanInboundLoadResponse {
     pub planned_at: String,
 }
 
+/// Exact scanner evidence for transitioning a planned inbound load to arrived.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArriveInboundLoadRequest {
+    pub load_scan: String,
+    pub receiving_location_scan: String,
+    /// Optional RFC 3339 actual arrival; omitted to use authoritative server time.
+    pub arrived_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadPreArrivalStatus {
+    Planned,
+    Scheduled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArrivedInboundLoadStatus {
+    Arrived,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArriveInboundLoadResponse {
+    pub arrival_id: i64,
+    pub load_id: i64,
+    pub previous_status: InboundLoadPreArrivalStatus,
+    pub status: ArrivedInboundLoadStatus,
+    pub receiving_location_id: i64,
+    pub arrived_by: i64,
+    pub arrived_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -131,5 +166,20 @@ mod tests {
         let value = serde_json::to_value(response).unwrap();
         assert_eq!(value["lines"][0]["load_line_id"], json!(201));
         assert_eq!(value["status"], json!("planned"));
+    }
+
+    #[test]
+    fn arrival_request_is_scan_only_and_strict() {
+        let request = json!({
+            "load_scan": "WB-LOAD-101",
+            "receiving_location_scan": "RECV-01",
+            "arrived_at": null
+        });
+        let decoded = serde_json::from_value::<ArriveInboundLoadRequest>(request.clone()).unwrap();
+        assert_eq!(decoded.load_scan, "WB-LOAD-101");
+
+        let mut with_status = request;
+        with_status["status"] = json!("arrived");
+        assert!(serde_json::from_value::<ArriveInboundLoadRequest>(with_status).is_err());
     }
 }

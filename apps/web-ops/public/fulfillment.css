@@ -880,6 +880,22 @@
   background: var(--blue-soft);
 }
 
+.arrival-confirmation .evidence-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 10px;
+}
+
+.arrival-confirmation .evidence-summary strong {
+  margin-right: 4px;
+  color: var(--ink);
+}
+
 .detail-section,
 .detail-section-stack {
   min-width: 0;

@@ -116,25 +116,55 @@ BEGIN
   IF clear_seed THEN
     DELETE FROM load_orders
     WHERE tenant_id = tenant AND load_id IN (
-      SELECT id FROM loads WHERE tenant_id = tenant AND reference_number LIKE 'WB-SEED-LOAD-%'
+      SELECT load.id FROM loads load
+      WHERE load.tenant_id = tenant AND load.reference_number LIKE 'WB-SEED-LOAD-%'
+        AND NOT EXISTS (
+          SELECT 1 FROM inbound_load_arrivals arrival
+          WHERE arrival.tenant_id=load.tenant_id AND arrival.load_id=load.id
+        )
     );
     DELETE FROM load_activity
     WHERE tenant_id = tenant AND load_id IN (
-      SELECT id FROM loads WHERE tenant_id = tenant AND reference_number LIKE 'WB-SEED-LOAD-%'
+      SELECT load.id FROM loads load
+      WHERE load.tenant_id = tenant AND load.reference_number LIKE 'WB-SEED-LOAD-%'
+        AND NOT EXISTS (
+          SELECT 1 FROM inbound_load_arrivals arrival
+          WHERE arrival.tenant_id=load.tenant_id AND arrival.load_id=load.id
+        )
     );
     DELETE FROM load_files
     WHERE tenant_id = tenant AND load_id IN (
-      SELECT id FROM loads WHERE tenant_id = tenant AND reference_number LIKE 'WB-SEED-LOAD-%'
+      SELECT load.id FROM loads load
+      WHERE load.tenant_id = tenant AND load.reference_number LIKE 'WB-SEED-LOAD-%'
+        AND NOT EXISTS (
+          SELECT 1 FROM inbound_load_arrivals arrival
+          WHERE arrival.tenant_id=load.tenant_id AND arrival.load_id=load.id
+        )
     );
     DELETE FROM load_notes
     WHERE tenant_id = tenant AND load_id IN (
-      SELECT id FROM loads WHERE tenant_id = tenant AND reference_number LIKE 'WB-SEED-LOAD-%'
+      SELECT load.id FROM loads load
+      WHERE load.tenant_id = tenant AND load.reference_number LIKE 'WB-SEED-LOAD-%'
+        AND NOT EXISTS (
+          SELECT 1 FROM inbound_load_arrivals arrival
+          WHERE arrival.tenant_id=load.tenant_id AND arrival.load_id=load.id
+        )
     );
     DELETE FROM load_lines
     WHERE tenant_id = tenant AND load_id IN (
-      SELECT id FROM loads WHERE tenant_id = tenant AND reference_number LIKE 'WB-SEED-LOAD-%'
+      SELECT load.id FROM loads load
+      WHERE load.tenant_id = tenant AND load.reference_number LIKE 'WB-SEED-LOAD-%'
+        AND NOT EXISTS (
+          SELECT 1 FROM inbound_load_arrivals arrival
+          WHERE arrival.tenant_id=load.tenant_id AND arrival.load_id=load.id
+        )
     );
-    DELETE FROM loads WHERE tenant_id = tenant AND reference_number LIKE 'WB-SEED-LOAD-%';
+    DELETE FROM loads load
+    WHERE load.tenant_id = tenant AND load.reference_number LIKE 'WB-SEED-LOAD-%'
+      AND NOT EXISTS (
+        SELECT 1 FROM inbound_load_arrivals arrival
+        WHERE arrival.tenant_id=load.tenant_id AND arrival.load_id=load.id
+      );
   END IF;
 
   INSERT INTO facilities (tenant_id, created, name)
@@ -176,7 +206,35 @@ BEGIN
       VALUES (tenant, now(), load_status, 'Load seed item', 'case', 5, 8, 12)
       RETURNING id INTO item;
     END IF;
+    UPDATE barcodes
+    SET deleted = NULL,
+        item_id = item,
+        type = 'code128',
+        notes = 'Scanner barcode for executable inbound demo work'
+    WHERE tenant_id = tenant
+      AND lower(name) = lower('WB-SEED-ITEM-' || item);
+    IF NOT FOUND THEN
+      INSERT INTO barcodes (tenant_id, created, name, type, item_id, notes)
+      VALUES (
+        tenant,
+        now(),
+        'WB-SEED-ITEM-' || item,
+        'code128',
+        item,
+        'Scanner barcode for executable inbound demo work'
+      );
+    END IF;
     item_ids := array_append(item_ids, item);
+  END LOOP;
+
+  FOREACH owner IN ARRAY owner_ids LOOP
+    FOREACH item IN ARRAY item_ids LOOP
+      INSERT INTO inventory_owner_items
+          (tenant_id, created, inventory_owner_id, item_id)
+      VALUES (tenant, now(), owner, item)
+      ON CONFLICT (tenant_id, inventory_owner_id, item_id)
+      DO UPDATE SET deleted = NULL;
+    END LOOP;
   END LOOP;
 
   FOR i IN 1..seed_count LOOP

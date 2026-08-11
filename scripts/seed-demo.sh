@@ -106,6 +106,40 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM putaway_tasks) THEN missing := array_append(missing, 'putaway'); END IF;
   IF NOT EXISTS (SELECT 1 FROM inventory_holds) THEN missing := array_append(missing, 'inventory holds'); END IF;
   IF NOT EXISTS (SELECT 1 FROM integration_inbox_receipts) THEN missing := array_append(missing, 'integration monitor'); END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM loads load
+    INNER JOIN load_lines line
+      ON line.tenant_id=load.tenant_id AND line.load_id=load.id
+    WHERE load.type='inbound'
+      AND load.status IN ('planned','scheduled')
+      AND load.deleted IS NULL
+      AND (
+        load.dock_door_location_id IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM locations location
+          WHERE location.tenant_id=load.tenant_id
+            AND location.id=load.dock_door_location_id
+            AND location.deleted IS NULL
+            AND location.active AND location.receivable
+            AND NULLIF(btrim(location.barcode),'') IS NOT NULL
+        )
+        OR NOT EXISTS (
+          SELECT 1 FROM inventory_owner_items owner_item
+          WHERE owner_item.tenant_id=load.tenant_id
+            AND owner_item.inventory_owner_id=load.inventory_owner_id
+            AND owner_item.item_id=line.item_id
+            AND owner_item.deleted IS NULL
+        )
+        OR NOT EXISTS (
+          SELECT 1 FROM barcodes barcode
+          WHERE barcode.tenant_id=load.tenant_id
+            AND barcode.item_id=line.item_id
+            AND barcode.deleted IS NULL
+            AND NULLIF(btrim(barcode.name),'') IS NOT NULL
+        )
+      )
+  ) THEN missing := array_append(missing, 'executable planned inbound loads'); END IF;
   IF cardinality(missing) > 0 THEN
     RAISE EXCEPTION 'full demo coverage is incomplete: %', array_to_string(missing, ', ');
   END IF;

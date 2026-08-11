@@ -58,9 +58,11 @@ pub use inbound_inspection::{
     InboundInspectionOutcome, InboundInspectionTargetStatus, MAX_INBOUND_INSPECTION_NOTE_LENGTH,
 };
 pub use inbound_load::{
-    InboundExpectedQuantity, InboundLoadField, InboundLoadPlanLine, InboundLoadPlanningError,
-    InboundLoadReference, NewInboundLoadPlan, MAX_INBOUND_LOAD_IDENTITY_LENGTH,
-    MAX_INBOUND_LOAD_REFERENCE_LENGTH, MAX_INBOUND_LOAD_TEXT_LENGTH,
+    validate_inbound_load_arrival, InboundExpectedQuantity, InboundLoadArrivalError,
+    InboundLoadField, InboundLoadPlanLine, InboundLoadPlanningError, InboundLoadPreArrivalStatus,
+    InboundLoadReference, InboundLoadScanValue, NewInboundLoadPlan,
+    MAX_INBOUND_LOAD_IDENTITY_LENGTH, MAX_INBOUND_LOAD_REFERENCE_LENGTH,
+    MAX_INBOUND_LOAD_SCAN_VALUE_LENGTH, MAX_INBOUND_LOAD_TEXT_LENGTH,
 };
 pub use integration::{
     IntegrationInboxCorrectionReason, IntegrationInboxCorrectionReasonError,
@@ -262,6 +264,7 @@ positive_id!(FacilityId, "facility ID");
 positive_id!(AddressId, "address ID");
 positive_id!(InboundLoadId, "inbound load ID");
 positive_id!(InboundLoadLineId, "inbound load line ID");
+positive_id!(InboundLoadArrivalId, "inbound load arrival ID");
 positive_id!(
     FacilityShippingOriginConfigurationId,
     "facility shipping origin configuration ID"

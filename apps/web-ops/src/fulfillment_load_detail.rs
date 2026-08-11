@@ -1,7 +1,8 @@
 use leptos::{html, prelude::*};
 use lucide_leptos::{Download, ExternalLink, Paperclip, Trash2};
+use wareboxes_api_contract::v1::ArriveInboundLoadRequest;
 use wareboxes_core::dto::{
-    AddLoadLine, AddLoadNote, ArriveLoad, LoadFileIdRequest, LoadNoteIdRequest, LoadUpdate,
+    AddLoadLine, AddLoadNote, LoadFileIdRequest, LoadNoteIdRequest, LoadUpdate,
 };
 use wareboxes_core::models::{Item, Load, LoadFileCategory, LoadStatus, LoadType, Location};
 
@@ -192,6 +193,7 @@ pub fn LoadDetailPanel(
                 <Show when=move || arrival_open.get()>
                     <ArrivalConfirmation
                         load=load.get_value()
+                        locations=locations.get_value()
                         pending=command_pending
                         error=command_error
                         on_close=Callback::new(move |_| arrival_open.set(false))
@@ -541,54 +543,93 @@ fn LoadHeaderForm(
 #[component]
 fn ArrivalConfirmation(
     load: Load,
+    locations: Vec<Location>,
     pending: RwSignal<bool>,
     error: RwSignal<Option<String>>,
     on_close: Callback<()>,
     on_refreshed: Callback<i64>,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
-    let invoice = RwSignal::new(load.invoice_number.clone().unwrap_or_default());
+    let load_scan = RwSignal::new(String::new());
+    let location_scan = RwSignal::new(String::new());
     let arrival = RwSignal::new(String::new());
+    let retry_attempt = RwSignal::new(None::<(ArriveInboundLoadRequest, String)>);
+    let confirmation_ref = NodeRef::<html::Form>::new();
+    let load_scan_ref = NodeRef::<html::Input>::new();
     let load_id = load.id;
+    let receiving_location = load
+        .dock_door_location_id
+        .and_then(|location_id| locations.iter().find(|location| location.id == location_id))
+        .map(|location| {
+            format!(
+                "{} ({})",
+                location.name.as_deref().unwrap_or("Receiving location"),
+                location.barcode.as_deref().unwrap_or("no barcode")
+            )
+        })
+        .unwrap_or_else(|| "No receiving location assigned".to_owned());
     let toasts = use_toast_bus();
+
+    #[cfg(target_arch = "wasm32")]
+    Effect::new(move |_| {
+        if let Some(input) = load_scan_ref.get() {
+            let _ = input.focus();
+        }
+        if let Some(form) = confirmation_ref.get() {
+            form.scroll_into_view_with_bool(false);
+        }
+    });
 
     let submit = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
         if pending.get_untracked() {
             return;
         }
-        let arrival_value = match parse_optional_timestamp(&arrival.get_untracked()) {
-            Ok(value) => value,
-            Err(message) => {
-                error.set(Some(message));
-                return;
-            }
-        };
-        let request = ArriveLoad {
-            invoice_number: optional_text(&invoice.get_untracked()),
-            arrival: arrival_value,
+        let (request, idempotency_key) = if let Some(saved) = retry_attempt.get_untracked() {
+            saved
+        } else {
+            let arrival_value = match parse_optional_timestamp(&arrival.get_untracked()) {
+                Ok(value) => value.map(|value| value.to_rfc3339()),
+                Err(message) => {
+                    error.set(Some(message));
+                    return;
+                }
+            };
+            let request = ArriveInboundLoadRequest {
+                load_scan: load_scan.get_untracked(),
+                receiving_location_scan: location_scan.get_untracked(),
+                arrived_at: arrival_value,
+            };
+            let key = api::new_idempotency_key();
+            retry_attempt.set(Some((request.clone(), key.clone())));
+            (request, key)
         };
         pending.set(true);
         error.set(None);
         leptos::task::spawn_local(async move {
-            let path = format!("/api/mobile/inbound/loads/{load_id}/arrive");
-            match api::internal_post::<_, bool>(&path, &request).await {
-                Ok(true) => {
+            match api::arrive_inbound_load(load_id, &request, &idempotency_key).await {
+                Ok(result) => {
+                    retry_attempt.set(None);
                     pending.set(false);
                     on_close.run(());
-                    toasts.success(format!("Load #{load_id} arrived."));
-                    on_refreshed.run(load_id);
-                }
-                Ok(false) => {
-                    error.set(Some(
-                        "The load could not be arrived in its current state.".to_owned(),
+                    toasts.success(format!(
+                        "Load #{load_id} arrived at location #{}.",
+                        result.receiving_location_id
                     ));
-                    pending.set(false);
+                    on_refreshed.run(load_id);
                 }
                 Err(api_error) if api_error.unauthorized => on_unauthorized.run(()),
                 Err(api_error) => {
+                    if !api_error.ambiguous_outcome {
+                        retry_attempt.set(None);
+                    }
                     toasts.error(api_error.message.clone());
-                    error.set(Some(api_error.message));
+                    error.set(Some(if api_error.ambiguous_outcome {
+                        "Arrival outcome is unknown. Retry to reconcile the exact saved scans."
+                            .to_owned()
+                    } else {
+                        api_error.message
+                    }));
                     pending.set(false);
                 }
             }
@@ -597,29 +638,46 @@ fn ArrivalConfirmation(
 
     view! {
         <form
+            node_ref=confirmation_ref
             class="confirmation-panel arrival-confirmation"
             role="alertdialog"
             aria-labelledby="arrive-load-title"
             on:submit=submit
         >
             <h3 id="arrive-load-title">"Confirm trailer arrival"</h3>
-            <p>"This makes the load available to receiving operators."</p>
+            <p>"Scan the planned load and assigned receiving location to release it to receiving."</p>
+            <div class="evidence-summary">
+                <span><strong>"Load"</strong> {load.reference_number.unwrap_or_else(|| format!("#{}", load_id))}</span>
+                <span><strong>"Assigned location"</strong> {receiving_location}</span>
+            </div>
             <div class="form-grid two-column">
                 <label>
-                    <span>"Invoice"</span>
+                    <span>"Load scan"</span>
                     <input
-                        prop:value=move || invoice.get()
-                        on:input=move |event| invoice.set(event_target_value(&event))
+                        node_ref=load_scan_ref
+                        required
+                        autocomplete="off"
+                        prop:value=move || load_scan.get()
+                        on:input=move |event| load_scan.set(event_target_value(&event))
                     />
                 </label>
                 <label>
-                    <span>"Arrival time (UTC)"</span>
+                    <span>"Receiving location scan"</span>
+                    <input
+                        required
+                        autocomplete="off"
+                        prop:value=move || location_scan.get()
+                        on:input=move |event| location_scan.set(event_target_value(&event))
+                    />
+                </label>
+                <label>
+                    <span>"Arrival time"</span>
                     <input
                         type="datetime-local"
                         prop:value=move || arrival.get()
                         on:input=move |event| arrival.set(event_target_value(&event))
                     />
-                    <small>"Leave blank to use server time."</small>
+                    <small>"Leave blank to use the warehouse server time."</small>
                 </label>
             </div>
             <div class="form-actions">

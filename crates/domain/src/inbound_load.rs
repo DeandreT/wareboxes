@@ -8,6 +8,7 @@ use crate::{CatalogItemId, FacilityId, InventoryOwnerId, LocationId, Timestamp};
 pub const MAX_INBOUND_LOAD_REFERENCE_LENGTH: usize = 200;
 pub const MAX_INBOUND_LOAD_TEXT_LENGTH: usize = 200;
 pub const MAX_INBOUND_LOAD_IDENTITY_LENGTH: usize = 200;
+pub const MAX_INBOUND_LOAD_SCAN_VALUE_LENGTH: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboundLoadField {
@@ -49,6 +50,65 @@ pub enum InboundLoadPlanningError {
     MissingLines,
     #[error("an inbound load cannot contain duplicate expected item identities")]
     DuplicateLineIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InboundLoadArrivalError {
+    #[error("inbound load scan must be nonblank, trimmed, control-free, and at most {MAX_INBOUND_LOAD_SCAN_VALUE_LENGTH} characters")]
+    InvalidScanValue,
+    #[error("inbound load must be planned or scheduled before arrival")]
+    InvalidStatus,
+    #[error("arrival time cannot be in the future")]
+    FutureArrival,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct InboundLoadScanValue(String);
+
+impl InboundLoadScanValue {
+    pub fn new(value: impl Into<String>) -> Result<Self, InboundLoadArrivalError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.trim() != value
+            || value.chars().count() > MAX_INBOUND_LOAD_SCAN_VALUE_LENGTH
+            || value.chars().any(char::is_control)
+        {
+            return Err(InboundLoadArrivalError::InvalidScanValue);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for InboundLoadScanValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadPreArrivalStatus {
+    Planned,
+    Scheduled,
+}
+
+pub fn validate_inbound_load_arrival(
+    status: InboundLoadPreArrivalStatus,
+    arrived_at: Timestamp,
+    current_time: Timestamp,
+) -> Result<InboundLoadPreArrivalStatus, InboundLoadArrivalError> {
+    if arrived_at > current_time {
+        return Err(InboundLoadArrivalError::FutureArrival);
+    }
+    Ok(status)
 }
 
 fn required_text(
@@ -338,5 +398,23 @@ mod tests {
             None,
         )
         .is_err());
+    }
+
+    #[test]
+    fn arrival_requires_exact_bounded_scans_and_nonfuture_time() {
+        assert!(InboundLoadScanValue::new("WB-LOAD-100").is_ok());
+        assert!(InboundLoadScanValue::new(" WB-LOAD-100").is_err());
+        assert!(InboundLoadScanValue::new("\n").is_err());
+        let now = "2027-08-10T12:00:00Z".parse::<Timestamp>().unwrap();
+        let arrived = "2027-08-10T11:59:00Z".parse::<Timestamp>().unwrap();
+        assert_eq!(
+            validate_inbound_load_arrival(InboundLoadPreArrivalStatus::Planned, arrived, now),
+            Ok(InboundLoadPreArrivalStatus::Planned)
+        );
+        let future = "2027-08-10T12:00:01Z".parse::<Timestamp>().unwrap();
+        assert_eq!(
+            validate_inbound_load_arrival(InboundLoadPreArrivalStatus::Scheduled, future, now),
+            Err(InboundLoadArrivalError::FutureArrival)
+        );
     }
 }

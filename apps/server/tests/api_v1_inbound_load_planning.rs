@@ -4,13 +4,15 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use common::*;
 use serde_json::{json, Value};
+use sqlx::Row;
 use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    ErrorReason, ErrorResponse, ExpectedReceivingSessionResponse, InboundLoadEntryItemResponse,
-    PlanInboundLoadResponse, PlannedInboundLoadStatus,
+    ArriveInboundLoadResponse, ArrivedInboundLoadStatus, ErrorReason, ErrorResponse,
+    ExpectedReceivingSessionResponse, InboundLoadEntryItemResponse, PlanInboundLoadResponse,
+    PlannedInboundLoadStatus,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
@@ -37,6 +39,24 @@ fn session_request(token: &str, tenant_id: TenantId, load_id: i64) -> Request<Bo
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(TENANT_ID_HEADER, tenant_id.to_string())
         .body(Body::empty())
+        .unwrap()
+}
+
+fn arrival_request(
+    token: &str,
+    tenant_id: TenantId,
+    load_id: i64,
+    idempotency_key: &str,
+    body: &Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/v1/inbound-loads/{load_id}/arrivals"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .header(IDEMPOTENCY_KEY_HEADER, idempotency_key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
         .unwrap()
 }
 
@@ -190,6 +210,41 @@ async fn effects(fixture: &Fixture, tenant_id: TenantId, reference: &str) -> Eff
     effects
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct ArrivalEffects {
+    arrivals: i64,
+    arrival_commands: i64,
+    arrival_events: i64,
+    arrived_activities: i64,
+    status: String,
+}
+
+async fn arrival_effects(fixture: &Fixture, tenant_id: TenantId, load_id: i64) -> ArrivalEffects {
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let effects = sqlx::query_as(
+        r#"
+        SELECT
+          (SELECT COUNT(*) FROM inbound_load_arrivals WHERE load_id=$2) AS arrivals,
+          (SELECT COUNT(*) FROM command_idempotency_records
+             WHERE operation='inbound.load.arrive.v1'
+               AND (result_json->>'load_id')::BIGINT=$2) AS arrival_commands,
+          (SELECT COUNT(*) FROM outbox_events
+             WHERE event_type='inbound.load.arrived'
+               AND aggregate_id=$2::TEXT) AS arrival_events,
+          (SELECT COUNT(*) FROM load_activity
+             WHERE load_id=$2 AND action='arrived') AS arrived_activities,
+          (SELECT status FROM loads WHERE id=$2) AS status
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(load_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    effects
+}
+
 #[tokio::test]
 async fn atomic_plan_replays_exactly_and_enters_expected_receiving() {
     let fixture = Fixture::new().await;
@@ -274,14 +329,109 @@ async fn atomic_plan_replays_exactly_and_enters_expected_receiving() {
     assert_eq!(current.commands, 1);
     assert_eq!(current.events, 1);
 
-    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
-    sqlx::query("UPDATE loads SET status='arrived' WHERE tenant_id=$1 AND id=$2")
-        .bind(tenant_id.get())
-        .bind(result.load_id)
-        .execute(&mut *tx)
+    let arrival_body = json!({
+        "load_scan": result.execution_barcode,
+        "receiving_location_scan": "PLAN-DOCK",
+        "arrived_at": null
+    });
+    let arrival = app
+        .clone()
+        .oneshot(arrival_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "arrive-atomic",
+            &arrival_body,
+        ))
         .await
         .unwrap();
-    tx.commit().await.unwrap();
+    assert_eq!(arrival.status(), StatusCode::OK);
+    let arrival: ArriveInboundLoadResponse = json_body(arrival).await;
+    assert_eq!(arrival.status, ArrivedInboundLoadStatus::Arrived);
+    assert_eq!(arrival.receiving_location_id, dock);
+
+    let replay = app
+        .clone()
+        .oneshot(arrival_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "arrive-atomic",
+            &arrival_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<ArriveInboundLoadResponse>(replay).await,
+        arrival
+    );
+
+    let mut changed_arrival = arrival_body.clone();
+    changed_arrival["receiving_location_scan"] = json!("OTHER-DOCK");
+    let changed = app
+        .clone()
+        .oneshot(arrival_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "arrive-atomic",
+            &changed_arrival,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(changed.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body::<ErrorResponse>(changed).await.reason,
+        ErrorReason::IdempotencyKeyReused
+    );
+    let arrival_effects = arrival_effects(&fixture, tenant_id, result.load_id).await;
+    assert_eq!(
+        (
+            arrival_effects.arrivals,
+            arrival_effects.arrival_commands,
+            arrival_effects.arrival_events,
+            arrival_effects.arrived_activities,
+            arrival_effects.status.as_str(),
+        ),
+        (1, 1, 1, 1, "arrived")
+    );
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let evidence = sqlx::query(
+        r#"
+        SELECT arrival.previous_status, arrival.observed_load_barcode,
+               arrival.observed_receiving_location_barcode,
+               event.aggregate_sequence, event.payload->>'status' AS event_status,
+               event.payload->>'arrival_id' AS event_arrival_id
+        FROM inbound_load_arrivals arrival
+        INNER JOIN outbox_events event
+          ON event.tenant_id=arrival.tenant_id
+         AND event.event_type='inbound.load.arrived'
+         AND event.aggregate_id=arrival.load_id::TEXT
+        WHERE arrival.load_id=$1
+        "#,
+    )
+    .bind(result.load_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(evidence.get::<String, _>("previous_status"), "planned");
+    assert_eq!(
+        evidence.get::<String, _>("observed_load_barcode"),
+        arrival_body["load_scan"].as_str().unwrap()
+    );
+    assert_eq!(
+        evidence.get::<String, _>("observed_receiving_location_barcode"),
+        "PLAN-DOCK"
+    );
+    assert_eq!(evidence.get::<i64, _>("aggregate_sequence"), 2);
+    assert_eq!(evidence.get::<String, _>("event_status"), "arrived");
+    assert_eq!(
+        evidence.get::<String, _>("event_arrival_id"),
+        arrival.arrival_id.to_string()
+    );
+    tx.rollback().await.unwrap();
+
     let session = app
         .oneshot(session_request(&token, tenant_id, result.load_id))
         .await
@@ -298,6 +448,130 @@ async fn atomic_plan_replays_exactly_and_enters_expected_receiving() {
         15
     );
     assert_eq!(session.receiving_location.location_id, dock);
+}
+
+#[tokio::test]
+async fn arrival_rejects_wrong_evidence_and_races_to_one_effect() {
+    let fixture = Fixture::new().await;
+    let operator = fixture.wms_user("inbound-arrival-race@test.local").await;
+    let tenant_id = tenant_for_user(&fixture.db, operator.id).await;
+    let facility = fixture.facility(tenant_id, "Inbound Arrival Race DC").await;
+    let owner = fixture
+        .inventory_owner(tenant_id, "Inbound Arrival Race Owner")
+        .await;
+    fixture
+        .assign_owner_to_facility(tenant_id, owner, facility)
+        .await;
+    let dock = receiving_dock(&fixture, tenant_id, facility, "ARRIVAL-RACE-DOCK").await;
+    let item = fixture
+        .item(tenant_id, "Inbound Arrival Race Item", "each")
+        .await;
+    link_item(&fixture, tenant_id, owner, item).await;
+    let token = auth::create_session(&fixture.db, operator.id)
+        .await
+        .unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let planned = app
+        .clone()
+        .oneshot(plan_request(
+            &token,
+            tenant_id,
+            "arrival-race-plan",
+            &body(owner, facility, dock, item, "ASN-ARRIVAL-RACE"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(planned.status(), StatusCode::OK);
+    let planned: PlanInboundLoadResponse = json_body(planned).await;
+
+    for (key, request_body) in [
+        (
+            "arrival-wrong-load",
+            json!({
+                "load_scan": "WRONG-LOAD",
+                "receiving_location_scan": "ARRIVAL-RACE-DOCK",
+                "arrived_at": null
+            }),
+        ),
+        (
+            "arrival-wrong-location",
+            json!({
+                "load_scan": planned.execution_barcode.clone(),
+                "receiving_location_scan": "WRONG-DOCK",
+                "arrived_at": null
+            }),
+        ),
+        (
+            "arrival-future",
+            json!({
+                "load_scan": planned.execution_barcode.clone(),
+                "receiving_location_scan": "ARRIVAL-RACE-DOCK",
+                "arrived_at": "2099-01-01T00:00:00Z"
+            }),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(arrival_request(
+                &token,
+                tenant_id,
+                planned.load_id,
+                key,
+                &request_body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let before = arrival_effects(&fixture, tenant_id, planned.load_id).await;
+    assert_eq!((before.arrivals, before.arrival_commands), (0, 0));
+    assert_eq!(before.status, "planned");
+
+    let arrival_body = json!({
+        "load_scan": planned.execution_barcode,
+        "receiving_location_scan": "ARRIVAL-RACE-DOCK",
+        "arrived_at": null
+    });
+    let first = app.clone().oneshot(arrival_request(
+        &token,
+        tenant_id,
+        planned.load_id,
+        "arrival-race-a",
+        &arrival_body,
+    ));
+    let second = app.clone().oneshot(arrival_request(
+        &token,
+        tenant_id,
+        planned.load_id,
+        "arrival-race-b",
+        &arrival_body,
+    ));
+    let (first, second) = tokio::join!(first, second);
+    let statuses = [first.unwrap().status(), second.unwrap().status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let after = arrival_effects(&fixture, tenant_id, planned.load_id).await;
+    assert_eq!(
+        (
+            after.arrivals,
+            after.arrival_commands,
+            after.arrival_events,
+            after.arrived_activities,
+        ),
+        (1, 1, 1, 1)
+    );
 }
 
 #[tokio::test]
@@ -504,4 +778,103 @@ async fn planning_enforces_current_owner_and_facility_scope() {
         effects(&fixture, tenant_id, "ASN-SCOPE-REPLAY").await.loads,
         1
     );
+}
+
+#[tokio::test]
+async fn arrival_replays_are_concealed_after_scope_revocation() {
+    let fixture = Fixture::new().await;
+    let operator = fixture.wms_user("inbound-arrival-scope@test.local").await;
+    let tenant_id = tenant_for_user(&fixture.db, operator.id).await;
+    let facility = fixture.facility(tenant_id, "Arrival Scoped DC").await;
+    let owner = fixture
+        .inventory_owner(tenant_id, "Arrival Scoped Owner")
+        .await;
+    fixture
+        .assign_owner_to_facility(tenant_id, owner, facility)
+        .await;
+    let dock = receiving_dock(&fixture, tenant_id, facility, "ARRIVAL-SCOPE-DOCK").await;
+    let item = fixture.item(tenant_id, "Arrival Scoped Item", "case").await;
+    link_item(&fixture, tenant_id, owner, item).await;
+    assert!(repo::tenants::update_user_access_scope(
+        &fixture.db,
+        tenant_id,
+        &UpdateUserAccessScope {
+            user_id: operator.id,
+            all_facilities: false,
+            facility_ids: vec![facility],
+            all_inventory_owners: false,
+            inventory_owner_ids: vec![owner],
+        },
+    )
+    .await
+    .unwrap());
+    let token = auth::create_session(&fixture.db, operator.id)
+        .await
+        .unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let planned = app
+        .clone()
+        .oneshot(plan_request(
+            &token,
+            tenant_id,
+            "arrival-scope-plan",
+            &body(owner, facility, dock, item, "ASN-ARRIVAL-SCOPE"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(planned.status(), StatusCode::OK);
+    let planned: PlanInboundLoadResponse = json_body(planned).await;
+    let arrival_body = json!({
+        "load_scan": planned.execution_barcode,
+        "receiving_location_scan": "ARRIVAL-SCOPE-DOCK",
+        "arrived_at": null
+    });
+    let arrived = app
+        .clone()
+        .oneshot(arrival_request(
+            &token,
+            tenant_id,
+            planned.load_id,
+            "arrival-scope",
+            &arrival_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(arrived.status(), StatusCode::OK);
+
+    assert!(repo::tenants::update_user_access_scope(
+        &fixture.db,
+        tenant_id,
+        &UpdateUserAccessScope {
+            user_id: operator.id,
+            all_facilities: false,
+            facility_ids: vec![],
+            all_inventory_owners: false,
+            inventory_owner_ids: vec![],
+        },
+    )
+    .await
+    .unwrap());
+    let mut changed = arrival_body.clone();
+    changed["receiving_location_scan"] = json!("CHANGED-DOCK");
+    for request_body in [arrival_body, changed] {
+        let response = app
+            .clone()
+            .oneshot(arrival_request(
+                &token,
+                tenant_id,
+                planned.load_id,
+                "arrival-scope",
+                &request_body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            json_body::<ErrorResponse>(response).await.reason,
+            ErrorReason::NotFound
+        );
+    }
+    let effects = arrival_effects(&fixture, tenant_id, planned.load_id).await;
+    assert_eq!((effects.arrivals, effects.arrival_commands), (1, 1));
 }
