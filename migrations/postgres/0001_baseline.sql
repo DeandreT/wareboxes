@@ -38081,3 +38081,477 @@ REVOKE ALL ON FUNCTION public.validate_purchase_order_asn_source() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_purchase_order_asn_source_line() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_purchase_order_asn_source_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_purchase_order_asn_source_mutation() FROM PUBLIC;
+
+-- Interfacility transfer orders are owner-scoped planning documents. Inventory
+-- movement is a later typed execution step; this aggregate preserves exact demand,
+-- both facility identities, release evidence, and terminal cancellation evidence.
+CREATE TABLE public.transfer_orders (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    source_facility_id bigint NOT NULL,
+    destination_facility_id bigint NOT NULL,
+    number text NOT NULL,
+    expected_departure_at timestamp with time zone,
+    expected_arrival_at timestamp with time zone,
+    status text NOT NULL DEFAULT 'draft',
+    revision bigint NOT NULL DEFAULT 1,
+    line_count bigint NOT NULL,
+    total_requested_quantity bigint NOT NULL,
+    created_by_user_id bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    released_by_user_id bigint,
+    released_at timestamp with time zone,
+    CONSTRAINT transfer_orders_number_check CHECK (
+        number=btrim(number) AND char_length(number) BETWEEN 1 AND 120
+        AND number !~ '[[:cntrl:]]'),
+    CONSTRAINT transfer_orders_facilities_check CHECK (
+        source_facility_id <> destination_facility_id),
+    CONSTRAINT transfer_orders_schedule_check CHECK (
+        expected_departure_at IS NULL OR expected_arrival_at IS NULL
+        OR expected_arrival_at >= expected_departure_at),
+    CONSTRAINT transfer_orders_status_check CHECK (
+        status IN ('draft','released','cancelled')),
+    CONSTRAINT transfer_orders_revision_check CHECK (revision > 0),
+    CONSTRAINT transfer_orders_quantity_check CHECK (
+        line_count > 0 AND total_requested_quantity > 0),
+    CONSTRAINT transfer_orders_state_check CHECK (
+        (status='draft' AND revision=1
+         AND released_by_user_id IS NULL AND released_at IS NULL)
+        OR
+        (status='released' AND revision=2
+         AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL)
+        OR
+        (status='cancelled' AND (
+            (revision=2 AND released_by_user_id IS NULL AND released_at IS NULL)
+            OR
+            (revision=3 AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL)
+        ))),
+    CONSTRAINT transfer_orders_owner_number_unique
+        UNIQUE (tenant_id,inventory_owner_id,number),
+    CONSTRAINT transfer_orders_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,source_facility_id,destination_facility_id,id),
+    CONSTRAINT transfer_orders_owner_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id,id),
+    CONSTRAINT transfer_orders_source_facility_fkey
+        FOREIGN KEY (tenant_id,source_facility_id)
+        REFERENCES public.facilities(tenant_id,id),
+    CONSTRAINT transfer_orders_destination_facility_fkey
+        FOREIGN KEY (tenant_id,destination_facility_id)
+        REFERENCES public.facilities(tenant_id,id),
+    CONSTRAINT transfer_orders_created_by_fkey
+        FOREIGN KEY (created_by_user_id) REFERENCES public.users(id),
+    CONSTRAINT transfer_orders_released_by_fkey
+        FOREIGN KEY (released_by_user_id) REFERENCES public.users(id)
+);
+
+CREATE TABLE public.transfer_order_lines (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    source_facility_id bigint NOT NULL,
+    destination_facility_id bigint NOT NULL,
+    transfer_order_id bigint NOT NULL,
+    sequence bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    requested_quantity bigint NOT NULL,
+    CONSTRAINT transfer_order_lines_sequence_check CHECK (sequence > 0),
+    CONSTRAINT transfer_order_lines_quantity_check CHECK (requested_quantity > 0),
+    CONSTRAINT transfer_order_lines_uom_check CHECK (
+        uom=btrim(uom) AND char_length(uom) BETWEEN 1 AND 64),
+    CONSTRAINT transfer_order_lines_sequence_unique
+        UNIQUE (tenant_id,transfer_order_id,sequence),
+    CONSTRAINT transfer_order_lines_item_unique
+        UNIQUE (tenant_id,transfer_order_id,item_id),
+    CONSTRAINT transfer_order_lines_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,source_facility_id,
+                destination_facility_id,transfer_order_id,id),
+    CONSTRAINT transfer_order_lines_order_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,source_facility_id,
+                     destination_facility_id,transfer_order_id)
+        REFERENCES public.transfer_orders(
+            tenant_id,inventory_owner_id,source_facility_id,destination_facility_id,id),
+    CONSTRAINT transfer_order_lines_item_fkey
+        FOREIGN KEY (tenant_id,item_id) REFERENCES public.items(tenant_id,id)
+);
+
+CREATE TABLE public.transfer_order_releases (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    source_facility_id bigint NOT NULL,
+    destination_facility_id bigint NOT NULL,
+    transfer_order_id bigint NOT NULL,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    released_by_user_id bigint NOT NULL,
+    released_at timestamp with time zone NOT NULL,
+    CONSTRAINT transfer_order_releases_revision_check CHECK (
+        expected_revision=1 AND resulting_revision=2),
+    CONSTRAINT transfer_order_releases_order_unique
+        UNIQUE (tenant_id,transfer_order_id),
+    CONSTRAINT transfer_order_releases_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,source_facility_id,
+                destination_facility_id,transfer_order_id,id),
+    CONSTRAINT transfer_order_releases_order_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,source_facility_id,
+                     destination_facility_id,transfer_order_id)
+        REFERENCES public.transfer_orders(
+            tenant_id,inventory_owner_id,source_facility_id,destination_facility_id,id),
+    CONSTRAINT transfer_order_releases_actor_fkey
+        FOREIGN KEY (released_by_user_id) REFERENCES public.users(id)
+);
+
+CREATE TABLE public.transfer_order_cancellations (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    source_facility_id bigint NOT NULL,
+    destination_facility_id bigint NOT NULL,
+    transfer_order_id bigint NOT NULL,
+    previous_status text NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    cancelled_by_user_id bigint NOT NULL,
+    cancelled_at timestamp with time zone NOT NULL,
+    CONSTRAINT transfer_order_cancellations_previous_status_check CHECK (
+        previous_status IN ('draft','released')),
+    CONSTRAINT transfer_order_cancellations_reason_check CHECK (
+        reason_code IN ('demand_cancelled','duplicate_order','route_cancelled','other')),
+    CONSTRAINT transfer_order_cancellations_note_check CHECK (
+        (note IS NULL OR (
+            note=btrim(note) AND char_length(note) BETWEEN 1 AND 500
+            AND note !~ '[[:cntrl:]]'))
+        AND (reason_code <> 'other' OR note IS NOT NULL)),
+    CONSTRAINT transfer_order_cancellations_revision_check CHECK (
+        (previous_status='draft' AND expected_revision=1 AND resulting_revision=2)
+        OR
+        (previous_status='released' AND expected_revision=2 AND resulting_revision=3)),
+    CONSTRAINT transfer_order_cancellations_order_unique
+        UNIQUE (tenant_id,transfer_order_id),
+    CONSTRAINT transfer_order_cancellations_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,source_facility_id,
+                destination_facility_id,transfer_order_id,id),
+    CONSTRAINT transfer_order_cancellations_order_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,source_facility_id,
+                     destination_facility_id,transfer_order_id)
+        REFERENCES public.transfer_orders(
+            tenant_id,inventory_owner_id,source_facility_id,destination_facility_id,id),
+    CONSTRAINT transfer_order_cancellations_actor_fkey
+        FOREIGN KEY (cancelled_by_user_id) REFERENCES public.users(id)
+);
+
+CREATE INDEX transfer_orders_queue_idx
+ON public.transfer_orders(tenant_id,status,created_at DESC,id DESC);
+CREATE INDEX transfer_orders_scope_queue_idx
+ON public.transfer_orders(
+    tenant_id,source_facility_id,destination_facility_id,inventory_owner_id,
+    status,created_at DESC,id DESC);
+CREATE INDEX transfer_order_lines_order_idx
+ON public.transfer_order_lines(tenant_id,transfer_order_id,sequence,id);
+
+CREATE FUNCTION public.validate_transfer_order() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.status <> 'draft' OR NEW.revision <> 1
+       OR NEW.released_by_user_id IS NOT NULL OR NEW.released_at IS NOT NULL
+       OR NEW.created_at > clock_timestamp()
+       OR NOT EXISTS (
+           SELECT 1 FROM public.inventory_owners owner
+           WHERE owner.tenant_id=NEW.tenant_id AND owner.id=NEW.inventory_owner_id
+             AND owner.deleted IS NULL)
+       OR NOT EXISTS (
+           SELECT 1 FROM public.facilities facility
+           WHERE facility.tenant_id=NEW.tenant_id AND facility.id=NEW.source_facility_id
+             AND facility.deleted IS NULL)
+       OR NOT EXISTS (
+           SELECT 1 FROM public.facilities facility
+           WHERE facility.tenant_id=NEW.tenant_id AND facility.id=NEW.destination_facility_id
+             AND facility.deleted IS NULL)
+       OR NOT EXISTS (
+           SELECT 1 FROM public.inventory_owner_facilities link
+           WHERE link.tenant_id=NEW.tenant_id
+             AND link.inventory_owner_id=NEW.inventory_owner_id
+             AND link.facility_id=NEW.source_facility_id AND link.deleted IS NULL)
+       OR NOT EXISTS (
+           SELECT 1 FROM public.inventory_owner_facilities link
+           WHERE link.tenant_id=NEW.tenant_id
+             AND link.inventory_owner_id=NEW.inventory_owner_id
+             AND link.facility_id=NEW.destination_facility_id AND link.deleted IS NULL) THEN
+        RAISE EXCEPTION 'transfer order is not a valid draft interfacility document'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.validate_transfer_order_line() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    order_status text;
+    item_uom text;
+BEGIN
+    SELECT status INTO order_status
+    FROM public.transfer_orders
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND source_facility_id=NEW.source_facility_id
+      AND destination_facility_id=NEW.destination_facility_id
+      AND id=NEW.transfer_order_id
+    FOR SHARE;
+    SELECT item.packaging_unit INTO item_uom
+    FROM public.inventory_owner_items owner_item
+    JOIN public.items item
+      ON item.tenant_id=owner_item.tenant_id AND item.id=owner_item.item_id
+    WHERE owner_item.tenant_id=NEW.tenant_id
+      AND owner_item.inventory_owner_id=NEW.inventory_owner_id
+      AND owner_item.item_id=NEW.item_id
+      AND owner_item.deleted IS NULL AND item.deleted IS NULL
+    FOR SHARE OF owner_item,item;
+    IF order_status <> 'draft' OR item_uom IS NULL OR NEW.uom <> item_uom THEN
+        RAISE EXCEPTION 'transfer order line is not executable for its owner'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.guard_transfer_order_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.tenant_id <> NEW.tenant_id
+       OR OLD.inventory_owner_id <> NEW.inventory_owner_id
+       OR OLD.source_facility_id <> NEW.source_facility_id
+       OR OLD.destination_facility_id <> NEW.destination_facility_id
+       OR OLD.number <> NEW.number
+       OR OLD.expected_departure_at IS DISTINCT FROM NEW.expected_departure_at
+       OR OLD.expected_arrival_at IS DISTINCT FROM NEW.expected_arrival_at
+       OR OLD.line_count <> NEW.line_count
+       OR OLD.total_requested_quantity <> NEW.total_requested_quantity
+       OR OLD.created_by_user_id <> NEW.created_by_user_id
+       OR OLD.created_at <> NEW.created_at
+       OR NOT (
+           (OLD.status='draft' AND NEW.status='released'
+            AND NEW.revision=OLD.revision+1
+            AND OLD.released_by_user_id IS NULL AND OLD.released_at IS NULL
+            AND NEW.released_by_user_id IS NOT NULL AND NEW.released_at IS NOT NULL)
+           OR
+           (OLD.status IN ('draft','released') AND NEW.status='cancelled'
+            AND NEW.revision=OLD.revision+1
+            AND NEW.released_by_user_id IS NOT DISTINCT FROM OLD.released_by_user_id
+            AND NEW.released_at IS NOT DISTINCT FROM OLD.released_at)
+       ) THEN
+        RAISE EXCEPTION 'transfer order mutation requires a typed lifecycle transition'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.reject_transfer_order_ledger_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'transfer order evidence is immutable' USING ERRCODE='55000';
+END
+$$;
+
+CREATE FUNCTION public.require_transfer_order_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    target_order_id bigint;
+    order_row record;
+    actual_count bigint;
+    actual_total bigint;
+BEGIN
+    IF TG_TABLE_NAME='transfer_orders' THEN
+        target_order_id := NEW.id;
+    ELSE
+        target_order_id := NEW.transfer_order_id;
+    END IF;
+    SELECT * INTO order_row FROM public.transfer_orders
+    WHERE tenant_id=NEW.tenant_id AND id=target_order_id;
+    SELECT COUNT(*),COALESCE(SUM(requested_quantity),0)
+    INTO actual_count,actual_total
+    FROM public.transfer_order_lines
+    WHERE tenant_id=NEW.tenant_id AND transfer_order_id=target_order_id;
+    IF order_row IS NULL OR actual_count <> order_row.line_count
+       OR actual_total <> order_row.total_requested_quantity THEN
+        RAISE EXCEPTION 'transfer order line set does not match its header'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.validate_transfer_order_release() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE order_row record;
+BEGIN
+    SELECT * INTO order_row FROM public.transfer_orders
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.transfer_order_id FOR UPDATE;
+    IF order_row IS NULL OR order_row.status <> 'draft'
+       OR order_row.revision <> NEW.expected_revision
+       OR NEW.resulting_revision <> NEW.expected_revision+1
+       OR NEW.inventory_owner_id <> order_row.inventory_owner_id
+       OR NEW.source_facility_id <> order_row.source_facility_id
+       OR NEW.destination_facility_id <> order_row.destination_facility_id
+       OR NEW.released_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'transfer order release does not match current draft state'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.validate_transfer_order_cancellation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE order_row record;
+BEGIN
+    SELECT * INTO order_row FROM public.transfer_orders
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.transfer_order_id FOR UPDATE;
+    IF order_row IS NULL OR order_row.status NOT IN ('draft','released')
+       OR order_row.status <> NEW.previous_status
+       OR order_row.revision <> NEW.expected_revision
+       OR NEW.resulting_revision <> NEW.expected_revision+1
+       OR NEW.inventory_owner_id <> order_row.inventory_owner_id
+       OR NEW.source_facility_id <> order_row.source_facility_id
+       OR NEW.destination_facility_id <> order_row.destination_facility_id
+       OR NEW.cancelled_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'transfer order cancellation does not match current state'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.require_transfer_order_transition_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    target_order_id bigint;
+    order_row record;
+BEGIN
+    IF TG_TABLE_NAME='transfer_orders' THEN
+        target_order_id := NEW.id;
+    ELSE
+        target_order_id := NEW.transfer_order_id;
+    END IF;
+    SELECT * INTO order_row FROM public.transfer_orders
+    WHERE tenant_id=NEW.tenant_id AND id=target_order_id;
+    IF order_row.status='released' AND NOT EXISTS (
+        SELECT 1 FROM public.transfer_order_releases evidence
+        WHERE evidence.tenant_id=order_row.tenant_id
+          AND evidence.transfer_order_id=order_row.id
+          AND evidence.resulting_revision=order_row.revision
+          AND evidence.released_by_user_id=order_row.released_by_user_id
+          AND evidence.released_at=order_row.released_at)
+    OR order_row.status='cancelled' AND NOT EXISTS (
+        SELECT 1 FROM public.transfer_order_cancellations evidence
+        WHERE evidence.tenant_id=order_row.tenant_id
+          AND evidence.transfer_order_id=order_row.id
+          AND evidence.resulting_revision=order_row.revision)
+    OR order_row.status='draft' AND EXISTS (
+        SELECT 1 FROM public.transfer_order_releases evidence
+        WHERE evidence.tenant_id=order_row.tenant_id
+          AND evidence.transfer_order_id=order_row.id)
+    THEN
+        RAISE EXCEPTION 'transfer order lifecycle evidence is inconsistent'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE TRIGGER transfer_orders_validate
+BEFORE INSERT ON public.transfer_orders
+FOR EACH ROW EXECUTE FUNCTION public.validate_transfer_order();
+CREATE TRIGGER transfer_orders_guard_mutation
+BEFORE UPDATE ON public.transfer_orders
+FOR EACH ROW EXECUTE FUNCTION public.guard_transfer_order_mutation();
+CREATE TRIGGER transfer_orders_reject_delete
+BEFORE DELETE ON public.transfer_orders
+FOR EACH ROW EXECUTE FUNCTION public.reject_transfer_order_ledger_mutation();
+CREATE TRIGGER transfer_order_lines_validate
+BEFORE INSERT ON public.transfer_order_lines
+FOR EACH ROW EXECUTE FUNCTION public.validate_transfer_order_line();
+CREATE TRIGGER transfer_order_lines_are_immutable
+BEFORE UPDATE OR DELETE ON public.transfer_order_lines
+FOR EACH ROW EXECUTE FUNCTION public.reject_transfer_order_ledger_mutation();
+CREATE TRIGGER transfer_order_releases_validate
+BEFORE INSERT ON public.transfer_order_releases
+FOR EACH ROW EXECUTE FUNCTION public.validate_transfer_order_release();
+CREATE TRIGGER transfer_order_releases_are_immutable
+BEFORE UPDATE OR DELETE ON public.transfer_order_releases
+FOR EACH ROW EXECUTE FUNCTION public.reject_transfer_order_ledger_mutation();
+CREATE TRIGGER transfer_order_cancellations_validate
+BEFORE INSERT ON public.transfer_order_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.validate_transfer_order_cancellation();
+CREATE TRIGGER transfer_order_cancellations_are_immutable
+BEFORE UPDATE OR DELETE ON public.transfer_order_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.reject_transfer_order_ledger_mutation();
+
+CREATE CONSTRAINT TRIGGER transfer_orders_require_lines
+AFTER INSERT ON public.transfer_orders
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_transfer_order_consistency();
+CREATE CONSTRAINT TRIGGER transfer_order_lines_require_header
+AFTER INSERT ON public.transfer_order_lines
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_transfer_order_consistency();
+CREATE CONSTRAINT TRIGGER transfer_orders_require_transition_evidence
+AFTER UPDATE ON public.transfer_orders
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_transfer_order_transition_consistency();
+CREATE CONSTRAINT TRIGGER transfer_order_releases_require_transition
+AFTER INSERT ON public.transfer_order_releases
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_transfer_order_transition_consistency();
+CREATE CONSTRAINT TRIGGER transfer_order_cancellations_require_transition
+AFTER INSERT ON public.transfer_order_cancellations
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_transfer_order_transition_consistency();
+
+ALTER TABLE public.transfer_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_orders FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_order_lines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_order_lines FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_order_releases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_order_releases FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_order_cancellations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_order_cancellations FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY transfer_orders_tenant_isolation ON public.transfer_orders
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY transfer_order_lines_tenant_isolation ON public.transfer_order_lines
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY transfer_order_releases_tenant_isolation ON public.transfer_order_releases
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY transfer_order_cancellations_tenant_isolation ON public.transfer_order_cancellations
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.transfer_orders TO wareboxes_app;
+GRANT UPDATE(status,revision,released_by_user_id,released_at)
+ON public.transfer_orders TO wareboxes_app;
+GRANT SELECT,INSERT ON public.transfer_order_lines TO wareboxes_app;
+GRANT SELECT,INSERT ON public.transfer_order_releases TO wareboxes_app;
+GRANT SELECT,INSERT ON public.transfer_order_cancellations TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.transfer_orders_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.transfer_order_lines_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.transfer_order_releases_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.transfer_order_cancellations_id_seq TO wareboxes_app;
+
+REVOKE ALL ON FUNCTION public.validate_transfer_order() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_transfer_order_line() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_transfer_order_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_transfer_order_ledger_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_transfer_order_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_transfer_order_release() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_transfer_order_cancellation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_transfer_order_transition_consistency() FROM PUBLIC;

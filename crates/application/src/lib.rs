@@ -38,6 +38,7 @@ pub mod replenishment;
 pub mod shipping;
 pub mod storage_zone;
 pub mod topology;
+pub mod transfer_order;
 
 pub use context::CommandContext;
 pub use error::{ApplicationError, ApplicationResult, ValidationIssue};

@@ -60,6 +60,7 @@ DECLARE
   tenant bigint;
   owner bigint;
   facility bigint;
+  transfer_facility bigint;
   actor bigint;
   item bigint;
   location bigint;
@@ -119,6 +120,33 @@ BEGIN
   VALUES (tenant, now(), owner, facility)
   ON CONFLICT (tenant_id, inventory_owner_id, facility_id)
   DO UPDATE SET deleted = NULL;
+
+  INSERT INTO facilities (tenant_id, created, name)
+  VALUES (tenant, now(), 'Cedar Transfer Hub')
+  ON CONFLICT (tenant_id, name) DO UPDATE SET deleted = NULL
+  RETURNING id INTO transfer_facility;
+
+  INSERT INTO inventory_owner_facilities
+      (tenant_id, created, inventory_owner_id, facility_id)
+  VALUES (tenant, now(), owner, transfer_facility)
+  ON CONFLICT (tenant_id, inventory_owner_id, facility_id)
+  DO UPDATE SET deleted = NULL;
+
+  INSERT INTO locations
+      (tenant_id, created, facility_id, barcode, name, type, active, pickable, receivable)
+  VALUES
+      (tenant, now(), transfer_facility, 'SEED-CEDAR-RECV-01', 'Cedar Receiving 01',
+       'staging', true, false, true),
+      (tenant, now(), transfer_facility, 'SEED-CEDAR-PICK-01', 'Cedar Pick 01',
+       'pick', true, true, false)
+  ON CONFLICT (tenant_id, barcode) DO UPDATE
+  SET deleted = NULL,
+      active = true,
+      name = EXCLUDED.name,
+      facility_id = EXCLUDED.facility_id,
+      type = EXCLUDED.type,
+      pickable = EXCLUDED.pickable,
+      receivable = EXCLUDED.receivable;
 
   FOREACH inventory_status IN ARRAY location_codes LOOP
     INSERT INTO locations

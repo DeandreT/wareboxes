@@ -454,6 +454,7 @@ impl SeedContext {
     pub async fn verify(&self) -> anyhow::Result<()> {
         let required = [
             ("purchase orders", "purchase_orders"),
+            ("transfer orders", "transfer_orders"),
             ("packing", "packing_sessions"),
             ("shipping", "shipments"),
             ("outbound loads", "outbound_loads"),

@@ -393,6 +393,19 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "purchase_order_asn_source_lines",
             "purchase_order_asn_source_lines_tenant_isolation",
         ),
+        ("transfer_orders", "transfer_orders_tenant_isolation"),
+        (
+            "transfer_order_lines",
+            "transfer_order_lines_tenant_isolation",
+        ),
+        (
+            "transfer_order_releases",
+            "transfer_order_releases_tenant_isolation",
+        ),
+        (
+            "transfer_order_cancellations",
+            "transfer_order_cancellations_tenant_isolation",
+        ),
         ("facilities", "facilities_tenant_isolation"),
         (
             "facility_shipping_origin_configurations",

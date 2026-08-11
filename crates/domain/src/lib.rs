@@ -28,6 +28,7 @@ mod replenishment;
 mod shipping;
 mod storage_zone;
 mod tenant;
+mod transfer_order;
 
 pub use allocation::{
     assess_order_allocation_readiness, plan_fefo_allocation, AllocationCandidate,
@@ -228,6 +229,13 @@ pub use storage_zone::{
     StorageZoneTravelSequence, MAX_STORAGE_ZONE_CODE_LENGTH, MAX_STORAGE_ZONE_NAME_LENGTH,
 };
 pub use tenant::TenantStatus;
+pub use transfer_order::{
+    cancel_transfer_order, release_transfer_order, NewTransferOrder,
+    TransferOrderCancellationDetails, TransferOrderCancellationNote,
+    TransferOrderCancellationReason, TransferOrderError, TransferOrderLineDefinition,
+    TransferOrderNumber, TransferOrderQuantity, TransferOrderRevision, TransferOrderStatus,
+    MAX_TRANSFER_ORDER_CANCELLATION_NOTE_LENGTH, MAX_TRANSFER_ORDER_NUMBER_LENGTH,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -358,6 +366,13 @@ positive_id!(PurchaseOrderAsnSourceId, "purchase order ASN source ID");
 positive_id!(
     PurchaseOrderAsnSourceLineId,
     "purchase order ASN source line ID"
+);
+positive_id!(TransferOrderId, "transfer order ID");
+positive_id!(TransferOrderLineId, "transfer order line ID");
+positive_id!(TransferOrderReleaseId, "transfer order release ID");
+positive_id!(
+    TransferOrderCancellationId,
+    "transfer order cancellation ID"
 );
 positive_id!(
     InboundInspectionDispositionId,

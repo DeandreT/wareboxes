@@ -36,6 +36,7 @@ use crate::replenishment::ReplenishmentWorkspace;
 use crate::shipping::ShippingWorkspace;
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::toast::ToastProvider;
+use crate::transfer_orders::TransferOrdersWorkspace;
 use crate::view_model::{facility_inventory, format_quantity, has_permission, open_order_count};
 
 const SESSION_BOOTSTRAP_ID: &str = "wareboxes-session-bootstrap";
@@ -174,6 +175,7 @@ pub(crate) enum Section {
     CycleCounts,
     Loads,
     PurchaseOrders,
+    TransferOrders,
     InboundAsns,
     Catalog,
     Inventory,
@@ -242,6 +244,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/fulfillment.css"/>
                 <link rel="stylesheet" href="/inbound-asns.css"/>
                 <link rel="stylesheet" href="/purchase-orders.css"/>
+                <link rel="stylesheet" href="/transfer-orders.css"/>
                 <link rel="stylesheet" href="/pick-shortages.css"/>
                 <link rel="stylesheet" href="/order-allocation.css"/>
                 <link rel="stylesheet" href="/packing.css"/>
@@ -303,6 +306,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("cycle-counts") view=CycleCountsPage/>
                     <Route path=StaticSegment("loads") view=LoadsPage/>
                     <Route path=StaticSegment("purchase-orders") view=PurchaseOrdersPage/>
+                    <Route path=StaticSegment("transfer-orders") view=TransferOrdersPage/>
                     <Route path=StaticSegment("inbound-asns") view=InboundAsnsPage/>
                     <Route path=StaticSegment("catalog") view=CatalogPage/>
                     <Route path=StaticSegment("inventory") view=InventoryPage/>
@@ -702,6 +706,9 @@ async fn load_workspace(
         Section::PurchaseOrders if has_permission(session, "wms") => {
             data.access = api::access().await?;
         }
+        Section::TransferOrders if has_permission(session, "wms") => {
+            data.access = api::access().await?;
+        }
         Section::Catalog if has_permission(session, "wms") => {}
         Section::Inventory if has_permission(session, "wms") => {
             let page = api::balances(None).await?;
@@ -753,6 +760,7 @@ async fn load_workspace(
         | Section::CycleCounts
         | Section::Loads
         | Section::PurchaseOrders
+        | Section::TransferOrders
         | Section::InboundAsns
         | Section::Catalog
         | Section::Inventory
@@ -818,6 +826,11 @@ fn InboundAsnsPage() -> impl IntoView {
 #[component]
 fn PurchaseOrdersPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::PurchaseOrders/> }
+}
+
+#[component]
+fn TransferOrdersPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::TransferOrders/> }
 }
 
 #[component]
@@ -999,6 +1012,13 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
             .into_any(),
             Section::PurchaseOrders if has_permission(&session, "wms") => view! {
                 <PurchaseOrdersWorkspace
+                    access=data.access
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::TransferOrders if has_permission(&session, "wms") => view! {
+                <TransferOrdersWorkspace
                     access=data.access
                     on_unauthorized=session_expired_callback()
                 />

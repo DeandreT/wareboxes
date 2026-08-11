@@ -49,4 +49,5 @@ pub mod shipping;
 pub mod storage_zone;
 pub mod tasks;
 pub mod tenants;
+pub mod transfer_order;
 pub mod unexpected_receipt;

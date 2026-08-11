@@ -42,6 +42,7 @@ mod rf_sessions;
 mod shipping;
 pub(crate) mod shipping_queue;
 mod storage_zones;
+mod transfer_orders;
 
 use axum::middleware;
 use axum::routing::{get, post};
@@ -77,6 +78,19 @@ pub fn router() -> Router<AppState> {
         .route(
             "/purchase-orders/{purchase_order_id}/asns",
             post(purchase_orders::create_asn),
+        )
+        .route(
+            "/transfer-orders",
+            get(transfer_orders::list).post(transfer_orders::create),
+        )
+        .route("/transfer-orders/{transfer_order_id}", get(transfer_orders::get))
+        .route(
+            "/transfer-orders/{transfer_order_id}/releases",
+            post(transfer_orders::release),
+        )
+        .route(
+            "/transfer-orders/{transfer_order_id}/cancellations",
+            post(transfer_orders::cancel),
         )
         .route("/inbound-loads", post(inbound_loads::plan))
         .route(

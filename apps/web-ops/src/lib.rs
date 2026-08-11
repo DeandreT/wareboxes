@@ -33,6 +33,7 @@ mod replenishment;
 mod shipping;
 mod sorting;
 mod toast;
+mod transfer_orders;
 mod view_model;
 mod workspace_layout;
 

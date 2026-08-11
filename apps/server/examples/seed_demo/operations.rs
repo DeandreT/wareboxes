@@ -4,24 +4,131 @@ use axum::http::{Method, StatusCode};
 use serde_json::json;
 use wareboxes_api::repo;
 use wareboxes_api_contract::v1::{
-    CancelInboundAsnResponse, CancelPurchaseOrderResponse, ConfigureReplenishmentPolicyResponse,
-    CreateCycleCountTaskResponse, CreatePurchaseOrderAsnResponse, CreatePurchaseOrderResponse,
-    CreatePutawayTaskResponse, IntegrationOrderIntakeResponse,
+    CancelInboundAsnResponse, CancelPurchaseOrderResponse, CancelTransferOrderResponse,
+    ConfigureReplenishmentPolicyResponse, CreateCycleCountTaskResponse,
+    CreatePurchaseOrderAsnResponse, CreatePurchaseOrderResponse, CreatePutawayTaskResponse,
+    CreateTransferOrderResponse, IntegrationOrderIntakeResponse,
     IntegrationOrderOwnerMappingResponse, PickWaveResponse, PlaceInventoryHoldResponse,
     PlanInboundAsnLoadResponse, PlanOrderAllocationResponse, PlanReplenishmentResponse,
-    ReleasePurchaseOrderResponse,
+    ReleasePurchaseOrderResponse, ReleaseTransferOrderResponse,
 };
 
 use crate::support::SeedContext;
 
 pub async fn seed(context: &SeedContext) -> anyhow::Result<()> {
     seed_purchase_orders(context).await?;
+    seed_transfer_orders(context).await?;
     seed_inventory_hold(context).await?;
     seed_cycle_count(context).await?;
     seed_putaway(context).await?;
     seed_replenishment(context).await?;
     seed_pick_wave(context).await?;
     seed_integration_monitor(context).await?;
+    Ok(())
+}
+
+async fn seed_transfer_orders(context: &SeedContext) -> anyhow::Result<()> {
+    let destination_id: i64 = sqlx::query_scalar(
+        r#"
+        SELECT facility.id
+        FROM facilities facility
+        INNER JOIN inventory_owner_facilities link
+          ON link.tenant_id=facility.tenant_id AND link.facility_id=facility.id
+        WHERE facility.tenant_id=$1 AND facility.id<>$2 AND facility.deleted IS NULL
+          AND link.inventory_owner_id=$3 AND link.deleted IS NULL
+        ORDER BY facility.id LIMIT 1
+        "#,
+    )
+    .bind(context.tenant_id.get())
+    .bind(context.facility_id)
+    .bind(context.inventory_owner_id)
+    .fetch_one(&context.admin)
+    .await
+    .context("finding a second owner-enabled facility for transfer demos")?;
+    let item_ids = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT owner_item.item_id
+        FROM inventory_owner_items owner_item
+        INNER JOIN items item
+          ON item.tenant_id=owner_item.tenant_id AND item.id=owner_item.item_id
+        WHERE owner_item.tenant_id=$1 AND owner_item.inventory_owner_id=$2
+          AND owner_item.deleted IS NULL AND item.deleted IS NULL
+        ORDER BY owner_item.item_id LIMIT 2
+        "#,
+    )
+    .bind(context.tenant_id.get())
+    .bind(context.inventory_owner_id)
+    .fetch_all(&context.admin)
+    .await?;
+    if item_ids.len() < 2 {
+        bail!("transfer-order demo requires two client-eligible catalog items");
+    }
+    for sequence in 1_i64..=4 {
+        let number = format!("WB-DEMO-TO-{sequence:04}");
+        let existing: Option<(i64, String, i64)> = sqlx::query_as(
+            "SELECT id,status,revision FROM transfer_orders WHERE tenant_id=$1 AND number=$2",
+        )
+        .bind(context.tenant_id.get())
+        .bind(&number)
+        .fetch_optional(&context.admin)
+        .await?;
+        let (id, mut status, mut revision) = match existing {
+            Some(value) => value,
+            None => {
+                let created: CreateTransferOrderResponse = context
+                    .command(
+                        Method::POST,
+                        "/api/v1/transfer-orders",
+                        &format!("demo-transfer-order-{sequence}"),
+                        json!({
+                            "inventory_owner_id": context.inventory_owner_id,
+                            "source_facility_id": context.facility_id,
+                            "destination_facility_id": destination_id,
+                            "number": number,
+                            "expected_departure_at": format!("2027-08-{:02}T08:00:00Z", 20+sequence),
+                            "expected_arrival_at": format!("2027-08-{:02}T16:00:00Z", 20+sequence),
+                            "lines": [
+                                {"item_id": item_ids[0], "requested_quantity": 6+sequence},
+                                {"item_id": item_ids[1], "requested_quantity": 10+sequence}
+                            ]
+                        }),
+                    )
+                    .await?;
+                (
+                    created.transfer_order_id,
+                    "draft".to_owned(),
+                    created.revision.get(),
+                )
+            }
+        };
+        if sequence <= 2 && status == "draft" {
+            let released: ReleaseTransferOrderResponse = context
+                .command(
+                    Method::POST,
+                    &format!("/api/v1/transfer-orders/{id}/releases"),
+                    &format!("demo-transfer-order-release-{sequence}"),
+                    json!({"expected_revision": revision}),
+                )
+                .await?;
+            status = "released".to_owned();
+            revision = released.revision.get();
+        }
+        if sequence == 3 && status != "cancelled" {
+            let _: CancelTransferOrderResponse = context
+                .command(
+                    Method::POST,
+                    &format!("/api/v1/transfer-orders/{id}/cancellations"),
+                    "demo-transfer-order-cancel-3",
+                    json!({
+                        "expected_revision": revision,
+                        "reason": "route_cancelled",
+                        "note": "Demo linehaul route was withdrawn"
+                    }),
+                )
+                .await?;
+        }
+    }
+    println!("seeded draft, released, and cancelled interfacility transfer orders");
     Ok(())
 }
 

@@ -45,6 +45,7 @@ mod rf_session;
 mod shipping;
 mod shipping_queue;
 mod storage_zone;
+mod transfer_order;
 
 pub use backorder::{
     BackorderPolicyMode, BackorderPolicyRequest, BackorderPolicyResponse, BackorderReason,
@@ -348,6 +349,14 @@ pub use storage_zone::{
     ConfigureStorageZoneRequest, RetireStorageZoneRequest, StorageZoneLocationResponse,
     StorageZonePage, StorageZonePageRequest, StorageZonePurpose, StorageZoneResponse,
     StorageZoneStatus,
+};
+pub use transfer_order::{
+    CancelTransferOrderRequest, CancelTransferOrderResponse, CreateTransferOrderLineRequest,
+    CreateTransferOrderRequest, CreateTransferOrderResponse, CreatedTransferOrderLineResponse,
+    ReleaseTransferOrderRequest, ReleaseTransferOrderResponse, TransferOrderCancellationReason,
+    TransferOrderDetailResponse, TransferOrderLineResponse, TransferOrderPage,
+    TransferOrderPageRequest, TransferOrderStatus, TransferOrderSummaryResponse,
+    MAX_TRANSFER_ORDER_CANCELLATION_NOTE_LENGTH,
 };
 
 /// URL prefix for the version 1 public API.

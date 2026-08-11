@@ -1,0 +1,33 @@
+.transfer-order-table {
+  min-width: 1050px;
+}
+
+.transfer-order-table th,
+.transfer-order-table td {
+  padding: 4px 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.transfer-order-table th:first-child,
+.transfer-order-table td:first-child {
+  width: 150px;
+}
+
+.transfer-order-table th:nth-child(2),
+.transfer-order-table td:nth-child(2) {
+  width: 72px;
+}
+
+.transfer-order-table tbody tr.active-row {
+  background: var(--amber-soft);
+  box-shadow: inset 3px 0 var(--accent);
+}
+
+.transfer-order-workspace .purchase-order-toolbar .search-field {
+  max-width: 210px;
+}
+
+.transfer-order-workspace .purchase-order-toolbar select {
+  max-width: 145px;
+}

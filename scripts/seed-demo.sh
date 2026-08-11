@@ -159,6 +159,20 @@ BEGIN
   ) THEN
     missing := array_append(missing, 'cancelled purchase order evidence');
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM transfer_orders WHERE status='draft') THEN
+    missing := array_append(missing, 'draft transfer orders');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM transfer_orders WHERE status='released') THEN
+    missing := array_append(missing, 'released transfer orders');
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM transfer_orders transfer
+    INNER JOIN transfer_order_cancellations cancellation
+      ON cancellation.tenant_id=transfer.tenant_id
+     AND cancellation.transfer_order_id=transfer.id
+    WHERE transfer.status='cancelled'
+      AND transfer.revision=cancellation.resulting_revision
+  ) THEN missing := array_append(missing, 'cancelled transfer order evidence'); END IF;
   IF NOT EXISTS (
     SELECT 1
     FROM purchase_order_asn_sources source
@@ -298,6 +312,7 @@ report_coverage() {
       ('Legacy loads', (SELECT COUNT(*) FROM loads WHERE deleted IS NULL)),
       ('Advance shipping notices', (SELECT COUNT(*) FROM inbound_asns)),
       ('Purchase orders', (SELECT COUNT(*) FROM purchase_orders)),
+      ('Transfer orders', (SELECT COUNT(*) FROM transfer_orders)),
       ('Pick waves', (SELECT COUNT(*) FROM pick_waves)),
       ('Packing sessions', (SELECT COUNT(*) FROM packing_sessions)),
       ('Shipments', (SELECT COUNT(*) FROM shipments)),
