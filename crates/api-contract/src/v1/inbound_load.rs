@@ -100,6 +100,33 @@ pub struct ArriveInboundLoadResponse {
     pub arrived_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartInboundLoadUnloadingRequest {
+    pub load_scan: String,
+    pub receiving_location_scan: String,
+    pub seal_scan: Option<String>,
+    /// Optional RFC 3339 start time; omitted to use authoritative server time.
+    pub started_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadReceivingStatus {
+    Receiving,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartInboundLoadUnloadingResponse {
+    pub unloading_start_id: i64,
+    pub load_id: i64,
+    pub status: InboundLoadReceivingStatus,
+    pub receiving_location_id: i64,
+    pub started_by: i64,
+    pub started_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -181,5 +208,21 @@ mod tests {
         let mut with_status = request;
         with_status["status"] = json!("arrived");
         assert!(serde_json::from_value::<ArriveInboundLoadRequest>(with_status).is_err());
+    }
+
+    #[test]
+    fn unloading_start_request_is_scan_only_and_strict() {
+        let request = json!({
+            "load_scan": "WB-LOAD-101",
+            "receiving_location_scan": "RECV-01",
+            "seal_scan": "SEAL-101",
+            "started_at": null
+        });
+        assert!(
+            serde_json::from_value::<StartInboundLoadUnloadingRequest>(request.clone()).is_ok()
+        );
+        let mut changed = request;
+        changed["quantity"] = json!(1);
+        assert!(serde_json::from_value::<StartInboundLoadUnloadingRequest>(changed).is_err());
     }
 }

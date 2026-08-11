@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
     InboundLoadArrivalId, InboundLoadId, InboundLoadLineId, InboundLoadPreArrivalStatus,
-    InboundLoadScanValue, LocationId, NewInboundLoadPlan, Timestamp, UserId,
+    InboundLoadScanValue, InboundLoadUnloadingStartId, LocationId, NewInboundLoadPlan, Timestamp,
+    UserId,
 };
 
 pub const PLAN_INBOUND_LOAD_OPERATION: &str = "inbound.load.plan.v1";
 pub const ARRIVE_INBOUND_LOAD_OPERATION: &str = "inbound.load.arrive.v1";
+pub const START_INBOUND_LOAD_UNLOADING_OPERATION: &str = "inbound.load.unloading.start.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlanInboundLoadCommand {
@@ -104,6 +106,65 @@ pub struct ArriveInboundLoadResult {
     pub arrived_at: Timestamp,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StartInboundLoadUnloadingCommand {
+    load_id: InboundLoadId,
+    load_scan: InboundLoadScanValue,
+    receiving_location_scan: InboundLoadScanValue,
+    seal_scan: Option<InboundLoadScanValue>,
+    started_at: Option<Timestamp>,
+}
+
+impl StartInboundLoadUnloadingCommand {
+    pub const fn new(
+        load_id: InboundLoadId,
+        load_scan: InboundLoadScanValue,
+        receiving_location_scan: InboundLoadScanValue,
+        seal_scan: Option<InboundLoadScanValue>,
+        started_at: Option<Timestamp>,
+    ) -> Self {
+        Self {
+            load_id,
+            load_scan,
+            receiving_location_scan,
+            seal_scan,
+            started_at,
+        }
+    }
+
+    pub const fn load_id(&self) -> InboundLoadId {
+        self.load_id
+    }
+    pub const fn load_scan(&self) -> &InboundLoadScanValue {
+        &self.load_scan
+    }
+    pub const fn receiving_location_scan(&self) -> &InboundLoadScanValue {
+        &self.receiving_location_scan
+    }
+    pub fn seal_scan(&self) -> Option<&InboundLoadScanValue> {
+        self.seal_scan.as_ref()
+    }
+    pub const fn started_at(&self) -> Option<&Timestamp> {
+        self.started_at.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadReceivingStatus {
+    Receiving,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartInboundLoadUnloadingResult {
+    pub unloading_start_id: InboundLoadUnloadingStartId,
+    pub load_id: InboundLoadId,
+    pub status: InboundLoadReceivingStatus,
+    pub receiving_location_id: LocationId,
+    pub started_by: UserId,
+    pub started_at: Timestamp,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -155,5 +216,19 @@ mod tests {
         assert_eq!(value["load_id"], json!(12));
         assert_eq!(value["load_scan"], json!("WB-LOAD-12"));
         assert_eq!(value["receiving_location_scan"], json!("RECV-01"));
+    }
+
+    #[test]
+    fn unloading_hash_contains_optional_seal_evidence() {
+        let value = serde_json::to_value(StartInboundLoadUnloadingCommand::new(
+            InboundLoadId::new(12).unwrap(),
+            InboundLoadScanValue::new("WB-LOAD-12").unwrap(),
+            InboundLoadScanValue::new("RECV-01").unwrap(),
+            Some(InboundLoadScanValue::new("SEAL-12").unwrap()),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(value["seal_scan"], json!("SEAL-12"));
+        assert_eq!(value["load_id"], json!(12));
     }
 }

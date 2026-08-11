@@ -896,6 +896,58 @@
   color: var(--ink);
 }
 
+.receiving-start-action {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 8px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--blue-soft);
+}
+
+.receiving-start-action > div {
+  display: grid;
+  gap: 1px;
+}
+
+.receiving-start-action strong {
+  font-size: 11px;
+}
+
+.receiving-start-action span {
+  color: var(--ink-soft);
+  font-size: 9px;
+}
+
+.receiving-start-action .primary-action {
+  flex: 0 0 auto;
+}
+
+.unloading-confirmation {
+  margin: 6px;
+  border-left-color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.unloading-confirmation .evidence-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 16px;
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 9px;
+}
+
+.unloading-confirmation .evidence-summary strong {
+  margin-right: 3px;
+  color: var(--ink);
+}
+
 .detail-section,
 .detail-section-stack {
   min-width: 0;

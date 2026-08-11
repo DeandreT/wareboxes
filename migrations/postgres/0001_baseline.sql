@@ -35671,3 +35671,137 @@ GRANT USAGE ON SEQUENCE public.inbound_load_arrivals_id_seq TO wareboxes_app;
 REVOKE ALL ON FUNCTION public.validate_inbound_load_arrival() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_inbound_load_arrival_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_inbound_load_arrival_mutation() FROM PUBLIC;
+
+CREATE TABLE public.inbound_load_unloading_starts (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    load_id bigint NOT NULL,
+    receiving_location_id bigint NOT NULL,
+    observed_load_barcode text NOT NULL,
+    observed_receiving_location_barcode text NOT NULL,
+    observed_seal text,
+    started_by_user_id bigint NOT NULL,
+    started_at timestamp with time zone NOT NULL,
+    CONSTRAINT inbound_load_unloading_starts_load_scan_check CHECK (
+        observed_load_barcode = btrim(observed_load_barcode)
+        AND char_length(observed_load_barcode) BETWEEN 1 AND 200
+    ),
+    CONSTRAINT inbound_load_unloading_starts_location_scan_check CHECK (
+        observed_receiving_location_barcode = btrim(observed_receiving_location_barcode)
+        AND char_length(observed_receiving_location_barcode) BETWEEN 1 AND 200
+    ),
+    CONSTRAINT inbound_load_unloading_starts_seal_scan_check CHECK (
+        observed_seal IS NULL OR (
+            observed_seal = btrim(observed_seal)
+            AND char_length(observed_seal) BETWEEN 1 AND 200
+        )
+    ),
+    CONSTRAINT inbound_load_unloading_starts_tenant_load_unique UNIQUE (tenant_id, load_id),
+    CONSTRAINT inbound_load_unloading_starts_owner_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    CONSTRAINT inbound_load_unloading_starts_facility_fkey
+        FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities(tenant_id, id),
+    CONSTRAINT inbound_load_unloading_starts_load_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, load_id)
+        REFERENCES public.loads(tenant_id, inventory_owner_id, id),
+    CONSTRAINT inbound_load_unloading_starts_location_fkey
+        FOREIGN KEY (tenant_id, facility_id, receiving_location_id)
+        REFERENCES public.locations(tenant_id, facility_id, id),
+    CONSTRAINT inbound_load_unloading_starts_actor_fkey FOREIGN KEY (started_by_user_id)
+        REFERENCES public.users(id)
+);
+
+CREATE INDEX inbound_load_unloading_starts_scope_idx
+ON public.inbound_load_unloading_starts
+    (tenant_id, facility_id, inventory_owner_id, started_at DESC, id DESC);
+
+CREATE FUNCTION public.validate_inbound_load_unloading_start() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    load_row record;
+    location_barcode text;
+BEGIN
+    SELECT type, status, facility_id, dock_door_location_id, execution_barcode,
+           NULLIF(btrim(seal_number),'') AS seal_number
+    INTO load_row
+    FROM public.loads
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND id=NEW.load_id
+      AND deleted IS NULL;
+    IF load_row IS NULL
+       OR load_row.type <> 'inbound'
+       OR load_row.status <> 'arrived'
+       OR load_row.facility_id <> NEW.facility_id
+       OR load_row.dock_door_location_id IS DISTINCT FROM NEW.receiving_location_id
+       OR upper(btrim(load_row.execution_barcode)) <> upper(NEW.observed_load_barcode)
+       OR (load_row.seal_number IS NULL AND NEW.observed_seal IS NOT NULL)
+       OR (load_row.seal_number IS NOT NULL AND (
+            NEW.observed_seal IS NULL
+            OR upper(load_row.seal_number) <> upper(NEW.observed_seal)
+       ))
+       OR NEW.started_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'inbound unloading evidence does not match the arrived load'
+            USING ERRCODE='23514';
+    END IF;
+    SELECT barcode INTO location_barcode
+    FROM public.locations
+    WHERE tenant_id=NEW.tenant_id
+      AND facility_id=NEW.facility_id
+      AND id=NEW.receiving_location_id
+      AND deleted IS NULL AND active AND receivable;
+    IF location_barcode IS NULL
+       OR upper(btrim(location_barcode)) <> upper(NEW.observed_receiving_location_barcode) THEN
+        RAISE EXCEPTION 'inbound unloading location evidence is invalid'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.require_inbound_load_unloading_start_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    load_row record;
+BEGIN
+    SELECT status, actual_time, dock_door_location_id
+    INTO load_row
+    FROM public.loads
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.load_id;
+    IF load_row IS NULL
+       OR load_row.status <> 'receiving'
+       OR load_row.actual_time IS DISTINCT FROM NEW.started_at
+       OR load_row.dock_door_location_id IS DISTINCT FROM NEW.receiving_location_id THEN
+        RAISE EXCEPTION 'inbound unloading evidence does not match resulting load state'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE TRIGGER inbound_load_unloading_starts_validate
+BEFORE INSERT ON public.inbound_load_unloading_starts
+FOR EACH ROW EXECUTE FUNCTION public.validate_inbound_load_unloading_start();
+CREATE TRIGGER inbound_load_unloading_starts_are_immutable
+BEFORE UPDATE OR DELETE ON public.inbound_load_unloading_starts
+FOR EACH ROW EXECUTE FUNCTION public.reject_inbound_load_arrival_mutation();
+CREATE CONSTRAINT TRIGGER inbound_load_unloading_starts_require_consistency
+AFTER INSERT ON public.inbound_load_unloading_starts
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_inbound_load_unloading_start_consistency();
+
+ALTER TABLE public.inbound_load_unloading_starts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.inbound_load_unloading_starts FORCE ROW LEVEL SECURITY;
+CREATE POLICY inbound_load_unloading_starts_tenant_isolation
+ON public.inbound_load_unloading_starts
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.inbound_load_unloading_starts TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.inbound_load_unloading_starts_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_inbound_load_unloading_start() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_inbound_load_unloading_start_consistency() FROM PUBLIC;

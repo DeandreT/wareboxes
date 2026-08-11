@@ -62,6 +62,25 @@ pub enum InboundLoadArrivalError {
     FutureArrival,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InboundLoadUnloadingError {
+    #[error("inbound load must be arrived before unloading begins")]
+    InvalidStatus,
+    #[error("unloading start time cannot be in the future")]
+    FutureStart,
+}
+
+pub fn validate_inbound_load_unloading_start(
+    started_at: Timestamp,
+    current_time: Timestamp,
+) -> Result<(), InboundLoadUnloadingError> {
+    if started_at > current_time {
+        Err(InboundLoadUnloadingError::FutureStart)
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct InboundLoadScanValue(String);
@@ -415,6 +434,10 @@ mod tests {
         assert_eq!(
             validate_inbound_load_arrival(InboundLoadPreArrivalStatus::Scheduled, future, now),
             Err(InboundLoadArrivalError::FutureArrival)
+        );
+        assert_eq!(
+            validate_inbound_load_unloading_start(future, now),
+            Err(InboundLoadUnloadingError::FutureStart)
         );
     }
 }

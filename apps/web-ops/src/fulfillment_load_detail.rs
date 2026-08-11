@@ -284,6 +284,8 @@ pub fn LoadDetailPanel(
                 <ReceivingExecutionPanel
                     load_id
                     execution_barcode=load.get_value().execution_barcode
+                    seal_number=load.get_value().seal_number
+                    on_refreshed
                     on_unauthorized
                 />
             </Show>

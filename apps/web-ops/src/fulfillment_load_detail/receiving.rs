@@ -1,10 +1,12 @@
-use leptos::prelude::*;
+use leptos::{html, prelude::*};
 use lucide_leptos::RefreshCw;
 use wareboxes_api_contract::v1::{
     ExpectedReceiptLine, ExpectedReceivingLoadStatus, ExpectedReceivingSessionResponse,
+    StartInboundLoadUnloadingRequest,
 };
 
 use crate::api;
+use crate::toast::use_toast_bus;
 use crate::view_model::format_quantity;
 
 #[derive(Clone, Copy)]
@@ -29,6 +31,8 @@ struct ReceivingTotals {
 pub(super) fn ReceivingExecutionPanel(
     load_id: i64,
     execution_barcode: String,
+    seal_number: Option<String>,
+    on_refreshed: Callback<i64>,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     let state = ReceivingState {
@@ -39,6 +43,8 @@ pub(super) fn ReceivingExecutionPanel(
         on_unauthorized,
     };
     let execution_barcode = StoredValue::new(execution_barcode);
+    let seal_number = StoredValue::new(seal_number);
+    let unloading_open = RwSignal::new(false);
 
     Effect::new(move |_| request_session(load_id, state));
 
@@ -89,13 +95,43 @@ pub(super) fn ReceivingExecutionPanel(
                         <div>
                             <span>"Directed destination"</span>
                             <strong>{location_name}</strong>
-                            <small class="mono">{location_barcode}</small>
+                            <small class="mono">{location_barcode.clone()}</small>
                         </div>
                         <div>
                             <span>"Execution state"</span>
                             <strong class=receiving_status_class(status)>{receiving_status_label(status)}</strong>
                         </div>
                     </div>
+                    <Show when=move || status == ExpectedReceivingLoadStatus::Arrived && !unloading_open.get()>
+                        <div class="receiving-start-action">
+                            <div>
+                                <strong>"Ready to unload"</strong>
+                                <span>"Verify the load, dock, and planned seal before physical unloading begins."</span>
+                            </div>
+                            <button
+                                type="button"
+                                class="button primary-action"
+                                on:click=move |_| unloading_open.set(true)
+                            >
+                                "Start unloading"
+                            </button>
+                        </div>
+                    </Show>
+                    <Show when=move || status == ExpectedReceivingLoadStatus::Arrived && unloading_open.get()>
+                        <UnloadingConfirmation
+                            load_id
+                            expected_load_scan=execution_barcode.get_value()
+                            expected_location_scan=location_barcode.clone()
+                            expected_seal=seal_number.get_value()
+                            on_close=Callback::new(move |_| unloading_open.set(false))
+                            on_started=Callback::new(move |_| {
+                                unloading_open.set(false);
+                                request_session(load_id, state);
+                                on_refreshed.run(load_id);
+                            })
+                            on_unauthorized
+                        />
+                    </Show>
                     <div class="receiving-progress-strip">
                         <ReceivingMetric label="Expected" value=totals.expected/>
                         <ReceivingMetric label="Received" value=totals.received/>
@@ -125,6 +161,146 @@ pub(super) fn ReceivingExecutionPanel(
                 }
             })}
         </section>
+    }
+}
+
+#[component]
+fn UnloadingConfirmation(
+    load_id: i64,
+    expected_load_scan: String,
+    expected_location_scan: String,
+    expected_seal: Option<String>,
+    on_close: Callback<()>,
+    on_started: Callback<()>,
+    on_unauthorized: Callback<()>,
+) -> impl IntoView {
+    let load_scan = RwSignal::new(String::new());
+    let location_scan = RwSignal::new(String::new());
+    let seal_scan = RwSignal::new(String::new());
+    let pending = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let retry = RwSignal::new(None::<(StartInboundLoadUnloadingRequest, String)>);
+    let form_ref = NodeRef::<html::Form>::new();
+    let load_ref = NodeRef::<html::Input>::new();
+    let toasts = use_toast_bus();
+    let seal_required = expected_seal.is_some();
+    let expected_load_scan = StoredValue::new(expected_load_scan);
+    let expected_location_scan = StoredValue::new(expected_location_scan);
+    let expected_seal = StoredValue::new(expected_seal);
+
+    #[cfg(target_arch = "wasm32")]
+    Effect::new(move |_| {
+        if let Some(input) = load_ref.get() {
+            let _ = input.focus();
+        }
+        if let Some(form) = form_ref.get() {
+            form.scroll_into_view_with_bool(false);
+        }
+    });
+
+    let submit = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        if pending.get_untracked() {
+            return;
+        }
+        let (request, key) = if let Some(saved) = retry.get_untracked() {
+            saved
+        } else {
+            let request = StartInboundLoadUnloadingRequest {
+                load_scan: load_scan.get_untracked(),
+                receiving_location_scan: location_scan.get_untracked(),
+                seal_scan: seal_required.then(|| seal_scan.get_untracked()),
+                started_at: None,
+            };
+            let key = api::new_idempotency_key();
+            retry.set(Some((request.clone(), key.clone())));
+            (request, key)
+        };
+        pending.set(true);
+        error.set(None);
+        leptos::task::spawn_local(async move {
+            match api::start_inbound_load_unloading(load_id, &request, &key).await {
+                Ok(_) => {
+                    retry.set(None);
+                    pending.set(false);
+                    toasts.success(format!("Unloading started for load #{load_id}."));
+                    on_started.run(());
+                }
+                Err(api_error) if api_error.unauthorized => on_unauthorized.run(()),
+                Err(api_error) => {
+                    if !api_error.ambiguous_outcome {
+                        retry.set(None);
+                    }
+                    error.set(Some(if api_error.ambiguous_outcome {
+                        "Unloading outcome is unknown. Retry to reconcile the exact saved scans."
+                            .to_owned()
+                    } else {
+                        api_error.message
+                    }));
+                    pending.set(false);
+                }
+            }
+        });
+    };
+
+    view! {
+        <form
+            node_ref=form_ref
+            class="confirmation-panel unloading-confirmation"
+            on:submit=submit
+        >
+            <h3>"Verify unloading start"</h3>
+            <div class="evidence-summary">
+                <span><strong>"Expected load"</strong> {expected_load_scan.get_value()}</span>
+                <span><strong>"Expected dock"</strong> {expected_location_scan.get_value()}</span>
+                <Show when=move || expected_seal.get_value().is_some()>
+                    <span><strong>"Expected seal"</strong> {expected_seal.get_value().unwrap_or_default()}</span>
+                </Show>
+            </div>
+            <div class="form-grid three-column">
+                <label>
+                    <span>"Load scan"</span>
+                    <input
+                        node_ref=load_ref
+                        required
+                        autocomplete="off"
+                        prop:value=move || load_scan.get()
+                        on:input=move |event| load_scan.set(event_target_value(&event))
+                    />
+                </label>
+                <label>
+                    <span>"Dock scan"</span>
+                    <input
+                        required
+                        autocomplete="off"
+                        prop:value=move || location_scan.get()
+                        on:input=move |event| location_scan.set(event_target_value(&event))
+                    />
+                </label>
+                <Show when=move || seal_required>
+                    <label>
+                        <span>"Seal scan"</span>
+                        <input
+                            required
+                            autocomplete="off"
+                            prop:value=move || seal_scan.get()
+                            on:input=move |event| seal_scan.set(event_target_value(&event))
+                        />
+                    </label>
+                </Show>
+            </div>
+            <Show when=move || error.get().is_some()>
+                <p class="inline-command-error" role="alert">{move || error.get().unwrap_or_default()}</p>
+            </Show>
+            <div class="form-actions">
+                <button type="submit" class="button primary-action" disabled=move || pending.get()>
+                    {move || if pending.get() { "Starting" } else { "Confirm unloading" }}
+                </button>
+                <button type="button" class="button secondary-action" on:click=move |_| on_close.run(()) disabled=move || pending.get()>
+                    "Go back"
+                </button>
+            </div>
+        </form>
     }
 }
 

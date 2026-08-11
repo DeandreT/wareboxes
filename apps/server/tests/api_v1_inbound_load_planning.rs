@@ -12,7 +12,7 @@ use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     ArriveInboundLoadResponse, ArrivedInboundLoadStatus, ErrorReason, ErrorResponse,
     ExpectedReceivingSessionResponse, InboundLoadEntryItemResponse, PlanInboundLoadResponse,
-    PlannedInboundLoadStatus,
+    PlannedInboundLoadStatus, StartInboundLoadUnloadingResponse,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
@@ -52,6 +52,24 @@ fn arrival_request(
     Request::builder()
         .method(Method::POST)
         .uri(format!("/api/v1/inbound-loads/{load_id}/arrivals"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .header(IDEMPOTENCY_KEY_HEADER, idempotency_key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn unloading_request(
+    token: &str,
+    tenant_id: TenantId,
+    load_id: i64,
+    idempotency_key: &str,
+    body: &Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/v1/inbound-loads/{load_id}/unloading-starts"))
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(TENANT_ID_HEADER, tenant_id.to_string())
         .header(IDEMPOTENCY_KEY_HEADER, idempotency_key)
@@ -432,6 +450,81 @@ async fn atomic_plan_replays_exactly_and_enters_expected_receiving() {
     );
     tx.rollback().await.unwrap();
 
+    let unloading_body = json!({
+        "load_scan": arrival_body["load_scan"],
+        "receiving_location_scan": "PLAN-DOCK",
+        "seal_scan": "SEAL-100",
+        "started_at": null
+    });
+    let started = app
+        .clone()
+        .oneshot(unloading_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "unloading-atomic",
+            &unloading_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK);
+    let started: StartInboundLoadUnloadingResponse = json_body(started).await;
+    assert_eq!(started.load_id, result.load_id);
+    assert_eq!(started.receiving_location_id, dock);
+    let replay = app
+        .clone()
+        .oneshot(unloading_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "unloading-atomic",
+            &unloading_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<StartInboundLoadUnloadingResponse>(replay).await,
+        started
+    );
+    let mut changed_unloading = unloading_body.clone();
+    changed_unloading["seal_scan"] = json!("OTHER-SEAL");
+    let changed = app
+        .clone()
+        .oneshot(unloading_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "unloading-atomic",
+            &changed_unloading,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(changed.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body::<ErrorResponse>(changed).await.reason,
+        ErrorReason::IdempotencyKeyReused
+    );
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let execution: (i64, i64, i64, String) = sqlx::query_as(
+        r#"
+        SELECT
+          (SELECT COUNT(*) FROM inbound_load_unloading_starts WHERE load_id=$1),
+          (SELECT COUNT(*) FROM command_idempotency_records
+             WHERE operation='inbound.load.unloading.start.v1'
+               AND (result_json->>'load_id')::BIGINT=$1),
+          (SELECT aggregate_sequence FROM outbox_events
+             WHERE event_type='inbound.load.unloading_started' AND aggregate_id=$1::TEXT),
+          (SELECT status FROM loads WHERE id=$1)
+        "#,
+    )
+    .bind(result.load_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(execution, (1, 1, 3, "receiving".to_owned()));
+
     let session = app
         .oneshot(session_request(&token, tenant_id, result.load_id))
         .await
@@ -572,6 +665,77 @@ async fn arrival_rejects_wrong_evidence_and_races_to_one_effect() {
         ),
         (1, 1, 1, 1)
     );
+
+    let wrong_seal = json!({
+        "load_scan": planned.execution_barcode,
+        "receiving_location_scan": "ARRIVAL-RACE-DOCK",
+        "seal_scan": "WRONG-SEAL",
+        "started_at": null
+    });
+    let rejected = app
+        .clone()
+        .oneshot(unloading_request(
+            &token,
+            tenant_id,
+            planned.load_id,
+            "unloading-wrong-seal",
+            &wrong_seal,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let unloading_body = json!({
+        "load_scan": wrong_seal["load_scan"],
+        "receiving_location_scan": "ARRIVAL-RACE-DOCK",
+        "seal_scan": "SEAL-100",
+        "started_at": null
+    });
+    let first = app.clone().oneshot(unloading_request(
+        &token,
+        tenant_id,
+        planned.load_id,
+        "unloading-race-a",
+        &unloading_body,
+    ));
+    let second = app.clone().oneshot(unloading_request(
+        &token,
+        tenant_id,
+        planned.load_id,
+        "unloading-race-b",
+        &unloading_body,
+    ));
+    let (first, second) = tokio::join!(first, second);
+    let statuses = [first.unwrap().status(), second.unwrap().status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let effects: (i64, i64, String) = sqlx::query_as(
+        r#"
+        SELECT
+          (SELECT COUNT(*) FROM inbound_load_unloading_starts WHERE load_id=$1),
+          (SELECT COUNT(*) FROM outbox_events
+             WHERE event_type='inbound.load.unloading_started' AND aggregate_id=$1::TEXT),
+          (SELECT status FROM loads WHERE id=$1)
+        "#,
+    )
+    .bind(planned.load_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(effects, (1, 1, "receiving".to_owned()));
 }
 
 #[tokio::test]
@@ -841,6 +1005,24 @@ async fn arrival_replays_are_concealed_after_scope_revocation() {
         .await
         .unwrap();
     assert_eq!(arrived.status(), StatusCode::OK);
+    let unloading_body = json!({
+        "load_scan": arrival_body["load_scan"],
+        "receiving_location_scan": "ARRIVAL-SCOPE-DOCK",
+        "seal_scan": "SEAL-100",
+        "started_at": null
+    });
+    let unloading = app
+        .clone()
+        .oneshot(unloading_request(
+            &token,
+            tenant_id,
+            planned.load_id,
+            "unloading-scope",
+            &unloading_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unloading.status(), StatusCode::OK);
 
     assert!(repo::tenants::update_user_access_scope(
         &fixture.db,
@@ -865,6 +1047,26 @@ async fn arrival_replays_are_concealed_after_scope_revocation() {
                 tenant_id,
                 planned.load_id,
                 "arrival-scope",
+                &request_body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            json_body::<ErrorResponse>(response).await.reason,
+            ErrorReason::NotFound
+        );
+    }
+    let mut changed_unloading = unloading_body.clone();
+    changed_unloading["seal_scan"] = json!("CHANGED-SEAL");
+    for request_body in [unloading_body, changed_unloading] {
+        let response = app
+            .clone()
+            .oneshot(unloading_request(
+                &token,
+                tenant_id,
+                planned.load_id,
+                "unloading-scope",
                 &request_body,
             ))
             .await

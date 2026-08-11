@@ -1,6 +1,7 @@
 use wareboxes_api_contract::v1::{
     ArriveInboundLoadRequest, ArriveInboundLoadResponse, InboundLoadEntryItemResponse,
-    PlanInboundLoadRequest, PlanInboundLoadResponse,
+    PlanInboundLoadRequest, PlanInboundLoadResponse, StartInboundLoadUnloadingRequest,
+    StartInboundLoadUnloadingResponse,
 };
 
 use super::ApiError;
@@ -58,5 +59,28 @@ pub async fn arrive_inbound_load(
     _request: &ArriveInboundLoadRequest,
     _idempotency_key: &str,
 ) -> Result<ArriveInboundLoadResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn start_inbound_load_unloading(
+    load_id: i64,
+    request: &StartInboundLoadUnloadingRequest,
+    idempotency_key: &str,
+) -> Result<StartInboundLoadUnloadingResponse, ApiError> {
+    super::browser::post(
+        &format!("/api/v1/inbound-loads/{load_id}/unloading-starts"),
+        request,
+        idempotency_key,
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn start_inbound_load_unloading(
+    _load_id: i64,
+    _request: &StartInboundLoadUnloadingRequest,
+    _idempotency_key: &str,
+) -> Result<StartInboundLoadUnloadingResponse, ApiError> {
     Err(ApiError::unavailable())
 }

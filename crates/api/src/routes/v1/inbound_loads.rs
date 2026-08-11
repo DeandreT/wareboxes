@@ -4,13 +4,16 @@ use serde::Deserialize;
 use wareboxes_api_contract::v1::{
     ArriveInboundLoadRequest, ArriveInboundLoadResponse,
     ArrivedInboundLoadStatus as ContractArrivedStatus, InboundLoadEntryItemResponse,
-    InboundLoadPreArrivalStatus as ContractPreviousStatus, PlanInboundLoadRequest,
+    InboundLoadPreArrivalStatus as ContractPreviousStatus,
+    InboundLoadReceivingStatus as ContractReceivingStatus, PlanInboundLoadRequest,
     PlanInboundLoadResponse, PlannedInboundLoadLineResponse, PlannedInboundLoadStatus,
+    StartInboundLoadUnloadingRequest, StartInboundLoadUnloadingResponse,
 };
 use wareboxes_application::inbound_load::{
     ArriveInboundLoadCommand, ArriveInboundLoadResult,
     ArrivedInboundLoadStatus as ApplicationArrivedStatus, PlanInboundLoadCommand,
     PlanInboundLoadResult, PlannedInboundLoadStatus as ApplicationStatus,
+    StartInboundLoadUnloadingCommand, StartInboundLoadUnloadingResult,
 };
 use wareboxes_application::ApplicationError;
 use wareboxes_domain::{
@@ -113,6 +116,34 @@ pub async fn arrive(
     Ok(Json(arrival_response(result)))
 }
 
+pub async fn start_unloading(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(load_id): Path<i64>,
+    idempotency_key: IdempotencyKey,
+    Json(body): Json<StartInboundLoadUnloadingRequest>,
+) -> V1Result<Json<StartInboundLoadUnloadingResponse>> {
+    user.require_permission(&state.db, "wms").await?;
+    let command = StartInboundLoadUnloadingCommand::new(
+        InboundLoadId::new(load_id).map_err(invalid)?,
+        InboundLoadScanValue::new(body.load_scan).map_err(invalid)?,
+        InboundLoadScanValue::new(body.receiving_location_scan).map_err(invalid)?,
+        body.seal_scan
+            .map(InboundLoadScanValue::new)
+            .transpose()
+            .map_err(invalid)?,
+        parse_timestamp(body.started_at.as_deref(), "started_at")?,
+    );
+    let result = repo::inbound_load::start_inbound_load_unloading(
+        &state.db,
+        &user.tenant,
+        &user.command_context(&idempotency_key),
+        &command,
+    )
+    .await?;
+    Ok(Json(unloading_response(result)))
+}
+
 pub(crate) fn plan_command(request: PlanInboundLoadRequest) -> V1Result<PlanInboundLoadCommand> {
     let lines = request
         .lines
@@ -182,6 +213,23 @@ fn arrival_response(result: ArriveInboundLoadResult) -> ArriveInboundLoadRespons
         receiving_location_id: result.receiving_location_id.get(),
         arrived_by: result.arrived_by.get(),
         arrived_at: result.arrived_at.to_rfc3339(),
+    }
+}
+
+fn unloading_response(
+    result: StartInboundLoadUnloadingResult,
+) -> StartInboundLoadUnloadingResponse {
+    StartInboundLoadUnloadingResponse {
+        unloading_start_id: result.unloading_start_id.get(),
+        load_id: result.load_id.get(),
+        status: match result.status {
+            wareboxes_application::inbound_load::InboundLoadReceivingStatus::Receiving => {
+                ContractReceivingStatus::Receiving
+            }
+        },
+        receiving_location_id: result.receiving_location_id.get(),
+        started_by: result.started_by.get(),
+        started_at: result.started_at.to_rfc3339(),
     }
 }
 
@@ -263,5 +311,19 @@ mod tests {
         assert_eq!(response.arrival_id, 31);
         assert_eq!(response.previous_status, ContractPreviousStatus::Scheduled);
         assert_eq!(response.status, ContractArrivedStatus::Arrived);
+    }
+
+    #[test]
+    fn unloading_response_preserves_execution_evidence() {
+        let response = unloading_response(StartInboundLoadUnloadingResult {
+            unloading_start_id: wareboxes_domain::InboundLoadUnloadingStartId::new(41).unwrap(),
+            load_id: InboundLoadId::new(12).unwrap(),
+            status: wareboxes_application::inbound_load::InboundLoadReceivingStatus::Receiving,
+            receiving_location_id: LocationId::new(9).unwrap(),
+            started_by: wareboxes_domain::UserId::new(4).unwrap(),
+            started_at: "2027-08-10T12:00:00Z".parse().unwrap(),
+        });
+        assert_eq!(response.unloading_start_id, 41);
+        assert_eq!(response.status, ContractReceivingStatus::Receiving);
     }
 }
