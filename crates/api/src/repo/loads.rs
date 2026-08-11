@@ -117,7 +117,7 @@ pub fn normalize_execution_barcode(value: &str) -> AppResult<String> {
     Ok(normalized.to_ascii_uppercase())
 }
 
-fn generated_execution_barcode() -> String {
+pub(crate) fn generated_execution_barcode() -> String {
     format!("WB-LOAD-{}", hex::encode_upper(rand::random::<[u8; 16]>()))
 }
 

@@ -48,6 +48,8 @@ pub use item_substitution::{
 };
 mod inbound_inspection;
 pub use inbound_inspection::dispose_inbound_inspection;
+mod inbound_load;
+pub use inbound_load::{inbound_load_entry_items, plan_inbound_load};
 mod integration_monitor;
 pub use integration_monitor::{
     correct_inbound_order, discard_outbound_dead_letter, inbound_integration_detail,

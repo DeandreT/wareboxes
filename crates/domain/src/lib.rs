@@ -5,6 +5,7 @@ mod backorder;
 mod cycle_count;
 mod facility;
 mod inbound_inspection;
+mod inbound_load;
 mod integration;
 mod integration_mapping;
 mod inventory_recall;
@@ -55,6 +56,11 @@ pub use facility::{
 pub use inbound_inspection::{
     decide_inbound_inspection, InboundInspectionError, InboundInspectionNote,
     InboundInspectionOutcome, InboundInspectionTargetStatus, MAX_INBOUND_INSPECTION_NOTE_LENGTH,
+};
+pub use inbound_load::{
+    InboundExpectedQuantity, InboundLoadField, InboundLoadPlanLine, InboundLoadPlanningError,
+    InboundLoadReference, NewInboundLoadPlan, MAX_INBOUND_LOAD_IDENTITY_LENGTH,
+    MAX_INBOUND_LOAD_REFERENCE_LENGTH, MAX_INBOUND_LOAD_TEXT_LENGTH,
 };
 pub use integration::{
     IntegrationInboxCorrectionReason, IntegrationInboxCorrectionReasonError,
@@ -254,6 +260,8 @@ positive_id!(TenantId, "tenant ID");
 positive_id!(InventoryOwnerId, "inventory owner ID");
 positive_id!(FacilityId, "facility ID");
 positive_id!(AddressId, "address ID");
+positive_id!(InboundLoadId, "inbound load ID");
+positive_id!(InboundLoadLineId, "inbound load line ID");
 positive_id!(
     FacilityShippingOriginConfigurationId,
     "facility shipping origin configuration ID"

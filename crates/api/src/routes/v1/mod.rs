@@ -6,6 +6,7 @@ mod error;
 mod expected_receiving;
 mod facility_shipping_origins;
 mod inbound_inspections;
+mod inbound_loads;
 mod integration_mappings;
 mod integration_monitor;
 mod integration_order_intake;
@@ -48,6 +49,11 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/inbound-loads", post(inbound_loads::plan))
+        .route(
+            "/inventory-owners/{inventory_owner_id}/inbound-load-entry-items",
+            get(inbound_loads::entry_items),
+        )
         .route(
             "/expected-receiving/loads/by-barcode/{execution_barcode}",
             get(expected_receiving::get_session_by_execution_barcode),

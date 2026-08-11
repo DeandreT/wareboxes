@@ -16725,6 +16725,15 @@ CREATE INDEX idx_loads_active_work ON public.loads USING btree (tenant_id, facil
 
 
 --
+-- Name: idx_loads_active_inbound_reference; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_loads_active_inbound_reference
+    ON public.loads USING btree (tenant_id, inventory_owner_id, reference_number)
+    WHERE deleted IS NULL AND type = 'inbound' AND reference_number IS NOT NULL;
+
+
+--
 -- Name: idx_loads_dock_door; Type: INDEX; Schema: public; Owner: -
 --
 

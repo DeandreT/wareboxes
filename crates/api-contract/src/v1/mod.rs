@@ -8,6 +8,7 @@ mod expected_receiving;
 mod facility_shipping_origin;
 mod idempotency;
 mod inbound_inspection;
+mod inbound_load;
 mod integration_mapping;
 mod integration_monitor;
 mod integration_order_intake;
@@ -86,6 +87,10 @@ pub use idempotency::{
 };
 pub use inbound_inspection::{
     DisposeInboundInspectionRequest, DisposeInboundInspectionResponse, InboundInspectionOutcome,
+};
+pub use inbound_load::{
+    InboundLoadEntryItemResponse, PlanInboundLoadLineRequest, PlanInboundLoadRequest,
+    PlanInboundLoadResponse, PlannedInboundLoadLineResponse, PlannedInboundLoadStatus,
 };
 pub use integration_mapping::{
     ConfigureIntegrationOrderItemMappingRequest, ConfigureIntegrationOrderOwnerMappingRequest,

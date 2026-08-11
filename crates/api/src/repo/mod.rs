@@ -10,6 +10,7 @@ pub mod employees;
 pub mod expected_receiving;
 pub mod facility_shipping_origin;
 pub mod inbound_inspection;
+pub mod inbound_load;
 pub mod inbound_receipt;
 pub mod integration_mapping;
 pub mod integration_monitor;

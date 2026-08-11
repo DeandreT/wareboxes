@@ -1,10 +1,12 @@
 use leptos::prelude::*;
+use wareboxes_api_contract::v1::{
+    InboundLoadEntryItemResponse, PlanInboundLoadLineRequest, PlanInboundLoadRequest,
+};
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
-use wareboxes_core::dto::AddLoad;
-use wareboxes_core::models::{Item, Load, LoadStatus, LoadType, Location};
+use wareboxes_core::models::{Item, Load, LoadStatus, Location};
 
 use crate::api;
-use crate::components::SearchField;
+use crate::components::{Icon, SearchField, UiIcon};
 use crate::fulfillment_load_detail::LoadDetailPanel;
 use crate::fulfillment_shared::{optional_text, parse_optional_timestamp, short_timestamp};
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
@@ -23,6 +25,16 @@ enum LoadSort {
     Facility,
     Status,
     Appointment,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct DraftInboundLine {
+    item_id: i64,
+    description: String,
+    expected_quantity: i64,
+    lot: Option<String>,
+    serial: Option<String>,
+    expiration: Option<String>,
 }
 
 #[component]
@@ -438,7 +450,6 @@ fn CreateLoadPanel(
             .first()
             .map_or_else(String::new, |client| client.id.to_string()),
     );
-    let load_type = RwSignal::new(LoadType::Inbound);
     let reference = RwSignal::new(String::new());
     let invoice = RwSignal::new(String::new());
     let carrier = RwSignal::new(String::new());
@@ -447,9 +458,108 @@ fn CreateLoadPanel(
     let dock = RwSignal::new(String::new());
     let expected = RwSignal::new(String::new());
     let appointment = RwSignal::new(String::new());
+    let line_item_id = RwSignal::new(String::new());
+    let eligible_items = RwSignal::new(Vec::<InboundLoadEntryItemResponse>::new());
+    let item_pending = RwSignal::new(false);
+    let line_quantity = RwSignal::new("1".to_owned());
+    let line_lot = RwSignal::new(String::new());
+    let line_serial = RwSignal::new(String::new());
+    let line_expiration = RwSignal::new(String::new());
+    let lines = RwSignal::new(Vec::<DraftInboundLine>::new());
+    let retry_attempt = RwSignal::new(None::<(PlanInboundLoadRequest, String)>);
     let pending = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let toasts = use_toast_bus();
+
+    #[cfg(target_arch = "wasm32")]
+    Effect::new(move |_| {
+        let selected_client = client_id.get();
+        let Ok(inventory_owner_id) = selected_client.parse::<i64>() else {
+            eligible_items.set(Vec::new());
+            line_item_id.set(String::new());
+            return;
+        };
+        item_pending.set(true);
+        leptos::task::spawn_local(async move {
+            match api::inbound_load_entry_items(inventory_owner_id).await {
+                Ok(items) => {
+                    line_item_id.set(
+                        items
+                            .first()
+                            .map_or_else(String::new, |item| item.item_id.to_string()),
+                    );
+                    eligible_items.set(items);
+                    item_pending.set(false);
+                }
+                Err(api_error) if api_error.unauthorized => on_unauthorized.run(()),
+                Err(api_error) => {
+                    eligible_items.set(Vec::new());
+                    line_item_id.set(String::new());
+                    error.set(Some(api_error.message));
+                    item_pending.set(false);
+                }
+            }
+        });
+    });
+
+    let add_line = move |_| {
+        let Ok(item_id) = line_item_id.get_untracked().parse::<i64>() else {
+            error.set(Some("Choose an item for the expected line.".to_owned()));
+            return;
+        };
+        let Ok(expected_quantity) = line_quantity.get_untracked().trim().parse::<i64>() else {
+            error.set(Some("Expected quantity must be a whole number.".to_owned()));
+            return;
+        };
+        if expected_quantity <= 0 {
+            error.set(Some(
+                "Expected quantity must be greater than zero.".to_owned(),
+            ));
+            return;
+        }
+        let expiration = match parse_optional_timestamp(&line_expiration.get_untracked()) {
+            Ok(value) => value.map(|value| value.to_rfc3339()),
+            Err(message) => {
+                error.set(Some(format!("Expiration: {message}")));
+                return;
+            }
+        };
+        let lot = optional_text(&line_lot.get_untracked());
+        let serial = optional_text(&line_serial.get_untracked());
+        if lines.get_untracked().iter().any(|line| {
+            line.item_id == item_id
+                && line.lot == lot
+                && line.serial == serial
+                && line.expiration == expiration
+        }) {
+            error.set(Some(
+                "This item, lot, serial, and expiration combination is already listed.".to_owned(),
+            ));
+            return;
+        }
+        let description = eligible_items
+            .get_untracked()
+            .into_iter()
+            .find(|item| item.item_id == item_id)
+            .and_then(|item| item.description)
+            .unwrap_or_else(|| format!("Item #{item_id}"));
+        lines.update(|values| {
+            values.push(DraftInboundLine {
+                item_id,
+                description,
+                expected_quantity,
+                lot,
+                serial,
+                expiration,
+            });
+        });
+        line_quantity.set("1".to_owned());
+        line_lot.set(String::new());
+        line_serial.set(String::new());
+        line_expiration.set(String::new());
+        retry_attempt.set(None);
+        error.set(None);
+    };
 
     let submit = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
@@ -464,15 +574,12 @@ fn CreateLoadPanel(
             error.set(Some("Choose a client.".to_owned()));
             return;
         };
-        let dock_location_id = match dock.get_untracked().trim() {
-            "" => None,
-            value => match value.parse::<i64>() {
-                Ok(id) => Some(id),
-                Err(_) => {
-                    error.set(Some("Choose a dock door.".to_owned()));
-                    return;
-                }
-            },
+        let receiving_location_id = match dock.get_untracked().trim().parse::<i64>() {
+            Ok(id) => id,
+            Err(_) => {
+                error.set(Some("Choose a receivable dock.".to_owned()));
+                return;
+            }
         };
         let expected_time = match parse_optional_timestamp(&expected.get_untracked()) {
             Ok(value) => value,
@@ -488,27 +595,56 @@ fn CreateLoadPanel(
                 return;
             }
         };
-        let request = AddLoad {
+        let reference_value = reference.get_untracked().trim().to_owned();
+        if reference_value.is_empty() {
+            error.set(Some("Load reference is required.".to_owned()));
+            return;
+        }
+        let planned_lines = lines.get_untracked();
+        if planned_lines.is_empty() {
+            error.set(Some("Add at least one expected freight line.".to_owned()));
+            return;
+        }
+        let request = PlanInboundLoadRequest {
             facility_id: selected_facility,
             inventory_owner_id: selected_client,
-            r#type: load_type.get_untracked(),
-            reference_number: optional_text(&reference.get_untracked()),
+            receiving_location_id,
+            reference: reference_value.clone(),
             invoice_number: optional_text(&invoice.get_untracked()),
             carrier: optional_text(&carrier.get_untracked()),
             trailer_number: optional_text(&trailer.get_untracked()),
             seal_number: optional_text(&seal.get_untracked()),
-            dock_door_location_id: dock_location_id,
-            expected_time,
-            appointment_time,
+            expected_at: expected_time.map(|value| value.to_rfc3339()),
+            appointment_at: appointment_time.map(|value| value.to_rfc3339()),
+            lines: planned_lines
+                .iter()
+                .map(|line| PlanInboundLoadLineRequest {
+                    item_id: line.item_id,
+                    expected_quantity: line.expected_quantity,
+                    lot: line.lot.clone(),
+                    serial: line.serial.clone(),
+                    expiration: line.expiration.clone(),
+                })
+                .collect(),
         };
         pending.set(true);
         error.set(None);
+        let idempotency_key = retry_attempt
+            .get_untracked()
+            .filter(|(prior, _)| prior == &request)
+            .map_or_else(api::new_idempotency_key, |(_, key)| key);
+        retry_attempt.set(Some((request.clone(), idempotency_key.clone())));
         leptos::task::spawn_local(async move {
-            match api::internal_post::<_, i64>("/api/loads/add", &request).await {
-                Ok(load_id) => {
+            match api::plan_inbound_load(&request, &idempotency_key).await {
+                Ok(result) => {
                     pending.set(false);
-                    toasts.success(format!("Load #{load_id} created."));
-                    on_created.run(load_id);
+                    retry_attempt.set(None);
+                    toasts.success(format!(
+                        "Inbound load {} planned with {} line(s).",
+                        result.reference,
+                        result.lines.len()
+                    ));
+                    on_created.run(result.load_id);
                 }
                 Err(api_error) if api_error.unauthorized => on_unauthorized.run(()),
                 Err(api_error) => {
@@ -524,28 +660,14 @@ fn CreateLoadPanel(
         <form class="fulfillment-form" on:submit=submit>
             <div class="detail-heading">
                 <div>
-                    <span class="eyebrow">"Load planning"</span>
-                    <h2>"New load"</h2>
+                    <span class="eyebrow">"Inbound planning"</span>
+                    <h2>"New inbound load"</h2>
                 </div>
                 <button type="button" class="text-button" on:click=move |_| on_close.run(())>
                     "Close"
                 </button>
             </div>
             <div class="form-grid two-column">
-                <label>
-                    <span>"Direction"</span>
-                    <select
-                        prop:value=move || load_type.get().as_str()
-                        on:change=move |event| {
-                            if let Some(value) = LoadType::parse(&event_target_value(&event)) {
-                                load_type.set(value);
-                            }
-                        }
-                    >
-                        <option value="inbound">"Inbound"</option>
-                        <option value="outbound">"Outbound"</option>
-                    </select>
-                </label>
                 <label>
                     <span>"Facility"</span>
                     <select
@@ -568,8 +690,14 @@ fn CreateLoadPanel(
                     <span>"Client"</span>
                     <select
                         required
+                        disabled=move || pending.get() || !lines.get().is_empty()
                         prop:value=move || client_id.get()
-                        on:change=move |event| client_id.set(event_target_value(&event))
+                        on:change=move |event| {
+                            client_id.set(event_target_value(&event));
+                            lines.set(Vec::new());
+                            retry_attempt.set(None);
+                            error.set(None);
+                        }
                     >
                         {clients
                             .into_iter()
@@ -578,12 +706,13 @@ fn CreateLoadPanel(
                     </select>
                 </label>
                 <label>
-                    <span>"Dock door"</span>
+                    <span>"Receiving dock"</span>
                     <select
+                        required
                         prop:value=move || dock.get()
                         on:change=move |event| dock.set(event_target_value(&event))
                     >
-                        <option value="">"Not assigned"</option>
+                        <option value="">"Choose dock"</option>
                         {move || {
                             let selected = facility_id.get().parse::<i64>().ok();
                             locations
@@ -592,7 +721,8 @@ fn CreateLoadPanel(
                                 .filter(|location| {
                                     Some(location.facility_id) == selected
                                         && location.active
-                                        && location.r#type.eq_ignore_ascii_case("dock")
+                                        && location.receivable
+                                        && location.barcode.as_ref().is_some_and(|value| !value.trim().is_empty())
                                 })
                                 .map(|location| {
                                     let label = location
@@ -608,6 +738,8 @@ fn CreateLoadPanel(
                 <label>
                     <span>"Reference"</span>
                     <input
+                        required
+                        autocomplete="off"
                         prop:value=move || reference.get()
                         on:input=move |event| reference.set(event_target_value(&event))
                     />
@@ -657,12 +789,46 @@ fn CreateLoadPanel(
                     />
                 </label>
             </div>
+            <section class="detail-section inbound-plan-lines">
+                <div class="detail-section-title">
+                    <div><h3>"Expected freight"</h3><span>{move || format!("{} lines", lines.get().len())}</span></div>
+                </div>
+                <div class="form-grid three-column inbound-line-entry">
+                    <label>
+                        <span>"Item"</span>
+                        <select required disabled=move || pending.get() || item_pending.get() || eligible_items.get().is_empty() prop:value=move || line_item_id.get() on:change=move |event| line_item_id.set(event_target_value(&event))>
+                            {move || eligible_items.get().into_iter().map(|item| {
+                                let item_id = item.item_id;
+                                let label = item.description.unwrap_or_else(|| format!("Item #{item_id}"));
+                                view! { <option value=item_id>{format!("{label} · {}", item.uom)}</option> }
+                            }).collect_view()}
+                        </select>
+                        <small class="field-help">{move || if item_pending.get() { "Loading client items" } else if eligible_items.get().is_empty() { "No scanner-ready items for this client" } else { "Client-linked and scanner-ready" }}</small>
+                    </label>
+                    <label><span>"Expected quantity"</span><input required type="number" min="1" step="1" prop:value=move || line_quantity.get() on:input=move |event| line_quantity.set(event_target_value(&event))/></label>
+                    <label><span>"Lot"</span><input placeholder="Optional" prop:value=move || line_lot.get() on:input=move |event| line_lot.set(event_target_value(&event))/></label>
+                    <label><span>"Serial"</span><input placeholder="Optional" prop:value=move || line_serial.get() on:input=move |event| line_serial.set(event_target_value(&event))/></label>
+                    <label><span>"Expiration"</span><input type="datetime-local" prop:value=move || line_expiration.get() on:input=move |event| line_expiration.set(event_target_value(&event))/></label>
+                    <div class="field-action"><button class="button secondary-action" type="button" disabled=move || pending.get() || item_pending.get() || eligible_items.get().is_empty() on:click=add_line><Icon icon=UiIcon::Add/>"Add line"</button></div>
+                </div>
+                <div class="table-scroll inbound-plan-table">
+                    <table class="data-table detail-table">
+                        <thead><tr><th>"Item"</th><th>"Lot / serial"</th><th>"Expiration"</th><th class="numeric">"Expected"</th><th class="action-column"><span class="sr-only">"Actions"</span></th></tr></thead>
+                        <tbody>{move || lines.get().into_iter().enumerate().map(|(index, line)| {
+                            let identity = [line.lot.as_deref(), line.serial.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" / ");
+                            view! { <tr><td><strong>{line.description}</strong><small class="cell-detail">{format!("Item #{}", line.item_id)}</small></td><td>{if identity.is_empty() { "-".to_owned() } else { identity }}</td><td>{line.expiration.unwrap_or_else(|| "-".to_owned())}</td><td class="numeric strong">{format_quantity(line.expected_quantity)}</td><td><button class="button order-line-remove" type="button" title="Remove expected line" aria-label=format!("Remove expected line {}", index + 1) disabled=move || pending.get() on:click=move |_| { lines.update(|values| { if index < values.len() { values.remove(index); } }); retry_attempt.set(None); }><Icon icon=UiIcon::Remove/></button></td></tr> }
+                        }).collect_view()}</tbody>
+                    </table>
+                    {move || lines.get().is_empty().then(|| view! { <p class="empty-state compact">"Add every item expected on this inbound load."</p> })}
+                </div>
+                <div class="order-lines-draft-summary"><span>{move || format!("{} lines", lines.get().len())}</span><strong>{move || format!("{} units", lines.get().iter().fold(0_i64, |total, line| total.saturating_add(line.expected_quantity.max(0))))}</strong></div>
+            </section>
             <Show when=move || error.get().is_some()>
                 <p class="inline-command-error" role="alert">{move || error.get().unwrap_or_default()}</p>
             </Show>
             <div class="form-actions">
                 <button type="submit" class="button primary-action" disabled=move || pending.get()>
-                    {move || if pending.get() { "Creating" } else { "Create load" }}
+                    {move || if pending.get() { "Planning" } else { "Plan inbound load" }}
                 </button>
                 <button type="button" class="button secondary-action" on:click=move |_| on_close.run(())>
                     "Cancel"

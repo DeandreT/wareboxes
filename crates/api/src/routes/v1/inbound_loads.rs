@@ -1,0 +1,204 @@
+use axum::extract::{Path, Query, State};
+use axum::Json;
+use serde::Deserialize;
+use wareboxes_api_contract::v1::{
+    InboundLoadEntryItemResponse, PlanInboundLoadRequest, PlanInboundLoadResponse,
+    PlannedInboundLoadLineResponse, PlannedInboundLoadStatus,
+};
+use wareboxes_application::inbound_load::{
+    PlanInboundLoadCommand, PlanInboundLoadResult, PlannedInboundLoadStatus as ApplicationStatus,
+};
+use wareboxes_application::ApplicationError;
+use wareboxes_domain::{
+    CatalogItemId, FacilityId, InboundExpectedQuantity, InboundLoadPlanLine, InboundLoadReference,
+    InventoryOwnerId, LocationId, NewInboundLoadPlan, Timestamp,
+};
+
+use super::error::{V1Error, V1Result};
+use crate::auth::CurrentTenant;
+use crate::repo;
+use crate::request_context::IdempotencyKey;
+use crate::state::AppState;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntryItemQuery {
+    pub search: Option<String>,
+    pub limit: Option<i64>,
+}
+
+pub async fn entry_items(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(inventory_owner_id): Path<i64>,
+    Query(query): Query<EntryItemQuery>,
+) -> V1Result<Json<Vec<InboundLoadEntryItemResponse>>> {
+    user.require_permission(&state.db, "wms").await?;
+    if inventory_owner_id <= 0 {
+        return Err(invalid("inventory owner ID must be positive"));
+    }
+    let search = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if search.is_some_and(|value| value.chars().count() > 200) {
+        return Err(invalid("item search cannot exceed 200 characters"));
+    }
+    let items = repo::inbound_load::inbound_load_entry_items(
+        &state.db,
+        &user.tenant,
+        inventory_owner_id,
+        search,
+        query.limit.unwrap_or(100).clamp(1, 100),
+    )
+    .await?
+    .ok_or_else(|| crate::error::AppError::not_found("inventory owner"))?;
+    Ok(Json(
+        items
+            .into_iter()
+            .map(|item| InboundLoadEntryItemResponse {
+                item_id: item.item_id,
+                description: item.description,
+                uom: item.uom,
+            })
+            .collect(),
+    ))
+}
+
+pub async fn plan(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Json(body): Json<PlanInboundLoadRequest>,
+) -> V1Result<Json<PlanInboundLoadResponse>> {
+    user.require_permission(&state.db, "wms").await?;
+    let command = plan_command(body)?;
+    let result = repo::inbound_load::plan_inbound_load(
+        &state.db,
+        &user.tenant,
+        &user.command_context(&idempotency_key),
+        &command,
+    )
+    .await?;
+    Ok(Json(plan_response(result)))
+}
+
+pub(crate) fn plan_command(request: PlanInboundLoadRequest) -> V1Result<PlanInboundLoadCommand> {
+    let lines = request
+        .lines
+        .into_iter()
+        .map(|line| {
+            InboundLoadPlanLine::new(
+                CatalogItemId::new(line.item_id).map_err(invalid)?,
+                InboundExpectedQuantity::new(line.expected_quantity).map_err(invalid)?,
+                line.lot,
+                line.serial,
+                parse_timestamp(line.expiration.as_deref(), "expiration")?,
+            )
+            .map_err(invalid)
+        })
+        .collect::<V1Result<Vec<_>>>()?;
+    let plan = NewInboundLoadPlan::new(
+        InventoryOwnerId::new(request.inventory_owner_id).map_err(invalid)?,
+        FacilityId::new(request.facility_id).map_err(invalid)?,
+        LocationId::new(request.receiving_location_id).map_err(invalid)?,
+        InboundLoadReference::new(request.reference).map_err(invalid)?,
+        request.invoice_number,
+        request.carrier,
+        request.trailer_number,
+        request.seal_number,
+        parse_timestamp(request.expected_at.as_deref(), "expected_at")?,
+        parse_timestamp(request.appointment_at.as_deref(), "appointment_at")?,
+        lines,
+    )
+    .map_err(invalid)?;
+    Ok(PlanInboundLoadCommand::new(plan))
+}
+
+fn plan_response(result: PlanInboundLoadResult) -> PlanInboundLoadResponse {
+    PlanInboundLoadResponse {
+        load_id: result.load_id.get(),
+        execution_barcode: result.execution_barcode,
+        reference: result.reference,
+        status: match result.status {
+            ApplicationStatus::Planned => PlannedInboundLoadStatus::Planned,
+        },
+        lines: result
+            .lines
+            .into_iter()
+            .map(|line| PlannedInboundLoadLineResponse {
+                load_line_id: line.load_line_id.get(),
+                item_id: line.item_id,
+                expected_quantity: line.expected_quantity,
+            })
+            .collect(),
+        total_expected_quantity: result.total_expected_quantity,
+        planned_by: result.planned_by.get(),
+        planned_at: result.planned_at.to_rfc3339(),
+    }
+}
+
+fn parse_timestamp(value: Option<&str>, field: &str) -> V1Result<Option<Timestamp>> {
+    value
+        .map(|value| {
+            value.parse::<Timestamp>().map_err(|_| {
+                invalid(format!(
+                    "{field} must be an RFC 3339 timestamp with an explicit offset"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn invalid(error: impl std::fmt::Display) -> V1Error {
+    V1Error::from(ApplicationError::InvalidRequest(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request() -> PlanInboundLoadRequest {
+        PlanInboundLoadRequest {
+            inventory_owner_id: 7,
+            facility_id: 8,
+            receiving_location_id: 9,
+            reference: "ASN-100".into(),
+            invoice_number: None,
+            carrier: Some("Parcel Freight".into()),
+            trailer_number: None,
+            seal_number: None,
+            expected_at: Some("2027-08-11T17:00:00Z".into()),
+            appointment_at: None,
+            lines: vec![wareboxes_api_contract::v1::PlanInboundLoadLineRequest {
+                item_id: 41,
+                expected_quantity: 12,
+                lot: Some("LOT-A".into()),
+                serial: None,
+                expiration: Some("2028-08-12T00:00:00Z".into()),
+            }],
+        }
+    }
+
+    #[test]
+    fn mapping_preserves_the_complete_plan() {
+        let command = plan_command(request()).unwrap();
+        assert_eq!(command.plan().reference().as_str(), "ASN-100");
+        assert_eq!(command.plan().receiving_location_id().get(), 9);
+        assert_eq!(command.plan().lines()[0].item_id().get(), 41);
+        assert_eq!(command.plan().lines()[0].expected_quantity().get(), 12);
+        assert!(command.plan().lines()[0].expiration().is_some());
+    }
+
+    #[test]
+    fn mapping_rejects_empty_lines_and_malformed_timestamps() {
+        let mut empty = request();
+        empty.lines.clear();
+        assert!(plan_command(empty).is_err());
+
+        let mut malformed = request();
+        malformed.expected_at = Some("tomorrow".into());
+        assert!(plan_command(malformed).is_err());
+    }
+}

@@ -542,6 +542,34 @@
   margin-left: auto;
 }
 
+.inbound-plan-lines {
+  margin-top: 8px;
+}
+
+.inbound-line-entry {
+  align-items: end;
+}
+
+.inbound-line-entry .field-action {
+  display: flex;
+  min-height: var(--control-height);
+  align-items: stretch;
+}
+
+.inbound-line-entry .field-action .button {
+  width: 100%;
+}
+
+.inbound-plan-table {
+  max-height: 190px;
+  margin-top: 7px;
+}
+
+.inbound-plan-table td {
+  height: 34px;
+  padding: 3px 6px;
+}
+
 .empty-state.compact {
   min-height: 34px;
   margin: 0;

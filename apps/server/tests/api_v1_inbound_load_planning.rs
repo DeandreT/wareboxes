@@ -1,0 +1,507 @@
+mod common;
+
+use axum::body::{to_bytes, Body};
+use axum::http::{header, Method, Request, StatusCode};
+use common::*;
+use serde_json::{json, Value};
+use tower::ServiceExt;
+use wareboxes_api::auth::TENANT_ID_HEADER;
+use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
+use wareboxes_api::{routes, state::AppState};
+use wareboxes_api_contract::v1::{
+    ErrorReason, ErrorResponse, ExpectedReceivingSessionResponse, InboundLoadEntryItemResponse,
+    PlanInboundLoadResponse, PlannedInboundLoadStatus,
+};
+use wareboxes_core::dto::UpdateUserAccessScope;
+
+fn plan_request(
+    token: &str,
+    tenant_id: TenantId,
+    idempotency_key: &str,
+    body: &Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/inbound-loads")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .header(IDEMPOTENCY_KEY_HEADER, idempotency_key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn session_request(token: &str, tenant_id: TenantId, load_id: i64) -> Request<Body> {
+    Request::builder()
+        .uri(format!("/api/v1/expected-receiving/loads/{load_id}"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn entry_items_request(token: &str, tenant_id: TenantId, inventory_owner_id: i64) -> Request<Body> {
+    Request::builder()
+        .uri(format!(
+            "/api/v1/inventory-owners/{inventory_owner_id}/inbound-load-entry-items?limit=100"
+        ))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn json_body<T: serde::de::DeserializeOwned>(response: axum::response::Response) -> T {
+    let body = to_bytes(response.into_body(), 256 * 1024).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn receiving_dock(
+    fixture: &Fixture,
+    tenant_id: TenantId,
+    facility_id: i64,
+    barcode: &str,
+) -> i64 {
+    wareboxes_persistence_postgres::locations::add_location(
+        &fixture.db,
+        tenant_id,
+        facility_id,
+        None,
+        Some(barcode),
+        Some(barcode),
+        "dock",
+        true,
+        false,
+        true,
+    )
+    .await
+    .unwrap()
+}
+
+async fn link_item(fixture: &Fixture, tenant_id: TenantId, inventory_owner_id: i64, item_id: i64) {
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    sqlx::query(
+        r#"
+        INSERT INTO inventory_owner_items
+            (tenant_id, created, inventory_owner_id, item_id)
+        VALUES ($1,$2,$3,$4)
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(db::now_iso())
+    .bind(inventory_owner_id)
+    .bind(item_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let has_barcode: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM barcodes WHERE tenant_id=$1 AND item_id=$2 AND deleted IS NULL)",
+    )
+    .bind(tenant_id.get())
+    .bind(item_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    if !has_barcode {
+        repo::items::add_barcode(
+            &fixture.db,
+            tenant_id,
+            item_id,
+            &format!("ITEM-{item_id}"),
+            "code128",
+            None,
+        )
+        .await
+        .unwrap();
+    }
+}
+
+fn body(owner: i64, facility: i64, dock: i64, item: i64, reference: &str) -> Value {
+    json!({
+        "inventory_owner_id": owner,
+        "facility_id": facility,
+        "receiving_location_id": dock,
+        "reference": reference,
+        "invoice_number": "INV-100",
+        "carrier": "Parcel Freight",
+        "trailer_number": "TRL-100",
+        "seal_number": "SEAL-100",
+        "expected_at": "2027-08-11T17:00:00Z",
+        "appointment_at": "2027-08-12T17:00:00Z",
+        "lines": [
+            {
+                "item_id": item,
+                "expected_quantity": 12,
+                "lot": "LOT-A",
+                "serial": null,
+                "expiration": "2028-08-12T00:00:00Z"
+            },
+            {
+                "item_id": item,
+                "expected_quantity": 3,
+                "lot": "LOT-B",
+                "serial": null,
+                "expiration": "2028-09-12T00:00:00Z"
+            }
+        ]
+    })
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct Effects {
+    loads: i64,
+    lines: i64,
+    expected_quantity: i64,
+    activities: i64,
+    commands: i64,
+    events: i64,
+}
+
+async fn effects(fixture: &Fixture, tenant_id: TenantId, reference: &str) -> Effects {
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let effects = sqlx::query_as(
+        r#"
+        SELECT
+          (SELECT COUNT(*) FROM loads WHERE reference_number=$2) AS loads,
+          (SELECT COUNT(*) FROM load_lines line INNER JOIN loads load
+             ON load.tenant_id=line.tenant_id AND load.id=line.load_id
+             WHERE load.reference_number=$2) AS lines,
+          (SELECT COALESCE(SUM(line.expected_qty),0)::BIGINT FROM load_lines line
+             INNER JOIN loads load ON load.tenant_id=line.tenant_id AND load.id=line.load_id
+             WHERE load.reference_number=$2) AS expected_quantity,
+          (SELECT COUNT(*) FROM load_activity activity INNER JOIN loads load
+             ON load.tenant_id=activity.tenant_id AND load.id=activity.load_id
+             WHERE load.reference_number=$2) AS activities,
+          (SELECT COUNT(*) FROM command_idempotency_records
+             WHERE tenant_id=$1 AND operation='inbound.load.plan.v1') AS commands,
+          (SELECT COUNT(*) FROM outbox_events
+             WHERE tenant_id=$1 AND event_type='inbound.load.planned') AS events
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(reference)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    effects
+}
+
+#[tokio::test]
+async fn atomic_plan_replays_exactly_and_enters_expected_receiving() {
+    let fixture = Fixture::new().await;
+    let operator = fixture.wms_user("inbound-plan@test.local").await;
+    let tenant_id = tenant_for_user(&fixture.db, operator.id).await;
+    let facility = fixture.facility(tenant_id, "Inbound Plan DC").await;
+    let owner = fixture
+        .inventory_owner(tenant_id, "Inbound Plan Owner")
+        .await;
+    fixture
+        .assign_owner_to_facility(tenant_id, owner, facility)
+        .await;
+    let dock = receiving_dock(&fixture, tenant_id, facility, "PLAN-DOCK").await;
+    let item = fixture.item(tenant_id, "Inbound Plan Item", "case").await;
+    link_item(&fixture, tenant_id, owner, item).await;
+    let token = auth::create_session(&fixture.db, operator.id)
+        .await
+        .unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let request_body = body(owner, facility, dock, item, "ASN-ATOMIC-100");
+
+    let entry_items = app
+        .clone()
+        .oneshot(entry_items_request(&token, tenant_id, owner))
+        .await
+        .unwrap();
+    assert_eq!(entry_items.status(), StatusCode::OK);
+    let entry_items: Vec<InboundLoadEntryItemResponse> = json_body(entry_items).await;
+    assert_eq!(entry_items.len(), 1);
+    assert_eq!(entry_items[0].item_id, item);
+    assert_eq!(entry_items[0].uom, "case");
+
+    let first = app
+        .clone()
+        .oneshot(plan_request(
+            &token,
+            tenant_id,
+            "plan-atomic",
+            &request_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let result: PlanInboundLoadResponse = json_body(first).await;
+    assert_eq!(result.reference, "ASN-ATOMIC-100");
+    assert_eq!(result.status, PlannedInboundLoadStatus::Planned);
+    assert_eq!(result.lines.len(), 2);
+    assert_eq!(result.total_expected_quantity, 15);
+    assert!(result.execution_barcode.starts_with("WB-LOAD-"));
+
+    let replay = app
+        .clone()
+        .oneshot(plan_request(
+            &token,
+            tenant_id,
+            "plan-atomic",
+            &request_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(json_body::<PlanInboundLoadResponse>(replay).await, result);
+
+    let mut changed = request_body.clone();
+    changed["lines"][0]["expected_quantity"] = json!(13);
+    let conflict = app
+        .clone()
+        .oneshot(plan_request(&token, tenant_id, "plan-atomic", &changed))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body::<ErrorResponse>(conflict).await.reason,
+        ErrorReason::IdempotencyKeyReused
+    );
+
+    let current = effects(&fixture, tenant_id, "ASN-ATOMIC-100").await;
+    assert_eq!(current.loads, 1);
+    assert_eq!(current.lines, 2);
+    assert_eq!(current.expected_quantity, 15);
+    assert_eq!(current.activities, 1);
+    assert_eq!(current.commands, 1);
+    assert_eq!(current.events, 1);
+
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    sqlx::query("UPDATE loads SET status='arrived' WHERE tenant_id=$1 AND id=$2")
+        .bind(tenant_id.get())
+        .bind(result.load_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let session = app
+        .oneshot(session_request(&token, tenant_id, result.load_id))
+        .await
+        .unwrap();
+    assert_eq!(session.status(), StatusCode::OK);
+    let session: ExpectedReceivingSessionResponse = json_body(session).await;
+    assert_eq!(session.lines.len(), 2);
+    assert_eq!(
+        session
+            .lines
+            .iter()
+            .map(|line| line.expected_quantity)
+            .sum::<i64>(),
+        15
+    );
+    assert_eq!(session.receiving_location.location_id, dock);
+}
+
+#[tokio::test]
+async fn reference_race_has_one_winner_and_invalid_plans_have_zero_effects() {
+    let fixture = Fixture::new().await;
+    let operator = fixture.wms_user("inbound-plan-race@test.local").await;
+    let tenant_id = tenant_for_user(&fixture.db, operator.id).await;
+    let facility = fixture.facility(tenant_id, "Inbound Race DC").await;
+    let owner = fixture
+        .inventory_owner(tenant_id, "Inbound Race Owner")
+        .await;
+    fixture
+        .assign_owner_to_facility(tenant_id, owner, facility)
+        .await;
+    let dock = receiving_dock(&fixture, tenant_id, facility, "RACE-DOCK").await;
+    let item = fixture.item(tenant_id, "Inbound Race Item", "each").await;
+    link_item(&fixture, tenant_id, owner, item).await;
+    let token = auth::create_session(&fixture.db, operator.id)
+        .await
+        .unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+    let request_body = body(owner, facility, dock, item, "ASN-RACE-100");
+    let first = app.clone().oneshot(plan_request(
+        &token,
+        tenant_id,
+        "plan-race-a",
+        &request_body,
+    ));
+    let second = app.clone().oneshot(plan_request(
+        &token,
+        tenant_id,
+        "plan-race-b",
+        &request_body,
+    ));
+    let (first, second) = tokio::join!(first, second);
+    let statuses = [first.unwrap().status(), second.unwrap().status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let current = effects(&fixture, tenant_id, "ASN-RACE-100").await;
+    assert_eq!(
+        (
+            current.loads,
+            current.lines,
+            current.commands,
+            current.events
+        ),
+        (1, 2, 1, 1)
+    );
+
+    let mut invalid = body(owner, facility, dock, item, "ASN-INVALID-100");
+    invalid["receiving_location_id"] = json!(9_999_999);
+    let response = app
+        .oneshot(plan_request(&token, tenant_id, "plan-invalid", &invalid))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let invalid_effects = effects(&fixture, tenant_id, "ASN-INVALID-100").await;
+    assert_eq!((invalid_effects.loads, invalid_effects.lines), (0, 0));
+}
+
+#[tokio::test]
+async fn planning_enforces_current_owner_and_facility_scope() {
+    let fixture = Fixture::new().await;
+    let operator = fixture.wms_user("inbound-plan-scope@test.local").await;
+    let tenant_id = tenant_for_user(&fixture.db, operator.id).await;
+    let allowed_facility = fixture.facility(tenant_id, "Allowed Inbound DC").await;
+    let denied_facility = fixture.facility(tenant_id, "Denied Inbound DC").await;
+    let allowed_owner = fixture
+        .inventory_owner(tenant_id, "Allowed Inbound Owner")
+        .await;
+    let denied_owner = fixture
+        .inventory_owner(tenant_id, "Denied Inbound Owner")
+        .await;
+    for (owner, facility) in [
+        (allowed_owner, allowed_facility),
+        (allowed_owner, denied_facility),
+        (denied_owner, allowed_facility),
+    ] {
+        fixture
+            .assign_owner_to_facility(tenant_id, owner, facility)
+            .await;
+    }
+    let allowed_dock = receiving_dock(&fixture, tenant_id, allowed_facility, "ALLOWED-DOCK").await;
+    let denied_dock = receiving_dock(&fixture, tenant_id, denied_facility, "DENIED-DOCK").await;
+    let item = fixture.item(tenant_id, "Scoped Inbound Item", "case").await;
+    link_item(&fixture, tenant_id, allowed_owner, item).await;
+    link_item(&fixture, tenant_id, denied_owner, item).await;
+    assert!(repo::tenants::update_user_access_scope(
+        &fixture.db,
+        tenant_id,
+        &UpdateUserAccessScope {
+            user_id: operator.id,
+            all_facilities: false,
+            facility_ids: vec![allowed_facility],
+            all_inventory_owners: false,
+            inventory_owner_ids: vec![allowed_owner],
+        },
+    )
+    .await
+    .unwrap());
+    let token = auth::create_session(&fixture.db, operator.id)
+        .await
+        .unwrap();
+    let app = routes::app(AppState::new(fixture.db.clone()));
+
+    for (key, request_body) in [
+        (
+            "scope-denied-facility",
+            body(
+                allowed_owner,
+                denied_facility,
+                denied_dock,
+                item,
+                "ASN-DENIED-FACILITY",
+            ),
+        ),
+        (
+            "scope-denied-owner",
+            body(
+                denied_owner,
+                allowed_facility,
+                allowed_dock,
+                item,
+                "ASN-DENIED-OWNER",
+            ),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(plan_request(&token, tenant_id, key, &request_body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    assert_eq!(
+        effects(&fixture, tenant_id, "ASN-DENIED-FACILITY")
+            .await
+            .loads,
+        0
+    );
+    assert_eq!(
+        effects(&fixture, tenant_id, "ASN-DENIED-OWNER").await.loads,
+        0
+    );
+
+    let allowed = body(
+        allowed_owner,
+        allowed_facility,
+        allowed_dock,
+        item,
+        "ASN-SCOPE-REPLAY",
+    );
+    let response = app
+        .clone()
+        .oneshot(plan_request(&token, tenant_id, "scope-replay", &allowed))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(repo::tenants::update_user_access_scope(
+        &fixture.db,
+        tenant_id,
+        &UpdateUserAccessScope {
+            user_id: operator.id,
+            all_facilities: false,
+            facility_ids: vec![],
+            all_inventory_owners: false,
+            inventory_owner_ids: vec![],
+        },
+    )
+    .await
+    .unwrap());
+    let mut changed = allowed.clone();
+    changed["carrier"] = json!("Changed Carrier");
+    for request_body in [allowed, changed] {
+        let response = app
+            .clone()
+            .oneshot(plan_request(
+                &token,
+                tenant_id,
+                "scope-replay",
+                &request_body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            json_body::<ErrorResponse>(response).await.reason,
+            ErrorReason::NotFound
+        );
+    }
+    assert_eq!(
+        effects(&fixture, tenant_id, "ASN-SCOPE-REPLAY").await.loads,
+        1
+    );
+}
