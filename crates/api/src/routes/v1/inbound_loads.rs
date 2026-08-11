@@ -3,17 +3,20 @@ use axum::Json;
 use serde::Deserialize;
 use wareboxes_api_contract::v1::{
     ArriveInboundLoadRequest, ArriveInboundLoadResponse,
-    ArrivedInboundLoadStatus as ContractArrivedStatus, InboundLoadEntryItemResponse,
-    InboundLoadPreArrivalStatus as ContractPreviousStatus,
+    ArrivedInboundLoadStatus as ContractArrivedStatus, CloseInboundLoadRequest,
+    CloseInboundLoadResponse, InboundLoadClosedStatus as ContractClosedStatus,
+    InboundLoadEntryItemResponse, InboundLoadPreArrivalStatus as ContractPreviousStatus,
+    InboundLoadReceivedStatus as ContractReceivedStatus,
     InboundLoadReceivingStatus as ContractReceivingStatus, PlanInboundLoadRequest,
     PlanInboundLoadResponse, PlannedInboundLoadLineResponse, PlannedInboundLoadStatus,
     StartInboundLoadUnloadingRequest, StartInboundLoadUnloadingResponse,
 };
 use wareboxes_application::inbound_load::{
     ArriveInboundLoadCommand, ArriveInboundLoadResult,
-    ArrivedInboundLoadStatus as ApplicationArrivedStatus, PlanInboundLoadCommand,
-    PlanInboundLoadResult, PlannedInboundLoadStatus as ApplicationStatus,
-    StartInboundLoadUnloadingCommand, StartInboundLoadUnloadingResult,
+    ArrivedInboundLoadStatus as ApplicationArrivedStatus, CloseInboundLoadCommand,
+    CloseInboundLoadResult, PlanInboundLoadCommand, PlanInboundLoadResult,
+    PlannedInboundLoadStatus as ApplicationStatus, StartInboundLoadUnloadingCommand,
+    StartInboundLoadUnloadingResult,
 };
 use wareboxes_application::ApplicationError;
 use wareboxes_domain::{
@@ -144,6 +147,30 @@ pub async fn start_unloading(
     Ok(Json(unloading_response(result)))
 }
 
+pub async fn close(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(load_id): Path<i64>,
+    idempotency_key: IdempotencyKey,
+    Json(body): Json<CloseInboundLoadRequest>,
+) -> V1Result<Json<CloseInboundLoadResponse>> {
+    user.require_permission(&state.db, "wms").await?;
+    let command = CloseInboundLoadCommand::new(
+        InboundLoadId::new(load_id).map_err(invalid)?,
+        InboundLoadScanValue::new(body.load_scan).map_err(invalid)?,
+        InboundLoadScanValue::new(body.receiving_location_scan).map_err(invalid)?,
+        parse_timestamp(body.closed_at.as_deref(), "closed_at")?,
+    );
+    let result = repo::inbound_load::close_inbound_load(
+        &state.db,
+        &user.tenant,
+        &user.command_context(&idempotency_key),
+        &command,
+    )
+    .await?;
+    Ok(Json(closure_response(result)))
+}
+
 pub(crate) fn plan_command(request: PlanInboundLoadRequest) -> V1Result<PlanInboundLoadCommand> {
     let lines = request
         .lines
@@ -230,6 +257,26 @@ fn unloading_response(
         receiving_location_id: result.receiving_location_id.get(),
         started_by: result.started_by.get(),
         started_at: result.started_at.to_rfc3339(),
+    }
+}
+
+fn closure_response(result: CloseInboundLoadResult) -> CloseInboundLoadResponse {
+    CloseInboundLoadResponse {
+        closure_id: result.closure_id.get(),
+        load_id: result.load_id.get(),
+        previous_status: match result.previous_status {
+            wareboxes_application::inbound_load::InboundLoadReceivedStatus::Received => {
+                ContractReceivedStatus::Received
+            }
+        },
+        status: match result.status {
+            wareboxes_application::inbound_load::InboundLoadClosedStatus::Closed => {
+                ContractClosedStatus::Closed
+            }
+        },
+        receiving_location_id: result.receiving_location_id.get(),
+        closed_by: result.closed_by.get(),
+        closed_at: result.closed_at.to_rfc3339(),
     }
 }
 
@@ -325,5 +372,22 @@ mod tests {
         });
         assert_eq!(response.unloading_start_id, 41);
         assert_eq!(response.status, ContractReceivingStatus::Receiving);
+    }
+
+    #[test]
+    fn closure_response_preserves_execution_evidence() {
+        let response = closure_response(CloseInboundLoadResult {
+            closure_id: wareboxes_domain::InboundLoadClosureId::new(51).unwrap(),
+            load_id: InboundLoadId::new(12).unwrap(),
+            previous_status:
+                wareboxes_application::inbound_load::InboundLoadReceivedStatus::Received,
+            status: wareboxes_application::inbound_load::InboundLoadClosedStatus::Closed,
+            receiving_location_id: LocationId::new(9).unwrap(),
+            closed_by: wareboxes_domain::UserId::new(4).unwrap(),
+            closed_at: "2027-08-10T12:00:00Z".parse().unwrap(),
+        });
+        assert_eq!(response.closure_id, 51);
+        assert_eq!(response.previous_status, ContractReceivedStatus::Received);
+        assert_eq!(response.status, ContractClosedStatus::Closed);
     }
 }

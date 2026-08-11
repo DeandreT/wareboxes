@@ -10,9 +10,10 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    ArriveInboundLoadResponse, ArrivedInboundLoadStatus, ErrorReason, ErrorResponse,
-    ExpectedReceivingSessionResponse, InboundLoadEntryItemResponse, PlanInboundLoadResponse,
-    PlannedInboundLoadStatus, StartInboundLoadUnloadingResponse,
+    ArriveInboundLoadResponse, ArrivedInboundLoadStatus, CloseInboundLoadResponse, ErrorReason,
+    ErrorResponse, ExpectedReceivingSessionResponse, InboundLoadClosedStatus,
+    InboundLoadEntryItemResponse, PlanInboundLoadResponse, PlannedInboundLoadStatus,
+    StartInboundLoadUnloadingResponse,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
@@ -95,6 +96,60 @@ fn receipt_request(
         .header(IDEMPOTENCY_KEY_HEADER, idempotency_key)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn closure_request(
+    token: &str,
+    tenant_id: TenantId,
+    load_id: i64,
+    idempotency_key: &str,
+    body: &Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/v1/inbound-loads/{load_id}/closures"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .header(IDEMPOTENCY_KEY_HEADER, idempotency_key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn legacy_load_update_request(
+    token: &str,
+    tenant_id: TenantId,
+    load_id: i64,
+    status: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri("/api/loads/update")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "load_id": load_id,
+                "status": status,
+                "type": null,
+                "reference_number": null,
+                "invoice_number": null,
+                "carrier": null,
+                "trailer_number": null,
+                "seal_number": null,
+                "dock_door_location_id": null,
+                "expected_time": null,
+                "appointment_time": null,
+                "actual_time": null,
+                "arrival": null,
+                "departure": null,
+                "rejected": null,
+                "closed": null
+            })
+            .to_string(),
+        ))
         .unwrap()
 }
 
@@ -582,6 +637,7 @@ async fn atomic_plan_replays_exactly_and_enters_expected_receiving() {
     assert_eq!(receipt.status(), StatusCode::OK);
 
     let session = app
+        .clone()
         .oneshot(session_request(&token, tenant_id, result.load_id))
         .await
         .unwrap();
@@ -597,6 +653,153 @@ async fn atomic_plan_replays_exactly_and_enters_expected_receiving() {
         15
     );
     assert_eq!(session.receiving_location.location_id, dock);
+
+    let closure_body = json!({
+        "load_scan": arrival_body["load_scan"],
+        "receiving_location_scan": "PLAN-DOCK",
+        "closed_at": null
+    });
+    let premature_close = app
+        .clone()
+        .oneshot(closure_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "close-before-receiving-complete",
+            &closure_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(premature_close.status(), StatusCode::CONFLICT);
+
+    let remaining_first = json!({
+        "disposition": "received",
+        "item_barcode": format!("ITEM-{item}"),
+        "receiving_location_barcode": "PLAN-DOCK",
+        "quantity": 11,
+        "license_plate_barcode": null,
+        "lot": "LOT-A",
+        "serial": null,
+        "expiration": "2028-08-12T00:00:00Z"
+    });
+    let completed_first = app
+        .clone()
+        .oneshot(receipt_request(
+            &token,
+            tenant_id,
+            result.lines[0].load_line_id,
+            "receipt-complete-first-line",
+            &remaining_first,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(completed_first.status(), StatusCode::OK);
+    let missing_second = app
+        .clone()
+        .oneshot(receipt_request(
+            &token,
+            tenant_id,
+            result.lines[1].load_line_id,
+            "receipt-resolve-second-line",
+            &json!({
+                "disposition": "missing",
+                "quantity": 3,
+                "reason": "short_shipment",
+                "note": null
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_second.status(), StatusCode::OK);
+
+    let legacy_close = app
+        .clone()
+        .oneshot(legacy_load_update_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "closed",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(legacy_close.status(), StatusCode::CONFLICT);
+
+    let closed = app
+        .clone()
+        .oneshot(closure_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "close-atomic",
+            &closure_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(closed.status(), StatusCode::OK);
+    let closed: CloseInboundLoadResponse = json_body(closed).await;
+    assert_eq!(closed.status, InboundLoadClosedStatus::Closed);
+    assert_eq!(closed.receiving_location_id, dock);
+    let replay = app
+        .clone()
+        .oneshot(closure_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "close-atomic",
+            &closure_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(json_body::<CloseInboundLoadResponse>(replay).await, closed);
+    let mut changed_closure = closure_body.clone();
+    changed_closure["receiving_location_scan"] = json!("OTHER-DOCK");
+    let changed = app
+        .clone()
+        .oneshot(closure_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "close-atomic",
+            &changed_closure,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(changed.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body::<ErrorResponse>(changed).await.reason,
+        ErrorReason::IdempotencyKeyReused
+    );
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let closure_effects: (i64, i64, i64, i64, String) = sqlx::query_as(
+        r#"
+        SELECT
+          (SELECT COUNT(*) FROM inbound_load_closures WHERE load_id=$1),
+          (SELECT COUNT(*) FROM command_idempotency_records
+             WHERE operation='inbound.load.close.v1'
+               AND (result_json->>'load_id')::BIGINT=$1),
+          (SELECT COUNT(*) FROM load_activity WHERE load_id=$1 AND action='closed'),
+          (SELECT aggregate_sequence FROM outbox_events
+             WHERE event_type='inbound.load.closed' AND aggregate_id=$1::TEXT),
+          (SELECT status FROM loads WHERE id=$1)
+        "#,
+    )
+    .bind(result.load_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(closure_effects.0, 1);
+    assert_eq!(closure_effects.1, 1);
+    assert_eq!(closure_effects.2, 1);
+    assert!(closure_effects.3 > 3);
+    assert_eq!(closure_effects.4, "closed");
+
+    let terminal_session = app
+        .oneshot(session_request(&token, tenant_id, result.load_id))
+        .await
+        .unwrap();
+    assert_eq!(terminal_session.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]

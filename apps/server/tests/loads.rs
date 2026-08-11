@@ -6,11 +6,15 @@ use common::*;
 use tower::ServiceExt;
 use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::{routes, state::AppState};
+use wareboxes_application::inbound_load::{
+    CloseInboundLoadCommand, StartInboundLoadUnloadingCommand,
+};
 use wareboxes_application::CommandContext;
 use wareboxes_core::dto::UpdateUserAccessScope;
 use wareboxes_core::models::{
     InboundReceiptExceptionReason, ReceiveExpectedInventoryResult, Timestamp,
 };
+use wareboxes_domain::{InboundLoadId, InboundLoadScanValue};
 
 #[allow(clippy::too_many_arguments)]
 async fn receive_expected_line(
@@ -68,13 +72,51 @@ async fn receive_expected_line(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn start_inbound_unloading(
+    db: &db::Db,
+    tenant_id: TenantId,
+    user_id: i64,
+    load_id: i64,
+    dock_barcode: &str,
+    seal_scan: Option<&str>,
+    idempotency_key: &str,
+) {
+    let access = repo::tenants::access_for_user(db, user_id, tenant_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let load = repo::loads::get_load(db, tenant_id, load_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    repo::inbound_load::start_inbound_load_unloading(
+        db,
+        &access,
+        &CommandContext {
+            tenant_id,
+            actor_id: access.user_id,
+            request_id: format!("test-{idempotency_key}"),
+            idempotency_key: Some(idempotency_key.to_owned()),
+        },
+        &StartInboundLoadUnloadingCommand::new(
+            InboundLoadId::new(load_id).unwrap(),
+            InboundLoadScanValue::new(load.execution_barcode).unwrap(),
+            InboundLoadScanValue::new(dock_barcode).unwrap(),
+            seal_scan.map(|scan| InboundLoadScanValue::new(scan).unwrap()),
+            None,
+        ),
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
-    let db = setup().await;
+    let fixture = Fixture::new().await;
+    let db = fixture.db.clone();
 
-    let user = auth::register_user(&db, "receiver@test.com", "supersecret", None, None)
-        .await
-        .unwrap();
+    let user = fixture.wms_user("receiver@test.com").await;
     let tenant_id = tenant_for_user(&db, user.id).await;
     let facility =
         wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "Inbound DC")
@@ -225,6 +267,17 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     .await
     .unwrap());
 
+    start_inbound_unloading(
+        &db,
+        tenant_id,
+        user.id,
+        load,
+        "DOCK-1",
+        Some("SEAL-1"),
+        "start-unloading",
+    )
+    .await;
+
     let receipt = receive_expected_line(
         &db,
         tenant_id,
@@ -344,6 +397,16 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
     )
     .await
     .unwrap());
+    start_inbound_unloading(
+        &db,
+        tenant_id,
+        user.id,
+        mixed_lot_load,
+        "DOCK-1",
+        None,
+        "start-mixed-unloading",
+    )
+    .await;
     let err = receive_expected_line(
         &db,
         tenant_id,
@@ -368,29 +431,29 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
         AppError::Application(ApplicationError::Conflict(_))
     ));
 
-    assert!(repo::loads::update_load(
+    let access = repo::tenants::access_for_user(&db, user.id, tenant_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let closure = repo::inbound_load::close_inbound_load(
         &db,
-        tenant_id,
-        user.id,
-        load,
-        Some(LoadStatus::Closed),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(db::now_iso()),
+        &access,
+        &CommandContext {
+            tenant_id,
+            actor_id: access.user_id,
+            request_id: "close-load".into(),
+            idempotency_key: Some("close-load".into()),
+        },
+        &CloseInboundLoadCommand::new(
+            InboundLoadId::new(load).unwrap(),
+            InboundLoadScanValue::new(load_row.execution_barcode.clone()).unwrap(),
+            InboundLoadScanValue::new("DOCK-1").unwrap(),
+            None,
+        ),
     )
     .await
-    .unwrap());
+    .unwrap();
+    assert_eq!(closure.load_id.get(), load);
     let closed = repo::loads::get_loads(&db, tenant_id, false, false)
         .await
         .unwrap()
@@ -404,7 +467,7 @@ async fn inbound_load_lines_receive_into_inventory_with_close_guards() {
 #[tokio::test]
 async fn concurrent_load_receipts_preserve_every_accepted_quantity() {
     let fixture = Fixture::new().await;
-    let user = fixture.user("concurrent-receiver@test.com").await;
+    let user = fixture.wms_user("concurrent-receiver@test.com").await;
     let tenant_id = tenant_for_user(&fixture.db, user.id).await;
     let facility = fixture.facility(tenant_id, "Concurrent Inbound DC").await;
     let dock = wareboxes_persistence_postgres::locations::add_location(
@@ -466,6 +529,17 @@ async fn concurrent_load_receipts_preserve_every_accepted_quantity() {
         .await
         .unwrap();
     tx.commit().await.unwrap();
+
+    start_inbound_unloading(
+        &fixture.db,
+        tenant_id,
+        user.id,
+        load,
+        "CONCURRENT-DOCK",
+        None,
+        "concurrent-start-unloading",
+    )
+    .await;
 
     let receipt_a = receive_expected_line(
         &fixture.db,
@@ -875,9 +949,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     let fixture = Fixture::new().await;
     let db = fixture.db.clone();
 
-    let user = auth::register_user(&db, "lp-receiver@test.com", "supersecret", None, None)
-        .await
-        .unwrap();
+    let user = fixture.wms_user("lp-receiver@test.com").await;
     let tenant_id = tenant_for_user(&db, user.id).await;
     let facility =
         wareboxes_persistence_postgres::facilities::add_facility(&db, tenant_id, "LP Inbound DC")
@@ -923,6 +995,7 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     )
     .await
     .unwrap());
+
     let item = repo::items::add_item(
         &db,
         tenant_id,
@@ -986,6 +1059,17 @@ async fn inbound_receive_can_use_license_plate_and_confirm_missing() {
     )
     .await
     .unwrap());
+
+    start_inbound_unloading(
+        &db,
+        tenant_id,
+        user.id,
+        load,
+        "LP-DOCK",
+        None,
+        "lp-start-unloading",
+    )
+    .await;
 
     let receipt = receive_expected_line(
         &db,

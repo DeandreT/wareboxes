@@ -338,6 +338,10 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "inbound_load_unloading_starts",
             "inbound_load_unloading_starts_tenant_isolation",
         ),
+        (
+            "inbound_load_closures",
+            "inbound_load_closures_tenant_isolation",
+        ),
         ("facilities", "facilities_tenant_isolation"),
         (
             "facility_shipping_origin_configurations",

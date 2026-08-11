@@ -127,6 +127,39 @@ pub struct StartInboundLoadUnloadingResponse {
     pub started_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseInboundLoadRequest {
+    pub load_scan: String,
+    pub receiving_location_scan: String,
+    /// Optional RFC 3339 closure time; omitted to use authoritative server time.
+    pub closed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadReceivedStatus {
+    Received,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadClosedStatus {
+    Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseInboundLoadResponse {
+    pub closure_id: i64,
+    pub load_id: i64,
+    pub previous_status: InboundLoadReceivedStatus,
+    pub status: InboundLoadClosedStatus,
+    pub receiving_location_id: i64,
+    pub closed_by: i64,
+    pub closed_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -224,5 +257,18 @@ mod tests {
         let mut changed = request;
         changed["quantity"] = json!(1);
         assert!(serde_json::from_value::<StartInboundLoadUnloadingRequest>(changed).is_err());
+    }
+
+    #[test]
+    fn closure_request_is_scan_only_and_strict() {
+        let request = json!({
+            "load_scan": "WB-LOAD-101",
+            "receiving_location_scan": "RECV-01",
+            "closed_at": null
+        });
+        assert!(serde_json::from_value::<CloseInboundLoadRequest>(request.clone()).is_ok());
+        let mut changed = request;
+        changed["status"] = json!("closed");
+        assert!(serde_json::from_value::<CloseInboundLoadRequest>(changed).is_err());
     }
 }

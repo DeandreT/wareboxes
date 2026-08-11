@@ -221,29 +221,9 @@ pub async fn mobile_arrive(
             "arrival time cannot be in the future",
         ));
     }
-    let ok = repo::loads::update_load(
-        &state.db,
-        user.tenant.tenant_id,
-        user.user.id,
-        load_id,
-        Some(LoadStatus::Arrived),
-        None,
-        None,
-        body.invoice_number.as_deref(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        body.arrival,
-        None,
-        None,
-        None,
-    )
-    .await?;
-    Ok(Json(ok))
+    Err(AppError::conflict(
+        "use the scanned v1 inbound arrival workflow",
+    ))
 }
 
 pub async fn add(
@@ -317,6 +297,21 @@ pub async fn update(
     else {
         return Ok(Json(false));
     };
+    if body.status.is_some_and(|status| {
+        matches!(
+            status,
+            LoadStatus::Arrived | LoadStatus::Receiving | LoadStatus::Received | LoadStatus::Closed
+        )
+    }) {
+        let load = repo::loads::get_load_in_scope(&state.db, &user.tenant, body.load_id, false)
+            .await?
+            .ok_or_else(|| AppError::not_found("load"))?;
+        if load.r#type == LoadType::Inbound {
+            return Err(AppError::conflict(
+                "inbound execution states require the scanned v1 workflow",
+            ));
+        }
+    }
     if let Some(location_id) = body.dock_door_location_id {
         require_active_location_in_facility(
             &state.db,

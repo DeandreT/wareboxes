@@ -14,7 +14,9 @@ use crate::fulfillment_shared::{
 use crate::toast::use_toast_bus;
 use crate::view_model::format_quantity;
 
+mod closure;
 mod receiving;
+use closure::LoadClosureConfirmation;
 use receiving::ReceivingExecutionPanel;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -61,6 +63,7 @@ pub fn LoadDetailPanel(
     let command_pending = RwSignal::new(false);
     let command_error = RwSignal::new(None::<String>);
     let arrival_open = RwSignal::new(false);
+    let closure_open = RwSignal::new(false);
     let lifecycle_target = RwSignal::new(None::<LoadStatus>);
     let lifecycle_confirmation = NodeRef::<html::Section>::new();
     let load_id = load.id;
@@ -218,7 +221,13 @@ pub fn LoadDetailPanel(
                                             } else {
                                                 "button secondary-action"
                                             }
-                                            on:click=move |_| lifecycle_target.set(Some(target))
+                                            on:click=move |_| {
+                                                if target == LoadStatus::Closed {
+                                                    closure_open.set(true);
+                                                } else {
+                                                    lifecycle_target.set(Some(target));
+                                                }
+                                            }
                                         >
                                             {label}
                                         </button>
@@ -277,6 +286,17 @@ pub fn LoadDetailPanel(
                             }
                         })
                     }}
+                </Show>
+                <Show when=move || closure_open.get()>
+                    <LoadClosureConfirmation
+                        load=load.get_value()
+                        locations=locations.get_value()
+                        pending=command_pending
+                        error=command_error
+                        on_close=Callback::new(move |_| closure_open.set(false))
+                        on_refreshed
+                        on_unauthorized
+                    />
                 </Show>
             </Show>
 

@@ -35805,3 +35805,160 @@ GRANT SELECT,INSERT ON public.inbound_load_unloading_starts TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.inbound_load_unloading_starts_id_seq TO wareboxes_app;
 REVOKE ALL ON FUNCTION public.validate_inbound_load_unloading_start() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_inbound_load_unloading_start_consistency() FROM PUBLIC;
+
+CREATE TABLE public.inbound_load_closures (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    load_id bigint NOT NULL,
+    receiving_location_id bigint NOT NULL,
+    observed_load_barcode text NOT NULL,
+    observed_receiving_location_barcode text NOT NULL,
+    closed_by_user_id bigint NOT NULL,
+    closed_at timestamp with time zone NOT NULL,
+    CONSTRAINT inbound_load_closures_load_scan_check CHECK (
+        observed_load_barcode = btrim(observed_load_barcode)
+        AND char_length(observed_load_barcode) BETWEEN 1 AND 200
+    ),
+    CONSTRAINT inbound_load_closures_location_scan_check CHECK (
+        observed_receiving_location_barcode = btrim(observed_receiving_location_barcode)
+        AND char_length(observed_receiving_location_barcode) BETWEEN 1 AND 200
+    ),
+    CONSTRAINT inbound_load_closures_tenant_load_unique UNIQUE (tenant_id, load_id),
+    CONSTRAINT inbound_load_closures_owner_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    CONSTRAINT inbound_load_closures_facility_fkey
+        FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities(tenant_id, id),
+    CONSTRAINT inbound_load_closures_load_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, load_id)
+        REFERENCES public.loads(tenant_id, inventory_owner_id, id),
+    CONSTRAINT inbound_load_closures_location_fkey
+        FOREIGN KEY (tenant_id, facility_id, receiving_location_id)
+        REFERENCES public.locations(tenant_id, facility_id, id),
+    CONSTRAINT inbound_load_closures_actor_fkey FOREIGN KEY (closed_by_user_id)
+        REFERENCES public.users(id)
+);
+
+CREATE INDEX inbound_load_closures_scope_idx
+ON public.inbound_load_closures
+    (tenant_id, facility_id, inventory_owner_id, closed_at DESC, id DESC);
+
+CREATE FUNCTION public.validate_inbound_load_closure() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    load_row record;
+    location_barcode text;
+    unresolved_line_count bigint;
+BEGIN
+    SELECT type, status, facility_id, dock_door_location_id, execution_barcode,
+           receive_completed
+    INTO load_row
+    FROM public.loads
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND id=NEW.load_id
+      AND deleted IS NULL;
+    SELECT COUNT(*) INTO unresolved_line_count
+    FROM public.load_lines
+    WHERE tenant_id=NEW.tenant_id
+      AND load_id=NEW.load_id
+      AND deleted IS NULL
+      AND status IN ('pending','partial');
+    IF load_row IS NULL
+       OR load_row.type <> 'inbound'
+       OR load_row.status <> 'received'
+       OR NOT load_row.receive_completed
+       OR unresolved_line_count <> 0
+       OR load_row.facility_id <> NEW.facility_id
+       OR load_row.dock_door_location_id IS DISTINCT FROM NEW.receiving_location_id
+       OR upper(btrim(load_row.execution_barcode)) <> upper(NEW.observed_load_barcode)
+       OR NEW.closed_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'inbound closure does not match a fully received load'
+            USING ERRCODE='23514';
+    END IF;
+    SELECT barcode INTO location_barcode
+    FROM public.locations
+    WHERE tenant_id=NEW.tenant_id
+      AND facility_id=NEW.facility_id
+      AND id=NEW.receiving_location_id
+      AND deleted IS NULL AND active AND receivable;
+    IF location_barcode IS NULL
+       OR upper(btrim(location_barcode)) <> upper(NEW.observed_receiving_location_barcode) THEN
+        RAISE EXCEPTION 'inbound closure location evidence is invalid'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.require_inbound_load_closure_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    load_row record;
+BEGIN
+    SELECT status, closed, closed_by, dock_door_location_id
+    INTO load_row
+    FROM public.loads
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.load_id;
+    IF load_row IS NULL
+       OR load_row.status <> 'closed'
+       OR load_row.closed IS DISTINCT FROM NEW.closed_at
+       OR load_row.closed_by IS DISTINCT FROM NEW.closed_by_user_id
+       OR load_row.dock_door_location_id IS DISTINCT FROM NEW.receiving_location_id THEN
+        RAISE EXCEPTION 'inbound closure evidence does not match resulting load state'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.require_closed_inbound_load_evidence() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.type='inbound' AND NEW.status='closed' AND NOT EXISTS (
+        SELECT 1 FROM public.inbound_load_closures closure
+        WHERE closure.tenant_id=NEW.tenant_id
+          AND closure.inventory_owner_id=NEW.inventory_owner_id
+          AND closure.facility_id=NEW.facility_id
+          AND closure.load_id=NEW.id
+          AND closure.receiving_location_id=NEW.dock_door_location_id
+          AND closure.closed_by_user_id=NEW.closed_by
+          AND closure.closed_at=NEW.closed
+    ) THEN
+        RAISE EXCEPTION 'closed inbound load lacks immutable closure evidence'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE TRIGGER inbound_load_closures_validate
+BEFORE INSERT ON public.inbound_load_closures
+FOR EACH ROW EXECUTE FUNCTION public.validate_inbound_load_closure();
+CREATE TRIGGER inbound_load_closures_are_immutable
+BEFORE UPDATE OR DELETE ON public.inbound_load_closures
+FOR EACH ROW EXECUTE FUNCTION public.reject_inbound_load_arrival_mutation();
+CREATE CONSTRAINT TRIGGER inbound_load_closures_require_consistency
+AFTER INSERT ON public.inbound_load_closures
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_inbound_load_closure_consistency();
+CREATE CONSTRAINT TRIGGER loads_require_inbound_closure_evidence
+AFTER UPDATE OF status, closed, closed_by ON public.loads
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_closed_inbound_load_evidence();
+
+ALTER TABLE public.inbound_load_closures ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.inbound_load_closures FORCE ROW LEVEL SECURITY;
+CREATE POLICY inbound_load_closures_tenant_isolation
+ON public.inbound_load_closures
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.inbound_load_closures TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.inbound_load_closures_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_inbound_load_closure() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_inbound_load_closure_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_closed_inbound_load_evidence() FROM PUBLIC;

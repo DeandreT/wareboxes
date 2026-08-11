@@ -70,12 +70,31 @@ pub enum InboundLoadUnloadingError {
     FutureStart,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InboundLoadClosureError {
+    #[error("inbound load must be fully received before it can be closed")]
+    InvalidStatus,
+    #[error("load closure time cannot be in the future")]
+    FutureClosure,
+}
+
 pub fn validate_inbound_load_unloading_start(
     started_at: Timestamp,
     current_time: Timestamp,
 ) -> Result<(), InboundLoadUnloadingError> {
     if started_at > current_time {
         Err(InboundLoadUnloadingError::FutureStart)
+    } else {
+        Ok(())
+    }
+}
+
+pub fn validate_inbound_load_closure(
+    closed_at: Timestamp,
+    current_time: Timestamp,
+) -> Result<(), InboundLoadClosureError> {
+    if closed_at > current_time {
+        Err(InboundLoadClosureError::FutureClosure)
     } else {
         Ok(())
     }
@@ -438,6 +457,10 @@ mod tests {
         assert_eq!(
             validate_inbound_load_unloading_start(future, now),
             Err(InboundLoadUnloadingError::FutureStart)
+        );
+        assert_eq!(
+            validate_inbound_load_closure(future, now),
+            Err(InboundLoadClosureError::FutureClosure)
         );
     }
 }

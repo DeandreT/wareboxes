@@ -90,10 +90,11 @@ pub use inbound_inspection::{
 };
 pub use inbound_load::{
     ArriveInboundLoadRequest, ArriveInboundLoadResponse, ArrivedInboundLoadStatus,
-    InboundLoadEntryItemResponse, InboundLoadPreArrivalStatus, InboundLoadReceivingStatus,
-    PlanInboundLoadLineRequest, PlanInboundLoadRequest, PlanInboundLoadResponse,
-    PlannedInboundLoadLineResponse, PlannedInboundLoadStatus, StartInboundLoadUnloadingRequest,
-    StartInboundLoadUnloadingResponse,
+    CloseInboundLoadRequest, CloseInboundLoadResponse, InboundLoadClosedStatus,
+    InboundLoadEntryItemResponse, InboundLoadPreArrivalStatus, InboundLoadReceivedStatus,
+    InboundLoadReceivingStatus, PlanInboundLoadLineRequest, PlanInboundLoadRequest,
+    PlanInboundLoadResponse, PlannedInboundLoadLineResponse, PlannedInboundLoadStatus,
+    StartInboundLoadUnloadingRequest, StartInboundLoadUnloadingResponse,
 };
 pub use integration_mapping::{
     ConfigureIntegrationOrderItemMappingRequest, ConfigureIntegrationOrderOwnerMappingRequest,

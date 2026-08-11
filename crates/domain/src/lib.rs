@@ -58,8 +58,9 @@ pub use inbound_inspection::{
     InboundInspectionOutcome, InboundInspectionTargetStatus, MAX_INBOUND_INSPECTION_NOTE_LENGTH,
 };
 pub use inbound_load::{
-    validate_inbound_load_arrival, validate_inbound_load_unloading_start, InboundExpectedQuantity,
-    InboundLoadArrivalError, InboundLoadField, InboundLoadPlanLine, InboundLoadPlanningError,
+    validate_inbound_load_arrival, validate_inbound_load_closure,
+    validate_inbound_load_unloading_start, InboundExpectedQuantity, InboundLoadArrivalError,
+    InboundLoadClosureError, InboundLoadField, InboundLoadPlanLine, InboundLoadPlanningError,
     InboundLoadPreArrivalStatus, InboundLoadReference, InboundLoadScanValue,
     InboundLoadUnloadingError, NewInboundLoadPlan, MAX_INBOUND_LOAD_IDENTITY_LENGTH,
     MAX_INBOUND_LOAD_REFERENCE_LENGTH, MAX_INBOUND_LOAD_SCAN_VALUE_LENGTH,
@@ -266,6 +267,7 @@ positive_id!(AddressId, "address ID");
 positive_id!(InboundLoadId, "inbound load ID");
 positive_id!(InboundLoadLineId, "inbound load line ID");
 positive_id!(InboundLoadArrivalId, "inbound load arrival ID");
+positive_id!(InboundLoadClosureId, "inbound load closure ID");
 positive_id!(
     InboundLoadUnloadingStartId,
     "inbound load unloading start ID"

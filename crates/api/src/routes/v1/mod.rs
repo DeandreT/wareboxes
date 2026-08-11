@@ -59,6 +59,10 @@ pub fn router() -> Router<AppState> {
             post(inbound_loads::start_unloading),
         )
         .route(
+            "/inbound-loads/{load_id}/closures",
+            post(inbound_loads::close),
+        )
+        .route(
             "/inventory-owners/{inventory_owner_id}/inbound-load-entry-items",
             get(inbound_loads::entry_items),
         )

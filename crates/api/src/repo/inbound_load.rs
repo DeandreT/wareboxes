@@ -25,6 +25,9 @@ use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 use super::access::{lock_current_scope_tx, require_permission_tx};
 use crate::error::{AppError, AppResult};
 
+mod closure;
+pub use closure::close_inbound_load;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundLoadEntryItem {
     pub item_id: i64,
