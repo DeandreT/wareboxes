@@ -14,17 +14,19 @@ pub(super) enum WorkMode {
     Pick,
     Relocate,
     Replenish,
+    CrossDock,
     OutboundLoad,
     Count,
 }
 
 impl WorkMode {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Receive,
         Self::Putaway,
         Self::Pick,
         Self::Relocate,
         Self::Replenish,
+        Self::CrossDock,
         Self::OutboundLoad,
         Self::Count,
     ];
@@ -36,6 +38,7 @@ impl WorkMode {
             Self::Pick => "Pick",
             Self::Relocate => "Relocate",
             Self::Replenish => "Replenish",
+            Self::CrossDock => "Cross-dock",
             Self::OutboundLoad => "Load",
             Self::Count => "Count",
         }
@@ -48,6 +51,7 @@ impl WorkMode {
             Self::Pick => "Pick released order demand",
             Self::Relocate => "Move stock between locations",
             Self::Replenish => "Refill forward pick locations",
+            Self::CrossDock => "Flow received stock to demand",
             Self::OutboundLoad => "Load and unload cartons",
             Self::Count => "Perform directed counts",
         }
@@ -60,6 +64,7 @@ impl WorkMode {
             Self::Pick => Icon::ScanBarcode,
             Self::Relocate => Icon::Move,
             Self::Replenish => Icon::RefreshCw,
+            Self::CrossDock => Icon::ArrowRightLeft,
             Self::OutboundLoad => Icon::Truck,
             Self::Count => Icon::ClipboardCheck,
         }
@@ -144,6 +149,7 @@ impl RfApp {
             self.cycle_count.activity(),
             self.picking.activity(),
             self.replenishment.activity(),
+            self.cross_dock.activity(),
             self.outbound_load.activity(),
         )
     }
@@ -218,6 +224,7 @@ impl RfApp {
             WorkMode::Receive
             | WorkMode::Pick
             | WorkMode::Replenish
+            | WorkMode::CrossDock
             | WorkMode::OutboundLoad
             | WorkMode::Count => {}
         }
@@ -226,6 +233,7 @@ impl RfApp {
         self.count_scan_focus = None;
         self.pick_scan_focus = None;
         self.replenishment_scan_focus = None;
+        self.cross_dock_scan_focus = None;
         self.outbound_load_scan_focus = None;
         self.work_menu_open = false;
     }
@@ -244,6 +252,9 @@ impl RfApp {
             WorkMode::Replenish => self
                 .heartbeat_header()
                 .unwrap_or_else(|| activity_status(self.replenishment.activity())),
+            WorkMode::CrossDock => self
+                .heartbeat_header()
+                .unwrap_or_else(|| activity_status(self.cross_dock.activity())),
             WorkMode::OutboundLoad => activity_status(self.outbound_load.activity()),
             WorkMode::Receive => match self.receiving.activity() {
                 ReceivingActivity::AwaitingLoad | ReceivingActivity::LoadComplete => {
@@ -278,12 +289,14 @@ pub(super) fn work_mode_switch_allowed(
     count: Activity,
     picking: Activity,
     replenishment: Activity,
+    cross_dock: Activity,
     outbound_load: Activity,
 ) -> bool {
     putaway == Activity::Idle
         && count == Activity::Idle
         && picking == Activity::Idle
         && replenishment == Activity::Idle
+        && cross_dock == Activity::Idle
         && outbound_load == Activity::Idle
         && matches!(
             receiving,
@@ -318,6 +331,7 @@ mod tests {
             Activity::Idle,
             Activity::Idle,
             Activity::Idle,
+            Activity::Idle,
         ));
         assert!(work_mode_switch_allowed(
             Activity::Idle,
@@ -326,9 +340,10 @@ mod tests {
             Activity::Idle,
             Activity::Idle,
             Activity::Idle,
+            Activity::Idle,
         ));
-        for blocked in 0..6 {
-            let mut activities = [Activity::Idle; 5];
+        for blocked in 0..7 {
+            let mut activities = [Activity::Idle; 6];
             let receiving = if blocked == 1 {
                 ReceivingActivity::Active
             } else {
@@ -345,6 +360,7 @@ mod tests {
                 activities[2],
                 activities[3],
                 activities[4],
+                activities[5],
             ));
         }
     }
@@ -363,6 +379,7 @@ mod tests {
             assert!(!work_mode_switch_allowed(
                 Activity::Idle,
                 receiving,
+                Activity::Idle,
                 Activity::Idle,
                 Activity::Idle,
                 Activity::Idle,

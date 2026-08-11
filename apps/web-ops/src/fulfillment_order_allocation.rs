@@ -761,6 +761,9 @@ const fn outcome_label(outcome: OrderAllocationOutcome) -> &'static str {
 const fn blocker_label(reason: OrderAllocationReadinessBlocker) -> &'static str {
     match reason {
         OrderAllocationReadinessBlocker::ActiveHold => "Release active order holds first.",
+        OrderAllocationReadinessBlocker::CrossDockInProgress => {
+            "Complete or cancel active cross-dock work first."
+        }
         OrderAllocationReadinessBlocker::OrderStatusNotAllocatable => {
             "The order status does not allow allocation."
         }

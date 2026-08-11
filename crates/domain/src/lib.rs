@@ -2,6 +2,7 @@
 
 mod allocation;
 mod backorder;
+mod cross_dock;
 mod customer_return;
 mod cycle_count;
 mod facility;
@@ -41,6 +42,13 @@ pub use backorder::{
     split_current_allocation_shortage, BackorderDetails, BackorderError, BackorderLineSnapshot,
     BackorderNote, BackorderPolicyMode, BackorderPolicyRevision, BackorderReason,
     BackorderSplitLineTransition, BackorderSplitTransition, MAX_BACKORDER_NOTE_LENGTH,
+};
+pub use cross_dock::{
+    plan_cross_dock, CrossDockCancellationDetails, CrossDockCancellationReason,
+    CrossDockClaimReleaseReason, CrossDockError, CrossDockNote, CrossDockPlanDecision,
+    CrossDockPlanningSnapshot, CrossDockQuantity, CrossDockScanValue, CrossDockUom,
+    CrossDockWorkStatus, MAX_CROSS_DOCK_NOTE_LENGTH, MAX_CROSS_DOCK_SCAN_VALUE_LENGTH,
+    MAX_CROSS_DOCK_UOM_LENGTH,
 };
 pub use customer_return::{
     cancel_customer_return, plan_customer_return, CustomerReturnCancellationDetails,
@@ -346,6 +354,10 @@ positive_id!(
     CustomerReturnCancellationId,
     "customer return cancellation ID"
 );
+positive_id!(CrossDockPlanId, "cross-dock plan ID");
+positive_id!(CrossDockWorkId, "cross-dock work ID");
+positive_id!(CrossDockConfirmationId, "cross-dock confirmation ID");
+positive_id!(CrossDockCancellationId, "cross-dock cancellation ID");
 positive_id!(
     CycleCountVarianceDecisionId,
     "cycle count variance decision ID"

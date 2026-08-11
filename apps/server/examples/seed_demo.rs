@@ -1,3 +1,5 @@
+#[path = "seed_demo/cross_dock.rs"]
+mod cross_dock;
 #[path = "seed_demo/fulfillment.rs"]
 mod fulfillment;
 #[path = "seed_demo/operations.rs"]
@@ -23,6 +25,7 @@ async fn main() -> anyhow::Result<()> {
 
     fulfillment::seed(&context).await?;
     operations::seed(&context).await?;
+    cross_dock::seed(&context).await?;
     context.verify().await?;
 
     println!(

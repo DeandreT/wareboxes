@@ -4,10 +4,11 @@ use leptos_router::{
     StaticSegment,
 };
 use wareboxes_api_contract::v1::{
-    CycleCountCandidatePage, CycleCountPolicyPage, CycleCountVariancePage, CycleCountWorkPage,
-    InventoryBalanceResponse, InventoryHoldResponse, InventoryHoldStatus, OpaqueCursor,
-    OutboundLoadQueuePage, PackingQueuePage, PickWavePage, PutawayCandidatePage, PutawayWorkPage,
-    ReplenishmentPolicyPage, ReplenishmentQueuePage, ShippingQueuePage,
+    CrossDockPlanningOptionPage, CrossDockWorkPage, CycleCountCandidatePage, CycleCountPolicyPage,
+    CycleCountVariancePage, CycleCountWorkPage, InventoryBalanceResponse, InventoryHoldResponse,
+    InventoryHoldStatus, OpaqueCursor, OutboundLoadQueuePage, PackingQueuePage, PickWavePage,
+    PutawayCandidatePage, PutawayWorkPage, ReplenishmentPolicyPage, ReplenishmentQueuePage,
+    ShippingQueuePage,
 };
 use wareboxes_api_contract::web::access::{AccessScopeResource, AccessScopeWorkspace};
 use wareboxes_core::dto::{OrderPage, WebSessionContext};
@@ -18,6 +19,7 @@ use crate::api;
 use crate::app_frame::{Brand, PageFrame};
 use crate::catalog::CatalogWorkbench;
 use crate::components::{Icon, SearchField, UiIcon};
+use crate::cross_dock::CrossDockWorkspace;
 use crate::customer_returns::CustomerReturnsWorkspace;
 use crate::cycle_count::CycleCountWorkspace;
 use crate::fulfillment::{LoadsWorkbench, OrdersWorkbench};
@@ -60,6 +62,7 @@ pub enum WorkspaceBootstrapSection {
     OutboundLoads,
     Putaway,
     CycleCounts,
+    CrossDock,
     Inventory,
     InventoryIntegrity,
     Replenishment,
@@ -79,6 +82,8 @@ pub struct WorkspaceBootstrapData {
     pub cycle_count_work: Option<CycleCountWorkPage>,
     pub cycle_count_policies: Option<CycleCountPolicyPage>,
     pub cycle_count_variances: Option<CycleCountVariancePage>,
+    pub cross_dock_planning_options: Option<CrossDockPlanningOptionPage>,
+    pub cross_dock_work: Option<CrossDockWorkPage>,
     pub replenishment_policies: Option<ReplenishmentPolicyPage>,
     pub replenishment_queue: Option<ReplenishmentQueuePage>,
     pub balances: Vec<InventoryBalanceResponse>,
@@ -119,6 +124,8 @@ struct WorkspaceData {
     cycle_count_work: Option<CycleCountWorkPage>,
     cycle_count_policies: Option<CycleCountPolicyPage>,
     cycle_count_variances: Option<CycleCountVariancePage>,
+    cross_dock_planning_options: Option<CrossDockPlanningOptionPage>,
+    cross_dock_work: Option<CrossDockWorkPage>,
     replenishment_policies: Option<ReplenishmentPolicyPage>,
     replenishment_queue: Option<ReplenishmentQueuePage>,
     balances: Vec<InventoryBalanceResponse>,
@@ -145,6 +152,8 @@ impl From<WorkspaceBootstrapData> for WorkspaceData {
             cycle_count_work: bootstrap.cycle_count_work,
             cycle_count_policies: bootstrap.cycle_count_policies,
             cycle_count_variances: bootstrap.cycle_count_variances,
+            cross_dock_planning_options: bootstrap.cross_dock_planning_options,
+            cross_dock_work: bootstrap.cross_dock_work,
             replenishment_policies: bootstrap.replenishment_policies,
             replenishment_queue: bootstrap.replenishment_queue,
             balances: bootstrap.balances,
@@ -174,6 +183,7 @@ pub(crate) enum Section {
     OutboundLoads,
     Putaway,
     CycleCounts,
+    CrossDock,
     Loads,
     PurchaseOrders,
     TransferOrders,
@@ -200,6 +210,7 @@ impl Section {
             Self::OutboundLoads => Some(WorkspaceBootstrapSection::OutboundLoads),
             Self::Putaway => Some(WorkspaceBootstrapSection::Putaway),
             Self::CycleCounts => Some(WorkspaceBootstrapSection::CycleCounts),
+            Self::CrossDock => Some(WorkspaceBootstrapSection::CrossDock),
             Self::Inventory => Some(WorkspaceBootstrapSection::Inventory),
             Self::InventoryIntegrity => Some(WorkspaceBootstrapSection::InventoryIntegrity),
             Self::Replenishment => Some(WorkspaceBootstrapSection::Replenishment),
@@ -256,6 +267,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/replenishment.css"/>
                 <link rel="stylesheet" href="/putaway.css"/>
                 <link rel="stylesheet" href="/cycle-count.css"/>
+                <link rel="stylesheet" href="/cross-dock.css"/>
                 <link rel="stylesheet" href="/catalog.css"/>
                 <link rel="stylesheet" href="/administration.css"/>
                 <link rel="stylesheet" href="/integration-monitor.css"/>
@@ -306,6 +318,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("outbound-loads") view=OutboundLoadsPage/>
                     <Route path=StaticSegment("putaway") view=PutawayPage/>
                     <Route path=StaticSegment("cycle-counts") view=CycleCountsPage/>
+                    <Route path=StaticSegment("cross-dock") view=CrossDockPage/>
                     <Route path=StaticSegment("loads") view=LoadsPage/>
                     <Route path=StaticSegment("purchase-orders") view=PurchaseOrdersPage/>
                     <Route path=StaticSegment("transfer-orders") view=TransferOrdersPage/>
@@ -754,6 +767,14 @@ async fn load_workspace(
             );
             data.access = api::access().await?;
         }
+        Section::CrossDock if has_permission(session, "wms_supervisor") => {
+            data.cross_dock_planning_options = Some(
+                api::cross_dock_planning_options(api::CrossDockFilters::default(), None).await?,
+            );
+            data.cross_dock_work =
+                Some(api::cross_dock_work(api::CrossDockFilters::default(), None).await?);
+            data.access = api::access().await?;
+        }
         Section::Access => {
             data.access = api::access().await?;
         }
@@ -765,6 +786,7 @@ async fn load_workspace(
         | Section::OutboundLoads
         | Section::Putaway
         | Section::CycleCounts
+        | Section::CrossDock
         | Section::Loads
         | Section::PurchaseOrders
         | Section::TransferOrders
@@ -874,6 +896,11 @@ fn InventoryIntegrityPage() -> impl IntoView {
 #[component]
 fn ReplenishmentPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::Replenishment/> }
+}
+
+#[component]
+fn CrossDockPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::CrossDock/> }
 }
 
 #[component]
@@ -1089,6 +1116,15 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                 <ReplenishmentWorkspace
                     initial_policies=data.replenishment_policies
                     initial_work=data.replenishment_queue
+                    access=data.access
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::CrossDock if has_permission(&session, "wms_supervisor") => view! {
+                <CrossDockWorkspace
+                    initial_options=data.cross_dock_planning_options
+                    initial_work=data.cross_dock_work
                     access=data.access
                     on_unauthorized=session_expired_callback()
                 />

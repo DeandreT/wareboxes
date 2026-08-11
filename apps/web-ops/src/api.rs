@@ -2,29 +2,30 @@
 use wareboxes_api_contract::v1::ReleaseInventoryHoldRequest;
 use wareboxes_api_contract::v1::{
     AbandonPackSessionRequest, AbandonPackSessionResponse, AcceptPickShortageAsShortShipRequest,
-    AcceptPickShortageAsShortShipResponse, CancelOrderRequest, CancelOrderResponse,
-    CancelReplenishmentWorkRequest, CloseCartonRequest, CloseCartonResponse,
-    ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,
-    ConfigureReplenishmentPolicyRequest, ConfigureReplenishmentPolicyResponse, CreateCartonRequest,
-    CreateCartonResponse, InventoryBalancePage, InventoryBalanceSort, InventoryHoldPage,
-    InventoryHoldSort, InventoryHoldStatus, InventorySortDirection,
-    InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
-    OpenPackSessionResponse, OrderAllocationReadinessResponse, PackPickedAllocationRequest,
-    PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage,
-    PickConfirmationHistoryPage, PickShortagePage, PickShortageQueueSort,
+    AcceptPickShortageAsShortShipResponse, CancelCrossDockWorkRequest, CancelCrossDockWorkResponse,
+    CancelOrderRequest, CancelOrderResponse, CancelReplenishmentWorkRequest, CloseCartonRequest,
+    CloseCartonResponse, ConfigureFacilityShippingOriginRequest,
+    ConfigureFacilityShippingOriginResponse, ConfigureReplenishmentPolicyRequest,
+    ConfigureReplenishmentPolicyResponse, CreateCartonRequest, CreateCartonResponse,
+    CrossDockPlanningOptionPage, CrossDockWorkPage, CrossDockWorkStatus, InventoryBalancePage,
+    InventoryBalanceSort, InventoryHoldPage, InventoryHoldSort, InventoryHoldStatus,
+    InventorySortDirection, InventoryStatusTransitionResponse, OpaqueCursor,
+    OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
+    PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
+    PackingQueuePage, PickConfirmationHistoryPage, PickShortagePage, PickShortageQueueSort,
     PickShortageQueueSortDirection, PickShortageResponse, PickShortageStatus,
     PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
-    PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
-    PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
-    ReallocatePickShortageResponse, ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest,
-    ReleaseOrderHoldResponse, ReleaseOrderRequest, ReleaseOrderResponse,
-    RemovePackedContentRequest, RemovePackedContentResponse, ReopenCartonRequest,
-    ReopenCartonResponse, ReplenishmentPolicyPage, ReplenishmentPolicySort,
-    ReplenishmentPolicySortDirection, ReplenishmentQueuePage,
-    ReplenishmentWorkCancellationResponse, ReplenishmentWorkSort, ReplenishmentWorkSortDirection,
-    ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
-    ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
-    VoidCartonResponse,
+    PlaceOrderHoldResponse, PlanCrossDockWorkRequest, PlanCrossDockWorkResponse,
+    PlanOrderAllocationRequest, PlanOrderAllocationResponse, PlanReplenishmentRequest,
+    PlanReplenishmentResponse, ReallocatePickShortageRequest, ReallocatePickShortageResponse,
+    ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
+    ReleaseOrderRequest, ReleaseOrderResponse, RemovePackedContentRequest,
+    RemovePackedContentResponse, ReopenCartonRequest, ReopenCartonResponse,
+    ReplenishmentPolicyPage, ReplenishmentPolicySort, ReplenishmentPolicySortDirection,
+    ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse, ReplenishmentWorkSort,
+    ReplenishmentWorkSortDirection, ReplenishmentWorkStatus, RetireReplenishmentPolicyRequest,
+    RetireReplenishmentPolicyResponse, ReversePickConfirmationRequest,
+    ReversePickConfirmationResponse, VoidCartonRequest, VoidCartonResponse,
 };
 use wareboxes_api_contract::v1::{
     CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
@@ -142,6 +143,14 @@ pub struct ReplenishmentQueueFilters {
     pub direction: ReplenishmentWorkSortDirection,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct CrossDockFilters {
+    pub facility_id: Option<i64>,
+    pub inventory_owner_id: Option<i64>,
+    pub order_id: Option<i64>,
+    pub status: Option<CrossDockWorkStatus>,
+}
+
 #[derive(Clone)]
 pub struct PickShortageFilters {
     pub facility_id: Option<i64>,
@@ -211,20 +220,22 @@ mod browser {
     use super::{
         AbandonPackSessionRequest, AbandonPackSessionResponse,
         AcceptPickShortageAsShortShipRequest, AcceptPickShortageAsShortShipResponse,
-        AccessScopeWorkspace, ApiError, CancelOrderRequest, CancelOrderResponse,
-        CancelReplenishmentWorkRequest, CloseCartonRequest, CloseCartonResponse,
-        ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,
-        ConfigureReplenishmentPolicyRequest, ConfigureReplenishmentPolicyResponse,
-        CreateCartonRequest, CreateCartonResponse, CreateInventoryRelocationTaskRequest,
-        CreateInventoryRelocationTaskResponse, CreateInventoryStatusTransitionRequest,
-        InventoryBalancePage, InventoryBalanceSort, InventoryHoldPage, InventoryHoldSort,
-        InventoryHoldStatus, InventorySortDirection, InventoryStatusTransitionResponse,
-        OpaqueCursor, OpenPackSessionRequest, OpenPackSessionResponse,
-        OrderAllocationReadinessResponse, OrderPage, PackPickedAllocationRequest,
-        PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage,
-        PickConfirmationHistoryPage, PickShortageFilters, PickShortagePage, PickShortageResponse,
-        PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
-        PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
+        AccessScopeWorkspace, ApiError, CancelCrossDockWorkRequest, CancelCrossDockWorkResponse,
+        CancelOrderRequest, CancelOrderResponse, CancelReplenishmentWorkRequest,
+        CloseCartonRequest, CloseCartonResponse, ConfigureFacilityShippingOriginRequest,
+        ConfigureFacilityShippingOriginResponse, ConfigureReplenishmentPolicyRequest,
+        ConfigureReplenishmentPolicyResponse, CreateCartonRequest, CreateCartonResponse,
+        CreateInventoryRelocationTaskRequest, CreateInventoryRelocationTaskResponse,
+        CreateInventoryStatusTransitionRequest, CrossDockFilters, CrossDockPlanningOptionPage,
+        CrossDockWorkPage, InventoryBalancePage, InventoryBalanceSort, InventoryHoldPage,
+        InventoryHoldSort, InventoryHoldStatus, InventorySortDirection,
+        InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
+        OpenPackSessionResponse, OrderAllocationReadinessResponse, OrderPage,
+        PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
+        PackingQueuePage, PickConfirmationHistoryPage, PickShortageFilters, PickShortagePage,
+        PickShortageResponse, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
+        PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanCrossDockWorkRequest,
+        PlanCrossDockWorkResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
         PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
         ReallocatePickShortageResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
         ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest,
@@ -739,6 +750,46 @@ mod browser {
         cursor: Option<&OpaqueCursor>,
     ) -> Result<ReplenishmentPolicyPage, ApiError> {
         get(&super::replenishment_policy_page_path(filters, cursor)).await
+    }
+
+    pub async fn cross_dock_planning_options(
+        filters: CrossDockFilters,
+        cursor: Option<&OpaqueCursor>,
+    ) -> Result<CrossDockPlanningOptionPage, ApiError> {
+        get(&super::cross_dock_planning_options_path(filters, cursor)).await
+    }
+
+    pub async fn cross_dock_work(
+        filters: CrossDockFilters,
+        cursor: Option<&OpaqueCursor>,
+    ) -> Result<CrossDockWorkPage, ApiError> {
+        get(&super::cross_dock_work_path(filters, cursor)).await
+    }
+
+    pub async fn plan_cross_dock_work(
+        order_id: i64,
+        request: &PlanCrossDockWorkRequest,
+        idempotency_key: &str,
+    ) -> Result<PlanCrossDockWorkResponse, ApiError> {
+        post(
+            &format!("/api/v1/orders/{order_id}/cross-dock-tasks"),
+            request,
+            idempotency_key,
+        )
+        .await
+    }
+
+    pub async fn cancel_cross_dock_work(
+        work_id: i64,
+        request: &CancelCrossDockWorkRequest,
+        idempotency_key: &str,
+    ) -> Result<CancelCrossDockWorkResponse, ApiError> {
+        post(
+            &format!("/api/v1/cross-dock-tasks/{work_id}/cancellations"),
+            request,
+            idempotency_key,
+        )
+        .await
     }
 
     pub async fn replenishment_queue(
@@ -1299,6 +1350,40 @@ pub async fn replenishment_policies(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub async fn cross_dock_planning_options(
+    _filters: CrossDockFilters,
+    _cursor: Option<&OpaqueCursor>,
+) -> Result<CrossDockPlanningOptionPage, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn cross_dock_work(
+    _filters: CrossDockFilters,
+    _cursor: Option<&OpaqueCursor>,
+) -> Result<CrossDockWorkPage, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn plan_cross_dock_work(
+    _order_id: i64,
+    _request: &PlanCrossDockWorkRequest,
+    _idempotency_key: &str,
+) -> Result<PlanCrossDockWorkResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn cancel_cross_dock_work(
+    _work_id: i64,
+    _request: &CancelCrossDockWorkRequest,
+    _idempotency_key: &str,
+) -> Result<CancelCrossDockWorkResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn replenishment_queue(
     _filters: ReplenishmentQueueFilters,
     _cursor: Option<&OpaqueCursor>,
@@ -1406,6 +1491,38 @@ fn replenishment_queue_page_path(
     if let Some(status) = filters.status {
         path.push_str("&status=");
         path.push_str(replenishment_work_status_wire(status));
+    }
+    append_cursor(&mut path, cursor);
+    path
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn cross_dock_planning_options_path(
+    filters: CrossDockFilters,
+    cursor: Option<&OpaqueCursor>,
+) -> String {
+    let mut path = "/api/v1/cross-dock-planning-options?limit=100".to_owned();
+    append_optional_id(&mut path, "facility_id", filters.facility_id);
+    append_optional_id(&mut path, "inventory_owner_id", filters.inventory_owner_id);
+    append_cursor(&mut path, cursor);
+    path
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn cross_dock_work_path(filters: CrossDockFilters, cursor: Option<&OpaqueCursor>) -> String {
+    let mut path = "/api/v1/cross-dock-queue?limit=100".to_owned();
+    append_optional_id(&mut path, "facility_id", filters.facility_id);
+    append_optional_id(&mut path, "inventory_owner_id", filters.inventory_owner_id);
+    append_optional_id(&mut path, "order_id", filters.order_id);
+    if let Some(status) = filters.status {
+        let status = match status {
+            CrossDockWorkStatus::Pending => "pending",
+            CrossDockWorkStatus::InProgress => "in_progress",
+            CrossDockWorkStatus::Completed => "completed",
+            CrossDockWorkStatus::Cancelled => "cancelled",
+        };
+        path.push_str("&status=");
+        path.push_str(status);
     }
     append_cursor(&mut path, cursor);
     path
@@ -1610,6 +1727,25 @@ mod tests {
         assert_eq!(
             replenishment_cancellation_path(42),
             "/api/v1/replenishment-tasks/42/cancellations"
+        );
+    }
+
+    #[test]
+    fn cross_dock_paths_bind_scope_status_and_cursor() {
+        let cursor = OpaqueCursor::new("cd1.cursor".to_owned()).unwrap();
+        let filters = CrossDockFilters {
+            facility_id: Some(3),
+            inventory_owner_id: Some(4),
+            order_id: Some(5),
+            status: Some(CrossDockWorkStatus::InProgress),
+        };
+        assert_eq!(
+            cross_dock_work_path(filters, Some(&cursor)),
+            "/api/v1/cross-dock-queue?limit=100&facility_id=3&inventory_owner_id=4&order_id=5&status=in_progress&cursor=cd1.cursor"
+        );
+        assert_eq!(
+            cross_dock_planning_options_path(filters, None),
+            "/api/v1/cross-dock-planning-options?limit=100&facility_id=3&inventory_owner_id=4"
         );
     }
 

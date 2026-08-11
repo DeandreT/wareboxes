@@ -2,6 +2,7 @@
 
 mod app;
 pub mod command_store;
+pub mod cross_dock;
 pub mod cycle_count;
 pub mod expected_receiving;
 pub mod lease;

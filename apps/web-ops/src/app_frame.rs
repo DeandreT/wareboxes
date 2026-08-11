@@ -233,6 +233,12 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                 icon=UiIcon::Replenishment
                                 active=section == Section::Replenishment
                             />
+                            <NavItem
+                                href="/cross-dock"
+                                label="Cross-dock"
+                                icon=UiIcon::CrossDock
+                                active=section == Section::CrossDock
+                            />
                         }
                     })}
                     <p class="nav-group">"Context"</p>

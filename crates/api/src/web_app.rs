@@ -95,6 +95,7 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
         "/outbound-loads" | "/outbound-loads/" => Some(WorkspaceBootstrapSection::OutboundLoads),
         "/putaway" | "/putaway/" => Some(WorkspaceBootstrapSection::Putaway),
         "/cycle-counts" | "/cycle-counts/" => Some(WorkspaceBootstrapSection::CycleCounts),
+        "/cross-dock" | "/cross-dock/" => Some(WorkspaceBootstrapSection::CrossDock),
         "/replenishment" | "/replenishment/" => Some(WorkspaceBootstrapSection::Replenishment),
         "/inventory" | "/inventory/" => Some(WorkspaceBootstrapSection::Inventory),
         "/inventory/control" | "/inventory/control/" => {
@@ -160,6 +161,8 @@ async fn workspace_bootstrap(
                 cycle_count_work: None,
                 cycle_count_policies: None,
                 cycle_count_variances: None,
+                cross_dock_planning_options: None,
+                cross_dock_work: None,
                 replenishment_policies: None,
                 replenishment_queue: None,
                 balances,
@@ -309,6 +312,21 @@ async fn workspace_bootstrap(
                 ..WorkspaceBootstrapData::default()
             })
         }
+        WorkspaceBootstrapSection::CrossDock => {
+            if !has_permission(session, "wms_supervisor") {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            let ((planning_options, work), access_workspace) = tokio::try_join!(
+                routes::v1::cross_dock::pages_for_access(state, access, 100),
+                routes::access::workspace_for_access(state, access),
+            )?;
+            Ok(WorkspaceBootstrapData {
+                cross_dock_planning_options: Some(planning_options),
+                cross_dock_work: Some(work),
+                access: access_workspace,
+                ..WorkspaceBootstrapData::default()
+            })
+        }
         WorkspaceBootstrapSection::Inventory => {
             if !has_permission(session, "wms") {
                 return Ok(WorkspaceBootstrapData::default());
@@ -411,6 +429,10 @@ mod tests {
         assert_eq!(
             section_for_path("/replenishment"),
             Some(WorkspaceBootstrapSection::Replenishment)
+        );
+        assert_eq!(
+            section_for_path("/cross-dock"),
+            Some(WorkspaceBootstrapSection::CrossDock)
         );
         assert_eq!(
             section_for_path("/inventory/control"),

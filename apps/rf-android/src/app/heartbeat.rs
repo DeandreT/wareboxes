@@ -13,9 +13,9 @@ use crate::transport::{
     AuthenticatedTransport, NetworkResponse, build_movement_heartbeat_request, send_heartbeat,
 };
 use crate::wire::{
-    decode_cycle_count_heartbeat_response, decode_heartbeat_response,
-    decode_pick_heartbeat_response, decode_relocation_heartbeat_response,
-    decode_replenishment_heartbeat_response,
+    decode_cross_dock_heartbeat_response, decode_cycle_count_heartbeat_response,
+    decode_heartbeat_response, decode_pick_heartbeat_response,
+    decode_relocation_heartbeat_response, decode_replenishment_heartbeat_response,
 };
 use crate::workflow::{Activity, ClaimOperation};
 
@@ -109,6 +109,14 @@ impl RfApp {
             self.replenishment.claim().map(|claim| {
                 (
                     ClaimOperation::Replenishment,
+                    claim.work_id,
+                    claim.lease_expires_at.clone(),
+                )
+            })
+        } else if self.cross_dock.activity() == Activity::Active {
+            self.cross_dock.claim().map(|claim| {
+                (
+                    ClaimOperation::CrossDock,
                     claim.work_id,
                     claim.lease_expires_at.clone(),
                 )
@@ -293,6 +301,13 @@ impl RfApp {
                         .claim()
                         .is_some_and(|claim| claim.work_id == task_id)
             }
+            ClaimOperation::CrossDock => {
+                self.cross_dock.activity() == Activity::Active
+                    && self
+                        .cross_dock
+                        .claim()
+                        .is_some_and(|claim| claim.work_id == task_id)
+            }
             ClaimOperation::Putaway | ClaimOperation::InventoryRelocation => {
                 ClaimOperation::from(self.workflow.operation()) == operation
                     && self.workflow.activity() == Activity::Active
@@ -374,6 +389,16 @@ impl RfApp {
                         response.lease_expires_at,
                     )
                 }),
+                ClaimOperation::CrossDock => {
+                    decode_cross_dock_heartbeat_response(task_id, response.status, &response.body)
+                        .map(|response| {
+                            (
+                                response.work_id,
+                                response.heartbeat_at,
+                                response.lease_expires_at,
+                            )
+                        })
+                }
             };
             let (heartbeat_task_id, heartbeat_at, lease_expires_at) = match heartbeat {
                 Ok(heartbeat) => heartbeat,
@@ -439,6 +464,7 @@ impl RfApp {
             && self.cycle_count.activity() != Activity::Active
             && self.picking.activity() != Activity::Active
             && self.replenishment.activity() != Activity::Active
+            && self.cross_dock.activity() != Activity::Active
         {
             return None;
         }
@@ -582,6 +608,8 @@ impl RfApp {
                     ClaimOperation::Picking
                 } else if self.replenishment.activity() == Activity::Active {
                     ClaimOperation::Replenishment
+                } else if self.cross_dock.activity() == Activity::Active {
+                    ClaimOperation::CrossDock
                 } else {
                     self.workflow.operation().into()
                 }
@@ -600,6 +628,7 @@ impl RfApp {
             ClaimOperation::Replenishment => {
                 self.replenishment.require_reconciliation(message.into())
             }
+            ClaimOperation::CrossDock => self.cross_dock.require_reconciliation(message.into()),
             ClaimOperation::Putaway | ClaimOperation::InventoryRelocation => {
                 self.workflow.require_reconciliation(message.into());
             }

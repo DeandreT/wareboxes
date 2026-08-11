@@ -29,9 +29,9 @@ use read_model::{eligible_facilities_tx, line_state_totals, load_line_states_tx}
 use workflow::{
     create_missing_full_demand_reservations_tx, cumulative_outcome,
     enqueue_order_allocation_event_tx, insert_allocation_run_tx, load_allocated_quantities_tx,
-    lock_active_order_holds_tx, lock_active_owner_facility_tx, lock_active_reservations_tx,
-    lock_candidate_inventory_tx, lock_order_lines_tx, lock_order_tx, persist_planned_lines_tx,
-    plan_lines, read_order_tx, sum_line_demand, update_order_revision_tx,
+    lock_active_cross_dock_work_tx, lock_active_order_holds_tx, lock_active_owner_facility_tx,
+    lock_active_reservations_tx, lock_candidate_inventory_tx, lock_order_lines_tx, lock_order_tx,
+    persist_planned_lines_tx, plan_lines, read_order_tx, sum_line_demand, update_order_revision_tx,
     validate_existing_reservations,
 };
 
@@ -233,6 +233,19 @@ pub async fn plan_order_allocation(
         command.order_id,
     )
     .await?;
+    if lock_active_cross_dock_work_tx(
+        &mut tx,
+        access.tenant_id,
+        order.inventory_owner_id,
+        command.order_id,
+    )
+    .await?
+        > 0
+    {
+        return Err(AppError::conflict(
+            "order has active cross-dock work; complete or cancel it first",
+        ));
+    }
     validate_existing_reservations(&lines, &reservations, command.facility_id)?;
 
     let occurred_at = now_iso();
@@ -451,6 +464,24 @@ pub async fn order_allocation_readiness(
     .bind(order_id.get())
     .fetch_one(&mut *tx)
     .await?;
+    let active_cross_dock_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM cross_dock_tasks detail
+        INNER JOIN work_tasks work
+          ON work.tenant_id=detail.tenant_id AND work.id=detail.task_id
+        WHERE detail.tenant_id=$1
+          AND detail.inventory_owner_id=$2
+          AND detail.order_id=$3
+          AND detail.closed_at IS NULL
+          AND work.status IN ('open','assigned','in_progress')
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(order.inventory_owner_id.get())
+    .bind(order_id.get())
+    .fetch_one(&mut *tx)
+    .await?;
     let lines = load_line_states_tx(
         &mut tx,
         access.tenant_id,
@@ -505,6 +536,9 @@ pub async fn order_allocation_readiness(
     }
     if !selected_facility_is_eligible {
         blocking_reasons.push(OrderAllocationReadinessBlocker::OwnerFacilityUnavailable);
+    }
+    if active_cross_dock_count > 0 {
+        blocking_reasons.push(OrderAllocationReadinessBlocker::CrossDockInProgress);
     }
     let status = if !blocking_reasons.is_empty() {
         OrderAllocationReadinessStatus::Blocked

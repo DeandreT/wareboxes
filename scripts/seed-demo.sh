@@ -270,6 +270,16 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pick_waves) THEN missing := array_append(missing, 'pick waves'); END IF;
   IF NOT EXISTS (SELECT 1 FROM replenishment_policies) THEN missing := array_append(missing, 'replenishment policies'); END IF;
   IF NOT EXISTS (SELECT 1 FROM replenishment_tasks) THEN missing := array_append(missing, 'replenishment work'); END IF;
+  IF NOT EXISTS (SELECT 1 FROM cross_dock_tasks) THEN missing := array_append(missing, 'cross-dock work'); END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM inventory_reservations reservation
+    JOIN orders orders ON orders.tenant_id=reservation.tenant_id AND orders.id=reservation.order_id
+    WHERE orders.order_key='WB-DEMO-XD-ORDER-01' AND reservation.status='active'
+  ) THEN missing := array_append(missing, 'cross-dock planning option'); END IF;
+  IF NOT EXISTS (SELECT 1 FROM cross_dock_tasks detail JOIN work_tasks work ON work.tenant_id=detail.tenant_id AND work.id=detail.task_id WHERE work.status='open')
+  THEN missing := array_append(missing, 'pending cross-dock work'); END IF;
+  IF NOT EXISTS (SELECT 1 FROM cross_dock_cancellations) THEN missing := array_append(missing, 'cancelled cross-dock evidence'); END IF;
+  IF NOT EXISTS (SELECT 1 FROM cross_dock_confirmations) THEN missing := array_append(missing, 'completed cross-dock evidence'); END IF;
   IF NOT EXISTS (SELECT 1 FROM cycle_count_location_tasks)
      AND NOT EXISTS (SELECT 1 FROM cycle_count_item_location_tasks) THEN
     missing := array_append(missing, 'cycle counts');
@@ -339,6 +349,7 @@ report_coverage() {
       ('Inventory holds', (SELECT COUNT(*) FROM inventory_holds)),
       ('Replenishment policies', (SELECT COUNT(*) FROM replenishment_policies)),
       ('Replenishment work', (SELECT COUNT(*) FROM replenishment_tasks)),
+      ('Cross-dock work', (SELECT COUNT(*) FROM cross_dock_tasks)),
       ('Integration receipts', (SELECT COUNT(*) FROM integration_inbox_receipts))
     ) AS coverage(workspace, records)
     ORDER BY workspace;"

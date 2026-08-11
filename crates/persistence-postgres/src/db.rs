@@ -846,6 +846,22 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'replenishment_confirmations_tenant_isolation'
                 ),
                 (
+                    'cross_dock_plan_runs',
+                    'cross_dock_plan_runs_tenant_isolation'
+                ),
+                (
+                    'cross_dock_tasks',
+                    'cross_dock_tasks_tenant_isolation'
+                ),
+                (
+                    'cross_dock_confirmations',
+                    'cross_dock_confirmations_tenant_isolation'
+                ),
+                (
+                    'cross_dock_cancellations',
+                    'cross_dock_cancellations_tenant_isolation'
+                ),
+                (
                     'license_plate_putaway_tasks',
                     'license_plate_putaway_tasks_tenant_isolation'
                 ),

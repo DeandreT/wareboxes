@@ -28,7 +28,8 @@ fn work_mode_changes_only_without_owned_work() {
         Activity::Idle,
         Activity::Idle,
         Activity::Idle,
-        Activity::Idle
+        Activity::Idle,
+        Activity::Idle,
     ));
     assert!(work_mode_switch_allowed(
         Activity::Idle,
@@ -36,7 +37,8 @@ fn work_mode_changes_only_without_owned_work() {
         Activity::Idle,
         Activity::Idle,
         Activity::Idle,
-        Activity::Idle
+        Activity::Idle,
+        Activity::Idle,
     ));
     assert!(!work_mode_switch_allowed(
         Activity::Active,
@@ -44,7 +46,8 @@ fn work_mode_changes_only_without_owned_work() {
         Activity::Idle,
         Activity::Idle,
         Activity::Idle,
-        Activity::Idle
+        Activity::Idle,
+        Activity::Idle,
     ));
     assert!(!work_mode_switch_allowed(
         Activity::Idle,
@@ -52,7 +55,8 @@ fn work_mode_changes_only_without_owned_work() {
         Activity::Idle,
         Activity::Idle,
         Activity::Idle,
-        Activity::Idle
+        Activity::Idle,
+        Activity::Idle,
     ));
     assert!(!work_mode_switch_allowed(
         Activity::Idle,
@@ -60,7 +64,8 @@ fn work_mode_changes_only_without_owned_work() {
         Activity::Idle,
         Activity::Idle,
         Activity::Idle,
-        Activity::Idle
+        Activity::Idle,
+        Activity::Idle,
     ));
     assert!(!work_mode_switch_allowed(
         Activity::Idle,
@@ -68,7 +73,8 @@ fn work_mode_changes_only_without_owned_work() {
         Activity::Active,
         Activity::Idle,
         Activity::Idle,
-        Activity::Idle
+        Activity::Idle,
+        Activity::Idle,
     ));
     assert!(!work_mode_switch_allowed(
         Activity::Idle,
@@ -76,7 +82,8 @@ fn work_mode_changes_only_without_owned_work() {
         Activity::Idle,
         Activity::Active,
         Activity::Idle,
-        Activity::Idle
+        Activity::Idle,
+        Activity::Idle,
     ));
     assert!(!work_mode_switch_allowed(
         Activity::Idle,
@@ -84,7 +91,8 @@ fn work_mode_changes_only_without_owned_work() {
         Activity::Idle,
         Activity::Idle,
         Activity::Active,
-        Activity::Idle
+        Activity::Idle,
+        Activity::Idle,
     ));
 }
 

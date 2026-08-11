@@ -69,6 +69,31 @@ pub async fn cancel_order(
             order.revision.get()
         )));
     }
+    let active_cross_dock_work: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+          SELECT 1
+          FROM cross_dock_tasks detail
+          INNER JOIN work_tasks work
+            ON work.tenant_id=detail.tenant_id AND work.id=detail.task_id
+          WHERE detail.tenant_id=$1
+            AND detail.inventory_owner_id=$2
+            AND detail.order_id=$3
+            AND detail.closed_at IS NULL
+            AND work.status IN ('open','assigned','in_progress')
+        )
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(order.inventory_owner_id.get())
+    .bind(command.order_id().get())
+    .fetch_one(&mut *tx)
+    .await?;
+    if active_cross_dock_work {
+        return Err(AppError::conflict(
+            "cancel active cross-dock work before cancelling the order",
+        ));
+    }
     let occurred_at = now_iso();
     let cancelled_pick_work = cancel_pending_pick_work_tx(
         &mut tx,

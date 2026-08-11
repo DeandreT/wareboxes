@@ -39709,3 +39709,597 @@ REVOKE ALL ON FUNCTION public.require_customer_return_line_consistency() FROM PU
 REVOKE ALL ON FUNCTION public.validate_customer_return_load_plan() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_customer_return_cancellation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_customer_return_ledger_mutation() FROM PUBLIC;
+
+--
+-- Demand-backed cross-docking from newly received loose stock.
+--
+
+ALTER TABLE public.work_tasks DROP CONSTRAINT work_tasks_required_dimensions_check;
+ALTER TABLE public.work_tasks ADD CONSTRAINT work_tasks_required_dimensions_check CHECK (
+    ((task_type=ANY(ARRAY['cycle_count_item_location','unpack_cancelled_order','putaway',
+        'license_plate_putaway','inventory_relocation','replenishment','cross_dock']))
+      AND facility_id IS NOT NULL AND inventory_owner_id IS NOT NULL)
+    OR (task_type=ANY(ARRAY['cycle_count_location','break_master_pack'])
+      AND facility_id IS NOT NULL));
+ALTER TABLE public.work_tasks DROP CONSTRAINT work_tasks_task_type_check;
+ALTER TABLE public.work_tasks ADD CONSTRAINT work_tasks_task_type_check CHECK (
+    task_type=ANY(ARRAY['cycle_count_item_location','cycle_count_location','break_master_pack',
+      'unpack_cancelled_order','putaway','license_plate_putaway','inventory_relocation',
+      'replenishment','cross_dock']));
+ALTER TABLE public.work_task_progress DROP CONSTRAINT work_task_progress_action_check;
+ALTER TABLE public.work_task_progress ADD CONSTRAINT work_task_progress_action_check CHECK (
+    action=ANY(ARRAY['started','aborted','expired','scope_revoked','completed','cancelled',
+      'progress','unpacked','missing','damaged','moved','cycle_count_confirmed',
+      'putaway_confirmed','license_plate_putaway_confirmed','putaway_heartbeat',
+      'putaway_released','inventory_relocation_confirmed','inventory_relocation_heartbeat',
+      'inventory_relocation_released','replenishment_confirmed','replenishment_heartbeat',
+      'replenishment_released','replenishment_cancelled','cross_dock_confirmed',
+      'cross_dock_heartbeat','cross_dock_released','cross_dock_cancelled',
+      'cycle_count_heartbeat','cycle_count_released']));
+ALTER TABLE public.loose_inventory_movement_claims
+    DROP CONSTRAINT loose_inventory_movement_claims_work_kind_check;
+ALTER TABLE public.loose_inventory_movement_claims
+    ADD CONSTRAINT loose_inventory_movement_claims_work_kind_check CHECK (
+        work_kind=ANY(ARRAY['putaway','inventory_relocation','replenishment','cross_dock']));
+
+CREATE TABLE public.cross_dock_plan_runs (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    source_receipt_inventory_transaction_id bigint NOT NULL,
+    inbound_load_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    lot text,
+    serial text,
+    expiration timestamp with time zone,
+    receipt_quantity bigint NOT NULL,
+    prior_receipt_cross_dock_quantity bigint NOT NULL,
+    active_cross_dock_quantity bigint NOT NULL,
+    source_free_quantity bigint NOT NULL,
+    reservation_quantity bigint NOT NULL,
+    active_allocation_quantity bigint NOT NULL,
+    unallocated_demand_quantity bigint NOT NULL,
+    planned_quantity bigint NOT NULL,
+    expected_order_revision bigint NOT NULL,
+    resulting_order_revision bigint NOT NULL,
+    planned_by_user_id bigint NOT NULL,
+    planned_at timestamp with time zone NOT NULL,
+    CONSTRAINT cross_dock_plan_runs_scope_key UNIQUE
+        (tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT cross_dock_plan_runs_quantity_check CHECK (
+        receipt_quantity>0 AND prior_receipt_cross_dock_quantity>=0
+        AND active_cross_dock_quantity>=0
+        AND source_free_quantity>0 AND reservation_quantity>0
+        AND active_allocation_quantity>=0
+        AND unallocated_demand_quantity=reservation_quantity-active_allocation_quantity-active_cross_dock_quantity
+        AND planned_quantity>0
+        AND planned_quantity<=source_free_quantity
+        AND planned_quantity<=receipt_quantity-prior_receipt_cross_dock_quantity
+        AND planned_quantity<=unallocated_demand_quantity),
+    CONSTRAINT cross_dock_plan_runs_revision_check CHECK (
+        expected_order_revision>0 AND resulting_order_revision=expected_order_revision+1),
+    CONSTRAINT cross_dock_plan_runs_locations_check CHECK (source_location_id<>destination_location_id),
+    CONSTRAINT cross_dock_plan_runs_uom_check CHECK (
+        uom=btrim(uom) AND uom<>'' AND char_length(uom)<=32),
+    CONSTRAINT cross_dock_plan_runs_order_fkey FOREIGN KEY
+        (tenant_id,inventory_owner_id,order_id)
+        REFERENCES public.orders(tenant_id,inventory_owner_id,id),
+    CONSTRAINT cross_dock_plan_runs_order_item_fkey FOREIGN KEY
+        (tenant_id,inventory_owner_id,order_id,order_item_id)
+        REFERENCES public.order_items(tenant_id,inventory_owner_id,order_id,id),
+    CONSTRAINT cross_dock_plan_runs_reservation_fkey FOREIGN KEY
+        (tenant_id,inventory_owner_id,facility_id,reservation_id)
+        REFERENCES public.inventory_reservations(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT cross_dock_plan_runs_receipt_transaction_fkey FOREIGN KEY
+        (tenant_id,inventory_owner_id,source_receipt_inventory_transaction_id)
+        REFERENCES public.inventory_transactions(tenant_id,inventory_owner_id,id),
+    CONSTRAINT cross_dock_plan_runs_source_balance_fkey FOREIGN KEY
+        (tenant_id,inventory_owner_id,facility_id,source_inventory_balance_id)
+        REFERENCES public.inventory_balances(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT cross_dock_plan_runs_source_location_fkey FOREIGN KEY
+        (tenant_id,facility_id,source_location_id)
+        REFERENCES public.locations(tenant_id,facility_id,id),
+    CONSTRAINT cross_dock_plan_runs_destination_location_fkey FOREIGN KEY
+        (tenant_id,facility_id,destination_location_id)
+        REFERENCES public.locations(tenant_id,facility_id,id),
+    CONSTRAINT cross_dock_plan_runs_batch_fkey FOREIGN KEY
+        (tenant_id,inventory_owner_id,item_batch_id)
+        REFERENCES public.item_batches(tenant_id,inventory_owner_id,id),
+    CONSTRAINT cross_dock_plan_runs_item_fkey FOREIGN KEY
+        (tenant_id,item_id) REFERENCES public.items(tenant_id,id),
+    CONSTRAINT cross_dock_plan_runs_actor_fkey FOREIGN KEY
+        (tenant_id,planned_by_user_id) REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.cross_dock_tasks (
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    plan_run_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    source_receipt_inventory_transaction_id bigint NOT NULL,
+    inbound_load_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    lot text,
+    serial text,
+    expiration timestamp with time zone,
+    planned_quantity bigint NOT NULL CHECK (planned_quantity>0),
+    closed_at timestamp with time zone,
+    PRIMARY KEY (tenant_id,task_id),
+    CONSTRAINT cross_dock_tasks_plan_key UNIQUE (tenant_id,plan_run_id),
+    CONSTRAINT cross_dock_tasks_scope_key UNIQUE
+        (tenant_id,inventory_owner_id,facility_id,task_id),
+    CONSTRAINT cross_dock_tasks_location_check CHECK (source_location_id<>destination_location_id),
+    CONSTRAINT cross_dock_tasks_uom_check CHECK (uom=btrim(uom) AND uom<>'' AND char_length(uom)<=32),
+    CONSTRAINT cross_dock_tasks_work_fkey FOREIGN KEY
+        (tenant_id,inventory_owner_id,facility_id,task_id)
+        REFERENCES public.work_tasks(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT cross_dock_tasks_plan_fkey FOREIGN KEY
+        (tenant_id,inventory_owner_id,facility_id,plan_run_id)
+        REFERENCES public.cross_dock_plan_runs(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT cross_dock_tasks_source_balance_fkey FOREIGN KEY
+        (tenant_id,inventory_owner_id,facility_id,source_inventory_balance_id)
+        REFERENCES public.inventory_balances(tenant_id,inventory_owner_id,facility_id,id)
+);
+
+CREATE TABLE public.cross_dock_confirmations (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    plan_run_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    inventory_transaction_id bigint NOT NULL,
+    inventory_allocation_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    destination_inventory_balance_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    lot text,
+    serial text,
+    expiration timestamp with time zone,
+    quantity bigint NOT NULL CHECK (quantity>0),
+    confirmed_by_user_id bigint NOT NULL,
+    confirmed_at timestamp with time zone NOT NULL,
+    CONSTRAINT cross_dock_confirmations_tenant_key UNIQUE (tenant_id,id),
+    CONSTRAINT cross_dock_confirmations_task_key UNIQUE (tenant_id,task_id),
+    CONSTRAINT cross_dock_confirmations_transaction_key UNIQUE
+        (tenant_id,inventory_owner_id,inventory_transaction_id),
+    CONSTRAINT cross_dock_confirmations_allocation_key UNIQUE
+        (tenant_id,inventory_owner_id,inventory_allocation_id),
+    CONSTRAINT cross_dock_confirmations_task_fkey FOREIGN KEY
+        (tenant_id,task_id) REFERENCES public.cross_dock_tasks(tenant_id,task_id),
+    CONSTRAINT cross_dock_confirmations_transaction_fkey FOREIGN KEY
+        (tenant_id,inventory_owner_id,inventory_transaction_id)
+        REFERENCES public.inventory_transactions(tenant_id,inventory_owner_id,id),
+    CONSTRAINT cross_dock_confirmations_allocation_fkey FOREIGN KEY
+        (tenant_id,inventory_owner_id,inventory_allocation_id)
+        REFERENCES public.inventory_allocations(tenant_id,inventory_owner_id,id),
+    CONSTRAINT cross_dock_confirmations_actor_fkey FOREIGN KEY
+        (tenant_id,confirmed_by_user_id) REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE TABLE public.cross_dock_cancellations (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    task_id bigint NOT NULL,
+    plan_run_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    order_id bigint NOT NULL,
+    order_item_id bigint NOT NULL,
+    reservation_id bigint NOT NULL,
+    planned_quantity bigint NOT NULL CHECK (planned_quantity>0),
+    expected_order_revision bigint NOT NULL,
+    resulting_order_revision bigint NOT NULL,
+    previous_work_status text NOT NULL CHECK (previous_work_status IN ('open','assigned')),
+    previous_assigned_user_id bigint,
+    reason_code text NOT NULL CHECK (
+        reason_code IN ('demand_changed','receipt_reassigned','operational_change','other')),
+    note text,
+    cancelled_by_user_id bigint NOT NULL,
+    cancelled_at timestamp with time zone NOT NULL,
+    CONSTRAINT cross_dock_cancellations_tenant_key UNIQUE (tenant_id,id),
+    CONSTRAINT cross_dock_cancellations_task_key UNIQUE (tenant_id,task_id),
+    CONSTRAINT cross_dock_cancellations_revision_check CHECK (
+        expected_order_revision>0 AND resulting_order_revision=expected_order_revision+1),
+    CONSTRAINT cross_dock_cancellations_assignment_check CHECK (
+        (previous_work_status='open' AND previous_assigned_user_id IS NULL)
+        OR (previous_work_status='assigned' AND previous_assigned_user_id IS NOT NULL)),
+    CONSTRAINT cross_dock_cancellations_note_check CHECK (
+        (note IS NULL OR (note=btrim(note) AND note<>'' AND char_length(note)<=500
+          AND note!~'[[:cntrl:]]')) AND (reason_code<>'other' OR note IS NOT NULL)),
+    CONSTRAINT cross_dock_cancellations_task_fkey FOREIGN KEY
+        (tenant_id,task_id) REFERENCES public.cross_dock_tasks(tenant_id,task_id),
+    CONSTRAINT cross_dock_cancellations_actor_fkey FOREIGN KEY
+        (tenant_id,cancelled_by_user_id) REFERENCES public.tenant_memberships(tenant_id,user_id),
+    CONSTRAINT cross_dock_cancellations_assignee_fkey FOREIGN KEY
+        (tenant_id,previous_assigned_user_id) REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+
+CREATE INDEX cross_dock_plan_runs_order_idx
+ON public.cross_dock_plan_runs(tenant_id,inventory_owner_id,order_id,order_item_id,id);
+CREATE INDEX cross_dock_tasks_queue_idx
+ON public.cross_dock_tasks(tenant_id,facility_id,inventory_owner_id,task_id)
+WHERE closed_at IS NULL;
+CREATE UNIQUE INDEX cross_dock_tasks_active_source_idx
+ON public.cross_dock_tasks(tenant_id,inventory_owner_id,facility_id,source_inventory_balance_id)
+WHERE closed_at IS NULL;
+
+CREATE OR REPLACE FUNCTION public.claim_loose_inventory_movement_source() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE claim_kind text; claimed_at_value timestamp with time zone;
+BEGIN
+    IF TG_TABLE_NAME='inventory_relocation_tasks' THEN
+        IF NEW.workflow<>'loose_balance' THEN RETURN NEW; END IF;
+        claim_kind:='inventory_relocation';
+    ELSIF TG_TABLE_NAME='putaway_tasks' THEN claim_kind:='putaway';
+    ELSIF TG_TABLE_NAME='replenishment_tasks' THEN claim_kind:='replenishment';
+    ELSIF TG_TABLE_NAME='cross_dock_tasks' THEN claim_kind:='cross_dock';
+    ELSE RAISE EXCEPTION 'unsupported loose inventory movement source table' USING ERRCODE='23514';
+    END IF;
+    SELECT task.created INTO claimed_at_value FROM public.work_tasks task
+    WHERE task.tenant_id=NEW.tenant_id AND task.id=NEW.task_id
+      AND task.inventory_owner_id=NEW.inventory_owner_id AND task.facility_id=NEW.facility_id
+      AND task.task_type=claim_kind;
+    IF claimed_at_value IS NULL THEN
+        RAISE EXCEPTION 'loose inventory movement work task is missing' USING ERRCODE='23514';
+    END IF;
+    INSERT INTO public.loose_inventory_movement_claims
+        (tenant_id,inventory_owner_id,facility_id,source_inventory_balance_id,
+         work_task_id,work_kind,claimed_at)
+    VALUES (NEW.tenant_id,NEW.inventory_owner_id,NEW.facility_id,
+        NEW.source_inventory_balance_id,NEW.task_id,claim_kind,claimed_at_value);
+    RETURN NEW;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.release_loose_inventory_movement_source() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE claim_kind text; affected_rows bigint;
+BEGIN
+    IF OLD.closed_at IS NOT NULL OR NEW.closed_at IS NULL THEN RETURN NEW; END IF;
+    IF TG_TABLE_NAME='inventory_relocation_tasks' THEN
+        IF NEW.workflow<>'loose_balance' THEN RETURN NEW; END IF;
+        claim_kind:='inventory_relocation';
+    ELSIF TG_TABLE_NAME='putaway_tasks' THEN claim_kind:='putaway';
+    ELSIF TG_TABLE_NAME='replenishment_tasks' THEN claim_kind:='replenishment';
+    ELSIF TG_TABLE_NAME='cross_dock_tasks' THEN claim_kind:='cross_dock';
+    ELSE RAISE EXCEPTION 'unsupported loose inventory movement source table' USING ERRCODE='23514';
+    END IF;
+    UPDATE public.loose_inventory_movement_claims SET released_at=NEW.closed_at
+    WHERE tenant_id=NEW.tenant_id AND work_task_id=NEW.task_id
+      AND work_kind=claim_kind AND released_at IS NULL;
+    GET DIAGNOSTICS affected_rows=ROW_COUNT;
+    IF affected_rows<>1 THEN
+        RAISE EXCEPTION 'active loose inventory movement claim is missing' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_cross_dock_task_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' OR OLD.closed_at IS NOT NULL OR NEW.closed_at IS NULL
+       OR NEW.tenant_id<>OLD.tenant_id OR NEW.task_id<>OLD.task_id
+       OR NEW.plan_run_id<>OLD.plan_run_id OR NEW.inventory_owner_id<>OLD.inventory_owner_id
+       OR NEW.facility_id<>OLD.facility_id OR NEW.order_id<>OLD.order_id
+       OR NEW.order_item_id<>OLD.order_item_id OR NEW.reservation_id<>OLD.reservation_id
+       OR NEW.source_receipt_inventory_transaction_id<>OLD.source_receipt_inventory_transaction_id
+       OR NEW.inbound_load_id<>OLD.inbound_load_id
+       OR NEW.source_inventory_balance_id<>OLD.source_inventory_balance_id
+       OR NEW.source_location_id<>OLD.source_location_id
+       OR NEW.destination_location_id<>OLD.destination_location_id
+       OR NEW.item_batch_id<>OLD.item_batch_id OR NEW.item_id<>OLD.item_id
+       OR NEW.uom<>OLD.uom OR NEW.lot IS DISTINCT FROM OLD.lot
+       OR NEW.serial IS DISTINCT FROM OLD.serial OR NEW.expiration IS DISTINCT FROM OLD.expiration
+       OR NEW.planned_quantity<>OLD.planned_quantity THEN
+        RAISE EXCEPTION 'cross-dock task facts are immutable' USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.close_cross_dock_task_detail() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+    IF NEW.task_type='cross_dock' AND NEW.status IN ('completed','cancelled') THEN
+        UPDATE public.cross_dock_tasks SET closed_at=COALESCE(NEW.completed_at,statement_timestamp())
+        WHERE tenant_id=NEW.tenant_id AND task_id=NEW.id AND closed_at IS NULL;
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.reject_cross_dock_ledger_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'cross-dock execution evidence is immutable' USING ERRCODE='55000';
+END $$;
+
+CREATE FUNCTION public.validate_cross_dock_plan() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE receipt record; target record; current_receipt_prior bigint;
+    current_active bigint; current_allocated bigint;
+BEGIN
+    SELECT transaction.transaction_type,transaction.operation,transaction.reference_type,
+           transaction.reference_id,entry.location_id,entry.item_batch_id,entry.item_id,
+           entry.uom,entry.lot,entry.serial,entry.expiration,entry.status,entry.quantity_delta,
+           batch.load_id
+    INTO receipt
+    FROM public.inventory_transactions transaction
+    JOIN public.inventory_entries entry ON entry.tenant_id=transaction.tenant_id
+      AND entry.inventory_owner_id=transaction.inventory_owner_id
+      AND entry.transaction_id=transaction.id AND entry.quantity_delta>0
+    JOIN public.item_batches batch ON batch.tenant_id=entry.tenant_id
+      AND batch.inventory_owner_id=entry.inventory_owner_id AND batch.id=entry.item_batch_id
+    WHERE transaction.tenant_id=NEW.tenant_id
+      AND transaction.inventory_owner_id=NEW.inventory_owner_id
+      AND transaction.id=NEW.source_receipt_inventory_transaction_id;
+    IF receipt IS NULL OR receipt.transaction_type<>'receive'
+       OR receipt.operation<>'inbound.receive_expected_inventory.v1'
+       OR receipt.reference_type<>'load_line' OR receipt.status<>'available'
+       OR receipt.quantity_delta<>NEW.receipt_quantity OR receipt.load_id<>NEW.inbound_load_id
+       OR receipt.location_id<>NEW.source_location_id OR receipt.item_batch_id<>NEW.item_batch_id
+       OR receipt.item_id<>NEW.item_id OR receipt.uom<>NEW.uom
+       OR receipt.lot IS DISTINCT FROM NEW.lot OR receipt.serial IS DISTINCT FROM NEW.serial
+       OR receipt.expiration IS DISTINCT FROM NEW.expiration THEN
+        RAISE EXCEPTION 'cross-dock plan lacks exact expected-receipt evidence' USING ERRCODE='23514';
+    END IF;
+    SELECT orders.status AS order_status,orders.revision,reservation.qty AS reservation_qty,
+           balance.qty_on_hand-balance.qty_reserved-balance.qty_held AS free_qty,
+           balance.location_id,balance.item_batch_id,balance.item_id,balance.uom,
+           balance.status AS inventory_status,balance.license_plate_id,balance.deleted,
+           source.active AS source_active,source.receivable AS source_receivable,
+           source.barcode AS source_barcode,destination.active AS destination_active,
+           destination.pickable AS destination_pickable,
+           destination.receivable AS destination_receivable,
+           destination.barcode AS destination_barcode
+    INTO target
+    FROM public.orders orders
+    JOIN public.order_items line ON line.tenant_id=orders.tenant_id
+      AND line.inventory_owner_id=orders.inventory_owner_id AND line.order_id=orders.id
+      AND line.id=NEW.order_item_id AND line.deleted IS NULL
+    JOIN public.inventory_reservations reservation ON reservation.tenant_id=orders.tenant_id
+      AND reservation.inventory_owner_id=orders.inventory_owner_id
+      AND reservation.order_id=orders.id AND reservation.order_item_id=line.id
+      AND reservation.facility_id=NEW.facility_id AND reservation.id=NEW.reservation_id
+      AND reservation.status='active' AND reservation.deleted IS NULL
+    JOIN public.inventory_balances balance ON balance.tenant_id=orders.tenant_id
+      AND balance.inventory_owner_id=orders.inventory_owner_id
+      AND balance.facility_id=NEW.facility_id AND balance.id=NEW.source_inventory_balance_id
+    JOIN public.locations source ON source.tenant_id=NEW.tenant_id
+      AND source.facility_id=NEW.facility_id AND source.id=NEW.source_location_id
+      AND source.deleted IS NULL
+    JOIN public.locations destination ON destination.tenant_id=NEW.tenant_id
+      AND destination.facility_id=NEW.facility_id AND destination.id=NEW.destination_location_id
+      AND destination.deleted IS NULL
+    WHERE orders.tenant_id=NEW.tenant_id AND orders.inventory_owner_id=NEW.inventory_owner_id
+      AND orders.id=NEW.order_id AND line.item_id=NEW.item_id AND line.uom=NEW.uom;
+    SELECT COALESCE(SUM(plan.planned_quantity),0) INTO current_receipt_prior
+    FROM public.cross_dock_plan_runs plan JOIN public.cross_dock_tasks task
+      ON task.tenant_id=plan.tenant_id AND task.plan_run_id=plan.id
+    JOIN public.work_tasks work ON work.tenant_id=task.tenant_id AND work.id=task.task_id
+    WHERE plan.tenant_id=NEW.tenant_id AND plan.inventory_owner_id=NEW.inventory_owner_id
+      AND plan.source_receipt_inventory_transaction_id=NEW.source_receipt_inventory_transaction_id
+      AND work.status<>'cancelled';
+    SELECT COALESCE(SUM(plan.planned_quantity),0) INTO current_active
+    FROM public.cross_dock_plan_runs plan JOIN public.cross_dock_tasks task
+      ON task.tenant_id=plan.tenant_id AND task.plan_run_id=plan.id
+    WHERE plan.tenant_id=NEW.tenant_id AND plan.inventory_owner_id=NEW.inventory_owner_id
+      AND plan.reservation_id=NEW.reservation_id AND task.closed_at IS NULL;
+    SELECT COALESCE(SUM(allocation.qty),0) INTO current_allocated
+    FROM public.inventory_allocations allocation
+    WHERE allocation.tenant_id=NEW.tenant_id
+      AND allocation.inventory_owner_id=NEW.inventory_owner_id
+      AND allocation.reservation_id=NEW.reservation_id
+      AND allocation.status='allocated' AND allocation.deleted IS NULL;
+    IF target IS NULL OR target.order_status<>'open' OR target.revision<>NEW.resulting_order_revision
+       OR target.reservation_qty<>NEW.reservation_quantity
+       OR current_receipt_prior<>NEW.prior_receipt_cross_dock_quantity
+       OR current_active<>NEW.active_cross_dock_quantity
+       OR current_allocated<>NEW.active_allocation_quantity
+       OR target.free_qty<>NEW.source_free_quantity
+       OR target.location_id<>NEW.source_location_id
+       OR target.item_batch_id<>NEW.item_batch_id OR target.item_id<>NEW.item_id
+       OR target.uom<>NEW.uom OR target.inventory_status<>'available'
+       OR target.license_plate_id IS NOT NULL OR target.deleted IS NOT NULL
+       OR NOT target.source_active OR NOT target.source_receivable
+       OR target.source_barcode IS NULL OR NOT target.destination_active
+       OR NOT target.destination_pickable OR target.destination_receivable
+       OR target.destination_barcode IS NULL THEN
+        RAISE EXCEPTION 'cross-dock planning snapshot is stale or ineligible' USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_cross_dock_plan_task() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE plan_id bigint; task_count bigint;
+BEGIN
+    IF TG_TABLE_NAME='cross_dock_plan_runs' THEN
+        plan_id:=NEW.id;
+    ELSE
+        plan_id:=NEW.plan_run_id;
+    END IF;
+    SELECT COUNT(*) INTO task_count FROM public.cross_dock_tasks task
+    JOIN public.cross_dock_plan_runs plan ON plan.tenant_id=task.tenant_id AND plan.id=task.plan_run_id
+    WHERE task.tenant_id=NEW.tenant_id AND task.plan_run_id=plan_id
+      AND task.inventory_owner_id=plan.inventory_owner_id AND task.facility_id=plan.facility_id
+      AND task.order_id=plan.order_id AND task.order_item_id=plan.order_item_id
+      AND task.reservation_id=plan.reservation_id
+      AND task.source_receipt_inventory_transaction_id=plan.source_receipt_inventory_transaction_id
+      AND task.source_inventory_balance_id=plan.source_inventory_balance_id
+      AND task.source_location_id=plan.source_location_id
+      AND task.destination_location_id=plan.destination_location_id
+      AND task.item_batch_id=plan.item_batch_id AND task.item_id=plan.item_id
+      AND task.uom=plan.uom AND task.lot IS NOT DISTINCT FROM plan.lot
+      AND task.serial IS NOT DISTINCT FROM plan.serial
+      AND task.expiration IS NOT DISTINCT FROM plan.expiration
+      AND task.planned_quantity=plan.planned_quantity;
+    IF task_count<>1 THEN
+        RAISE EXCEPTION 'cross-dock plan must have one exact work task' USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.validate_cross_dock_confirmation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE valid boolean;
+BEGIN
+    SELECT EXISTS(
+      SELECT 1 FROM public.cross_dock_tasks detail
+      JOIN public.work_tasks work ON work.tenant_id=detail.tenant_id AND work.id=detail.task_id
+      JOIN public.inventory_transactions transaction ON transaction.tenant_id=NEW.tenant_id
+        AND transaction.inventory_owner_id=NEW.inventory_owner_id
+        AND transaction.id=NEW.inventory_transaction_id
+      JOIN public.inventory_allocations allocation ON allocation.tenant_id=NEW.tenant_id
+        AND allocation.inventory_owner_id=NEW.inventory_owner_id
+        AND allocation.id=NEW.inventory_allocation_id
+      WHERE detail.tenant_id=NEW.tenant_id AND detail.task_id=NEW.task_id
+        AND detail.plan_run_id=NEW.plan_run_id AND detail.closed_at=NEW.confirmed_at
+        AND work.status='completed' AND work.completed_at=NEW.confirmed_at
+        AND detail.order_id=NEW.order_id AND detail.order_item_id=NEW.order_item_id
+        AND detail.reservation_id=NEW.reservation_id
+        AND detail.source_inventory_balance_id=NEW.source_inventory_balance_id
+        AND detail.source_location_id=NEW.source_location_id
+        AND detail.destination_location_id=NEW.destination_location_id
+        AND detail.item_batch_id=NEW.item_batch_id AND detail.item_id=NEW.item_id
+        AND detail.uom=NEW.uom AND detail.lot IS NOT DISTINCT FROM NEW.lot
+        AND detail.serial IS NOT DISTINCT FROM NEW.serial
+        AND detail.expiration IS NOT DISTINCT FROM NEW.expiration
+        AND detail.planned_quantity=NEW.quantity
+        AND transaction.transaction_type='move'
+        AND transaction.operation='inbound.cross_dock.confirm.v1'
+        AND transaction.reference_type='cross_dock_task'
+        AND transaction.reference_id=NEW.task_id
+        AND allocation.reservation_id=NEW.reservation_id
+        AND allocation.inventory_balance_id=NEW.destination_inventory_balance_id
+        AND allocation.facility_id=NEW.facility_id
+        AND allocation.location_id=NEW.destination_location_id
+        AND allocation.item_batch_id=NEW.item_batch_id AND allocation.item_id=NEW.item_id
+        AND allocation.uom=NEW.uom AND allocation.inventory_status='available'
+        AND allocation.qty=NEW.quantity AND allocation.status='allocated'
+        AND allocation.execution_stage='pick_source' AND allocation.deleted IS NULL
+        AND (SELECT COUNT(*) FROM public.inventory_entries entry
+             WHERE entry.tenant_id=NEW.tenant_id
+               AND entry.inventory_owner_id=NEW.inventory_owner_id
+               AND entry.transaction_id=NEW.inventory_transaction_id)=2
+        AND (SELECT COALESCE(SUM(entry.quantity_delta),0) FROM public.inventory_entries entry
+             WHERE entry.tenant_id=NEW.tenant_id
+               AND entry.inventory_owner_id=NEW.inventory_owner_id
+               AND entry.transaction_id=NEW.inventory_transaction_id)=0
+    ) INTO valid;
+    IF NOT valid THEN
+        RAISE EXCEPTION 'cross-dock confirmation evidence is inconsistent' USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.validate_cross_dock_cancellation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+      SELECT 1 FROM public.cross_dock_tasks detail
+      JOIN public.work_tasks work ON work.tenant_id=detail.tenant_id AND work.id=detail.task_id
+      JOIN public.orders orders ON orders.tenant_id=detail.tenant_id
+        AND orders.inventory_owner_id=detail.inventory_owner_id AND orders.id=detail.order_id
+      WHERE detail.tenant_id=NEW.tenant_id AND detail.task_id=NEW.task_id
+        AND detail.plan_run_id=NEW.plan_run_id AND detail.inventory_owner_id=NEW.inventory_owner_id
+        AND detail.facility_id=NEW.facility_id AND detail.order_id=NEW.order_id
+        AND detail.order_item_id=NEW.order_item_id AND detail.reservation_id=NEW.reservation_id
+        AND detail.planned_quantity=NEW.planned_quantity AND detail.closed_at=NEW.cancelled_at
+        AND work.status='cancelled' AND work.completed_at=NEW.cancelled_at
+        AND orders.status='open' AND orders.revision=NEW.resulting_order_revision
+    ) THEN
+        RAISE EXCEPTION 'cross-dock cancellation evidence is inconsistent' USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END $$;
+
+CREATE TRIGGER cross_dock_plans_validate BEFORE INSERT ON public.cross_dock_plan_runs
+FOR EACH ROW EXECUTE FUNCTION public.validate_cross_dock_plan();
+CREATE TRIGGER cross_dock_plans_are_immutable BEFORE UPDATE OR DELETE ON public.cross_dock_plan_runs
+FOR EACH ROW EXECUTE FUNCTION public.reject_cross_dock_ledger_mutation();
+CREATE TRIGGER cross_dock_tasks_guard BEFORE UPDATE OR DELETE ON public.cross_dock_tasks
+FOR EACH ROW EXECUTE FUNCTION public.guard_cross_dock_task_mutation();
+CREATE TRIGGER cross_dock_tasks_claim_source AFTER INSERT ON public.cross_dock_tasks
+FOR EACH ROW EXECUTE FUNCTION public.claim_loose_inventory_movement_source();
+CREATE TRIGGER cross_dock_tasks_release_source AFTER UPDATE OF closed_at ON public.cross_dock_tasks
+FOR EACH ROW EXECUTE FUNCTION public.release_loose_inventory_movement_source();
+CREATE TRIGGER work_tasks_close_cross_dock_detail
+AFTER UPDATE OF status,completed_at ON public.work_tasks
+FOR EACH ROW EXECUTE FUNCTION public.close_cross_dock_task_detail();
+CREATE CONSTRAINT TRIGGER cross_dock_plans_require_task AFTER INSERT ON public.cross_dock_plan_runs
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_cross_dock_plan_task();
+CREATE CONSTRAINT TRIGGER cross_dock_tasks_require_plan AFTER INSERT ON public.cross_dock_tasks
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.require_cross_dock_plan_task();
+CREATE TRIGGER cross_dock_confirmations_are_immutable
+BEFORE UPDATE OR DELETE ON public.cross_dock_confirmations
+FOR EACH ROW EXECUTE FUNCTION public.reject_cross_dock_ledger_mutation();
+CREATE CONSTRAINT TRIGGER cross_dock_confirmations_validate
+AFTER INSERT ON public.cross_dock_confirmations DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.validate_cross_dock_confirmation();
+CREATE TRIGGER cross_dock_cancellations_are_immutable
+BEFORE UPDATE OR DELETE ON public.cross_dock_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.reject_cross_dock_ledger_mutation();
+CREATE CONSTRAINT TRIGGER cross_dock_cancellations_validate
+AFTER INSERT ON public.cross_dock_cancellations DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.validate_cross_dock_cancellation();
+
+ALTER TABLE public.cross_dock_plan_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.cross_dock_plan_runs FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.cross_dock_tasks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.cross_dock_tasks FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.cross_dock_confirmations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.cross_dock_confirmations FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.cross_dock_cancellations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.cross_dock_cancellations FORCE ROW LEVEL SECURITY;
+CREATE POLICY cross_dock_plan_runs_tenant_isolation ON public.cross_dock_plan_runs
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY cross_dock_tasks_tenant_isolation ON public.cross_dock_tasks
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY cross_dock_confirmations_tenant_isolation ON public.cross_dock_confirmations
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY cross_dock_cancellations_tenant_isolation ON public.cross_dock_cancellations
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.cross_dock_plan_runs TO wareboxes_app;
+GRANT SELECT,INSERT,UPDATE(closed_at) ON public.cross_dock_tasks TO wareboxes_app;
+GRANT SELECT,INSERT ON public.cross_dock_confirmations TO wareboxes_app;
+GRANT SELECT,INSERT ON public.cross_dock_cancellations TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.cross_dock_plan_runs_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.cross_dock_confirmations_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.cross_dock_cancellations_id_seq TO wareboxes_app;
+
+REVOKE ALL ON FUNCTION public.guard_cross_dock_task_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.close_cross_dock_task_detail() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_cross_dock_ledger_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_cross_dock_plan() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_cross_dock_plan_task() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_cross_dock_confirmation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_cross_dock_cancellation() FROM PUBLIC;

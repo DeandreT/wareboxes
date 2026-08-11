@@ -19,9 +19,9 @@ use crate::transport::{
     send_session,
 };
 use crate::wire::{
-    decode_claim_response, decode_command_response, decode_cycle_count_claim_response,
-    decode_pick_claim_response, decode_receiving_session, decode_relocation_claim_response,
-    decode_replenishment_claim_response,
+    decode_claim_response, decode_command_response, decode_cross_dock_claim_response,
+    decode_cycle_count_claim_response, decode_pick_claim_response, decode_receiving_session,
+    decode_relocation_claim_response, decode_replenishment_claim_response,
 };
 use crate::workflow::{
     ClaimOperation, DurableCommandDraft, InventoryRelocationClaim, MovementWorkflow, PutawayClaim,
@@ -75,6 +75,7 @@ enum CurrentMovementClaim {
     CycleCount(Option<crate::cycle_count::CycleCountClaim>),
     Picking(Option<crate::picking::PickClaim>),
     Replenishment(Option<crate::replenishment::ReplenishmentClaim>),
+    CrossDock(Option<crate::cross_dock::CrossDockClaim>),
 }
 
 impl CurrentMovementClaim {
@@ -85,6 +86,7 @@ impl CurrentMovementClaim {
             Self::CycleCount(claim) => claim.is_none(),
             Self::Picking(claim) => claim.is_none(),
             Self::Replenishment(claim) => claim.is_none(),
+            Self::CrossDock(claim) => claim.is_none(),
         }
     }
 
@@ -95,6 +97,7 @@ impl CurrentMovementClaim {
             Self::CycleCount(claim) => claim.as_ref().map(|claim| claim.task_id),
             Self::Picking(claim) => claim.as_ref().map(|claim| claim.task_id),
             Self::Replenishment(claim) => claim.as_ref().map(|claim| claim.work_id),
+            Self::CrossDock(claim) => claim.as_ref().map(|claim| claim.work_id),
         }
     }
 
@@ -104,6 +107,7 @@ impl CurrentMovementClaim {
         cycle_count: &mut crate::cycle_count::CycleCountWorkflow,
         picking: &mut crate::picking::PickingWorkflow,
         replenishment: &mut crate::replenishment::ReplenishmentWorkflow,
+        cross_dock: &mut crate::cross_dock::CrossDockWorkflow,
     ) {
         match self {
             Self::Putaway(claim) => workflow.restore_current_putaway_claim(claim),
@@ -113,6 +117,7 @@ impl CurrentMovementClaim {
             Self::CycleCount(claim) => cycle_count.restore_current_claim(claim),
             Self::Picking(claim) => picking.restore_current_claim(claim),
             Self::Replenishment(claim) => replenishment.restore_current_claim(claim),
+            Self::CrossDock(claim) => cross_dock.restore_current_claim(claim),
         }
     }
 }
@@ -388,6 +393,10 @@ impl RfApp {
         }
         if matches!(record.draft.command, RfCommand::Replenishment(_)) {
             self.restore_replenishment_command(context, record);
+            return;
+        }
+        if matches!(record.draft.command, RfCommand::CrossDock(_)) {
+            self.restore_cross_dock_command(context, record);
             return;
         }
         if matches!(record.draft.command, RfCommand::OutboundLoad(_)) {
@@ -727,6 +736,8 @@ impl RfApp {
             }
             ClaimOperation::Replenishment => decode_replenishment_claim_response(&response.body)
                 .map(CurrentMovementClaim::Replenishment),
+            ClaimOperation::CrossDock => decode_cross_dock_claim_response(&response.body)
+                .map(CurrentMovementClaim::CrossDock),
         };
         match claim {
             Ok(claim) => {
@@ -764,6 +775,13 @@ impl RfApp {
                     );
                     return;
                 }
+                if lease_check_task_id.is_none()
+                    && operation == ClaimOperation::Replenishment
+                    && claim.is_none()
+                {
+                    self.request_current_claim_for_operation(context, ClaimOperation::CrossDock);
+                    return;
+                }
                 self.session_gate = SessionGate::Ready;
                 self.clear_claim_heartbeat();
                 if let Some(expected_task_id) = lease_check_task_id {
@@ -773,6 +791,7 @@ impl RfApp {
                             &mut self.cycle_count,
                             &mut self.picking,
                             &mut self.replenishment,
+                            &mut self.cross_dock,
                         );
                         self.work_mode = match operation {
                             ClaimOperation::Putaway => super::WorkMode::Putaway,
@@ -780,6 +799,7 @@ impl RfApp {
                             ClaimOperation::CycleCount => super::WorkMode::Count,
                             ClaimOperation::Picking => super::WorkMode::Pick,
                             ClaimOperation::Replenishment => super::WorkMode::Replenish,
+                            ClaimOperation::CrossDock => super::WorkMode::CrossDock,
                         };
                     } else {
                         match operation {
@@ -796,6 +816,9 @@ impl RfApp {
                             ClaimOperation::Replenishment => {
                                 self.replenishment.restore_current_claim(None)
                             }
+                            ClaimOperation::CrossDock => {
+                                self.cross_dock.restore_current_claim(None)
+                            }
                         }
                         self.work_mode = match operation {
                             ClaimOperation::Putaway => super::WorkMode::Putaway,
@@ -803,6 +826,7 @@ impl RfApp {
                             ClaimOperation::CycleCount => super::WorkMode::Count,
                             ClaimOperation::Picking => super::WorkMode::Pick,
                             ClaimOperation::Replenishment => super::WorkMode::Replenish,
+                            ClaimOperation::CrossDock => super::WorkMode::CrossDock,
                         };
                         match operation {
                             ClaimOperation::CycleCount => self.cycle_count.require_reconciliation(
@@ -818,6 +842,10 @@ impl RfApp {
                                     "This replenishment is no longer assigned. Do not move its inventory. Contact a supervisor."
                                         .into(),
                                 ),
+                            ClaimOperation::CrossDock => self.cross_dock.require_reconciliation(
+                                "This cross-dock move is no longer assigned. Do not move its inventory. Contact a supervisor."
+                                    .into(),
+                            ),
                             ClaimOperation::Putaway | ClaimOperation::InventoryRelocation => {
                                 self.workflow.require_reconciliation(
                                     "This task is no longer assigned. Do not move its inventory. Contact a supervisor."
@@ -832,6 +860,7 @@ impl RfApp {
                         &mut self.cycle_count,
                         &mut self.picking,
                         &mut self.replenishment,
+                        &mut self.cross_dock,
                     );
                     self.work_mode = match operation {
                         ClaimOperation::Putaway => super::WorkMode::Putaway,
@@ -839,12 +868,14 @@ impl RfApp {
                         ClaimOperation::CycleCount => super::WorkMode::Count,
                         ClaimOperation::Picking => super::WorkMode::Pick,
                         ClaimOperation::Replenishment => super::WorkMode::Replenish,
+                        ClaimOperation::CrossDock => super::WorkMode::CrossDock,
                     };
                 } else {
                     self.workflow.restore_current_putaway_claim(None);
                     self.cycle_count.restore_current_claim(None);
                     self.picking.restore_current_claim(None);
                     self.replenishment.restore_current_claim(None);
+                    self.cross_dock.restore_current_claim(None);
                     self.work_mode = super::WorkMode::Putaway;
                 }
                 self.connectivity_notice = None;
@@ -863,6 +894,9 @@ impl RfApp {
                     ),
                     ClaimOperation::Replenishment => self.replenishment.require_reconciliation(
                         "The server returned invalid current-replenishment data.".into(),
+                    ),
+                    ClaimOperation::CrossDock => self.cross_dock.require_reconciliation(
+                        "The server returned invalid current cross-dock data.".into(),
                     ),
                     ClaimOperation::Putaway | ClaimOperation::InventoryRelocation => {
                         self.workflow.require_reconciliation(
@@ -892,6 +926,9 @@ impl RfApp {
             || self.replenishment.claim().is_some()
         {
             ClaimOperation::Replenishment
+        } else if self.work_mode == super::WorkMode::CrossDock || self.cross_dock.claim().is_some()
+        {
+            ClaimOperation::CrossDock
         } else if self.work_mode == super::WorkMode::Count || self.cycle_count.claim().is_some() {
             ClaimOperation::CycleCount
         } else {
@@ -924,6 +961,7 @@ impl RfApp {
             let is_cycle_count = matches!(draft.command, RfCommand::CycleCount(_));
             let is_picking = matches!(draft.command, RfCommand::Picking(_));
             let is_replenishment = matches!(draft.command, RfCommand::Replenishment(_));
+            let is_cross_dock = matches!(draft.command, RfCommand::CrossDock(_));
             let is_outbound_load = matches!(draft.command, RfCommand::OutboundLoad(_));
             let Some(store) = self.command_store.as_mut() else {
                 if is_outbound_load {
@@ -931,6 +969,9 @@ impl RfApp {
                         .require_reconciliation("Durable device storage is unavailable".into());
                 } else if is_replenishment {
                     self.replenishment
+                        .require_reconciliation("Durable device storage is unavailable".into());
+                } else if is_cross_dock {
+                    self.cross_dock
                         .require_reconciliation("Durable device storage is unavailable".into());
                 } else {
                     self.workflow
@@ -947,6 +988,11 @@ impl RfApp {
                 } else if is_replenishment {
                     self.replenishment.require_reconciliation(
                         "The replenishment cannot be stored without an authenticated device scope"
+                            .into(),
+                    );
+                } else if is_cross_dock {
+                    self.cross_dock.require_reconciliation(
+                        "The cross-dock action cannot be stored without an authenticated device scope"
                             .into(),
                     );
                 } else {
@@ -974,6 +1020,11 @@ impl RfApp {
                             .replenishment
                             .command_persisted(&command_id, record.record_id);
                         self.emit_replenishment_transition(transition);
+                    } else if is_cross_dock {
+                        let transition = self
+                            .cross_dock
+                            .command_persisted(&command_id, record.record_id);
+                        self.emit_cross_dock_transition(transition);
                     } else if is_outbound_load {
                         let transition = self
                             .outbound_load
@@ -998,6 +1049,10 @@ impl RfApp {
                     } else if is_replenishment {
                         self.replenishment.require_reconciliation(format!(
                             "The replenishment could not be stored durably: {error}"
+                        ));
+                    } else if is_cross_dock {
+                        self.cross_dock.require_reconciliation(format!(
+                            "The cross-dock action could not be stored durably: {error}"
                         ));
                     } else if is_outbound_load {
                         self.outbound_load.require_reconciliation(format!(
@@ -1047,6 +1102,10 @@ impl RfApp {
                         self.replenishment.require_reconciliation(
                             "The saved replenishment could not enter network dispatch.".into(),
                         );
+                    } else if self.cross_dock.owns_record(record_id) {
+                        self.cross_dock.require_reconciliation(
+                            "The saved cross-dock action could not enter network dispatch.".into(),
+                        );
                     } else if self.outbound_load.owns_record(record_id) {
                         self.outbound_load.require_reconciliation(
                             "The saved carton move could not enter network dispatch.".into(),
@@ -1085,6 +1144,10 @@ impl RfApp {
                         self.replenishment.require_reconciliation(
                             "The saved replenishment failed its integrity check.".into(),
                         );
+                    } else if self.cross_dock.owns_record(record_id) {
+                        self.cross_dock.require_reconciliation(
+                            "The saved cross-dock action failed its integrity check.".into(),
+                        );
                     } else if self.outbound_load.owns_record(record_id) {
                         self.outbound_load.require_reconciliation(
                             "The saved carton move failed its integrity check.".into(),
@@ -1103,6 +1166,8 @@ impl RfApp {
                 self.picking.dispatch_started(record_id);
             } else if matches!(attempt.command.draft.command, RfCommand::Replenishment(_)) {
                 self.replenishment.dispatch_started(record_id);
+            } else if matches!(attempt.command.draft.command, RfCommand::CrossDock(_)) {
+                self.cross_dock.dispatch_started(record_id);
             } else if matches!(attempt.command.draft.command, RfCommand::OutboundLoad(_)) {
                 self.outbound_load.dispatch_started(record_id);
             } else {
@@ -1144,6 +1209,10 @@ impl RfApp {
             } else if self.replenishment.owns_record(record_id) {
                 self.replenishment.require_reconciliation(
                     "The authenticated device scope was lost during replenishment dispatch.".into(),
+                );
+            } else if self.cross_dock.owns_record(record_id) {
+                self.cross_dock.require_reconciliation(
+                    "The authenticated device scope was lost during cross-dock dispatch.".into(),
                 );
             } else if self.outbound_load.owns_record(record_id) {
                 self.outbound_load.require_reconciliation(
@@ -1193,6 +1262,11 @@ impl RfApp {
                             record_id,
                             "The server may have received the replenishment. Check it before continuing.",
                         );
+                    } else if matches!(stored.draft.command, RfCommand::CrossDock(_)) {
+                        self.cross_dock.dispatch_ambiguous(
+                            record_id,
+                            "The server may have received the cross-dock action. Check it before continuing.",
+                        );
                     } else if matches!(stored.draft.command, RfCommand::OutboundLoad(_)) {
                         self.outbound_load.dispatch_ambiguous(
                             record_id,
@@ -1225,6 +1299,11 @@ impl RfApp {
                     } else if self.replenishment.owns_record(record_id) {
                         self.replenishment.require_reconciliation(
                             "The interrupted replenishment could not be saved for recovery.".into(),
+                        );
+                    } else if self.cross_dock.owns_record(record_id) {
+                        self.cross_dock.require_reconciliation(
+                            "The interrupted cross-dock action could not be saved for recovery."
+                                .into(),
                         );
                     } else if self.outbound_load.owns_record(record_id) {
                         self.outbound_load.require_reconciliation(
@@ -1267,6 +1346,10 @@ impl RfApp {
                     self.replenishment.require_reconciliation(
                         "The retryable replenishment result could not be saved.".into(),
                     );
+                } else if self.cross_dock.owns_record(record_id) {
+                    self.cross_dock.require_reconciliation(
+                        "The retryable cross-dock result could not be saved.".into(),
+                    );
                 } else if self.outbound_load.owns_record(record_id) {
                     self.outbound_load.require_reconciliation(
                         "The retryable carton-move result could not be saved.".into(),
@@ -1282,6 +1365,7 @@ impl RfApp {
             let is_cycle_count = matches!(stored.draft.command, RfCommand::CycleCount(_));
             let is_picking = matches!(stored.draft.command, RfCommand::Picking(_));
             let is_replenishment = matches!(stored.draft.command, RfCommand::Replenishment(_));
+            let is_cross_dock = matches!(stored.draft.command, RfCommand::CrossDock(_));
             let is_outbound_load = matches!(stored.draft.command, RfCommand::OutboundLoad(_));
             if response.status == 401 {
                 if is_receiving {
@@ -1309,6 +1393,12 @@ impl RfApp {
                         record_id,
                         stored.draft,
                         "Sign in with the same operator account to recover this saved replenishment.",
+                    );
+                } else if is_cross_dock {
+                    self.cross_dock.restore_ambiguous_command(
+                        record_id,
+                        stored.draft,
+                        "Sign in with the same operator account to recover this saved cross-dock action.",
                     );
                 } else if is_outbound_load {
                     self.outbound_load.restore_ambiguous_command(
@@ -1355,6 +1445,11 @@ impl RfApp {
                         record_id,
                         "The service is temporarily unavailable. Check the saved replenishment again.",
                     );
+                } else if is_cross_dock {
+                    self.cross_dock.dispatch_ambiguous(
+                        record_id,
+                        "The service is temporarily unavailable. Check the saved cross-dock action again.",
+                    );
                 } else if is_outbound_load {
                     self.outbound_load.dispatch_ambiguous(
                         record_id,
@@ -1397,6 +1492,10 @@ impl RfApp {
                 } else if self.replenishment.owns_record(record_id) {
                     self.replenishment.require_reconciliation(
                         "The replenishment result could not be stored durably.".into(),
+                    );
+                } else if self.cross_dock.owns_record(record_id) {
+                    self.cross_dock.require_reconciliation(
+                        "The cross-dock result could not be stored durably.".into(),
                     );
                 } else if self.outbound_load.owns_record(record_id) {
                     self.outbound_load.require_reconciliation(
@@ -1475,6 +1574,12 @@ impl RfApp {
                             | crate::workflow::CommandOutcome::ReplenishmentConfirmed(_)
                             | crate::workflow::CommandOutcome::ReplenishmentReleased { .. }
                     );
+                    let is_cross_dock = matches!(
+                        &outcome,
+                        crate::workflow::CommandOutcome::CrossDockClaimed(_)
+                            | crate::workflow::CommandOutcome::CrossDockConfirmed(_)
+                            | crate::workflow::CommandOutcome::CrossDockReleased { .. }
+                    );
                     let is_outbound_load = matches!(
                         &outcome,
                         crate::workflow::CommandOutcome::OutboundCartonMoved(_)
@@ -1491,6 +1596,21 @@ impl RfApp {
                             scope,
                             record_id,
                             "The replenishment result conflicts with the saved command or task.",
+                        );
+                        return;
+                    }
+                    if is_cross_dock
+                        && (!self.cross_dock.accepts_outcome(record_id, &outcome)
+                            || matches!(
+                                &outcome,
+                                crate::workflow::CommandOutcome::CrossDockConfirmed(result)
+                                    if result.confirmed_by != scope.operator_id
+                            ))
+                    {
+                        self.require_cross_dock_record_reconciliation(
+                            scope,
+                            record_id,
+                            "The cross-dock result conflicts with the saved command or task.",
                         );
                         return;
                     }
@@ -1521,6 +1641,8 @@ impl RfApp {
                         } else if is_replenishment {
                             self.replenishment
                                 .durable_outcome_recorded(record_id, outcome);
+                        } else if is_cross_dock {
+                            self.cross_dock.durable_outcome_recorded(record_id, outcome);
                         } else if is_outbound_load {
                             self.outbound_load
                                 .durable_outcome_recorded(record_id, outcome);
@@ -1554,6 +1676,12 @@ impl RfApp {
                             scope,
                             record_id,
                             "The server returned an invalid replenishment result.",
+                        );
+                    } else if matches!(recorded.draft.command, RfCommand::CrossDock(_)) {
+                        self.require_cross_dock_record_reconciliation(
+                            scope,
+                            record_id,
+                            "The server returned an invalid cross-dock result.",
                         );
                     } else if matches!(recorded.draft.command, RfCommand::OutboundLoad(_)) {
                         self.require_outbound_load_record_reconciliation(
@@ -1599,6 +1727,9 @@ impl RfApp {
                 } else if matches!(recorded.draft.command, RfCommand::Replenishment(_)) {
                     self.replenishment
                         .durable_rejection_recorded(record_id, message);
+                } else if matches!(recorded.draft.command, RfCommand::CrossDock(_)) {
+                    self.cross_dock
+                        .durable_rejection_recorded(record_id, message);
                 } else if matches!(recorded.draft.command, RfCommand::OutboundLoad(_)) {
                     self.outbound_load
                         .durable_rejection_recorded(record_id, message);
@@ -1619,6 +1750,8 @@ impl RfApp {
                 self.require_pick_record_reconciliation(scope, record_id, &message);
             } else if matches!(recorded.draft.command, RfCommand::Replenishment(_)) {
                 self.require_replenishment_record_reconciliation(scope, record_id, &message);
+            } else if matches!(recorded.draft.command, RfCommand::CrossDock(_)) {
+                self.require_cross_dock_record_reconciliation(scope, record_id, &message);
             } else if matches!(recorded.draft.command, RfCommand::OutboundLoad(_)) {
                 self.require_outbound_load_record_reconciliation(scope, record_id, &message);
             } else {
@@ -1773,6 +1906,14 @@ impl RfApp {
                     self.replenishment.require_reconciliation(
                         "The durable replenishment command could not be finalized.".into(),
                     );
+                } else if self.cross_dock.owns_record(record_id) {
+                    self.cross_dock.require_reconciliation(
+                        "The durable cross-dock command could not be finalized.".into(),
+                    );
+                } else if self.outbound_load.owns_record(record_id) {
+                    self.outbound_load.require_reconciliation(
+                        "The durable carton-move command could not be finalized.".into(),
+                    );
                 } else {
                     self.workflow.require_reconciliation(
                         "The durable command could not be finalized.".into(),
@@ -1810,6 +1951,8 @@ impl RfApp {
                 self.cycle_count.require_reconciliation(message.into());
             } else if self.replenishment.owns_record(record_id) {
                 self.replenishment.require_reconciliation(message.into());
+            } else if self.cross_dock.owns_record(record_id) {
+                self.cross_dock.require_reconciliation(message.into());
             } else if self.outbound_load.owns_record(record_id) {
                 self.outbound_load.require_reconciliation(message.into());
             } else {
@@ -1872,6 +2015,25 @@ impl RfApp {
             .is_some()
         {
             self.replenishment.require_reconciliation(message.into());
+        }
+    }
+
+    fn require_cross_dock_record_reconciliation(
+        &mut self,
+        scope: &ExecutionScope,
+        record_id: i64,
+        message: &str,
+    ) {
+        if self
+            .finalize_record(
+                scope,
+                record_id,
+                CommandStatus::ReconcileRequired,
+                Some(message),
+            )
+            .is_some()
+        {
+            self.cross_dock.require_reconciliation(message.into());
         }
     }
 
@@ -1963,5 +2125,6 @@ pub(super) const fn next_claim_operation_after_conflict(
         ClaimOperation::CycleCount | ClaimOperation::Picking | ClaimOperation::Replenishment => {
             None
         }
+        ClaimOperation::CrossDock => None,
     }
 }

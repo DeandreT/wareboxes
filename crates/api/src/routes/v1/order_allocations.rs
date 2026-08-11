@@ -246,6 +246,7 @@ const fn map_readiness_status(status: AppReadinessStatus) -> OrderAllocationRead
 const fn map_readiness_blocker(blocker: AppBlocker) -> OrderAllocationReadinessBlocker {
     match blocker {
         AppBlocker::ActiveHold => OrderAllocationReadinessBlocker::ActiveHold,
+        AppBlocker::CrossDockInProgress => OrderAllocationReadinessBlocker::CrossDockInProgress,
         AppBlocker::OrderStatusNotAllocatable => {
             OrderAllocationReadinessBlocker::OrderStatusNotAllocatable
         }

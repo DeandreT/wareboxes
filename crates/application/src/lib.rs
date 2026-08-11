@@ -3,6 +3,7 @@
 pub mod authorization;
 pub mod backorder;
 mod context;
+pub mod cross_dock;
 pub mod customer_return;
 pub mod cycle_count;
 pub mod cycle_count_control;

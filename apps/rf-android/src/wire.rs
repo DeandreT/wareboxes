@@ -54,9 +54,15 @@ use crate::workflow::{
     MovementWork, PutawayClaim, PutawayCommand, ReleaseReason, RfCommand,
 };
 
+mod cross_dock;
 mod outbound_load;
 mod replenishment;
 
+pub use cross_dock::{
+    build_heartbeat_request_parts as build_cross_dock_heartbeat_request_parts,
+    decode_claim_response as decode_cross_dock_claim_response,
+    decode_heartbeat_response as decode_cross_dock_heartbeat_response,
+};
 pub use replenishment::{
     build_heartbeat_request_parts as build_replenishment_heartbeat_request_parts,
     decode_claim_response as decode_replenishment_claim_response,
@@ -102,6 +108,10 @@ pub enum ResponseKind {
     ReplenishmentClaim,
     ReplenishmentConfirmation,
     ReplenishmentRelease,
+    CrossDockOptionalClaim,
+    CrossDockClaim,
+    CrossDockConfirmation,
+    CrossDockRelease,
     OutboundCartonMovement,
     InboundUnloadingStart,
     ExpectedReceiptConfirmation,
@@ -138,6 +148,8 @@ pub enum WireRequestError {
     InvalidPickShortageField { field: &'static str },
     #[error("replenishment command contains invalid persisted state")]
     InvalidReplenishmentCommand,
+    #[error("cross-dock command contains invalid persisted state")]
+    InvalidCrossDockCommand,
     #[error("outbound-load command contains invalid persisted state")]
     InvalidOutboundLoadCommand,
     #[error("load ID must be positive")]
@@ -189,6 +201,8 @@ pub enum WireResponseError {
     InvalidPickShortageResponse,
     #[error("the warehouse service returned an invalid replenishment result")]
     InvalidReplenishmentResponse,
+    #[error("the warehouse service returned an invalid cross-dock result")]
+    InvalidCrossDockResponse,
     #[error(
         "the expected receipt response line ID {actual} does not match requested line {expected}"
     )]
@@ -539,6 +553,7 @@ pub fn build_durable_request(
             )
         }
         RfCommand::Replenishment(command) => replenishment::build_command_parts(command)?,
+        RfCommand::CrossDock(command) => cross_dock::build_command_parts(command)?,
         RfCommand::OutboundLoad(command) => outbound_load::build_command_parts(command)?,
         RfCommand::ExpectedReceipt(intent) => {
             if !intent.is_current_and_valid() {
@@ -721,6 +736,10 @@ pub fn decode_command_response(
         | ResponseKind::ReplenishmentClaim
         | ResponseKind::ReplenishmentConfirmation
         | ResponseKind::ReplenishmentRelease => replenishment::decode_outcome(response_kind, body),
+        ResponseKind::CrossDockOptionalClaim
+        | ResponseKind::CrossDockClaim
+        | ResponseKind::CrossDockConfirmation
+        | ResponseKind::CrossDockRelease => cross_dock::decode_outcome(response_kind, body),
         ResponseKind::OutboundCartonMovement => outbound_load::decode_response(body),
         ResponseKind::InboundUnloadingStart => {
             let response = serde_json::from_slice::<StartInboundLoadUnloadingResponse>(body)?;

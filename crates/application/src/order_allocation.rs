@@ -156,6 +156,7 @@ pub enum OrderAllocationReadinessStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderAllocationReadinessBlocker {
     ActiveHold,
+    CrossDockInProgress,
     OrderStatusNotAllocatable,
     OwnerFacilityUnavailable,
 }

@@ -7,6 +7,7 @@ use lucide_icons::Icon;
 use wareboxes_api_contract::v1::{ErrorReason, ErrorResponse};
 
 use crate::command_store::{CommandStore, ExecutionScope};
+use crate::cross_dock::{CrossDockScanStage, CrossDockWorkflow};
 use crate::cycle_count::{CountScanStage, CycleCountWorkflow};
 use crate::expected_receiving::{ExpectedReceivingReducer, ReceivingEffect};
 use crate::outbound_load::{OutboundLoadScanStage, OutboundLoadWorkflow};
@@ -15,6 +16,8 @@ use crate::replenishment::{ReplenishmentScanStage, ReplenishmentWorkflow};
 use crate::transport::{NetworkEvent, ServerEndpoint};
 use crate::workflow::{Activity, MovementWorkflow, ScanStage, Transition, WorkflowEffect};
 
+mod cross_dock_session;
+mod cross_dock_ui;
 mod cycle_count_ui;
 mod heartbeat;
 mod movement_ui;
@@ -59,6 +62,8 @@ pub struct RfApp {
     picking_effects: VecDeque<WorkflowEffect>,
     replenishment: ReplenishmentWorkflow,
     replenishment_effects: VecDeque<WorkflowEffect>,
+    cross_dock: CrossDockWorkflow,
+    cross_dock_effects: VecDeque<WorkflowEffect>,
     outbound_load: OutboundLoadWorkflow,
     outbound_load_effects: VecDeque<WorkflowEffect>,
     receiving: ExpectedReceivingReducer,
@@ -93,10 +98,12 @@ pub struct RfApp {
     count_scan_focus: Option<(i64, CountScanStage)>,
     pick_scan_focus: Option<(i64, PickScanStage)>,
     replenishment_scan_focus: Option<(i64, ReplenishmentScanStage)>,
+    cross_dock_scan_focus: Option<(i64, CrossDockScanStage)>,
     outbound_load_scan_focus: Option<(i64, OutboundLoadScanStage)>,
     outbound_load_barcode_draft: String,
     expected_outbound_load_request_id: Option<String>,
     replenishment_task_id_draft: String,
+    cross_dock_task_id_draft: String,
     field_focus_pending: bool,
     heartbeat: heartbeat::HeartbeatRuntime,
 }
@@ -131,6 +138,8 @@ impl RfApp {
             picking_effects: VecDeque::new(),
             replenishment: ReplenishmentWorkflow::default(),
             replenishment_effects: VecDeque::new(),
+            cross_dock: CrossDockWorkflow::default(),
+            cross_dock_effects: VecDeque::new(),
             outbound_load: OutboundLoadWorkflow::default(),
             outbound_load_effects: VecDeque::new(),
             receiving: ExpectedReceivingReducer::default(),
@@ -165,10 +174,12 @@ impl RfApp {
             count_scan_focus: None,
             pick_scan_focus: None,
             replenishment_scan_focus: None,
+            cross_dock_scan_focus: None,
             outbound_load_scan_focus: None,
             outbound_load_barcode_draft: String::new(),
             expected_outbound_load_request_id: None,
             replenishment_task_id_draft: String::new(),
+            cross_dock_task_id_draft: String::new(),
             field_focus_pending: true,
             heartbeat: heartbeat::HeartbeatRuntime::new(),
         }
@@ -220,6 +231,8 @@ impl RfApp {
             picking_effects: VecDeque::new(),
             replenishment: ReplenishmentWorkflow::default(),
             replenishment_effects: VecDeque::new(),
+            cross_dock: CrossDockWorkflow::default(),
+            cross_dock_effects: VecDeque::new(),
             outbound_load: OutboundLoadWorkflow::default(),
             outbound_load_effects: VecDeque::new(),
             receiving: ExpectedReceivingReducer::default(),
@@ -254,10 +267,12 @@ impl RfApp {
             count_scan_focus: None,
             pick_scan_focus: None,
             replenishment_scan_focus: None,
+            cross_dock_scan_focus: None,
             outbound_load_scan_focus: None,
             outbound_load_barcode_draft: String::new(),
             expected_outbound_load_request_id: None,
             replenishment_task_id_draft: String::new(),
+            cross_dock_task_id_draft: String::new(),
             field_focus_pending: true,
             heartbeat: heartbeat::HeartbeatRuntime::new(),
         };
@@ -637,6 +652,7 @@ const fn can_retry_connectivity_check(
     cycle_count: Activity,
     picking: Activity,
     replenishment: Activity,
+    cross_dock: Activity,
     outbound_load: Activity,
     request_pending: bool,
 ) -> bool {
@@ -644,6 +660,7 @@ const fn can_retry_connectivity_check(
         && matches!(cycle_count, Activity::Idle)
         && matches!(picking, Activity::Idle)
         && matches!(replenishment, Activity::Idle)
+        && matches!(cross_dock, Activity::Idle)
         && matches!(outbound_load, Activity::Idle)
         && !request_pending
 }
@@ -723,6 +740,7 @@ impl eframe::App for RfApp {
         self.effects.extend(self.cycle_count_effects.drain(..));
         self.effects.extend(self.picking_effects.drain(..));
         self.effects.extend(self.replenishment_effects.drain(..));
+        self.effects.extend(self.cross_dock_effects.drain(..));
         self.effects.extend(self.outbound_load_effects.drain(..));
         self.persist_queued_commands();
         self.dispatch_queued_commands(root_ui.ctx());
@@ -772,6 +790,7 @@ impl eframe::App for RfApp {
                                 | WorkMode::Count
                                 | WorkMode::Pick
                                 | WorkMode::Replenish
+                                | WorkMode::CrossDock
                                 | WorkMode::OutboundLoad
                         ) && let Some(notice) = self.connectivity_notice.clone()
                         {
@@ -781,6 +800,7 @@ impl eframe::App for RfApp {
                                 self.cycle_count.activity(),
                                 self.picking.activity(),
                                 self.replenishment.activity(),
+                                self.cross_dock.activity(),
                                 self.outbound_load.activity(),
                                 self.expected_claim_request_id.is_some(),
                             ) && ui
@@ -810,6 +830,7 @@ impl eframe::App for RfApp {
                                 WorkMode::Count => self.count_view(ui),
                                 WorkMode::Pick => self.pick_view(ui),
                                 WorkMode::Replenish => self.replenishment_view(ui),
+                                WorkMode::CrossDock => self.cross_dock_view(ui),
                                 WorkMode::OutboundLoad => self.outbound_load_view(ui),
                                 WorkMode::Putaway | WorkMode::Relocate => {
                                     if self.workflow.claim().is_some() {
@@ -861,9 +882,20 @@ mod tests {
             Activity::Idle,
             Activity::Idle,
             Activity::Idle,
+            Activity::Idle,
             false,
         ));
         assert!(!can_retry_connectivity_check(
+            Activity::Idle,
+            Activity::Idle,
+            Activity::Active,
+            Activity::Idle,
+            Activity::Idle,
+            Activity::Idle,
+            false,
+        ));
+        assert!(!can_retry_connectivity_check(
+            Activity::Idle,
             Activity::Idle,
             Activity::Idle,
             Activity::Active,
@@ -873,13 +905,6 @@ mod tests {
         ));
         assert!(!can_retry_connectivity_check(
             Activity::Idle,
-            Activity::Idle,
-            Activity::Idle,
-            Activity::Active,
-            Activity::Idle,
-            false,
-        ));
-        assert!(!can_retry_connectivity_check(
             Activity::Idle,
             Activity::Idle,
             Activity::Idle,

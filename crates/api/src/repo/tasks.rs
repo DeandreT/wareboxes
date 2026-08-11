@@ -171,6 +171,7 @@ pub(in crate::repo) fn task_timeout_seconds(task_type: WorkTaskType) -> i64 {
         WorkTaskType::LicensePlatePutaway => 30 * 60,
         WorkTaskType::InventoryRelocation => 30 * 60,
         WorkTaskType::Replenishment => 30 * 60,
+        WorkTaskType::CrossDock => 30 * 60,
     }
 }
 

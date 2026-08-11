@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::cross_dock::{CrossDockClaim, CrossDockCommand, CrossDockConfirmationResult};
 use crate::expected_receiving::{ConfirmationIntent, ReceivingCommandIntent};
 use crate::outbound_load::OutboundLoadCommand;
 use crate::picking::{PickClaim, PickShortageReportResult, PickingCommand};
@@ -27,6 +28,7 @@ pub enum ClaimOperation {
     CycleCount,
     Picking,
     Replenishment,
+    CrossDock,
 }
 
 impl From<MovementOperation> for ClaimOperation {
@@ -369,6 +371,7 @@ pub enum RfCommand {
     CycleCount(CycleCountCommand),
     Picking(PickingCommand),
     Replenishment(ReplenishmentCommand),
+    CrossDock(CrossDockCommand),
     OutboundLoad(OutboundLoadCommand),
     ExpectedReceipt(Box<ReceivingCommandIntent>),
 }
@@ -381,6 +384,7 @@ impl RfCommand {
             Self::CycleCount(_) => None,
             Self::Picking(_) => None,
             Self::Replenishment(_) => None,
+            Self::CrossDock(_) => None,
             Self::OutboundLoad(_) => None,
             Self::ExpectedReceipt(_) => None,
         }
@@ -485,6 +489,11 @@ pub enum CommandOutcome {
     ReplenishmentClaimed(Option<Box<ReplenishmentClaim>>),
     ReplenishmentConfirmed(Box<ReplenishmentConfirmationResult>),
     ReplenishmentReleased {
+        work_id: i64,
+    },
+    CrossDockClaimed(Option<Box<CrossDockClaim>>),
+    CrossDockConfirmed(Box<CrossDockConfirmationResult>),
+    CrossDockReleased {
         work_id: i64,
     },
     OutboundCartonMoved(Box<wareboxes_api_contract::v1::MovePackedCartonResponse>),
@@ -903,6 +912,9 @@ impl MovementWorkflow {
             | CommandOutcome::ReplenishmentClaimed(_)
             | CommandOutcome::ReplenishmentConfirmed(_)
             | CommandOutcome::ReplenishmentReleased { .. }
+            | CommandOutcome::CrossDockClaimed(_)
+            | CommandOutcome::CrossDockConfirmed(_)
+            | CommandOutcome::CrossDockReleased { .. }
             | CommandOutcome::OutboundCartonMoved(_) => {
                 self.require_reconciliation("Recorded result does not match the workflow".into());
                 return Transition::Applied;

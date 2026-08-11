@@ -1478,6 +1478,7 @@ pub enum WorkTaskType {
     LicensePlatePutaway,
     InventoryRelocation,
     Replenishment,
+    CrossDock,
 }
 
 impl WorkTaskType {
@@ -1491,6 +1492,7 @@ impl WorkTaskType {
             WorkTaskType::LicensePlatePutaway => "license_plate_putaway",
             WorkTaskType::InventoryRelocation => "inventory_relocation",
             WorkTaskType::Replenishment => "replenishment",
+            WorkTaskType::CrossDock => "cross_dock",
         }
     }
 
@@ -1504,6 +1506,7 @@ impl WorkTaskType {
             "license_plate_putaway" => WorkTaskType::LicensePlatePutaway,
             "inventory_relocation" => WorkTaskType::InventoryRelocation,
             "replenishment" => WorkTaskType::Replenishment,
+            "cross_dock" => WorkTaskType::CrossDock,
             _ => return None,
         })
     }
@@ -1558,6 +1561,10 @@ pub enum WorkTaskProgressAction {
     ReplenishmentHeartbeat,
     ReplenishmentReleased,
     ReplenishmentCancelled,
+    CrossDockConfirmed,
+    CrossDockHeartbeat,
+    CrossDockReleased,
+    CrossDockCancelled,
 }
 
 impl WorkTaskProgressAction {
@@ -1571,6 +1578,10 @@ impl WorkTaskProgressAction {
             WorkTaskProgressAction::ReplenishmentHeartbeat => "replenishment_heartbeat",
             WorkTaskProgressAction::ReplenishmentReleased => "replenishment_released",
             WorkTaskProgressAction::ReplenishmentCancelled => "replenishment_cancelled",
+            WorkTaskProgressAction::CrossDockConfirmed => "cross_dock_confirmed",
+            WorkTaskProgressAction::CrossDockHeartbeat => "cross_dock_heartbeat",
+            WorkTaskProgressAction::CrossDockReleased => "cross_dock_released",
+            WorkTaskProgressAction::CrossDockCancelled => "cross_dock_cancelled",
         }
     }
 
@@ -1584,6 +1595,10 @@ impl WorkTaskProgressAction {
             "replenishment_heartbeat" => WorkTaskProgressAction::ReplenishmentHeartbeat,
             "replenishment_released" => WorkTaskProgressAction::ReplenishmentReleased,
             "replenishment_cancelled" => WorkTaskProgressAction::ReplenishmentCancelled,
+            "cross_dock_confirmed" => WorkTaskProgressAction::CrossDockConfirmed,
+            "cross_dock_heartbeat" => WorkTaskProgressAction::CrossDockHeartbeat,
+            "cross_dock_released" => WorkTaskProgressAction::CrossDockReleased,
+            "cross_dock_cancelled" => WorkTaskProgressAction::CrossDockCancelled,
             _ => return None,
         })
     }

@@ -7,9 +7,10 @@ use wareboxes_api_contract::v1::{HeartbeatCycleCountClaimRequest, IdempotencyKey
 
 use crate::command_store::{DispatchAttempt, DurableHttpResponse, ExecutionScope};
 use crate::wire::{
-    EXPECTED_RECEIVING_BARCODE_LOOKUP_PATH, build_expected_receiving_session_path,
-    build_movement_heartbeat_request_parts, build_pick_heartbeat_request_parts,
-    build_replenishment_heartbeat_request_parts, normalize_expected_receiving_load_barcode,
+    EXPECTED_RECEIVING_BARCODE_LOOKUP_PATH, build_cross_dock_heartbeat_request_parts,
+    build_expected_receiving_session_path, build_movement_heartbeat_request_parts,
+    build_pick_heartbeat_request_parts, build_replenishment_heartbeat_request_parts,
+    normalize_expected_receiving_load_barcode,
 };
 use crate::workflow::{ClaimOperation, MovementOperation};
 
@@ -179,6 +180,7 @@ pub fn build_current_claim_request(
         ClaimOperation::CycleCount => "/api/v1/cycle-count-claims/current",
         ClaimOperation::Picking => "/api/v1/picking-claims/current",
         ClaimOperation::Replenishment => "/api/v1/replenishment-claims/current",
+        ClaimOperation::CrossDock => "/api/v1/cross-dock-claims/current",
     };
     let mut request = ehttp::Request::get(transport.endpoint.api_url(path)?);
     request.headers = authenticated_headers(transport, request_id);
@@ -199,7 +201,8 @@ pub fn build_movement_heartbeat_request(
                 ClaimOperation::InventoryRelocation => MovementOperation::InventoryRelocation,
                 ClaimOperation::CycleCount
                 | ClaimOperation::Picking
-                | ClaimOperation::Replenishment => unreachable!(),
+                | ClaimOperation::Replenishment
+                | ClaimOperation::CrossDock => unreachable!(),
             };
             build_movement_heartbeat_request_parts(movement, task_id).map_err(
                 |error| match error {
@@ -231,6 +234,12 @@ pub fn build_movement_heartbeat_request(
                 crate::wire::WireRequestError::InvalidTaskId => TransportBuildError::InvalidTaskId,
                 _ => TransportBuildError::InvalidHeartbeatRequest,
             })?,
+        ClaimOperation::CrossDock => {
+            build_cross_dock_heartbeat_request_parts(task_id).map_err(|error| match error {
+                crate::wire::WireRequestError::InvalidTaskId => TransportBuildError::InvalidTaskId,
+                _ => TransportBuildError::InvalidHeartbeatRequest,
+            })?
+        }
     };
     let idempotency_key = IdempotencyKey::new(idempotency_key)
         .map_err(|_| TransportBuildError::InvalidIdempotencyKey)?;

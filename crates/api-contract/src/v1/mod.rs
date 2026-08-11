@@ -1,6 +1,7 @@
 //! Version 1 public API primitives.
 
 mod backorder;
+mod cross_dock;
 mod cursor;
 mod customer_return;
 mod cycle_count;
@@ -52,6 +53,17 @@ pub use backorder::{
     BackorderPolicyMode, BackorderPolicyRequest, BackorderPolicyResponse, BackorderReason,
     BackorderSplitLineResponse, ConfigureBackorderPolicyRequest, SplitOrderBackorderRequest,
     SplitOrderBackorderResponse,
+};
+pub use cross_dock::{
+    CancelCrossDockWorkRequest, CancelCrossDockWorkResponse, ClaimCrossDockWorkByIdRequest,
+    ClaimNextCrossDockWorkRequest, ConfirmCrossDockWorkRequest, ConfirmCrossDockWorkResponse,
+    CrossDockCancellationReason, CrossDockClaimHeartbeatResponse, CrossDockClaimReleaseReason,
+    CrossDockClaimReleaseResponse, CrossDockClaimResponse, CrossDockLocationResponse,
+    CrossDockPlanningOptionPage, CrossDockPlanningOptionPageRequest,
+    CrossDockPlanningOptionResponse, CrossDockWorkPage, CrossDockWorkPageRequest,
+    CrossDockWorkResponse, CrossDockWorkStatus, HeartbeatCrossDockClaimRequest,
+    PlanCrossDockWorkRequest, PlanCrossDockWorkResponse, ReleaseCrossDockClaimRequest,
+    MAX_CROSS_DOCK_INSTRUCTIONS_LENGTH, MAX_CROSS_DOCK_NOTE_LENGTH,
 };
 pub use cursor::{
     CursorPage, CursorPageRequest, OpaqueCursor, OpaqueCursorError, PageLimit, PageLimitError,

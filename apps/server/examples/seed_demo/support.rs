@@ -462,6 +462,7 @@ impl SeedContext {
             ("pick waves", "pick_waves"),
             ("replenishment", "replenishment_policies"),
             ("replenishment work", "replenishment_tasks"),
+            ("cross-dock work", "cross_dock_tasks"),
             ("putaway", "putaway_tasks"),
             ("inventory holds", "inventory_holds"),
             ("integration monitor", "integration_inbox_receipts"),
@@ -485,6 +486,30 @@ impl SeedContext {
         .await?;
         if !has_cycle_counts {
             missing.push("cycle counts");
+        }
+        let cross_dock_states: (bool, bool, bool, bool) = sqlx::query_as(
+            r#"
+            SELECT EXISTS(
+                     SELECT 1 FROM inventory_reservations reservation
+                     JOIN orders orders ON orders.tenant_id=reservation.tenant_id
+                       AND orders.id=reservation.order_id
+                     WHERE reservation.tenant_id=$1 AND orders.order_key='WB-DEMO-XD-ORDER-01'
+                       AND reservation.status='active'),
+                   EXISTS(
+                     SELECT 1 FROM cross_dock_tasks detail
+                     JOIN work_tasks work ON work.tenant_id=detail.tenant_id AND work.id=detail.task_id
+                     WHERE detail.tenant_id=$1 AND work.status='open'),
+                   EXISTS(
+                     SELECT 1 FROM cross_dock_cancellations WHERE tenant_id=$1),
+                   EXISTS(
+                     SELECT 1 FROM cross_dock_confirmations WHERE tenant_id=$1)
+            "#,
+        )
+        .bind(self.tenant_id.get())
+        .fetch_one(&self.admin)
+        .await?;
+        if cross_dock_states != (true, true, true, true) {
+            missing.push("cross-dock planning and lifecycle states");
         }
         let has_cancelled_purchase_order = sqlx::query_scalar::<_, bool>(
             r#"

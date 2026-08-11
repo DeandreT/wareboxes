@@ -181,6 +181,35 @@ pub(super) async fn lock_active_order_holds_tx(
     i64::try_from(rows.len()).map_err(|_| AppError::internal("active order hold count exceeds i64"))
 }
 
+pub(super) async fn lock_active_cross_dock_work_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: TenantId,
+    inventory_owner_id: InventoryOwnerId,
+    order_id: OrderId,
+) -> AppResult<i64> {
+    let rows = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT detail.task_id
+        FROM cross_dock_tasks detail
+        INNER JOIN work_tasks work
+          ON work.tenant_id=detail.tenant_id AND work.id=detail.task_id
+        WHERE detail.tenant_id=$1
+          AND detail.inventory_owner_id=$2
+          AND detail.order_id=$3
+          AND detail.closed_at IS NULL
+          AND work.status IN ('open','assigned','in_progress')
+        ORDER BY detail.task_id
+        FOR UPDATE OF detail,work
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(inventory_owner_id.get())
+    .bind(order_id.get())
+    .fetch_all(&mut **tx)
+    .await?;
+    i64::try_from(rows.len()).map_err(|_| AppError::internal("active cross-dock count exceeds i64"))
+}
+
 pub(super) async fn lock_active_reservations_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: TenantId,

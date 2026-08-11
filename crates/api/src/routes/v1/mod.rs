@@ -1,6 +1,7 @@
 //! Version 1 public HTTP routes.
 
 mod backorders;
+pub(crate) mod cross_dock;
 mod customer_returns;
 pub(crate) mod cycle_count;
 mod error;
@@ -78,6 +79,37 @@ pub fn router() -> Router<AppState> {
         .route(
             "/customer-returns/{customer_return_id}/cancellations",
             post(customer_returns::cancel),
+        )
+        .route(
+            "/orders/{order_id}/cross-dock-tasks",
+            post(cross_dock::plan_work),
+        )
+        .route("/cross-dock-queue", get(cross_dock::work_page))
+        .route(
+            "/cross-dock-planning-options",
+            get(cross_dock::planning_options),
+        )
+        .route("/cross-dock-claims/next", post(cross_dock::claim_next))
+        .route("/cross-dock-claims/current", get(cross_dock::current_claim))
+        .route(
+            "/cross-dock-claims/{work_id}",
+            post(cross_dock::claim_by_id),
+        )
+        .route(
+            "/cross-dock-claims/{work_id}/heartbeats",
+            post(cross_dock::heartbeat_claim),
+        )
+        .route(
+            "/cross-dock-claims/{work_id}/releases",
+            post(cross_dock::release_claim),
+        )
+        .route(
+            "/cross-dock-tasks/{work_id}/confirmations",
+            post(cross_dock::confirm_work),
+        )
+        .route(
+            "/cross-dock-tasks/{work_id}/cancellations",
+            post(cross_dock::cancel_work),
         )
         .route(
             "/purchase-orders",

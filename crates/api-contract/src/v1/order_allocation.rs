@@ -116,6 +116,7 @@ pub enum OrderAllocationReadinessStatus {
 #[serde(rename_all = "snake_case")]
 pub enum OrderAllocationReadinessBlocker {
     ActiveHold,
+    CrossDockInProgress,
     OrderStatusNotAllocatable,
     FacilityNotEligible,
 }

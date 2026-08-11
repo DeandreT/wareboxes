@@ -776,6 +776,7 @@ impl RfApp {
                 self.cycle_count = crate::cycle_count::CycleCountWorkflow::default();
                 self.picking = crate::picking::PickingWorkflow::default();
                 self.replenishment = crate::replenishment::ReplenishmentWorkflow::default();
+                self.cross_dock = crate::cross_dock::CrossDockWorkflow::default();
                 self.outbound_load = crate::outbound_load::OutboundLoadWorkflow::default();
                 self.receiving = ExpectedReceivingReducer::default();
                 self.receiving_ui = ReceivingUiState::default();
@@ -798,6 +799,7 @@ impl RfApp {
             "pick-active" => self.load_pick_preview(),
             "pick-shortage" => self.load_pick_shortage_preview(),
             "replenishment-active" => self.load_replenishment_preview(),
+            "cross-dock-active" => self.load_cross_dock_preview(),
             "outbound-load-active" => self.load_outbound_load_preview(),
             _ => {}
         }
