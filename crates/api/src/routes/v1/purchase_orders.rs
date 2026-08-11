@@ -2,19 +2,25 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use sha2::{Digest, Sha256};
 use wareboxes_api_contract::v1::{
-    CreatePurchaseOrderRequest, CreatePurchaseOrderResponse, CreatedPurchaseOrderLineResponse,
-    OpaqueCursor, PurchaseOrderDetailResponse, PurchaseOrderLineResponse,
-    PurchaseOrderPage as ApiPage, PurchaseOrderPageRequest, PurchaseOrderStatus as ApiStatus,
-    PurchaseOrderSummaryResponse, ReleasePurchaseOrderRequest, ReleasePurchaseOrderResponse,
-    Revision,
+    CreatePurchaseOrderAsnRequest, CreatePurchaseOrderAsnResponse, CreatePurchaseOrderRequest,
+    CreatePurchaseOrderResponse, CreatedPurchaseOrderAsnLineResponse,
+    CreatedPurchaseOrderLineResponse, InboundAsnStatus as ApiInboundAsnStatus, OpaqueCursor,
+    PurchaseOrderDetailResponse, PurchaseOrderLineResponse, PurchaseOrderPage as ApiPage,
+    PurchaseOrderPageRequest, PurchaseOrderStatus as ApiStatus, PurchaseOrderSummaryResponse,
+    ReleasePurchaseOrderRequest, ReleasePurchaseOrderResponse, Revision,
+};
+use wareboxes_application::inbound_asn::{
+    CreatePurchaseOrderAsnCommand, CreatePurchaseOrderAsnResult,
 };
 use wareboxes_application::purchase_order::{
     CreatePurchaseOrderCommand, CreatePurchaseOrderResult, PurchaseOrderPageFilter,
     PurchaseOrderReadModel, ReleasePurchaseOrderCommand, ReleasePurchaseOrderResult,
 };
 use wareboxes_domain::{
-    CatalogItemId, FacilityId, InventoryOwnerId, NewPurchaseOrder, PurchaseOrderId,
-    PurchaseOrderLineDefinition, PurchaseOrderNumber, PurchaseOrderQuantity, PurchaseOrderRevision,
+    CatalogItemId, FacilityId, InboundAsnNumber, InboundAsnQuantity, InboundAsnRevision,
+    InboundAsnStatus, InventoryOwnerId, NewPurchaseOrder, NewPurchaseOrderAsn,
+    PurchaseOrderAsnLineDefinition, PurchaseOrderId, PurchaseOrderLineDefinition,
+    PurchaseOrderLineId, PurchaseOrderNumber, PurchaseOrderQuantity, PurchaseOrderRevision,
     PurchaseOrderStatus, PurchaseOrderSupplier, Timestamp,
 };
 
@@ -82,6 +88,50 @@ pub async fn release(
     let context = user.command_context(&idempotency_key);
     let result = repo::purchase_order::release(&state.db, &user.tenant, &context, &command).await?;
     Ok(Json(map_release(result)?))
+}
+
+pub async fn create_asn(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(purchase_order_id): Path<i64>,
+    Json(body): Json<CreatePurchaseOrderAsnRequest>,
+) -> V1Result<Json<CreatePurchaseOrderAsnResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let notice = NewPurchaseOrderAsn::new(
+        PurchaseOrderId::new(purchase_order_id).map_err(validation)?,
+        PurchaseOrderRevision::new(body.expected_purchase_order_revision.get())
+            .map_err(validation)?,
+        InboundAsnNumber::new(body.number).map_err(validation)?,
+        body.expected_at
+            .map(|value| parse_timestamp(&value, "expected_at"))
+            .transpose()?,
+        body.lines
+            .into_iter()
+            .map(|line| {
+                PurchaseOrderAsnLineDefinition::new(
+                    PurchaseOrderLineId::new(line.purchase_order_line_id).map_err(validation)?,
+                    InboundAsnQuantity::new(line.expected_quantity).map_err(validation)?,
+                    line.lot,
+                    line.serial,
+                    line.expiration
+                        .map(|value| parse_timestamp(&value, "expiration"))
+                        .transpose()?,
+                )
+                .map_err(validation)
+            })
+            .collect::<V1Result<Vec<_>>>()?,
+    )
+    .map_err(validation)?;
+    let context = user.command_context(&idempotency_key);
+    let result = repo::purchase_order::create_asn(
+        &state.db,
+        &user.tenant,
+        &context,
+        &CreatePurchaseOrderAsnCommand { notice },
+    )
+    .await?;
+    Ok(Json(map_create_asn(result)?))
 }
 
 pub async fn list(
@@ -162,9 +212,37 @@ pub async fn get(
                 item_description: line.item_description,
                 uom: line.uom,
                 ordered_quantity: line.ordered_quantity,
+                asn_expected_quantity: line.asn_expected_quantity,
+                remaining_quantity: line.remaining_quantity,
             })
             .collect(),
     }))
+}
+
+fn map_create_asn(value: CreatePurchaseOrderAsnResult) -> V1Result<CreatePurchaseOrderAsnResponse> {
+    Ok(CreatePurchaseOrderAsnResponse {
+        source_id: value.source_id.get(),
+        purchase_order_id: value.purchase_order_id.get(),
+        purchase_order_revision: api_revision(value.purchase_order_revision)?,
+        asn_id: value.asn_id.get(),
+        number: value.number,
+        status: map_inbound_asn_status(value.status),
+        revision: api_inbound_asn_revision(value.revision)?,
+        lines: value
+            .lines
+            .into_iter()
+            .map(|line| CreatedPurchaseOrderAsnLineResponse {
+                source_line_id: line.source_line_id.get(),
+                purchase_order_line_id: line.purchase_order_line_id.get(),
+                asn_line_id: line.asn_line_id.get(),
+                item_id: line.item_id.get(),
+                expected_quantity: line.expected_quantity,
+            })
+            .collect(),
+        total_expected_quantity: value.total_expected_quantity,
+        created_by: value.created_by.get(),
+        created_at: value.created_at.to_rfc3339(),
+    })
 }
 
 fn map_create(value: CreatePurchaseOrderResult) -> V1Result<CreatePurchaseOrderResponse> {
@@ -186,6 +264,17 @@ fn map_create(value: CreatePurchaseOrderResult) -> V1Result<CreatePurchaseOrderR
         created_by: value.created_by.get(),
         created_at: value.created_at.to_rfc3339(),
     })
+}
+
+fn map_inbound_asn_status(value: InboundAsnStatus) -> ApiInboundAsnStatus {
+    match value {
+        InboundAsnStatus::Open => ApiInboundAsnStatus::Open,
+        InboundAsnStatus::Planned => ApiInboundAsnStatus::Planned,
+    }
+}
+
+fn api_inbound_asn_revision(value: InboundAsnRevision) -> V1Result<Revision> {
+    Revision::new(value.get()).map_err(|error| V1Error::internal(error.to_string()))
 }
 
 fn map_release(value: ReleasePurchaseOrderResult) -> V1Result<ReleasePurchaseOrderResponse> {
@@ -214,6 +303,8 @@ fn map_summary(value: PurchaseOrderReadModel) -> V1Result<PurchaseOrderSummaryRe
         revision: api_revision(value.revision)?,
         line_count: value.line_count,
         total_ordered_quantity: value.total_ordered_quantity,
+        total_asn_expected_quantity: value.total_asn_expected_quantity,
+        total_remaining_quantity: value.total_remaining_quantity,
         created_by: value.created_by.get(),
         created_at: value.created_at.to_rfc3339(),
         released_by: value.released_by.map(wareboxes_domain::UserId::get),

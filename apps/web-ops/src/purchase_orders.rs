@@ -1,8 +1,9 @@
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
+    CreatePurchaseOrderAsnLineRequest, CreatePurchaseOrderAsnRequest,
     CreatePurchaseOrderLineRequest, CreatePurchaseOrderRequest, OpaqueCursor,
-    PurchaseOrderDetailResponse, PurchaseOrderPage, PurchaseOrderStatus,
-    ReleasePurchaseOrderRequest, Revision,
+    PurchaseOrderDetailResponse, PurchaseOrderLineResponse, PurchaseOrderPage, PurchaseOrderStatus,
+    PurchaseOrderSummaryResponse, ReleasePurchaseOrderRequest, Revision,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
 
@@ -34,6 +35,18 @@ struct DraftLine {
     description: String,
     uom: String,
     ordered_quantity: i64,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct DraftAsnLine {
+    purchase_order_line_id: i64,
+    description: String,
+    uom: String,
+    remaining_quantity: i64,
+    expected_quantity: String,
+    lot: String,
+    serial: String,
+    expiration: String,
 }
 
 #[component]
@@ -142,8 +155,8 @@ pub(crate) fn PurchaseOrdersWorkspace(
                 </form>
                 <div class="table-scroll">
                     <table class="dense-table purchase-order-table">
-                        <thead><tr><th>"PO"</th><th>"Status"</th><th class="numeric">"Quantity"</th><th>"Due"</th><th>"Supplier"</th><th>"Client"</th><th>"Facility"</th><th class="numeric">"Lines"</th></tr></thead>
-                        <tbody>{move || page.get().map(|current| current.items.into_iter().map(|entry| { let id=entry.purchase_order_id; let active=selected_id.get()==Some(id) && !create_open.get(); view! { <tr class:active-row=active><td><button type="button" class="row-link" on:click=move |_| load_detail(id)>{entry.number}</button></td><td><span class=status_class(entry.status)>{status_label(entry.status)}</span></td><td class="numeric">{format_quantity(entry.total_ordered_quantity)}</td><td>{entry.expected_by.as_deref().map(short_timestamp).unwrap_or_else(|| "Not supplied".into())}</td><td>{entry.supplier}</td><td>{entry.inventory_owner_name}</td><td>{entry.facility_name}</td><td class="numeric">{entry.line_count}</td></tr> } }).collect_view())}</tbody>
+                        <thead><tr><th>"PO"</th><th>"Status"</th><th class="numeric">"Ordered"</th><th class="numeric">"Remaining"</th><th>"Due"</th><th>"Supplier"</th><th>"Client"</th><th>"Facility"</th><th class="numeric">"Lines"</th></tr></thead>
+                        <tbody>{move || page.get().map(|current| current.items.into_iter().map(|entry| { let id=entry.purchase_order_id; let active=selected_id.get()==Some(id) && !create_open.get(); view! { <tr class:active-row=active><td><button type="button" class="row-link" on:click=move |_| load_detail(id)>{entry.number}</button></td><td><span class=status_class(entry.status)>{status_label(entry.status)}</span></td><td class="numeric">{format_quantity(entry.total_ordered_quantity)}</td><td class="numeric"><strong>{format_quantity(entry.total_remaining_quantity)}</strong></td><td>{entry.expected_by.as_deref().map(short_timestamp).unwrap_or_else(|| "Not supplied".into())}</td><td>{entry.supplier}</td><td>{entry.inventory_owner_name}</td><td>{entry.facility_name}</td><td class="numeric">{entry.line_count}</td></tr> } }).collect_view())}</tbody>
                     </table>
                     <Show when=move || !loading.get() && page.get().is_some_and(|value| value.items.is_empty())><p class="empty-state">"No purchase orders match these filters."</p></Show>
                 </div>
@@ -177,8 +190,13 @@ fn PurchaseOrderDetail(
     let retry = RwSignal::new(None::<(ReleasePurchaseOrderRequest, String)>);
     let toasts = use_toast_bus();
     let summary = detail.summary.clone();
+    let asn_summary = detail.summary.clone();
+    let asn_lines = detail.lines.clone();
+    let asn_open = RwSignal::new(false);
     let purchase_order_id = summary.purchase_order_id;
     let can_release = summary.status == PurchaseOrderStatus::Draft;
+    let can_create_asn =
+        summary.status == PurchaseOrderStatus::Released && summary.total_remaining_quantity > 0;
     let release = move |_| {
         if pending.get_untracked() {
             return;
@@ -214,14 +232,153 @@ fn PurchaseOrderDetail(
         });
     };
     view! {
-        <div class="purchase-order-detail-content">
+        <Show when=move || asn_open.get()>
+            <CreatePurchaseOrderAsnPanel
+                summary=asn_summary.clone()
+                lines=asn_lines.clone()
+                on_close=Callback::new(move |_| asn_open.set(false))
+                on_created=Callback::new(move |_| {
+                    asn_open.set(false);
+                    on_released.run(purchase_order_id);
+                })
+                on_unauthorized
+            />
+        </Show>
+        <div class="purchase-order-detail-content" style:display=move || if asn_open.get() { "none" } else { "grid" }>
             <header class="detail-heading"><div><span class="eyebrow">{format!("Purchase order #{}", summary.purchase_order_id)}</span><h2>{summary.number.clone()}</h2><p>{summary.supplier.clone()}</p></div><span class=status_class(summary.status)>{status_label(summary.status)}</span></header>
-            <dl class="summary-grid"><div><dt>"Client"</dt><dd>{summary.inventory_owner_name}</dd></div><div><dt>"Facility"</dt><dd>{summary.facility_name}</dd></div><div><dt>"Expected"</dt><dd>{summary.expected_by.as_deref().map(short_timestamp).unwrap_or_else(|| "Not supplied".into())}</dd></div><div><dt>"Total quantity"</dt><dd>{format_quantity(summary.total_ordered_quantity)}</dd></div></dl>
+            <dl class="summary-grid"><div><dt>"Client"</dt><dd>{summary.inventory_owner_name}</dd></div><div><dt>"Facility"</dt><dd>{summary.facility_name}</dd></div><div><dt>"Expected"</dt><dd>{summary.expected_by.as_deref().map(short_timestamp).unwrap_or_else(|| "Not supplied".into())}</dd></div><div><dt>"Ordered"</dt><dd>{format_quantity(summary.total_ordered_quantity)}</dd></div><div><dt>"ASN expected"</dt><dd>{format_quantity(summary.total_asn_expected_quantity)}</dd></div><div><dt>"Remaining"</dt><dd><strong>{format_quantity(summary.total_remaining_quantity)}</strong></dd></div></dl>
             <div class="detail-section-heading"><h3>"Ordered items"</h3><span>{format!("{} lines", detail.lines.len())}</span></div>
-            <div class="table-scroll"><table class="dense-table"><thead><tr><th>"Item"</th><th>"UOM"</th><th class="numeric">"Ordered"</th></tr></thead><tbody>{detail.lines.into_iter().map(|line| view! { <tr><td><strong>{line.item_description}</strong><small>{format!("Item #{}", line.item_id)}</small></td><td>{line.uom}</td><td class="numeric">{format_quantity(line.ordered_quantity)}</td></tr> }).collect_view()}</tbody></table></div>
+            <div class="table-scroll"><table class="dense-table"><thead><tr><th>"Item"</th><th>"UOM"</th><th class="numeric">"Ordered"</th><th class="numeric">"ASN expected"</th><th class="numeric">"Remaining"</th></tr></thead><tbody>{detail.lines.into_iter().map(|line| view! { <tr><td><strong>{line.item_description}</strong><small>{format!("Item #{}", line.item_id)}</small></td><td>{line.uom}</td><td class="numeric">{format_quantity(line.ordered_quantity)}</td><td class="numeric">{format_quantity(line.asn_expected_quantity)}</td><td class="numeric"><strong>{format_quantity(line.remaining_quantity)}</strong></td></tr> }).collect_view()}</tbody></table></div>
             <Show when=move || error.get().is_some()>{move || error.get().map(|message| view! { <p class="inline-command-error">{message}</p> })}</Show>
-            <footer class="detail-actions"><a class="button quiet-action" href="/inbound-asns">"Open inbound ASNs"</a>{can_release.then(|| view! { <button class="button primary-action" type="button" disabled=move || pending.get() on:click=release><Icon icon=UiIcon::Orders/><span>{move || if pending.get() { "Releasing..." } else { "Release PO" }}</span></button> })}</footer>
+            <footer class="detail-actions"><a class="button quiet-action" href="/inbound-asns">"Open inbound ASNs"</a>{can_release.then(|| view! { <button class="button primary-action" type="button" disabled=move || pending.get() on:click=release><Icon icon=UiIcon::Orders/><span>{move || if pending.get() { "Releasing..." } else { "Release PO" }}</span></button> })}{can_create_asn.then(|| view! { <button class="button primary-action" type="button" on:click=move |_| asn_open.set(true)><Icon icon=UiIcon::Add/><span>"Create ASN"</span></button> })}</footer>
         </div>
+    }
+}
+
+#[component]
+fn CreatePurchaseOrderAsnPanel(
+    summary: PurchaseOrderSummaryResponse,
+    lines: Vec<PurchaseOrderLineResponse>,
+    on_close: Callback<()>,
+    on_created: Callback<i64>,
+    on_unauthorized: Callback<()>,
+) -> impl IntoView {
+    let number = RwSignal::new(String::new());
+    let expected = RwSignal::new(String::new());
+    let lines = RwSignal::new(
+        lines
+            .into_iter()
+            .filter(|line| line.remaining_quantity > 0)
+            .map(|line| DraftAsnLine {
+                purchase_order_line_id: line.line_id,
+                description: line.item_description,
+                uom: line.uom,
+                remaining_quantity: line.remaining_quantity,
+                expected_quantity: line.remaining_quantity.to_string(),
+                lot: String::new(),
+                serial: String::new(),
+                expiration: String::new(),
+            })
+            .collect::<Vec<_>>(),
+    );
+    let pending = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let retry = RwSignal::new(None::<(CreatePurchaseOrderAsnRequest, String)>);
+    let toasts = use_toast_bus();
+    let purchase_order_id = summary.purchase_order_id;
+    let purchase_order_revision = summary.revision;
+    let submit = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        if pending.get_untracked() {
+            return;
+        }
+        let asn_number = number.get_untracked().trim().to_owned();
+        if asn_number.is_empty() {
+            error.set(Some("ASN number is required.".into()));
+            return;
+        }
+        let expected_at = match parse_optional_timestamp(&expected.get_untracked()) {
+            Ok(value) => value.map(|value| value.to_rfc3339()),
+            Err(message) => {
+                error.set(Some(format!("Expected arrival: {message}")));
+                return;
+            }
+        };
+        let mut request_lines = Vec::new();
+        for line in lines.get_untracked() {
+            let quantity = match line.expected_quantity.trim().parse::<i64>() {
+                Ok(0) => continue,
+                Ok(value) if value > 0 && value <= line.remaining_quantity => value,
+                _ => {
+                    error.set(Some(format!(
+                        "{} quantity must be between 0 and {}.",
+                        line.description, line.remaining_quantity
+                    )));
+                    return;
+                }
+            };
+            let expiration = match parse_optional_timestamp(&line.expiration) {
+                Ok(value) => value.map(|value| value.to_rfc3339()),
+                Err(message) => {
+                    error.set(Some(format!("{} expiration: {message}", line.description)));
+                    return;
+                }
+            };
+            request_lines.push(CreatePurchaseOrderAsnLineRequest {
+                purchase_order_line_id: line.purchase_order_line_id,
+                expected_quantity: quantity,
+                lot: optional_text(&line.lot),
+                serial: optional_text(&line.serial),
+                expiration,
+            });
+        }
+        if request_lines.is_empty() {
+            error.set(Some(
+                "Enter a quantity for at least one purchase-order line.".into(),
+            ));
+            return;
+        }
+        let request = CreatePurchaseOrderAsnRequest {
+            expected_purchase_order_revision: purchase_order_revision,
+            number: asn_number,
+            expected_at,
+            lines: request_lines,
+        };
+        let key = retry
+            .get_untracked()
+            .filter(|(saved, _)| saved == &request)
+            .map_or_else(api::new_idempotency_key, |(_, key)| key);
+        retry.set(Some((request.clone(), key.clone())));
+        pending.set(true);
+        error.set(None);
+        leptos::task::spawn_local(async move {
+            match api::create_purchase_order_asn(purchase_order_id, &request, &key).await {
+                Ok(result) => {
+                    pending.set(false);
+                    retry.set(None);
+                    toasts.success(format!("ASN {} created from this PO.", result.number));
+                    on_created.run(result.asn_id);
+                }
+                Err(value) if value.unauthorized => on_unauthorized.run(()),
+                Err(value) => {
+                    pending.set(false);
+                    if !value.ambiguous_outcome {
+                        retry.set(None);
+                    }
+                    error.set(Some(value.message.clone()));
+                    toasts.error(value.message);
+                }
+            }
+        });
+    };
+    view! {
+        <form class="purchase-order-form po-asn-form" on:submit=submit>
+            <header class="detail-heading"><div><span class="eyebrow">{format!("{} · {} remaining", summary.number, format_quantity(summary.total_remaining_quantity))}</span><h2>"Create ASN from PO"</h2><p>{summary.supplier}</p></div><button class="text-button" type="button" on:click=move |_| on_close.run(())>"Close"</button></header>
+            <div class="form-grid two-column"><label><span>"ASN number"</span><input required maxlength="120" autofocus prop:value=move || number.get() on:input=move |event| number.set(event_target_value(&event))/></label><label><span>"Expected arrival"</span><input type="datetime-local" prop:value=move || expected.get() on:input=move |event| expected.set(event_target_value(&event))/></label></div>
+            <section class="po-line-builder"><div class="detail-section-heading"><h3>"Expected freight"</h3><span>"0 excludes a line"</span></div><div class="table-scroll"><table class="dense-table po-asn-lines"><thead><tr><th>"Item"</th><th class="numeric">"Remaining"</th><th class="numeric">"ASN qty"</th><th>"Lot"</th><th>"Serial"</th><th>"Expiration"</th></tr></thead><tbody>{move || lines.get().into_iter().enumerate().map(|(index, line)| view! { <tr><td><strong>{line.description}</strong><small>{line.uom}</small></td><td class="numeric">{format_quantity(line.remaining_quantity)}</td><td><input aria-label="Expected quantity" class="compact-number" type="number" min="0" max=line.remaining_quantity prop:value=line.expected_quantity on:input=move |event| lines.update(|values| values[index].expected_quantity=event_target_value(&event))/></td><td><input aria-label="Lot" placeholder="Optional" prop:value=line.lot on:input=move |event| lines.update(|values| values[index].lot=event_target_value(&event))/></td><td><input aria-label="Serial" placeholder="Optional" prop:value=line.serial on:input=move |event| lines.update(|values| values[index].serial=event_target_value(&event))/></td><td><input aria-label="Expiration" type="datetime-local" prop:value=line.expiration on:input=move |event| lines.update(|values| values[index].expiration=event_target_value(&event))/></td></tr> }).collect_view()}</tbody></table></div></section>
+            <Show when=move || error.get().is_some()>{move || error.get().map(|message| view! { <p class="inline-command-error">{message}</p> })}</Show>
+            <footer class="detail-actions"><button class="button quiet-action" type="button" on:click=move |_| on_close.run(())>"Cancel"</button><button class="button primary-action" type="submit" disabled=move || pending.get()><Icon icon=UiIcon::Add/><span>{move || if pending.get() { "Creating..." } else { "Create ASN" }}</span></button></footer>
+        </form>
     }
 }
 

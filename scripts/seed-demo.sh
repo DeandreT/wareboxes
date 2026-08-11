@@ -140,6 +140,14 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM purchase_orders WHERE status='released') THEN
     missing := array_append(missing, 'released purchase orders');
   END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM purchase_order_asn_sources source
+    INNER JOIN purchase_order_asn_source_lines line
+      ON line.tenant_id=source.tenant_id AND line.source_id=source.id
+  ) THEN
+    missing := array_append(missing, 'purchase-order sourced ASN demand');
+  END IF;
   IF cardinality(missing) > 0 THEN
     RAISE EXCEPTION 'core demo coverage is incomplete: %', array_to_string(missing, ', ');
   END IF;

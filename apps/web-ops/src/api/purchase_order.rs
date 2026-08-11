@@ -1,7 +1,7 @@
 use wareboxes_api_contract::v1::{
-    CreatePurchaseOrderRequest, CreatePurchaseOrderResponse, OpaqueCursor,
-    PurchaseOrderDetailResponse, PurchaseOrderPage, PurchaseOrderStatus,
-    ReleasePurchaseOrderRequest, ReleasePurchaseOrderResponse,
+    CreatePurchaseOrderAsnRequest, CreatePurchaseOrderAsnResponse, CreatePurchaseOrderRequest,
+    CreatePurchaseOrderResponse, OpaqueCursor, PurchaseOrderDetailResponse, PurchaseOrderPage,
+    PurchaseOrderStatus, ReleasePurchaseOrderRequest, ReleasePurchaseOrderResponse,
 };
 
 use super::ApiError;
@@ -72,6 +72,29 @@ pub async fn release_purchase_order(
         idempotency_key,
     )
     .await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn create_purchase_order_asn(
+    purchase_order_id: i64,
+    request: &CreatePurchaseOrderAsnRequest,
+    idempotency_key: &str,
+) -> Result<CreatePurchaseOrderAsnResponse, ApiError> {
+    super::browser::post(
+        &format!("/api/v1/purchase-orders/{purchase_order_id}/asns"),
+        request,
+        idempotency_key,
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn create_purchase_order_asn(
+    _purchase_order_id: i64,
+    _request: &CreatePurchaseOrderAsnRequest,
+    _idempotency_key: &str,
+) -> Result<CreatePurchaseOrderAsnResponse, ApiError> {
+    Err(ApiError::unavailable())
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -58,7 +58,8 @@ pub use facility::{
 pub use inbound_asn::{
     plan_inbound_asn, InboundAsnError, InboundAsnLineDefinition, InboundAsnLoadPlanDetails,
     InboundAsnNumber, InboundAsnQuantity, InboundAsnRevision, InboundAsnStatus, InboundAsnSupplier,
-    NewInboundAsn, MAX_INBOUND_ASN_IDENTITY_LENGTH, MAX_INBOUND_ASN_NUMBER_LENGTH,
+    NewInboundAsn, NewPurchaseOrderAsn, PurchaseOrderAsnLineDefinition,
+    MAX_INBOUND_ASN_IDENTITY_LENGTH, MAX_INBOUND_ASN_NUMBER_LENGTH,
     MAX_INBOUND_ASN_SUPPLIER_LENGTH,
 };
 pub use inbound_inspection::{
@@ -343,6 +344,11 @@ positive_id!(InboundAsnLoadPlanId, "inbound ASN load plan ID");
 positive_id!(PurchaseOrderId, "purchase order ID");
 positive_id!(PurchaseOrderLineId, "purchase order line ID");
 positive_id!(PurchaseOrderReleaseId, "purchase order release ID");
+positive_id!(PurchaseOrderAsnSourceId, "purchase order ASN source ID");
+positive_id!(
+    PurchaseOrderAsnSourceLineId,
+    "purchase order ASN source line ID"
+);
 positive_id!(
     InboundInspectionDispositionId,
     "inbound inspection disposition ID"

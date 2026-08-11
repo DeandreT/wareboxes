@@ -59,6 +59,8 @@ pub struct PurchaseOrderLineReadModel {
     pub item_description: String,
     pub uom: String,
     pub ordered_quantity: i64,
+    pub asn_expected_quantity: i64,
+    pub remaining_quantity: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +77,8 @@ pub struct PurchaseOrderReadModel {
     pub revision: PurchaseOrderRevision,
     pub line_count: i64,
     pub total_ordered_quantity: i64,
+    pub total_asn_expected_quantity: i64,
+    pub total_remaining_quantity: i64,
     pub created_by: UserId,
     pub created_at: Timestamp,
     pub released_by: Option<UserId>,

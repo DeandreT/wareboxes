@@ -66,6 +66,10 @@ pub fn router() -> Router<AppState> {
             "/purchase-orders/{purchase_order_id}/releases",
             post(purchase_orders::release),
         )
+        .route(
+            "/purchase-orders/{purchase_order_id}/asns",
+            post(purchase_orders::create_asn),
+        )
         .route("/inbound-loads", post(inbound_loads::plan))
         .route(
             "/inbound-loads/{load_id}/appointments",

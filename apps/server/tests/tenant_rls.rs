@@ -377,6 +377,14 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "purchase_order_releases",
             "purchase_order_releases_tenant_isolation",
         ),
+        (
+            "purchase_order_asn_sources",
+            "purchase_order_asn_sources_tenant_isolation",
+        ),
+        (
+            "purchase_order_asn_source_lines",
+            "purchase_order_asn_source_lines_tenant_isolation",
+        ),
         ("facilities", "facilities_tenant_isolation"),
         (
             "facility_shipping_origin_configurations",

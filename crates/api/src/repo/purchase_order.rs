@@ -4,6 +4,10 @@ use std::collections::HashMap;
 
 use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
+use wareboxes_application::inbound_asn::{
+    CreatePurchaseOrderAsnCommand, CreatePurchaseOrderAsnResult, CreatedPurchaseOrderAsnLineResult,
+    CREATE_PURCHASE_ORDER_ASN_OPERATION,
+};
 use wareboxes_application::purchase_order::{
     CreatePurchaseOrderCommand, CreatePurchaseOrderResult, CreatedPurchaseOrderLineResult,
     PurchaseOrderLineReadModel, PurchaseOrderPage, PurchaseOrderPageFilter, PurchaseOrderReadModel,
@@ -13,9 +17,10 @@ use wareboxes_application::purchase_order::{
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    release_purchase_order, CatalogItemId, FacilityId, InventoryOwnerId, PurchaseOrderId,
-    PurchaseOrderLineId, PurchaseOrderReleaseId, PurchaseOrderRevision, PurchaseOrderStatus,
-    Timestamp, UserId,
+    release_purchase_order, CatalogItemId, FacilityId, InboundAsnId, InboundAsnLineId,
+    InboundAsnRevision, InboundAsnStatus, InventoryOwnerId, PurchaseOrderAsnSourceId,
+    PurchaseOrderAsnSourceLineId, PurchaseOrderId, PurchaseOrderLineId, PurchaseOrderReleaseId,
+    PurchaseOrderRevision, PurchaseOrderStatus, Timestamp, UserId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::{insert_result, PostgresPreparedCommandExt};
@@ -296,6 +301,298 @@ pub async fn release(
     Ok(result)
 }
 
+pub async fn create_asn(
+    db: &Db,
+    access: &TenantAccess,
+    context: &CommandContext,
+    command: &CreatePurchaseOrderAsnCommand,
+) -> AppResult<CreatePurchaseOrderAsnResult> {
+    context.require_actor(access.tenant_id, access.user_id)?;
+    let prepared = PreparedCommand::new_v1(context, CREATE_PURCHASE_ORDER_ASN_OPERATION, command)?;
+    let mut tx = db.begin().await?;
+    bind_tenant_context(&mut tx, access.tenant_id).await?;
+    let scope = lock_current_scope_tx(&mut tx, access.tenant_id, context.actor_id.get()).await?;
+    require_permission_tx(&mut tx, access.tenant_id, context.actor_id.get(), "wms").await?;
+    require_stored_visible_before_replay(&mut tx, access, &prepared, &scope).await?;
+    if let Some(result) = prepared
+        .replayed::<CreatePurchaseOrderAsnResult>(&mut tx)
+        .await?
+    {
+        tx.commit().await?;
+        return Ok(result);
+    }
+
+    let notice = &command.notice;
+    let header = sqlx::query(
+        r#"
+        SELECT inventory_owner_id,facility_id,supplier,status,revision
+        FROM purchase_orders
+        WHERE tenant_id=$1 AND id=$2
+          AND ($3 OR facility_id=ANY($4))
+          AND ($5 OR inventory_owner_id=ANY($6))
+        FOR UPDATE
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(notice.purchase_order_id().get())
+    .bind(scope.all_facilities)
+    .bind(&scope.facility_ids)
+    .bind(scope.all_inventory_owners)
+    .bind(&scope.inventory_owner_ids)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::not_found("purchase order"))?;
+    let current_revision = revision(header.try_get("revision")?)?;
+    if current_revision != notice.expected_purchase_order_revision() {
+        return Err(AppError::conflict(
+            "purchase order changed; refresh before creating the ASN",
+        ));
+    }
+    if parse_status(header.try_get::<String, _>("status")?.as_str())?
+        != PurchaseOrderStatus::Released
+    {
+        return Err(AppError::conflict(
+            "purchase order must be released before creating an ASN",
+        ));
+    }
+    let inventory_owner_id = InventoryOwnerId::new(header.try_get("inventory_owner_id")?)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let facility_id = FacilityId::new(header.try_get("facility_id")?)
+        .map_err(|error| AppError::internal(error.to_string()))?;
+    let supplier: String = header.try_get("supplier")?;
+    lock_asn_identity(
+        &mut tx,
+        access,
+        inventory_owner_id.get(),
+        notice.number().as_str(),
+    )
+    .await?;
+
+    let requested_line_ids = notice
+        .lines()
+        .iter()
+        .map(|line| line.purchase_order_line_id().get())
+        .collect::<Vec<_>>();
+    let source_rows = sqlx::query(
+        r#"
+        SELECT line.id,line.item_id,line.uom,line.ordered_quantity,
+               COALESCE(SUM(mapping.expected_quantity),0)::BIGINT AS asn_expected_quantity
+        FROM purchase_order_lines line
+        INNER JOIN items item
+          ON item.tenant_id=line.tenant_id AND item.id=line.item_id AND item.deleted IS NULL
+        INNER JOIN inventory_owner_items owner_item
+          ON owner_item.tenant_id=line.tenant_id
+         AND owner_item.inventory_owner_id=line.inventory_owner_id
+         AND owner_item.item_id=line.item_id AND owner_item.deleted IS NULL
+        LEFT JOIN purchase_order_asn_source_lines mapping
+          ON mapping.tenant_id=line.tenant_id AND mapping.purchase_order_line_id=line.id
+        WHERE line.tenant_id=$1 AND line.purchase_order_id=$2 AND line.id=ANY($3)
+        GROUP BY line.id,line.item_id,line.uom,line.ordered_quantity
+        ORDER BY line.id
+        "#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(notice.purchase_order_id().get())
+    .bind(&requested_line_ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    let source_lines = source_rows
+        .iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<i64, _>("id")?,
+                (
+                    row.try_get::<i64, _>("item_id")?,
+                    row.try_get::<String, _>("uom")?,
+                    row.try_get::<i64, _>("ordered_quantity")?,
+                    row.try_get::<i64, _>("asn_expected_quantity")?,
+                ),
+            ))
+        })
+        .collect::<AppResult<HashMap<_, _>>>()?;
+    if requested_line_ids
+        .iter()
+        .any(|line_id| !source_lines.contains_key(line_id))
+    {
+        return Err(AppError::conflict(
+            "every ASN line must reference an active line on this purchase order",
+        ));
+    }
+    let mut requested_by_line = HashMap::<i64, i64>::new();
+    for line in notice.lines() {
+        let requested = requested_by_line
+            .entry(line.purchase_order_line_id().get())
+            .or_default();
+        *requested = requested
+            .checked_add(line.expected_quantity().get())
+            .ok_or_else(|| AppError::bad_request("ASN expected quantity exceeds i64"))?;
+    }
+    for (line_id, requested) in &requested_by_line {
+        let (_, _, ordered, already_expected) = source_lines
+            .get(line_id)
+            .ok_or_else(|| AppError::conflict("purchase order line is no longer available"))?;
+        if already_expected
+            .checked_add(*requested)
+            .is_none_or(|total| total > *ordered)
+        {
+            return Err(AppError::conflict(
+                "ASN quantities exceed the purchase order's remaining demand",
+            ));
+        }
+    }
+
+    let line_count = i64::try_from(notice.lines().len())
+        .map_err(|_| AppError::bad_request("ASN line count exceeds i64"))?;
+    let total_expected_quantity = notice.lines().iter().try_fold(0_i64, |total, line| {
+        total
+            .checked_add(line.expected_quantity().get())
+            .ok_or_else(|| AppError::bad_request("ASN expected quantity exceeds i64"))
+    })?;
+    let created_at = now_iso();
+    let asn_id = InboundAsnId::new(
+        sqlx::query_scalar(
+            r#"
+            INSERT INTO inbound_asns
+                (tenant_id,inventory_owner_id,facility_id,number,supplier,expected_at,
+                 status,revision,line_count,total_expected_quantity,created_by_user_id,created_at)
+            VALUES ($1,$2,$3,$4,$5,$6,'open',1,$7,$8,$9,$10)
+            RETURNING id
+            "#,
+        )
+        .bind(access.tenant_id.get())
+        .bind(inventory_owner_id.get())
+        .bind(facility_id.get())
+        .bind(notice.number().as_str())
+        .bind(&supplier)
+        .bind(notice.expected_at())
+        .bind(line_count)
+        .bind(total_expected_quantity)
+        .bind(context.actor_id.get())
+        .bind(created_at)
+        .fetch_one(&mut *tx)
+        .await?,
+    )
+    .map_err(|error| AppError::internal(error.to_string()))?;
+    let source_id = PurchaseOrderAsnSourceId::new(
+        sqlx::query_scalar(
+            r#"
+            INSERT INTO purchase_order_asn_sources
+                (tenant_id,inventory_owner_id,facility_id,purchase_order_id,asn_id,
+                 expected_purchase_order_revision,line_count,total_expected_quantity,
+                 created_by_user_id,created_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            RETURNING id
+            "#,
+        )
+        .bind(access.tenant_id.get())
+        .bind(inventory_owner_id.get())
+        .bind(facility_id.get())
+        .bind(notice.purchase_order_id().get())
+        .bind(asn_id.get())
+        .bind(current_revision.get())
+        .bind(line_count)
+        .bind(total_expected_quantity)
+        .bind(context.actor_id.get())
+        .bind(created_at)
+        .fetch_one(&mut *tx)
+        .await?,
+    )
+    .map_err(|error| AppError::internal(error.to_string()))?;
+    let mut lines = Vec::with_capacity(notice.lines().len());
+    for (index, line) in notice.lines().iter().enumerate() {
+        let sequence = i64::try_from(index + 1)
+            .map_err(|_| AppError::bad_request("ASN line sequence exceeds i64"))?;
+        let (item_id, uom, _, _) = source_lines
+            .get(&line.purchase_order_line_id().get())
+            .ok_or_else(|| AppError::conflict("purchase order line is no longer available"))?;
+        let asn_line_id = InboundAsnLineId::new(
+            sqlx::query_scalar(
+                r#"
+                INSERT INTO inbound_asn_lines
+                    (tenant_id,inventory_owner_id,facility_id,asn_id,sequence,item_id,uom,
+                     expected_quantity,lot,serial,expiration)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                RETURNING id
+                "#,
+            )
+            .bind(access.tenant_id.get())
+            .bind(inventory_owner_id.get())
+            .bind(facility_id.get())
+            .bind(asn_id.get())
+            .bind(sequence)
+            .bind(item_id)
+            .bind(uom)
+            .bind(line.expected_quantity().get())
+            .bind(line.lot())
+            .bind(line.serial())
+            .bind(line.expiration())
+            .fetch_one(&mut *tx)
+            .await?,
+        )
+        .map_err(|error| AppError::internal(error.to_string()))?;
+        let source_line_id = PurchaseOrderAsnSourceLineId::new(
+            sqlx::query_scalar(
+                r#"
+                INSERT INTO purchase_order_asn_source_lines
+                    (tenant_id,inventory_owner_id,facility_id,purchase_order_id,asn_id,source_id,
+                     purchase_order_line_id,asn_line_id,sequence,item_id,uom,expected_quantity)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                RETURNING id
+                "#,
+            )
+            .bind(access.tenant_id.get())
+            .bind(inventory_owner_id.get())
+            .bind(facility_id.get())
+            .bind(notice.purchase_order_id().get())
+            .bind(asn_id.get())
+            .bind(source_id.get())
+            .bind(line.purchase_order_line_id().get())
+            .bind(asn_line_id.get())
+            .bind(sequence)
+            .bind(item_id)
+            .bind(uom)
+            .bind(line.expected_quantity().get())
+            .fetch_one(&mut *tx)
+            .await?,
+        )
+        .map_err(|error| AppError::internal(error.to_string()))?;
+        lines.push(CreatedPurchaseOrderAsnLineResult {
+            source_line_id,
+            purchase_order_line_id: line.purchase_order_line_id(),
+            asn_line_id,
+            item_id: CatalogItemId::new(*item_id)
+                .map_err(|error| AppError::internal(error.to_string()))?,
+            expected_quantity: line.expected_quantity().get(),
+        });
+    }
+    let result = CreatePurchaseOrderAsnResult {
+        source_id,
+        purchase_order_id: notice.purchase_order_id(),
+        purchase_order_revision: current_revision,
+        asn_id,
+        number: notice.number().as_str().to_owned(),
+        status: InboundAsnStatus::Open,
+        revision: InboundAsnRevision::new(1)
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        lines,
+        total_expected_quantity,
+        created_by: context.actor_id,
+        created_at,
+    };
+    enqueue_purchase_order_asn_created(
+        &mut tx,
+        access,
+        context,
+        inventory_owner_id,
+        facility_id,
+        &result,
+    )
+    .await?;
+    insert_result(&mut tx, &prepared.completed_result(&result, None)?).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
 pub async fn page(
     db: &Db,
     access: &TenantAccess,
@@ -314,6 +611,11 @@ pub async fn page(
                purchase.facility_id,facility.name AS facility_name,purchase.number,
                purchase.supplier,purchase.expected_by,purchase.status,purchase.revision,
                purchase.line_count,purchase.total_ordered_quantity,
+               COALESCE(notified.total_expected_quantity,0)::BIGINT
+                   AS total_asn_expected_quantity,
+               purchase.total_ordered_quantity
+                   - COALESCE(notified.total_expected_quantity,0)::BIGINT
+                   AS total_remaining_quantity,
                purchase.created_by_user_id,purchase.created_at,
                purchase.released_by_user_id,purchase.released_at
         FROM purchase_orders purchase
@@ -321,6 +623,12 @@ pub async fn page(
           ON owner.tenant_id=purchase.tenant_id AND owner.id=purchase.inventory_owner_id
         INNER JOIN facilities facility
           ON facility.tenant_id=purchase.tenant_id AND facility.id=purchase.facility_id
+        LEFT JOIN LATERAL (
+            SELECT SUM(mapping.expected_quantity)::BIGINT AS total_expected_quantity
+            FROM purchase_order_asn_source_lines mapping
+            WHERE mapping.tenant_id=purchase.tenant_id
+              AND mapping.purchase_order_id=purchase.id
+        ) notified ON TRUE
         WHERE purchase.tenant_id=$1
           AND ($2 OR purchase.facility_id=ANY($3))
           AND ($4 OR purchase.inventory_owner_id=ANY($5))
@@ -374,6 +682,11 @@ pub async fn detail(
                purchase.facility_id,facility.name AS facility_name,purchase.number,
                purchase.supplier,purchase.expected_by,purchase.status,purchase.revision,
                purchase.line_count,purchase.total_ordered_quantity,
+               COALESCE(notified.total_expected_quantity,0)::BIGINT
+                   AS total_asn_expected_quantity,
+               purchase.total_ordered_quantity
+                   - COALESCE(notified.total_expected_quantity,0)::BIGINT
+                   AS total_remaining_quantity,
                purchase.created_by_user_id,purchase.created_at,
                purchase.released_by_user_id,purchase.released_at
         FROM purchase_orders purchase
@@ -381,6 +694,12 @@ pub async fn detail(
           ON owner.tenant_id=purchase.tenant_id AND owner.id=purchase.inventory_owner_id
         INNER JOIN facilities facility
           ON facility.tenant_id=purchase.tenant_id AND facility.id=purchase.facility_id
+        LEFT JOIN LATERAL (
+            SELECT SUM(mapping.expected_quantity)::BIGINT AS total_expected_quantity
+            FROM purchase_order_asn_source_lines mapping
+            WHERE mapping.tenant_id=purchase.tenant_id
+              AND mapping.purchase_order_id=purchase.id
+        ) notified ON TRUE
         WHERE purchase.tenant_id=$1 AND purchase.id=$2
           AND ($3 OR purchase.facility_id=ANY($4))
           AND ($5 OR purchase.inventory_owner_id=ANY($6))
@@ -403,10 +722,17 @@ pub async fn detail(
         r#"
         SELECT line.id,line.sequence,line.item_id,
                COALESCE(item.description,'Item #' || item.id) AS item_description,
-               line.uom,line.ordered_quantity
+               line.uom,line.ordered_quantity,
+               COALESCE(SUM(mapping.expected_quantity),0)::BIGINT AS asn_expected_quantity,
+               line.ordered_quantity - COALESCE(SUM(mapping.expected_quantity),0)::BIGINT
+                   AS remaining_quantity
         FROM purchase_order_lines line
         INNER JOIN items item ON item.tenant_id=line.tenant_id AND item.id=line.item_id
+        LEFT JOIN purchase_order_asn_source_lines mapping
+          ON mapping.tenant_id=line.tenant_id AND mapping.purchase_order_line_id=line.id
         WHERE line.tenant_id=$1 AND line.purchase_order_id=$2
+        GROUP BY line.id,line.sequence,line.item_id,item.description,item.id,
+                 line.uom,line.ordered_quantity
         ORDER BY line.sequence,line.id
         "#,
     )
@@ -426,6 +752,8 @@ pub async fn detail(
                 item_description: line.try_get("item_description")?,
                 uom: line.try_get("uom")?,
                 ordered_quantity: line.try_get("ordered_quantity")?,
+                asn_expected_quantity: line.try_get("asn_expected_quantity")?,
+                remaining_quantity: line.try_get("remaining_quantity")?,
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
@@ -458,6 +786,37 @@ async fn lock_source_identity(
     if exists {
         Err(AppError::conflict(
             "purchase order number already exists for this client",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+async fn lock_asn_identity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    access: &TenantAccess,
+    inventory_owner_id: i64,
+    number: &str,
+) -> AppResult<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(format!(
+            "inbound-asn:{}:{inventory_owner_id}:{}",
+            access.tenant_id.get(),
+            number.to_uppercase()
+        ))
+        .execute(&mut **tx)
+        .await?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM inbound_asns WHERE tenant_id=$1 AND inventory_owner_id=$2 AND number=$3)",
+    )
+    .bind(access.tenant_id.get())
+    .bind(inventory_owner_id)
+    .bind(number)
+    .fetch_one(&mut **tx)
+    .await?;
+    if exists {
+        Err(AppError::conflict(
+            "advance shipping notice number already exists for this client",
         ))
     } else {
         Ok(())
@@ -590,6 +949,8 @@ fn map_header(row: &sqlx::postgres::PgRow) -> AppResult<PurchaseOrderReadModel> 
         revision: revision(row.try_get("revision")?)?,
         line_count: row.try_get("line_count")?,
         total_ordered_quantity: row.try_get("total_ordered_quantity")?,
+        total_asn_expected_quantity: row.try_get("total_asn_expected_quantity")?,
+        total_remaining_quantity: row.try_get("total_remaining_quantity")?,
         created_by: UserId::new(row.try_get("created_by_user_id")?)
             .map_err(|error| AppError::internal(error.to_string()))?,
         created_at: row.try_get("created_at")?,
@@ -674,6 +1035,52 @@ async fn enqueue_released(
         result.released_at,
     )
     .await
+}
+
+async fn enqueue_purchase_order_asn_created(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    access: &TenantAccess,
+    context: &CommandContext,
+    inventory_owner_id: InventoryOwnerId,
+    facility_id: FacilityId,
+    result: &CreatePurchaseOrderAsnResult,
+) -> AppResult<()> {
+    let event_key = format!("inbound-asn:{}:created", result.asn_id.get());
+    let aggregate_id = result.asn_id.to_string();
+    let ordering_key = format!("inbound-asn:{}", result.asn_id.get());
+    let payload = serde_json::json!({
+        "source_id": result.source_id.get(),
+        "purchase_order_id": result.purchase_order_id.get(),
+        "purchase_order_revision": result.purchase_order_revision.get(),
+        "asn_id": result.asn_id.get(),
+        "number": result.number,
+        "status": "open",
+        "revision": result.revision.get(),
+        "line_count": result.lines.len(),
+        "total_expected_quantity": result.total_expected_quantity,
+        "created_by": result.created_by.get(),
+        "created_at": result.created_at,
+    });
+    outbox::enqueue(
+        tx,
+        &NewOutboxEvent {
+            tenant_id: access.tenant_id,
+            inventory_owner_id: Some(inventory_owner_id),
+            facility_id: Some(facility_id),
+            actor_user_id: Some(context.actor_id.get()),
+            event_key: &event_key,
+            aggregate_type: "inbound_asn",
+            aggregate_id: &aggregate_id,
+            ordering_key: &ordering_key,
+            aggregate_sequence: result.revision.get(),
+            event_type: "inbound.asn.created",
+            schema_version: 1,
+            payload: &payload,
+            occurred_at: result.created_at,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

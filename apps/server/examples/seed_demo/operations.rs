@@ -5,9 +5,10 @@ use serde_json::json;
 use wareboxes_api::repo;
 use wareboxes_api_contract::v1::{
     ConfigureReplenishmentPolicyResponse, CreateCycleCountTaskResponse,
-    CreatePurchaseOrderResponse, CreatePutawayTaskResponse, IntegrationOrderIntakeResponse,
-    IntegrationOrderOwnerMappingResponse, PickWaveResponse, PlaceInventoryHoldResponse,
-    PlanOrderAllocationResponse, PlanReplenishmentResponse, ReleasePurchaseOrderResponse,
+    CreatePurchaseOrderAsnResponse, CreatePurchaseOrderResponse, CreatePutawayTaskResponse,
+    IntegrationOrderIntakeResponse, IntegrationOrderOwnerMappingResponse, PickWaveResponse,
+    PlaceInventoryHoldResponse, PlanOrderAllocationResponse, PlanReplenishmentResponse,
+    ReleasePurchaseOrderResponse,
 };
 
 use crate::support::SeedContext;
@@ -33,9 +34,6 @@ async fn seed_purchase_orders(context: &SeedContext) -> anyhow::Result<()> {
     .bind(context.tenant_id.get())
     .fetch_one(&context.admin)
     .await?;
-    if states == (true, true) {
-        return Ok(());
-    }
     let item_ids = sqlx::query_scalar::<_, i64>(
         r#"
         SELECT owner_item.item_id
@@ -55,41 +53,105 @@ async fn seed_purchase_orders(context: &SeedContext) -> anyhow::Result<()> {
     if item_ids.len() < 2 {
         bail!("purchase-order demo requires two client-eligible catalog items");
     }
-    for sequence in 1_i64..=6 {
-        let number = format!("WB-DEMO-PO-{sequence:04}");
-        let created: CreatePurchaseOrderResponse = context
+    if states != (true, true) {
+        for sequence in 1_i64..=6 {
+            let number = format!("WB-DEMO-PO-{sequence:04}");
+            let created: CreatePurchaseOrderResponse = context
+                .command(
+                    Method::POST,
+                    "/api/v1/purchase-orders",
+                    &format!("demo-purchase-order-{sequence}"),
+                    json!({
+                        "inventory_owner_id": context.inventory_owner_id,
+                        "facility_id": context.facility_id,
+                        "number": number,
+                        "supplier": if sequence % 2 == 0 { "Northstar Foods" } else { "Cascade Supply Co." },
+                        "expected_by": format!("2027-08-{:02}T17:00:00Z", 10 + sequence),
+                        "lines": [
+                            {"item_id": item_ids[0], "ordered_quantity": 8 + sequence},
+                            {"item_id": item_ids[1], "ordered_quantity": 12 + sequence}
+                        ]
+                    }),
+                )
+                .await?;
+            if sequence <= 3 {
+                let _: ReleasePurchaseOrderResponse = context
+                    .command(
+                        Method::POST,
+                        &format!(
+                            "/api/v1/purchase-orders/{}/releases",
+                            created.purchase_order_id
+                        ),
+                        &format!("demo-purchase-order-release-{sequence}"),
+                        json!({"expected_revision": created.revision}),
+                    )
+                    .await?;
+            }
+        }
+    }
+    let source_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM purchase_order_asn_sources WHERE tenant_id=$1)",
+    )
+    .bind(context.tenant_id.get())
+    .fetch_one(&context.admin)
+    .await?;
+    if !source_exists {
+        let source: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            r#"
+            SELECT purchase.id,purchase.revision,first_line.id,first_line.ordered_quantity,
+                   second_line.id
+            FROM purchase_orders purchase
+            INNER JOIN purchase_order_lines first_line
+              ON first_line.tenant_id=purchase.tenant_id
+             AND first_line.purchase_order_id=purchase.id AND first_line.sequence=1
+            INNER JOIN purchase_order_lines second_line
+              ON second_line.tenant_id=purchase.tenant_id
+             AND second_line.purchase_order_id=purchase.id AND second_line.sequence=2
+            WHERE purchase.tenant_id=$1 AND purchase.status='released'
+            ORDER BY purchase.id
+            LIMIT 1
+            "#,
+        )
+        .bind(context.tenant_id.get())
+        .fetch_one(&context.admin)
+        .await?;
+        let second_quantity: i64 = sqlx::query_scalar(
+            "SELECT ordered_quantity FROM purchase_order_lines WHERE tenant_id=$1 AND id=$2",
+        )
+        .bind(context.tenant_id.get())
+        .bind(source.4)
+        .fetch_one(&context.admin)
+        .await?;
+        let _: CreatePurchaseOrderAsnResponse = context
             .command(
                 Method::POST,
-                "/api/v1/purchase-orders",
-                &format!("demo-purchase-order-{sequence}"),
+                &format!("/api/v1/purchase-orders/{}/asns", source.0),
+                "demo-purchase-order-asn-source",
                 json!({
-                    "inventory_owner_id": context.inventory_owner_id,
-                    "facility_id": context.facility_id,
-                    "number": number,
-                    "supplier": if sequence % 2 == 0 { "Northstar Foods" } else { "Cascade Supply Co." },
-                    "expected_by": format!("2027-08-{:02}T17:00:00Z", 10 + sequence),
+                    "expected_purchase_order_revision": source.1,
+                    "number": "WB-DEMO-ASN-FROM-PO-0001",
+                    "expected_at": "2027-08-12T14:00:00Z",
                     "lines": [
-                        {"item_id": item_ids[0], "ordered_quantity": 8 + sequence},
-                        {"item_id": item_ids[1], "ordered_quantity": 12 + sequence}
+                        {
+                            "purchase_order_line_id": source.2,
+                            "expected_quantity": std::cmp::max(source.3 / 2, 1),
+                            "lot": "WB-DEMO-PO-LOT-01",
+                            "serial": null,
+                            "expiration": "2028-08-12T00:00:00Z"
+                        },
+                        {
+                            "purchase_order_line_id": source.4,
+                            "expected_quantity": second_quantity,
+                            "lot": null,
+                            "serial": null,
+                            "expiration": null
+                        }
                     ]
                 }),
             )
             .await?;
-        if sequence <= 3 {
-            let _: ReleasePurchaseOrderResponse = context
-                .command(
-                    Method::POST,
-                    &format!(
-                        "/api/v1/purchase-orders/{}/releases",
-                        created.purchase_order_id
-                    ),
-                    &format!("demo-purchase-order-release-{sequence}"),
-                    json!({"expected_revision": created.revision}),
-                )
-                .await?;
-        }
     }
-    println!("seeded draft and released purchase orders");
+    println!("seeded draft and released purchase orders with PO-sourced ASN demand");
     Ok(())
 }
 

@@ -89,7 +89,9 @@ pub use idempotency::{
 };
 pub use inbound_asn::{
     CreateInboundAsnLineRequest, CreateInboundAsnRequest, CreateInboundAsnResponse,
-    CreatedInboundAsnLineResponse, InboundAsnDetailResponse, InboundAsnLineResponse,
+    CreatePurchaseOrderAsnLineRequest, CreatePurchaseOrderAsnRequest,
+    CreatePurchaseOrderAsnResponse, CreatedInboundAsnLineResponse,
+    CreatedPurchaseOrderAsnLineResponse, InboundAsnDetailResponse, InboundAsnLineResponse,
     InboundAsnPage, InboundAsnPageRequest, InboundAsnStatus, InboundAsnSummaryResponse,
     PlanInboundAsnLoadRequest, PlanInboundAsnLoadResponse, PlannedInboundAsnLoadLineResponse,
 };

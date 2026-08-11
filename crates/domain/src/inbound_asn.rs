@@ -2,7 +2,10 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CatalogItemId, FacilityId, InventoryOwnerId, LocationId, Timestamp};
+use crate::{
+    CatalogItemId, FacilityId, InventoryOwnerId, LocationId, PurchaseOrderId, PurchaseOrderLineId,
+    PurchaseOrderRevision, Timestamp,
+};
 
 pub const MAX_INBOUND_ASN_NUMBER_LENGTH: usize = 120;
 pub const MAX_INBOUND_ASN_SUPPLIER_LENGTH: usize = 200;
@@ -24,6 +27,10 @@ pub enum InboundAsnError {
     InvalidRevision { value: i64 },
     #[error("advance shipping notice revision cannot advance beyond its supported range")]
     RevisionExhausted,
+    #[error("a purchase-order ASN requires at least one source line")]
+    MissingPurchaseOrderLines,
+    #[error("a purchase-order ASN cannot repeat the same source line identity")]
+    DuplicatePurchaseOrderLineIdentity,
     #[error("only an open advance shipping notice can be planned into a load")]
     InvalidStatus,
 }
@@ -203,6 +210,117 @@ pub struct NewInboundAsn {
     supplier: InboundAsnSupplier,
     expected_at: Option<Timestamp>,
     lines: Vec<InboundAsnLineDefinition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurchaseOrderAsnLineDefinition {
+    purchase_order_line_id: PurchaseOrderLineId,
+    expected_quantity: InboundAsnQuantity,
+    lot: Option<String>,
+    serial: Option<String>,
+    expiration: Option<Timestamp>,
+}
+
+impl PurchaseOrderAsnLineDefinition {
+    pub fn new(
+        purchase_order_line_id: PurchaseOrderLineId,
+        expected_quantity: InboundAsnQuantity,
+        lot: Option<String>,
+        serial: Option<String>,
+        expiration: Option<Timestamp>,
+    ) -> Result<Self, InboundAsnError> {
+        Ok(Self {
+            purchase_order_line_id,
+            expected_quantity,
+            lot: optional_text(lot, "lot", MAX_INBOUND_ASN_IDENTITY_LENGTH)?,
+            serial: optional_text(serial, "serial", MAX_INBOUND_ASN_IDENTITY_LENGTH)?,
+            expiration,
+        })
+    }
+
+    pub const fn purchase_order_line_id(&self) -> PurchaseOrderLineId {
+        self.purchase_order_line_id
+    }
+
+    pub const fn expected_quantity(&self) -> InboundAsnQuantity {
+        self.expected_quantity
+    }
+
+    pub fn lot(&self) -> Option<&str> {
+        self.lot.as_deref()
+    }
+
+    pub fn serial(&self) -> Option<&str> {
+        self.serial.as_deref()
+    }
+
+    pub const fn expiration(&self) -> Option<&Timestamp> {
+        self.expiration.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewPurchaseOrderAsn {
+    purchase_order_id: PurchaseOrderId,
+    expected_purchase_order_revision: PurchaseOrderRevision,
+    number: InboundAsnNumber,
+    expected_at: Option<Timestamp>,
+    lines: Vec<PurchaseOrderAsnLineDefinition>,
+}
+
+impl NewPurchaseOrderAsn {
+    pub fn new(
+        purchase_order_id: PurchaseOrderId,
+        expected_purchase_order_revision: PurchaseOrderRevision,
+        number: InboundAsnNumber,
+        expected_at: Option<Timestamp>,
+        lines: Vec<PurchaseOrderAsnLineDefinition>,
+    ) -> Result<Self, InboundAsnError> {
+        if lines.is_empty() {
+            return Err(InboundAsnError::MissingPurchaseOrderLines);
+        }
+        let unique = lines
+            .iter()
+            .map(|line| {
+                (
+                    line.purchase_order_line_id,
+                    line.lot.clone(),
+                    line.serial.clone(),
+                    line.expiration,
+                )
+            })
+            .collect::<HashSet<_>>();
+        if unique.len() != lines.len() {
+            return Err(InboundAsnError::DuplicatePurchaseOrderLineIdentity);
+        }
+        Ok(Self {
+            purchase_order_id,
+            expected_purchase_order_revision,
+            number,
+            expected_at,
+            lines,
+        })
+    }
+
+    pub const fn purchase_order_id(&self) -> PurchaseOrderId {
+        self.purchase_order_id
+    }
+
+    pub const fn expected_purchase_order_revision(&self) -> PurchaseOrderRevision {
+        self.expected_purchase_order_revision
+    }
+
+    pub const fn number(&self) -> &InboundAsnNumber {
+        &self.number
+    }
+
+    pub const fn expected_at(&self) -> Option<&Timestamp> {
+        self.expected_at.as_ref()
+    }
+
+    pub fn lines(&self) -> &[PurchaseOrderAsnLineDefinition] {
+        &self.lines
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -392,5 +510,36 @@ mod tests {
             None,
         )
         .is_err());
+    }
+
+    #[test]
+    fn purchase_order_notice_requires_unique_source_identities() {
+        let line = || {
+            PurchaseOrderAsnLineDefinition::new(
+                PurchaseOrderLineId::new(7).unwrap(),
+                InboundAsnQuantity::new(2).unwrap(),
+                Some("LOT-A".into()),
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let build = |lines| {
+            NewPurchaseOrderAsn::new(
+                PurchaseOrderId::new(6).unwrap(),
+                PurchaseOrderRevision::new(2).unwrap(),
+                InboundAsnNumber::new("ASN-PO-100").unwrap(),
+                None,
+                lines,
+            )
+        };
+        assert_eq!(
+            build(Vec::new()),
+            Err(InboundAsnError::MissingPurchaseOrderLines)
+        );
+        assert_eq!(
+            build(vec![line(), line()]),
+            Err(InboundAsnError::DuplicatePurchaseOrderLineIdentity)
+        );
     }
 }

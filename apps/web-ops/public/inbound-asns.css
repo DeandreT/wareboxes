@@ -44,7 +44,7 @@
 }
 
 .inbound-asn-table {
-  min-width: 900px;
+  min-width: 980px;
 }
 
 .inbound-asn-table th,
@@ -65,16 +65,21 @@
 
 .inbound-asn-table th:nth-child(2),
 .inbound-asn-table td:nth-child(2) {
-  width: 72px;
+  width: 110px;
 }
 
 .inbound-asn-table th:nth-child(3),
 .inbound-asn-table td:nth-child(3) {
-  width: 68px;
+  width: 72px;
 }
 
 .inbound-asn-table th:nth-child(4),
 .inbound-asn-table td:nth-child(4) {
+  width: 68px;
+}
+
+.inbound-asn-table th:nth-child(5),
+.inbound-asn-table td:nth-child(5) {
   width: 112px;
 }
 
@@ -103,7 +108,30 @@
 }
 
 .inbound-asn-detail .summary-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.inbound-asn-detail .summary-grid > div {
+  min-width: 0;
+  padding: 7px 8px;
+  background: var(--surface);
+}
+
+.inbound-asn-detail .summary-grid dt {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.inbound-asn-detail .summary-grid dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
 }
 
 .inbound-asn-detail td small {

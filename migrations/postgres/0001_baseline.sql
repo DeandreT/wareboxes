@@ -37466,3 +37466,265 @@ REVOKE ALL ON FUNCTION public.validate_purchase_order_release() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_purchase_order_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_purchase_order_ledger_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_purchase_order_release_consistency() FROM PUBLIC;
+
+-- A released purchase order may source multiple ASNs. These append-only ledgers
+-- preserve the exact PO-line to ASN-line mapping and cap cumulative notices at
+-- the immutable ordered quantity.
+CREATE TABLE public.purchase_order_asn_sources (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    purchase_order_id bigint NOT NULL,
+    asn_id bigint NOT NULL,
+    expected_purchase_order_revision bigint NOT NULL,
+    line_count bigint NOT NULL,
+    total_expected_quantity bigint NOT NULL,
+    created_by_user_id bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    CONSTRAINT purchase_order_asn_sources_revision_check CHECK (
+        expected_purchase_order_revision=2),
+    CONSTRAINT purchase_order_asn_sources_quantity_check CHECK (
+        line_count > 0 AND total_expected_quantity > 0),
+    CONSTRAINT purchase_order_asn_sources_asn_unique UNIQUE (tenant_id,asn_id),
+    CONSTRAINT purchase_order_asn_sources_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,facility_id,purchase_order_id,asn_id,id),
+    CONSTRAINT purchase_order_asn_sources_order_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,purchase_order_id)
+        REFERENCES public.purchase_orders(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT purchase_order_asn_sources_asn_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,asn_id)
+        REFERENCES public.inbound_asns(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT purchase_order_asn_sources_actor_fkey
+        FOREIGN KEY (created_by_user_id) REFERENCES public.users(id)
+);
+
+CREATE TABLE public.purchase_order_asn_source_lines (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    purchase_order_id bigint NOT NULL,
+    asn_id bigint NOT NULL,
+    source_id bigint NOT NULL,
+    purchase_order_line_id bigint NOT NULL,
+    asn_line_id bigint NOT NULL,
+    sequence bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    expected_quantity bigint NOT NULL,
+    CONSTRAINT purchase_order_asn_source_lines_sequence_check CHECK (sequence > 0),
+    CONSTRAINT purchase_order_asn_source_lines_quantity_check CHECK (expected_quantity > 0),
+    CONSTRAINT purchase_order_asn_source_lines_uom_check CHECK (
+        uom=btrim(uom) AND char_length(uom) BETWEEN 1 AND 64),
+    CONSTRAINT purchase_order_asn_source_lines_asn_line_unique
+        UNIQUE (tenant_id,asn_line_id),
+    CONSTRAINT purchase_order_asn_source_lines_source_sequence_unique
+        UNIQUE (tenant_id,source_id,sequence),
+    CONSTRAINT purchase_order_asn_source_lines_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,facility_id,purchase_order_id,asn_id,source_id,id),
+    CONSTRAINT purchase_order_asn_source_lines_source_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,purchase_order_id,asn_id,source_id)
+        REFERENCES public.purchase_order_asn_sources(
+            tenant_id,inventory_owner_id,facility_id,purchase_order_id,asn_id,id),
+    CONSTRAINT purchase_order_asn_source_lines_order_line_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,purchase_order_id,purchase_order_line_id)
+        REFERENCES public.purchase_order_lines(
+            tenant_id,inventory_owner_id,facility_id,purchase_order_id,id),
+    CONSTRAINT purchase_order_asn_source_lines_asn_line_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,asn_id,asn_line_id)
+        REFERENCES public.inbound_asn_lines(
+            tenant_id,inventory_owner_id,facility_id,asn_id,id),
+    CONSTRAINT purchase_order_asn_source_lines_item_fkey
+        FOREIGN KEY (tenant_id,item_id) REFERENCES public.items(tenant_id,id)
+);
+
+CREATE INDEX purchase_order_asn_sources_order_idx
+ON public.purchase_order_asn_sources(tenant_id,purchase_order_id,created_at,id);
+CREATE INDEX purchase_order_asn_source_lines_order_line_idx
+ON public.purchase_order_asn_source_lines(
+    tenant_id,purchase_order_id,purchase_order_line_id,source_id,id);
+
+CREATE FUNCTION public.validate_purchase_order_asn_source() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    order_row record;
+    asn_row record;
+BEGIN
+    SELECT status,revision,supplier INTO order_row
+    FROM public.purchase_orders
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.facility_id
+      AND id=NEW.purchase_order_id
+    FOR UPDATE;
+    SELECT status,revision,supplier,line_count,total_expected_quantity,
+           created_by_user_id,created_at
+    INTO asn_row
+    FROM public.inbound_asns
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.facility_id
+      AND id=NEW.asn_id
+    FOR SHARE;
+    IF order_row IS NULL OR order_row.status <> 'released'
+       OR order_row.revision <> NEW.expected_purchase_order_revision
+       OR asn_row IS NULL OR asn_row.status <> 'open' OR asn_row.revision <> 1
+       OR asn_row.supplier IS DISTINCT FROM order_row.supplier
+       OR NEW.line_count <> asn_row.line_count
+       OR NEW.total_expected_quantity <> asn_row.total_expected_quantity
+       OR NEW.created_by_user_id <> asn_row.created_by_user_id
+       OR NEW.created_at IS DISTINCT FROM asn_row.created_at
+       OR NEW.created_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'purchase-order ASN source does not match a released order and open ASN'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.validate_purchase_order_asn_source_line() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    source_row record;
+    order_line record;
+    asn_line record;
+BEGIN
+    SELECT line_count,total_expected_quantity INTO source_row
+    FROM public.purchase_order_asn_sources
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.facility_id
+      AND purchase_order_id=NEW.purchase_order_id
+      AND asn_id=NEW.asn_id AND id=NEW.source_id;
+    SELECT item_id,uom,ordered_quantity INTO order_line
+    FROM public.purchase_order_lines
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.facility_id
+      AND purchase_order_id=NEW.purchase_order_id
+      AND id=NEW.purchase_order_line_id;
+    SELECT sequence,item_id,uom,expected_quantity INTO asn_line
+    FROM public.inbound_asn_lines
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.facility_id
+      AND asn_id=NEW.asn_id AND id=NEW.asn_line_id;
+    IF source_row IS NULL OR order_line IS NULL OR asn_line IS NULL
+       OR NEW.sequence <> asn_line.sequence
+       OR NEW.item_id <> order_line.item_id OR NEW.item_id <> asn_line.item_id
+       OR NEW.uom IS DISTINCT FROM order_line.uom OR NEW.uom IS DISTINCT FROM asn_line.uom
+       OR NEW.expected_quantity <> asn_line.expected_quantity
+       OR NEW.expected_quantity > order_line.ordered_quantity THEN
+        RAISE EXCEPTION 'purchase-order ASN source line does not match its source identities'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.require_purchase_order_asn_source_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    target_tenant_id bigint;
+    target_source_id bigint;
+    source_row record;
+    actual_count bigint;
+    actual_total bigint;
+BEGIN
+    target_tenant_id := NEW.tenant_id;
+    IF TG_TABLE_NAME='purchase_order_asn_sources' THEN
+        target_source_id := NEW.id;
+    ELSE
+        target_source_id := NEW.source_id;
+    END IF;
+    SELECT * INTO source_row
+    FROM public.purchase_order_asn_sources
+    WHERE tenant_id=target_tenant_id AND id=target_source_id;
+    SELECT COUNT(*),COALESCE(SUM(expected_quantity),0)
+    INTO actual_count,actual_total
+    FROM public.purchase_order_asn_source_lines
+    WHERE tenant_id=target_tenant_id AND source_id=target_source_id;
+    IF source_row IS NULL OR actual_count <> source_row.line_count
+       OR actual_total <> source_row.total_expected_quantity
+       OR EXISTS (
+           SELECT 1
+           FROM public.inbound_asn_lines asn_line
+           LEFT JOIN public.purchase_order_asn_source_lines mapping
+             ON mapping.tenant_id=asn_line.tenant_id
+            AND mapping.asn_line_id=asn_line.id
+            AND mapping.source_id=target_source_id
+           WHERE asn_line.tenant_id=target_tenant_id
+             AND asn_line.asn_id=source_row.asn_id
+           GROUP BY asn_line.id
+           HAVING COUNT(mapping.id) <> 1)
+       OR EXISTS (
+           SELECT 1
+           FROM public.purchase_order_lines order_line
+           LEFT JOIN public.purchase_order_asn_source_lines mapping
+             ON mapping.tenant_id=order_line.tenant_id
+            AND mapping.purchase_order_line_id=order_line.id
+           WHERE order_line.tenant_id=target_tenant_id
+             AND order_line.purchase_order_id=source_row.purchase_order_id
+           GROUP BY order_line.id,order_line.ordered_quantity
+           HAVING COALESCE(SUM(mapping.expected_quantity),0) > order_line.ordered_quantity) THEN
+        RAISE EXCEPTION 'purchase-order ASN source lines do not conserve ordered demand'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.reject_purchase_order_asn_source_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'purchase-order ASN source evidence is immutable'
+        USING ERRCODE='55000';
+END
+$$;
+
+CREATE TRIGGER purchase_order_asn_sources_validate
+BEFORE INSERT ON public.purchase_order_asn_sources
+FOR EACH ROW EXECUTE FUNCTION public.validate_purchase_order_asn_source();
+CREATE TRIGGER purchase_order_asn_sources_are_immutable
+BEFORE UPDATE OR DELETE ON public.purchase_order_asn_sources
+FOR EACH ROW EXECUTE FUNCTION public.reject_purchase_order_asn_source_mutation();
+CREATE TRIGGER purchase_order_asn_source_lines_validate
+BEFORE INSERT ON public.purchase_order_asn_source_lines
+FOR EACH ROW EXECUTE FUNCTION public.validate_purchase_order_asn_source_line();
+CREATE TRIGGER purchase_order_asn_source_lines_are_immutable
+BEFORE UPDATE OR DELETE ON public.purchase_order_asn_source_lines
+FOR EACH ROW EXECUTE FUNCTION public.reject_purchase_order_asn_source_mutation();
+
+CREATE CONSTRAINT TRIGGER purchase_order_asn_sources_require_consistency
+AFTER INSERT ON public.purchase_order_asn_sources
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_purchase_order_asn_source_consistency();
+CREATE CONSTRAINT TRIGGER purchase_order_asn_source_lines_require_consistency
+AFTER INSERT ON public.purchase_order_asn_source_lines
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_purchase_order_asn_source_consistency();
+
+ALTER TABLE public.purchase_order_asn_sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.purchase_order_asn_sources FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.purchase_order_asn_source_lines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.purchase_order_asn_source_lines FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY purchase_order_asn_sources_tenant_isolation
+ON public.purchase_order_asn_sources
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY purchase_order_asn_source_lines_tenant_isolation
+ON public.purchase_order_asn_source_lines
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.purchase_order_asn_sources TO wareboxes_app;
+GRANT SELECT,INSERT ON public.purchase_order_asn_source_lines TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.purchase_order_asn_sources_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.purchase_order_asn_source_lines_id_seq TO wareboxes_app;
+
+REVOKE ALL ON FUNCTION public.validate_purchase_order_asn_source() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_purchase_order_asn_source_line() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_purchase_order_asn_source_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_purchase_order_asn_source_mutation() FROM PUBLIC;

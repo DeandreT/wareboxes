@@ -242,6 +242,9 @@ fn map_summary(value: InboundAsnReadModel) -> V1Result<InboundAsnSummaryResponse
         created_at: value.created_at.to_rfc3339(),
         planned_by: value.planned_by.map(|id| id.get()),
         planned_at: value.planned_at.map(|value| value.to_rfc3339()),
+        purchase_order_source_id: value.purchase_order_source_id.map(|id| id.get()),
+        purchase_order_id: value.purchase_order_id.map(|id| id.get()),
+        purchase_order_number: value.purchase_order_number,
     })
 }
 

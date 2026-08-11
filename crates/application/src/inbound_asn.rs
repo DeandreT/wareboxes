@@ -4,11 +4,14 @@ use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
     CatalogItemId, FacilityId, InboundAsnId, InboundAsnLineId, InboundAsnLoadPlanDetails,
     InboundAsnLoadPlanId, InboundAsnRevision, InboundAsnStatus, InboundLoadId, InboundLoadLineId,
-    InventoryOwnerId, NewInboundAsn, Timestamp, UserId,
+    InventoryOwnerId, NewInboundAsn, NewPurchaseOrderAsn, PurchaseOrderAsnSourceId,
+    PurchaseOrderAsnSourceLineId, PurchaseOrderId, PurchaseOrderLineId, PurchaseOrderRevision,
+    Timestamp, UserId,
 };
 
 pub const CREATE_INBOUND_ASN_OPERATION: &str = "inbound.asn.create.v1";
 pub const PLAN_INBOUND_ASN_LOAD_OPERATION: &str = "inbound.asn.load.plan.v1";
+pub const CREATE_PURCHASE_ORDER_ASN_OPERATION: &str = "inbound.purchase_order.asn.create.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateInboundAsnCommand {
@@ -29,6 +32,35 @@ pub struct CreateInboundAsnResult {
     pub status: InboundAsnStatus,
     pub revision: InboundAsnRevision,
     pub lines: Vec<CreatedInboundAsnLineResult>,
+    pub total_expected_quantity: i64,
+    pub created_by: UserId,
+    pub created_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatePurchaseOrderAsnCommand {
+    pub notice: NewPurchaseOrderAsn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatedPurchaseOrderAsnLineResult {
+    pub source_line_id: PurchaseOrderAsnSourceLineId,
+    pub purchase_order_line_id: PurchaseOrderLineId,
+    pub asn_line_id: InboundAsnLineId,
+    pub item_id: CatalogItemId,
+    pub expected_quantity: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatePurchaseOrderAsnResult {
+    pub source_id: PurchaseOrderAsnSourceId,
+    pub purchase_order_id: PurchaseOrderId,
+    pub purchase_order_revision: PurchaseOrderRevision,
+    pub asn_id: InboundAsnId,
+    pub number: String,
+    pub status: InboundAsnStatus,
+    pub revision: InboundAsnRevision,
+    pub lines: Vec<CreatedPurchaseOrderAsnLineResult>,
     pub total_expected_quantity: i64,
     pub created_by: UserId,
     pub created_at: Timestamp,
@@ -95,6 +127,9 @@ pub struct InboundAsnReadModel {
     pub created_at: Timestamp,
     pub planned_by: Option<UserId>,
     pub planned_at: Option<Timestamp>,
+    pub purchase_order_source_id: Option<PurchaseOrderAsnSourceId>,
+    pub purchase_order_id: Option<PurchaseOrderId>,
+    pub purchase_order_number: Option<String>,
     pub lines: Vec<InboundAsnLineReadModel>,
 }
 

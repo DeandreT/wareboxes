@@ -55,6 +55,53 @@ pub struct CreateInboundAsnResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CreatePurchaseOrderAsnLineRequest {
+    pub purchase_order_line_id: i64,
+    pub expected_quantity: i64,
+    pub lot: Option<String>,
+    pub serial: Option<String>,
+    /// RFC 3339 timestamp, or `None` for stock without an expiration identity.
+    pub expiration: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePurchaseOrderAsnRequest {
+    pub expected_purchase_order_revision: Revision,
+    pub number: String,
+    /// RFC 3339 expected arrival supplied by the trading partner.
+    pub expected_at: Option<String>,
+    pub lines: Vec<CreatePurchaseOrderAsnLineRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreatedPurchaseOrderAsnLineResponse {
+    pub source_line_id: i64,
+    pub purchase_order_line_id: i64,
+    pub asn_line_id: i64,
+    pub item_id: i64,
+    pub expected_quantity: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePurchaseOrderAsnResponse {
+    pub source_id: i64,
+    pub purchase_order_id: i64,
+    pub purchase_order_revision: Revision,
+    pub asn_id: i64,
+    pub number: String,
+    pub status: InboundAsnStatus,
+    pub revision: Revision,
+    pub lines: Vec<CreatedPurchaseOrderAsnLineResponse>,
+    pub total_expected_quantity: i64,
+    pub created_by: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlanInboundAsnLoadRequest {
     pub expected_revision: Revision,
     pub receiving_location_id: i64,
@@ -121,6 +168,9 @@ pub struct InboundAsnSummaryResponse {
     pub created_at: String,
     pub planned_by: Option<i64>,
     pub planned_at: Option<String>,
+    pub purchase_order_source_id: Option<i64>,
+    pub purchase_order_id: Option<i64>,
+    pub purchase_order_number: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,5 +248,25 @@ mod tests {
         let mut invalid = request;
         invalid["lines"] = serde_json::json!([]);
         assert!(serde_json::from_value::<PlanInboundAsnLoadRequest>(invalid).is_err());
+    }
+
+    #[test]
+    fn purchase_order_notice_derives_commercial_identities() {
+        let request = serde_json::json!({
+            "expected_purchase_order_revision": 2,
+            "number": "ASN-PO-100",
+            "expected_at": null,
+            "lines": [{
+                "purchase_order_line_id": 41,
+                "expected_quantity": 7,
+                "lot": "LOT-A",
+                "serial": null,
+                "expiration": null
+            }]
+        });
+        assert!(serde_json::from_value::<CreatePurchaseOrderAsnRequest>(request.clone()).is_ok());
+        let mut invalid = request;
+        invalid["supplier"] = serde_json::json!("client supplied");
+        assert!(serde_json::from_value::<CreatePurchaseOrderAsnRequest>(invalid).is_err());
     }
 }

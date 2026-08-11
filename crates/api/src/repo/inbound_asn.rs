@@ -15,7 +15,7 @@ use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     plan_inbound_asn, CatalogItemId, FacilityId, InboundAsnId, InboundAsnLineId,
     InboundAsnLoadPlanId, InboundAsnRevision, InboundAsnStatus, InboundLoadId, InboundLoadLineId,
-    InventoryOwnerId, Timestamp, UserId,
+    InventoryOwnerId, PurchaseOrderAsnSourceId, PurchaseOrderId, Timestamp, UserId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::{insert_result, PostgresPreparedCommandExt};
@@ -450,12 +450,19 @@ pub async fn page(
                asn.facility_id,facility.name AS facility_name,asn.number,asn.supplier,
                asn.expected_at,asn.status,asn.revision,asn.line_count,
                asn.total_expected_quantity,asn.load_id,asn.created_by_user_id,asn.created_at,
-               asn.planned_by_user_id,asn.planned_at
+               asn.planned_by_user_id,asn.planned_at,
+               po_source.id AS purchase_order_source_id,
+               po_source.purchase_order_id,purchase.number AS purchase_order_number
         FROM inbound_asns asn
         INNER JOIN inventory_owners owner
           ON owner.tenant_id=asn.tenant_id AND owner.id=asn.inventory_owner_id
         INNER JOIN facilities facility
           ON facility.tenant_id=asn.tenant_id AND facility.id=asn.facility_id
+        LEFT JOIN purchase_order_asn_sources po_source
+          ON po_source.tenant_id=asn.tenant_id AND po_source.asn_id=asn.id
+        LEFT JOIN purchase_orders purchase
+          ON purchase.tenant_id=po_source.tenant_id
+         AND purchase.id=po_source.purchase_order_id
         WHERE asn.tenant_id=$1
           AND ($2 OR asn.facility_id=ANY($3))
           AND ($4 OR asn.inventory_owner_id=ANY($5))
@@ -463,7 +470,8 @@ pub async fn page(
           AND ($7::BIGINT IS NULL OR asn.inventory_owner_id=$7)
           AND ($8::TEXT IS NULL OR asn.status=$8)
           AND ($9::TEXT IS NULL OR asn.number ILIKE '%' || $9 || '%'
-               OR asn.supplier ILIKE '%' || $9 || '%')
+               OR asn.supplier ILIKE '%' || $9 || '%'
+               OR purchase.number ILIKE '%' || $9 || '%')
         ORDER BY asn.created_at DESC,asn.id DESC
         OFFSET $10 LIMIT $11+1
         "#,
@@ -509,12 +517,19 @@ pub async fn detail(
                asn.facility_id,facility.name AS facility_name,asn.number,asn.supplier,
                asn.expected_at,asn.status,asn.revision,asn.line_count,
                asn.total_expected_quantity,asn.load_id,asn.created_by_user_id,asn.created_at,
-               asn.planned_by_user_id,asn.planned_at
+               asn.planned_by_user_id,asn.planned_at,
+               po_source.id AS purchase_order_source_id,
+               po_source.purchase_order_id,purchase.number AS purchase_order_number
         FROM inbound_asns asn
         INNER JOIN inventory_owners owner
           ON owner.tenant_id=asn.tenant_id AND owner.id=asn.inventory_owner_id
         INNER JOIN facilities facility
           ON facility.tenant_id=asn.tenant_id AND facility.id=asn.facility_id
+        LEFT JOIN purchase_order_asn_sources po_source
+          ON po_source.tenant_id=asn.tenant_id AND po_source.asn_id=asn.id
+        LEFT JOIN purchase_orders purchase
+          ON purchase.tenant_id=po_source.tenant_id
+         AND purchase.id=po_source.purchase_order_id
         WHERE asn.tenant_id=$1 AND asn.id=$2
           AND ($3 OR asn.facility_id=ANY($4))
           AND ($5 OR asn.inventory_owner_id=ANY($6))
@@ -770,6 +785,17 @@ fn map_header(row: &sqlx::postgres::PgRow) -> AppResult<InboundAsnReadModel> {
             .transpose()
             .map_err(|error| AppError::internal(error.to_string()))?,
         planned_at: row.try_get("planned_at")?,
+        purchase_order_source_id: row
+            .try_get::<Option<i64>, _>("purchase_order_source_id")?
+            .map(PurchaseOrderAsnSourceId::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        purchase_order_id: row
+            .try_get::<Option<i64>, _>("purchase_order_id")?
+            .map(PurchaseOrderId::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        purchase_order_number: row.try_get("purchase_order_number")?,
         lines: Vec::new(),
     })
 }

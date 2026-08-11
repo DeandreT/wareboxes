@@ -9,8 +9,9 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    CreatePurchaseOrderResponse, ErrorReason, ErrorResponse, PurchaseOrderDetailResponse,
-    PurchaseOrderPage, PurchaseOrderStatus, ReleasePurchaseOrderResponse,
+    CreatePurchaseOrderAsnResponse, CreatePurchaseOrderResponse, ErrorReason, ErrorResponse,
+    InboundAsnDetailResponse, PurchaseOrderDetailResponse, PurchaseOrderPage, PurchaseOrderStatus,
+    ReleasePurchaseOrderResponse,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
@@ -131,6 +132,53 @@ async fn create_order(context: &PurchaseOrderFixture, number: &str) -> CreatePur
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     json_body(response).await
+}
+
+async fn release_order(
+    context: &PurchaseOrderFixture,
+    order: &CreatePurchaseOrderResponse,
+    key: &str,
+) -> ReleasePurchaseOrderResponse {
+    let response = routes::app(AppState::new(context.fixture.db.clone()))
+        .oneshot(command_request(
+            context,
+            &format!("purchase-orders/{}/releases", order.purchase_order_id),
+            key,
+            &json!({"expected_revision": order.revision.get()}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    json_body(response).await
+}
+
+fn asn_body(
+    order: &CreatePurchaseOrderResponse,
+    number: &str,
+    first_quantity: i64,
+    second_quantity: i64,
+) -> Value {
+    json!({
+        "expected_purchase_order_revision": 2,
+        "number": number,
+        "expected_at": "2027-08-18T17:00:00Z",
+        "lines": [
+            {
+                "purchase_order_line_id": order.lines[0].line_id,
+                "expected_quantity": first_quantity,
+                "lot": format!("{number}-LOT"),
+                "serial": null,
+                "expiration": "2028-08-18T00:00:00Z"
+            },
+            {
+                "purchase_order_line_id": order.lines[1].line_id,
+                "expected_quantity": second_quantity,
+                "lot": null,
+                "serial": null,
+                "expiration": null
+            }
+        ]
+    })
 }
 
 #[tokio::test]
@@ -314,6 +362,208 @@ async fn release_is_revision_guarded_race_safe_and_audited() {
 }
 
 #[tokio::test]
+async fn released_order_sources_multiple_asns_with_exact_conservation_and_replay() {
+    let context = fixture("purchase-order-asn@test.local").await;
+    let order = create_order(&context, "PO-ASN-100").await;
+    let release = release_order(&context, &order, "release-po-asn-100").await;
+    assert_eq!(release.revision.get(), 2);
+    let app = routes::app(AppState::new(context.fixture.db.clone()));
+    let path = format!("purchase-orders/{}/asns", order.purchase_order_id);
+    let first_body = asn_body(&order, "ASN-PO-100-A", 5, 3);
+    let first = app
+        .clone()
+        .oneshot(command_request(
+            &context,
+            &path,
+            "po-asn-first",
+            &first_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = json_body::<CreatePurchaseOrderAsnResponse>(first).await;
+    assert_eq!(first.purchase_order_id, order.purchase_order_id);
+    assert_eq!(first.purchase_order_revision.get(), 2);
+    assert_eq!(first.total_expected_quantity, 8);
+    assert_eq!(first.lines.len(), 2);
+
+    let replay = app
+        .clone()
+        .oneshot(command_request(
+            &context,
+            &path,
+            "po-asn-first",
+            &first_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<CreatePurchaseOrderAsnResponse>(replay).await,
+        first
+    );
+    let changed = app
+        .clone()
+        .oneshot(command_request(
+            &context,
+            &path,
+            "po-asn-first",
+            &asn_body(&order, "ASN-PO-100-A", 6, 3),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(changed.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body::<ErrorResponse>(changed).await.reason,
+        ErrorReason::IdempotencyKeyReused
+    );
+
+    let second = app
+        .clone()
+        .oneshot(command_request(
+            &context,
+            &path,
+            "po-asn-second",
+            &asn_body(&order, "ASN-PO-100-B", 7, 5),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    let second = json_body::<CreatePurchaseOrderAsnResponse>(second).await;
+    assert_eq!(second.total_expected_quantity, 12);
+
+    let over = app
+        .clone()
+        .oneshot(command_request(
+            &context,
+            &path,
+            "po-asn-over",
+            &asn_body(&order, "ASN-PO-100-C", 1, 1),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(over.status(), StatusCode::CONFLICT);
+
+    let detail = app
+        .clone()
+        .oneshot(get_request(
+            &context,
+            &format!("purchase-orders/{}", order.purchase_order_id),
+        ))
+        .await
+        .unwrap();
+    let detail = json_body::<PurchaseOrderDetailResponse>(detail).await;
+    assert_eq!(detail.summary.total_ordered_quantity, 20);
+    assert_eq!(detail.summary.total_asn_expected_quantity, 20);
+    assert_eq!(detail.summary.total_remaining_quantity, 0);
+    assert!(detail.lines.iter().all(|line| line.remaining_quantity == 0));
+    let asn_detail = app
+        .oneshot(get_request(
+            &context,
+            &format!("inbound-asns/{}", second.asn_id),
+        ))
+        .await
+        .unwrap();
+    let asn_detail = json_body::<InboundAsnDetailResponse>(asn_detail).await;
+    assert_eq!(
+        asn_detail.summary.purchase_order_id,
+        Some(order.purchase_order_id)
+    );
+    assert_eq!(
+        asn_detail.summary.purchase_order_number.as_deref(),
+        Some("PO-ASN-100")
+    );
+
+    let mut tx = tenant_tx(&context.fixture.db, context.tenant_id).await;
+    let effects: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+          (SELECT COUNT(*) FROM purchase_order_asn_sources WHERE purchase_order_id=$1),
+          (SELECT COUNT(*) FROM purchase_order_asn_source_lines WHERE purchase_order_id=$1),
+          (SELECT COUNT(*) FROM inbound_asns WHERE id IN ($2,$3)),
+          (SELECT COUNT(*) FROM outbox_events WHERE event_type='inbound.asn.created'
+             AND aggregate_id IN ($2::TEXT,$3::TEXT)),
+          (SELECT COUNT(*) FROM command_idempotency_records
+             WHERE operation='inbound.purchase_order.asn.create.v1'
+               AND (result_json->>'purchase_order_id')::BIGINT=$1)
+        "#,
+    )
+    .bind(order.purchase_order_id)
+    .bind(first.asn_id)
+    .bind(second.asn_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(effects, (2, 4, 2, 2, 2));
+    let immutable = sqlx::query(
+        "UPDATE purchase_order_asn_source_lines SET expected_quantity=1 WHERE purchase_order_id=$1",
+    )
+    .bind(order.purchase_order_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap_err();
+    assert!(!immutable.to_string().is_empty());
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_notices_cannot_overstate_remaining_order_demand() {
+    let context = fixture("purchase-order-asn-race@test.local").await;
+    let order = create_order(&context, "PO-ASN-RACE").await;
+    release_order(&context, &order, "release-po-asn-race").await;
+    let app = routes::app(AppState::new(context.fixture.db.clone()));
+    let path = format!("purchase-orders/{}/asns", order.purchase_order_id);
+    let first = app.clone().oneshot(command_request(
+        &context,
+        &path,
+        "po-asn-race-a",
+        &asn_body(&order, "ASN-PO-RACE-A", 8, 6),
+    ));
+    let second = app.clone().oneshot(command_request(
+        &context,
+        &path,
+        "po-asn-race-b",
+        &asn_body(&order, "ASN-PO-RACE-B", 8, 6),
+    ));
+    let (first, second) = tokio::join!(first, second);
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(
+        [first.status(), second.status()]
+            .into_iter()
+            .filter(|status| *status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        [first.status(), second.status()]
+            .into_iter()
+            .filter(|status| *status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let mut tx = tenant_tx(&context.fixture.db, context.tenant_id).await;
+    let quantities: Vec<(i64, i64, i64)> = sqlx::query_as(
+        r#"
+        SELECT line.ordered_quantity,COALESCE(SUM(mapping.expected_quantity),0)::BIGINT,
+               line.ordered_quantity-COALESCE(SUM(mapping.expected_quantity),0)::BIGINT
+        FROM purchase_order_lines line
+        LEFT JOIN purchase_order_asn_source_lines mapping
+          ON mapping.tenant_id=line.tenant_id AND mapping.purchase_order_line_id=line.id
+        WHERE line.purchase_order_id=$1
+        GROUP BY line.id,line.sequence,line.ordered_quantity
+        ORDER BY line.sequence
+        "#,
+    )
+    .bind(order.purchase_order_id)
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(quantities, vec![(12, 8, 4), (8, 6, 2)]);
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
 async fn pages_replays_and_ledgers_are_scope_bound_with_minimal_grants() {
     let context = fixture("purchase-order-scope@test.local").await;
     assert!(repo::tenants::update_user_access_scope(
@@ -331,7 +581,22 @@ async fn pages_replays_and_ledgers_are_scope_bound_with_minimal_grants() {
     .unwrap());
     let first = create_order(&context, "PO-PAGE-100").await;
     let _second = create_order(&context, "PO-PAGE-101").await;
+    let sourced = create_order(&context, "PO-SCOPE-ASN").await;
+    release_order(&context, &sourced, "release-po-scope-asn").await;
     let app = routes::app(AppState::new(context.fixture.db.clone()));
+    let sourced_path = format!("purchase-orders/{}/asns", sourced.purchase_order_id);
+    let sourced_body = asn_body(&sourced, "ASN-PO-SCOPE", 4, 3);
+    let sourced_response = app
+        .clone()
+        .oneshot(command_request(
+            &context,
+            &sourced_path,
+            "po-scope-asn",
+            &sourced_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(sourced_response.status(), StatusCode::OK);
     let page = app
         .clone()
         .oneshot(get_request(
@@ -397,6 +662,19 @@ async fn pages_replays_and_ledgers_are_scope_bound_with_minimal_grants() {
             .unwrap();
         assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
     }
+    for body in [sourced_body, asn_body(&sourced, "ASN-PO-SCOPE", 5, 3)] {
+        let hidden = app
+            .clone()
+            .oneshot(command_request(
+                &context,
+                &sourced_path,
+                "po-scope-asn",
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+    }
     let hidden_detail = app
         .oneshot(get_request(
             &context,
@@ -411,6 +689,8 @@ async fn pages_replays_and_ledgers_are_scope_bound_with_minimal_grants() {
         "purchase_orders",
         "purchase_order_lines",
         "purchase_order_releases",
+        "purchase_order_asn_sources",
+        "purchase_order_asn_source_lines",
     ] {
         let checks: (bool, bool) = sqlx::query_as(
             "SELECT relforcerowsecurity,has_table_privilege('wareboxes_app',$1,'DELETE') FROM pg_class WHERE oid=$1::regclass",
