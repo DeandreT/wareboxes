@@ -124,6 +124,27 @@ If migrations were changed during development, reset the local database with:
 scripts/reset-db.sh
 ```
 
+Seed a coherent operator dataset after the server has migrated the database and
+created the bootstrap user:
+
+```bash
+scripts/seed-demo.sh --profile full
+```
+
+The `core` profile creates catalog, inventory, order, and legacy load volume. The
+default `full` profile additionally executes real V1 commands to leave useful rows
+in pick waves, packing, shipping, outbound loads, putaway, cycle counts, inventory
+holds, replenishment, and the integration monitor. Both profiles are replay-safe.
+Use `--verify-only` in CI or before a visual test to fail when a promised workspace
+has no data. Counts can be adjusted without editing SQL:
+
+```bash
+scripts/seed-demo.sh --inventory-count 1000 --order-count 250 --load-count 250
+```
+
+Set `SEED_USER_EMAIL` when the target database has more than one administrator.
+`DATABASE_URL` and `MIGRATION_DATABASE_URL` select a non-default database.
+
 ## Deployment
 
 The deployment workflow verifies `deploy/runtime-version` before it builds or
