@@ -27,6 +27,7 @@ mod outbound_loads;
 mod packing;
 mod pick_waves;
 mod preferences;
+mod purchase_orders;
 mod putaway;
 mod replenishment;
 mod shipping;

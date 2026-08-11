@@ -4,20 +4,92 @@ use axum::http::{Method, StatusCode};
 use serde_json::json;
 use wareboxes_api::repo;
 use wareboxes_api_contract::v1::{
-    ConfigureReplenishmentPolicyResponse, CreateCycleCountTaskResponse, CreatePutawayTaskResponse,
-    IntegrationOrderIntakeResponse, IntegrationOrderOwnerMappingResponse, PickWaveResponse,
-    PlaceInventoryHoldResponse, PlanOrderAllocationResponse, PlanReplenishmentResponse,
+    ConfigureReplenishmentPolicyResponse, CreateCycleCountTaskResponse,
+    CreatePurchaseOrderResponse, CreatePutawayTaskResponse, IntegrationOrderIntakeResponse,
+    IntegrationOrderOwnerMappingResponse, PickWaveResponse, PlaceInventoryHoldResponse,
+    PlanOrderAllocationResponse, PlanReplenishmentResponse, ReleasePurchaseOrderResponse,
 };
 
 use crate::support::SeedContext;
 
 pub async fn seed(context: &SeedContext) -> anyhow::Result<()> {
+    seed_purchase_orders(context).await?;
     seed_inventory_hold(context).await?;
     seed_cycle_count(context).await?;
     seed_putaway(context).await?;
     seed_replenishment(context).await?;
     seed_pick_wave(context).await?;
     seed_integration_monitor(context).await?;
+    Ok(())
+}
+
+async fn seed_purchase_orders(context: &SeedContext) -> anyhow::Result<()> {
+    let states: (bool, bool) = sqlx::query_as(
+        r#"
+        SELECT EXISTS(SELECT 1 FROM purchase_orders WHERE tenant_id=$1 AND status='draft'),
+               EXISTS(SELECT 1 FROM purchase_orders WHERE tenant_id=$1 AND status='released')
+        "#,
+    )
+    .bind(context.tenant_id.get())
+    .fetch_one(&context.admin)
+    .await?;
+    if states == (true, true) {
+        return Ok(());
+    }
+    let item_ids = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT owner_item.item_id
+        FROM inventory_owner_items owner_item
+        INNER JOIN items item
+          ON item.tenant_id=owner_item.tenant_id AND item.id=owner_item.item_id
+        WHERE owner_item.tenant_id=$1 AND owner_item.inventory_owner_id=$2
+          AND owner_item.deleted IS NULL AND item.deleted IS NULL
+        ORDER BY owner_item.item_id
+        LIMIT 2
+        "#,
+    )
+    .bind(context.tenant_id.get())
+    .bind(context.inventory_owner_id)
+    .fetch_all(&context.admin)
+    .await?;
+    if item_ids.len() < 2 {
+        bail!("purchase-order demo requires two client-eligible catalog items");
+    }
+    for sequence in 1_i64..=6 {
+        let number = format!("WB-DEMO-PO-{sequence:04}");
+        let created: CreatePurchaseOrderResponse = context
+            .command(
+                Method::POST,
+                "/api/v1/purchase-orders",
+                &format!("demo-purchase-order-{sequence}"),
+                json!({
+                    "inventory_owner_id": context.inventory_owner_id,
+                    "facility_id": context.facility_id,
+                    "number": number,
+                    "supplier": if sequence % 2 == 0 { "Northstar Foods" } else { "Cascade Supply Co." },
+                    "expected_by": format!("2027-08-{:02}T17:00:00Z", 10 + sequence),
+                    "lines": [
+                        {"item_id": item_ids[0], "ordered_quantity": 8 + sequence},
+                        {"item_id": item_ids[1], "ordered_quantity": 12 + sequence}
+                    ]
+                }),
+            )
+            .await?;
+        if sequence <= 3 {
+            let _: ReleasePurchaseOrderResponse = context
+                .command(
+                    Method::POST,
+                    &format!(
+                        "/api/v1/purchase-orders/{}/releases",
+                        created.purchase_order_id
+                    ),
+                    &format!("demo-purchase-order-release-{sequence}"),
+                    json!({"expected_revision": created.revision}),
+                )
+                .await?;
+        }
+    }
+    println!("seeded draft and released purchase orders");
     Ok(())
 }
 

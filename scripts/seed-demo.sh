@@ -134,6 +134,12 @@ BEGIN
          WHERE mapping.tenant_id=asn.tenant_id AND mapping.asn_id=asn.id)
       )
   ) THEN missing := array_append(missing, 'exact ASN load mappings'); END IF;
+  IF NOT EXISTS (SELECT 1 FROM purchase_orders WHERE status='draft') THEN
+    missing := array_append(missing, 'draft purchase orders');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM purchase_orders WHERE status='released') THEN
+    missing := array_append(missing, 'released purchase orders');
+  END IF;
   IF cardinality(missing) > 0 THEN
     RAISE EXCEPTION 'core demo coverage is incomplete: %', array_to_string(missing, ', ');
   END IF;
@@ -209,6 +215,7 @@ report_coverage() {
       ('Orders', (SELECT COUNT(*) FROM orders WHERE deleted IS NULL)),
       ('Legacy loads', (SELECT COUNT(*) FROM loads WHERE deleted IS NULL)),
       ('Advance shipping notices', (SELECT COUNT(*) FROM inbound_asns)),
+      ('Purchase orders', (SELECT COUNT(*) FROM purchase_orders)),
       ('Pick waves', (SELECT COUNT(*) FROM pick_waves)),
       ('Packing sessions', (SELECT COUNT(*) FROM packing_sessions)),
       ('Shipments', (SELECT COUNT(*) FROM shipments)),

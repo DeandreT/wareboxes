@@ -36,6 +36,7 @@ mod outbound_qa;
 mod packing;
 mod pick_wave;
 mod picking;
+mod purchase_order;
 mod putaway;
 mod putaway_claim;
 mod replenishment;
@@ -280,6 +281,12 @@ pub use picking::{
     ReleasePickClaimRequest, ReportPickShortageOutcome, ReportPickShortageRequest,
     ReportPickShortageResponse, ReversePickConfirmationRequest, ReversePickConfirmationResponse,
     ShortShipDemandResponse,
+};
+pub use purchase_order::{
+    CreatePurchaseOrderLineRequest, CreatePurchaseOrderRequest, CreatePurchaseOrderResponse,
+    CreatedPurchaseOrderLineResponse, PurchaseOrderDetailResponse, PurchaseOrderLineResponse,
+    PurchaseOrderPage, PurchaseOrderPageRequest, PurchaseOrderStatus, PurchaseOrderSummaryResponse,
+    ReleasePurchaseOrderRequest, ReleasePurchaseOrderResponse,
 };
 pub use putaway::{
     ConfirmPutawayRequest, CreatePutawayTaskRequest, CreatePutawayTaskResponse,

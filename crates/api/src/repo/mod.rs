@@ -43,6 +43,7 @@ pub mod outbound_qa;
 pub mod packing;
 pub mod pick_wave;
 pub mod picking;
+pub mod purchase_order;
 pub mod replenishment;
 pub mod shipping;
 pub mod storage_zone;

@@ -368,6 +368,15 @@ async fn command_records_require_a_transaction_local_tenant_context() {
             "inbound_asn_load_plan_lines",
             "inbound_asn_load_plan_lines_tenant_isolation",
         ),
+        ("purchase_orders", "purchase_orders_tenant_isolation"),
+        (
+            "purchase_order_lines",
+            "purchase_order_lines_tenant_isolation",
+        ),
+        (
+            "purchase_order_releases",
+            "purchase_order_releases_tenant_isolation",
+        ),
         ("facilities", "facilities_tenant_isolation"),
         (
             "facility_shipping_origin_configurations",

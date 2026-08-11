@@ -33,6 +33,7 @@ pub(crate) mod packing;
 mod pick_shortages;
 pub(crate) mod pick_waves;
 mod picking;
+mod purchase_orders;
 pub(crate) mod putaway;
 mod putaway_claim_lifecycle;
 mod putaway_claims;
@@ -55,6 +56,15 @@ pub fn router() -> Router<AppState> {
         .route(
             "/inbound-asns/{asn_id}/load-plans",
             post(inbound_asns::plan_load),
+        )
+        .route(
+            "/purchase-orders",
+            get(purchase_orders::list).post(purchase_orders::create),
+        )
+        .route("/purchase-orders/{purchase_order_id}", get(purchase_orders::get))
+        .route(
+            "/purchase-orders/{purchase_order_id}/releases",
+            post(purchase_orders::release),
         )
         .route("/inbound-loads", post(inbound_loads::plan))
         .route(

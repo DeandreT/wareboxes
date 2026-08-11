@@ -37108,3 +37108,361 @@ REVOKE ALL ON FUNCTION public.validate_inbound_asn_load_plan_line() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_inbound_asn_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_inbound_asn_ledger_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_inbound_asn_load_plan_consistency() FROM PUBLIC;
+
+-- Purchase orders are immutable upstream demand documents. A typed release
+-- transition makes their exact line set eligible for downstream ASN planning.
+CREATE TABLE public.purchase_orders (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    number text NOT NULL,
+    supplier text NOT NULL,
+    expected_by timestamp with time zone,
+    status text NOT NULL DEFAULT 'draft',
+    revision bigint NOT NULL DEFAULT 1,
+    line_count bigint NOT NULL,
+    total_ordered_quantity bigint NOT NULL,
+    created_by_user_id bigint NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    released_by_user_id bigint,
+    released_at timestamp with time zone,
+    CONSTRAINT purchase_orders_number_check CHECK (
+        number=btrim(number) AND char_length(number) BETWEEN 1 AND 120
+        AND number !~ '[[:cntrl:]]'),
+    CONSTRAINT purchase_orders_supplier_check CHECK (
+        supplier=btrim(supplier) AND char_length(supplier) BETWEEN 1 AND 200
+        AND supplier !~ '[[:cntrl:]]'),
+    CONSTRAINT purchase_orders_status_check CHECK (status IN ('draft','released')),
+    CONSTRAINT purchase_orders_revision_check CHECK (revision > 0),
+    CONSTRAINT purchase_orders_quantity_check CHECK (
+        line_count > 0 AND total_ordered_quantity > 0),
+    CONSTRAINT purchase_orders_state_check CHECK (
+        (status='draft' AND revision=1
+         AND released_by_user_id IS NULL AND released_at IS NULL)
+        OR
+        (status='released' AND revision=2
+         AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL)),
+    CONSTRAINT purchase_orders_owner_number_unique
+        UNIQUE (tenant_id,inventory_owner_id,number),
+    CONSTRAINT purchase_orders_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT purchase_orders_owner_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id,id),
+    CONSTRAINT purchase_orders_facility_fkey
+        FOREIGN KEY (tenant_id,facility_id)
+        REFERENCES public.facilities(tenant_id,id),
+    CONSTRAINT purchase_orders_created_by_fkey
+        FOREIGN KEY (created_by_user_id) REFERENCES public.users(id),
+    CONSTRAINT purchase_orders_released_by_fkey
+        FOREIGN KEY (released_by_user_id) REFERENCES public.users(id)
+);
+
+CREATE TABLE public.purchase_order_lines (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    purchase_order_id bigint NOT NULL,
+    sequence bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    ordered_quantity bigint NOT NULL,
+    CONSTRAINT purchase_order_lines_sequence_check CHECK (sequence > 0),
+    CONSTRAINT purchase_order_lines_quantity_check CHECK (ordered_quantity > 0),
+    CONSTRAINT purchase_order_lines_uom_check CHECK (
+        uom=btrim(uom) AND char_length(uom) BETWEEN 1 AND 64),
+    CONSTRAINT purchase_order_lines_sequence_unique
+        UNIQUE (tenant_id,purchase_order_id,sequence),
+    CONSTRAINT purchase_order_lines_item_unique
+        UNIQUE (tenant_id,purchase_order_id,item_id),
+    CONSTRAINT purchase_order_lines_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,facility_id,purchase_order_id,id),
+    CONSTRAINT purchase_order_lines_order_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,purchase_order_id)
+        REFERENCES public.purchase_orders(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT purchase_order_lines_item_fkey
+        FOREIGN KEY (tenant_id,item_id) REFERENCES public.items(tenant_id,id)
+);
+
+CREATE TABLE public.purchase_order_releases (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    purchase_order_id bigint NOT NULL,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    released_by_user_id bigint NOT NULL,
+    released_at timestamp with time zone NOT NULL,
+    CONSTRAINT purchase_order_releases_revision_check CHECK (
+        expected_revision=1 AND resulting_revision=2),
+    CONSTRAINT purchase_order_releases_order_unique
+        UNIQUE (tenant_id,purchase_order_id),
+    CONSTRAINT purchase_order_releases_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,facility_id,purchase_order_id,id),
+    CONSTRAINT purchase_order_releases_order_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,purchase_order_id)
+        REFERENCES public.purchase_orders(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT purchase_order_releases_actor_fkey
+        FOREIGN KEY (released_by_user_id) REFERENCES public.users(id)
+);
+
+CREATE INDEX purchase_orders_queue_idx
+ON public.purchase_orders(tenant_id,status,created_at DESC,id DESC);
+CREATE INDEX purchase_orders_scope_queue_idx
+ON public.purchase_orders(
+    tenant_id,facility_id,inventory_owner_id,status,created_at DESC,id DESC);
+CREATE INDEX purchase_order_lines_order_idx
+ON public.purchase_order_lines(tenant_id,purchase_order_id,sequence,id);
+
+CREATE FUNCTION public.validate_purchase_order() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.status <> 'draft' OR NEW.revision <> 1
+       OR NEW.released_by_user_id IS NOT NULL OR NEW.released_at IS NOT NULL
+       OR NEW.created_at > clock_timestamp()
+       OR NOT EXISTS (
+           SELECT 1 FROM public.inventory_owners owner
+           WHERE owner.tenant_id=NEW.tenant_id AND owner.id=NEW.inventory_owner_id
+             AND owner.deleted IS NULL)
+       OR NOT EXISTS (
+           SELECT 1 FROM public.facilities facility
+           WHERE facility.tenant_id=NEW.tenant_id AND facility.id=NEW.facility_id
+             AND facility.deleted IS NULL) THEN
+        RAISE EXCEPTION 'purchase order is not a draft scoped source document'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.validate_purchase_order_line() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    order_status text;
+    item_uom text;
+BEGIN
+    SELECT status INTO order_status
+    FROM public.purchase_orders
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.facility_id
+      AND id=NEW.purchase_order_id
+    FOR SHARE;
+    SELECT item.packaging_unit INTO item_uom
+    FROM public.inventory_owner_items owner_item
+    INNER JOIN public.items item
+      ON item.tenant_id=owner_item.tenant_id AND item.id=owner_item.item_id
+    WHERE owner_item.tenant_id=NEW.tenant_id
+      AND owner_item.inventory_owner_id=NEW.inventory_owner_id
+      AND owner_item.item_id=NEW.item_id
+      AND owner_item.deleted IS NULL AND item.deleted IS NULL;
+    IF order_status IS DISTINCT FROM 'draft'
+       OR item_uom IS NULL OR item_uom IS DISTINCT FROM NEW.uom THEN
+        RAISE EXCEPTION 'purchase order line is not valid for the source document'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.require_purchase_order_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    target_tenant_id bigint;
+    target_order_id bigint;
+    order_row record;
+    actual_count bigint;
+    actual_total bigint;
+BEGIN
+    target_tenant_id := NEW.tenant_id;
+    IF TG_TABLE_NAME='purchase_orders' THEN
+        target_order_id := NEW.id;
+    ELSE
+        target_order_id := NEW.purchase_order_id;
+    END IF;
+    SELECT line_count,total_ordered_quantity INTO order_row
+    FROM public.purchase_orders
+    WHERE tenant_id=target_tenant_id AND id=target_order_id;
+    SELECT COUNT(*),COALESCE(SUM(ordered_quantity),0)
+    INTO actual_count,actual_total
+    FROM public.purchase_order_lines
+    WHERE tenant_id=target_tenant_id AND purchase_order_id=target_order_id;
+    IF order_row IS NULL OR actual_count <> order_row.line_count
+       OR actual_total <> order_row.total_ordered_quantity THEN
+        RAISE EXCEPTION 'purchase order lines do not reconcile to the source header'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.validate_purchase_order_release() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    order_row record;
+BEGIN
+    SELECT status,revision INTO order_row
+    FROM public.purchase_orders
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.facility_id
+      AND id=NEW.purchase_order_id
+    FOR UPDATE;
+    IF order_row IS NULL OR order_row.status <> 'draft'
+       OR order_row.revision <> NEW.expected_revision
+       OR NEW.resulting_revision <> NEW.expected_revision + 1
+       OR NEW.released_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'purchase order release does not match the current draft'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.guard_purchase_order_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        RAISE EXCEPTION 'purchase orders cannot be deleted' USING ERRCODE='55000';
+    END IF;
+    IF OLD.tenant_id IS DISTINCT FROM NEW.tenant_id
+       OR OLD.inventory_owner_id IS DISTINCT FROM NEW.inventory_owner_id
+       OR OLD.facility_id IS DISTINCT FROM NEW.facility_id
+       OR OLD.number IS DISTINCT FROM NEW.number
+       OR OLD.supplier IS DISTINCT FROM NEW.supplier
+       OR OLD.expected_by IS DISTINCT FROM NEW.expected_by
+       OR OLD.line_count IS DISTINCT FROM NEW.line_count
+       OR OLD.total_ordered_quantity IS DISTINCT FROM NEW.total_ordered_quantity
+       OR OLD.created_by_user_id IS DISTINCT FROM NEW.created_by_user_id
+       OR OLD.created_at IS DISTINCT FROM NEW.created_at
+       OR OLD.status <> 'draft' OR NEW.status <> 'released'
+       OR OLD.revision <> 1 OR NEW.revision <> 2
+       OR NEW.released_by_user_id IS NULL OR NEW.released_at IS NULL
+       OR NOT EXISTS (
+           SELECT 1 FROM public.purchase_order_releases evidence
+           WHERE evidence.tenant_id=NEW.tenant_id
+             AND evidence.purchase_order_id=NEW.id
+             AND evidence.expected_revision=OLD.revision
+             AND evidence.resulting_revision=NEW.revision
+             AND evidence.released_by_user_id=NEW.released_by_user_id
+             AND evidence.released_at=NEW.released_at) THEN
+        RAISE EXCEPTION 'purchase order facts are immutable outside typed release'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.reject_purchase_order_ledger_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'purchase order evidence is immutable' USING ERRCODE='55000';
+END
+$$;
+
+CREATE FUNCTION public.require_purchase_order_release_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    target_tenant_id bigint;
+    target_order_id bigint;
+    order_row record;
+    release_row record;
+BEGIN
+    target_tenant_id := NEW.tenant_id;
+    IF TG_TABLE_NAME='purchase_orders' THEN
+        target_order_id := NEW.id;
+    ELSE
+        target_order_id := NEW.purchase_order_id;
+    END IF;
+    SELECT status,revision,released_by_user_id,released_at INTO order_row
+    FROM public.purchase_orders
+    WHERE tenant_id=target_tenant_id AND id=target_order_id;
+    SELECT * INTO release_row
+    FROM public.purchase_order_releases
+    WHERE tenant_id=target_tenant_id AND purchase_order_id=target_order_id;
+    IF release_row IS NULL THEN
+        RETURN NULL;
+    END IF;
+    IF order_row IS NULL OR order_row.status <> 'released'
+       OR order_row.revision <> release_row.resulting_revision
+       OR order_row.released_by_user_id <> release_row.released_by_user_id
+       OR order_row.released_at <> release_row.released_at THEN
+        RAISE EXCEPTION 'purchase order release evidence does not reconcile'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE TRIGGER purchase_orders_validate
+BEFORE INSERT ON public.purchase_orders
+FOR EACH ROW EXECUTE FUNCTION public.validate_purchase_order();
+CREATE TRIGGER purchase_orders_guard_mutation
+BEFORE UPDATE OR DELETE ON public.purchase_orders
+FOR EACH ROW EXECUTE FUNCTION public.guard_purchase_order_mutation();
+CREATE TRIGGER purchase_order_lines_validate
+BEFORE INSERT ON public.purchase_order_lines
+FOR EACH ROW EXECUTE FUNCTION public.validate_purchase_order_line();
+CREATE TRIGGER purchase_order_lines_are_immutable
+BEFORE UPDATE OR DELETE ON public.purchase_order_lines
+FOR EACH ROW EXECUTE FUNCTION public.reject_purchase_order_ledger_mutation();
+CREATE TRIGGER purchase_order_releases_validate
+BEFORE INSERT ON public.purchase_order_releases
+FOR EACH ROW EXECUTE FUNCTION public.validate_purchase_order_release();
+CREATE TRIGGER purchase_order_releases_are_immutable
+BEFORE UPDATE OR DELETE ON public.purchase_order_releases
+FOR EACH ROW EXECUTE FUNCTION public.reject_purchase_order_ledger_mutation();
+
+CREATE CONSTRAINT TRIGGER purchase_orders_require_consistency
+AFTER INSERT ON public.purchase_orders
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_purchase_order_consistency();
+CREATE CONSTRAINT TRIGGER purchase_order_lines_require_consistency
+AFTER INSERT ON public.purchase_order_lines
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_purchase_order_consistency();
+CREATE CONSTRAINT TRIGGER purchase_orders_require_release_consistency
+AFTER UPDATE ON public.purchase_orders
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_purchase_order_release_consistency();
+CREATE CONSTRAINT TRIGGER purchase_order_releases_require_consistency
+AFTER INSERT ON public.purchase_order_releases
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_purchase_order_release_consistency();
+
+ALTER TABLE public.purchase_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.purchase_orders FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.purchase_order_lines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.purchase_order_lines FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.purchase_order_releases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.purchase_order_releases FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY purchase_orders_tenant_isolation ON public.purchase_orders
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY purchase_order_lines_tenant_isolation ON public.purchase_order_lines
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY purchase_order_releases_tenant_isolation ON public.purchase_order_releases
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.purchase_orders TO wareboxes_app;
+GRANT UPDATE(status,revision,released_by_user_id,released_at)
+ON public.purchase_orders TO wareboxes_app;
+GRANT SELECT,INSERT ON public.purchase_order_lines TO wareboxes_app;
+GRANT SELECT,INSERT ON public.purchase_order_releases TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.purchase_orders_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.purchase_order_lines_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.purchase_order_releases_id_seq TO wareboxes_app;
+
+REVOKE ALL ON FUNCTION public.validate_purchase_order() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_purchase_order_line() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_purchase_order_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_purchase_order_release() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_purchase_order_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_purchase_order_ledger_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_purchase_order_release_consistency() FROM PUBLIC;

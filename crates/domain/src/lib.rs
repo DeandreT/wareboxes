@@ -23,6 +23,7 @@ mod outbound_qa;
 mod packing;
 mod pick_wave;
 mod picking;
+mod purchase_order;
 mod replenishment;
 mod shipping;
 mod storage_zone;
@@ -186,6 +187,11 @@ pub use picking::{
     PickShortageStatus, PickingError, ShortShipDemandQuantities, MAX_PICK_REVERSAL_NOTE_LENGTH,
     MAX_PICK_SCAN_VALUE_LENGTH, MAX_PICK_SHORTAGE_NOTE_LENGTH, MAX_PICK_SHORT_SHIP_NOTE_LENGTH,
 };
+pub use purchase_order::{
+    release_purchase_order, NewPurchaseOrder, PurchaseOrderError, PurchaseOrderLineDefinition,
+    PurchaseOrderNumber, PurchaseOrderQuantity, PurchaseOrderRevision, PurchaseOrderStatus,
+    PurchaseOrderSupplier, MAX_PURCHASE_ORDER_NUMBER_LENGTH, MAX_PURCHASE_ORDER_SUPPLIER_LENGTH,
+};
 pub use replenishment::{
     assess_replenishment_source, plan_replenishment, select_replenishment_sources,
     validate_unique_active_replenishment_policy_scopes, EligibleReplenishmentSource,
@@ -334,6 +340,9 @@ positive_id!(StorageZoneId, "storage zone ID");
 positive_id!(InboundAsnId, "inbound ASN ID");
 positive_id!(InboundAsnLineId, "inbound ASN line ID");
 positive_id!(InboundAsnLoadPlanId, "inbound ASN load plan ID");
+positive_id!(PurchaseOrderId, "purchase order ID");
+positive_id!(PurchaseOrderLineId, "purchase order line ID");
+positive_id!(PurchaseOrderReleaseId, "purchase order release ID");
 positive_id!(
     InboundInspectionDispositionId,
     "inbound inspection disposition ID"
