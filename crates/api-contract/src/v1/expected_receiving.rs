@@ -48,6 +48,7 @@ pub struct ExpectedReceivingSessionResponse {
     pub facility_id: i64,
     pub reference_number: Option<String>,
     pub status: ExpectedReceivingLoadStatus,
+    pub expected_seal: Option<String>,
     pub receiving_location: ExpectedReceivingLocation,
     pub lines: Vec<ExpectedReceiptLine>,
 }
@@ -226,6 +227,7 @@ mod tests {
             facility_id: 33,
             reference_number: Some("ASN-1001".into()),
             status: ExpectedReceivingLoadStatus::Receiving,
+            expected_seal: Some("SEAL-1001".into()),
             receiving_location: ExpectedReceivingLocation {
                 location_id: 44,
                 barcode: "DOCK-04".into(),
@@ -262,6 +264,7 @@ mod tests {
                 "facility_id": 33,
                 "reference_number": "ASN-1001",
                 "status": "receiving",
+                "expected_seal": "SEAL-1001",
                 "receiving_location": {
                     "location_id": 44,
                     "barcode": "DOCK-04",

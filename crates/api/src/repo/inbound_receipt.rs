@@ -750,9 +750,9 @@ async fn execute_expected_receipt(
     }
     let load_status = LoadStatus::parse(&load_row.try_get::<String, _>("load_status")?)
         .ok_or_else(|| AppError::internal("invalid load status in database"))?;
-    if !matches!(load_status, LoadStatus::Arrived | LoadStatus::Receiving) {
+    if load_status != LoadStatus::Receiving {
         return Err(AppError::conflict(
-            "load must be arrived before receiving can begin",
+            "inbound unloading must be started before receiving inventory",
         ));
     }
 

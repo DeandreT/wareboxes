@@ -27,6 +27,7 @@ pub(super) const fn name(kind: ResponseKind) -> &'static str {
         ResponseKind::ReplenishmentConfirmation => "replenishment_confirmation",
         ResponseKind::ReplenishmentRelease => "replenishment_release",
         ResponseKind::OutboundCartonMovement => "outbound_carton_movement",
+        ResponseKind::InboundUnloadingStart => "inbound_unloading_start",
         ResponseKind::ExpectedReceiptConfirmation => "expected_receipt_confirmation",
         ResponseKind::UnexpectedReceiptConfirmation => "unexpected_receipt_confirmation",
     }
@@ -57,6 +58,7 @@ pub(super) fn parse(value: &str) -> Result<ResponseKind, CommandStoreError> {
         "replenishment_confirmation" => Ok(ResponseKind::ReplenishmentConfirmation),
         "replenishment_release" => Ok(ResponseKind::ReplenishmentRelease),
         "outbound_carton_movement" => Ok(ResponseKind::OutboundCartonMovement),
+        "inbound_unloading_start" => Ok(ResponseKind::InboundUnloadingStart),
         "expected_receipt_confirmation" => Ok(ResponseKind::ExpectedReceiptConfirmation),
         "unexpected_receipt_confirmation" => Ok(ResponseKind::UnexpectedReceiptConfirmation),
         _ => Err(CommandStoreError::CorruptRecord(

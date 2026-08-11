@@ -787,7 +787,7 @@ async fn expected_receipt_confirmations_are_scanned_scoped_replay_safe_and_concu
         inventory_owner_id,
         Some(item_id),
         Some(dock_id),
-        LoadStatus::Arrived,
+        LoadStatus::Receiving,
         "ASN-WRITE-01",
     )
     .await;
@@ -834,7 +834,7 @@ async fn expected_receipt_confirmations_are_scanned_scoped_replay_safe_and_concu
         denied_owner_id,
         Some(item_id),
         Some(dock_id),
-        LoadStatus::Arrived,
+        LoadStatus::Receiving,
         "ASN-WRITE-DENIED",
     )
     .await;

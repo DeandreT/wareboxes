@@ -12,7 +12,7 @@ use crate::expected_receiving::{
 use crate::expected_receiving::{
     ExpectedReceiptLineInput, FacilityId, InventoryOwnerId, ItemBarcode, ItemId, LoadId,
     LoadResolutionFailure, LocationId, NonNegativeQuantity, ReceivingDock, ReceivingEffect,
-    ReceivingSession, ReceivingSessionInput, StockDimension,
+    ReceivingSession, ReceivingSessionInput, SealBarcode, StockDimension,
 };
 use crate::workflow::MovementKind;
 
@@ -232,6 +232,14 @@ impl RfApp {
     }
 
     fn receiving_active(&mut self, ui: &mut egui::Ui) {
+        if self
+            .receiving
+            .session()
+            .is_some_and(|session| session.status() == ReceivingLoadStatus::Arrived)
+        {
+            self.receiving_unloading(ui);
+            return;
+        }
         self.receiving_session_summary(ui);
         self.receiving_disposition(ui);
 
@@ -283,7 +291,58 @@ impl RfApp {
                 self.receiving_completion_panel(ui);
             }
             FocusTarget::Scanner(ScannerTarget::LoadBarcode | ScannerTarget::ItemBarcode)
+            | FocusTarget::Scanner(ScannerTarget::SealBarcode)
             | FocusTarget::Blocked(_) => {}
+        }
+        self.receiving_operator_error(ui);
+    }
+
+    fn receiving_unloading(&mut self, ui: &mut egui::Ui) {
+        self.receiving_session_summary(ui);
+        Self::state_band(
+            ui,
+            Self::warning(),
+            Icon::PackageOpen,
+            "Verify unloading",
+            "Scan the assigned dock and planned seal before receiving inventory.",
+        );
+        ui.add_space(8.0);
+        match self.receiving.focus_target() {
+            FocusTarget::Scanner(ScannerTarget::DockBarcode) => {
+                self.receiving_scan_control(ui, ScannerTarget::DockBarcode);
+            }
+            FocusTarget::Scanner(ScannerTarget::SealBarcode) => {
+                self.receiving_scan_control(ui, ScannerTarget::SealBarcode);
+            }
+            FocusTarget::ConfirmAction => {
+                let guard = self
+                    .receiving
+                    .unloading_start_guard(self.receiving_command_access());
+                ui.label(action_guard_message(guard));
+                let enabled = guard == ActionGuard::Allowed;
+                if ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(egui::RichText::new("Start unloading").strong())
+                            .min_size(egui::vec2(ui.available_width(), 56.0))
+                            .fill(Self::accent()),
+                    )
+                    .clicked()
+                {
+                    let access = self.receiving_command_access();
+                    let transition = self.receiving.begin_unloading_start(access);
+                    self.emit_receiving_transition(transition);
+                }
+            }
+            FocusTarget::Scanner(
+                ScannerTarget::LoadBarcode
+                | ScannerTarget::ItemBarcode
+                | ScannerTarget::LicensePlateBarcode,
+            )
+            | FocusTarget::Blocked(_)
+            | FocusTarget::Quantity
+            | FocusTarget::ExceptionReason
+            | FocusTarget::ExceptionNote => {}
         }
         self.receiving_operator_error(ui);
     }
@@ -337,6 +396,11 @@ impl RfApp {
                 .receiving
                 .session()
                 .map(|session| session.dock().barcode().as_str().to_owned()),
+            ScannerTarget::SealBarcode => self
+                .receiving
+                .session()
+                .and_then(|session| session.expected_seal())
+                .map(|seal| seal.as_str().to_owned()),
             ScannerTarget::LoadBarcode
             | ScannerTarget::ItemBarcode
             | ScannerTarget::LicensePlateBarcode => None,
@@ -491,7 +555,13 @@ impl RfApp {
 
     fn receiving_confirmation_pending(&mut self, ui: &mut egui::Ui) {
         self.receiving_session_summary(ui);
-        self.receiving_saved_draft(ui);
+        let unloading = self
+            .receiving
+            .session()
+            .is_some_and(|session| session.status() == ReceivingLoadStatus::Arrived);
+        if !unloading {
+            self.receiving_saved_draft(ui);
+        }
         let phase = self
             .receiving_command
             .as_ref()
@@ -505,15 +575,31 @@ impl RfApp {
                 ui,
                 Self::warning(),
                 Icon::Save,
-                "Receipt saved",
-                "Queued for the warehouse service. Do not scan this inventory again.",
+                if unloading {
+                    "Unloading scan saved"
+                } else {
+                    "Receipt saved"
+                },
+                if unloading {
+                    "Queued for the warehouse service. Do not start receiving yet."
+                } else {
+                    "Queued for the warehouse service. Do not scan this inventory again."
+                },
             ),
             ReceivingCommandPhase::InFlight => Self::state_band(
                 ui,
                 Self::warning(),
                 Icon::Send,
-                "Sending receipt",
-                "Waiting for the warehouse service. Do not scan this inventory again.",
+                if unloading {
+                    "Starting unloading"
+                } else {
+                    "Sending receipt"
+                },
+                if unloading {
+                    "Waiting for the warehouse service. Do not start receiving yet."
+                } else {
+                    "Waiting for the warehouse service. Do not scan this inventory again."
+                },
             ),
             ReceivingCommandPhase::Ambiguous => {
                 Self::state_band(
@@ -702,6 +788,7 @@ impl RfApp {
                 self.open_debug_relocation_preview(MovementKind::LicensePlate)
             }
             "receiving-active" => self.load_receiving_preview(ReceivingPreview::Active),
+            "receiving-unloading" => self.load_receiving_preview(ReceivingPreview::Unloading),
             "receiving-quarantine" => self.load_receiving_preview(ReceivingPreview::Quarantine),
             "receiving-unexpected" => self.load_receiving_preview(ReceivingPreview::Unexpected),
             "receiving-error" => self.load_receiving_preview(ReceivingPreview::Error),
@@ -738,15 +825,19 @@ impl RfApp {
                     .load_resolution_failed(resolution_id, LoadResolutionFailure::Retryable);
             }
             ReceivingPreview::Active
+            | ReceivingPreview::Unloading
             | ReceivingPreview::Quarantine
             | ReceivingPreview::Unexpected
             | ReceivingPreview::Recovery
             | ReceivingPreview::Reconcile => {
-                let Some(session) = debug_receiving_session() else {
+                let Some(session) = debug_receiving_session(preview == ReceivingPreview::Unloading)
+                else {
                     return;
                 };
                 self.receiving.load_resolved(resolution_id, session);
-                if preview == ReceivingPreview::Unexpected {
+                if preview == ReceivingPreview::Unloading {
+                    self.receiving_ui.scan_draft = "DOCK-04".into();
+                } else if preview == ReceivingPreview::Unexpected {
                     self.receiving.select_mode(ConfirmationMode::Unexpected);
                     self.receiving.scan_item("UNEXPECTED-CASE-200");
                     self.receiving.scan_dock("DOCK-04");
@@ -797,6 +888,7 @@ impl RfApp {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReceivingPreview {
     Active,
+    Unloading,
     Quarantine,
     Unexpected,
     Error,
@@ -842,6 +934,7 @@ const fn scanner_prompt(target: ScannerTarget) -> &'static str {
         ScannerTarget::LoadBarcode => "Scan inbound load",
         ScannerTarget::ItemBarcode => "Scan expected item",
         ScannerTarget::DockBarcode => "Scan receiving dock",
+        ScannerTarget::SealBarcode => "Scan trailer seal",
         ScannerTarget::LicensePlateBarcode => "Scan license plate",
     }
 }
@@ -851,6 +944,7 @@ const fn scanner_hint(target: ScannerTarget) -> &'static str {
         ScannerTarget::LoadBarcode => "LOAD BARCODE",
         ScannerTarget::ItemBarcode => "ITEM BARCODE",
         ScannerTarget::DockBarcode => "DOCK BARCODE",
+        ScannerTarget::SealBarcode => "SEAL BARCODE",
         ScannerTarget::LicensePlateBarcode => "LICENSE PLATE",
     }
 }
@@ -871,6 +965,7 @@ const fn receiving_error_message(error: Option<&ReceivingOperatorError>) -> &'st
         Some(ReceivingOperatorError::WrongReceivingDock) => {
             "Wrong dock. Scan the assigned receiving dock."
         }
+        Some(ReceivingOperatorError::WrongSeal) => "Wrong seal. Scan the planned trailer seal.",
         Some(ReceivingOperatorError::InvalidQuantity) => "Enter a quantity greater than zero.",
         Some(ReceivingOperatorError::QuantityExceedsRemaining) => {
             "Quantity exceeds the expected amount remaining."
@@ -885,6 +980,9 @@ const fn receiving_error_message(error: Option<&ReceivingOperatorError>) -> &'st
         }
         Some(ReceivingOperatorError::ConfirmationRejected) => {
             "The receipt was not accepted. Review the line and try again."
+        }
+        Some(ReceivingOperatorError::UnloadingStartRejected) => {
+            "Unloading was not accepted. Refresh the load before continuing."
         }
     }
 }
@@ -912,6 +1010,7 @@ const fn action_block_message(reason: ActionBlockReason) -> &'static str {
         ActionBlockReason::NoSelectedLine => "Scan an item or select an open line.",
         ActionBlockReason::ItemScanRequired => "Scan the expected item.",
         ActionBlockReason::DockScanRequired => "Scan the assigned receiving dock.",
+        ActionBlockReason::SealScanRequired => "Scan the planned trailer seal.",
         ActionBlockReason::QuantityRequired => "Enter the quantity.",
         ActionBlockReason::LicensePlateScanRequired => "Scan the license plate.",
         ActionBlockReason::ExceptionReasonRequired => "Select an exception reason.",
@@ -949,7 +1048,7 @@ const fn reconciliation_message(reason: Option<ReconciliationReason>) -> &'stati
 }
 
 #[cfg(all(debug_assertions, not(target_os = "android")))]
-fn debug_receiving_session() -> Option<ReceivingSession> {
+fn debug_receiving_session(unloading: bool) -> Option<ReceivingSession> {
     let first = debug_line(
         501,
         1_100,
@@ -964,7 +1063,15 @@ fn debug_receiving_session() -> Option<ReceivingSession> {
         inventory_owner_id: InventoryOwnerId::try_from(12).ok()?,
         facility_id: FacilityId::try_from(4).ok()?,
         reference_number: Some("ASN-2027-00418".into()),
-        status: ReceivingLoadStatus::Receiving,
+        status: if unloading {
+            ReceivingLoadStatus::Arrived
+        } else {
+            ReceivingLoadStatus::Receiving
+        },
+        expected_seal: unloading
+            .then(|| SealBarcode::new("SEAL-2027"))
+            .transpose()
+            .ok()?,
         dock: ReceivingDock::new(
             LocationId::try_from(44).ok()?,
             crate::expected_receiving::DockBarcode::new("DOCK-04").ok()?,

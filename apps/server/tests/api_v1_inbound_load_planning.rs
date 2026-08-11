@@ -78,6 +78,26 @@ fn unloading_request(
         .unwrap()
 }
 
+fn receipt_request(
+    token: &str,
+    tenant_id: TenantId,
+    load_line_id: i64,
+    idempotency_key: &str,
+    body: &Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/api/v1/expected-receiving/lines/{load_line_id}/confirmations"
+        ))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .header(IDEMPOTENCY_KEY_HEADER, idempotency_key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
 fn entry_items_request(token: &str, tenant_id: TenantId, inventory_owner_id: i64) -> Request<Body> {
     Request::builder()
         .uri(format!(
@@ -450,6 +470,29 @@ async fn atomic_plan_replays_exactly_and_enters_expected_receiving() {
     );
     tx.rollback().await.unwrap();
 
+    let receipt_body = json!({
+        "disposition": "received",
+        "item_barcode": format!("ITEM-{item}"),
+        "receiving_location_barcode": "PLAN-DOCK",
+        "quantity": 1,
+        "license_plate_barcode": null,
+        "lot": "LOT-A",
+        "serial": null,
+        "expiration": "2028-08-12T00:00:00Z"
+    });
+    let premature_receipt = app
+        .clone()
+        .oneshot(receipt_request(
+            &token,
+            tenant_id,
+            result.lines[0].load_line_id,
+            "receipt-before-unloading",
+            &receipt_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(premature_receipt.status(), StatusCode::CONFLICT);
+
     let unloading_body = json!({
         "load_scan": arrival_body["load_scan"],
         "receiving_location_scan": "PLAN-DOCK",
@@ -524,6 +567,19 @@ async fn atomic_plan_replays_exactly_and_enters_expected_receiving() {
     .unwrap();
     tx.rollback().await.unwrap();
     assert_eq!(execution, (1, 1, 3, "receiving".to_owned()));
+
+    let receipt = app
+        .clone()
+        .oneshot(receipt_request(
+            &token,
+            tenant_id,
+            result.lines[0].load_line_id,
+            "receipt-after-unloading",
+            &receipt_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(receipt.status(), StatusCode::OK);
 
     let session = app
         .oneshot(session_request(&token, tenant_id, result.load_id))

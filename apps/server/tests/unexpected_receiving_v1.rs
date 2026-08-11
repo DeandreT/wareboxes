@@ -209,7 +209,7 @@ async fn setup(fixture: &Fixture, email: &str) -> Setup {
     .await
     .unwrap();
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
-    sqlx::query("UPDATE loads SET status='arrived' WHERE tenant_id=$1 AND id=$2")
+    sqlx::query("UPDATE loads SET status='receiving' WHERE tenant_id=$1 AND id=$2")
         .bind(tenant_id.get())
         .bind(load_id)
         .execute(&mut *tx)
@@ -275,7 +275,7 @@ async fn unexpected_receipt_is_quarantined_held_audited_and_replay_safe() {
     assert_eq!(result.uom, "case");
     assert_eq!(result.reason, UnexpectedReceiptReason::UnexpectedItem);
     assert_eq!(result.inventory_status, InventoryBalanceStatus::Quarantine);
-    assert_eq!(result.load_status, ExpectedReceivingLoadStatus::Arrived);
+    assert_eq!(result.load_status, ExpectedReceivingLoadStatus::Receiving);
 
     let mut tx = tenant_tx(&fixture.db, setup.tenant_id).await;
     let line: (i64, i64, i64, String) = sqlx::query_as(

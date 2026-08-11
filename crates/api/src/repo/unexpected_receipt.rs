@@ -238,13 +238,10 @@ pub async fn confirm_unexpected_receipt(
     let load_status = LoadStatus::parse(&load.try_get::<String, _>("status")?)
         .ok_or_else(|| AppError::internal("invalid load status in database"))?;
     if load_type != LoadType::Inbound
-        || !matches!(
-            load_status,
-            LoadStatus::Arrived | LoadStatus::Receiving | LoadStatus::Received
-        )
+        || !matches!(load_status, LoadStatus::Receiving | LoadStatus::Received)
     {
         return Err(AppError::conflict(
-            "unexpected inventory can only be received against an active inbound load",
+            "inbound unloading must be started before recording unexpected inventory",
         ));
     }
 

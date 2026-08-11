@@ -7,6 +7,7 @@ mod command;
 mod recovery;
 mod reducer;
 mod unexpected;
+mod unloading;
 mod validation;
 
 use std::collections::HashSet;
@@ -25,6 +26,7 @@ pub use unexpected::{
     ReceivingCommandIntent, ReceivingCommandResult, UnexpectedReceiptCommand,
     UnexpectedReceiptIntent, UnexpectedReceiptRecoverySnapshot, UnexpectedReceiptResult,
 };
+pub use unloading::{UnloadingStartCommand, UnloadingStartIntent, UnloadingStartResult};
 pub use validation::ReceivingValidationError;
 
 pub const CONFIRMATION_INTENT_SCHEMA_VERSION: u16 = 2;
@@ -175,6 +177,7 @@ macro_rules! scanned_code {
 
 scanned_code!(ItemBarcode);
 scanned_code!(DockBarcode);
+scanned_code!(SealBarcode);
 scanned_code!(LicensePlateBarcode);
 
 /// Canonical server-side execution code scanned from an inbound load label.
@@ -554,6 +557,7 @@ pub struct ReceivingSessionInput {
     pub facility_id: FacilityId,
     pub reference_number: Option<String>,
     pub status: ReceivingLoadStatus,
+    pub expected_seal: Option<SealBarcode>,
     pub dock: ReceivingDock,
     pub lines: Vec<ExpectedReceiptLine>,
 }
@@ -606,6 +610,11 @@ impl ReceivingSession {
     }
 
     #[must_use]
+    pub const fn expected_seal(&self) -> Option<&SealBarcode> {
+        self.input.expected_seal.as_ref()
+    }
+
+    #[must_use]
     pub const fn dock(&self) -> &ReceivingDock {
         &self.input.dock
     }
@@ -627,6 +636,10 @@ impl ReceivingSession {
             .lines
             .iter_mut()
             .find(|line| line.load_line_id() == line_id)
+    }
+
+    fn mark_receiving(&mut self) {
+        self.input.status = ReceivingLoadStatus::Receiving;
     }
 }
 
@@ -661,6 +674,12 @@ struct ConfirmationDraft {
     unexpected_reason: Option<UnexpectedReceiptReason>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct UnloadingDraft {
+    dock_scan: Option<DockBarcode>,
+    seal_scan: Option<SealBarcode>,
+}
+
 impl Default for ConfirmationDraft {
     fn default() -> Self {
         Self {
@@ -686,6 +705,7 @@ struct ActiveSession {
     load_barcode: LoadBarcode,
     session: ReceivingSession,
     draft: ConfirmationDraft,
+    unloading: UnloadingDraft,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -731,6 +751,7 @@ pub enum ScannerTarget {
     LoadBarcode,
     ItemBarcode,
     DockBarcode,
+    SealBarcode,
     LicensePlateBarcode,
 }
 
@@ -775,6 +796,7 @@ pub enum ActionBlockReason {
     NoSelectedLine,
     ItemScanRequired,
     DockScanRequired,
+    SealScanRequired,
     QuantityRequired,
     LicensePlateScanRequired,
     ExceptionReasonRequired,
@@ -799,6 +821,7 @@ pub enum ReceivingOperatorError {
     LineNotOpen,
     ItemDoesNotMatchLine,
     WrongReceivingDock,
+    WrongSeal,
     InvalidQuantity,
     QuantityExceedsRemaining,
     DimensionDoesNotMatchExpected,
@@ -806,6 +829,7 @@ pub enum ReceivingOperatorError {
     LoadNotReady,
     ConnectionUnavailable,
     ConfirmationRejected,
+    UnloadingStartRejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -967,6 +991,15 @@ fn select_line(active: &mut ActiveSession, line_id: LoadLineId, barcode: Option<
 }
 
 fn focus_for_draft(active: &ActiveSession) -> FocusTarget {
+    if active.session.status() == ReceivingLoadStatus::Arrived {
+        if active.unloading.dock_scan.is_none() {
+            return FocusTarget::Scanner(ScannerTarget::DockBarcode);
+        }
+        if active.session.expected_seal().is_some() && active.unloading.seal_scan.is_none() {
+            return FocusTarget::Scanner(ScannerTarget::SealBarcode);
+        }
+        return FocusTarget::ConfirmAction;
+    }
     let draft = &active.draft;
     if draft.mode != ConfirmationMode::Unexpected && draft.selected_line_id.is_none() {
         return FocusTarget::Scanner(ScannerTarget::ItemBarcode);

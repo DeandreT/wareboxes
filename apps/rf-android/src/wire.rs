@@ -25,7 +25,8 @@ use wareboxes_api_contract::v1::{
     PutawayWorkflow as ApiPutawayWorkflow, ReleaseCycleCountClaimRequest,
     ReleaseInventoryRelocationClaimRequest, ReleasePickClaimRequest, ReleasePutawayClaimRequest,
     ReportPickShortageOutcome as ApiReportPickShortageOutcome, ReportPickShortageRequest,
-    ReportPickShortageResponse, UnexpectedReceiptConfirmationResponse,
+    ReportPickShortageResponse, StartInboundLoadUnloadingRequest,
+    StartInboundLoadUnloadingResponse, UnexpectedReceiptConfirmationResponse,
     UnexpectedReceiptReason as ApiUnexpectedReceiptReason,
 };
 
@@ -36,8 +37,12 @@ use crate::expected_receiving::{
     FacilityId, InventoryOwnerId, ItemBarcode, ItemId, LicensePlateBarcode, LoadId, LoadLineId,
     LocationId, NonNegativeQuantity, PositiveQuantity, ReceiptExceptionReason,
     ReceiptQuarantineReason, ReceivingCommandIntent, ReceivingDock, ReceivingLoadStatus,
-    ReceivingSession, ReceivingSessionInput, StockDimension, UnexpectedReceiptCommand,
+    ReceivingSession, ReceivingSessionInput, SealBarcode, StockDimension, UnexpectedReceiptCommand,
     UnexpectedReceiptReason, UnexpectedReceiptResult,
+};
+#[cfg(test)]
+use crate::expected_receiving::{
+    UnloadingStartCommand, UnloadingStartIntent, UnloadingStartResult,
 };
 use crate::picking::{
     PickClaim, PickClaimContent, PickContentState, PickReleaseReason, PickShortageOutcome,
@@ -98,6 +103,7 @@ pub enum ResponseKind {
     ReplenishmentConfirmation,
     ReplenishmentRelease,
     OutboundCartonMovement,
+    InboundUnloadingStart,
     ExpectedReceiptConfirmation,
     UnexpectedReceiptConfirmation,
 }
@@ -169,6 +175,8 @@ pub enum WireResponseError {
     InvalidHeartbeatTimestamp { field: &'static str },
     #[error("the warehouse service returned an invalid expected receiving session")]
     InvalidExpectedReceivingSession,
+    #[error("the warehouse service returned an invalid inbound unloading result")]
+    InvalidInboundUnloadingStart,
     #[error(
         "the expected receiving response load ID {actual} does not match requested load {expected}"
     )]
@@ -539,6 +547,27 @@ pub fn build_durable_request(
                 });
             }
             match intent.as_ref() {
+                ReceivingCommandIntent::Unloading(intent) => (
+                    format!(
+                        "{API_PREFIX}/inbound-loads/{}/unloading-starts",
+                        intent.load_id.get()
+                    ),
+                    serde_json::to_vec(&StartInboundLoadUnloadingRequest {
+                        load_scan: intent.command.load_scan.as_str().to_owned(),
+                        receiving_location_scan: intent
+                            .command
+                            .receiving_location_scan
+                            .as_str()
+                            .to_owned(),
+                        seal_scan: intent
+                            .command
+                            .seal_scan
+                            .as_ref()
+                            .map(|value| value.as_str().to_owned()),
+                        started_at: None,
+                    })?,
+                    ResponseKind::InboundUnloadingStart,
+                ),
                 ReceivingCommandIntent::Expected(intent) => {
                     let confirmation = map_expected_receipt_command(&intent.command);
                     let (path, body) = build_expected_receipt_confirmation_parts(
@@ -693,6 +722,34 @@ pub fn decode_command_response(
         | ResponseKind::ReplenishmentConfirmation
         | ResponseKind::ReplenishmentRelease => replenishment::decode_outcome(response_kind, body),
         ResponseKind::OutboundCartonMovement => outbound_load::decode_response(body),
+        ResponseKind::InboundUnloadingStart => {
+            let response = serde_json::from_slice::<StartInboundLoadUnloadingResponse>(body)?;
+            if response.unloading_start_id <= 0
+                || response.load_id <= 0
+                || response.receiving_location_id <= 0
+                || response.started_by <= 0
+                || response.status
+                    != wareboxes_api_contract::v1::InboundLoadReceivingStatus::Receiving
+                || DateTime::parse_from_rfc3339(&response.started_at).is_err()
+            {
+                return Err(WireResponseError::InvalidInboundUnloadingStart);
+            }
+            Ok(CommandOutcome::InboundUnloadingStarted(
+                crate::expected_receiving::UnloadingStartResult {
+                    unloading_start_id: response.unloading_start_id,
+                    load_id: response
+                        .load_id
+                        .try_into()
+                        .map_err(|_| WireResponseError::InvalidInboundUnloadingStart)?,
+                    receiving_location_id: response
+                        .receiving_location_id
+                        .try_into()
+                        .map_err(|_| WireResponseError::InvalidInboundUnloadingStart)?,
+                    started_by: response.started_by,
+                    started_at: response.started_at,
+                },
+            ))
+        }
         ResponseKind::ExpectedReceiptConfirmation => {
             let response = decode_expected_receipt_confirmation_response_from_body(status, body)?;
             Ok(CommandOutcome::ExpectedReceipt(response))
@@ -1552,6 +1609,11 @@ fn map_receiving_session(
             .map_err(|_| WireResponseError::InvalidExpectedReceivingSession)?,
         reference_number: response.reference_number,
         status,
+        expected_seal: response
+            .expected_seal
+            .map(SealBarcode::new)
+            .transpose()
+            .map_err(|_| WireResponseError::InvalidExpectedReceivingSession)?,
         dock: ReceivingDock::new(
             LocationId::try_from(response.receiving_location.location_id)
                 .map_err(|_| WireResponseError::InvalidExpectedReceivingSession)?,
@@ -1871,6 +1933,10 @@ fn validate_expected_receiving_session(
             &response.receiving_location.barcode,
             MAX_EXPECTED_RECEIVING_BARCODE_LENGTH,
         )
+        || response
+            .expected_seal
+            .as_deref()
+            .is_some_and(|seal| !valid_response_text(seal, MAX_EXPECTED_RECEIVING_BARCODE_LENGTH))
     {
         return Err(WireResponseError::InvalidExpectedReceivingSession);
     }
@@ -2889,6 +2955,7 @@ mod tests {
             "facility_id": 33,
             "reference_number": "ASN-1001",
             "status": "receiving",
+            "expected_seal": "SEAL-1001",
             "receiving_location": {
                 "location_id": 44,
                 "barcode": "DOCK-04",
@@ -2957,6 +3024,69 @@ mod tests {
     }
 
     #[test]
+    fn unloading_start_request_and_response_match_the_public_contract() {
+        let mut response = serde_json::from_slice::<ExpectedReceivingSessionResponse>(
+            &expected_receiving_session_body(),
+        )
+        .unwrap();
+        response.status = ExpectedReceivingLoadStatus::Arrived;
+        let session = map_receiving_session(response).unwrap();
+        let intent = UnloadingStartIntent::try_new(
+            crate::expected_receiving::LoadBarcode::new("WB-LOAD-11").unwrap(),
+            session,
+            UnloadingStartCommand {
+                load_scan: crate::expected_receiving::LoadBarcode::new("WB-LOAD-11").unwrap(),
+                receiving_location_scan: DockBarcode::new("DOCK-04").unwrap(),
+                seal_scan: Some(SealBarcode::new("SEAL-1001").unwrap()),
+            },
+        )
+        .unwrap();
+        let request = build_durable_request(&DurableCommandDraft {
+            schema_version: 1,
+            command_id: "unloading-11".into(),
+            idempotency_key: "unloading:11:1".into(),
+            command: RfCommand::ExpectedReceipt(Box::new(ReceivingCommandIntent::Unloading(
+                Box::new(intent),
+            ))),
+        })
+        .unwrap();
+        assert_eq!(request.path, "/api/v1/inbound-loads/11/unloading-starts");
+        assert_eq!(request.response_kind, ResponseKind::InboundUnloadingStart);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&request.body).unwrap(),
+            json!({
+                "load_scan": "WB-LOAD-11",
+                "receiving_location_scan": "DOCK-04",
+                "seal_scan": "SEAL-1001",
+                "started_at": null
+            })
+        );
+
+        let body = serde_json::to_vec(&json!({
+            "unloading_start_id": 71,
+            "load_id": 11,
+            "status": "receiving",
+            "receiving_location_id": 44,
+            "started_by": 12,
+            "started_at": "2026-08-11T04:00:00Z"
+        }))
+        .unwrap();
+        let outcome =
+            decode_command_response(ResponseKind::InboundUnloadingStart, 200, &body).unwrap();
+        assert!(matches!(
+            outcome,
+            CommandOutcome::InboundUnloadingStarted(UnloadingStartResult {
+                unloading_start_id: 71,
+                ..
+            })
+        ));
+        assert!(matches!(
+            decode_command_response(ResponseKind::InboundUnloadingStart, 200, b"{}"),
+            Err(WireResponseError::Decode(_))
+        ));
+    }
+
+    #[test]
     fn expected_receipt_confirmation_is_only_built_from_a_durable_intent() {
         let line = DomainExpectedReceiptLine::try_new(ExpectedReceiptLineInput {
             load_line_id: LoadLineId::try_from(55).unwrap(),
@@ -2982,6 +3112,7 @@ mod tests {
                 facility_id: FacilityId::try_from(33).unwrap(),
                 reference_number: Some("ASN-11".into()),
                 status: ReceivingLoadStatus::Receiving,
+                expected_seal: None,
                 dock: ReceivingDock::new(
                     LocationId::try_from(44).unwrap(),
                     DockBarcode::new("DOCK-04").unwrap(),
@@ -3218,6 +3349,7 @@ mod tests {
                     facility_id: FacilityId::try_from(33).unwrap(),
                     reference_number: Some("ASN-11".into()),
                     status: ReceivingLoadStatus::Received,
+                    expected_seal: None,
                     dock: ReceivingDock::new(
                         LocationId::try_from(44).unwrap(),
                         DockBarcode::new("DOCK-04").unwrap(),

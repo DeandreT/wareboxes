@@ -45,6 +45,7 @@ pub struct ExpectedReceivingSession {
     pub facility_id: i64,
     pub reference_number: Option<String>,
     pub status: ExpectedReceivingLoadStatus,
+    pub expected_seal: Option<String>,
     pub receiving_location: ExpectedReceivingLocation,
     pub lines: Vec<ExpectedReceiptLine>,
 }
@@ -104,6 +105,7 @@ pub async fn get_expected_receiving_session(
                load.reference_number,
                load.status,
                load.type,
+               load.seal_number,
                location.id AS location_id,
                location.barcode AS location_barcode,
                location.name AS location_name,
@@ -216,6 +218,7 @@ pub async fn get_expected_receiving_session(
         facility_id: load.try_get("facility_id")?,
         reference_number: load.try_get("reference_number")?,
         status,
+        expected_seal: load.try_get("seal_number")?,
         receiving_location,
         lines,
     })

@@ -72,7 +72,8 @@ fn session_with(
         inventory_owner_id: owner_id(owner),
         facility_id: facility_id(facility),
         reference_number: Some(format!("ASN-{load}")),
-        status: ReceivingLoadStatus::Arrived,
+        status: ReceivingLoadStatus::Receiving,
+        expected_seal: None,
         dock: ReceivingDock::new(
             location_id(90),
             DockBarcode::new("DOCK-1").unwrap(),
@@ -87,6 +88,24 @@ fn session(lines: Vec<ExpectedReceiptLine>) -> ReceivingSession {
     session_with(10, 20, 30, lines)
 }
 
+fn arrived_session(expected_seal: Option<&str>) -> ReceivingSession {
+    ReceivingSession::try_new(ReceivingSessionInput {
+        load_id: load_id(10),
+        inventory_owner_id: owner_id(20),
+        facility_id: facility_id(30),
+        reference_number: Some("ASN-10".into()),
+        status: ReceivingLoadStatus::Arrived,
+        expected_seal: expected_seal.map(SealBarcode::new).transpose().unwrap(),
+        dock: ReceivingDock::new(
+            location_id(90),
+            DockBarcode::new("DOCK-1").unwrap(),
+            Some("Receiving Dock 1".into()),
+        ),
+        lines: vec![line(1, "ITEM-1", 10, 0, 0, 0)],
+    })
+    .unwrap()
+}
+
 fn recovery_snapshot(selected_line: ExpectedReceiptLine) -> ConfirmationRecoverySnapshot {
     ConfirmationRecoverySnapshot::try_new(ConfirmationRecoverySnapshotInput {
         load_barcode: LoadBarcode::new("LOAD-10").unwrap(),
@@ -94,7 +113,8 @@ fn recovery_snapshot(selected_line: ExpectedReceiptLine) -> ConfirmationRecovery
         inventory_owner_id: owner_id(20),
         facility_id: facility_id(30),
         reference_number: Some("ASN-10".into()),
-        status: ReceivingLoadStatus::Arrived,
+        status: ReceivingLoadStatus::Receiving,
+        expected_seal: None,
         dock: ReceivingDock::new(
             location_id(90),
             DockBarcode::new("DOCK-1").unwrap(),
@@ -120,6 +140,126 @@ fn resolve(reducer: &mut ExpectedReceivingReducer, session: ReceivingSession) ->
         ReceivingTransition::Applied
     );
     resolution_id
+}
+
+#[test]
+fn arrived_load_requires_exact_dock_and_seal_before_receiving() {
+    let mut reducer = ExpectedReceivingReducer::default();
+    resolve(&mut reducer, arrived_session(Some("SEAL-10")));
+    assert_eq!(
+        reducer.focus_target(),
+        FocusTarget::Scanner(ScannerTarget::DockBarcode)
+    );
+    assert_eq!(reducer.scan_dock("DOCK-X"), ReceivingTransition::Applied);
+    assert_eq!(
+        reducer.operator_error(),
+        Some(&ReceivingOperatorError::WrongReceivingDock)
+    );
+    assert_eq!(reducer.scan_dock("DOCK-1"), ReceivingTransition::Applied);
+    assert_eq!(
+        reducer.focus_target(),
+        FocusTarget::Scanner(ScannerTarget::SealBarcode)
+    );
+    assert_eq!(
+        reducer.scan_unloading_seal("SEAL-X"),
+        ReceivingTransition::Applied
+    );
+    assert_eq!(
+        reducer.operator_error(),
+        Some(&ReceivingOperatorError::WrongSeal)
+    );
+    assert_eq!(
+        reducer.scan_unloading_seal("SEAL-10"),
+        ReceivingTransition::Applied
+    );
+    assert_eq!(reducer.focus_target(), FocusTarget::ConfirmAction);
+    assert_eq!(
+        reducer.confirmation_guard(CommandAccess::Allowed),
+        ActionGuard::Blocked(ActionBlockReason::WorkflowBusy)
+    );
+
+    let transition = reducer.begin_unloading_start(CommandAccess::Allowed);
+    let ReceivingTransition::Effect(ReceivingEffect::PersistConfirmation {
+        confirmation_id,
+        intent,
+    }) = transition
+    else {
+        panic!("verified unloading scans must create a durable command");
+    };
+    let ReceivingCommandIntent::Unloading(intent) = intent.as_ref() else {
+        panic!("the durable command must retain unloading identity");
+    };
+    assert_eq!(intent.command.load_scan.as_str(), "WB:LOAD-10");
+    assert_eq!(intent.command.receiving_location_scan.as_str(), "DOCK-1");
+    assert_eq!(
+        intent.command.seal_scan.as_ref().map(SealBarcode::as_str),
+        Some("SEAL-10")
+    );
+    assert!(intent.is_current_and_valid());
+
+    assert_eq!(
+        reducer.confirmation_succeeded(
+            confirmation_id,
+            ReceivingCommandResult::Unloading(UnloadingStartResult {
+                unloading_start_id: 71,
+                load_id: load_id(10),
+                receiving_location_id: location_id(90),
+                started_by: 12,
+                started_at: "2026-08-11T04:00:00Z".into(),
+            }),
+        ),
+        ReceivingTransition::Applied
+    );
+    assert_eq!(
+        reducer.session().map(ReceivingSession::status),
+        Some(ReceivingLoadStatus::Receiving)
+    );
+    assert_eq!(
+        reducer.focus_target(),
+        FocusTarget::Scanner(ScannerTarget::ItemBarcode)
+    );
+}
+
+#[test]
+fn seal_optional_unloading_command_restores_exactly_after_restart() {
+    let mut reducer = ExpectedReceivingReducer::default();
+    resolve(&mut reducer, arrived_session(None));
+    assert_eq!(reducer.scan_dock("DOCK-1"), ReceivingTransition::Applied);
+    assert_eq!(reducer.focus_target(), FocusTarget::ConfirmAction);
+    let ReceivingTransition::Effect(ReceivingEffect::PersistConfirmation { intent, .. }) =
+        reducer.begin_unloading_start(CommandAccess::Allowed)
+    else {
+        panic!("seal-optional load must create an unloading command");
+    };
+    let encoded = serde_json::to_vec(intent.as_ref()).unwrap();
+    let decoded = serde_json::from_slice::<ReceivingCommandIntent>(&encoded).unwrap();
+    assert_eq!(*intent, decoded);
+
+    let mut restored = ExpectedReceivingReducer::default();
+    let confirmation_id = restored.restore_pending_confirmation(decoded).unwrap();
+    assert_eq!(restored.activity(), ReceivingActivity::ConfirmationPending);
+    assert_eq!(
+        restored.confirmation_failed(confirmation_id, ConfirmationFailure::Rejected),
+        ReceivingTransition::Applied
+    );
+    assert_eq!(
+        restored.operator_error(),
+        Some(&ReceivingOperatorError::UnloadingStartRejected)
+    );
+    assert_eq!(restored.focus_target(), FocusTarget::ConfirmAction);
+
+    assert_eq!(
+        UnloadingStartIntent::try_new(
+            LoadBarcode::new("WB:LOAD-10").unwrap(),
+            session(vec![line(1, "ITEM-1", 1, 0, 0, 0)]),
+            UnloadingStartCommand {
+                load_scan: LoadBarcode::new("WB:LOAD-10").unwrap(),
+                receiving_location_scan: DockBarcode::new("DOCK-1").unwrap(),
+                seal_scan: None,
+            },
+        ),
+        Err(ReceivingValidationError::InvalidConfirmationIntent)
+    );
 }
 
 fn prepare_received(
@@ -228,6 +368,7 @@ fn line_and_session_boundaries_reject_invalid_projections() {
             facility_id: facility_id(3),
             reference_number: None,
             status: ReceivingLoadStatus::Receiving,
+            expected_seal: None,
             dock: ReceivingDock::new(location_id(4), DockBarcode::new("DOCK").unwrap(), None,),
             lines: vec![closed],
         }),
@@ -411,7 +552,8 @@ fn received_flow_has_explicit_focus_and_exact_serializable_intent() {
                 "inventory_owner_id": 20,
                 "facility_id": 30,
                 "reference_number": "ASN-10",
-                "status": "arrived",
+                "status": "receiving",
+                "expected_seal": null,
                 "dock": {
                     "location_id": 90,
                     "barcode": "DOCK-1",
@@ -1162,6 +1304,7 @@ fn received_session() -> ReceivingSession {
         facility_id: facility_id(30),
         reference_number: Some("ASN-10".into()),
         status: ReceivingLoadStatus::Received,
+        expected_seal: None,
         dock: ReceivingDock::new(
             location_id(90),
             DockBarcode::new("DOCK-1").unwrap(),

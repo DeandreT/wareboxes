@@ -488,6 +488,7 @@ pub enum CommandOutcome {
         work_id: i64,
     },
     OutboundCartonMoved(Box<wareboxes_api_contract::v1::MovePackedCartonResponse>),
+    InboundUnloadingStarted(crate::expected_receiving::UnloadingStartResult),
     ExpectedReceipt(crate::expected_receiving::ConfirmationResult),
     UnexpectedReceipt(Box<crate::expected_receiving::UnexpectedReceiptResult>),
 }
@@ -890,6 +891,7 @@ impl MovementWorkflow {
                 self.notice = Some(format!("{} returned to the queue", self.operation.label()));
             }
             CommandOutcome::ExpectedReceipt(_)
+            | CommandOutcome::InboundUnloadingStarted(_)
             | CommandOutcome::UnexpectedReceipt(_)
             | CommandOutcome::CycleCountClaimed(_)
             | CommandOutcome::CycleCountConfirmed { .. }

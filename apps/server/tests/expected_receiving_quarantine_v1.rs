@@ -184,7 +184,7 @@ async fn setup(fixture: &Fixture, email: &str) -> Setup {
     .await
     .unwrap();
     let mut tx = tenant_tx(&fixture.db, tenant_id).await;
-    sqlx::query("UPDATE loads SET status = 'arrived' WHERE tenant_id = $1 AND id = $2")
+    sqlx::query("UPDATE loads SET status = 'receiving' WHERE tenant_id = $1 AND id = $2")
         .bind(tenant_id.get())
         .bind(load_id)
         .execute(&mut *tx)

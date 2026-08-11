@@ -286,7 +286,12 @@ impl RfApp {
             self.emit_receiving_transition(transition);
             return;
         };
-        let (command_id, idempotency_key) = Self::command_identity("expected-receipt");
+        let identity_prefix = if intent.is_unloading() {
+            "inbound-unloading"
+        } else {
+            "expected-receipt"
+        };
+        let (command_id, idempotency_key) = Self::command_identity(identity_prefix);
         let draft = DurableCommandDraft {
             schema_version: 1,
             command_id,

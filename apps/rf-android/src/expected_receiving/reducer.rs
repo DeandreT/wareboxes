@@ -94,6 +94,7 @@ impl ExpectedReceivingReducer {
             FocusTarget::Scanner(ScannerTarget::LoadBarcode) => self.scan_load(value),
             FocusTarget::Scanner(ScannerTarget::ItemBarcode) => self.scan_item(value),
             FocusTarget::Scanner(ScannerTarget::DockBarcode) => self.scan_dock(value),
+            FocusTarget::Scanner(ScannerTarget::SealBarcode) => self.scan_unloading_seal(value),
             FocusTarget::Scanner(ScannerTarget::LicensePlateBarcode) => {
                 self.scan_license_plate(value)
             }
@@ -163,6 +164,7 @@ impl ExpectedReceivingReducer {
             load_barcode: barcode.clone(),
             session,
             draft: ConfirmationDraft::default(),
+            unloading: UnloadingDraft::default(),
         });
         self.operator_error = None;
         ReceivingTransition::Applied
@@ -286,6 +288,14 @@ impl ExpectedReceivingReducer {
         let Some(active) = self.active_mut() else {
             return ReceivingTransition::Blocked(ActionBlockReason::NoActiveSession);
         };
+        if active.session.status() == ReceivingLoadStatus::Arrived {
+            if barcode != *active.session.dock().barcode() {
+                return self.set_operator_error(ReceivingOperatorError::WrongReceivingDock);
+            }
+            active.unloading.dock_scan = Some(barcode);
+            self.operator_error = None;
+            return ReceivingTransition::Applied;
+        }
         if active.draft.mode != ConfirmationMode::Unexpected
             && active.draft.selected_line_id.is_none()
         {
@@ -303,6 +313,27 @@ impl ExpectedReceivingReducer {
             return self.set_operator_error(ReceivingOperatorError::WrongReceivingDock);
         }
         active.draft.dock_barcode = Some(barcode);
+        self.operator_error = None;
+        ReceivingTransition::Applied
+    }
+
+    pub fn scan_unloading_seal(&mut self, value: &str) -> ReceivingTransition {
+        let seal = match SealBarcode::new(value) {
+            Ok(seal) => seal,
+            Err(_) => return self.set_operator_error(ReceivingOperatorError::InvalidScan),
+        };
+        let Some(active) = self.active_mut() else {
+            return ReceivingTransition::Blocked(ActionBlockReason::NoActiveSession);
+        };
+        if active.session.status() != ReceivingLoadStatus::Arrived
+            || active.unloading.dock_scan.is_none()
+        {
+            return ReceivingTransition::Blocked(ActionBlockReason::WorkflowBusy);
+        }
+        if active.session.expected_seal() != Some(&seal) {
+            return self.set_operator_error(ReceivingOperatorError::WrongSeal);
+        }
+        active.unloading.seal_scan = Some(seal);
         self.operator_error = None;
         ReceivingTransition::Applied
     }
@@ -462,7 +493,55 @@ impl ExpectedReceivingReducer {
                 _ => ActionBlockReason::WorkflowBusy,
             });
         };
+        if active.session.status() == ReceivingLoadStatus::Arrived {
+            return ActionGuard::Blocked(ActionBlockReason::WorkflowBusy);
+        }
         guard_for_draft(active)
+    }
+
+    #[must_use]
+    pub fn unloading_start_guard(&self, access: CommandAccess) -> ActionGuard {
+        if let CommandAccess::Blocked(reason) = access {
+            return ActionGuard::Blocked(ActionBlockReason::Device(reason));
+        }
+        let State::Active(active) = &self.state else {
+            return ActionGuard::Blocked(ActionBlockReason::NoActiveSession);
+        };
+        if active.session.status() != ReceivingLoadStatus::Arrived {
+            return ActionGuard::Blocked(ActionBlockReason::WorkflowBusy);
+        }
+        if active.unloading.dock_scan.is_none() {
+            return ActionGuard::Blocked(ActionBlockReason::DockScanRequired);
+        }
+        if active.session.expected_seal().is_some() && active.unloading.seal_scan.is_none() {
+            return ActionGuard::Blocked(ActionBlockReason::SealScanRequired);
+        }
+        ActionGuard::Allowed
+    }
+
+    pub fn begin_unloading_start(&mut self, access: CommandAccess) -> ReceivingTransition {
+        if let ActionGuard::Blocked(reason) = self.unloading_start_guard(access) {
+            return ReceivingTransition::Blocked(reason);
+        }
+        let State::Active(active) = &self.state else {
+            return ReceivingTransition::Blocked(ActionBlockReason::WorkflowBusy);
+        };
+        let Some(intent) = UnloadingStartIntent::capture(active) else {
+            return self.reconcile(ReconciliationReason::CommandIntegrityFailure);
+        };
+        let active = active.clone();
+        let confirmation_id = ConfirmationId(self.next_id());
+        let intent = ReceivingCommandIntent::Unloading(Box::new(intent));
+        self.state = State::ConfirmationPending {
+            active,
+            confirmation_id,
+            intent: intent.clone(),
+        };
+        self.operator_error = None;
+        ReceivingTransition::Effect(ReceivingEffect::PersistConfirmation {
+            confirmation_id,
+            intent: Box::new(intent),
+        })
     }
 
     pub fn begin_confirmation(&mut self, access: CommandAccess) -> ReceivingTransition {
@@ -536,8 +615,14 @@ impl ExpectedReceivingReducer {
         }
         match failure {
             ConfirmationFailure::Rejected => {
-                self.state = State::Active(active.clone());
-                self.operator_error = Some(ReceivingOperatorError::ConfirmationRejected);
+                let active = active.clone();
+                let arrived = active.session.status() == ReceivingLoadStatus::Arrived;
+                self.state = State::Active(active);
+                self.operator_error = Some(if arrived {
+                    ReceivingOperatorError::UnloadingStartRejected
+                } else {
+                    ReceivingOperatorError::ConfirmationRejected
+                });
                 ReceivingTransition::Applied
             }
             ConfirmationFailure::CommandStillPending => ReceivingTransition::Applied,
@@ -566,6 +651,23 @@ impl ExpectedReceivingReducer {
         }
         let mut active = active.clone();
         let intent = intent.clone();
+        if let (
+            ReceivingCommandIntent::Unloading(intent),
+            ReceivingCommandResult::Unloading(result),
+        ) = (&intent, &result)
+        {
+            if result.unloading_start_id <= 0
+                || result.load_id != intent.load_id
+                || result.receiving_location_id != intent.receiving_location_id()
+            {
+                return self.reconcile(ReconciliationReason::ConfirmationIdentityMismatch);
+            }
+            active.session.mark_receiving();
+            active.unloading = UnloadingDraft::default();
+            self.state = State::Active(active);
+            self.operator_error = None;
+            return ReceivingTransition::Applied;
+        }
         if let (
             ReceivingCommandIntent::Unexpected(intent),
             ReceivingCommandResult::Unexpected(result),
@@ -675,6 +777,7 @@ impl ExpectedReceivingReducer {
             load_barcode: active.load_barcode.clone(),
             session,
             draft: ConfirmationDraft::default(),
+            unloading: UnloadingDraft::default(),
         });
         self.operator_error = None;
         ReceivingTransition::Applied

@@ -27,6 +27,7 @@ pub struct UnexpectedReceiptRecoverySnapshot {
     pub facility_id: FacilityId,
     pub reference_number: Option<String>,
     pub status: ReceivingLoadStatus,
+    pub expected_seal: Option<SealBarcode>,
     pub dock: ReceivingDock,
     pub lines: Vec<ExpectedReceiptLine>,
 }
@@ -40,6 +41,7 @@ impl UnexpectedReceiptRecoverySnapshot {
             facility_id: active.session.facility_id(),
             reference_number: active.session.reference_number().map(str::to_owned),
             status: active.session.status(),
+            expected_seal: active.session.expected_seal().cloned(),
             dock: active.session.dock().clone(),
             lines: active.session.lines().to_vec(),
         }
@@ -52,6 +54,7 @@ impl UnexpectedReceiptRecoverySnapshot {
             facility_id: self.facility_id,
             reference_number: self.reference_number.clone(),
             status: self.status,
+            expected_seal: self.expected_seal.clone(),
             dock: self.dock.clone(),
             lines: self.lines.clone(),
         })
@@ -78,6 +81,7 @@ impl UnexpectedReceiptRecoverySnapshot {
                 exception_note: command.note.clone(),
                 unexpected_reason: Some(command.reason),
             },
+            unloading: UnloadingDraft::default(),
         })
     }
 }
@@ -127,6 +131,7 @@ impl UnexpectedReceiptIntent {
                 facility_id: self.recovery.facility_id,
                 reference_number: self.recovery.reference_number.clone(),
                 status: self.recovery.status,
+                expected_seal: self.recovery.expected_seal.clone(),
                 dock: self.recovery.dock.clone(),
                 lines: self.recovery.lines.clone(),
             })
@@ -143,6 +148,7 @@ impl UnexpectedReceiptIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "intent", rename_all = "snake_case")]
 pub enum ReceivingCommandIntent {
+    Unloading(Box<UnloadingStartIntent>),
     Expected(Box<ConfirmationIntent>),
     Unexpected(Box<UnexpectedReceiptIntent>),
 }
@@ -151,6 +157,7 @@ impl ReceivingCommandIntent {
     #[must_use]
     pub fn is_current_and_valid(&self) -> bool {
         match self {
+            Self::Unloading(intent) => intent.is_current_and_valid(),
             Self::Expected(intent) => intent.is_current_and_valid(),
             Self::Unexpected(intent) => intent.is_current_and_valid(),
         }
@@ -158,6 +165,7 @@ impl ReceivingCommandIntent {
 
     pub(super) fn restore_active(&self) -> Option<ActiveSession> {
         match self {
+            Self::Unloading(intent) => intent.restore_active(),
             Self::Expected(intent) => intent.restore_active(),
             Self::Unexpected(intent) => intent.restore_active(),
         }
@@ -165,6 +173,7 @@ impl ReceivingCommandIntent {
 
     pub fn canonical_payload(&self) -> Result<Vec<u8>, serde_json::Error> {
         match self {
+            Self::Unloading(intent) => serde_json::to_vec(intent),
             Self::Expected(intent) => intent.canonical_payload(),
             Self::Unexpected(intent) => serde_json::to_vec(intent),
         }
@@ -174,8 +183,13 @@ impl ReceivingCommandIntent {
     pub const fn as_expected(&self) -> Option<&ConfirmationIntent> {
         match self {
             Self::Expected(intent) => Some(intent),
-            Self::Unexpected(_) => None,
+            Self::Unloading(_) | Self::Unexpected(_) => None,
         }
+    }
+
+    #[must_use]
+    pub const fn is_unloading(&self) -> bool {
+        matches!(self, Self::Unloading(_))
     }
 }
 
@@ -227,6 +241,7 @@ pub struct UnexpectedReceiptResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReceivingCommandResult {
+    Unloading(UnloadingStartResult),
     Expected(ConfirmationResult),
     Unexpected(Box<UnexpectedReceiptResult>),
 }

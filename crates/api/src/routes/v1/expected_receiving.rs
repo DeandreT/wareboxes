@@ -502,6 +502,7 @@ fn map_session(
                 ExpectedReceivingLoadStatus::Received
             }
         },
+        expected_seal: session.expected_seal,
         receiving_location: ExpectedReceivingLocation {
             location_id: session.receiving_location.location_id,
             barcode: session.receiving_location.barcode,

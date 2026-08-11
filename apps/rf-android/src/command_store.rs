@@ -57,6 +57,7 @@ pub enum CommandOperation {
     ConfirmLoose,
     ConfirmLicensePlate,
     Release,
+    InboundUnloadingStart,
     ExpectedReceiptConfirmation,
     CycleCountConfirmation,
     PickConfirmation,
@@ -73,6 +74,7 @@ impl CommandOperation {
             Self::ConfirmLoose => "confirm_loose",
             Self::ConfirmLicensePlate => "confirm_license_plate",
             Self::Release => "release",
+            Self::InboundUnloadingStart => "inbound_unloading_start",
             Self::ExpectedReceiptConfirmation => "expected_receipt_confirmation",
             Self::CycleCountConfirmation => "cycle_count_confirmation",
             Self::PickConfirmation => "pick_confirmation",
@@ -89,6 +91,7 @@ impl CommandOperation {
             "confirm_loose" => Ok(Self::ConfirmLoose),
             "confirm_license_plate" => Ok(Self::ConfirmLicensePlate),
             "release" => Ok(Self::Release),
+            "inbound_unloading_start" => Ok(Self::InboundUnloadingStart),
             "expected_receipt_confirmation" => Ok(Self::ExpectedReceiptConfirmation),
             "cycle_count_confirmation" => Ok(Self::CycleCountConfirmation),
             "pick_confirmation" => Ok(Self::PickConfirmation),
@@ -125,6 +128,9 @@ impl From<&RfCommand> for CommandOperation {
             | RfCommand::InventoryRelocation(InventoryRelocationCommand::Release { .. }) => {
                 Self::Release
             }
+            RfCommand::ExpectedReceipt(intent) if intent.is_unloading() => {
+                Self::InboundUnloadingStart
+            }
             RfCommand::ExpectedReceipt(_) => Self::ExpectedReceiptConfirmation,
             RfCommand::CycleCount(CycleCountCommand::ClaimNext) => Self::ClaimNext,
             RfCommand::CycleCount(CycleCountCommand::ClaimById { .. }) => Self::ClaimById,
@@ -140,6 +146,15 @@ impl From<&RfCommand> for CommandOperation {
             RfCommand::Replenishment(command) => replenishment::command_operation(command),
             RfCommand::OutboundLoad(_) => Self::OutboundCartonMovement,
         }
+    }
+}
+
+impl CommandOperation {
+    pub(super) const fn is_receiving(self) -> bool {
+        matches!(
+            self,
+            Self::InboundUnloadingStart | Self::ExpectedReceiptConfirmation
+        )
     }
 }
 

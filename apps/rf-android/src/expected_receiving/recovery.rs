@@ -11,6 +11,7 @@ pub struct ConfirmationRecoverySnapshotInput {
     pub facility_id: FacilityId,
     pub reference_number: Option<String>,
     pub status: ReceivingLoadStatus,
+    pub expected_seal: Option<SealBarcode>,
     pub dock: ReceivingDock,
     pub selected_line: ExpectedReceiptLine,
 }
@@ -71,6 +72,11 @@ impl ConfirmationRecoverySnapshot {
     }
 
     #[must_use]
+    pub const fn expected_seal(&self) -> Option<&SealBarcode> {
+        self.input.expected_seal.as_ref()
+    }
+
+    #[must_use]
     pub const fn selected_line(&self) -> &ExpectedReceiptLine {
         &self.input.selected_line
     }
@@ -84,6 +90,7 @@ impl ConfirmationRecoverySnapshot {
             facility_id: active.session.facility_id(),
             reference_number: active.session.reference_number().map(str::to_owned),
             status: active.session.status(),
+            expected_seal: active.session.expected_seal().cloned(),
             dock: active.session.dock().clone(),
             selected_line,
         })
@@ -182,6 +189,7 @@ impl ConfirmationRecoverySnapshot {
             facility_id: self.facility_id(),
             reference_number: self.reference_number().map(str::to_owned),
             status: self.status(),
+            expected_seal: self.expected_seal().cloned(),
             dock: self.dock().clone(),
             lines: vec![line.clone()],
         })
@@ -190,6 +198,7 @@ impl ConfirmationRecoverySnapshot {
             load_barcode: self.load_barcode().clone(),
             session,
             draft,
+            unloading: UnloadingDraft::default(),
         })
     }
 }

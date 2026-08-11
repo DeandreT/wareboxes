@@ -130,6 +130,7 @@ fn expected_receipt_draft(command_id: &str, key: &str) -> DurableCommandDraft {
         facility_id: FacilityId::try_from(33).unwrap(),
         reference_number: Some("ASN-11".into()),
         status: ReceivingLoadStatus::Receiving,
+        expected_seal: None,
         dock: ReceivingDock::new(
             LocationId::try_from(44).unwrap(),
             DockBarcode::new("DOCK-04").unwrap(),

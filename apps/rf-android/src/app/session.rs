@@ -4,7 +4,7 @@ use wareboxes_api_contract::v1::{
 };
 
 use crate::command_store::{
-    CommandOperation, CommandStatus, DurableCommandRecord, DurableHttpResponse, ExecutionScope,
+    CommandStatus, DurableCommandRecord, DurableHttpResponse, ExecutionScope,
     is_retryable_http_status,
 };
 use crate::expected_receiving::{
@@ -374,7 +374,7 @@ impl RfApp {
 
     fn restore_command(&mut self, context: &egui::Context, record: DurableCommandRecord) {
         self.session_gate = SessionGate::Ready;
-        if record.operation == CommandOperation::ExpectedReceiptConfirmation {
+        if record.operation.is_receiving() {
             self.restore_receiving_command(record);
             return;
         }
@@ -1170,7 +1170,7 @@ impl RfApp {
                         .ok()
                 });
                 if let Some(stored) = stored {
-                    if stored.operation == CommandOperation::ExpectedReceiptConfirmation {
+                    if stored.operation.is_receiving() {
                         if let Some(runtime) = self.receiving_command.as_mut() {
                             runtime.phase = ReceivingCommandPhase::Ambiguous;
                             runtime.message = Some(
@@ -1278,7 +1278,7 @@ impl RfApp {
                 }
                 return;
             };
-            let is_receiving = stored.operation == CommandOperation::ExpectedReceiptConfirmation;
+            let is_receiving = stored.operation.is_receiving();
             let is_cycle_count = matches!(stored.draft.command, RfCommand::CycleCount(_));
             let is_picking = matches!(stored.draft.command, RfCommand::Picking(_));
             let is_replenishment = matches!(stored.draft.command, RfCommand::Replenishment(_));
@@ -1440,6 +1440,21 @@ impl RfApp {
                         crate::expected_receiving::ReceivingCommandResult::Unexpected(result),
                     );
                 }
+                Ok(crate::workflow::CommandOutcome::InboundUnloadingStarted(result)) => {
+                    if result.started_by != scope.operator_id {
+                        self.require_receiving_record_reconciliation(
+                            scope,
+                            record_id,
+                            "The unloading result actor does not match the saved command.",
+                        );
+                    } else {
+                        self.apply_receiving_success(
+                            scope,
+                            record_id,
+                            crate::expected_receiving::ReceivingCommandResult::Unloading(result),
+                        );
+                    }
+                }
                 Ok(outcome) => {
                     let is_cycle_count = matches!(
                         &outcome,
@@ -1516,7 +1531,7 @@ impl RfApp {
                     }
                 }
                 Err(_) => {
-                    if recorded.operation == CommandOperation::ExpectedReceiptConfirmation {
+                    if recorded.operation.is_receiving() {
                         self.require_receiving_record_reconciliation(
                             scope,
                             record_id,
@@ -1568,7 +1583,7 @@ impl RfApp {
             && !matches!(reason, Some(ErrorReason::IdempotencyKeyReused))
         {
             let message = rejected_command_message(error.as_ref());
-            if recorded.operation == CommandOperation::ExpectedReceiptConfirmation {
+            if recorded.operation.is_receiving() {
                 self.apply_receiving_rejection(scope, record_id, &message);
                 return;
             }
@@ -1596,7 +1611,7 @@ impl RfApp {
                 "Work needs review. Do not move or scan inventory.",
                 request_id,
             );
-            if recorded.operation == CommandOperation::ExpectedReceiptConfirmation {
+            if recorded.operation.is_receiving() {
                 self.require_receiving_record_reconciliation(scope, record_id, &message);
             } else if matches!(recorded.draft.command, RfCommand::CycleCount(_)) {
                 self.require_count_record_reconciliation(scope, record_id, &message);
