@@ -120,7 +120,7 @@ pub(super) fn JournalView(
             </Show>
             <div class="integrity-read-split split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
                 <section class="data-section split-master integrity-read-master">
-                    <div class="table-toolbar compact"><div class="toolbar-summary"><strong>{move || signals.page.get().items.len()}</strong><span>"transactions on page"</span></div><span>{move || if signals.loading.get() { "Loading journal" } else { "Server-sorted journal" }}</span></div>
+                    <div class="table-toolbar compact"><div class="toolbar-summary"><strong>{move || signals.page.get().items.len()}</strong><span>"transactions on page"</span></div><span>{move || if signals.loading.get() { "Loading journal" } else { "Journal results" }}</span></div>
                     <div class="table-scroll"><table class="data-table journal-table"><thead><tr>
                         <SortableHeader label="Transaction" active=move || signals.sort.get()==InventoryJournalSort::Transaction direction=move || sort_direction(signals.direction.get()) on_sort=Callback::new(move |_| select_journal_sort(signals,InventoryJournalSort::Transaction,on_unauthorized))/>
                         <SortableHeader label="Occurred" active=move || signals.sort.get()==InventoryJournalSort::OccurredAt direction=move || sort_direction(signals.direction.get()) on_sort=Callback::new(move |_| select_journal_sort(signals,InventoryJournalSort::OccurredAt,on_unauthorized))/>

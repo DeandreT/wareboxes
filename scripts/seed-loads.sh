@@ -71,6 +71,7 @@ DECLARE
   owner bigint;
   item bigint;
   v_load_id bigint;
+  v_file_id bigint;
   owner_ids bigint[] := ARRAY[]::bigint[];
   item_ids bigint[] := ARRAY[]::bigint[];
   owner_names text[] := ARRAY[
@@ -251,6 +252,50 @@ BEGIN
     INSERT INTO load_activity (tenant_id, created, load_id, user_id, action, message)
     VALUES (tenant, created_at, v_load_id, actor, 'load_created', 'Seed load created');
   END LOOP;
+
+  SELECT id INTO v_load_id
+  FROM loads
+  WHERE tenant_id = tenant AND reference_number = 'WB-SEED-LOAD-000001';
+  IF v_load_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM load_files
+    WHERE tenant_id = tenant
+      AND load_id = v_load_id
+      AND original_name = 'Demo bill of lading.txt'
+      AND deleted IS NULL
+  ) THEN
+    INSERT INTO load_files
+        (tenant_id, created, load_id, original_name, name, path, content_type, content, category)
+    VALUES (
+      tenant,
+      now(),
+      v_load_id,
+      'Demo bill of lading.txt',
+      'Demo bill of lading.txt',
+      '',
+      'text/plain',
+      convert_to(
+        'Wareboxes demo bill of lading' || E'\n' || 'Load WB-SEED-LOAD-000001' || E'\n',
+        'UTF8'
+      ),
+      'general'
+    )
+    RETURNING id INTO v_file_id;
+
+    UPDATE load_files
+    SET path = '/api/loads/files/' || v_file_id || '/content'
+    WHERE tenant_id = tenant AND id = v_file_id;
+
+    INSERT INTO load_activity (tenant_id, created, load_id, user_id, action, message)
+    VALUES (
+      tenant,
+      now(),
+      v_load_id,
+      actor,
+      'file_added',
+      'Demo bill of lading.txt'
+    );
+  END IF;
 
   RAISE NOTICE 'Seeded up to % loads for tenant %.', seed_count, tenant;
 END $$;

@@ -152,6 +152,12 @@
   overflow: auto;
 }
 
+.pick-wave-detail > .workspace-empty,
+.pick-wave-detail > .workspace-state {
+  min-height: 100%;
+  padding: 18px;
+}
+
 .pick-wave-detail-content {
   display: grid;
   min-height: 100%;

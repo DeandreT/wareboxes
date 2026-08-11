@@ -695,7 +695,7 @@ fn ItemDetail(store: CatalogStore, item: Item, can_supervise: bool) -> impl Into
                     </label>
                     <label>
                         <span class="sr-only">"Pack conversion notes"</span>
-                        <input type="text" placeholder="Notes (optional)" prop:value=move || pack_notes.get() on:input=move |event| pack_notes.set(event_target_value(&event))/>
+                        <input type="text" placeholder="Notes" prop:value=move || pack_notes.get() on:input=move |event| pack_notes.set(event_target_value(&event))/>
                     </label>
                     <button class="button secondary-action compact" type="submit" disabled=move || pending.get() || inactive>"Add conversion"</button>
                 </form>

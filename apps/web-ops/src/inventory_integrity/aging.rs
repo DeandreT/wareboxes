@@ -179,7 +179,7 @@ pub(super) fn AgingView(
                             <strong>{move || signals.page.get().items.len()}</strong>
                             <span>"current positions"</span>
                         </div>
-                        <span>{move || if signals.loading.get() { "Loading aging inventory" } else { "Server-sorted aging" }}</span>
+                        <span>{move || if signals.loading.get() { "Loading aging inventory" } else { "Aging results" }}</span>
                     </div>
                     <div class="table-scroll">
                         <table class="data-table aging-table">

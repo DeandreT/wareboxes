@@ -37,7 +37,18 @@ wasm-bindgen = { version = "0.2.106", optional = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-net = { version = "0.6", features = ["http"] }
 uuid = { version = "1", features = ["js", "v4"] }
-web-sys = { version = "0.3", features = ["Document", "Element", "Node", "PointerEvent", "Window"] }
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "Document",
+    "Element",
+    "File",
+    "FileList",
+    "FormData",
+    "HtmlInputElement",
+    "Node",
+    "PointerEvent",
+    "Window",
+] }
 
 [features]
 default = []

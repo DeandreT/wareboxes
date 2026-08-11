@@ -562,9 +562,10 @@
 }
 
 .shipping-shipment-cancel {
-  width: 100%;
+  width: calc(100% - 18px);
+  min-height: 38px;
   justify-content: center;
-  margin-top: 8px;
+  margin: 0 9px 9px;
 }
 
 .shipping-shipment-cancel-dialog input {

@@ -1,4 +1,7 @@
-use axum::extract::{Path, Query, State};
+use axum::body::Body;
+use axum::extract::{Multipart, Path, Query, State};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::Response;
 use axum::Json;
 use serde::Deserialize;
 use wareboxes_core::dto::{
@@ -18,6 +21,7 @@ use crate::state::AppState;
 const PERM: &str = "wms";
 const DEFAULT_LOAD_LIMIT: i64 = 500;
 const MAX_LOAD_LIMIT: i64 = 2_000;
+const MAX_UPLOAD_BYTES: usize = 8 * 1024 * 1024;
 
 async fn require_active_load(
     db: &Db,
@@ -489,6 +493,104 @@ pub async fn add_file(
     Ok(Json(id))
 }
 
+pub async fn upload_file(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(load_id): Path<i64>,
+    mut multipart: Multipart,
+) -> AppResult<Json<i64>> {
+    user.require_permission(&state.db, PERM).await?;
+    require_active_load(&state.db, &user, load_id).await?;
+
+    let mut category = LoadFileCategory::General;
+    let mut upload = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| AppError::bad_request(format!("invalid document upload: {error}")))?
+    {
+        match field.name() {
+            Some("category") => {
+                let value = field.text().await.map_err(|error| {
+                    AppError::bad_request(format!("invalid document category: {error}"))
+                })?;
+                category = LoadFileCategory::parse(value.trim())
+                    .ok_or_else(|| AppError::bad_request("invalid document category"))?;
+            }
+            Some("file") if upload.is_none() => {
+                let original_name = uploaded_file_name(field.file_name().unwrap_or_default())?;
+                let content_type = field.content_type().map(str::to_owned);
+                let content = field.bytes().await.map_err(|error| {
+                    AppError::bad_request(format!("invalid document content: {error}"))
+                })?;
+                if content.is_empty() {
+                    return Err(AppError::bad_request("document is empty"));
+                }
+                if content.len() > MAX_UPLOAD_BYTES {
+                    return Err(AppError::bad_request(format!(
+                        "document exceeds the {} MB upload limit",
+                        MAX_UPLOAD_BYTES / (1024 * 1024)
+                    )));
+                }
+                upload = Some((original_name, content_type, content));
+            }
+            Some("file") => return Err(AppError::bad_request("upload exactly one document")),
+            Some(_) | None => return Err(AppError::bad_request("invalid document upload field")),
+        }
+    }
+
+    let (original_name, content_type, content) =
+        upload.ok_or_else(|| AppError::bad_request("choose a document to upload"))?;
+    let id = repo::loads::add_uploaded_file(
+        &state.db,
+        user.tenant.tenant_id,
+        user.user.id,
+        load_id,
+        &original_name,
+        content_type.as_deref(),
+        category,
+        &content,
+    )
+    .await?;
+    Ok(Json(id))
+}
+
+pub async fn file_content(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(file_id): Path<i64>,
+) -> AppResult<Response> {
+    user.require_permission(&state.db, PERM).await?;
+    if repo::access::load_file_dimensions(&state.db, &user.tenant, file_id)
+        .await?
+        .is_none()
+    {
+        return Err(AppError::not_found("document"));
+    }
+    let file = repo::loads::get_file_content(&state.db, user.tenant.tenant_id, file_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("document content"))?;
+    let mut response = Response::new(Body::from(file.content));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        file.content_type
+            .as_deref()
+            .and_then(|value| HeaderValue::from_str(value).ok())
+            .unwrap_or_else(|| HeaderValue::from_static("application/octet-stream")),
+    );
+    let disposition = format!(
+        "attachment; filename=\"{}\"",
+        download_file_name(&file.original_name)
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&disposition)
+            .map_err(|error| AppError::internal(format!("invalid document filename: {error}")))?,
+    );
+    Ok(response)
+}
+
 pub async fn delete_file(
     State(state): State<AppState>,
     user: CurrentTenant,
@@ -506,6 +608,34 @@ pub async fn delete_file(
         repo::loads::delete_file(&state.db, user.tenant.tenant_id, user.user.id, body.file_id)
             .await?,
     ))
+}
+
+fn uploaded_file_name(value: &str) -> AppResult<String> {
+    let name = value
+        .split(['/', '\\'])
+        .next_back()
+        .unwrap_or_default()
+        .trim();
+    if name.is_empty() {
+        return Err(AppError::bad_request("document filename is required"));
+    }
+    if name.chars().count() > 255 || name.chars().any(char::is_control) {
+        return Err(AppError::bad_request("document filename is invalid"));
+    }
+    Ok(name.to_owned())
+}
+
+fn download_file_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | ' ') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -570,5 +700,17 @@ mod tests {
             mutate(&mut request);
             assert!(load_summary_query(request).is_err());
         }
+    }
+
+    #[test]
+    fn uploaded_document_names_are_bounded_and_download_safe() {
+        assert_eq!(
+            uploaded_file_name(r"C:\fakepath\Bill of lading.pdf").unwrap(),
+            "Bill of lading.pdf"
+        );
+        assert!(uploaded_file_name(" ").is_err());
+        assert!(uploaded_file_name("line\nbreak.pdf").is_err());
+        assert!(uploaded_file_name(&"a".repeat(256)).is_err());
+        assert_eq!(download_file_name("client \"BOL\".pdf"), "client _BOL_.pdf");
     }
 }

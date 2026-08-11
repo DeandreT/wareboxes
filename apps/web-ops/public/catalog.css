@@ -4,6 +4,8 @@
   height: calc(100vh - 76px);
   min-height: min(620px, calc(100vh - 76px));
   grid-template-rows: auto 34px minmax(0, 1fr);
+  overflow: hidden;
+  contain: paint;
   color: var(--ink);
 }
 
@@ -726,8 +728,8 @@
 .catalog-form,
 .catalog-detail {
   display: grid;
-  gap: 11px;
-  padding: 14px;
+  gap: 8px;
+  padding: 10px;
 }
 
 .catalog-detail {
@@ -737,12 +739,12 @@
 .catalog-detail > .catalog-editor-heading,
 .catalog-detail > .catalog-form,
 .catalog-detail > .catalog-facts {
-  margin-right: 14px;
-  margin-left: 14px;
+  margin-right: 10px;
+  margin-left: 10px;
 }
 
 .catalog-detail > .catalog-editor-heading {
-  margin-top: 14px;
+  margin-top: 10px;
 }
 
 .catalog-form label {
@@ -863,21 +865,21 @@
   font-size: 10px;
 }
 
-.danger-action {
+.catalog-workbench .danger-action {
   border-color: color-mix(in srgb, var(--red) 45%, var(--line));
   background: var(--red-soft);
   color: var(--danger-ink);
 }
 
-.danger-action:hover:not(:disabled) {
+.catalog-workbench .danger-action:hover:not(:disabled) {
   border-color: var(--red);
 }
 
 .catalog-subsection {
   display: grid;
   min-width: 0;
-  gap: 8px;
-  padding: 12px 14px;
+  gap: 6px;
+  padding: 9px 10px;
   border-top: 1px solid var(--line);
 }
 

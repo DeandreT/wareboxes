@@ -17,6 +17,13 @@ use crate::repo::orders;
 
 const MAX_EXECUTION_BARCODE_LENGTH: usize = 200;
 
+#[derive(Debug)]
+pub struct LoadFileContent {
+    pub original_name: String,
+    pub content_type: Option<String>,
+    pub content: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadSummarySort {
     Id,
@@ -1125,8 +1132,7 @@ async fn insert_activity_tx(
     Ok(id)
 }
 
-/// Record an uploaded document/image against a load. The bytes themselves are
-/// written to disk by the route handler; this stores the metadata row.
+/// Record externally stored document metadata against a load.
 #[allow(clippy::too_many_arguments)]
 pub async fn add_file(
     db: &Db,
@@ -1179,6 +1185,66 @@ pub async fn add_file(
     Ok(id)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn add_uploaded_file(
+    db: &Db,
+    tenant_id: TenantId,
+    user_id: i64,
+    load_id: i64,
+    original_name: &str,
+    content_type: Option<&str>,
+    category: LoadFileCategory,
+    content: &[u8],
+) -> AppResult<i64> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    let created = now_iso();
+    let id: Option<i64> = sqlx::query_scalar(
+        r#"
+        INSERT INTO load_files
+            (tenant_id, created, load_id, original_name, name, path, content_type, category, content)
+        SELECT $1, $2, load.id, $4, $4, '', $5, $6, $7
+        FROM loads load
+        WHERE load.tenant_id = $1 AND load.id = $3 AND load.deleted IS NULL
+        RETURNING id
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(created)
+    .bind(load_id)
+    .bind(original_name)
+    .bind(content_type)
+    .bind(category.as_str())
+    .bind(content)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let id = id.ok_or_else(|| AppError::not_found("load"))?;
+    let path = format!("/api/loads/files/{id}/content");
+    sqlx::query(
+        "UPDATE load_files SET path = $1 WHERE tenant_id = $2 AND id = $3 AND deleted IS NULL",
+    )
+    .bind(&path)
+    .bind(tenant_id.get())
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    insert_activity_tx(
+        &mut tx,
+        tenant_id,
+        load_id,
+        Some(user_id),
+        "file_added",
+        Some(original_name),
+        Some(&format!(
+            r#"{{"file_id":{id},"category":"{}","size_bytes":{}}}"#,
+            category.as_str(),
+            content.len()
+        )),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
 pub async fn get_file(db: &Db, tenant_id: TenantId, file_id: i64) -> AppResult<Option<LoadFile>> {
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let row = sqlx::query(
@@ -1191,6 +1257,39 @@ pub async fn get_file(db: &Db, tenant_id: TenantId, file_id: i64) -> AppResult<O
     let file = row.as_ref().map(map_file).transpose()?;
     tx.commit().await?;
     Ok(file)
+}
+
+pub async fn get_file_content(
+    db: &Db,
+    tenant_id: TenantId,
+    file_id: i64,
+) -> AppResult<Option<LoadFileContent>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    let row = sqlx::query(
+        r#"
+        SELECT original_name, content_type, content
+        FROM load_files
+        WHERE tenant_id = $1
+          AND id = $2
+          AND deleted IS NULL
+          AND content IS NOT NULL
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(file_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let content = row
+        .map(|row| {
+            Ok::<LoadFileContent, sqlx::Error>(LoadFileContent {
+                original_name: row.try_get("original_name")?,
+                content_type: row.try_get("content_type")?,
+                content: row.try_get("content")?,
+            })
+        })
+        .transpose()?;
+    tx.commit().await?;
+    Ok(content)
 }
 
 pub async fn delete_file(

@@ -466,7 +466,7 @@
 .integrity-query-bar {
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(260px, 1fr) repeat(4, 84px) auto auto;
+  grid-template-columns: minmax(260px, 1fr) minmax(96px, 110px) minmax(112px, 150px) 94px auto auto;
   align-items: end;
   gap: 5px;
   padding: 6px;
@@ -480,7 +480,7 @@
 }
 
 .integrity-query-bar.aging {
-  grid-template-columns: minmax(260px, 1fr) 150px 84px auto minmax(130px, 1fr) auto;
+  grid-template-columns: minmax(240px, 1fr) 150px 100px minmax(112px, 150px) auto minmax(120px, 1fr) auto;
 }
 
 .integrity-query-bar.recall {
@@ -548,11 +548,23 @@
 .integrity-query-bar select {
   width: 100%;
   height: var(--control-height);
-  padding: 0 6px;
+  padding: 0 24px 0 7px;
   border: 1px solid var(--line-strong);
   background: var(--surface);
   color: var(--ink);
   font-size: 10px;
+}
+
+.integrity-query-bar input {
+  padding-right: 7px;
+}
+
+.integrity-query-bar .search-field .ui-icon {
+  display: none;
+}
+
+.integrity-query-bar .search-field input {
+  padding-left: 7px;
 }
 
 .integrity-health {

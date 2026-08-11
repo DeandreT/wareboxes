@@ -157,6 +157,8 @@ pub fn app(state: AppState) -> Router {
         .route("/loads/notes/add", post(loads::add_note))
         .route("/loads/notes/delete", post(loads::delete_note))
         .route("/loads/files/add", post(loads::add_file))
+        .route("/loads/{load_id}/files/upload", post(loads::upload_file))
+        .route("/loads/files/{file_id}/content", get(loads::file_content))
         .route("/loads/files/delete", post(loads::delete_file))
         .route("/loads/lines/add", post(loads::add_line))
         .route("/mobile/inbound/loads", get(loads::mobile_inbound_list))

@@ -11777,6 +11777,7 @@ CREATE TABLE public.load_files (
     name text NOT NULL,
     path text NOT NULL,
     content_type text,
+    content bytea,
     category text DEFAULT 'general'::text NOT NULL,
     CONSTRAINT load_files_category_check CHECK ((category = ANY (ARRAY['general'::text, 'invoice'::text])))
 );

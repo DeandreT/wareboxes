@@ -552,16 +552,17 @@
 .danger-action {
   min-height: var(--control-height);
   padding: 0 12px;
-  border: 1px solid #a9363b;
+  border: 1px solid #c95a60;
   border-radius: 4px;
-  background: var(--red);
+  background: #9e3338;
   color: #fff;
   font-weight: 720;
   cursor: pointer;
 }
 
 .danger-action:hover:not(:disabled) {
-  background: #9e3338;
+  border-color: #dc6f74;
+  background: #872b30;
 }
 
 .confirmation-panel {
@@ -569,9 +570,9 @@
   gap: 8px;
   margin: 3px 0;
   padding: 10px;
-  border: 1px solid #d7a9ac;
+  border: 1px solid var(--line-strong);
   border-left: 3px solid var(--red);
-  background: var(--red-soft);
+  background: var(--surface-raised);
 }
 
 .confirmation-panel h3,
@@ -659,13 +660,14 @@
 }
 
 .order-cancellation-panel .danger-action {
-  border-color: #a9363b;
-  background: var(--red);
+  border-color: #c95a60;
+  background: #9e3338;
   color: #fff;
 }
 
 .order-cancellation-panel .danger-action:hover:not(:disabled) {
-  background: #9e3338;
+  border-color: #dc6f74;
+  background: #872b30;
   color: #fff;
 }
 
@@ -1137,7 +1139,7 @@
 
 .document-entry {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 92px;
+  grid-template-columns: minmax(220px, 1fr) 120px auto;
   align-items: end;
   gap: 6px 8px;
   padding: 8px;
@@ -1174,8 +1176,9 @@
   outline: 2px solid rgb(39 102 176 / 16%);
 }
 
-.document-entry .document-path-field {
-  grid-column: 1 / -1;
+.document-entry input[type="file"] {
+  padding: 3px 6px;
+  cursor: pointer;
 }
 
 .document-attach-action {

@@ -31,7 +31,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "multipart"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 sqlx = { version = "0.7", default-features = false, features = [

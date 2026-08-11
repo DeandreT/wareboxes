@@ -96,6 +96,10 @@ impl SplitPaneState {
         }
     }
 
+    pub fn show_both(self) {
+        self.set_mode(PaneMode::Both);
+    }
+
     fn set_mode(self, mode: PaneMode) {
         self.mode.set(mode);
         browser::set(&mode_key(self.storage_key), mode.storage_value());
@@ -201,20 +205,51 @@ pub fn SplitPaneHandle(layout: SplitPaneState) -> impl IntoView {
         <div
             class="split-pane-handle"
             class:dragging=move || layout.dragging.get()
-            role="separator"
+            class:collapsed=move || layout.mode() != PaneMode::Both
+            role=move || if layout.mode() == PaneMode::Both { "separator" } else { "presentation" }
             aria-orientation="vertical"
             aria-label="Resize workspace panes"
             aria-valuemin=MIN_MASTER_WIDTH
             aria-valuemax=MAX_MASTER_WIDTH
             aria-valuenow=move || layout.width.get()
-            tabindex="0"
+            tabindex=move || if layout.mode() == PaneMode::Both { "0" } else { "-1" }
             on:pointerdown=move |event| layout.begin_drag(event)
             on:pointermove=move |event| layout.drag(event)
             on:pointerup=move |_| layout.end_drag()
             on:pointercancel=move |_| layout.end_drag()
             on:keydown=move |event| layout.key(event)
         >
-            <GripVertical size=14/>
+            {move || match layout.mode() {
+                PaneMode::Both => view! { <GripVertical size=14/> }.into_any(),
+                PaneMode::MasterOnly => view! {
+                    <button
+                        type="button"
+                        class="split-pane-restore"
+                        title="Restore detail pane"
+                        aria-label="Restore detail pane"
+                        on:click=move |event| {
+                            event.stop_propagation();
+                            layout.show_both();
+                        }
+                    >
+                        <PanelRightOpen size=15/>
+                    </button>
+                }.into_any(),
+                PaneMode::DetailOnly => view! {
+                    <button
+                        type="button"
+                        class="split-pane-restore"
+                        title="Restore list pane"
+                        aria-label="Restore list pane"
+                        on:click=move |event| {
+                            event.stop_propagation();
+                            layout.show_both();
+                        }
+                    >
+                        <PanelLeftOpen size=15/>
+                    </button>
+                }.into_any(),
+            }}
         </div>
     }
 }

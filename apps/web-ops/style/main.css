@@ -57,6 +57,10 @@ select {
   letter-spacing: 0;
 }
 
+select {
+  text-overflow: ellipsis;
+}
+
 button,
 a {
   -webkit-tap-highlight-color: transparent;
@@ -297,23 +301,32 @@ a {
 
 .button {
   display: inline-flex;
+  height: var(--control-height);
   min-height: var(--control-height);
   align-items: center;
   justify-content: center;
   gap: 7px;
+  padding: 0 12px;
   border-radius: 4px;
+  font-size: 12px;
   font-weight: 720;
   line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
 }
 
 .primary-action {
-  margin-top: 14px;
-  min-height: 40px;
-  padding: 0 18px;
+  margin: 0;
+  min-height: var(--control-height);
+  padding: 0 13px;
   border: 1px solid #ba9214;
   background: var(--accent);
   color: #171b1d;
+}
+
+.login-form > .primary-action {
+  height: 40px;
+  margin-top: 14px;
 }
 
 .primary-action:hover:not(:disabled) {
@@ -332,7 +345,6 @@ a {
 
 .secondary-action {
   min-height: var(--control-height);
-  padding: 0 14px;
   border: 1px solid var(--line-strong);
   background: var(--surface);
   color: #30373a;
@@ -345,7 +357,6 @@ a {
 
 .quiet-action {
   min-height: var(--control-height);
-  padding: 0 11px;
   border: 1px solid var(--line);
   background: transparent;
   color: var(--ink-soft);
@@ -496,7 +507,7 @@ html[data-navigation-hidden="true"] .sidebar {
   min-height: 52px;
   align-items: center;
   justify-content: space-between;
-  padding: 6px clamp(18px, 2vw, 30px);
+  padding: 6px 10px;
   border-bottom: 1px solid var(--line);
   background: rgb(255 255 255 / 96%);
   backdrop-filter: blur(8px);
@@ -520,7 +531,7 @@ html[data-navigation-hidden="true"] .sidebar {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .tenant-control > .ui-icon {

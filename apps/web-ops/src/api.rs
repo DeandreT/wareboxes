@@ -96,6 +96,13 @@ pub struct ApiError {
     pub ambiguous_outcome: bool,
 }
 
+#[cfg(target_arch = "wasm32")]
+pub type BrowserUploadFile = web_sys::File;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct BrowserUploadFile;
+
 #[derive(Clone, Copy)]
 pub struct ReplenishmentQueueFilters {
     pub facility_id: Option<i64>,
@@ -487,6 +494,38 @@ mod browser {
             .json(request)
             .map_err(|error| ApiError {
                 message: format!("Could not prepare the command: {error}"),
+                unauthorized: false,
+                ambiguous_outcome: false,
+            })?;
+        decode(request.send().await).await
+    }
+
+    pub async fn upload_load_file(
+        load_id: i64,
+        category: &str,
+        file: super::BrowserUploadFile,
+    ) -> Result<i64, ApiError> {
+        let form = web_sys::FormData::new().map_err(|error| ApiError {
+            message: format!("Could not prepare the document upload: {error:?}"),
+            unauthorized: false,
+            ambiguous_outcome: false,
+        })?;
+        form.append_with_str("category", category)
+            .map_err(|error| ApiError {
+                message: format!("Could not prepare the document category: {error:?}"),
+                unauthorized: false,
+                ambiguous_outcome: false,
+            })?;
+        form.append_with_blob_and_filename("file", file.as_ref(), &file.name())
+            .map_err(|error| ApiError {
+                message: format!("Could not prepare the selected document: {error:?}"),
+                unauthorized: false,
+                ambiguous_outcome: false,
+            })?;
+        let request = Request::post(&url(&format!("/api/loads/{load_id}/files/upload")))
+            .body(form)
+            .map_err(|error| ApiError {
+                message: format!("Could not prepare the document upload: {error}"),
                 unauthorized: false,
                 ambiguous_outcome: false,
             })?;
@@ -1050,6 +1089,15 @@ where
     TRequest: serde::Serialize,
     TResponse: serde::de::DeserializeOwned,
 {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn upload_load_file(
+    _load_id: i64,
+    _category: &str,
+    _file: BrowserUploadFile,
+) -> Result<i64, ApiError> {
     Err(ApiError::unavailable())
 }
 

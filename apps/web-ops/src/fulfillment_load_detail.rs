@@ -1,8 +1,7 @@
-use leptos::prelude::*;
+use leptos::{html, prelude::*};
 use lucide_leptos::{Download, ExternalLink, Paperclip, Trash2};
 use wareboxes_core::dto::{
-    AddLoadFile, AddLoadLine, AddLoadNote, ArriveLoad, LoadFileIdRequest, LoadNoteIdRequest,
-    LoadUpdate,
+    AddLoadLine, AddLoadNote, ArriveLoad, LoadFileIdRequest, LoadNoteIdRequest, LoadUpdate,
 };
 use wareboxes_core::models::{Item, Load, LoadFileCategory, LoadStatus, LoadType, Location};
 
@@ -62,11 +61,20 @@ pub fn LoadDetailPanel(
     let command_error = RwSignal::new(None::<String>);
     let arrival_open = RwSignal::new(false);
     let lifecycle_target = RwSignal::new(None::<LoadStatus>);
+    let lifecycle_confirmation = NodeRef::<html::Section>::new();
     let load_id = load.id;
     let toasts = use_toast_bus();
     let load = StoredValue::new(load);
     let catalog_items = StoredValue::new(catalog_items);
     let locations = StoredValue::new(locations);
+
+    Effect::new(move |_| {
+        if lifecycle_target.get().is_some() {
+            if let Some(panel) = lifecycle_confirmation.get() {
+                let _ = panel.focus();
+            }
+        }
+    });
 
     view! {
         <div class="fulfillment-detail-content">
@@ -114,7 +122,10 @@ pub fn LoadDetailPanel(
                     (
                         LoadDetailTab::Receiving,
                         "Receiving",
-                        load.get_value().r#type == LoadType::Inbound,
+                        receiving_tab_visible(
+                            load.get_value().r#type,
+                            load.get_value().status,
+                        ),
                     ),
                     (LoadDetailTab::Freight, "Freight", true),
                     (LoadDetailTab::Notes, "Notes", true),
@@ -218,14 +229,17 @@ pub fn LoadDetailPanel(
                 <Show when=move || lifecycle_target.get().is_some()>
                     {move || {
                         lifecycle_target.get().map(|target| {
-                            let label = title_case(target.as_str());
+                            let title = transition_title(target);
+                            let action = transition_action(target);
                             view! {
                                 <section
+                                    node_ref=lifecycle_confirmation
+                                    tabindex="-1"
                                     class="confirmation-panel"
                                     role="alertdialog"
                                     aria-labelledby="load-transition-title"
                                 >
-                                    <h3 id="load-transition-title">{format!("{label} this load?")}</h3>
+                                    <h3 id="load-transition-title">{title}</h3>
                                     <p>{transition_confirmation(target)}</p>
                                     <div class="form-actions">
                                         <button
@@ -247,7 +261,7 @@ pub fn LoadDetailPanel(
                                                 });
                                             }
                                         >
-                                            {format!("Confirm {label}")}
+                                            {action}
                                         </button>
                                         <button
                                             type="button"
@@ -1002,9 +1016,8 @@ fn DocumentsPanel(
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     let original_name = RwSignal::new(String::new());
-    let path = RwSignal::new(String::new());
-    let content_type = RwSignal::new(String::new());
     let category = RwSignal::new(LoadFileCategory::General.as_str().to_owned());
+    let file_input = NodeRef::<html::Input>::new();
     let delete_target = RwSignal::new(None::<i64>);
     let load_id = load.id;
     let file_count = load.files.len();
@@ -1018,32 +1031,30 @@ fn DocumentsPanel(
         }
         let name_value = original_name.get_untracked().trim().to_owned();
         if name_value.is_empty() {
-            error.set(Some("Enter the document name.".to_owned()));
+            error.set(Some("Choose a document to attach.".to_owned()));
             return;
         }
-        let path_value = path.get_untracked().trim().to_owned();
-        if document_href(&path_value).is_none() {
-            error.set(Some(
-                "Enter a browser-safe storage URL or relative path.".to_owned(),
-            ));
+        #[cfg(target_arch = "wasm32")]
+        let selected_file = file_input
+            .get()
+            .and_then(|input| input.files())
+            .and_then(|files| files.get(0));
+        #[cfg(not(target_arch = "wasm32"))]
+        let selected_file = Some(api::BrowserUploadFile);
+        let Some(selected_file) = selected_file else {
+            error.set(Some("Choose a document to attach.".to_owned()));
             return;
-        }
-        let request = AddLoadFile {
-            load_id,
-            original_name: name_value.clone(),
-            name: stored_document_name(&name_value, &path_value),
-            path: path_value,
-            content_type: optional_text(&content_type.get_untracked()),
-            category: LoadFileCategory::parse(&category.get_untracked()),
         };
+        let category_value = category.get_untracked();
         pending.set(true);
         error.set(None);
         leptos::task::spawn_local(async move {
-            match api::internal_post::<_, i64>("/api/loads/files/add", &request).await {
+            match api::upload_load_file(load_id, &category_value, selected_file).await {
                 Ok(file_id) => {
                     original_name.set(String::new());
-                    path.set(String::new());
-                    content_type.set(String::new());
+                    if let Some(input) = file_input.get() {
+                        input.set_value("");
+                    }
                     category.set(LoadFileCategory::General.as_str().to_owned());
                     pending.set(false);
                     toasts.success(format!("Document #{file_id} attached to load #{load_id}."));
@@ -1069,13 +1080,15 @@ fn DocumentsPanel(
                 <span>{format!("{file_count} records")}</span>
             </div>
             <form class="document-entry" on:submit=submit>
-                <label>
-                    <span>"Document name"</span>
+                <label class="document-file-field">
+                    <span>"File"</span>
                     <input
-                        type="text"
-                        placeholder="BOL-1042.pdf"
-                        prop:value=move || original_name.get()
-                        on:input=move |event| original_name.set(event_target_value(&event))
+                        node_ref=file_input
+                        type="file"
+                        on:change=move |event| {
+                            original_name.set(selected_document_name(&event_target_value(&event)));
+                            error.set(None);
+                        }
                     />
                 </label>
                 <label>
@@ -1087,24 +1100,6 @@ fn DocumentsPanel(
                         <option value="general">"General"</option>
                         <option value="invoice">"Invoice"</option>
                     </select>
-                </label>
-                <label class="document-path-field">
-                    <span>"Storage URL or path"</span>
-                    <input
-                        type="text"
-                        placeholder="/documents/BOL-1042.pdf"
-                        prop:value=move || path.get()
-                        on:input=move |event| path.set(event_target_value(&event))
-                    />
-                </label>
-                <label>
-                    <span>"Content type"</span>
-                    <input
-                        type="text"
-                        placeholder="application/pdf"
-                        prop:value=move || content_type.get()
-                        on:input=move |event| content_type.set(event_target_value(&event))
-                    />
                 </label>
                 <button
                     class="button primary-action document-attach-action"
@@ -1461,13 +1456,42 @@ fn document_href(path: &str) -> Option<String> {
     (!path.contains(':')).then(|| path.to_owned())
 }
 
-fn stored_document_name(original_name: &str, path: &str) -> String {
+fn selected_document_name(path: &str) -> String {
     path.split(['/', '\\'])
         .next_back()
-        .and_then(|segment| segment.split(['?', '#']).next())
-        .filter(|segment| !segment.is_empty())
-        .unwrap_or(original_name)
+        .unwrap_or_default()
+        .trim()
         .to_owned()
+}
+
+fn receiving_tab_visible(load_type: LoadType, status: LoadStatus) -> bool {
+    load_type == LoadType::Inbound
+        && matches!(
+            status,
+            LoadStatus::Arrived | LoadStatus::Receiving | LoadStatus::Received
+        )
+}
+
+fn transition_title(target: LoadStatus) -> &'static str {
+    match target {
+        LoadStatus::Scheduled => "Schedule this load?",
+        LoadStatus::Arrived => "Mark this load at dock?",
+        LoadStatus::Rejected => "Reject this load?",
+        LoadStatus::Closed => "Close this load?",
+        LoadStatus::Cancelled => "Cancel this load?",
+        _ => "Change this load state?",
+    }
+}
+
+fn transition_action(target: LoadStatus) -> &'static str {
+    match target {
+        LoadStatus::Scheduled => "Schedule load",
+        LoadStatus::Arrived => "Mark at dock",
+        LoadStatus::Rejected => "Reject load",
+        LoadStatus::Closed => "Close load",
+        LoadStatus::Cancelled => "Cancel load",
+        _ => "Confirm change",
+    }
 }
 
 fn transition_load(load_id: i64, target: LoadStatus, context: LoadCommandContext) {
@@ -1610,18 +1634,6 @@ mod tests {
     }
 
     #[test]
-    fn stored_document_name_uses_the_storage_object_name() {
-        assert_eq!(
-            stored_document_name("Bill of lading.pdf", "/loads/42/bol-42.pdf?version=3"),
-            "bol-42.pdf"
-        );
-        assert_eq!(
-            stored_document_name("Bill of lading.pdf", "/loads/42/"),
-            "Bill of lading.pdf"
-        );
-    }
-
-    #[test]
     fn rf_receiving_transitions_are_not_supervisor_actions() {
         let actions = manager_actions(LoadStatus::Arrived, LoadType::Inbound);
         assert!(!actions
@@ -1635,5 +1647,37 @@ mod tests {
     fn terminal_transitions_require_confirmation_copy() {
         assert!(transition_confirmation(LoadStatus::Cancelled).contains("terminal"));
         assert!(transition_confirmation(LoadStatus::Closed).contains("resolved"));
+    }
+
+    #[test]
+    fn receiving_tab_is_hidden_outside_receiving_lifecycle() {
+        assert!(receiving_tab_visible(
+            LoadType::Inbound,
+            LoadStatus::Arrived
+        ));
+        assert!(receiving_tab_visible(
+            LoadType::Inbound,
+            LoadStatus::Receiving
+        ));
+        assert!(receiving_tab_visible(
+            LoadType::Inbound,
+            LoadStatus::Received
+        ));
+        assert!(!receiving_tab_visible(
+            LoadType::Inbound,
+            LoadStatus::Closed
+        ));
+        assert!(!receiving_tab_visible(
+            LoadType::Outbound,
+            LoadStatus::Arrived
+        ));
+    }
+
+    #[test]
+    fn browser_file_name_is_derived_without_operator_input() {
+        assert_eq!(
+            selected_document_name(r"C:\fakepath\Bill of lading.pdf"),
+            "Bill of lading.pdf"
+        );
     }
 }
