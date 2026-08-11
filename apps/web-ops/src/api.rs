@@ -99,8 +99,8 @@ mod putaway;
 pub use putaway::{create_license_plate_putaway, create_putaway, putaway_candidates, putaway_work};
 mod purchase_order;
 pub use purchase_order::{
-    create_purchase_order, create_purchase_order_asn, purchase_order_detail, purchase_orders,
-    release_purchase_order, PurchaseOrderFilters,
+    cancel_purchase_order, create_purchase_order, create_purchase_order_asn, purchase_order_detail,
+    purchase_orders, release_purchase_order, PurchaseOrderFilters,
 };
 mod storage_zone;
 pub use storage_zone::{configure_storage_zone, retire_storage_zone, storage_zones};

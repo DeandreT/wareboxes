@@ -1,5 +1,8 @@
 mod common;
 
+#[path = "api_v1_purchase_orders/cancellations.rs"]
+mod cancellations;
+
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Method, Request, StatusCode};
 use common::*;

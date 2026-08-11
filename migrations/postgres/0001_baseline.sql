@@ -37270,7 +37270,7 @@ CREATE TABLE public.purchase_orders (
     CONSTRAINT purchase_orders_supplier_check CHECK (
         supplier=btrim(supplier) AND char_length(supplier) BETWEEN 1 AND 200
         AND supplier !~ '[[:cntrl:]]'),
-    CONSTRAINT purchase_orders_status_check CHECK (status IN ('draft','released')),
+    CONSTRAINT purchase_orders_status_check CHECK (status IN ('draft','released','cancelled')),
     CONSTRAINT purchase_orders_revision_check CHECK (revision > 0),
     CONSTRAINT purchase_orders_quantity_check CHECK (
         line_count > 0 AND total_ordered_quantity > 0),
@@ -37279,7 +37279,13 @@ CREATE TABLE public.purchase_orders (
          AND released_by_user_id IS NULL AND released_at IS NULL)
         OR
         (status='released' AND revision=2
-         AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL)),
+         AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL)
+        OR
+        (status='cancelled' AND (
+            (revision=2 AND released_by_user_id IS NULL AND released_at IS NULL)
+            OR
+            (revision=3 AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL)
+        ))),
     CONSTRAINT purchase_orders_owner_number_unique
         UNIQUE (tenant_id,inventory_owner_id,number),
     CONSTRAINT purchase_orders_scope_identity_unique
@@ -37346,6 +37352,43 @@ CREATE TABLE public.purchase_order_releases (
         FOREIGN KEY (released_by_user_id) REFERENCES public.users(id)
 );
 
+CREATE TABLE public.purchase_order_cancellations (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    purchase_order_id bigint NOT NULL,
+    previous_status text NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    cancelled_by_user_id bigint NOT NULL,
+    cancelled_at timestamp with time zone NOT NULL,
+    CONSTRAINT purchase_order_cancellations_previous_status_check CHECK (
+        previous_status IN ('draft','released')),
+    CONSTRAINT purchase_order_cancellations_reason_check CHECK (
+        reason_code IN ('supplier_cancelled','duplicate_order','demand_cancelled','other')),
+    CONSTRAINT purchase_order_cancellations_note_check CHECK (
+        (note IS NULL OR (
+            note=btrim(note) AND char_length(note) BETWEEN 1 AND 500
+            AND note !~ '[[:cntrl:]]'))
+        AND (reason_code <> 'other' OR note IS NOT NULL)),
+    CONSTRAINT purchase_order_cancellations_revision_check CHECK (
+        (previous_status='draft' AND expected_revision=1 AND resulting_revision=2)
+        OR
+        (previous_status='released' AND expected_revision=2 AND resulting_revision=3)),
+    CONSTRAINT purchase_order_cancellations_order_unique
+        UNIQUE (tenant_id,purchase_order_id),
+    CONSTRAINT purchase_order_cancellations_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,facility_id,purchase_order_id,id),
+    CONSTRAINT purchase_order_cancellations_order_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,purchase_order_id)
+        REFERENCES public.purchase_orders(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT purchase_order_cancellations_actor_fkey
+        FOREIGN KEY (cancelled_by_user_id) REFERENCES public.users(id)
+);
+
 CREATE INDEX purchase_orders_queue_idx
 ON public.purchase_orders(tenant_id,status,created_at DESC,id DESC);
 CREATE INDEX purchase_orders_scope_queue_idx
@@ -37353,6 +37396,9 @@ ON public.purchase_orders(
     tenant_id,facility_id,inventory_owner_id,status,created_at DESC,id DESC);
 CREATE INDEX purchase_order_lines_order_idx
 ON public.purchase_order_lines(tenant_id,purchase_order_id,sequence,id);
+CREATE INDEX purchase_order_cancellations_scope_idx
+ON public.purchase_order_cancellations(
+    tenant_id,facility_id,inventory_owner_id,cancelled_at DESC,id DESC);
 
 CREATE FUNCTION public.validate_purchase_order() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -37459,6 +37505,39 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION public.validate_purchase_order_cancellation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    order_row record;
+BEGIN
+    SELECT status,revision INTO order_row
+    FROM public.purchase_orders
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.facility_id
+      AND id=NEW.purchase_order_id
+    FOR UPDATE;
+    IF order_row IS NULL
+       OR order_row.status NOT IN ('draft','released')
+       OR order_row.status <> NEW.previous_status
+       OR order_row.revision <> NEW.expected_revision
+       OR NEW.resulting_revision <> NEW.expected_revision + 1
+       OR NEW.cancelled_at > clock_timestamp()
+       OR EXISTS (
+           SELECT 1
+           FROM public.purchase_order_asn_sources source
+           INNER JOIN public.inbound_asns asn
+             ON asn.tenant_id=source.tenant_id AND asn.id=source.asn_id
+           WHERE source.tenant_id=NEW.tenant_id
+             AND source.purchase_order_id=NEW.purchase_order_id
+             AND asn.status <> 'cancelled') THEN
+        RAISE EXCEPTION 'purchase order cancellation requires no active source notices'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
 CREATE FUNCTION public.guard_purchase_order_mutation() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -37475,18 +37554,32 @@ BEGIN
        OR OLD.total_ordered_quantity IS DISTINCT FROM NEW.total_ordered_quantity
        OR OLD.created_by_user_id IS DISTINCT FROM NEW.created_by_user_id
        OR OLD.created_at IS DISTINCT FROM NEW.created_at
-       OR OLD.status <> 'draft' OR NEW.status <> 'released'
-       OR OLD.revision <> 1 OR NEW.revision <> 2
-       OR NEW.released_by_user_id IS NULL OR NEW.released_at IS NULL
-       OR NOT EXISTS (
-           SELECT 1 FROM public.purchase_order_releases evidence
-           WHERE evidence.tenant_id=NEW.tenant_id
-             AND evidence.purchase_order_id=NEW.id
-             AND evidence.expected_revision=OLD.revision
-             AND evidence.resulting_revision=NEW.revision
-             AND evidence.released_by_user_id=NEW.released_by_user_id
-             AND evidence.released_at=NEW.released_at) THEN
-        RAISE EXCEPTION 'purchase order facts are immutable outside typed release'
+       OR NOT (
+           (OLD.status='draft' AND NEW.status='released'
+            AND OLD.revision=1 AND NEW.revision=2
+            AND NEW.released_by_user_id IS NOT NULL AND NEW.released_at IS NOT NULL
+            AND EXISTS (
+                SELECT 1 FROM public.purchase_order_releases evidence
+                WHERE evidence.tenant_id=NEW.tenant_id
+                  AND evidence.purchase_order_id=NEW.id
+                  AND evidence.expected_revision=OLD.revision
+                  AND evidence.resulting_revision=NEW.revision
+                  AND evidence.released_by_user_id=NEW.released_by_user_id
+                  AND evidence.released_at=NEW.released_at))
+           OR
+           (OLD.status IN ('draft','released') AND NEW.status='cancelled'
+            AND NEW.revision=OLD.revision+1
+            AND OLD.released_by_user_id IS NOT DISTINCT FROM NEW.released_by_user_id
+            AND OLD.released_at IS NOT DISTINCT FROM NEW.released_at
+            AND EXISTS (
+                SELECT 1 FROM public.purchase_order_cancellations evidence
+                WHERE evidence.tenant_id=NEW.tenant_id
+                  AND evidence.purchase_order_id=NEW.id
+                  AND evidence.previous_status=OLD.status
+                  AND evidence.expected_revision=OLD.revision
+                  AND evidence.resulting_revision=NEW.revision))
+       ) THEN
+        RAISE EXCEPTION 'purchase order facts are immutable outside typed lifecycle commands'
             USING ERRCODE='55000';
     END IF;
     RETURN NEW;
@@ -37523,11 +37616,60 @@ BEGIN
     IF release_row IS NULL THEN
         RETURN NULL;
     END IF;
-    IF order_row IS NULL OR order_row.status <> 'released'
-       OR order_row.revision <> release_row.resulting_revision
+    IF order_row IS NULL
+       OR order_row.status NOT IN ('released','cancelled')
+       OR (order_row.status='released'
+           AND order_row.revision <> release_row.resulting_revision)
+       OR (order_row.status='cancelled'
+           AND order_row.revision <> release_row.resulting_revision+1)
        OR order_row.released_by_user_id <> release_row.released_by_user_id
        OR order_row.released_at <> release_row.released_at THEN
         RAISE EXCEPTION 'purchase order release evidence does not reconcile'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.require_purchase_order_cancellation_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    target_tenant_id bigint;
+    target_order_id bigint;
+    order_row record;
+    cancellation_row record;
+BEGIN
+    target_tenant_id := NEW.tenant_id;
+    IF TG_TABLE_NAME='purchase_orders' THEN
+        target_order_id := NEW.id;
+    ELSE
+        target_order_id := NEW.purchase_order_id;
+    END IF;
+    SELECT status,revision,released_by_user_id,released_at INTO order_row
+    FROM public.purchase_orders
+    WHERE tenant_id=target_tenant_id AND id=target_order_id;
+    SELECT * INTO cancellation_row
+    FROM public.purchase_order_cancellations
+    WHERE tenant_id=target_tenant_id AND purchase_order_id=target_order_id;
+    IF cancellation_row IS NULL AND order_row.status <> 'cancelled' THEN
+        RETURN NULL;
+    END IF;
+    IF cancellation_row IS NULL OR order_row IS NULL
+       OR order_row.status <> 'cancelled'
+       OR order_row.revision <> cancellation_row.resulting_revision
+       OR (cancellation_row.previous_status='draft' AND (
+           order_row.released_by_user_id IS NOT NULL OR order_row.released_at IS NOT NULL))
+       OR (cancellation_row.previous_status='released' AND (
+           order_row.released_by_user_id IS NULL OR order_row.released_at IS NULL))
+       OR EXISTS (
+           SELECT 1
+           FROM public.purchase_order_asn_sources source
+           INNER JOIN public.inbound_asns asn
+             ON asn.tenant_id=source.tenant_id AND asn.id=source.asn_id
+           WHERE source.tenant_id=target_tenant_id
+             AND source.purchase_order_id=target_order_id
+             AND asn.status <> 'cancelled') THEN
+        RAISE EXCEPTION 'purchase order cancellation evidence does not reconcile'
             USING ERRCODE='23514';
     END IF;
     RETURN NULL;
@@ -37552,6 +37694,12 @@ FOR EACH ROW EXECUTE FUNCTION public.validate_purchase_order_release();
 CREATE TRIGGER purchase_order_releases_are_immutable
 BEFORE UPDATE OR DELETE ON public.purchase_order_releases
 FOR EACH ROW EXECUTE FUNCTION public.reject_purchase_order_ledger_mutation();
+CREATE TRIGGER purchase_order_cancellations_validate
+BEFORE INSERT ON public.purchase_order_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.validate_purchase_order_cancellation();
+CREATE TRIGGER purchase_order_cancellations_are_immutable
+BEFORE UPDATE OR DELETE ON public.purchase_order_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.reject_purchase_order_ledger_mutation();
 
 CREATE CONSTRAINT TRIGGER purchase_orders_require_consistency
 AFTER INSERT ON public.purchase_orders
@@ -37569,6 +37717,14 @@ CREATE CONSTRAINT TRIGGER purchase_order_releases_require_consistency
 AFTER INSERT ON public.purchase_order_releases
 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
 EXECUTE FUNCTION public.require_purchase_order_release_consistency();
+CREATE CONSTRAINT TRIGGER purchase_orders_require_cancellation_consistency
+AFTER UPDATE ON public.purchase_orders
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_purchase_order_cancellation_consistency();
+CREATE CONSTRAINT TRIGGER purchase_order_cancellations_require_consistency
+AFTER INSERT ON public.purchase_order_cancellations
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_purchase_order_cancellation_consistency();
 
 ALTER TABLE public.purchase_orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.purchase_orders FORCE ROW LEVEL SECURITY;
@@ -37576,6 +37732,8 @@ ALTER TABLE public.purchase_order_lines ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.purchase_order_lines FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.purchase_order_releases ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.purchase_order_releases FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.purchase_order_cancellations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.purchase_order_cancellations FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY purchase_orders_tenant_isolation ON public.purchase_orders
 USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
@@ -37586,23 +37744,31 @@ WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bi
 CREATE POLICY purchase_order_releases_tenant_isolation ON public.purchase_order_releases
 USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
 WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY purchase_order_cancellations_tenant_isolation
+ON public.purchase_order_cancellations
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
 
 GRANT SELECT,INSERT ON public.purchase_orders TO wareboxes_app;
 GRANT UPDATE(status,revision,released_by_user_id,released_at)
 ON public.purchase_orders TO wareboxes_app;
 GRANT SELECT,INSERT ON public.purchase_order_lines TO wareboxes_app;
 GRANT SELECT,INSERT ON public.purchase_order_releases TO wareboxes_app;
+GRANT SELECT,INSERT ON public.purchase_order_cancellations TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.purchase_orders_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.purchase_order_lines_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.purchase_order_releases_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.purchase_order_cancellations_id_seq TO wareboxes_app;
 
 REVOKE ALL ON FUNCTION public.validate_purchase_order() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_purchase_order_line() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_purchase_order_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_purchase_order_release() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_purchase_order_cancellation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_purchase_order_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_purchase_order_ledger_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_purchase_order_release_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_purchase_order_cancellation_consistency() FROM PUBLIC;
 
 -- A released purchase order may source multiple ASNs. These append-only ledgers
 -- preserve the exact PO-line to ASN-line mapping and cap cumulative notices at

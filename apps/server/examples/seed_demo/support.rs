@@ -484,6 +484,24 @@ impl SeedContext {
         if !has_cycle_counts {
             missing.push("cycle counts");
         }
+        let has_cancelled_purchase_order = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM purchase_orders purchase
+                INNER JOIN purchase_order_cancellations cancellation
+                  ON cancellation.tenant_id=purchase.tenant_id
+                 AND cancellation.purchase_order_id=purchase.id
+                WHERE purchase.tenant_id=$1 AND purchase.status='cancelled'
+                  AND purchase.revision=cancellation.resulting_revision)
+            "#,
+        )
+        .bind(self.tenant_id.get())
+        .fetch_one(&self.admin)
+        .await?;
+        if !has_cancelled_purchase_order {
+            missing.push("cancelled purchase orders");
+        }
         if !missing.is_empty() {
             bail!("typed demo coverage is incomplete: {}", missing.join(", "));
         }

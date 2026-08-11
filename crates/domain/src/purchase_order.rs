@@ -6,6 +6,7 @@ use crate::{CatalogItemId, FacilityId, InventoryOwnerId, Timestamp};
 
 pub const MAX_PURCHASE_ORDER_NUMBER_LENGTH: usize = 120;
 pub const MAX_PURCHASE_ORDER_SUPPLIER_LENGTH: usize = 200;
+pub const MAX_PURCHASE_ORDER_CANCELLATION_NOTE_LENGTH: usize = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PurchaseOrderError {
@@ -25,6 +26,12 @@ pub enum PurchaseOrderError {
     RevisionExhausted,
     #[error("only a draft purchase order can be released")]
     InvalidReleaseStatus,
+    #[error("only a draft or released purchase order can be cancelled")]
+    InvalidCancellationStatus,
+    #[error("cancellation note must be trimmed, control-free, and at most 500 characters")]
+    InvalidCancellationNote,
+    #[error("a note is required for the Other cancellation reason")]
+    MissingCancellationNote,
     #[error(
         "purchase-order demand coverage must satisfy 0 <= received + active inbound <= ordered"
     )]
@@ -109,6 +116,7 @@ impl PurchaseOrderRevision {
 pub enum PurchaseOrderStatus {
     Draft,
     Released,
+    Cancelled,
 }
 
 impl PurchaseOrderStatus {
@@ -116,6 +124,7 @@ impl PurchaseOrderStatus {
         match self {
             Self::Draft => "draft",
             Self::Released => "released",
+            Self::Cancelled => "cancelled",
         }
     }
 
@@ -123,8 +132,96 @@ impl PurchaseOrderStatus {
         match value {
             "draft" => Some(Self::Draft),
             "released" => Some(Self::Released),
+            "cancelled" => Some(Self::Cancelled),
             _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PurchaseOrderCancellationReason {
+    SupplierCancelled,
+    DuplicateOrder,
+    DemandCancelled,
+    Other,
+}
+
+impl PurchaseOrderCancellationReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SupplierCancelled => "supplier_cancelled",
+            Self::DuplicateOrder => "duplicate_order",
+            Self::DemandCancelled => "demand_cancelled",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "supplier_cancelled" => Some(Self::SupplierCancelled),
+            "duplicate_order" => Some(Self::DuplicateOrder),
+            "demand_cancelled" => Some(Self::DemandCancelled),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct PurchaseOrderCancellationNote(String);
+
+impl PurchaseOrderCancellationNote {
+    pub fn new(value: impl Into<String>) -> Result<Self, PurchaseOrderError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.trim() != value
+            || value.chars().count() > MAX_PURCHASE_ORDER_CANCELLATION_NOTE_LENGTH
+            || value.chars().any(char::is_control)
+        {
+            return Err(PurchaseOrderError::InvalidCancellationNote);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PurchaseOrderCancellationNote {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurchaseOrderCancellationDetails {
+    reason: PurchaseOrderCancellationReason,
+    note: Option<PurchaseOrderCancellationNote>,
+}
+
+impl PurchaseOrderCancellationDetails {
+    pub fn new(
+        reason: PurchaseOrderCancellationReason,
+        note: Option<PurchaseOrderCancellationNote>,
+    ) -> Result<Self, PurchaseOrderError> {
+        if reason == PurchaseOrderCancellationReason::Other && note.is_none() {
+            return Err(PurchaseOrderError::MissingCancellationNote);
+        }
+        Ok(Self { reason, note })
+    }
+
+    pub const fn reason(&self) -> PurchaseOrderCancellationReason {
+        self.reason
+    }
+
+    pub fn note(&self) -> Option<&PurchaseOrderCancellationNote> {
+        self.note.as_ref()
     }
 }
 
@@ -281,6 +378,19 @@ pub fn release_purchase_order(
     revision.next()
 }
 
+pub fn cancel_purchase_order(
+    status: PurchaseOrderStatus,
+    revision: PurchaseOrderRevision,
+) -> Result<PurchaseOrderRevision, PurchaseOrderError> {
+    if !matches!(
+        status,
+        PurchaseOrderStatus::Draft | PurchaseOrderStatus::Released
+    ) {
+        return Err(PurchaseOrderError::InvalidCancellationStatus);
+    }
+    revision.next()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +448,39 @@ mod tests {
         assert_eq!(progress.available_to_notify_quantity(), 1);
         assert_eq!(progress.open_receipt_quantity(), 20);
         assert!(PurchaseOrderDemandCoverage::new(22, 2, 21).is_err());
+    }
+
+    #[test]
+    fn cancellation_is_revisioned_and_requires_other_notes() {
+        assert_eq!(
+            cancel_purchase_order(
+                PurchaseOrderStatus::Draft,
+                PurchaseOrderRevision::new(1).unwrap()
+            ),
+            Ok(PurchaseOrderRevision::new(2).unwrap())
+        );
+        assert_eq!(
+            cancel_purchase_order(
+                PurchaseOrderStatus::Released,
+                PurchaseOrderRevision::new(2).unwrap()
+            ),
+            Ok(PurchaseOrderRevision::new(3).unwrap())
+        );
+        assert_eq!(
+            cancel_purchase_order(
+                PurchaseOrderStatus::Cancelled,
+                PurchaseOrderRevision::new(2).unwrap()
+            ),
+            Err(PurchaseOrderError::InvalidCancellationStatus)
+        );
+        assert_eq!(
+            PurchaseOrderCancellationDetails::new(PurchaseOrderCancellationReason::Other, None),
+            Err(PurchaseOrderError::MissingCancellationNote)
+        );
+        assert!(PurchaseOrderCancellationDetails::new(
+            PurchaseOrderCancellationReason::Other,
+            Some(PurchaseOrderCancellationNote::new("Buyer approved cancellation").unwrap())
+        )
+        .is_ok());
     }
 }

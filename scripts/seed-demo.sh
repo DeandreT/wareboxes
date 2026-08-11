@@ -150,6 +150,17 @@ BEGIN
   END IF;
   IF NOT EXISTS (
     SELECT 1
+    FROM purchase_orders purchase
+    INNER JOIN purchase_order_cancellations cancellation
+      ON cancellation.tenant_id=purchase.tenant_id
+     AND cancellation.purchase_order_id=purchase.id
+    WHERE purchase.status='cancelled'
+      AND purchase.revision=cancellation.resulting_revision
+  ) THEN
+    missing := array_append(missing, 'cancelled purchase order evidence');
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
     FROM purchase_order_asn_sources source
     INNER JOIN purchase_order_asn_source_lines line
       ON line.tenant_id=source.tenant_id AND line.source_id=source.id

@@ -2,26 +2,30 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use sha2::{Digest, Sha256};
 use wareboxes_api_contract::v1::{
-    CreatePurchaseOrderAsnRequest, CreatePurchaseOrderAsnResponse, CreatePurchaseOrderRequest,
-    CreatePurchaseOrderResponse, CreatedPurchaseOrderAsnLineResponse,
-    CreatedPurchaseOrderLineResponse, InboundAsnStatus as ApiInboundAsnStatus, OpaqueCursor,
-    PurchaseOrderDetailResponse, PurchaseOrderLineResponse, PurchaseOrderPage as ApiPage,
-    PurchaseOrderPageRequest, PurchaseOrderStatus as ApiStatus, PurchaseOrderSummaryResponse,
-    ReleasePurchaseOrderRequest, ReleasePurchaseOrderResponse, Revision,
+    CancelPurchaseOrderRequest, CancelPurchaseOrderResponse, CreatePurchaseOrderAsnRequest,
+    CreatePurchaseOrderAsnResponse, CreatePurchaseOrderRequest, CreatePurchaseOrderResponse,
+    CreatedPurchaseOrderAsnLineResponse, CreatedPurchaseOrderLineResponse,
+    InboundAsnStatus as ApiInboundAsnStatus, OpaqueCursor,
+    PurchaseOrderCancellationReason as ApiCancellationReason, PurchaseOrderDetailResponse,
+    PurchaseOrderLineResponse, PurchaseOrderPage as ApiPage, PurchaseOrderPageRequest,
+    PurchaseOrderStatus as ApiStatus, PurchaseOrderSummaryResponse, ReleasePurchaseOrderRequest,
+    ReleasePurchaseOrderResponse, Revision,
 };
 use wareboxes_application::inbound_asn::{
     CreatePurchaseOrderAsnCommand, CreatePurchaseOrderAsnResult,
 };
 use wareboxes_application::purchase_order::{
-    CreatePurchaseOrderCommand, CreatePurchaseOrderResult, PurchaseOrderPageFilter,
-    PurchaseOrderReadModel, ReleasePurchaseOrderCommand, ReleasePurchaseOrderResult,
+    CancelPurchaseOrderCommand, CancelPurchaseOrderResult, CreatePurchaseOrderCommand,
+    CreatePurchaseOrderResult, PurchaseOrderPageFilter, PurchaseOrderReadModel,
+    ReleasePurchaseOrderCommand, ReleasePurchaseOrderResult,
 };
 use wareboxes_domain::{
     CatalogItemId, FacilityId, InboundAsnNumber, InboundAsnQuantity, InboundAsnRevision,
     InboundAsnStatus, InventoryOwnerId, NewPurchaseOrder, NewPurchaseOrderAsn,
-    PurchaseOrderAsnLineDefinition, PurchaseOrderId, PurchaseOrderLineDefinition,
-    PurchaseOrderLineId, PurchaseOrderNumber, PurchaseOrderQuantity, PurchaseOrderRevision,
-    PurchaseOrderStatus, PurchaseOrderSupplier, Timestamp,
+    PurchaseOrderAsnLineDefinition, PurchaseOrderCancellationDetails,
+    PurchaseOrderCancellationNote, PurchaseOrderCancellationReason, PurchaseOrderId,
+    PurchaseOrderLineDefinition, PurchaseOrderLineId, PurchaseOrderNumber, PurchaseOrderQuantity,
+    PurchaseOrderRevision, PurchaseOrderStatus, PurchaseOrderSupplier, Timestamp,
 };
 
 use super::error::{V1Error, V1Result};
@@ -88,6 +92,32 @@ pub async fn release(
     let context = user.command_context(&idempotency_key);
     let result = repo::purchase_order::release(&state.db, &user.tenant, &context, &command).await?;
     Ok(Json(map_release(result)?))
+}
+
+pub async fn cancel(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(purchase_order_id): Path<i64>,
+    Json(body): Json<CancelPurchaseOrderRequest>,
+) -> V1Result<Json<CancelPurchaseOrderResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let details = PurchaseOrderCancellationDetails::new(
+        map_cancellation_reason(body.reason),
+        body.note
+            .map(PurchaseOrderCancellationNote::new)
+            .transpose()
+            .map_err(validation)?,
+    )
+    .map_err(validation)?;
+    let command = CancelPurchaseOrderCommand::new(
+        PurchaseOrderId::new(purchase_order_id).map_err(validation)?,
+        PurchaseOrderRevision::new(body.expected_revision.get()).map_err(validation)?,
+        details,
+    );
+    let context = user.command_context(&idempotency_key);
+    let result = repo::purchase_order::cancel(&state.db, &user.tenant, &context, &command).await?;
+    Ok(Json(map_cancellation(result)?))
 }
 
 pub async fn create_asn(
@@ -295,6 +325,20 @@ fn map_release(value: ReleasePurchaseOrderResult) -> V1Result<ReleasePurchaseOrd
     })
 }
 
+fn map_cancellation(value: CancelPurchaseOrderResult) -> V1Result<CancelPurchaseOrderResponse> {
+    Ok(CancelPurchaseOrderResponse {
+        cancellation_id: value.cancellation_id.get(),
+        purchase_order_id: value.purchase_order_id.get(),
+        previous_status: map_status_to_api(value.previous_status),
+        status: map_status_to_api(value.status),
+        revision: api_revision(value.revision)?,
+        reason: map_cancellation_reason_to_api(value.reason),
+        note: value.note,
+        cancelled_by: value.cancelled_by.get(),
+        cancelled_at: value.cancelled_at.to_rfc3339(),
+    })
+}
+
 fn map_summary(value: PurchaseOrderReadModel) -> V1Result<PurchaseOrderSummaryResponse> {
     Ok(PurchaseOrderSummaryResponse {
         purchase_order_id: value.purchase_order_id.get(),
@@ -320,6 +364,16 @@ fn map_summary(value: PurchaseOrderReadModel) -> V1Result<PurchaseOrderSummaryRe
         created_at: value.created_at.to_rfc3339(),
         released_by: value.released_by.map(wareboxes_domain::UserId::get),
         released_at: value.released_at.map(|timestamp| timestamp.to_rfc3339()),
+        cancellation_ready: value.cancellation_ready,
+        cancellation_id: value
+            .cancellation_id
+            .map(wareboxes_domain::PurchaseOrderCancellationId::get),
+        cancellation_reason: value
+            .cancellation_reason
+            .map(map_cancellation_reason_to_api),
+        cancellation_note: value.cancellation_note,
+        cancelled_by: value.cancelled_by.map(wareboxes_domain::UserId::get),
+        cancelled_at: value.cancelled_at.map(|timestamp| timestamp.to_rfc3339()),
     })
 }
 
@@ -327,6 +381,7 @@ fn map_status(value: ApiStatus) -> PurchaseOrderStatus {
     match value {
         ApiStatus::Draft => PurchaseOrderStatus::Draft,
         ApiStatus::Released => PurchaseOrderStatus::Released,
+        ApiStatus::Cancelled => PurchaseOrderStatus::Cancelled,
     }
 }
 
@@ -334,6 +389,29 @@ fn map_status_to_api(value: PurchaseOrderStatus) -> ApiStatus {
     match value {
         PurchaseOrderStatus::Draft => ApiStatus::Draft,
         PurchaseOrderStatus::Released => ApiStatus::Released,
+        PurchaseOrderStatus::Cancelled => ApiStatus::Cancelled,
+    }
+}
+
+fn map_cancellation_reason(value: ApiCancellationReason) -> PurchaseOrderCancellationReason {
+    match value {
+        ApiCancellationReason::SupplierCancelled => {
+            PurchaseOrderCancellationReason::SupplierCancelled
+        }
+        ApiCancellationReason::DuplicateOrder => PurchaseOrderCancellationReason::DuplicateOrder,
+        ApiCancellationReason::DemandCancelled => PurchaseOrderCancellationReason::DemandCancelled,
+        ApiCancellationReason::Other => PurchaseOrderCancellationReason::Other,
+    }
+}
+
+fn map_cancellation_reason_to_api(value: PurchaseOrderCancellationReason) -> ApiCancellationReason {
+    match value {
+        PurchaseOrderCancellationReason::SupplierCancelled => {
+            ApiCancellationReason::SupplierCancelled
+        }
+        PurchaseOrderCancellationReason::DuplicateOrder => ApiCancellationReason::DuplicateOrder,
+        PurchaseOrderCancellationReason::DemandCancelled => ApiCancellationReason::DemandCancelled,
+        PurchaseOrderCancellationReason::Other => ApiCancellationReason::Other,
     }
 }
 
@@ -396,6 +474,7 @@ fn cursor_fingerprint(request: &PurchaseOrderPageRequest) -> String {
         request.status.map_or("", |status| match status {
             ApiStatus::Draft => "draft",
             ApiStatus::Released => "released",
+            ApiStatus::Cancelled => "cancelled",
         }),
         request.search.as_deref().unwrap_or_default(),
         request.limit.get()

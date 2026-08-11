@@ -2,13 +2,15 @@
 
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
-    CatalogItemId, FacilityId, InventoryOwnerId, NewPurchaseOrder, PurchaseOrderId,
-    PurchaseOrderLineId, PurchaseOrderReleaseId, PurchaseOrderRevision, PurchaseOrderStatus,
-    Timestamp, UserId,
+    CatalogItemId, FacilityId, InventoryOwnerId, NewPurchaseOrder,
+    PurchaseOrderCancellationDetails, PurchaseOrderCancellationId, PurchaseOrderCancellationReason,
+    PurchaseOrderId, PurchaseOrderLineId, PurchaseOrderReleaseId, PurchaseOrderRevision,
+    PurchaseOrderStatus, Timestamp, UserId,
 };
 
 pub const CREATE_PURCHASE_ORDER_OPERATION: &str = "inbound.purchase_order.create.v1";
 pub const RELEASE_PURCHASE_ORDER_OPERATION: &str = "inbound.purchase_order.release.v1";
+pub const CANCEL_PURCHASE_ORDER_OPERATION: &str = "inbound.purchase_order.cancel.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreatePurchaseOrderCommand {
@@ -49,6 +51,52 @@ pub struct ReleasePurchaseOrderResult {
     pub revision: PurchaseOrderRevision,
     pub released_by: UserId,
     pub released_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CancelPurchaseOrderCommand {
+    purchase_order_id: PurchaseOrderId,
+    expected_revision: PurchaseOrderRevision,
+    details: PurchaseOrderCancellationDetails,
+}
+
+impl CancelPurchaseOrderCommand {
+    pub const fn new(
+        purchase_order_id: PurchaseOrderId,
+        expected_revision: PurchaseOrderRevision,
+        details: PurchaseOrderCancellationDetails,
+    ) -> Self {
+        Self {
+            purchase_order_id,
+            expected_revision,
+            details,
+        }
+    }
+
+    pub const fn purchase_order_id(&self) -> PurchaseOrderId {
+        self.purchase_order_id
+    }
+
+    pub const fn expected_revision(&self) -> PurchaseOrderRevision {
+        self.expected_revision
+    }
+
+    pub const fn details(&self) -> &PurchaseOrderCancellationDetails {
+        &self.details
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelPurchaseOrderResult {
+    pub cancellation_id: PurchaseOrderCancellationId,
+    pub purchase_order_id: PurchaseOrderId,
+    pub previous_status: PurchaseOrderStatus,
+    pub status: PurchaseOrderStatus,
+    pub revision: PurchaseOrderRevision,
+    pub reason: PurchaseOrderCancellationReason,
+    pub note: Option<String>,
+    pub cancelled_by: UserId,
+    pub cancelled_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +141,12 @@ pub struct PurchaseOrderReadModel {
     pub created_at: Timestamp,
     pub released_by: Option<UserId>,
     pub released_at: Option<Timestamp>,
+    pub cancellation_ready: bool,
+    pub cancellation_id: Option<PurchaseOrderCancellationId>,
+    pub cancellation_reason: Option<PurchaseOrderCancellationReason>,
+    pub cancellation_note: Option<String>,
+    pub cancelled_by: Option<UserId>,
+    pub cancelled_at: Option<Timestamp>,
     pub lines: Vec<PurchaseOrderLineReadModel>,
 }
 
@@ -117,6 +171,7 @@ mod tests {
     use super::*;
     use crate::idempotency::PreparedCommand;
     use crate::CommandContext;
+    use wareboxes_domain::PurchaseOrderCancellationNote;
     use wareboxes_domain::{
         PurchaseOrderLineDefinition, PurchaseOrderNumber, PurchaseOrderQuantity,
         PurchaseOrderSupplier, TenantId,
@@ -147,5 +202,38 @@ mod tests {
         let prepared =
             PreparedCommand::new_v1(&context, CREATE_PURCHASE_ORDER_OPERATION, &command).unwrap();
         assert!(!prepared.request_hash().is_empty());
+    }
+
+    #[test]
+    fn cancellation_hash_contains_reason_and_note() {
+        let context = CommandContext {
+            tenant_id: TenantId::new(1).unwrap(),
+            actor_id: UserId::new(6).unwrap(),
+            request_id: "req-cancel".into(),
+            idempotency_key: Some("key-cancel".into()),
+        };
+        let command = CancelPurchaseOrderCommand::new(
+            PurchaseOrderId::new(8).unwrap(),
+            PurchaseOrderRevision::new(2).unwrap(),
+            PurchaseOrderCancellationDetails::new(
+                PurchaseOrderCancellationReason::DemandCancelled,
+                Some(PurchaseOrderCancellationNote::new("Buyer withdrew demand").unwrap()),
+            )
+            .unwrap(),
+        );
+        let changed = CancelPurchaseOrderCommand::new(
+            PurchaseOrderId::new(8).unwrap(),
+            PurchaseOrderRevision::new(2).unwrap(),
+            PurchaseOrderCancellationDetails::new(
+                PurchaseOrderCancellationReason::SupplierCancelled,
+                Some(PurchaseOrderCancellationNote::new("Buyer withdrew demand").unwrap()),
+            )
+            .unwrap(),
+        );
+        let prepared =
+            PreparedCommand::new_v1(&context, CANCEL_PURCHASE_ORDER_OPERATION, &command).unwrap();
+        let changed =
+            PreparedCommand::new_v1(&context, CANCEL_PURCHASE_ORDER_OPERATION, &changed).unwrap();
+        assert_ne!(prepared.request_hash(), changed.request_hash());
     }
 }

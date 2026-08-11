@@ -191,10 +191,12 @@ pub use picking::{
     MAX_PICK_SCAN_VALUE_LENGTH, MAX_PICK_SHORTAGE_NOTE_LENGTH, MAX_PICK_SHORT_SHIP_NOTE_LENGTH,
 };
 pub use purchase_order::{
-    release_purchase_order, NewPurchaseOrder, PurchaseOrderDemandCoverage, PurchaseOrderError,
+    cancel_purchase_order, release_purchase_order, NewPurchaseOrder,
+    PurchaseOrderCancellationDetails, PurchaseOrderCancellationNote,
+    PurchaseOrderCancellationReason, PurchaseOrderDemandCoverage, PurchaseOrderError,
     PurchaseOrderLineDefinition, PurchaseOrderNumber, PurchaseOrderQuantity, PurchaseOrderRevision,
-    PurchaseOrderStatus, PurchaseOrderSupplier, MAX_PURCHASE_ORDER_NUMBER_LENGTH,
-    MAX_PURCHASE_ORDER_SUPPLIER_LENGTH,
+    PurchaseOrderStatus, PurchaseOrderSupplier, MAX_PURCHASE_ORDER_CANCELLATION_NOTE_LENGTH,
+    MAX_PURCHASE_ORDER_NUMBER_LENGTH, MAX_PURCHASE_ORDER_SUPPLIER_LENGTH,
 };
 pub use replenishment::{
     assess_replenishment_source, plan_replenishment, select_replenishment_sources,
@@ -348,6 +350,10 @@ positive_id!(InboundAsnCancellationId, "inbound ASN cancellation ID");
 positive_id!(PurchaseOrderId, "purchase order ID");
 positive_id!(PurchaseOrderLineId, "purchase order line ID");
 positive_id!(PurchaseOrderReleaseId, "purchase order release ID");
+positive_id!(
+    PurchaseOrderCancellationId,
+    "purchase order cancellation ID"
+);
 positive_id!(PurchaseOrderAsnSourceId, "purchase order ASN source ID");
 positive_id!(
     PurchaseOrderAsnSourceLineId,

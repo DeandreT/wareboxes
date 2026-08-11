@@ -7,6 +7,74 @@ use super::{CursorPage, OpaqueCursor, PageLimit, Revision};
 pub enum PurchaseOrderStatus {
     Draft,
     Released,
+    Cancelled,
+}
+
+pub const MAX_PURCHASE_ORDER_CANCELLATION_NOTE_LENGTH: usize = 500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PurchaseOrderCancellationReason {
+    SupplierCancelled,
+    DuplicateOrder,
+    DemandCancelled,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CancelPurchaseOrderRequest {
+    pub expected_revision: Revision,
+    pub reason: PurchaseOrderCancellationReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CancelPurchaseOrderRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            expected_revision: Revision,
+            reason: PurchaseOrderCancellationReason,
+            #[serde(default)]
+            note: Option<String>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.note.as_ref().is_some_and(|note| {
+            note.is_empty()
+                || note.trim() != note
+                || note.chars().count() > MAX_PURCHASE_ORDER_CANCELLATION_NOTE_LENGTH
+                || note.chars().any(char::is_control)
+        }) || (raw.reason == PurchaseOrderCancellationReason::Other && raw.note.is_none())
+        {
+            return Err(serde::de::Error::custom(
+                "purchase order cancellation note is invalid",
+            ));
+        }
+        Ok(Self {
+            expected_revision: raw.expected_revision,
+            reason: raw.reason,
+            note: raw.note,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelPurchaseOrderResponse {
+    pub cancellation_id: i64,
+    pub purchase_order_id: i64,
+    pub previous_status: PurchaseOrderStatus,
+    pub status: PurchaseOrderStatus,
+    pub revision: Revision,
+    pub reason: PurchaseOrderCancellationReason,
+    pub note: Option<String>,
+    pub cancelled_by: i64,
+    pub cancelled_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +182,12 @@ pub struct PurchaseOrderSummaryResponse {
     pub created_at: String,
     pub released_by: Option<i64>,
     pub released_at: Option<String>,
+    pub cancellation_ready: bool,
+    pub cancellation_id: Option<i64>,
+    pub cancellation_reason: Option<PurchaseOrderCancellationReason>,
+    pub cancellation_note: Option<String>,
+    pub cancelled_by: Option<i64>,
+    pub cancelled_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,5 +277,33 @@ mod tests {
         let mut invalid = value;
         invalid["remaining_quantity"] = serde_json::json!(1);
         assert!(serde_json::from_value::<PurchaseOrderLineResponse>(invalid).is_err());
+    }
+
+    #[test]
+    fn cancellation_request_is_strict_and_requires_other_note() {
+        let request = serde_json::json!({
+            "expected_revision": 2,
+            "reason": "demand_cancelled",
+            "note": "Buyer withdrew demand"
+        });
+        assert!(serde_json::from_value::<CancelPurchaseOrderRequest>(request.clone()).is_ok());
+        let mut unknown = request;
+        unknown["status"] = serde_json::json!("cancelled");
+        assert!(serde_json::from_value::<CancelPurchaseOrderRequest>(unknown).is_err());
+        assert!(
+            serde_json::from_value::<CancelPurchaseOrderRequest>(serde_json::json!({
+                "expected_revision": 2,
+                "reason": "other"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CancelPurchaseOrderRequest>(serde_json::json!({
+                "expected_revision": 2,
+                "reason": "supplier_cancelled",
+                "note": " trailing "
+            }))
+            .is_err()
+        );
     }
 }

@@ -71,6 +71,10 @@ pub fn router() -> Router<AppState> {
             post(purchase_orders::release),
         )
         .route(
+            "/purchase-orders/{purchase_order_id}/cancellations",
+            post(purchase_orders::cancel),
+        )
+        .route(
             "/purchase-orders/{purchase_order_id}/asns",
             post(purchase_orders::create_asn),
         )

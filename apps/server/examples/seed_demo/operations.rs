@@ -4,11 +4,12 @@ use axum::http::{Method, StatusCode};
 use serde_json::json;
 use wareboxes_api::repo;
 use wareboxes_api_contract::v1::{
-    CancelInboundAsnResponse, ConfigureReplenishmentPolicyResponse, CreateCycleCountTaskResponse,
-    CreatePurchaseOrderAsnResponse, CreatePurchaseOrderResponse, CreatePutawayTaskResponse,
-    IntegrationOrderIntakeResponse, IntegrationOrderOwnerMappingResponse, PickWaveResponse,
-    PlaceInventoryHoldResponse, PlanInboundAsnLoadResponse, PlanOrderAllocationResponse,
-    PlanReplenishmentResponse, ReleasePurchaseOrderResponse,
+    CancelInboundAsnResponse, CancelPurchaseOrderResponse, ConfigureReplenishmentPolicyResponse,
+    CreateCycleCountTaskResponse, CreatePurchaseOrderAsnResponse, CreatePurchaseOrderResponse,
+    CreatePutawayTaskResponse, IntegrationOrderIntakeResponse,
+    IntegrationOrderOwnerMappingResponse, PickWaveResponse, PlaceInventoryHoldResponse,
+    PlanInboundAsnLoadResponse, PlanOrderAllocationResponse, PlanReplenishmentResponse,
+    ReleasePurchaseOrderResponse,
 };
 
 use crate::support::SeedContext;
@@ -153,7 +154,71 @@ async fn seed_purchase_orders(context: &SeedContext) -> anyhow::Result<()> {
     }
     seed_purchase_order_receipt_progress(context).await?;
     seed_cancelled_purchase_order_notice(context).await?;
-    println!("seeded draft and released purchase orders with PO-sourced ASN demand");
+    seed_cancelled_purchase_order(context, &item_ids).await?;
+    println!("seeded draft, released, and cancelled purchase orders with PO-sourced ASN demand");
+    Ok(())
+}
+
+async fn seed_cancelled_purchase_order(
+    context: &SeedContext,
+    item_ids: &[i64],
+) -> anyhow::Result<()> {
+    let existing: Option<(i64, String, i64)> = sqlx::query_as(
+        r#"
+        SELECT id,status,revision
+        FROM purchase_orders
+        WHERE tenant_id=$1 AND number='WB-DEMO-PO-CANCELLED-0001'
+        "#,
+    )
+    .bind(context.tenant_id.get())
+    .fetch_optional(&context.admin)
+    .await?;
+    let (purchase_order_id, status, revision) = match existing {
+        Some(existing) => existing,
+        None => {
+            let created: CreatePurchaseOrderResponse = context
+                .command(
+                    Method::POST,
+                    "/api/v1/purchase-orders",
+                    "demo-cancelled-purchase-order-create",
+                    json!({
+                        "inventory_owner_id": context.inventory_owner_id,
+                        "facility_id": context.facility_id,
+                        "number": "WB-DEMO-PO-CANCELLED-0001",
+                        "supplier": "Cancelled Supplier Example",
+                        "expected_by": "2027-08-24T17:00:00Z",
+                        "lines": [
+                            {"item_id": item_ids[0], "ordered_quantity": 6},
+                            {"item_id": item_ids[1], "ordered_quantity": 9}
+                        ]
+                    }),
+                )
+                .await?;
+            (
+                created.purchase_order_id,
+                "draft".to_owned(),
+                created.revision.get(),
+            )
+        }
+    };
+    match status.as_str() {
+        "draft" | "released" => {
+            let _: CancelPurchaseOrderResponse = context
+                .command(
+                    Method::POST,
+                    &format!("/api/v1/purchase-orders/{purchase_order_id}/cancellations"),
+                    "demo-cancelled-purchase-order-cancel",
+                    json!({
+                        "expected_revision": revision,
+                        "reason": "demand_cancelled",
+                        "note": "Demo demand was withdrawn before receiving began"
+                    }),
+                )
+                .await?;
+        }
+        "cancelled" => {}
+        status => bail!("demo cancellation purchase order has unsupported resume status {status}"),
+    }
     Ok(())
 }
 

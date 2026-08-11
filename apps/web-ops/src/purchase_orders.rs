@@ -1,8 +1,9 @@
-use leptos::prelude::*;
+use leptos::{html, prelude::*};
 use wareboxes_api_contract::v1::{
-    CreatePurchaseOrderAsnLineRequest, CreatePurchaseOrderAsnRequest,
-    CreatePurchaseOrderLineRequest, CreatePurchaseOrderRequest, OpaqueCursor,
-    PurchaseOrderDetailResponse, PurchaseOrderLineResponse, PurchaseOrderPage, PurchaseOrderStatus,
+    CancelPurchaseOrderRequest, CancelPurchaseOrderResponse, CreatePurchaseOrderAsnLineRequest,
+    CreatePurchaseOrderAsnRequest, CreatePurchaseOrderLineRequest, CreatePurchaseOrderRequest,
+    OpaqueCursor, PurchaseOrderCancellationReason, PurchaseOrderDetailResponse,
+    PurchaseOrderLineResponse, PurchaseOrderPage, PurchaseOrderStatus,
     PurchaseOrderSummaryResponse, ReleasePurchaseOrderRequest, Revision,
 };
 use wareboxes_api_contract::web::access::AccessScopeWorkspace;
@@ -70,6 +71,7 @@ pub(crate) fn PurchaseOrdersWorkspace(
     let detail_error = RwSignal::new(None::<String>);
     let detail_generation = RwSignal::new(0_u64);
     let create_open = RwSignal::new(false);
+    let cancel_open = RwSignal::new(false);
     let layout = SplitPaneState::new("purchase-orders", 700);
     let page_signals = PageSignals {
         page,
@@ -89,6 +91,7 @@ pub(crate) fn PurchaseOrdersWorkspace(
 
     let load_detail = move |purchase_order_id: i64| {
         create_open.set(false);
+        cancel_open.set(false);
         layout.show_detail();
         selected_id.set(Some(purchase_order_id));
         request_detail(
@@ -120,6 +123,11 @@ pub(crate) fn PurchaseOrdersWorkspace(
         request_page(page_signals, None, Vec::new());
         load_detail(purchase_order_id);
     });
+    let cancelled = Callback::new(move |result: CancelPurchaseOrderResponse| {
+        cancel_open.set(false);
+        request_page(page_signals, None, Vec::new());
+        load_detail(result.purchase_order_id);
+    });
     let previous = move |_| {
         if loading.get_untracked() {
             return;
@@ -148,7 +156,7 @@ pub(crate) fn PurchaseOrdersWorkspace(
                     <SearchField label="Search purchase orders".to_owned() placeholder="PO or supplier" value=search/>
                     <label><span class="sr-only">"Client"</span><select prop:value=move || owner.get() on:change=move |event| owner.set(event_target_value(&event))><option value="">"All clients"</option>{access.inventory_owners.clone().into_iter().map(|item| view! { <option value=item.id>{item.name}</option> }).collect_view()}</select></label>
                     <label><span class="sr-only">"Facility"</span><select prop:value=move || facility.get() on:change=move |event| facility.set(event_target_value(&event))><option value="">"All facilities"</option>{access.facilities.clone().into_iter().map(|item| view! { <option value=item.id>{item.name}</option> }).collect_view()}</select></label>
-                    <label><span class="sr-only">"Status"</span><select prop:value=move || status.get() on:change=move |event| status.set(event_target_value(&event))><option value="">"All statuses"</option><option value="draft">"Draft"</option><option value="released">"Released"</option></select></label>
+                    <label><span class="sr-only">"Status"</span><select prop:value=move || status.get() on:change=move |event| status.set(event_target_value(&event))><option value="">"All statuses"</option><option value="draft">"Draft"</option><option value="released">"Released"</option><option value="cancelled">"Cancelled"</option></select></label>
                     <button class="button secondary-action compact" type="submit" disabled=move || loading.get()>"Apply"</button>
                     <button class="icon-button" type="button" title="Refresh purchase orders" aria-label="Refresh purchase orders" disabled=move || loading.get() on:click=refresh><Icon icon=UiIcon::Refresh/></button>
                     <button class="button primary-action compact" type="button" on:click=move |_| { create_open.set(true); layout.show_detail(); }><Icon icon=UiIcon::Add/><span>"New PO"</span></button>
@@ -167,7 +175,7 @@ pub(crate) fn PurchaseOrdersWorkspace(
             <section class="data-section purchase-order-detail split-detail">
                 <Show when=move || create_open.get() fallback=move || view! {
                     <Show when=move || selected.get().is_some() fallback=move || view! { <div class="detail-empty"><h2>"Purchase order details"</h2><p>"Select a purchase order to inspect supplier demand and release evidence."</p></div> }>
-                        {move || selected.get().map(|detail| view! { <PurchaseOrderDetail detail on_released=released on_unauthorized/> })}
+                        {move || selected.get().map(|detail| view! { <PurchaseOrderDetail detail on_released=released on_cancel=Callback::new(move |_| cancel_open.set(true)) on_unauthorized/> })}
                     </Show>
                 }>
                     <CreatePurchaseOrderPanel access=access.clone() on_close=Callback::new(move |_| create_open.set(false)) on_created=created on_unauthorized/>
@@ -176,6 +184,9 @@ pub(crate) fn PurchaseOrdersWorkspace(
                 <Show when=move || detail_error.get().is_some()>{move || detail_error.get().map(|message| view! { <p class="inline-command-error">{message}</p> })}</Show>
             </section>
         </div>
+        <Show when=move || cancel_open.get() && selected.get().is_some()>
+            {move || selected.get().map(|detail| view! { <CancelPurchaseOrderDialog detail on_close=Callback::new(move |_| cancel_open.set(false)) on_cancelled=cancelled on_unauthorized/> })}
+        </Show>
     }
 }
 
@@ -183,6 +194,7 @@ pub(crate) fn PurchaseOrdersWorkspace(
 fn PurchaseOrderDetail(
     detail: PurchaseOrderDetailResponse,
     on_released: Callback<i64>,
+    on_cancel: Callback<()>,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     let pending = RwSignal::new(false);
@@ -197,6 +209,12 @@ fn PurchaseOrderDetail(
     let can_release = summary.status == PurchaseOrderStatus::Draft;
     let can_create_asn = summary.status == PurchaseOrderStatus::Released
         && summary.total_available_to_notify_quantity > 0;
+    let can_cancel = summary.cancellation_ready;
+    let cancellation = summary.cancellation_reason.map(|reason| {
+        let note = summary.cancellation_note.clone();
+        let at = summary.cancelled_at.clone();
+        view! { <section class="purchase-order-cancellation-evidence"><div><span>"Cancellation"</span><strong>{cancellation_reason_label(reason)}</strong></div>{note.map(|value| view! { <p>{value}</p> })}<small>{at.as_deref().map(short_timestamp).unwrap_or_else(|| "Time unavailable".into())}</small></section> }
+    });
     let release = move |_| {
         if pending.get_untracked() {
             return;
@@ -249,8 +267,85 @@ fn PurchaseOrderDetail(
             <dl class="summary-grid"><div><dt>"Client"</dt><dd>{summary.inventory_owner_name}</dd></div><div><dt>"Facility"</dt><dd>{summary.facility_name}</dd></div><div><dt>"Expected"</dt><dd>{summary.expected_by.as_deref().map(short_timestamp).unwrap_or_else(|| "Not supplied".into())}</dd></div><div><dt>"Ordered"</dt><dd>{format_quantity(summary.total_ordered_quantity)}</dd></div><div><dt>"ASN history"</dt><dd>{format_quantity(summary.total_historical_asn_quantity)}</dd></div><div><dt>"Active inbound"</dt><dd>{format_quantity(summary.total_active_inbound_quantity)}</dd></div><div><dt>"Available to notify"</dt><dd><strong>{format_quantity(summary.total_available_to_notify_quantity)}</strong></dd></div><div><dt>"Received"</dt><dd>{format_quantity(summary.total_received_quantity)}</dd></div><div><dt>"Exceptions"</dt><dd>{format_quantity(summary.total_rejected_quantity + summary.total_missing_quantity)}</dd></div><div class="summary-emphasis"><dt>"Open receipt"</dt><dd><strong>{format_quantity(summary.total_open_receipt_quantity)}</strong></dd></div></dl>
             <div class="detail-section-heading"><h3>"Ordered items"</h3><span>{format!("{} lines", detail.lines.len())}</span></div>
             <div class="table-scroll"><table class="dense-table document-progress-table"><thead><tr><th>"Item"</th><th>"Supply"</th><th>"Receipt"</th></tr></thead><tbody>{detail.lines.into_iter().map(|line| { let exceptions=line.rejected_quantity+line.missing_quantity; view! { <tr><td><strong>{line.item_description}</strong><small>{format!("Item #{} · {}", line.item_id, line.uom)}</small></td><td><dl class="line-metrics"><div><dt>"ASN history"</dt><dd>{format_quantity(line.historical_asn_quantity)}</dd></div><div><dt>"Active inbound"</dt><dd>{format_quantity(line.active_inbound_quantity)}</dd></div><div><dt>"Available"</dt><dd><strong>{format_quantity(line.available_to_notify_quantity)}</strong></dd></div></dl></td><td><dl class="line-metrics"><div><dt>"Ordered"</dt><dd>{format_quantity(line.ordered_quantity)}</dd></div><div><dt>"Received"</dt><dd>{format_quantity(line.received_quantity)}</dd></div><div><dt>"Exceptions"</dt><dd>{format_quantity(exceptions)}</dd></div><div><dt>"Open"</dt><dd><strong>{format_quantity(line.open_receipt_quantity)}</strong></dd></div></dl></td></tr> } }).collect_view()}</tbody></table></div>
+            {cancellation}
             <Show when=move || error.get().is_some()>{move || error.get().map(|message| view! { <p class="inline-command-error">{message}</p> })}</Show>
-            <footer class="detail-actions"><a class="button quiet-action" href="/inbound-asns">"Open inbound ASNs"</a>{can_release.then(|| view! { <button class="button primary-action" type="button" disabled=move || pending.get() on:click=release><Icon icon=UiIcon::Orders/><span>{move || if pending.get() { "Releasing..." } else { "Release PO" }}</span></button> })}{can_create_asn.then(|| view! { <button class="button primary-action" type="button" on:click=move |_| asn_open.set(true)><Icon icon=UiIcon::Add/><span>"Create ASN"</span></button> })}</footer>
+            <footer class="detail-actions"><a class="button quiet-action" href="/inbound-asns">"Open inbound ASNs"</a>{can_cancel.then(|| view! { <button class="button danger-action" type="button" on:click=move |_| on_cancel.run(())>"Cancel PO"</button> })}{can_release.then(|| view! { <button class="button primary-action" type="button" disabled=move || pending.get() on:click=release><Icon icon=UiIcon::Orders/><span>{move || if pending.get() { "Releasing..." } else { "Release PO" }}</span></button> })}{can_create_asn.then(|| view! { <button class="button primary-action" type="button" on:click=move |_| asn_open.set(true)><Icon icon=UiIcon::Add/><span>"Create ASN"</span></button> })}</footer>
+        </div>
+    }
+}
+
+#[component]
+fn CancelPurchaseOrderDialog(
+    detail: PurchaseOrderDetailResponse,
+    on_close: Callback<()>,
+    on_cancelled: Callback<CancelPurchaseOrderResponse>,
+    on_unauthorized: Callback<()>,
+) -> impl IntoView {
+    let reason = RwSignal::new(PurchaseOrderCancellationReason::DemandCancelled);
+    let note = RwSignal::new(String::new());
+    let pending = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let retry = RwSignal::new(None::<(CancelPurchaseOrderRequest, String)>);
+    let note_input = NodeRef::<html::Textarea>::new();
+    let toasts = use_toast_bus();
+    let purchase_order_id = detail.summary.purchase_order_id;
+    let revision = detail.summary.revision;
+    let number = detail.summary.number;
+    let submit = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        if pending.get_untracked() {
+            return;
+        }
+        let note_value = optional_text(&note.get_untracked());
+        if reason.get_untracked() == PurchaseOrderCancellationReason::Other && note_value.is_none()
+        {
+            error.set(Some("Enter a note for the Other reason.".into()));
+            if let Some(input) = note_input.get() {
+                let _ = input.focus();
+            }
+            return;
+        }
+        let request = CancelPurchaseOrderRequest {
+            expected_revision: revision,
+            reason: reason.get_untracked(),
+            note: note_value,
+        };
+        let key = retry
+            .get_untracked()
+            .filter(|(saved, _)| saved == &request)
+            .map_or_else(api::new_idempotency_key, |(_, key)| key);
+        retry.set(Some((request.clone(), key.clone())));
+        pending.set(true);
+        error.set(None);
+        leptos::task::spawn_local(async move {
+            match api::cancel_purchase_order(purchase_order_id, &request, &key).await {
+                Ok(result) => {
+                    pending.set(false);
+                    retry.set(None);
+                    toasts.success("Purchase order cancelled.");
+                    on_cancelled.run(result);
+                }
+                Err(value) if value.unauthorized => on_unauthorized.run(()),
+                Err(value) => {
+                    pending.set(false);
+                    if !value.ambiguous_outcome {
+                        retry.set(None);
+                    }
+                    error.set(Some(value.message.clone()));
+                    toasts.error(value.message);
+                }
+            }
+        });
+    };
+    view! {
+        <div class="purchase-order-dialog-backdrop" role="presentation">
+            <form class="purchase-order-dialog purchase-order-cancel-dialog" role="dialog" aria-modal="true" aria-labelledby="purchase-order-cancel-title" on:submit=submit>
+                <header><div><span class="eyebrow">"Terminal supplier action"</span><h2 id="purchase-order-cancel-title">{format!("Cancel {number}")}</h2></div><button type="button" class="icon-button" title="Close" aria-label="Close" on:click=move |_| on_close.run(())><Icon icon=UiIcon::Close/></button></header>
+                <p>"The purchase order remains in history and cannot source more ASNs. Every source ASN must already be cancelled."</p>
+                <div class="form-grid"><label><span>"Reason"</span><select on:change=move |event| reason.set(parse_cancellation_reason(&event_target_value(&event)))><option value="demand_cancelled">"Demand cancelled"</option><option value="supplier_cancelled">"Supplier cancelled"</option><option value="duplicate_order">"Duplicate order"</option><option value="other">"Other"</option></select></label><label><span>"Note"</span><textarea node_ref=note_input maxlength="500" placeholder="Optional unless reason is Other" aria-describedby="purchase-order-cancel-error" aria-invalid=move || if error.get().is_some() { "true" } else { "false" } prop:value=move || note.get() on:input=move |event| { note.set(event_target_value(&event)); error.set(None); }></textarea></label></div>
+                <Show when=move || error.get().is_some()>{move || error.get().map(|message| view! { <p id="purchase-order-cancel-error" class="inline-command-error" role="alert" aria-live="assertive">{message}</p> })}</Show>
+                <footer><button class="button quiet-action" type="button" on:click=move |_| on_close.run(())>"Go back"</button><button class="button danger-action" type="submit" disabled=move || pending.get()>{move || if pending.get() { "Cancelling..." } else { "Cancel PO" }}</button></footer>
+            </form>
         </div>
     }
 }
@@ -559,6 +654,7 @@ fn request_page(
         status: match signals.status.get_untracked().as_str() {
             "draft" => Some(PurchaseOrderStatus::Draft),
             "released" => Some(PurchaseOrderStatus::Released),
+            "cancelled" => Some(PurchaseOrderStatus::Cancelled),
             _ => None,
         },
         search: optional_text(&signals.search.get_untracked()),
@@ -651,12 +747,30 @@ fn status_label(status: PurchaseOrderStatus) -> &'static str {
     match status {
         PurchaseOrderStatus::Draft => "Draft",
         PurchaseOrderStatus::Released => "Released",
+        PurchaseOrderStatus::Cancelled => "Cancelled",
     }
 }
 fn status_class(status: PurchaseOrderStatus) -> &'static str {
     match status {
         PurchaseOrderStatus::Draft => "status-chip info",
         PurchaseOrderStatus::Released => "status-chip success",
+        PurchaseOrderStatus::Cancelled => "status-chip neutral",
+    }
+}
+fn parse_cancellation_reason(value: &str) -> PurchaseOrderCancellationReason {
+    match value {
+        "supplier_cancelled" => PurchaseOrderCancellationReason::SupplierCancelled,
+        "duplicate_order" => PurchaseOrderCancellationReason::DuplicateOrder,
+        "other" => PurchaseOrderCancellationReason::Other,
+        _ => PurchaseOrderCancellationReason::DemandCancelled,
+    }
+}
+fn cancellation_reason_label(reason: PurchaseOrderCancellationReason) -> &'static str {
+    match reason {
+        PurchaseOrderCancellationReason::SupplierCancelled => "Supplier cancelled",
+        PurchaseOrderCancellationReason::DuplicateOrder => "Duplicate order",
+        PurchaseOrderCancellationReason::DemandCancelled => "Demand cancelled",
+        PurchaseOrderCancellationReason::Other => "Other",
     }
 }
 fn short_timestamp(value: &str) -> String {

@@ -1,7 +1,8 @@
 use wareboxes_api_contract::v1::{
-    CreatePurchaseOrderAsnRequest, CreatePurchaseOrderAsnResponse, CreatePurchaseOrderRequest,
-    CreatePurchaseOrderResponse, OpaqueCursor, PurchaseOrderDetailResponse, PurchaseOrderPage,
-    PurchaseOrderStatus, ReleasePurchaseOrderRequest, ReleasePurchaseOrderResponse,
+    CancelPurchaseOrderRequest, CancelPurchaseOrderResponse, CreatePurchaseOrderAsnRequest,
+    CreatePurchaseOrderAsnResponse, CreatePurchaseOrderRequest, CreatePurchaseOrderResponse,
+    OpaqueCursor, PurchaseOrderDetailResponse, PurchaseOrderPage, PurchaseOrderStatus,
+    ReleasePurchaseOrderRequest, ReleasePurchaseOrderResponse,
 };
 
 use super::ApiError;
@@ -75,6 +76,20 @@ pub async fn release_purchase_order(
 }
 
 #[cfg(target_arch = "wasm32")]
+pub async fn cancel_purchase_order(
+    purchase_order_id: i64,
+    request: &CancelPurchaseOrderRequest,
+    idempotency_key: &str,
+) -> Result<CancelPurchaseOrderResponse, ApiError> {
+    super::browser::post(
+        &format!("/api/v1/purchase-orders/{purchase_order_id}/cancellations"),
+        request,
+        idempotency_key,
+    )
+    .await
+}
+
+#[cfg(target_arch = "wasm32")]
 pub async fn create_purchase_order_asn(
     purchase_order_id: i64,
     request: &CreatePurchaseOrderAsnRequest,
@@ -106,6 +121,15 @@ pub async fn release_purchase_order(
     Err(ApiError::unavailable())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn cancel_purchase_order(
+    _purchase_order_id: i64,
+    _request: &CancelPurchaseOrderRequest,
+    _idempotency_key: &str,
+) -> Result<CancelPurchaseOrderResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
 #[cfg(any(target_arch = "wasm32", test))]
 fn purchase_order_page_path(
     filters: &PurchaseOrderFilters,
@@ -119,6 +143,7 @@ fn purchase_order_page_path(
         path.push_str(match status {
             PurchaseOrderStatus::Draft => "draft",
             PurchaseOrderStatus::Released => "released",
+            PurchaseOrderStatus::Cancelled => "cancelled",
         });
     }
     if let Some(search) = filters.search.as_deref().filter(|value| !value.is_empty()) {

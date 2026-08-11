@@ -287,8 +287,9 @@ pub use picking::{
     ShortShipDemandResponse,
 };
 pub use purchase_order::{
-    CreatePurchaseOrderLineRequest, CreatePurchaseOrderRequest, CreatePurchaseOrderResponse,
-    CreatedPurchaseOrderLineResponse, PurchaseOrderDetailResponse, PurchaseOrderLineResponse,
+    CancelPurchaseOrderRequest, CancelPurchaseOrderResponse, CreatePurchaseOrderLineRequest,
+    CreatePurchaseOrderRequest, CreatePurchaseOrderResponse, CreatedPurchaseOrderLineResponse,
+    PurchaseOrderCancellationReason, PurchaseOrderDetailResponse, PurchaseOrderLineResponse,
     PurchaseOrderPage, PurchaseOrderPageRequest, PurchaseOrderStatus, PurchaseOrderSummaryResponse,
     ReleasePurchaseOrderRequest, ReleasePurchaseOrderResponse,
 };

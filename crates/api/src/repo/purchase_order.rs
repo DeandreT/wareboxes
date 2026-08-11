@@ -1,5 +1,9 @@
 //! Purchase-order source intake, release, and operational reads.
 
+mod cancellation;
+
+pub use cancellation::cancel;
+
 use std::collections::HashMap;
 
 use sqlx::Row;
@@ -19,9 +23,9 @@ use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     release_purchase_order, CatalogItemId, FacilityId, InboundAsnId, InboundAsnLineId,
     InboundAsnRevision, InboundAsnStatus, InventoryOwnerId, PurchaseOrderAsnSourceId,
-    PurchaseOrderAsnSourceLineId, PurchaseOrderDemandCoverage, PurchaseOrderId,
-    PurchaseOrderLineId, PurchaseOrderReleaseId, PurchaseOrderRevision, PurchaseOrderStatus,
-    Timestamp, UserId,
+    PurchaseOrderAsnSourceLineId, PurchaseOrderCancellationId, PurchaseOrderCancellationReason,
+    PurchaseOrderDemandCoverage, PurchaseOrderId, PurchaseOrderLineId, PurchaseOrderReleaseId,
+    PurchaseOrderRevision, PurchaseOrderStatus, Timestamp, UserId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::{insert_result, PostgresPreparedCommandExt};
@@ -616,18 +620,32 @@ pub async fn page(
                    AS total_historical_asn_quantity,
                COALESCE(progress.active_inbound_quantity,0)::BIGINT
                    AS total_active_inbound_quantity,
-               purchase.total_ordered_quantity
-                   - COALESCE(progress.received_quantity,0)::BIGINT
-                   - COALESCE(progress.active_inbound_quantity,0)::BIGINT
-                   AS total_available_to_notify_quantity,
+               CASE WHEN purchase.status='cancelled' THEN 0 ELSE
+                   purchase.total_ordered_quantity
+                       - COALESCE(progress.received_quantity,0)::BIGINT
+                       - COALESCE(progress.active_inbound_quantity,0)::BIGINT
+               END AS total_available_to_notify_quantity,
                COALESCE(progress.received_quantity,0)::BIGINT AS total_received_quantity,
                COALESCE(progress.rejected_quantity,0)::BIGINT AS total_rejected_quantity,
                COALESCE(progress.missing_quantity,0)::BIGINT AS total_missing_quantity,
-               purchase.total_ordered_quantity
-                   - COALESCE(progress.received_quantity,0)::BIGINT
-                   AS total_open_receipt_quantity,
+               CASE WHEN purchase.status='cancelled' THEN 0 ELSE
+                   purchase.total_ordered_quantity
+                       - COALESCE(progress.received_quantity,0)::BIGINT
+               END AS total_open_receipt_quantity,
                purchase.created_by_user_id,purchase.created_at,
-               purchase.released_by_user_id,purchase.released_at
+               purchase.released_by_user_id,purchase.released_at,
+               purchase.status IN ('draft','released') AND NOT EXISTS (
+                   SELECT 1
+                   FROM purchase_order_asn_sources source
+                   INNER JOIN inbound_asns asn
+                     ON asn.tenant_id=source.tenant_id AND asn.id=source.asn_id
+                   WHERE source.tenant_id=purchase.tenant_id
+                     AND source.purchase_order_id=purchase.id
+                     AND asn.status <> 'cancelled') AS cancellation_ready,
+               cancellation.id AS cancellation_id,
+               cancellation.reason_code AS cancellation_reason,
+               cancellation.note AS cancellation_note,
+               cancellation.cancelled_by_user_id,cancellation.cancelled_at
         FROM purchase_orders purchase
         INNER JOIN inventory_owners owner
           ON owner.tenant_id=purchase.tenant_id AND owner.id=purchase.inventory_owner_id
@@ -645,6 +663,9 @@ pub async fn page(
             WHERE line_progress.tenant_id=purchase.tenant_id
               AND line_progress.purchase_order_id=purchase.id
         ) progress ON TRUE
+        LEFT JOIN purchase_order_cancellations cancellation
+          ON cancellation.tenant_id=purchase.tenant_id
+         AND cancellation.purchase_order_id=purchase.id
         WHERE purchase.tenant_id=$1
           AND ($2 OR purchase.facility_id=ANY($3))
           AND ($4 OR purchase.inventory_owner_id=ANY($5))
@@ -702,18 +723,32 @@ pub async fn detail(
                    AS total_historical_asn_quantity,
                COALESCE(progress.active_inbound_quantity,0)::BIGINT
                    AS total_active_inbound_quantity,
-               purchase.total_ordered_quantity
-                   - COALESCE(progress.received_quantity,0)::BIGINT
-                   - COALESCE(progress.active_inbound_quantity,0)::BIGINT
-                   AS total_available_to_notify_quantity,
+               CASE WHEN purchase.status='cancelled' THEN 0 ELSE
+                   purchase.total_ordered_quantity
+                       - COALESCE(progress.received_quantity,0)::BIGINT
+                       - COALESCE(progress.active_inbound_quantity,0)::BIGINT
+               END AS total_available_to_notify_quantity,
                COALESCE(progress.received_quantity,0)::BIGINT AS total_received_quantity,
                COALESCE(progress.rejected_quantity,0)::BIGINT AS total_rejected_quantity,
                COALESCE(progress.missing_quantity,0)::BIGINT AS total_missing_quantity,
-               purchase.total_ordered_quantity
-                   - COALESCE(progress.received_quantity,0)::BIGINT
-                   AS total_open_receipt_quantity,
+               CASE WHEN purchase.status='cancelled' THEN 0 ELSE
+                   purchase.total_ordered_quantity
+                       - COALESCE(progress.received_quantity,0)::BIGINT
+               END AS total_open_receipt_quantity,
                purchase.created_by_user_id,purchase.created_at,
-               purchase.released_by_user_id,purchase.released_at
+               purchase.released_by_user_id,purchase.released_at,
+               purchase.status IN ('draft','released') AND NOT EXISTS (
+                   SELECT 1
+                   FROM purchase_order_asn_sources source
+                   INNER JOIN inbound_asns asn
+                     ON asn.tenant_id=source.tenant_id AND asn.id=source.asn_id
+                   WHERE source.tenant_id=purchase.tenant_id
+                     AND source.purchase_order_id=purchase.id
+                     AND asn.status <> 'cancelled') AS cancellation_ready,
+               cancellation.id AS cancellation_id,
+               cancellation.reason_code AS cancellation_reason,
+               cancellation.note AS cancellation_note,
+               cancellation.cancelled_by_user_id,cancellation.cancelled_at
         FROM purchase_orders purchase
         INNER JOIN inventory_owners owner
           ON owner.tenant_id=purchase.tenant_id AND owner.id=purchase.inventory_owner_id
@@ -731,6 +766,9 @@ pub async fn detail(
             WHERE line_progress.tenant_id=purchase.tenant_id
               AND line_progress.purchase_order_id=purchase.id
         ) progress ON TRUE
+        LEFT JOIN purchase_order_cancellations cancellation
+          ON cancellation.tenant_id=purchase.tenant_id
+         AND cancellation.purchase_order_id=purchase.id
         WHERE purchase.tenant_id=$1 AND purchase.id=$2
           AND ($3 OR purchase.facility_id=ANY($4))
           AND ($5 OR purchase.inventory_owner_id=ANY($6))
@@ -756,15 +794,20 @@ pub async fn detail(
                line.uom,line.ordered_quantity,
                progress.historical_asn_quantity,
                progress.active_inbound_quantity,
-               line.ordered_quantity
-                   - progress.received_quantity
-                   - progress.active_inbound_quantity AS available_to_notify_quantity,
+               CASE WHEN purchase.status='cancelled' THEN 0 ELSE
+                   line.ordered_quantity
+                       - progress.received_quantity
+                       - progress.active_inbound_quantity
+               END AS available_to_notify_quantity,
                progress.received_quantity,
                progress.rejected_quantity,
                progress.missing_quantity,
-               line.ordered_quantity
-                   - progress.received_quantity AS open_receipt_quantity
+               CASE WHEN purchase.status='cancelled' THEN 0 ELSE
+                   line.ordered_quantity - progress.received_quantity
+               END AS open_receipt_quantity
         FROM purchase_order_lines line
+        INNER JOIN purchase_orders purchase
+          ON purchase.tenant_id=line.tenant_id AND purchase.id=line.purchase_order_id
         INNER JOIN items item ON item.tenant_id=line.tenant_id AND item.id=line.item_id
         INNER JOIN purchase_order_line_inbound_progress progress
           ON progress.tenant_id=line.tenant_id
@@ -933,7 +976,7 @@ async fn lock_source_items(
     }
 }
 
-async fn require_stored_visible_before_replay(
+pub(super) async fn require_stored_visible_before_replay(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     access: &TenantAccess,
     prepared: &PreparedCommand,
@@ -1007,17 +1050,39 @@ fn map_header(row: &sqlx::postgres::PgRow) -> AppResult<PurchaseOrderReadModel> 
             .transpose()
             .map_err(|error| AppError::internal(error.to_string()))?,
         released_at: row.try_get("released_at")?,
+        cancellation_ready: row.try_get("cancellation_ready")?,
+        cancellation_id: row
+            .try_get::<Option<i64>, _>("cancellation_id")?
+            .map(PurchaseOrderCancellationId::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        cancellation_reason: row
+            .try_get::<Option<String>, _>("cancellation_reason")?
+            .map(|value| parse_cancellation_reason(&value))
+            .transpose()?,
+        cancellation_note: row.try_get("cancellation_note")?,
+        cancelled_by: row
+            .try_get::<Option<i64>, _>("cancelled_by_user_id")?
+            .map(UserId::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        cancelled_at: row.try_get("cancelled_at")?,
         lines: Vec::new(),
     })
 }
 
-fn parse_status(value: &str) -> AppResult<PurchaseOrderStatus> {
+pub(super) fn parse_status(value: &str) -> AppResult<PurchaseOrderStatus> {
     PurchaseOrderStatus::parse(value)
         .ok_or_else(|| AppError::internal("stored purchase order status is invalid"))
 }
 
-fn revision(value: i64) -> AppResult<PurchaseOrderRevision> {
+pub(super) fn revision(value: i64) -> AppResult<PurchaseOrderRevision> {
     PurchaseOrderRevision::new(value).map_err(|error| AppError::internal(error.to_string()))
+}
+
+fn parse_cancellation_reason(value: &str) -> AppResult<PurchaseOrderCancellationReason> {
+    PurchaseOrderCancellationReason::parse(value)
+        .ok_or_else(|| AppError::internal("stored purchase order cancellation reason is invalid"))
 }
 
 async fn enqueue_created(
@@ -1131,7 +1196,7 @@ async fn enqueue_purchase_order_asn_created(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn enqueue_event(
+pub(super) async fn enqueue_event(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     access: &TenantAccess,
     context: &CommandContext,
