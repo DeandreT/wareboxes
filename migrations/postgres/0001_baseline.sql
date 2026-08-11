@@ -35561,6 +35561,8 @@ CREATE TABLE public.inbound_load_arrivals (
         AND char_length(observed_receiving_location_barcode) BETWEEN 1 AND 200
     ),
     CONSTRAINT inbound_load_arrivals_tenant_load_unique UNIQUE (tenant_id, load_id),
+    CONSTRAINT inbound_load_arrivals_scope_identity_unique
+        UNIQUE (tenant_id, inventory_owner_id, facility_id, load_id, id),
     CONSTRAINT inbound_load_arrivals_owner_fkey FOREIGN KEY (tenant_id, inventory_owner_id)
         REFERENCES public.inventory_owners(tenant_id, id),
     CONSTRAINT inbound_load_arrivals_facility_fkey FOREIGN KEY (tenant_id, facility_id)
@@ -36220,3 +36222,197 @@ GRANT USAGE ON SEQUENCE public.inbound_load_cancellations_id_seq TO wareboxes_ap
 REVOKE ALL ON FUNCTION public.validate_inbound_load_cancellation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_inbound_load_cancellation_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_cancelled_inbound_load_evidence() FROM PUBLIC;
+
+CREATE TABLE public.inbound_load_rejections (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    load_id bigint NOT NULL,
+    arrival_id bigint NOT NULL,
+    receiving_location_id bigint NOT NULL,
+    observed_load_barcode text NOT NULL,
+    observed_receiving_location_barcode text NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    rejected_by_user_id bigint NOT NULL,
+    rejected_at timestamp with time zone NOT NULL,
+    CONSTRAINT inbound_load_rejections_load_scan_check CHECK (
+        observed_load_barcode=btrim(observed_load_barcode)
+        AND char_length(observed_load_barcode) BETWEEN 1 AND 200
+    ),
+    CONSTRAINT inbound_load_rejections_location_scan_check CHECK (
+        observed_receiving_location_barcode=btrim(observed_receiving_location_barcode)
+        AND char_length(observed_receiving_location_barcode) BETWEEN 1 AND 200
+    ),
+    CONSTRAINT inbound_load_rejections_reason_check CHECK (reason_code IN (
+        'load_damaged','seal_discrepancy','wrong_facility','documentation_mismatch',
+        'appointment_violation','other'
+    )),
+    CONSTRAINT inbound_load_rejections_note_check CHECK (
+        note IS NULL OR (
+            octet_length(note) BETWEEN 1 AND 2000
+            AND char_length(note) <= 500
+            AND note=btrim(note)
+            AND note !~ '[[:cntrl:]]'
+        )
+    ),
+    CONSTRAINT inbound_load_rejections_other_note_check
+        CHECK (reason_code <> 'other' OR note IS NOT NULL),
+    CONSTRAINT inbound_load_rejections_tenant_load_unique UNIQUE (tenant_id, load_id),
+    CONSTRAINT inbound_load_rejections_owner_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    CONSTRAINT inbound_load_rejections_facility_fkey
+        FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities(tenant_id, id),
+    CONSTRAINT inbound_load_rejections_load_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, load_id)
+        REFERENCES public.loads(tenant_id, inventory_owner_id, id),
+    CONSTRAINT inbound_load_rejections_arrival_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, facility_id, load_id, arrival_id)
+        REFERENCES public.inbound_load_arrivals
+            (tenant_id, inventory_owner_id, facility_id, load_id, id),
+    CONSTRAINT inbound_load_rejections_location_fkey
+        FOREIGN KEY (tenant_id, facility_id, receiving_location_id)
+        REFERENCES public.locations(tenant_id, facility_id, id),
+    CONSTRAINT inbound_load_rejections_actor_fkey FOREIGN KEY (rejected_by_user_id)
+        REFERENCES public.users(id)
+);
+
+CREATE INDEX inbound_load_rejections_scope_idx
+ON public.inbound_load_rejections
+    (tenant_id, facility_id, inventory_owner_id, rejected_at DESC, id DESC);
+
+CREATE FUNCTION public.validate_inbound_load_rejection() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    load_row record;
+    arrival_row record;
+    location_barcode text;
+BEGIN
+    SELECT type, status, facility_id, dock_door_location_id, execution_barcode
+    INTO load_row
+    FROM public.loads
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND id=NEW.load_id
+      AND deleted IS NULL
+    FOR UPDATE;
+    IF load_row IS NULL
+       OR load_row.type <> 'inbound'
+       OR load_row.status <> 'arrived'
+       OR load_row.facility_id <> NEW.facility_id
+       OR load_row.dock_door_location_id IS DISTINCT FROM NEW.receiving_location_id
+       OR upper(btrim(load_row.execution_barcode)) <> upper(NEW.observed_load_barcode)
+       OR NEW.rejected_at > clock_timestamp()
+       OR EXISTS (
+           SELECT 1 FROM public.inbound_load_unloading_starts unloading
+           WHERE unloading.tenant_id=NEW.tenant_id AND unloading.load_id=NEW.load_id
+       ) THEN
+        RAISE EXCEPTION 'inbound rejection does not match an arrived load before unloading'
+            USING ERRCODE='55000';
+    END IF;
+
+    SELECT receiving_location_id, arrived_at
+    INTO arrival_row
+    FROM public.inbound_load_arrivals
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.facility_id
+      AND load_id=NEW.load_id
+      AND id=NEW.arrival_id;
+    IF arrival_row IS NULL
+       OR arrival_row.receiving_location_id <> NEW.receiving_location_id
+       OR NEW.rejected_at < arrival_row.arrived_at THEN
+        RAISE EXCEPTION 'inbound rejection does not match immutable arrival evidence'
+            USING ERRCODE='23514';
+    END IF;
+
+    SELECT barcode INTO location_barcode
+    FROM public.locations
+    WHERE tenant_id=NEW.tenant_id
+      AND facility_id=NEW.facility_id
+      AND id=NEW.receiving_location_id
+      AND deleted IS NULL AND active AND receivable;
+    IF location_barcode IS NULL
+       OR upper(btrim(location_barcode)) <> upper(NEW.observed_receiving_location_barcode) THEN
+        RAISE EXCEPTION 'inbound rejection receiving location evidence is invalid'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.require_inbound_load_rejection_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    load_row record;
+BEGIN
+    SELECT status, rejected, dock_door_location_id
+    INTO load_row
+    FROM public.loads
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.load_id;
+    IF load_row IS NULL
+       OR load_row.status <> 'rejected'
+       OR load_row.rejected IS DISTINCT FROM NEW.rejected_at
+       OR load_row.dock_door_location_id IS DISTINCT FROM NEW.receiving_location_id THEN
+        RAISE EXCEPTION 'inbound rejection evidence does not match resulting load state'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.require_rejected_inbound_load_evidence() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.type='inbound' AND NEW.status='rejected' THEN
+        IF TG_OP <> 'UPDATE' THEN
+            RAISE EXCEPTION 'rejected inbound load must be created through a typed transition'
+                USING ERRCODE='23514';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM public.inbound_load_rejections rejection
+            WHERE rejection.tenant_id=NEW.tenant_id
+              AND rejection.inventory_owner_id=NEW.inventory_owner_id
+              AND rejection.facility_id=NEW.facility_id
+              AND rejection.load_id=NEW.id
+              AND rejection.rejected_at=NEW.rejected
+              AND OLD.status='arrived'
+        ) THEN
+            RAISE EXCEPTION 'rejected inbound load lacks immutable rejection evidence'
+                USING ERRCODE='23514';
+        END IF;
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE TRIGGER inbound_load_rejections_validate
+BEFORE INSERT ON public.inbound_load_rejections
+FOR EACH ROW EXECUTE FUNCTION public.validate_inbound_load_rejection();
+CREATE TRIGGER inbound_load_rejections_are_immutable
+BEFORE UPDATE OR DELETE ON public.inbound_load_rejections
+FOR EACH ROW EXECUTE FUNCTION public.reject_inbound_load_arrival_mutation();
+CREATE CONSTRAINT TRIGGER inbound_load_rejections_require_consistency
+AFTER INSERT ON public.inbound_load_rejections
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_inbound_load_rejection_consistency();
+CREATE CONSTRAINT TRIGGER loads_require_inbound_rejection_evidence
+AFTER INSERT OR UPDATE OF status, rejected ON public.loads
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_rejected_inbound_load_evidence();
+
+ALTER TABLE public.inbound_load_rejections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.inbound_load_rejections FORCE ROW LEVEL SECURITY;
+CREATE POLICY inbound_load_rejections_tenant_isolation
+ON public.inbound_load_rejections
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.inbound_load_rejections TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.inbound_load_rejections_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_inbound_load_rejection() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_inbound_load_rejection_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_rejected_inbound_load_evidence() FROM PUBLIC;

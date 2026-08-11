@@ -2,7 +2,8 @@ use wareboxes_api_contract::v1::{
     ArriveInboundLoadRequest, ArriveInboundLoadResponse, CancelInboundLoadRequest,
     CancelInboundLoadResponse, CloseInboundLoadRequest, CloseInboundLoadResponse,
     InboundLoadEntryItemResponse, PlanInboundLoadRequest, PlanInboundLoadResponse,
-    ScheduleInboundLoadRequest, ScheduleInboundLoadResponse, StartInboundLoadUnloadingRequest,
+    RejectInboundLoadRequest, RejectInboundLoadResponse, ScheduleInboundLoadRequest,
+    ScheduleInboundLoadResponse, StartInboundLoadUnloadingRequest,
     StartInboundLoadUnloadingResponse,
 };
 
@@ -59,6 +60,29 @@ pub async fn cancel_inbound_load(
         idempotency_key,
     )
     .await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn reject_inbound_load(
+    load_id: i64,
+    request: &RejectInboundLoadRequest,
+    idempotency_key: &str,
+) -> Result<RejectInboundLoadResponse, ApiError> {
+    super::browser::post(
+        &format!("/api/v1/inbound-loads/{load_id}/rejections"),
+        request,
+        idempotency_key,
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn reject_inbound_load(
+    _load_id: i64,
+    _request: &RejectInboundLoadRequest,
+    _idempotency_key: &str,
+) -> Result<RejectInboundLoadResponse, ApiError> {
+    Err(ApiError::unavailable())
 }
 
 #[cfg(not(target_arch = "wasm32"))]

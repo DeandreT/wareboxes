@@ -18,10 +18,12 @@ mod appointment;
 mod cancellation;
 mod closure;
 mod receiving;
+mod rejection;
 use appointment::InboundAppointmentConfirmation;
 use cancellation::InboundCancellationConfirmation;
 use closure::LoadClosureConfirmation;
 use receiving::ReceivingExecutionPanel;
+use rejection::InboundRejectionConfirmation;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LoadDetailTab {
@@ -69,6 +71,7 @@ pub fn LoadDetailPanel(
     let arrival_open = RwSignal::new(false);
     let appointment_open = RwSignal::new(false);
     let cancellation_open = RwSignal::new(false);
+    let rejection_open = RwSignal::new(false);
     let closure_open = RwSignal::new(false);
     let lifecycle_target = RwSignal::new(None::<LoadStatus>);
     let lifecycle_confirmation = NodeRef::<html::Section>::new();
@@ -236,6 +239,10 @@ pub fn LoadDetailPanel(
                                                     && load.get_value().r#type == LoadType::Inbound
                                                 {
                                                     cancellation_open.set(true);
+                                                } else if target == LoadStatus::Rejected
+                                                    && load.get_value().r#type == LoadType::Inbound
+                                                {
+                                                    rejection_open.set(true);
                                                 } else if target == LoadStatus::Closed {
                                                     closure_open.set(true);
                                                 } else {
@@ -317,6 +324,16 @@ pub fn LoadDetailPanel(
                         pending=command_pending
                         error=command_error
                         on_close=Callback::new(move |_| cancellation_open.set(false))
+                        on_refreshed
+                        on_unauthorized
+                    />
+                </Show>
+                <Show when=move || rejection_open.get()>
+                    <InboundRejectionConfirmation
+                        load=load.get_value()
+                        pending=command_pending
+                        error=command_error
+                        on_close=Callback::new(move |_| rejection_open.set(false))
                         on_refreshed
                         on_unauthorized
                     />

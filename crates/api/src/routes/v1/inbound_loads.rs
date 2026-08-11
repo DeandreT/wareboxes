@@ -5,6 +5,7 @@ use wareboxes_api_contract::v1::{
     ArriveInboundLoadRequest, ArriveInboundLoadResponse,
     ArrivedInboundLoadStatus as ContractArrivedStatus, CancelInboundLoadRequest,
     CancelInboundLoadResponse, CloseInboundLoadRequest, CloseInboundLoadResponse,
+    InboundLoadArrivedStatus as ContractInboundArrivedStatus,
     InboundLoadCancellationReason as ContractCancellationReason,
     InboundLoadCancelledStatus as ContractCancelledStatus,
     InboundLoadClosedStatus as ContractClosedStatus, InboundLoadEntryItemResponse,
@@ -12,24 +13,30 @@ use wareboxes_api_contract::v1::{
     InboundLoadPreArrivalStatus as ContractPreviousStatus,
     InboundLoadReceivedStatus as ContractReceivedStatus,
     InboundLoadReceivingStatus as ContractReceivingStatus,
+    InboundLoadRejectedStatus as ContractRejectedStatus,
+    InboundLoadRejectionReason as ContractRejectionReason,
     InboundLoadScheduledStatus as ContractScheduledStatus, PlanInboundLoadRequest,
     PlanInboundLoadResponse, PlannedInboundLoadLineResponse, PlannedInboundLoadStatus,
-    ScheduleInboundLoadRequest, ScheduleInboundLoadResponse, StartInboundLoadUnloadingRequest,
+    RejectInboundLoadRequest, RejectInboundLoadResponse, ScheduleInboundLoadRequest,
+    ScheduleInboundLoadResponse, StartInboundLoadUnloadingRequest,
     StartInboundLoadUnloadingResponse,
 };
 use wareboxes_application::inbound_load::{
     ArriveInboundLoadCommand, ArriveInboundLoadResult,
     ArrivedInboundLoadStatus as ApplicationArrivedStatus, CancelInboundLoadCommand,
     CancelInboundLoadResult, CloseInboundLoadCommand, CloseInboundLoadResult,
-    PlanInboundLoadCommand, PlanInboundLoadResult, PlannedInboundLoadStatus as ApplicationStatus,
-    ScheduleInboundLoadCommand, ScheduleInboundLoadResult, StartInboundLoadUnloadingCommand,
-    StartInboundLoadUnloadingResult,
+    InboundLoadArrivedStatus as ApplicationInboundArrivedStatus,
+    InboundLoadRejectedStatus as ApplicationRejectedStatus, PlanInboundLoadCommand,
+    PlanInboundLoadResult, PlannedInboundLoadStatus as ApplicationStatus, RejectInboundLoadCommand,
+    RejectInboundLoadResult, ScheduleInboundLoadCommand, ScheduleInboundLoadResult,
+    StartInboundLoadUnloadingCommand, StartInboundLoadUnloadingResult,
 };
 use wareboxes_application::ApplicationError;
 use wareboxes_domain::{
     CatalogItemId, FacilityId, InboundExpectedQuantity, InboundLoadCancellationDetails,
     InboundLoadCancellationNote, InboundLoadCancellationReason, InboundLoadId, InboundLoadPlanLine,
-    InboundLoadPreArrivalStatus, InboundLoadReference, InboundLoadScanValue, InventoryOwnerId,
+    InboundLoadPreArrivalStatus, InboundLoadReference, InboundLoadRejectionDetails,
+    InboundLoadRejectionNote, InboundLoadRejectionReason, InboundLoadScanValue, InventoryOwnerId,
     LocationId, NewInboundLoadPlan, Timestamp,
 };
 
@@ -179,6 +186,38 @@ pub async fn cancel(
     )
     .await?;
     Ok(Json(cancellation_response(result)))
+}
+
+pub async fn reject(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(load_id): Path<i64>,
+    idempotency_key: IdempotencyKey,
+    Json(body): Json<RejectInboundLoadRequest>,
+) -> V1Result<Json<RejectInboundLoadResponse>> {
+    user.require_permission(&state.db, "wms").await?;
+    let details = InboundLoadRejectionDetails::new(
+        rejection_reason(body.reason),
+        body.note
+            .map(InboundLoadRejectionNote::new)
+            .transpose()
+            .map_err(invalid)?,
+    )
+    .map_err(invalid)?;
+    let command = RejectInboundLoadCommand::new(
+        InboundLoadId::new(load_id).map_err(invalid)?,
+        InboundLoadScanValue::new(body.load_scan).map_err(invalid)?,
+        InboundLoadScanValue::new(body.receiving_location_scan).map_err(invalid)?,
+        details,
+    );
+    let result = repo::inbound_load::reject_inbound_load(
+        &state.db,
+        &user.tenant,
+        &user.command_context(&idempotency_key),
+        &command,
+    )
+    .await?;
+    Ok(Json(rejection_response(result)))
 }
 
 pub async fn start_unloading(
@@ -378,6 +417,54 @@ fn cancellation_response(result: CancelInboundLoadResult) -> CancelInboundLoadRe
     }
 }
 
+const fn rejection_reason(reason: ContractRejectionReason) -> InboundLoadRejectionReason {
+    match reason {
+        ContractRejectionReason::LoadDamaged => InboundLoadRejectionReason::LoadDamaged,
+        ContractRejectionReason::SealDiscrepancy => InboundLoadRejectionReason::SealDiscrepancy,
+        ContractRejectionReason::WrongFacility => InboundLoadRejectionReason::WrongFacility,
+        ContractRejectionReason::DocumentationMismatch => {
+            InboundLoadRejectionReason::DocumentationMismatch
+        }
+        ContractRejectionReason::AppointmentViolation => {
+            InboundLoadRejectionReason::AppointmentViolation
+        }
+        ContractRejectionReason::Other => InboundLoadRejectionReason::Other,
+    }
+}
+
+const fn contract_rejection_reason(reason: InboundLoadRejectionReason) -> ContractRejectionReason {
+    match reason {
+        InboundLoadRejectionReason::LoadDamaged => ContractRejectionReason::LoadDamaged,
+        InboundLoadRejectionReason::SealDiscrepancy => ContractRejectionReason::SealDiscrepancy,
+        InboundLoadRejectionReason::WrongFacility => ContractRejectionReason::WrongFacility,
+        InboundLoadRejectionReason::DocumentationMismatch => {
+            ContractRejectionReason::DocumentationMismatch
+        }
+        InboundLoadRejectionReason::AppointmentViolation => {
+            ContractRejectionReason::AppointmentViolation
+        }
+        InboundLoadRejectionReason::Other => ContractRejectionReason::Other,
+    }
+}
+
+fn rejection_response(result: RejectInboundLoadResult) -> RejectInboundLoadResponse {
+    RejectInboundLoadResponse {
+        rejection_id: result.rejection_id.get(),
+        load_id: result.load_id.get(),
+        previous_status: match result.previous_status {
+            ApplicationInboundArrivedStatus::Arrived => ContractInboundArrivedStatus::Arrived,
+        },
+        status: match result.status {
+            ApplicationRejectedStatus::Rejected => ContractRejectedStatus::Rejected,
+        },
+        receiving_location_id: result.receiving_location_id.get(),
+        reason: contract_rejection_reason(result.reason),
+        note: result.note,
+        rejected_by: result.rejected_by.get(),
+        rejected_at: result.rejected_at.to_rfc3339(),
+    }
+}
+
 fn unloading_response(
     result: StartInboundLoadUnloadingResult,
 ) -> StartInboundLoadUnloadingResponse {
@@ -528,6 +615,31 @@ mod tests {
             ContractCancellationReason::WarehouseCapacity
         );
         assert_eq!(response.note.as_deref(), Some("dock unavailable"));
+    }
+
+    #[test]
+    fn rejection_response_preserves_scoped_execution_evidence() {
+        let response = rejection_response(RejectInboundLoadResult {
+            rejection_id: wareboxes_domain::InboundLoadRejectionId::new(61).unwrap(),
+            load_id: InboundLoadId::new(12).unwrap(),
+            previous_status: ApplicationInboundArrivedStatus::Arrived,
+            status: ApplicationRejectedStatus::Rejected,
+            receiving_location_id: LocationId::new(9).unwrap(),
+            reason: InboundLoadRejectionReason::DocumentationMismatch,
+            note: Some("bill of lading does not match".to_owned()),
+            rejected_by: wareboxes_domain::UserId::new(4).unwrap(),
+            rejected_at: "2027-08-10T12:00:00Z".parse().unwrap(),
+        });
+        assert_eq!(response.rejection_id, 61);
+        assert_eq!(
+            response.previous_status,
+            ContractInboundArrivedStatus::Arrived
+        );
+        assert_eq!(response.status, ContractRejectedStatus::Rejected);
+        assert_eq!(
+            response.reason,
+            ContractRejectionReason::DocumentationMismatch
+        );
     }
 
     #[test]

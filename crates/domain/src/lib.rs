@@ -63,9 +63,11 @@ pub use inbound_load::{
     InboundLoadAppointmentError, InboundLoadArrivalError, InboundLoadCancellationDetails,
     InboundLoadCancellationError, InboundLoadCancellationNote, InboundLoadCancellationReason,
     InboundLoadClosureError, InboundLoadField, InboundLoadPlanLine, InboundLoadPlanningError,
-    InboundLoadPreArrivalStatus, InboundLoadReference, InboundLoadScanValue,
-    InboundLoadUnloadingError, NewInboundLoadPlan, MAX_INBOUND_LOAD_CANCELLATION_NOTE_LENGTH,
-    MAX_INBOUND_LOAD_IDENTITY_LENGTH, MAX_INBOUND_LOAD_REFERENCE_LENGTH,
+    InboundLoadPreArrivalStatus, InboundLoadReference, InboundLoadRejectionDetails,
+    InboundLoadRejectionError, InboundLoadRejectionNote, InboundLoadRejectionReason,
+    InboundLoadScanValue, InboundLoadUnloadingError, NewInboundLoadPlan,
+    MAX_INBOUND_LOAD_CANCELLATION_NOTE_LENGTH, MAX_INBOUND_LOAD_IDENTITY_LENGTH,
+    MAX_INBOUND_LOAD_REFERENCE_LENGTH, MAX_INBOUND_LOAD_REJECTION_NOTE_LENGTH,
     MAX_INBOUND_LOAD_SCAN_VALUE_LENGTH, MAX_INBOUND_LOAD_TEXT_LENGTH,
 };
 pub use integration::{
@@ -271,6 +273,7 @@ positive_id!(InboundLoadLineId, "inbound load line ID");
 positive_id!(InboundLoadArrivalId, "inbound load arrival ID");
 positive_id!(InboundLoadAppointmentId, "inbound load appointment ID");
 positive_id!(InboundLoadCancellationId, "inbound load cancellation ID");
+positive_id!(InboundLoadRejectionId, "inbound load rejection ID");
 positive_id!(InboundLoadClosureId, "inbound load closure ID");
 positive_id!(
     InboundLoadUnloadingStartId,

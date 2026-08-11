@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_INBOUND_LOAD_CANCELLATION_NOTE_LENGTH: usize = 500;
+pub const MAX_INBOUND_LOAD_REJECTION_NOTE_LENGTH: usize = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -163,6 +164,88 @@ pub struct CancelInboundLoadResponse {
     pub note: Option<String>,
     pub cancelled_by: i64,
     pub cancelled_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadRejectionReason {
+    LoadDamaged,
+    SealDiscrepancy,
+    WrongFacility,
+    DocumentationMismatch,
+    AppointmentViolation,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RejectInboundLoadRequest {
+    pub load_scan: String,
+    pub receiving_location_scan: String,
+    pub reason: InboundLoadRejectionReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for RejectInboundLoadRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            load_scan: String,
+            receiving_location_scan: String,
+            reason: InboundLoadRejectionReason,
+            #[serde(default)]
+            note: Option<String>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.note.as_ref().is_some_and(|note| {
+            note.is_empty()
+                || note.trim() != note
+                || note.chars().count() > MAX_INBOUND_LOAD_REJECTION_NOTE_LENGTH
+                || note.chars().any(char::is_control)
+        }) || (raw.reason == InboundLoadRejectionReason::Other && raw.note.is_none())
+        {
+            return Err(serde::de::Error::custom(
+                "inbound load rejection note is invalid",
+            ));
+        }
+        Ok(Self {
+            load_scan: raw.load_scan,
+            receiving_location_scan: raw.receiving_location_scan,
+            reason: raw.reason,
+            note: raw.note,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadArrivedStatus {
+    Arrived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadRejectedStatus {
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RejectInboundLoadResponse {
+    pub rejection_id: i64,
+    pub load_id: i64,
+    pub previous_status: InboundLoadArrivedStatus,
+    pub status: InboundLoadRejectedStatus,
+    pub receiving_location_id: i64,
+    pub reason: InboundLoadRejectionReason,
+    pub note: Option<String>,
+    pub rejected_by: i64,
+    pub rejected_at: String,
 }
 
 /// Exact scanner evidence for transitioning a planned inbound load to arrived.
@@ -349,6 +432,30 @@ mod tests {
             serde_json::from_value::<CancelInboundLoadRequest>(serde_json::json!({
                 "reason": "duplicate_plan",
                 "unknown": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejection_request_requires_scans_and_exact_reason_evidence() {
+        let request = serde_json::json!({
+            "load_scan": "WB-LOAD-101",
+            "receiving_location_scan": "RECV-01",
+            "reason": "seal_discrepancy",
+            "note": "seal was broken"
+        });
+        let parsed = serde_json::from_value::<RejectInboundLoadRequest>(request.clone()).unwrap();
+        assert_eq!(parsed.reason, InboundLoadRejectionReason::SealDiscrepancy);
+
+        let mut unknown = request;
+        unknown["status"] = json!("rejected");
+        assert!(serde_json::from_value::<RejectInboundLoadRequest>(unknown).is_err());
+        assert!(
+            serde_json::from_value::<RejectInboundLoadRequest>(serde_json::json!({
+                "load_scan": "WB-LOAD-101",
+                "receiving_location_scan": "RECV-01",
+                "reason": "other"
             }))
             .is_err()
         );

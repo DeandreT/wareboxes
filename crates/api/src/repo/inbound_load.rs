@@ -28,9 +28,11 @@ use crate::error::{AppError, AppResult};
 mod appointment;
 mod cancellation;
 mod closure;
+mod rejection;
 pub use appointment::schedule_inbound_load;
 pub use cancellation::cancel_inbound_load;
 pub use closure::close_inbound_load;
+pub use rejection::reject_inbound_load;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundLoadEntryItem {

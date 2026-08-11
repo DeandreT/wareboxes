@@ -71,7 +71,9 @@ DECLARE
   owner bigint;
   item bigint;
   v_load_id bigint;
+  v_arrival_id bigint;
   v_file_id bigint;
+  removable_load_ids bigint[] := ARRAY[]::bigint[];
   owner_ids bigint[] := ARRAY[]::bigint[];
   item_ids bigint[] := ARRAY[]::bigint[];
   owner_names text[] := ARRAY[
@@ -114,57 +116,34 @@ BEGIN
   LIMIT 1;
 
   IF clear_seed THEN
-    DELETE FROM load_orders
-    WHERE tenant_id = tenant AND load_id IN (
-      SELECT load.id FROM loads load
-      WHERE load.tenant_id = tenant AND load.reference_number LIKE 'WB-SEED-LOAD-%'
-        AND NOT EXISTS (
-          SELECT 1 FROM inbound_load_arrivals arrival
-          WHERE arrival.tenant_id=load.tenant_id AND arrival.load_id=load.id
-        )
-    );
-    DELETE FROM load_activity
-    WHERE tenant_id = tenant AND load_id IN (
-      SELECT load.id FROM loads load
-      WHERE load.tenant_id = tenant AND load.reference_number LIKE 'WB-SEED-LOAD-%'
-        AND NOT EXISTS (
-          SELECT 1 FROM inbound_load_arrivals arrival
-          WHERE arrival.tenant_id=load.tenant_id AND arrival.load_id=load.id
-        )
-    );
-    DELETE FROM load_files
-    WHERE tenant_id = tenant AND load_id IN (
-      SELECT load.id FROM loads load
-      WHERE load.tenant_id = tenant AND load.reference_number LIKE 'WB-SEED-LOAD-%'
-        AND NOT EXISTS (
-          SELECT 1 FROM inbound_load_arrivals arrival
-          WHERE arrival.tenant_id=load.tenant_id AND arrival.load_id=load.id
-        )
-    );
-    DELETE FROM load_notes
-    WHERE tenant_id = tenant AND load_id IN (
-      SELECT load.id FROM loads load
-      WHERE load.tenant_id = tenant AND load.reference_number LIKE 'WB-SEED-LOAD-%'
-        AND NOT EXISTS (
-          SELECT 1 FROM inbound_load_arrivals arrival
-          WHERE arrival.tenant_id=load.tenant_id AND arrival.load_id=load.id
-        )
-    );
-    DELETE FROM load_lines
-    WHERE tenant_id = tenant AND load_id IN (
-      SELECT load.id FROM loads load
-      WHERE load.tenant_id = tenant AND load.reference_number LIKE 'WB-SEED-LOAD-%'
-        AND NOT EXISTS (
-          SELECT 1 FROM inbound_load_arrivals arrival
-          WHERE arrival.tenant_id=load.tenant_id AND arrival.load_id=load.id
-        )
-    );
-    DELETE FROM loads load
-    WHERE load.tenant_id = tenant AND load.reference_number LIKE 'WB-SEED-LOAD-%'
+    SELECT COALESCE(array_agg(load.id), ARRAY[]::bigint[])
+    INTO removable_load_ids
+    FROM loads load
+    WHERE load.tenant_id=tenant AND load.reference_number LIKE 'WB-SEED-LOAD-%'
       AND NOT EXISTS (
         SELECT 1 FROM inbound_load_arrivals arrival
         WHERE arrival.tenant_id=load.tenant_id AND arrival.load_id=load.id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM inbound_load_cancellations cancellation
+        WHERE cancellation.tenant_id=load.tenant_id AND cancellation.load_id=load.id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM inbound_load_rejections rejection
+        WHERE rejection.tenant_id=load.tenant_id AND rejection.load_id=load.id
       );
+    DELETE FROM load_orders
+    WHERE tenant_id=tenant AND load_id=ANY(removable_load_ids);
+    DELETE FROM load_activity
+    WHERE tenant_id=tenant AND load_id=ANY(removable_load_ids);
+    DELETE FROM load_files
+    WHERE tenant_id=tenant AND load_id=ANY(removable_load_ids);
+    DELETE FROM load_notes
+    WHERE tenant_id=tenant AND load_id=ANY(removable_load_ids);
+    DELETE FROM load_lines
+    WHERE tenant_id=tenant AND load_id=ANY(removable_load_ids);
+    DELETE FROM loads load
+    WHERE load.tenant_id=tenant AND load.id=ANY(removable_load_ids);
   END IF;
 
   INSERT INTO facilities (tenant_id, created, name)
@@ -262,7 +241,7 @@ BEGIN
       owner_ids[((i - 1) % array_length(owner_ids, 1)) + 1],
       'WB-SEED-LOAD-' || seed_no,
       CASE
-        WHEN load_type = 'inbound' AND load_status = 'cancelled' THEN 'planned'
+        WHEN load_type = 'inbound' AND load_status IN ('arrived', 'cancelled', 'rejected') THEN 'planned'
         ELSE load_status
       END,
       load_type,
@@ -274,15 +253,15 @@ BEGIN
       dock,
       created_at + interval '18 hours',
       CASE
-        WHEN load_type = 'inbound' AND load_status IN ('planned', 'cancelled') THEN NULL
+        WHEN load_type = 'inbound' AND load_status IN ('planned', 'cancelled', 'rejected') THEN NULL
         ELSE created_at + interval '20 hours'
       END,
-      CASE WHEN load_status IN ('arrived', 'receiving', 'received', 'rejected', 'closed') THEN created_at + interval '21 hours' END,
-      CASE WHEN load_status IN ('arrived', 'receiving', 'received', 'rejected', 'closed') THEN created_at + interval '21 hours' END,
-      CASE WHEN load_status = 'rejected' THEN created_at + interval '22 hours' END,
+      CASE WHEN load_status IN ('arrived', 'receiving', 'received', 'rejected', 'closed') AND NOT (load_type='inbound' AND load_status IN ('arrived', 'rejected')) THEN created_at + interval '21 hours' END,
+      CASE WHEN load_status IN ('arrived', 'receiving', 'received', 'rejected', 'closed') AND NOT (load_type='inbound' AND load_status IN ('arrived', 'rejected')) THEN created_at + interval '21 hours' END,
+      CASE WHEN load_status = 'rejected' AND load_type <> 'inbound' THEN created_at + interval '22 hours' END,
       load_status IN ('received', 'closed'),
       CASE WHEN load_status = 'closed' THEN created_at + interval '24 hours' END,
-      CASE WHEN load_status IN ('arrived', 'receiving', 'received', 'rejected', 'closed') THEN actor END,
+      CASE WHEN load_status IN ('arrived', 'receiving', 'received', 'rejected', 'closed') AND NOT (load_type='inbound' AND load_status IN ('arrived', 'rejected')) THEN actor END,
       CASE WHEN load_status = 'closed' THEN actor END
     )
     RETURNING id INTO v_load_id;
@@ -307,13 +286,50 @@ BEGIN
       WHERE tenant_id = tenant AND id = v_load_id AND status = 'planned';
     END IF;
 
+    IF load_type = 'inbound' AND load_status IN ('arrived', 'rejected') THEN
+      INSERT INTO inbound_load_arrivals
+          (tenant_id, inventory_owner_id, facility_id, load_id, receiving_location_id,
+           previous_status, observed_load_barcode, observed_receiving_location_barcode,
+           arrived_by_user_id, arrived_at)
+      SELECT tenant, owner_ids[((i - 1) % array_length(owner_ids, 1)) + 1], facility,
+             v_load_id, dock, 'planned', 'WB-SEED-LOAD-' || seed_no, location.barcode,
+             actor, created_at + interval '21 hours'
+      FROM locations location
+      WHERE location.tenant_id=tenant AND location.facility_id=facility AND location.id=dock
+      RETURNING id INTO v_arrival_id;
+      UPDATE loads
+      SET status='arrived', arrival=created_at + interval '21 hours', checked_in_by=actor
+      WHERE tenant_id=tenant AND id=v_load_id AND status='planned';
+      SET CONSTRAINTS ALL IMMEDIATE;
+      SET CONSTRAINTS ALL DEFERRED;
+      IF load_status = 'rejected' THEN
+        INSERT INTO inbound_load_rejections
+            (tenant_id, inventory_owner_id, facility_id, load_id, arrival_id,
+             receiving_location_id, observed_load_barcode,
+             observed_receiving_location_barcode, reason_code, note,
+             rejected_by_user_id, rejected_at)
+        SELECT tenant, owner_ids[((i - 1) % array_length(owner_ids, 1)) + 1], facility,
+               v_load_id, v_arrival_id, dock, 'WB-SEED-LOAD-' || seed_no,
+               location.barcode, 'documentation_mismatch',
+               'Seeded typed rejection evidence', actor, created_at + interval '22 hours'
+        FROM locations location
+        WHERE location.tenant_id=tenant AND location.facility_id=facility AND location.id=dock;
+        UPDATE loads
+        SET status='rejected', rejected=created_at + interval '22 hours'
+        WHERE tenant_id=tenant AND id=v_load_id AND status='arrived';
+      END IF;
+    END IF;
+
     INSERT INTO load_notes (tenant_id, created, load_id, note)
     VALUES (tenant, created_at, v_load_id, 'Seed load');
 
     FOR j IN 1..(1 + (i % 4)) LOOP
       expected_qty := 12 + ((i * j * 7) % 96);
       received_qty := CASE WHEN load_status IN ('received', 'closed') THEN expected_qty ELSE 0 END;
-      rejected_qty := CASE WHEN load_status = 'rejected' THEN expected_qty ELSE 0 END;
+      rejected_qty := CASE
+        WHEN load_status = 'rejected' AND load_type <> 'inbound' THEN expected_qty
+        ELSE 0
+      END;
       missing_qty := 0;
       line_status := CASE
         WHEN received_qty = expected_qty THEN 'received'

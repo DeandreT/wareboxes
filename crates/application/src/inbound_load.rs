@@ -2,13 +2,15 @@ use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
     InboundLoadAppointmentId, InboundLoadArrivalId, InboundLoadCancellationDetails,
     InboundLoadCancellationId, InboundLoadCancellationReason, InboundLoadClosureId, InboundLoadId,
-    InboundLoadLineId, InboundLoadPreArrivalStatus, InboundLoadScanValue,
+    InboundLoadLineId, InboundLoadPreArrivalStatus, InboundLoadRejectionDetails,
+    InboundLoadRejectionId, InboundLoadRejectionReason, InboundLoadScanValue,
     InboundLoadUnloadingStartId, LocationId, NewInboundLoadPlan, Timestamp, UserId,
 };
 
 pub const PLAN_INBOUND_LOAD_OPERATION: &str = "inbound.load.plan.v1";
 pub const SCHEDULE_INBOUND_LOAD_OPERATION: &str = "inbound.load.appointment.schedule.v1";
 pub const CANCEL_INBOUND_LOAD_OPERATION: &str = "inbound.load.cancel.v1";
+pub const REJECT_INBOUND_LOAD_OPERATION: &str = "inbound.load.reject.v1";
 pub const ARRIVE_INBOUND_LOAD_OPERATION: &str = "inbound.load.arrive.v1";
 pub const START_INBOUND_LOAD_UNLOADING_OPERATION: &str = "inbound.load.unloading.start.v1";
 pub const CLOSE_INBOUND_LOAD_OPERATION: &str = "inbound.load.close.v1";
@@ -135,6 +137,71 @@ pub struct CancelInboundLoadResult {
     pub note: Option<String>,
     pub cancelled_by: UserId,
     pub cancelled_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RejectInboundLoadCommand {
+    load_id: InboundLoadId,
+    load_scan: InboundLoadScanValue,
+    receiving_location_scan: InboundLoadScanValue,
+    details: InboundLoadRejectionDetails,
+}
+
+impl RejectInboundLoadCommand {
+    pub const fn new(
+        load_id: InboundLoadId,
+        load_scan: InboundLoadScanValue,
+        receiving_location_scan: InboundLoadScanValue,
+        details: InboundLoadRejectionDetails,
+    ) -> Self {
+        Self {
+            load_id,
+            load_scan,
+            receiving_location_scan,
+            details,
+        }
+    }
+
+    pub const fn load_id(&self) -> InboundLoadId {
+        self.load_id
+    }
+
+    pub const fn load_scan(&self) -> &InboundLoadScanValue {
+        &self.load_scan
+    }
+
+    pub const fn receiving_location_scan(&self) -> &InboundLoadScanValue {
+        &self.receiving_location_scan
+    }
+
+    pub const fn details(&self) -> &InboundLoadRejectionDetails {
+        &self.details
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadArrivedStatus {
+    Arrived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadRejectedStatus {
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejectInboundLoadResult {
+    pub rejection_id: InboundLoadRejectionId,
+    pub load_id: InboundLoadId,
+    pub previous_status: InboundLoadArrivedStatus,
+    pub status: InboundLoadRejectedStatus,
+    pub receiving_location_id: LocationId,
+    pub reason: InboundLoadRejectionReason,
+    pub note: Option<String>,
+    pub rejected_by: UserId,
+    pub rejected_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -366,6 +433,25 @@ mod tests {
         assert_eq!(value["load_id"], json!(12));
         assert_eq!(value["details"]["reason"], json!("warehouse_capacity"));
         assert_eq!(value["details"]["note"], json!("dock unavailable"));
+    }
+
+    #[test]
+    fn rejection_hash_contains_exact_scans_and_reason() {
+        let details = wareboxes_domain::InboundLoadRejectionDetails::new(
+            wareboxes_domain::InboundLoadRejectionReason::LoadDamaged,
+            Some(wareboxes_domain::InboundLoadRejectionNote::new("rear pallet collapsed").unwrap()),
+        )
+        .unwrap();
+        let value = serde_json::to_value(RejectInboundLoadCommand::new(
+            InboundLoadId::new(12).unwrap(),
+            InboundLoadScanValue::new("WB-LOAD-12").unwrap(),
+            InboundLoadScanValue::new("RECV-01").unwrap(),
+            details,
+        ))
+        .unwrap();
+        assert_eq!(value["load_scan"], json!("WB-LOAD-12"));
+        assert_eq!(value["receiving_location_scan"], json!("RECV-01"));
+        assert_eq!(value["details"]["reason"], json!("load_damaged"));
     }
 
     #[test]

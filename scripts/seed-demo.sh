@@ -92,6 +92,14 @@ BEGIN
         WHERE cancellation.tenant_id=load.tenant_id AND cancellation.load_id=load.id
       )
   ) THEN missing := array_append(missing, 'typed inbound cancellation evidence'); END IF;
+  IF EXISTS (
+    SELECT 1 FROM loads load
+    WHERE load.deleted IS NULL AND load.type='inbound' AND load.status='rejected'
+      AND NOT EXISTS (
+        SELECT 1 FROM inbound_load_rejections rejection
+        WHERE rejection.tenant_id=load.tenant_id AND rejection.load_id=load.id
+      )
+  ) THEN missing := array_append(missing, 'typed inbound rejection evidence'); END IF;
   IF cardinality(missing) > 0 THEN
     RAISE EXCEPTION 'core demo coverage is incomplete: %', array_to_string(missing, ', ');
   END IF;

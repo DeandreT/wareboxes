@@ -59,6 +59,10 @@ pub fn router() -> Router<AppState> {
             post(inbound_loads::cancel),
         )
         .route(
+            "/inbound-loads/{load_id}/rejections",
+            post(inbound_loads::reject),
+        )
+        .route(
             "/inbound-loads/{load_id}/arrivals",
             post(inbound_loads::arrive),
         )

@@ -10,6 +10,7 @@ pub const MAX_INBOUND_LOAD_TEXT_LENGTH: usize = 200;
 pub const MAX_INBOUND_LOAD_IDENTITY_LENGTH: usize = 200;
 pub const MAX_INBOUND_LOAD_SCAN_VALUE_LENGTH: usize = 200;
 pub const MAX_INBOUND_LOAD_CANCELLATION_NOTE_LENGTH: usize = 500;
+pub const MAX_INBOUND_LOAD_REJECTION_NOTE_LENGTH: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboundLoadField {
@@ -165,6 +166,107 @@ impl InboundLoadCancellationDetails {
     }
 
     pub fn note(&self) -> Option<&InboundLoadCancellationNote> {
+        self.note.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InboundLoadRejectionError {
+    #[error("inbound load rejection note must be nonblank, trimmed, control-free, and at most {MAX_INBOUND_LOAD_REJECTION_NOTE_LENGTH} characters")]
+    InvalidNote,
+    #[error("a rejection note is required when the reason is other")]
+    MissingOtherNote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadRejectionReason {
+    LoadDamaged,
+    SealDiscrepancy,
+    WrongFacility,
+    DocumentationMismatch,
+    AppointmentViolation,
+    Other,
+}
+
+impl InboundLoadRejectionReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LoadDamaged => "load_damaged",
+            Self::SealDiscrepancy => "seal_discrepancy",
+            Self::WrongFacility => "wrong_facility",
+            Self::DocumentationMismatch => "documentation_mismatch",
+            Self::AppointmentViolation => "appointment_violation",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "load_damaged" => Some(Self::LoadDamaged),
+            "seal_discrepancy" => Some(Self::SealDiscrepancy),
+            "wrong_facility" => Some(Self::WrongFacility),
+            "documentation_mismatch" => Some(Self::DocumentationMismatch),
+            "appointment_violation" => Some(Self::AppointmentViolation),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct InboundLoadRejectionNote(String);
+
+impl InboundLoadRejectionNote {
+    pub fn new(value: impl Into<String>) -> Result<Self, InboundLoadRejectionError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.trim() != value
+            || value.chars().count() > MAX_INBOUND_LOAD_REJECTION_NOTE_LENGTH
+            || value.chars().any(char::is_control)
+        {
+            return Err(InboundLoadRejectionError::InvalidNote);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for InboundLoadRejectionNote {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundLoadRejectionDetails {
+    reason: InboundLoadRejectionReason,
+    note: Option<InboundLoadRejectionNote>,
+}
+
+impl InboundLoadRejectionDetails {
+    pub fn new(
+        reason: InboundLoadRejectionReason,
+        note: Option<InboundLoadRejectionNote>,
+    ) -> Result<Self, InboundLoadRejectionError> {
+        if reason == InboundLoadRejectionReason::Other && note.is_none() {
+            return Err(InboundLoadRejectionError::MissingOtherNote);
+        }
+        Ok(Self { reason, note })
+    }
+
+    pub const fn reason(&self) -> InboundLoadRejectionReason {
+        self.reason
+    }
+
+    pub fn note(&self) -> Option<&InboundLoadRejectionNote> {
         self.note.as_ref()
     }
 }
@@ -598,5 +700,23 @@ mod tests {
         );
         assert!(InboundLoadCancellationNote::new(" untrimmed").is_err());
         assert!(InboundLoadCancellationNote::new("x".repeat(501)).is_err());
+    }
+
+    #[test]
+    fn rejection_requires_bounded_reason_evidence() {
+        assert!(matches!(
+            InboundLoadRejectionDetails::new(InboundLoadRejectionReason::Other, None),
+            Err(InboundLoadRejectionError::MissingOtherNote)
+        ));
+        let details = InboundLoadRejectionDetails::new(
+            InboundLoadRejectionReason::SealDiscrepancy,
+            Some(InboundLoadRejectionNote::new("seal 42 was broken").unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            details.reason(),
+            InboundLoadRejectionReason::SealDiscrepancy
+        );
+        assert_eq!(details.note().unwrap().as_str(), "seal 42 was broken");
     }
 }
