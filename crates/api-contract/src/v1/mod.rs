@@ -88,13 +88,14 @@ pub use idempotency::{
     IdempotencyKey, IdempotencyKeyError, IDEMPOTENCY_KEY_HEADER, MAX_IDEMPOTENCY_KEY_LENGTH,
 };
 pub use inbound_asn::{
-    CreateInboundAsnLineRequest, CreateInboundAsnRequest, CreateInboundAsnResponse,
-    CreatePurchaseOrderAsnLineRequest, CreatePurchaseOrderAsnRequest,
-    CreatePurchaseOrderAsnResponse, CreatedInboundAsnLineResponse,
-    CreatedPurchaseOrderAsnLineResponse, InboundAsnDetailResponse, InboundAsnExecutionStatus,
-    InboundAsnLineResponse, InboundAsnPage, InboundAsnPageRequest, InboundAsnStatus,
-    InboundAsnSummaryResponse, PlanInboundAsnLoadRequest, PlanInboundAsnLoadResponse,
-    PlannedInboundAsnLoadLineResponse,
+    CancelInboundAsnRequest, CancelInboundAsnResponse, CreateInboundAsnLineRequest,
+    CreateInboundAsnRequest, CreateInboundAsnResponse, CreatePurchaseOrderAsnLineRequest,
+    CreatePurchaseOrderAsnRequest, CreatePurchaseOrderAsnResponse, CreatedInboundAsnLineResponse,
+    CreatedPurchaseOrderAsnLineResponse, InboundAsnCancellationReason, InboundAsnDetailResponse,
+    InboundAsnExecutionStatus, InboundAsnLineResponse, InboundAsnPage, InboundAsnPageRequest,
+    InboundAsnStatus, InboundAsnSummaryResponse, PlanInboundAsnLoadRequest,
+    PlanInboundAsnLoadResponse, PlannedInboundAsnLoadLineResponse,
+    MAX_INBOUND_ASN_CANCELLATION_NOTE_LENGTH,
 };
 pub use inbound_inspection::{
     DisposeInboundInspectionRequest, DisposeInboundInspectionResponse, InboundInspectionOutcome,

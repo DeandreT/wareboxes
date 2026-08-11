@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
-    CreateInboundAsnLineRequest, CreateInboundAsnRequest, InboundAsnDetailResponse,
+    CancelInboundAsnRequest, CancelInboundAsnResponse, CreateInboundAsnLineRequest,
+    CreateInboundAsnRequest, InboundAsnCancellationReason, InboundAsnDetailResponse,
     InboundAsnExecutionStatus, InboundAsnPage, InboundAsnStatus, OpaqueCursor,
     PlanInboundAsnLoadRequest, PlanInboundAsnLoadResponse, Revision,
 };
@@ -63,6 +64,7 @@ pub(crate) fn InboundAsnWorkspace(
     let detail_generation = RwSignal::new(0_u64);
     let create_open = RwSignal::new(false);
     let plan_open = RwSignal::new(false);
+    let cancel_open = RwSignal::new(false);
     let layout = SplitPaneState::new("inbound-asns", 700);
     let scoped_access = StoredValue::new(access.clone());
     let scoped_locations = StoredValue::new(locations.clone());
@@ -107,6 +109,7 @@ pub(crate) fn InboundAsnWorkspace(
     let open_detail = move |asn_id: i64| {
         create_open.set(false);
         plan_open.set(false);
+        cancel_open.set(false);
         layout.show_detail();
         selected_id.set(Some(asn_id));
         request_detail(
@@ -148,6 +151,11 @@ pub(crate) fn InboundAsnWorkspace(
         request_page(page_signals, None, Vec::new());
         open_detail(result.asn_id);
     });
+    let cancelled = Callback::new(move |result: CancelInboundAsnResponse| {
+        cancel_open.set(false);
+        request_page(page_signals, None, Vec::new());
+        open_detail(result.asn_id);
+    });
 
     view! {
         <div class="inbound-asn-workspace split-workspace" style=move || layout.style() data-pane-mode=move || layout.mode_attribute()>
@@ -161,7 +169,7 @@ pub(crate) fn InboundAsnWorkspace(
                     <SearchField label="Search ASNs".to_owned() placeholder="ASN, PO, or supplier" value=search/>
                     <label><span class="sr-only">"Client"</span><select prop:value=move || owner.get() on:change=move |event| owner.set(event_target_value(&event))><option value="">"All clients"</option>{scoped_access.get_value().inventory_owners.into_iter().map(|item| view! { <option value=item.id>{item.name}</option> }).collect_view()}</select></label>
                     <label><span class="sr-only">"Facility"</span><select prop:value=move || facility.get() on:change=move |event| facility.set(event_target_value(&event))><option value="">"All facilities"</option>{scoped_access.get_value().facilities.into_iter().map(|item| view! { <option value=item.id>{item.name}</option> }).collect_view()}</select></label>
-                    <label><span class="sr-only">"Status"</span><select prop:value=move || status.get() on:change=move |event| status.set(event_target_value(&event))><option value="">"All statuses"</option><option value="open">"Open"</option><option value="planned">"Planned"</option></select></label>
+                    <label><span class="sr-only">"Status"</span><select prop:value=move || status.get() on:change=move |event| status.set(event_target_value(&event))><option value="">"All statuses"</option><option value="open">"Open"</option><option value="planned">"Planned"</option><option value="cancelled">"Cancelled"</option></select></label>
                     <button class="button secondary-action compact" type="submit" disabled=move || loading.get()>"Apply"</button>
                     <button class="icon-button" type="button" title="Refresh ASNs" aria-label="Refresh ASNs" disabled=move || loading.get() on:click=refresh><Icon icon=UiIcon::Refresh/></button>
                     <button class="button primary-action compact" type="button" on:click=move |_| { plan_open.set(false); create_open.set(true); layout.show_detail(); }><Icon icon=UiIcon::Add/><span>"New ASN"</span></button>
@@ -186,7 +194,7 @@ pub(crate) fn InboundAsnWorkspace(
             <section class="data-section inbound-asn-detail split-detail">
                 <Show when=move || create_open.get() fallback=move || view! {
                     <Show when=move || selected.get().is_some() fallback=move || view! { <div class="detail-empty"><h2>"ASN details"</h2><p>"Select a source document to inspect expected freight and load-planning evidence."</p></div> }>
-                        {move || selected.get().map(|detail| view! { <AsnDetail detail=detail.clone() on_plan=Callback::new(move |_| plan_open.set(true))/> })}
+                        {move || selected.get().map(|detail| view! { <AsnDetail detail=detail.clone() on_plan=Callback::new(move |_| plan_open.set(true)) on_cancel=Callback::new(move |_| cancel_open.set(true))/> })}
                     </Show>
                 }>
                     <CreateAsnPanel access=access.clone() on_close=Callback::new(move |_| create_open.set(false)) on_created=created on_unauthorized/>
@@ -196,21 +204,94 @@ pub(crate) fn InboundAsnWorkspace(
             </section>
         </div>
         <Show when=move || plan_open.get() && selected.get().is_some()>{move || selected.get().map(|detail| view! { <PlanLoadDialog detail locations=scoped_locations.get_value() on_close=Callback::new(move |_| plan_open.set(false)) on_planned=planned on_unauthorized/> })}</Show>
+        <Show when=move || cancel_open.get() && selected.get().is_some()>{move || selected.get().map(|detail| view! { <CancelAsnDialog detail on_close=Callback::new(move |_| cancel_open.set(false)) on_cancelled=cancelled on_unauthorized/> })}</Show>
     }
 }
 
 #[component]
-fn AsnDetail(detail: InboundAsnDetailResponse, on_plan: Callback<()>) -> impl IntoView {
+fn AsnDetail(
+    detail: InboundAsnDetailResponse,
+    on_plan: Callback<()>,
+    on_cancel: Callback<()>,
+) -> impl IntoView {
     let can_plan = detail.summary.status == InboundAsnStatus::Open;
+    let can_cancel = can_plan;
+    let cancellation = detail.summary.cancellation_reason.map(|reason| {
+        let note = detail.summary.cancellation_note.clone();
+        let at = detail.summary.cancelled_at.clone();
+        view! { <section class="asn-cancellation-evidence"><div><span>"Cancellation"</span><strong>{cancellation_reason_label(reason)}</strong></div>{note.map(|value| view! { <p>{value}</p> })}<small>{at.as_deref().map(short_wire_timestamp).unwrap_or_else(|| "Time unavailable".into())}</small></section> }
+    });
     view! {
         <div class="inbound-asn-detail-content">
             <header class="detail-heading"><div><span class="eyebrow">{format!("ASN #{}", detail.summary.asn_id)}</span><h2>{detail.summary.number.clone()}</h2><p>{detail.summary.supplier.clone()}</p></div><span class=status_class(detail.summary.status)>{status_label(detail.summary.status)}</span></header>
             <dl class="summary-grid"><div><dt>"Client"</dt><dd>{detail.summary.inventory_owner_name}</dd></div><div><dt>"Facility"</dt><dd>{detail.summary.facility_name}</dd></div><div><dt>"Source"</dt><dd>{detail.summary.purchase_order_number.map(|number| format!("Purchase order {number}")).unwrap_or_else(|| "Independent ASN".into())}</dd></div><div><dt>"Due"</dt><dd>{detail.summary.expected_at.as_deref().map(short_wire_timestamp).unwrap_or_else(|| "Not supplied".into())}</dd></div><div><dt>"Load state"</dt><dd>{detail.summary.execution_status.map(execution_status_label).unwrap_or("Not planned")}</dd></div><div><dt>"Expected"</dt><dd>{format_quantity(detail.summary.total_expected_quantity)}</dd></div><div><dt>"Received"</dt><dd>{format_quantity(detail.summary.total_received_quantity)}</dd></div><div><dt>"Exceptions"</dt><dd>{format_quantity(detail.summary.total_rejected_quantity + detail.summary.total_missing_quantity)}</dd></div><div><dt>"Open"</dt><dd><strong>{format_quantity(detail.summary.total_remaining_quantity)}</strong></dd></div></dl>
             <div class="detail-section-heading"><h3>"Expected freight"</h3><span>{format!("{} lines", detail.lines.len())}</span></div>
             <div class="table-scroll"><table class="dense-table document-progress-table"><thead><tr><th>"Item"</th><th>"Identity"</th><th>"Receipt"</th></tr></thead><tbody>{detail.lines.into_iter().map(|line| { let exceptions=line.rejected_quantity+line.missing_quantity; view! { <tr><td><strong>{line.item_description}</strong><small>{format!("Item #{} · {}", line.item_id, line.uom)}</small></td><td>{identity_label(line.lot.as_deref(), line.serial.as_deref(), line.expiration.as_deref())}</td><td><dl class="line-metrics"><div><dt>"Expected"</dt><dd>{format_quantity(line.expected_quantity)}</dd></div><div><dt>"Received"</dt><dd>{format_quantity(line.received_quantity)}</dd></div><div><dt>"Exceptions"</dt><dd>{format_quantity(exceptions)}</dd></div><div><dt>"Open"</dt><dd><strong>{format_quantity(line.remaining_quantity)}</strong></dd></div></dl></td></tr> } }).collect_view()}</tbody></table></div>
-            <footer class="detail-actions"><a class="button quiet-action" href="/loads">"Open inbound loads"</a>{can_plan.then(|| view! { <button class="button primary-action" type="button" on:click=move |_| on_plan.run(())><Icon icon=UiIcon::Loads/><span>"Plan load"</span></button> })}</footer>
+            {cancellation}
+            <footer class="detail-actions"><a class="button quiet-action" href="/loads">"Open inbound loads"</a>{can_cancel.then(|| view! { <button class="button danger-action" type="button" on:click=move |_| on_cancel.run(())>"Cancel ASN"</button> })}{can_plan.then(|| view! { <button class="button primary-action" type="button" on:click=move |_| on_plan.run(())><Icon icon=UiIcon::Loads/><span>"Plan load"</span></button> })}</footer>
         </div>
     }
+}
+
+#[component]
+fn CancelAsnDialog(
+    detail: InboundAsnDetailResponse,
+    on_close: Callback<()>,
+    on_cancelled: Callback<CancelInboundAsnResponse>,
+    on_unauthorized: Callback<()>,
+) -> impl IntoView {
+    let reason = RwSignal::new(InboundAsnCancellationReason::SupplierCancelled);
+    let note = RwSignal::new(String::new());
+    let pending = RwSignal::new(false);
+    let error = RwSignal::new(None::<String>);
+    let retry = RwSignal::new(None::<(CancelInboundAsnRequest, String)>);
+    let toasts = use_toast_bus();
+    let asn_id = detail.summary.asn_id;
+    let revision = detail.summary.revision;
+    let number = detail.summary.number;
+    let submit = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        if pending.get_untracked() {
+            return;
+        }
+        let note_value = optional_text(&note.get_untracked());
+        if reason.get_untracked() == InboundAsnCancellationReason::Other && note_value.is_none() {
+            error.set(Some("Enter a note for the Other reason.".into()));
+            return;
+        }
+        let request = CancelInboundAsnRequest {
+            expected_revision: revision,
+            reason: reason.get_untracked(),
+            note: note_value,
+        };
+        let key = retry
+            .get_untracked()
+            .filter(|(saved, _)| saved == &request)
+            .map_or_else(api::new_idempotency_key, |(_, key)| key);
+        retry.set(Some((request.clone(), key.clone())));
+        pending.set(true);
+        error.set(None);
+        leptos::task::spawn_local(async move {
+            match api::cancel_inbound_asn(asn_id, &request, &key).await {
+                Ok(result) => {
+                    pending.set(false);
+                    retry.set(None);
+                    toasts.success("Advance shipping notice cancelled.");
+                    on_cancelled.run(result);
+                }
+                Err(value) if value.unauthorized => on_unauthorized.run(()),
+                Err(value) => {
+                    pending.set(false);
+                    if !value.ambiguous_outcome {
+                        retry.set(None);
+                    }
+                    error.set(Some(value.message.clone()));
+                    toasts.error(value.message);
+                }
+            }
+        });
+    };
+    view! { <div class="inbound-asn-dialog-backdrop" role="presentation"><form class="inbound-asn-dialog asn-cancel-dialog" role="dialog" aria-modal="true" aria-labelledby="asn-cancel-title" on:submit=submit><header><div><span class="eyebrow">"Terminal source action"</span><h2 id="asn-cancel-title">{format!("Cancel {number}")}</h2></div><button type="button" class="icon-button" title="Close" aria-label="Close" on:click=move |_| on_close.run(())><Icon icon=UiIcon::Close/></button></header><p>"The notice remains in history, and its unreceived quantity becomes available for a replacement ASN."</p><div class="form-grid"><label><span>"Reason"</span><select on:change=move |event| reason.set(parse_cancellation_reason(&event_target_value(&event)))><option value="supplier_cancelled">"Supplier cancelled"</option><option value="duplicate_notice">"Duplicate notice"</option><option value="order_changed">"Purchase order changed"</option><option value="other">"Other"</option></select></label><label><span>"Note"</span><textarea maxlength="500" placeholder="Optional unless reason is Other" prop:value=move || note.get() on:input=move |event| note.set(event_target_value(&event))></textarea></label></div><Show when=move || error.get().is_some()>{move || error.get().map(|message| view! { <p class="inline-command-error">{message}</p> })}</Show><footer><button class="button quiet-action" type="button" on:click=move |_| on_close.run(())>"Go back"</button><button class="button danger-action" type="submit" disabled=move || pending.get()>{move || if pending.get() { "Cancelling..." } else { "Cancel ASN" }}</button></footer></form></div> }
 }
 
 #[component]
@@ -485,6 +566,7 @@ fn request_page(
         status: match signals.status.get_untracked().as_str() {
             "open" => Some(InboundAsnStatus::Open),
             "planned" => Some(InboundAsnStatus::Planned),
+            "cancelled" => Some(InboundAsnStatus::Cancelled),
             _ => None,
         },
         search: optional_text(&signals.search.get_untracked()),
@@ -576,12 +658,30 @@ fn status_label(status: InboundAsnStatus) -> &'static str {
     match status {
         InboundAsnStatus::Open => "Open",
         InboundAsnStatus::Planned => "Planned",
+        InboundAsnStatus::Cancelled => "Cancelled",
     }
 }
 fn status_class(status: InboundAsnStatus) -> &'static str {
     match status {
         InboundAsnStatus::Open => "status-chip info",
         InboundAsnStatus::Planned => "status-chip success",
+        InboundAsnStatus::Cancelled => "status-chip neutral",
+    }
+}
+fn parse_cancellation_reason(value: &str) -> InboundAsnCancellationReason {
+    match value {
+        "duplicate_notice" => InboundAsnCancellationReason::DuplicateNotice,
+        "order_changed" => InboundAsnCancellationReason::OrderChanged,
+        "other" => InboundAsnCancellationReason::Other,
+        _ => InboundAsnCancellationReason::SupplierCancelled,
+    }
+}
+fn cancellation_reason_label(reason: InboundAsnCancellationReason) -> &'static str {
+    match reason {
+        InboundAsnCancellationReason::SupplierCancelled => "Supplier cancelled",
+        InboundAsnCancellationReason::DuplicateNotice => "Duplicate notice",
+        InboundAsnCancellationReason::OrderChanged => "Purchase order changed",
+        InboundAsnCancellationReason::Other => "Other",
     }
 }
 fn execution_status_label(status: InboundAsnExecutionStatus) -> &'static str {

@@ -10,6 +10,7 @@ use crate::{
 pub const MAX_INBOUND_ASN_NUMBER_LENGTH: usize = 120;
 pub const MAX_INBOUND_ASN_SUPPLIER_LENGTH: usize = 200;
 pub const MAX_INBOUND_ASN_IDENTITY_LENGTH: usize = 200;
+pub const MAX_INBOUND_ASN_CANCELLATION_NOTE_LENGTH: usize = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InboundAsnError {
@@ -33,6 +34,12 @@ pub enum InboundAsnError {
     DuplicatePurchaseOrderLineIdentity,
     #[error("only an open advance shipping notice can be planned into a load")]
     InvalidStatus,
+    #[error("only an open advance shipping notice can be cancelled")]
+    InvalidCancellationStatus,
+    #[error("advance shipping notice cancellation note is invalid")]
+    InvalidCancellationNote,
+    #[error("a cancellation note is required when the reason is other")]
+    MissingCancellationNote,
 }
 
 fn required_text(
@@ -118,6 +125,7 @@ impl InboundAsnRevision {
 pub enum InboundAsnStatus {
     Open,
     Planned,
+    Cancelled,
 }
 
 impl InboundAsnStatus {
@@ -125,6 +133,7 @@ impl InboundAsnStatus {
         match self {
             Self::Open => "open",
             Self::Planned => "planned",
+            Self::Cancelled => "cancelled",
         }
     }
 
@@ -132,8 +141,96 @@ impl InboundAsnStatus {
         match value {
             "open" => Some(Self::Open),
             "planned" => Some(Self::Planned),
+            "cancelled" => Some(Self::Cancelled),
             _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundAsnCancellationReason {
+    SupplierCancelled,
+    DuplicateNotice,
+    OrderChanged,
+    Other,
+}
+
+impl InboundAsnCancellationReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SupplierCancelled => "supplier_cancelled",
+            Self::DuplicateNotice => "duplicate_notice",
+            Self::OrderChanged => "order_changed",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "supplier_cancelled" => Some(Self::SupplierCancelled),
+            "duplicate_notice" => Some(Self::DuplicateNotice),
+            "order_changed" => Some(Self::OrderChanged),
+            "other" => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct InboundAsnCancellationNote(String);
+
+impl InboundAsnCancellationNote {
+    pub fn new(value: impl Into<String>) -> Result<Self, InboundAsnError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.trim() != value
+            || value.chars().count() > MAX_INBOUND_ASN_CANCELLATION_NOTE_LENGTH
+            || value.chars().any(char::is_control)
+        {
+            return Err(InboundAsnError::InvalidCancellationNote);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for InboundAsnCancellationNote {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundAsnCancellationDetails {
+    reason: InboundAsnCancellationReason,
+    note: Option<InboundAsnCancellationNote>,
+}
+
+impl InboundAsnCancellationDetails {
+    pub fn new(
+        reason: InboundAsnCancellationReason,
+        note: Option<InboundAsnCancellationNote>,
+    ) -> Result<Self, InboundAsnError> {
+        if reason == InboundAsnCancellationReason::Other && note.is_none() {
+            return Err(InboundAsnError::MissingCancellationNote);
+        }
+        Ok(Self { reason, note })
+    }
+
+    pub const fn reason(&self) -> InboundAsnCancellationReason {
+        self.reason
+    }
+
+    pub fn note(&self) -> Option<&InboundAsnCancellationNote> {
+        self.note.as_ref()
     }
 }
 
@@ -442,6 +539,16 @@ pub fn plan_inbound_asn(
     revision.next()
 }
 
+pub fn cancel_inbound_asn(
+    status: InboundAsnStatus,
+    revision: InboundAsnRevision,
+) -> Result<InboundAsnRevision, InboundAsnError> {
+    if status != InboundAsnStatus::Open {
+        return Err(InboundAsnError::InvalidCancellationStatus);
+    }
+    revision.next()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,12 +596,39 @@ mod tests {
             Err(InboundAsnError::InvalidStatus)
         );
         assert_eq!(
+            plan_inbound_asn(InboundAsnStatus::Cancelled, revision),
+            Err(InboundAsnError::InvalidStatus)
+        );
+        assert_eq!(
             plan_inbound_asn(
                 InboundAsnStatus::Open,
                 InboundAsnRevision::new(i64::MAX).unwrap()
             ),
             Err(InboundAsnError::RevisionExhausted)
         );
+    }
+
+    #[test]
+    fn cancellation_is_open_only_revisioned_and_requires_other_note() {
+        let revision = InboundAsnRevision::new(1).unwrap();
+        assert_eq!(
+            cancel_inbound_asn(InboundAsnStatus::Open, revision),
+            Ok(InboundAsnRevision::new(2).unwrap())
+        );
+        assert_eq!(
+            cancel_inbound_asn(InboundAsnStatus::Planned, revision),
+            Err(InboundAsnError::InvalidCancellationStatus)
+        );
+        assert_eq!(
+            InboundAsnCancellationDetails::new(InboundAsnCancellationReason::Other, None),
+            Err(InboundAsnError::MissingCancellationNote)
+        );
+        assert!(InboundAsnCancellationDetails::new(
+            InboundAsnCancellationReason::Other,
+            Some(InboundAsnCancellationNote::new("Supplier withdrew the notice").unwrap()),
+        )
+        .is_ok());
+        assert!(InboundAsnCancellationNote::new(" trailing ").is_err());
     }
 
     #[test]

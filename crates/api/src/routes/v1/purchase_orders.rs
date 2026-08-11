@@ -275,6 +275,7 @@ fn map_inbound_asn_status(value: InboundAsnStatus) -> ApiInboundAsnStatus {
     match value {
         InboundAsnStatus::Open => ApiInboundAsnStatus::Open,
         InboundAsnStatus::Planned => ApiInboundAsnStatus::Planned,
+        InboundAsnStatus::Cancelled => ApiInboundAsnStatus::Cancelled,
     }
 }
 

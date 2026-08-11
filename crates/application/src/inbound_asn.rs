@@ -2,7 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
-    CatalogItemId, FacilityId, InboundAsnId, InboundAsnLineId, InboundAsnLoadPlanDetails,
+    CatalogItemId, FacilityId, InboundAsnCancellationDetails, InboundAsnCancellationId,
+    InboundAsnCancellationReason, InboundAsnId, InboundAsnLineId, InboundAsnLoadPlanDetails,
     InboundAsnLoadPlanId, InboundAsnRevision, InboundAsnStatus, InboundLoadId, InboundLoadLineId,
     InventoryOwnerId, NewInboundAsn, NewPurchaseOrderAsn, PurchaseOrderAsnSourceId,
     PurchaseOrderAsnSourceLineId, PurchaseOrderId, PurchaseOrderLineId, PurchaseOrderRevision,
@@ -12,6 +13,7 @@ use wareboxes_domain::{
 pub const CREATE_INBOUND_ASN_OPERATION: &str = "inbound.asn.create.v1";
 pub const PLAN_INBOUND_ASN_LOAD_OPERATION: &str = "inbound.asn.load.plan.v1";
 pub const CREATE_PURCHASE_ORDER_ASN_OPERATION: &str = "inbound.purchase_order.asn.create.v1";
+pub const CANCEL_INBOUND_ASN_OPERATION: &str = "inbound.asn.cancel.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateInboundAsnCommand {
@@ -95,6 +97,52 @@ pub struct PlanInboundAsnLoadResult {
     pub planned_at: Timestamp,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CancelInboundAsnCommand {
+    asn_id: InboundAsnId,
+    expected_revision: InboundAsnRevision,
+    details: InboundAsnCancellationDetails,
+}
+
+impl CancelInboundAsnCommand {
+    pub const fn new(
+        asn_id: InboundAsnId,
+        expected_revision: InboundAsnRevision,
+        details: InboundAsnCancellationDetails,
+    ) -> Self {
+        Self {
+            asn_id,
+            expected_revision,
+            details,
+        }
+    }
+
+    pub const fn asn_id(&self) -> InboundAsnId {
+        self.asn_id
+    }
+
+    pub const fn expected_revision(&self) -> InboundAsnRevision {
+        self.expected_revision
+    }
+
+    pub const fn details(&self) -> &InboundAsnCancellationDetails {
+        &self.details
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelInboundAsnResult {
+    pub cancellation_id: InboundAsnCancellationId,
+    pub asn_id: InboundAsnId,
+    pub previous_status: InboundAsnStatus,
+    pub status: InboundAsnStatus,
+    pub revision: InboundAsnRevision,
+    pub reason: InboundAsnCancellationReason,
+    pub note: Option<String>,
+    pub cancelled_by: UserId,
+    pub cancelled_at: Timestamp,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InboundAsnExecutionStatus {
@@ -149,6 +197,11 @@ pub struct InboundAsnReadModel {
     pub created_at: Timestamp,
     pub planned_by: Option<UserId>,
     pub planned_at: Option<Timestamp>,
+    pub cancellation_id: Option<InboundAsnCancellationId>,
+    pub cancellation_reason: Option<InboundAsnCancellationReason>,
+    pub cancellation_note: Option<String>,
+    pub cancelled_by: Option<UserId>,
+    pub cancelled_at: Option<Timestamp>,
     pub purchase_order_source_id: Option<PurchaseOrderAsnSourceId>,
     pub purchase_order_id: Option<PurchaseOrderId>,
     pub purchase_order_number: Option<String>,
@@ -177,8 +230,8 @@ mod tests {
     use crate::idempotency::PreparedCommand;
     use crate::CommandContext;
     use wareboxes_domain::{
-        InboundAsnLineDefinition, InboundAsnNumber, InboundAsnQuantity, InboundAsnSupplier,
-        TenantId,
+        InboundAsnCancellationDetails, InboundAsnCancellationReason, InboundAsnLineDefinition,
+        InboundAsnNumber, InboundAsnQuantity, InboundAsnSupplier, TenantId,
     };
 
     #[test]
@@ -210,5 +263,35 @@ mod tests {
         let prepared =
             PreparedCommand::new_v1(&context, CREATE_INBOUND_ASN_OPERATION, &command).unwrap();
         assert!(!prepared.request_hash().is_empty());
+    }
+
+    #[test]
+    fn cancellation_hash_contains_revision_and_reason() {
+        let command = CancelInboundAsnCommand::new(
+            InboundAsnId::new(8).unwrap(),
+            InboundAsnRevision::new(1).unwrap(),
+            InboundAsnCancellationDetails::new(
+                InboundAsnCancellationReason::SupplierCancelled,
+                None,
+            )
+            .unwrap(),
+        );
+        let context = CommandContext {
+            tenant_id: TenantId::new(1).unwrap(),
+            actor_id: UserId::new(6).unwrap(),
+            request_id: "req-cancel".into(),
+            idempotency_key: Some("key-cancel".into()),
+        };
+        let prepared =
+            PreparedCommand::new_v1(&context, CANCEL_INBOUND_ASN_OPERATION, &command).unwrap();
+        let changed = CancelInboundAsnCommand::new(
+            InboundAsnId::new(8).unwrap(),
+            InboundAsnRevision::new(1).unwrap(),
+            InboundAsnCancellationDetails::new(InboundAsnCancellationReason::DuplicateNotice, None)
+                .unwrap(),
+        );
+        let changed =
+            PreparedCommand::new_v1(&context, CANCEL_INBOUND_ASN_OPERATION, &changed).unwrap();
+        assert_ne!(prepared.request_hash(), changed.request_hash());
     }
 }

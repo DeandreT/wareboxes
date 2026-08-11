@@ -51,7 +51,8 @@ mod inbound_inspection;
 pub use inbound_inspection::dispose_inbound_inspection;
 mod inbound_asn;
 pub use inbound_asn::{
-    create_inbound_asn, inbound_asn_detail, inbound_asns, plan_inbound_asn_load, InboundAsnFilters,
+    cancel_inbound_asn, create_inbound_asn, inbound_asn_detail, inbound_asns,
+    plan_inbound_asn_load, InboundAsnFilters,
 };
 mod inbound_load;
 pub use inbound_load::{

@@ -7,6 +7,74 @@ use super::{CursorPage, OpaqueCursor, PageLimit, Revision};
 pub enum InboundAsnStatus {
     Open,
     Planned,
+    Cancelled,
+}
+
+pub const MAX_INBOUND_ASN_CANCELLATION_NOTE_LENGTH: usize = 500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundAsnCancellationReason {
+    SupplierCancelled,
+    DuplicateNotice,
+    OrderChanged,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CancelInboundAsnRequest {
+    pub expected_revision: Revision,
+    pub reason: InboundAsnCancellationReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CancelInboundAsnRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            expected_revision: Revision,
+            reason: InboundAsnCancellationReason,
+            #[serde(default)]
+            note: Option<String>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.note.as_ref().is_some_and(|note| {
+            note.is_empty()
+                || note.trim() != note
+                || note.chars().count() > MAX_INBOUND_ASN_CANCELLATION_NOTE_LENGTH
+                || note.chars().any(char::is_control)
+        }) || (raw.reason == InboundAsnCancellationReason::Other && raw.note.is_none())
+        {
+            return Err(serde::de::Error::custom(
+                "advance shipping notice cancellation note is invalid",
+            ));
+        }
+        Ok(Self {
+            expected_revision: raw.expected_revision,
+            reason: raw.reason,
+            note: raw.note,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelInboundAsnResponse {
+    pub cancellation_id: i64,
+    pub asn_id: i64,
+    pub previous_status: InboundAsnStatus,
+    pub status: InboundAsnStatus,
+    pub revision: Revision,
+    pub reason: InboundAsnCancellationReason,
+    pub note: Option<String>,
+    pub cancelled_by: i64,
+    pub cancelled_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +258,11 @@ pub struct InboundAsnSummaryResponse {
     pub created_at: String,
     pub planned_by: Option<i64>,
     pub planned_at: Option<String>,
+    pub cancellation_id: Option<i64>,
+    pub cancellation_reason: Option<InboundAsnCancellationReason>,
+    pub cancellation_note: Option<String>,
+    pub cancelled_by: Option<i64>,
+    pub cancelled_at: Option<String>,
     pub purchase_order_source_id: Option<i64>,
     pub purchase_order_id: Option<i64>,
     pub purchase_order_number: Option<String>,
@@ -270,6 +343,33 @@ mod tests {
         let mut invalid = request;
         invalid["lines"] = serde_json::json!([]);
         assert!(serde_json::from_value::<PlanInboundAsnLoadRequest>(invalid).is_err());
+    }
+
+    #[test]
+    fn cancellation_request_is_strict_and_other_requires_a_note() {
+        let valid = serde_json::json!({
+            "expected_revision": 1,
+            "reason": "supplier_cancelled"
+        });
+        assert!(serde_json::from_value::<CancelInboundAsnRequest>(valid.clone()).is_ok());
+        let mut unknown = valid;
+        unknown["tenant_id"] = serde_json::json!(9);
+        assert!(serde_json::from_value::<CancelInboundAsnRequest>(unknown).is_err());
+        assert!(
+            serde_json::from_value::<CancelInboundAsnRequest>(serde_json::json!({
+                "expected_revision": 1,
+                "reason": "other"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CancelInboundAsnRequest>(serde_json::json!({
+                "expected_revision": 1,
+                "reason": "other",
+                "note": "Duplicate supplier transmission"
+            }))
+            .is_ok()
+        );
     }
 
     #[test]

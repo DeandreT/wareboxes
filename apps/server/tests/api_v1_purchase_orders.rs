@@ -9,10 +9,10 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    CreatePurchaseOrderAsnResponse, CreatePurchaseOrderResponse, ErrorReason, ErrorResponse,
-    InboundAsnDetailResponse, InboundAsnExecutionStatus, PlanInboundAsnLoadResponse,
-    PurchaseOrderDetailResponse, PurchaseOrderPage, PurchaseOrderStatus,
-    ReleasePurchaseOrderResponse,
+    CancelInboundAsnResponse, CreatePurchaseOrderAsnResponse, CreatePurchaseOrderResponse,
+    ErrorReason, ErrorResponse, InboundAsnDetailResponse, InboundAsnExecutionStatus,
+    InboundAsnStatus, PlanInboundAsnLoadResponse, PurchaseOrderDetailResponse, PurchaseOrderPage,
+    PurchaseOrderStatus, ReleasePurchaseOrderResponse,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
@@ -726,6 +726,167 @@ async fn concurrent_notices_cannot_overstate_remaining_order_demand() {
     .unwrap();
     assert_eq!(quantities, vec![(12, 8, 4), (8, 6, 2)]);
     tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_an_open_notice_restores_purchase_order_notification_demand() {
+    let context = fixture("purchase-order-asn-cancel@test.local").await;
+    let order = create_order(&context, "PO-ASN-CANCEL-100").await;
+    release_order(&context, &order, "release-asn-cancel").await;
+    let app = routes::app(AppState::new(context.fixture.db.clone()));
+    let source = app
+        .clone()
+        .oneshot(command_request(
+            &context,
+            &format!("purchase-orders/{}/asns", order.purchase_order_id),
+            "po-asn-cancel-source",
+            &asn_body(&order, "ASN-CANCEL-SOURCE", 12, 8),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(source.status(), StatusCode::OK);
+    let source = json_body::<CreatePurchaseOrderAsnResponse>(source).await;
+
+    let cancel_body = json!({
+        "expected_revision": source.revision.get(),
+        "reason": "supplier_cancelled",
+        "note": "Supplier withdrew the original dispatch"
+    });
+    let cancelled = app
+        .clone()
+        .oneshot(command_request(
+            &context,
+            &format!("inbound-asns/{}/cancellations", source.asn_id),
+            "cancel-po-asn-source",
+            &cancel_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status(), StatusCode::OK);
+    let cancelled = json_body::<CancelInboundAsnResponse>(cancelled).await;
+    assert_eq!(cancelled.status, InboundAsnStatus::Cancelled);
+    assert_eq!(cancelled.revision.get(), 2);
+
+    let replay = app
+        .clone()
+        .oneshot(command_request(
+            &context,
+            &format!("inbound-asns/{}/cancellations", source.asn_id),
+            "cancel-po-asn-source",
+            &cancel_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<CancelInboundAsnResponse>(replay).await,
+        cancelled
+    );
+    let changed = app
+        .clone()
+        .oneshot(command_request(
+            &context,
+            &format!("inbound-asns/{}/cancellations", source.asn_id),
+            "cancel-po-asn-source",
+            &json!({"expected_revision": 1, "reason": "duplicate_notice"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(changed.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body::<ErrorResponse>(changed).await.reason,
+        ErrorReason::IdempotencyKeyReused
+    );
+
+    let asn_detail = app
+        .clone()
+        .oneshot(get_request(
+            &context,
+            &format!("inbound-asns/{}", source.asn_id),
+        ))
+        .await
+        .unwrap();
+    let asn_detail = json_body::<InboundAsnDetailResponse>(asn_detail).await;
+    assert_eq!(asn_detail.summary.status, InboundAsnStatus::Cancelled);
+    assert_eq!(asn_detail.summary.total_remaining_quantity, 0);
+    assert_eq!(
+        asn_detail.summary.cancellation_id,
+        Some(cancelled.cancellation_id)
+    );
+    assert_eq!(asn_detail.lines[0].remaining_quantity, 0);
+
+    let detail = app
+        .clone()
+        .oneshot(get_request(
+            &context,
+            &format!("purchase-orders/{}", order.purchase_order_id),
+        ))
+        .await
+        .unwrap();
+    let detail = json_body::<PurchaseOrderDetailResponse>(detail).await;
+    assert_eq!(detail.summary.total_historical_asn_quantity, 20);
+    assert_eq!(detail.summary.total_active_inbound_quantity, 0);
+    assert_eq!(detail.summary.total_available_to_notify_quantity, 20);
+
+    let replacement = app
+        .clone()
+        .oneshot(command_request(
+            &context,
+            &format!("purchase-orders/{}/asns", order.purchase_order_id),
+            "po-asn-cancel-replacement",
+            &asn_body(&order, "ASN-CANCEL-REPLACEMENT", 12, 8),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replacement.status(), StatusCode::OK);
+    let replacement = json_body::<CreatePurchaseOrderAsnResponse>(replacement).await;
+    assert_eq!(replacement.total_expected_quantity, 20);
+
+    let cancelled_plan = app
+        .oneshot(command_request(
+            &context,
+            &format!("inbound-asns/{}/load-plans", source.asn_id),
+            "cancelled-asn-plan",
+            &json!({
+                "expected_revision": 2,
+                "receiving_location_id": context.facility_id,
+                "carrier": null,
+                "trailer_number": null,
+                "seal_number": null
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancelled_plan.status(), StatusCode::CONFLICT);
+
+    let mut tx = tenant_tx(&context.fixture.db, context.tenant_id).await;
+    let evidence: (i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+          (SELECT COUNT(*) FROM inbound_asn_cancellations WHERE asn_id=$1),
+          (SELECT COUNT(*) FROM outbox_events WHERE aggregate_type='inbound_asn'
+             AND aggregate_id=$1::TEXT AND event_type='inbound.asn.cancelled'),
+          (SELECT COUNT(*) FROM command_idempotency_records
+             WHERE operation='inbound.asn.cancel.v1'
+               AND (result_json->>'asn_id')::BIGINT=$1),
+          (SELECT COUNT(*) FROM purchase_order_asn_sources WHERE purchase_order_id=$2)
+        "#,
+    )
+    .bind(source.asn_id)
+    .bind(order.purchase_order_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(evidence, (1, 1, 1, 2));
+    let immutable = sqlx::query(
+        "UPDATE inbound_asn_cancellations SET reason_code='duplicate_notice' WHERE asn_id=$1",
+    )
+    .bind(source.asn_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap_err();
+    assert!(!immutable.to_string().is_empty());
+    tx.rollback().await.unwrap();
 }
 
 #[tokio::test]

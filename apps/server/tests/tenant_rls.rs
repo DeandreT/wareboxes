@@ -361,6 +361,10 @@ async fn command_records_require_a_transaction_local_tenant_context() {
         ("inbound_asns", "inbound_asns_tenant_isolation"),
         ("inbound_asn_lines", "inbound_asn_lines_tenant_isolation"),
         (
+            "inbound_asn_cancellations",
+            "inbound_asn_cancellations_tenant_isolation",
+        ),
+        (
             "inbound_asn_load_plans",
             "inbound_asn_load_plans_tenant_isolation",
         ),

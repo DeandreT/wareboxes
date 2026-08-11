@@ -56,9 +56,11 @@ pub use facility::{
     MAX_FACILITY_ORIGIN_POSTAL_CODE_LENGTH, MAX_FACILITY_ORIGIN_STATE_LENGTH,
 };
 pub use inbound_asn::{
-    plan_inbound_asn, InboundAsnError, InboundAsnLineDefinition, InboundAsnLoadPlanDetails,
-    InboundAsnNumber, InboundAsnQuantity, InboundAsnRevision, InboundAsnStatus, InboundAsnSupplier,
-    NewInboundAsn, NewPurchaseOrderAsn, PurchaseOrderAsnLineDefinition,
+    cancel_inbound_asn, plan_inbound_asn, InboundAsnCancellationDetails,
+    InboundAsnCancellationNote, InboundAsnCancellationReason, InboundAsnError,
+    InboundAsnLineDefinition, InboundAsnLoadPlanDetails, InboundAsnNumber, InboundAsnQuantity,
+    InboundAsnRevision, InboundAsnStatus, InboundAsnSupplier, NewInboundAsn, NewPurchaseOrderAsn,
+    PurchaseOrderAsnLineDefinition, MAX_INBOUND_ASN_CANCELLATION_NOTE_LENGTH,
     MAX_INBOUND_ASN_IDENTITY_LENGTH, MAX_INBOUND_ASN_NUMBER_LENGTH,
     MAX_INBOUND_ASN_SUPPLIER_LENGTH,
 };
@@ -342,6 +344,7 @@ positive_id!(StorageZoneId, "storage zone ID");
 positive_id!(InboundAsnId, "inbound ASN ID");
 positive_id!(InboundAsnLineId, "inbound ASN line ID");
 positive_id!(InboundAsnLoadPlanId, "inbound ASN load plan ID");
+positive_id!(InboundAsnCancellationId, "inbound ASN cancellation ID");
 positive_id!(PurchaseOrderId, "purchase order ID");
 positive_id!(PurchaseOrderLineId, "purchase order line ID");
 positive_id!(PurchaseOrderReleaseId, "purchase order release ID");

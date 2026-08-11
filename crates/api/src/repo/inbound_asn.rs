@@ -1,5 +1,9 @@
 //! Advance shipping notice source intake and source-bound load planning.
 
+mod cancellation;
+
+pub use cancellation::cancel;
+
 use std::collections::HashMap;
 
 use sqlx::Row;
@@ -13,9 +17,10 @@ use wareboxes_application::inbound_asn::{
 use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
-    plan_inbound_asn, CatalogItemId, FacilityId, InboundAsnId, InboundAsnLineId,
-    InboundAsnLoadPlanId, InboundAsnRevision, InboundAsnStatus, InboundLoadId, InboundLoadLineId,
-    InventoryOwnerId, PurchaseOrderAsnSourceId, PurchaseOrderId, Timestamp, UserId,
+    plan_inbound_asn, CatalogItemId, FacilityId, InboundAsnCancellationId,
+    InboundAsnCancellationReason, InboundAsnId, InboundAsnLineId, InboundAsnLoadPlanId,
+    InboundAsnRevision, InboundAsnStatus, InboundLoadId, InboundLoadLineId, InventoryOwnerId,
+    PurchaseOrderAsnSourceId, PurchaseOrderId, Timestamp, UserId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::{insert_result, PostgresPreparedCommandExt};
@@ -453,13 +458,19 @@ pub async fn page(
                COALESCE(receipt.received_quantity,0)::BIGINT AS total_received_quantity,
                COALESCE(receipt.rejected_quantity,0)::BIGINT AS total_rejected_quantity,
                COALESCE(receipt.missing_quantity,0)::BIGINT AS total_missing_quantity,
-               asn.total_expected_quantity
-                   - COALESCE(receipt.received_quantity,0)::BIGINT
-                   - COALESCE(receipt.rejected_quantity,0)::BIGINT
-                   - COALESCE(receipt.missing_quantity,0)::BIGINT AS total_remaining_quantity,
+               CASE WHEN asn.status='cancelled' THEN 0 ELSE
+                   asn.total_expected_quantity
+                       - COALESCE(receipt.received_quantity,0)::BIGINT
+                       - COALESCE(receipt.rejected_quantity,0)::BIGINT
+                       - COALESCE(receipt.missing_quantity,0)::BIGINT
+               END AS total_remaining_quantity,
                asn.load_id,load.status AS execution_status,
                asn.created_by_user_id,asn.created_at,
                asn.planned_by_user_id,asn.planned_at,
+               cancellation.id AS cancellation_id,
+               cancellation.reason_code AS cancellation_reason,
+               cancellation.note AS cancellation_note,
+               cancellation.cancelled_by_user_id,cancellation.cancelled_at,
                po_source.id AS purchase_order_source_id,
                po_source.purchase_order_id,purchase.number AS purchase_order_number
         FROM inbound_asns asn
@@ -474,6 +485,8 @@ pub async fn page(
          AND purchase.id=po_source.purchase_order_id
         LEFT JOIN loads load
           ON load.tenant_id=asn.tenant_id AND load.id=asn.load_id AND load.deleted IS NULL
+        LEFT JOIN inbound_asn_cancellations cancellation
+          ON cancellation.tenant_id=asn.tenant_id AND cancellation.asn_id=asn.id
         LEFT JOIN LATERAL (
             SELECT SUM(line.received_qty)::BIGINT AS received_quantity,
                    SUM(line.rejected_qty)::BIGINT AS rejected_quantity,
@@ -541,13 +554,19 @@ pub async fn detail(
                COALESCE(receipt.received_quantity,0)::BIGINT AS total_received_quantity,
                COALESCE(receipt.rejected_quantity,0)::BIGINT AS total_rejected_quantity,
                COALESCE(receipt.missing_quantity,0)::BIGINT AS total_missing_quantity,
-               asn.total_expected_quantity
-                   - COALESCE(receipt.received_quantity,0)::BIGINT
-                   - COALESCE(receipt.rejected_quantity,0)::BIGINT
-                   - COALESCE(receipt.missing_quantity,0)::BIGINT AS total_remaining_quantity,
+               CASE WHEN asn.status='cancelled' THEN 0 ELSE
+                   asn.total_expected_quantity
+                       - COALESCE(receipt.received_quantity,0)::BIGINT
+                       - COALESCE(receipt.rejected_quantity,0)::BIGINT
+                       - COALESCE(receipt.missing_quantity,0)::BIGINT
+               END AS total_remaining_quantity,
                asn.load_id,load.status AS execution_status,
                asn.created_by_user_id,asn.created_at,
                asn.planned_by_user_id,asn.planned_at,
+               cancellation.id AS cancellation_id,
+               cancellation.reason_code AS cancellation_reason,
+               cancellation.note AS cancellation_note,
+               cancellation.cancelled_by_user_id,cancellation.cancelled_at,
                po_source.id AS purchase_order_source_id,
                po_source.purchase_order_id,purchase.number AS purchase_order_number
         FROM inbound_asns asn
@@ -562,6 +581,8 @@ pub async fn detail(
          AND purchase.id=po_source.purchase_order_id
         LEFT JOIN loads load
           ON load.tenant_id=asn.tenant_id AND load.id=asn.load_id AND load.deleted IS NULL
+        LEFT JOIN inbound_asn_cancellations cancellation
+          ON cancellation.tenant_id=asn.tenant_id AND cancellation.asn_id=asn.id
         LEFT JOIN LATERAL (
             SELECT SUM(line.received_qty)::BIGINT AS received_quantity,
                    SUM(line.rejected_qty)::BIGINT AS rejected_quantity,
@@ -597,10 +618,12 @@ pub async fn detail(
                COALESCE(load_line.received_qty,0)::BIGINT AS received_quantity,
                COALESCE(load_line.rejected_qty,0)::BIGINT AS rejected_quantity,
                COALESCE(load_line.missing_qty,0)::BIGINT AS missing_quantity,
-               line.expected_quantity
-                   - COALESCE(load_line.received_qty,0)::BIGINT
-                   - COALESCE(load_line.rejected_qty,0)::BIGINT
-                   - COALESCE(load_line.missing_qty,0)::BIGINT AS remaining_quantity,
+               CASE WHEN $3 THEN 0 ELSE
+                   line.expected_quantity
+                       - COALESCE(load_line.received_qty,0)::BIGINT
+                       - COALESCE(load_line.rejected_qty,0)::BIGINT
+                       - COALESCE(load_line.missing_qty,0)::BIGINT
+               END AS remaining_quantity,
                line.lot,line.serial,line.expiration
         FROM inbound_asn_lines line
         INNER JOIN items item ON item.tenant_id=line.tenant_id AND item.id=line.item_id
@@ -615,6 +638,7 @@ pub async fn detail(
     )
     .bind(access.tenant_id.get())
     .bind(asn_id.get())
+    .bind(result.status == InboundAsnStatus::Cancelled)
     .fetch_all(&mut *tx)
     .await?;
     result.lines = rows
@@ -852,6 +876,25 @@ fn map_header(row: &sqlx::postgres::PgRow) -> AppResult<InboundAsnReadModel> {
             .transpose()
             .map_err(|error| AppError::internal(error.to_string()))?,
         planned_at: row.try_get("planned_at")?,
+        cancellation_id: row
+            .try_get::<Option<i64>, _>("cancellation_id")?
+            .map(InboundAsnCancellationId::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        cancellation_reason: row
+            .try_get::<Option<String>, _>("cancellation_reason")?
+            .map(|reason| {
+                InboundAsnCancellationReason::parse(&reason)
+                    .ok_or_else(|| AppError::internal("stored ASN cancellation reason is invalid"))
+            })
+            .transpose()?,
+        cancellation_note: row.try_get("cancellation_note")?,
+        cancelled_by: row
+            .try_get::<Option<i64>, _>("cancelled_by_user_id")?
+            .map(UserId::new)
+            .transpose()
+            .map_err(|error| AppError::internal(error.to_string()))?,
+        cancelled_at: row.try_get("cancelled_at")?,
         purchase_order_source_id: row
             .try_get::<Option<i64>, _>("purchase_order_source_id")?
             .map(PurchaseOrderAsnSourceId::new)

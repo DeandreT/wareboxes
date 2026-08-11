@@ -574,6 +574,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'inbound_asn_lines_tenant_isolation'
                 ),
                 (
+                    'inbound_asn_cancellations',
+                    'inbound_asn_cancellations_tenant_isolation'
+                ),
+                (
                     'inbound_asn_load_plans',
                     'inbound_asn_load_plans_tenant_isolation'
                 ),

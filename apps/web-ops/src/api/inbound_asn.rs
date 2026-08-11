@@ -1,6 +1,7 @@
 use wareboxes_api_contract::v1::{
-    CreateInboundAsnRequest, CreateInboundAsnResponse, InboundAsnDetailResponse, InboundAsnPage,
-    InboundAsnStatus, OpaqueCursor, PlanInboundAsnLoadRequest, PlanInboundAsnLoadResponse,
+    CancelInboundAsnRequest, CancelInboundAsnResponse, CreateInboundAsnRequest,
+    CreateInboundAsnResponse, InboundAsnDetailResponse, InboundAsnPage, InboundAsnStatus,
+    OpaqueCursor, PlanInboundAsnLoadRequest, PlanInboundAsnLoadResponse,
 };
 
 use super::ApiError;
@@ -69,6 +70,29 @@ pub async fn plan_inbound_asn_load(
     .await
 }
 
+#[cfg(target_arch = "wasm32")]
+pub async fn cancel_inbound_asn(
+    asn_id: i64,
+    request: &CancelInboundAsnRequest,
+    idempotency_key: &str,
+) -> Result<CancelInboundAsnResponse, ApiError> {
+    super::browser::post(
+        &format!("/api/v1/inbound-asns/{asn_id}/cancellations"),
+        request,
+        idempotency_key,
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn cancel_inbound_asn(
+    _asn_id: i64,
+    _request: &CancelInboundAsnRequest,
+    _idempotency_key: &str,
+) -> Result<CancelInboundAsnResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn plan_inbound_asn_load(
     _asn_id: i64,
@@ -88,6 +112,7 @@ fn inbound_asn_page_path(filters: &InboundAsnFilters, cursor: Option<&OpaqueCurs
         path.push_str(match status {
             InboundAsnStatus::Open => "open",
             InboundAsnStatus::Planned => "planned",
+            InboundAsnStatus::Cancelled => "cancelled",
         });
     }
     if let Some(search) = filters.search.as_deref().filter(|value| !value.is_empty()) {

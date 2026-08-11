@@ -9,8 +9,9 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    CreateInboundAsnResponse, ErrorReason, ErrorResponse, InboundAsnDetailResponse,
-    InboundAsnExecutionStatus, InboundAsnPage, InboundAsnStatus, PlanInboundAsnLoadResponse,
+    CancelInboundAsnResponse, CreateInboundAsnResponse, ErrorReason, ErrorResponse,
+    InboundAsnDetailResponse, InboundAsnExecutionStatus, InboundAsnPage, InboundAsnStatus,
+    PlanInboundAsnLoadResponse,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
@@ -384,6 +385,65 @@ async fn planning_copies_the_exact_source_once_and_races_to_one_load() {
 }
 
 #[tokio::test]
+async fn cancellation_and_load_planning_race_to_one_terminal_decision() {
+    let context = fixture("asn-cancel-race@test.local").await;
+    let created = create_asn(&context, "ASN-CANCEL-RACE-100").await;
+    let app = routes::app(AppState::new(context.fixture.db.clone()));
+    let cancel = app.clone().oneshot(command_request(
+        &context,
+        &format!("inbound-asns/{}/cancellations", created.asn_id),
+        "asn-cancel-race",
+        &json!({
+            "expected_revision": created.revision.get(),
+            "reason": "duplicate_notice"
+        }),
+    ));
+    let plan = app.clone().oneshot(command_request(
+        &context,
+        &format!("inbound-asns/{}/load-plans", created.asn_id),
+        "asn-plan-race",
+        &plan_body(&context, created.revision.get()),
+    ));
+    let (cancel, plan) = tokio::join!(cancel, plan);
+    let cancel = cancel.unwrap();
+    let plan = plan.unwrap();
+    assert!(
+        (cancel.status() == StatusCode::OK && plan.status() == StatusCode::CONFLICT)
+            || (cancel.status() == StatusCode::CONFLICT && plan.status() == StatusCode::OK)
+    );
+    let cancelled = if cancel.status() == StatusCode::OK {
+        let result = json_body::<CancelInboundAsnResponse>(cancel).await;
+        assert_eq!(result.status, InboundAsnStatus::Cancelled);
+        true
+    } else {
+        false
+    };
+
+    let mut tx = tenant_tx(&context.fixture.db, context.tenant_id).await;
+    let evidence: (String, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT status,
+          (SELECT COUNT(*) FROM inbound_asn_cancellations WHERE asn_id=$1),
+          (SELECT COUNT(*) FROM inbound_asn_load_plans WHERE asn_id=$1),
+          (SELECT COUNT(*) FROM loads load
+             INNER JOIN inbound_asns asn ON asn.tenant_id=load.tenant_id AND asn.load_id=load.id
+             WHERE asn.id=$1)
+        FROM inbound_asns WHERE id=$1
+        "#,
+    )
+    .bind(created.asn_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    if cancelled {
+        assert_eq!(evidence, ("cancelled".into(), 1, 0, 0));
+    } else {
+        assert_eq!(evidence, ("planned".into(), 0, 1, 1));
+    }
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
 async fn queue_cursors_and_replays_are_scope_bound_with_minimal_rls_grants() {
     let context = fixture("asn-scope@test.local").await;
     assert!(repo::tenants::update_user_access_scope(
@@ -477,6 +537,7 @@ async fn queue_cursors_and_replays_are_scope_bound_with_minimal_rls_grants() {
     for table in [
         "inbound_asns",
         "inbound_asn_lines",
+        "inbound_asn_cancellations",
         "inbound_asn_load_plans",
         "inbound_asn_load_plan_lines",
     ] {

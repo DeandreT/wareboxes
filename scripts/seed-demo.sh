@@ -122,6 +122,14 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM inbound_asns WHERE status='planned') THEN
     missing := array_append(missing, 'planned advance shipping notices');
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM inbound_asns asn
+    INNER JOIN inbound_asn_cancellations cancellation
+      ON cancellation.tenant_id=asn.tenant_id AND cancellation.asn_id=asn.id
+    WHERE asn.status='cancelled'
+  ) THEN
+    missing := array_append(missing, 'cancelled advance shipping notice evidence');
+  END IF;
   IF EXISTS (
     SELECT 1
     FROM inbound_asns asn
@@ -180,6 +188,28 @@ BEGIN
        AND SUM(progress.rejected_quantity+progress.missing_quantity) > 0
   ) THEN
     missing := array_append(missing, 'purchase-order exception renotification');
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM purchase_orders purchase
+    INNER JOIN purchase_order_asn_sources cancelled_source
+      ON cancelled_source.tenant_id=purchase.tenant_id
+     AND cancelled_source.purchase_order_id=purchase.id
+    INNER JOIN inbound_asns cancelled_asn
+      ON cancelled_asn.tenant_id=cancelled_source.tenant_id
+     AND cancelled_asn.id=cancelled_source.asn_id
+     AND cancelled_asn.status='cancelled'
+    WHERE EXISTS (
+      SELECT 1
+      FROM purchase_order_asn_sources replacement_source
+      INNER JOIN inbound_asns replacement_asn
+        ON replacement_asn.tenant_id=replacement_source.tenant_id
+       AND replacement_asn.id=replacement_source.asn_id
+       AND replacement_asn.status='open'
+      WHERE replacement_source.tenant_id=purchase.tenant_id
+        AND replacement_source.purchase_order_id=purchase.id)
+  ) THEN
+    missing := array_append(missing, 'cancelled ASN replacement demand');
   END IF;
   IF cardinality(missing) > 0 THEN
     RAISE EXCEPTION 'core demo coverage is incomplete: %', array_to_string(missing, ', ');

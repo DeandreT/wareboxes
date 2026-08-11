@@ -2,21 +2,24 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use sha2::{Digest, Sha256};
 use wareboxes_api_contract::v1::{
-    CreateInboundAsnRequest, CreateInboundAsnResponse, CreatedInboundAsnLineResponse,
-    InboundAsnDetailResponse, InboundAsnExecutionStatus as ApiExecutionStatus,
-    InboundAsnLineResponse, InboundAsnPage as ApiPage, InboundAsnPageRequest,
-    InboundAsnStatus as ApiStatus, InboundAsnSummaryResponse, OpaqueCursor,
-    PlanInboundAsnLoadRequest, PlanInboundAsnLoadResponse, PlannedInboundAsnLoadLineResponse,
-    Revision,
+    CancelInboundAsnRequest, CancelInboundAsnResponse, CreateInboundAsnRequest,
+    CreateInboundAsnResponse, CreatedInboundAsnLineResponse,
+    InboundAsnCancellationReason as ApiCancellationReason, InboundAsnDetailResponse,
+    InboundAsnExecutionStatus as ApiExecutionStatus, InboundAsnLineResponse,
+    InboundAsnPage as ApiPage, InboundAsnPageRequest, InboundAsnStatus as ApiStatus,
+    InboundAsnSummaryResponse, OpaqueCursor, PlanInboundAsnLoadRequest, PlanInboundAsnLoadResponse,
+    PlannedInboundAsnLoadLineResponse, Revision,
 };
 use wareboxes_application::inbound_asn::{
-    CreateInboundAsnCommand, CreateInboundAsnResult, InboundAsnExecutionStatus,
-    InboundAsnPageFilter, InboundAsnReadModel, PlanInboundAsnLoadCommand, PlanInboundAsnLoadResult,
+    CancelInboundAsnCommand, CancelInboundAsnResult, CreateInboundAsnCommand,
+    CreateInboundAsnResult, InboundAsnExecutionStatus, InboundAsnPageFilter, InboundAsnReadModel,
+    PlanInboundAsnLoadCommand, PlanInboundAsnLoadResult,
 };
 use wareboxes_domain::{
-    CatalogItemId, FacilityId, InboundAsnId, InboundAsnLineDefinition, InboundAsnLoadPlanDetails,
-    InboundAsnNumber, InboundAsnQuantity, InboundAsnRevision, InboundAsnStatus, InboundAsnSupplier,
-    InventoryOwnerId, NewInboundAsn, Timestamp,
+    CatalogItemId, FacilityId, InboundAsnCancellationDetails, InboundAsnCancellationNote,
+    InboundAsnCancellationReason, InboundAsnId, InboundAsnLineDefinition,
+    InboundAsnLoadPlanDetails, InboundAsnNumber, InboundAsnQuantity, InboundAsnRevision,
+    InboundAsnStatus, InboundAsnSupplier, InventoryOwnerId, NewInboundAsn, Timestamp,
 };
 
 use super::error::{V1Error, V1Result};
@@ -91,6 +94,32 @@ pub async fn plan_load(
     let context = user.command_context(&idempotency_key);
     let result = repo::inbound_asn::plan_load(&state.db, &user.tenant, &context, &command).await?;
     Ok(Json(map_plan(result)?))
+}
+
+pub async fn cancel(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(asn_id): Path<i64>,
+    Json(body): Json<CancelInboundAsnRequest>,
+) -> V1Result<Json<CancelInboundAsnResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let details = InboundAsnCancellationDetails::new(
+        cancellation_reason_to_domain(body.reason),
+        body.note
+            .map(InboundAsnCancellationNote::new)
+            .transpose()
+            .map_err(validation)?,
+    )
+    .map_err(validation)?;
+    let command = CancelInboundAsnCommand::new(
+        InboundAsnId::new(asn_id).map_err(validation)?,
+        InboundAsnRevision::new(body.expected_revision.get()).map_err(validation)?,
+        details,
+    );
+    let context = user.command_context(&idempotency_key);
+    let result = repo::inbound_asn::cancel(&state.db, &user.tenant, &context, &command).await?;
+    Ok(Json(map_cancel(result)?))
 }
 
 pub async fn list(
@@ -228,6 +257,20 @@ fn map_plan(value: PlanInboundAsnLoadResult) -> V1Result<PlanInboundAsnLoadRespo
     })
 }
 
+fn map_cancel(value: CancelInboundAsnResult) -> V1Result<CancelInboundAsnResponse> {
+    Ok(CancelInboundAsnResponse {
+        cancellation_id: value.cancellation_id.get(),
+        asn_id: value.asn_id.get(),
+        previous_status: map_status_to_api(value.previous_status),
+        status: map_status_to_api(value.status),
+        revision: Revision::new(value.revision.get()).map_err(invalid_result)?,
+        reason: cancellation_reason_to_api(value.reason),
+        note: value.note,
+        cancelled_by: value.cancelled_by.get(),
+        cancelled_at: value.cancelled_at.to_rfc3339(),
+    })
+}
+
 fn map_summary(value: InboundAsnReadModel) -> V1Result<InboundAsnSummaryResponse> {
     Ok(InboundAsnSummaryResponse {
         asn_id: value.asn_id.get(),
@@ -252,6 +295,11 @@ fn map_summary(value: InboundAsnReadModel) -> V1Result<InboundAsnSummaryResponse
         created_at: value.created_at.to_rfc3339(),
         planned_by: value.planned_by.map(|id| id.get()),
         planned_at: value.planned_at.map(|value| value.to_rfc3339()),
+        cancellation_id: value.cancellation_id.map(|id| id.get()),
+        cancellation_reason: value.cancellation_reason.map(cancellation_reason_to_api),
+        cancellation_note: value.cancellation_note,
+        cancelled_by: value.cancelled_by.map(|id| id.get()),
+        cancelled_at: value.cancelled_at.map(|value| value.to_rfc3339()),
         purchase_order_source_id: value.purchase_order_source_id.map(|id| id.get()),
         purchase_order_id: value.purchase_order_id.map(|id| id.get()),
         purchase_order_number: value.purchase_order_number,
@@ -275,6 +323,7 @@ const fn map_status(value: ApiStatus) -> InboundAsnStatus {
     match value {
         ApiStatus::Open => InboundAsnStatus::Open,
         ApiStatus::Planned => InboundAsnStatus::Planned,
+        ApiStatus::Cancelled => InboundAsnStatus::Cancelled,
     }
 }
 
@@ -282,6 +331,27 @@ const fn map_status_to_api(value: InboundAsnStatus) -> ApiStatus {
     match value {
         InboundAsnStatus::Open => ApiStatus::Open,
         InboundAsnStatus::Planned => ApiStatus::Planned,
+        InboundAsnStatus::Cancelled => ApiStatus::Cancelled,
+    }
+}
+
+const fn cancellation_reason_to_domain(
+    value: ApiCancellationReason,
+) -> InboundAsnCancellationReason {
+    match value {
+        ApiCancellationReason::SupplierCancelled => InboundAsnCancellationReason::SupplierCancelled,
+        ApiCancellationReason::DuplicateNotice => InboundAsnCancellationReason::DuplicateNotice,
+        ApiCancellationReason::OrderChanged => InboundAsnCancellationReason::OrderChanged,
+        ApiCancellationReason::Other => InboundAsnCancellationReason::Other,
+    }
+}
+
+const fn cancellation_reason_to_api(value: InboundAsnCancellationReason) -> ApiCancellationReason {
+    match value {
+        InboundAsnCancellationReason::SupplierCancelled => ApiCancellationReason::SupplierCancelled,
+        InboundAsnCancellationReason::DuplicateNotice => ApiCancellationReason::DuplicateNotice,
+        InboundAsnCancellationReason::OrderChanged => ApiCancellationReason::OrderChanged,
+        InboundAsnCancellationReason::Other => ApiCancellationReason::Other,
     }
 }
 
@@ -301,6 +371,7 @@ fn cursor_filter(request: &InboundAsnPageRequest) -> String {
             None => "all",
             Some(ApiStatus::Open) => "open",
             Some(ApiStatus::Planned) => "planned",
+            Some(ApiStatus::Cancelled) => "cancelled",
         },
         &search_hash[..16]
     )

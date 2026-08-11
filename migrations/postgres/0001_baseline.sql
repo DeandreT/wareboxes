@@ -36600,7 +36600,7 @@ CREATE TABLE public.inbound_asns (
     CONSTRAINT inbound_asns_supplier_check CHECK (
         supplier=btrim(supplier) AND char_length(supplier) BETWEEN 1 AND 200
         AND supplier !~ '[[:cntrl:]]'),
-    CONSTRAINT inbound_asns_status_check CHECK (status IN ('open','planned')),
+    CONSTRAINT inbound_asns_status_check CHECK (status IN ('open','planned','cancelled')),
     CONSTRAINT inbound_asns_revision_check CHECK (revision > 0),
     CONSTRAINT inbound_asns_quantity_check CHECK (
         line_count > 0 AND total_expected_quantity > 0),
@@ -36609,7 +36609,10 @@ CREATE TABLE public.inbound_asns (
          AND planned_by_user_id IS NULL AND planned_at IS NULL)
         OR
         (status='planned' AND revision=2 AND load_id IS NOT NULL
-         AND planned_by_user_id IS NOT NULL AND planned_at IS NOT NULL)),
+         AND planned_by_user_id IS NOT NULL AND planned_at IS NOT NULL)
+        OR
+        (status='cancelled' AND revision=2 AND load_id IS NULL
+         AND planned_by_user_id IS NULL AND planned_at IS NULL)),
     CONSTRAINT inbound_asns_owner_number_unique
         UNIQUE (tenant_id, inventory_owner_id, number),
     CONSTRAINT inbound_asns_scope_identity_unique
@@ -36661,6 +36664,38 @@ CREATE TABLE public.inbound_asn_lines (
         REFERENCES public.inbound_asns(tenant_id,inventory_owner_id,facility_id,id),
     CONSTRAINT inbound_asn_lines_item_fkey
         FOREIGN KEY (tenant_id,item_id) REFERENCES public.items(tenant_id,id)
+);
+
+CREATE TABLE public.inbound_asn_cancellations (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    asn_id bigint NOT NULL,
+    expected_asn_revision bigint NOT NULL,
+    resulting_asn_revision bigint NOT NULL,
+    reason_code text NOT NULL,
+    note text,
+    cancelled_by_user_id bigint NOT NULL,
+    cancelled_at timestamp with time zone NOT NULL,
+    CONSTRAINT inbound_asn_cancellations_revision_check CHECK (
+        expected_asn_revision=1 AND resulting_asn_revision=2),
+    CONSTRAINT inbound_asn_cancellations_reason_check CHECK (
+        reason_code IN ('supplier_cancelled','duplicate_notice','order_changed','other')),
+    CONSTRAINT inbound_asn_cancellations_note_check CHECK (
+        note IS NULL OR (
+            note=btrim(note) AND char_length(note) BETWEEN 1 AND 500
+            AND note !~ '[[:cntrl:]]')),
+    CONSTRAINT inbound_asn_cancellations_other_note_check CHECK (
+        reason_code <> 'other' OR note IS NOT NULL),
+    CONSTRAINT inbound_asn_cancellations_asn_unique UNIQUE (tenant_id,asn_id),
+    CONSTRAINT inbound_asn_cancellations_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,facility_id,asn_id,id),
+    CONSTRAINT inbound_asn_cancellations_asn_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,facility_id,asn_id)
+        REFERENCES public.inbound_asns(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT inbound_asn_cancellations_actor_fkey
+        FOREIGN KEY (cancelled_by_user_id) REFERENCES public.users(id)
 );
 
 CREATE TABLE public.inbound_asn_load_plans (
@@ -36746,6 +36781,9 @@ CREATE INDEX inbound_asns_scope_queue_idx
 ON public.inbound_asns(tenant_id,facility_id,inventory_owner_id,status,created_at DESC,id DESC);
 CREATE INDEX inbound_asn_lines_asn_idx
 ON public.inbound_asn_lines(tenant_id,asn_id,sequence,id);
+CREATE INDEX inbound_asn_cancellations_scope_idx
+ON public.inbound_asn_cancellations(
+    tenant_id,facility_id,inventory_owner_id,cancelled_at DESC,id DESC);
 
 CREATE FUNCTION public.validate_inbound_asn() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -36916,6 +36954,30 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION public.validate_inbound_asn_cancellation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    asn_row record;
+BEGIN
+    SELECT status,revision,load_id INTO asn_row
+    FROM public.inbound_asns
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.facility_id
+      AND id=NEW.asn_id
+    FOR UPDATE;
+    IF asn_row IS NULL OR asn_row.status <> 'open' OR asn_row.revision <> 1
+       OR asn_row.load_id IS NOT NULL
+       OR NEW.expected_asn_revision <> asn_row.revision
+       OR NEW.resulting_asn_revision <> asn_row.revision + 1
+       OR NEW.cancelled_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'ASN cancellation does not match an open unplanned source'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
 CREATE FUNCTION public.guard_inbound_asn_mutation() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -36932,22 +36994,74 @@ BEGIN
        OR OLD.total_expected_quantity IS DISTINCT FROM NEW.total_expected_quantity
        OR OLD.created_by_user_id IS DISTINCT FROM NEW.created_by_user_id
        OR OLD.created_at IS DISTINCT FROM NEW.created_at
-       OR OLD.status <> 'open' OR NEW.status <> 'planned'
-       OR OLD.revision <> 1 OR NEW.revision <> 2
-       OR OLD.load_id IS NOT NULL OR NEW.load_id IS NULL
-       OR NEW.planned_by_user_id IS NULL OR NEW.planned_at IS NULL
-       OR NOT EXISTS (
-           SELECT 1 FROM public.inbound_asn_load_plans plan
-           WHERE plan.tenant_id=NEW.tenant_id AND plan.asn_id=NEW.id
-             AND plan.load_id=NEW.load_id
-             AND plan.expected_asn_revision=OLD.revision
-             AND plan.resulting_asn_revision=NEW.revision
-             AND plan.planned_by_user_id=NEW.planned_by_user_id
-             AND plan.planned_at=NEW.planned_at) THEN
+       OR OLD.status <> 'open' OR OLD.revision <> 1 OR NEW.revision <> 2
+       OR OLD.load_id IS NOT NULL
+       OR NOT (
+           (NEW.status='planned'
+            AND NEW.load_id IS NOT NULL
+            AND NEW.planned_by_user_id IS NOT NULL AND NEW.planned_at IS NOT NULL
+            AND EXISTS (
+                SELECT 1 FROM public.inbound_asn_load_plans plan
+                WHERE plan.tenant_id=NEW.tenant_id AND plan.asn_id=NEW.id
+                  AND plan.load_id=NEW.load_id
+                  AND plan.expected_asn_revision=OLD.revision
+                  AND plan.resulting_asn_revision=NEW.revision
+                  AND plan.planned_by_user_id=NEW.planned_by_user_id
+                  AND plan.planned_at=NEW.planned_at))
+           OR
+           (NEW.status='cancelled'
+            AND NEW.load_id IS NULL
+            AND NEW.planned_by_user_id IS NULL AND NEW.planned_at IS NULL
+            AND EXISTS (
+                SELECT 1 FROM public.inbound_asn_cancellations cancellation
+                WHERE cancellation.tenant_id=NEW.tenant_id
+                  AND cancellation.asn_id=NEW.id
+                  AND cancellation.expected_asn_revision=OLD.revision
+                  AND cancellation.resulting_asn_revision=NEW.revision))) THEN
         RAISE EXCEPTION 'advance shipping notice facts are immutable outside typed load planning'
             USING ERRCODE='55000';
     END IF;
     RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.require_inbound_asn_cancellation_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    target_tenant_id bigint;
+    target_asn_id bigint;
+    asn_row record;
+    cancellation_row record;
+BEGIN
+    target_tenant_id := NEW.tenant_id;
+    IF TG_TABLE_NAME='inbound_asns' THEN
+        target_asn_id := NEW.id;
+    ELSE
+        target_asn_id := NEW.asn_id;
+    END IF;
+    SELECT status,revision,load_id,planned_by_user_id,planned_at
+    INTO asn_row
+    FROM public.inbound_asns
+    WHERE tenant_id=target_tenant_id AND id=target_asn_id;
+    SELECT * INTO cancellation_row
+    FROM public.inbound_asn_cancellations
+    WHERE tenant_id=target_tenant_id AND asn_id=target_asn_id;
+    IF asn_row.status='cancelled' THEN
+        IF cancellation_row IS NULL
+           OR asn_row.revision <> cancellation_row.resulting_asn_revision
+           OR asn_row.load_id IS NOT NULL
+           OR asn_row.planned_by_user_id IS NOT NULL OR asn_row.planned_at IS NOT NULL
+           OR EXISTS (
+               SELECT 1 FROM public.inbound_asn_load_plans plan
+               WHERE plan.tenant_id=target_tenant_id AND plan.asn_id=target_asn_id) THEN
+            RAISE EXCEPTION 'cancelled ASN does not match its immutable cancellation evidence'
+                USING ERRCODE='23514';
+        END IF;
+    ELSIF cancellation_row IS NOT NULL THEN
+        RAISE EXCEPTION 'ASN cancellation evidence requires a cancelled source document'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
 END
 $$;
 
@@ -37033,6 +37147,12 @@ FOR EACH ROW EXECUTE FUNCTION public.validate_inbound_asn_line();
 CREATE TRIGGER inbound_asn_lines_are_immutable
 BEFORE UPDATE OR DELETE ON public.inbound_asn_lines
 FOR EACH ROW EXECUTE FUNCTION public.reject_inbound_asn_ledger_mutation();
+CREATE TRIGGER inbound_asn_cancellations_validate
+BEFORE INSERT ON public.inbound_asn_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.validate_inbound_asn_cancellation();
+CREATE TRIGGER inbound_asn_cancellations_are_immutable
+BEFORE UPDATE OR DELETE ON public.inbound_asn_cancellations
+FOR EACH ROW EXECUTE FUNCTION public.reject_inbound_asn_ledger_mutation();
 CREATE TRIGGER inbound_asn_load_plans_validate
 BEFORE INSERT ON public.inbound_asn_load_plans
 FOR EACH ROW EXECUTE FUNCTION public.validate_inbound_asn_load_plan();
@@ -37066,11 +37186,21 @@ CREATE CONSTRAINT TRIGGER inbound_asn_load_plan_lines_require_consistency
 AFTER INSERT ON public.inbound_asn_load_plan_lines
 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
 EXECUTE FUNCTION public.require_inbound_asn_load_plan_consistency();
+CREATE CONSTRAINT TRIGGER inbound_asns_require_cancellation_consistency
+AFTER UPDATE ON public.inbound_asns
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_inbound_asn_cancellation_consistency();
+CREATE CONSTRAINT TRIGGER inbound_asn_cancellations_require_consistency
+AFTER INSERT ON public.inbound_asn_cancellations
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_inbound_asn_cancellation_consistency();
 
 ALTER TABLE public.inbound_asns ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.inbound_asns FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.inbound_asn_lines ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.inbound_asn_lines FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.inbound_asn_cancellations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.inbound_asn_cancellations FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.inbound_asn_load_plans ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.inbound_asn_load_plans FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.inbound_asn_load_plan_lines ENABLE ROW LEVEL SECURITY;
@@ -37080,6 +37210,9 @@ CREATE POLICY inbound_asns_tenant_isolation ON public.inbound_asns
 USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
 WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
 CREATE POLICY inbound_asn_lines_tenant_isolation ON public.inbound_asn_lines
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY inbound_asn_cancellations_tenant_isolation ON public.inbound_asn_cancellations
 USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
 WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
 CREATE POLICY inbound_asn_load_plans_tenant_isolation ON public.inbound_asn_load_plans
@@ -37093,21 +37226,25 @@ GRANT SELECT,INSERT ON public.inbound_asns TO wareboxes_app;
 GRANT UPDATE(status,revision,load_id,planned_by_user_id,planned_at)
 ON public.inbound_asns TO wareboxes_app;
 GRANT SELECT,INSERT ON public.inbound_asn_lines TO wareboxes_app;
+GRANT SELECT,INSERT ON public.inbound_asn_cancellations TO wareboxes_app;
 GRANT SELECT,INSERT ON public.inbound_asn_load_plans TO wareboxes_app;
 GRANT SELECT,INSERT ON public.inbound_asn_load_plan_lines TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.inbound_asns_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.inbound_asn_lines_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.inbound_asn_cancellations_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.inbound_asn_load_plans_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.inbound_asn_load_plan_lines_id_seq TO wareboxes_app;
 
 REVOKE ALL ON FUNCTION public.validate_inbound_asn() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_inbound_asn_line() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_inbound_asn_cancellation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_inbound_asn_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_inbound_asn_load_plan() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_inbound_asn_load_plan_line() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_inbound_asn_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_inbound_asn_ledger_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_inbound_asn_load_plan_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_inbound_asn_cancellation_consistency() FROM PUBLIC;
 
 -- Purchase orders are immutable upstream demand documents. A typed release
 -- transition makes their exact line set eligible for downstream ASN planning.
@@ -37568,6 +37705,7 @@ SELECT line.tenant_id,
            CASE
                WHEN mapping.id IS NULL THEN 0
                WHEN asn.status='open' THEN mapping.expected_quantity
+               WHEN asn.status='cancelled' THEN 0
                WHEN load.status IN ('cancelled','rejected') THEN 0
                ELSE GREATEST(
                    mapping.expected_quantity

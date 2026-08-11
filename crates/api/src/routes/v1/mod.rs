@@ -54,6 +54,10 @@ pub fn router() -> Router<AppState> {
         .route("/inbound-asns", get(inbound_asns::list).post(inbound_asns::create))
         .route("/inbound-asns/{asn_id}", get(inbound_asns::get))
         .route(
+            "/inbound-asns/{asn_id}/cancellations",
+            post(inbound_asns::cancel),
+        )
+        .route(
             "/inbound-asns/{asn_id}/load-plans",
             post(inbound_asns::plan_load),
         )

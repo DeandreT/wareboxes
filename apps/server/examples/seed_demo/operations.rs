@@ -4,7 +4,7 @@ use axum::http::{Method, StatusCode};
 use serde_json::json;
 use wareboxes_api::repo;
 use wareboxes_api_contract::v1::{
-    ConfigureReplenishmentPolicyResponse, CreateCycleCountTaskResponse,
+    CancelInboundAsnResponse, ConfigureReplenishmentPolicyResponse, CreateCycleCountTaskResponse,
     CreatePurchaseOrderAsnResponse, CreatePurchaseOrderResponse, CreatePutawayTaskResponse,
     IntegrationOrderIntakeResponse, IntegrationOrderOwnerMappingResponse, PickWaveResponse,
     PlaceInventoryHoldResponse, PlanInboundAsnLoadResponse, PlanOrderAllocationResponse,
@@ -152,7 +152,138 @@ async fn seed_purchase_orders(context: &SeedContext) -> anyhow::Result<()> {
             .await?;
     }
     seed_purchase_order_receipt_progress(context).await?;
+    seed_cancelled_purchase_order_notice(context).await?;
     println!("seeded draft and released purchase orders with PO-sourced ASN demand");
+    Ok(())
+}
+
+async fn seed_cancelled_purchase_order_notice(context: &SeedContext) -> anyhow::Result<()> {
+    let existing_notice: Option<(i64, i64, String, i64)> = sqlx::query_as(
+        r#"
+        SELECT asn.id,source.purchase_order_id,asn.status,asn.revision
+        FROM inbound_asns asn
+        INNER JOIN purchase_order_asn_sources source
+          ON source.tenant_id=asn.tenant_id AND source.asn_id=asn.id
+        WHERE asn.tenant_id=$1 AND asn.number='WB-DEMO-ASN-CANCELLED-0001'
+        "#,
+    )
+    .bind(context.tenant_id.get())
+    .fetch_optional(&context.admin)
+    .await?;
+    let order: (i64, i64) = if let Some((_, purchase_order_id, _, _)) = &existing_notice {
+        sqlx::query_as("SELECT id,revision FROM purchase_orders WHERE tenant_id=$1 AND id=$2")
+            .bind(context.tenant_id.get())
+            .bind(*purchase_order_id)
+            .fetch_one(&context.admin)
+            .await?
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT purchase.id,purchase.revision
+            FROM purchase_orders purchase
+            WHERE purchase.tenant_id=$1 AND purchase.status='released'
+              AND NOT EXISTS (
+                  SELECT 1 FROM purchase_order_asn_sources source
+                  WHERE source.tenant_id=purchase.tenant_id
+                    AND source.purchase_order_id=purchase.id)
+            ORDER BY purchase.id
+            LIMIT 1
+            "#,
+        )
+        .bind(context.tenant_id.get())
+        .fetch_one(&context.admin)
+        .await?
+    };
+    let source_lines = sqlx::query_as::<_, (i64, i64)>(
+        r#"
+        SELECT id,ordered_quantity FROM purchase_order_lines
+        WHERE tenant_id=$1 AND purchase_order_id=$2
+        ORDER BY sequence,id
+        "#,
+    )
+    .bind(context.tenant_id.get())
+    .bind(order.0)
+    .fetch_all(&context.admin)
+    .await?;
+    let line_payload = |lot_prefix: &str| {
+        source_lines
+            .iter()
+            .enumerate()
+            .map(|(index, (line_id, quantity))| {
+                json!({
+                    "purchase_order_line_id": line_id,
+                    "expected_quantity": quantity,
+                    "lot": (index == 0).then(|| format!("{lot_prefix}-LOT")),
+                    "serial": null,
+                    "expiration": null
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let cancellation_target = if let Some((asn_id, _, status, revision)) = existing_notice {
+        (asn_id, status, revision)
+    } else {
+        let cancelled_source: CreatePurchaseOrderAsnResponse = context
+            .command(
+                Method::POST,
+                &format!("/api/v1/purchase-orders/{}/asns", order.0),
+                "demo-purchase-order-cancelled-asn-source",
+                json!({
+                    "expected_purchase_order_revision": order.1,
+                    "number": "WB-DEMO-ASN-CANCELLED-0001",
+                    "expected_at": "2027-08-16T14:00:00Z",
+                    "lines": line_payload("WB-DEMO-CANCELLED")
+                }),
+            )
+            .await?;
+        (
+            cancelled_source.asn_id,
+            "open".to_owned(),
+            cancelled_source.revision.get(),
+        )
+    };
+    match cancellation_target.1.as_str() {
+        "open" => {
+            let _: CancelInboundAsnResponse = context
+                .command(
+                    Method::POST,
+                    &format!(
+                        "/api/v1/inbound-asns/{}/cancellations",
+                        cancellation_target.0
+                    ),
+                    "demo-purchase-order-cancel-asn",
+                    json!({
+                            "expected_revision": cancellation_target.2,
+                        "reason": "supplier_cancelled",
+                        "note": "Supplier replaced the original shipping notice"
+                    }),
+                )
+                .await?;
+        }
+        "cancelled" => {}
+        status => anyhow::bail!("demo cancellation ASN has unsupported resume status {status}"),
+    }
+    let replacement_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM inbound_asns WHERE tenant_id=$1 AND number='WB-DEMO-ASN-REPLACEMENT-0001')",
+    )
+    .bind(context.tenant_id.get())
+    .fetch_one(&context.admin)
+    .await?;
+    if !replacement_exists {
+        let _: CreatePurchaseOrderAsnResponse = context
+            .command(
+                Method::POST,
+                &format!("/api/v1/purchase-orders/{}/asns", order.0),
+                "demo-purchase-order-replacement-asn-source",
+                json!({
+                    "expected_purchase_order_revision": order.1,
+                    "number": "WB-DEMO-ASN-REPLACEMENT-0001",
+                    "expected_at": "2027-08-17T14:00:00Z",
+                    "lines": line_payload("WB-DEMO-REPLACEMENT")
+                }),
+            )
+            .await?;
+    }
     Ok(())
 }
 
