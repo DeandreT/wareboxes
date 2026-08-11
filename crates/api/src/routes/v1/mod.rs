@@ -92,6 +92,18 @@ pub fn router() -> Router<AppState> {
             "/transfer-orders/{transfer_order_id}/cancellations",
             post(transfer_orders::cancel),
         )
+        .route(
+            "/transfer-orders/{transfer_order_id}/execution-readiness",
+            get(transfer_orders::execution_readiness),
+        )
+        .route(
+            "/transfer-orders/{transfer_order_id}/dispatches",
+            post(transfer_orders::dispatch),
+        )
+        .route(
+            "/transfer-orders/{transfer_order_id}/receipts",
+            post(transfer_orders::receive),
+        )
         .route("/inbound-loads", post(inbound_loads::plan))
         .route(
             "/inbound-loads/{load_id}/appointments",

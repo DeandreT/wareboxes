@@ -9,6 +9,8 @@ pub const MAX_TRANSFER_ORDER_CANCELLATION_NOTE_LENGTH: usize = 500;
 pub enum TransferOrderStatus {
     Draft,
     Released,
+    InTransit,
+    Received,
     Cancelled,
 }
 
@@ -136,6 +138,139 @@ pub struct CancelTransferOrderResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct DispatchTransferOrderLineRequest {
+    pub transfer_order_line_id: i64,
+    pub source_inventory_balance_id: i64,
+    pub quantity: i64,
+    pub source_location_barcode: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchTransferOrderRequest {
+    pub expected_revision: Revision,
+    pub transit_location_id: i64,
+    pub transit_location_barcode: String,
+    pub lines: Vec<DispatchTransferOrderLineRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferDispatchLineResponse {
+    pub dispatch_line_id: i64,
+    pub transfer_order_line_id: i64,
+    pub source_inventory_balance_id: i64,
+    pub source_location_id: i64,
+    pub transit_inventory_balance_id: i64,
+    pub item_batch_id: i64,
+    pub item_id: i64,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub expiration: Option<String>,
+    pub serial: Option<String>,
+    pub inventory_status: String,
+    pub quantity: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchTransferOrderResponse {
+    pub dispatch_id: i64,
+    pub transfer_order_id: i64,
+    pub previous_status: TransferOrderStatus,
+    pub status: TransferOrderStatus,
+    pub revision: Revision,
+    pub transit_location_id: i64,
+    pub transit_location_barcode: String,
+    pub inventory_transaction_id: i64,
+    pub lines: Vec<TransferDispatchLineResponse>,
+    pub total_dispatched_quantity: i64,
+    pub dispatched_by: i64,
+    pub dispatched_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiveTransferOrderRequest {
+    pub expected_revision: Revision,
+    pub destination_location_id: i64,
+    pub destination_location_barcode: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferReceiptLineResponse {
+    pub receipt_line_id: i64,
+    pub dispatch_line_id: i64,
+    pub transfer_order_line_id: i64,
+    pub transit_inventory_balance_id: i64,
+    pub destination_inventory_balance_id: i64,
+    pub item_batch_id: i64,
+    pub item_id: i64,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub expiration: Option<String>,
+    pub serial: Option<String>,
+    pub inventory_status: String,
+    pub quantity: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiveTransferOrderResponse {
+    pub receipt_id: i64,
+    pub transfer_order_id: i64,
+    pub previous_status: TransferOrderStatus,
+    pub status: TransferOrderStatus,
+    pub revision: Revision,
+    pub destination_location_id: i64,
+    pub destination_location_barcode: String,
+    pub inventory_transaction_id: i64,
+    pub lines: Vec<TransferReceiptLineResponse>,
+    pub total_received_quantity: i64,
+    pub received_by: i64,
+    pub received_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferDispatchCandidateResponse {
+    pub transfer_order_line_id: i64,
+    pub source_inventory_balance_id: i64,
+    pub source_location_id: i64,
+    pub source_location_barcode: String,
+    pub source_location_name: String,
+    pub item_batch_id: i64,
+    pub item_id: i64,
+    pub item_description: String,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub expiration: Option<String>,
+    pub serial: Option<String>,
+    pub free_quantity: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferExecutionLocationResponse {
+    pub location_id: i64,
+    pub barcode: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferExecutionReadinessResponse {
+    pub transfer_order_id: i64,
+    pub revision: Revision,
+    pub status: TransferOrderStatus,
+    pub dispatch_candidates: Vec<TransferDispatchCandidateResponse>,
+    pub transit_locations: Vec<TransferExecutionLocationResponse>,
+    pub receiving_locations: Vec<TransferExecutionLocationResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TransferOrderLineResponse {
     pub line_id: i64,
     pub sequence: i64,
@@ -143,6 +278,8 @@ pub struct TransferOrderLineResponse {
     pub item_description: String,
     pub uom: String,
     pub requested_quantity: i64,
+    pub dispatched_quantity: i64,
+    pub received_quantity: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +308,18 @@ pub struct TransferOrderSummaryResponse {
     pub cancellation_note: Option<String>,
     pub cancelled_by: Option<i64>,
     pub cancelled_at: Option<String>,
+    pub dispatch_id: Option<i64>,
+    pub dispatch_inventory_transaction_id: Option<i64>,
+    pub transit_location_id: Option<i64>,
+    pub transit_location_barcode: Option<String>,
+    pub dispatched_by: Option<i64>,
+    pub dispatched_at: Option<String>,
+    pub receipt_id: Option<i64>,
+    pub receipt_inventory_transaction_id: Option<i64>,
+    pub destination_receiving_location_id: Option<i64>,
+    pub destination_receiving_location_barcode: Option<String>,
+    pub received_by: Option<i64>,
+    pub received_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,5 +378,24 @@ mod tests {
             serde_json::json!({"expected_revision": 1, "reason": "route_cancelled"})
         )
         .is_ok());
+    }
+
+    #[test]
+    fn dispatch_request_is_strict() {
+        let value = serde_json::json!({
+            "expected_revision": 2,
+            "transit_location_id": 3,
+            "transit_location_barcode": "TRANSFER-OUT",
+            "lines": [{
+                "transfer_order_line_id": 4,
+                "source_inventory_balance_id": 5,
+                "quantity": 6,
+                "source_location_barcode": "PICK-01"
+            }]
+        });
+        assert!(serde_json::from_value::<DispatchTransferOrderRequest>(value.clone()).is_ok());
+        let mut invalid = value;
+        invalid["item_id"] = serde_json::json!(7);
+        assert!(serde_json::from_value::<DispatchTransferOrderRequest>(invalid).is_err());
     }
 }

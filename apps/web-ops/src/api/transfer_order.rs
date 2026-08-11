@@ -1,8 +1,9 @@
 use wareboxes_api_contract::v1::{
     CancelTransferOrderRequest, CancelTransferOrderResponse, CreateTransferOrderRequest,
-    CreateTransferOrderResponse, OpaqueCursor, ReleaseTransferOrderRequest,
-    ReleaseTransferOrderResponse, TransferOrderDetailResponse, TransferOrderPage,
-    TransferOrderStatus,
+    CreateTransferOrderResponse, DispatchTransferOrderRequest, DispatchTransferOrderResponse,
+    OpaqueCursor, ReceiveTransferOrderRequest, ReceiveTransferOrderResponse,
+    ReleaseTransferOrderRequest, ReleaseTransferOrderResponse, TransferExecutionReadinessResponse,
+    TransferOrderDetailResponse, TransferOrderPage, TransferOrderStatus,
 };
 
 use super::ApiError;
@@ -41,6 +42,19 @@ pub async fn transfer_order_detail(_id: i64) -> Result<TransferOrderDetailRespon
 }
 
 #[cfg(target_arch = "wasm32")]
+pub async fn transfer_execution_readiness(
+    id: i64,
+) -> Result<TransferExecutionReadinessResponse, ApiError> {
+    super::browser::get(&format!("/api/v1/transfer-orders/{id}/execution-readiness")).await
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn transfer_execution_readiness(
+    _id: i64,
+) -> Result<TransferExecutionReadinessResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(target_arch = "wasm32")]
 pub async fn create_transfer_order(
     request: &CreateTransferOrderRequest,
     key: &str,
@@ -67,6 +81,50 @@ pub async fn release_transfer_order(
         key,
     )
     .await
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn dispatch_transfer_order(
+    id: i64,
+    request: &DispatchTransferOrderRequest,
+    key: &str,
+) -> Result<DispatchTransferOrderResponse, ApiError> {
+    super::browser::post(
+        &format!("/api/v1/transfer-orders/{id}/dispatches"),
+        request,
+        key,
+    )
+    .await
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn dispatch_transfer_order(
+    _id: i64,
+    _request: &DispatchTransferOrderRequest,
+    _key: &str,
+) -> Result<DispatchTransferOrderResponse, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn receive_transfer_order(
+    id: i64,
+    request: &ReceiveTransferOrderRequest,
+    key: &str,
+) -> Result<ReceiveTransferOrderResponse, ApiError> {
+    super::browser::post(
+        &format!("/api/v1/transfer-orders/{id}/receipts"),
+        request,
+        key,
+    )
+    .await
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn receive_transfer_order(
+    _id: i64,
+    _request: &ReceiveTransferOrderRequest,
+    _key: &str,
+) -> Result<ReceiveTransferOrderResponse, ApiError> {
+    Err(ApiError::unavailable())
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn release_transfer_order(
@@ -114,6 +172,8 @@ fn page_path(filters: &TransferOrderFilters, cursor: Option<&OpaqueCursor>) -> S
         path.push_str(match status {
             TransferOrderStatus::Draft => "draft",
             TransferOrderStatus::Released => "released",
+            TransferOrderStatus::InTransit => "in_transit",
+            TransferOrderStatus::Received => "received",
             TransferOrderStatus::Cancelled => "cancelled",
         });
     }

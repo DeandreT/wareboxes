@@ -746,15 +746,17 @@ pub enum InventoryTransactionType {
     Move,
     Adjust,
     Ship,
+    Transfer,
     StatusChange,
 }
 
 impl InventoryTransactionType {
-    pub const ALL: [InventoryTransactionType; 5] = [
+    pub const ALL: [InventoryTransactionType; 6] = [
         InventoryTransactionType::Receive,
         InventoryTransactionType::Move,
         InventoryTransactionType::Adjust,
         InventoryTransactionType::Ship,
+        InventoryTransactionType::Transfer,
         InventoryTransactionType::StatusChange,
     ];
 
@@ -764,6 +766,7 @@ impl InventoryTransactionType {
             InventoryTransactionType::Move => "move",
             InventoryTransactionType::Adjust => "adjust",
             InventoryTransactionType::Ship => "ship",
+            InventoryTransactionType::Transfer => "transfer",
             InventoryTransactionType::StatusChange => "status_change",
         }
     }
@@ -774,6 +777,7 @@ impl InventoryTransactionType {
             "move" => InventoryTransactionType::Move,
             "adjust" => InventoryTransactionType::Adjust,
             "ship" => InventoryTransactionType::Ship,
+            "transfer" => InventoryTransactionType::Transfer,
             "status_change" => InventoryTransactionType::StatusChange,
             _ => return None,
         })

@@ -106,8 +106,9 @@ mod storage_zone;
 pub use storage_zone::{configure_storage_zone, retire_storage_zone, storage_zones};
 mod transfer_order;
 pub use transfer_order::{
-    cancel_transfer_order, create_transfer_order, release_transfer_order, transfer_order_detail,
-    transfer_orders, TransferOrderFilters,
+    cancel_transfer_order, create_transfer_order, dispatch_transfer_order, receive_transfer_order,
+    release_transfer_order, transfer_execution_readiness, transfer_order_detail, transfer_orders,
+    TransferOrderFilters,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -353,10 +353,13 @@ pub use storage_zone::{
 pub use transfer_order::{
     CancelTransferOrderRequest, CancelTransferOrderResponse, CreateTransferOrderLineRequest,
     CreateTransferOrderRequest, CreateTransferOrderResponse, CreatedTransferOrderLineResponse,
-    ReleaseTransferOrderRequest, ReleaseTransferOrderResponse, TransferOrderCancellationReason,
-    TransferOrderDetailResponse, TransferOrderLineResponse, TransferOrderPage,
-    TransferOrderPageRequest, TransferOrderStatus, TransferOrderSummaryResponse,
-    MAX_TRANSFER_ORDER_CANCELLATION_NOTE_LENGTH,
+    DispatchTransferOrderLineRequest, DispatchTransferOrderRequest, DispatchTransferOrderResponse,
+    ReceiveTransferOrderRequest, ReceiveTransferOrderResponse, ReleaseTransferOrderRequest,
+    ReleaseTransferOrderResponse, TransferDispatchCandidateResponse, TransferDispatchLineResponse,
+    TransferExecutionLocationResponse, TransferExecutionReadinessResponse,
+    TransferOrderCancellationReason, TransferOrderDetailResponse, TransferOrderLineResponse,
+    TransferOrderPage, TransferOrderPageRequest, TransferOrderStatus, TransferOrderSummaryResponse,
+    TransferReceiptLineResponse, MAX_TRANSFER_ORDER_CANCELLATION_NOTE_LENGTH,
 };
 
 /// URL prefix for the version 1 public API.

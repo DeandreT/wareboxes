@@ -2509,6 +2509,32 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
+    IF NEW.transaction_type = 'transfer' AND EXISTS (
+        SELECT 1
+        FROM public.inventory_entries entry
+        WHERE entry.tenant_id = NEW.tenant_id
+          AND entry.inventory_owner_id = NEW.inventory_owner_id
+          AND entry.transaction_id = NEW.id
+        GROUP BY entry.inventory_owner_id, entry.item_id, entry.uom, entry.lot,
+                 entry.expiration, entry.serial, entry.status
+        HAVING SUM(entry.quantity_delta) <> 0
+    ) THEN
+        RAISE EXCEPTION
+            'inventory transfer entries must conserve quantity for every stock dimension'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.transaction_type = 'transfer' AND (
+        SELECT COUNT(DISTINCT entry.facility_id)
+        FROM public.inventory_entries entry
+        WHERE entry.tenant_id = NEW.tenant_id
+          AND entry.inventory_owner_id = NEW.inventory_owner_id
+          AND entry.transaction_id = NEW.id
+    ) <> 2 THEN
+        RAISE EXCEPTION 'inventory transfers must span exactly two facilities'
+            USING ERRCODE = '23514';
+    END IF;
+
     IF NEW.transaction_type = 'status_change' AND EXISTS (
         SELECT 1
         FROM public.inventory_entries entry
@@ -11495,7 +11521,7 @@ CREATE TABLE public.inventory_transactions (
     request_hash text NOT NULL,
     CONSTRAINT inventory_transactions_operation_check CHECK ((btrim(operation) <> ''::text)),
     CONSTRAINT inventory_transactions_request_hash_check CHECK ((btrim(request_hash) <> ''::text)),
-    CONSTRAINT inventory_transactions_transaction_type_check CHECK ((transaction_type = ANY (ARRAY['receive'::text, 'move'::text, 'adjust'::text, 'ship'::text, 'status_change'::text])))
+    CONSTRAINT inventory_transactions_transaction_type_check CHECK ((transaction_type = ANY (ARRAY['receive'::text, 'move'::text, 'adjust'::text, 'ship'::text, 'transfer'::text, 'status_change'::text])))
 );
 
 ALTER TABLE ONLY public.inventory_transactions FORCE ROW LEVEL SECURITY;
@@ -38082,9 +38108,9 @@ REVOKE ALL ON FUNCTION public.validate_purchase_order_asn_source_line() FROM PUB
 REVOKE ALL ON FUNCTION public.require_purchase_order_asn_source_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.reject_purchase_order_asn_source_mutation() FROM PUBLIC;
 
--- Interfacility transfer orders are owner-scoped planning documents. Inventory
--- movement is a later typed execution step; this aggregate preserves exact demand,
--- both facility identities, release evidence, and terminal cancellation evidence.
+-- Interfacility transfer orders preserve exact demand and both facility identities.
+-- Released stock is dispatched into a source transit lane, then received through
+-- a conserved cross-facility inventory transaction at the destination.
 CREATE TABLE public.transfer_orders (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     tenant_id bigint NOT NULL,
@@ -38102,6 +38128,10 @@ CREATE TABLE public.transfer_orders (
     created_at timestamp with time zone NOT NULL,
     released_by_user_id bigint,
     released_at timestamp with time zone,
+    dispatched_by_user_id bigint,
+    dispatched_at timestamp with time zone,
+    received_by_user_id bigint,
+    received_at timestamp with time zone,
     CONSTRAINT transfer_orders_number_check CHECK (
         number=btrim(number) AND char_length(number) BETWEEN 1 AND 120
         AND number !~ '[[:cntrl:]]'),
@@ -38111,22 +38141,37 @@ CREATE TABLE public.transfer_orders (
         expected_departure_at IS NULL OR expected_arrival_at IS NULL
         OR expected_arrival_at >= expected_departure_at),
     CONSTRAINT transfer_orders_status_check CHECK (
-        status IN ('draft','released','cancelled')),
+        status IN ('draft','released','in_transit','received','cancelled')),
     CONSTRAINT transfer_orders_revision_check CHECK (revision > 0),
     CONSTRAINT transfer_orders_quantity_check CHECK (
         line_count > 0 AND total_requested_quantity > 0),
     CONSTRAINT transfer_orders_state_check CHECK (
         (status='draft' AND revision=1
-         AND released_by_user_id IS NULL AND released_at IS NULL)
+         AND released_by_user_id IS NULL AND released_at IS NULL
+         AND dispatched_by_user_id IS NULL AND dispatched_at IS NULL
+         AND received_by_user_id IS NULL AND received_at IS NULL)
         OR
         (status='released' AND revision=2
-         AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL)
+         AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL
+         AND dispatched_by_user_id IS NULL AND dispatched_at IS NULL
+         AND received_by_user_id IS NULL AND received_at IS NULL)
+        OR
+        (status='in_transit' AND revision=3
+         AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL
+         AND dispatched_by_user_id IS NOT NULL AND dispatched_at IS NOT NULL
+         AND received_by_user_id IS NULL AND received_at IS NULL)
+        OR
+        (status='received' AND revision=4
+         AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL
+         AND dispatched_by_user_id IS NOT NULL AND dispatched_at IS NOT NULL
+         AND received_by_user_id IS NOT NULL AND received_at IS NOT NULL)
         OR
         (status='cancelled' AND (
             (revision=2 AND released_by_user_id IS NULL AND released_at IS NULL)
             OR
             (revision=3 AND released_by_user_id IS NOT NULL AND released_at IS NOT NULL)
-        ))),
+        ) AND dispatched_by_user_id IS NULL AND dispatched_at IS NULL
+          AND received_by_user_id IS NULL AND received_at IS NULL)),
     CONSTRAINT transfer_orders_owner_number_unique
         UNIQUE (tenant_id,inventory_owner_id,number),
     CONSTRAINT transfer_orders_scope_identity_unique
@@ -38143,7 +38188,11 @@ CREATE TABLE public.transfer_orders (
     CONSTRAINT transfer_orders_created_by_fkey
         FOREIGN KEY (created_by_user_id) REFERENCES public.users(id),
     CONSTRAINT transfer_orders_released_by_fkey
-        FOREIGN KEY (released_by_user_id) REFERENCES public.users(id)
+        FOREIGN KEY (released_by_user_id) REFERENCES public.users(id),
+    CONSTRAINT transfer_orders_dispatched_by_fkey
+        FOREIGN KEY (dispatched_by_user_id) REFERENCES public.users(id),
+    CONSTRAINT transfer_orders_received_by_fkey
+        FOREIGN KEY (received_by_user_id) REFERENCES public.users(id)
 );
 
 CREATE TABLE public.transfer_order_lines (
@@ -38245,6 +38294,233 @@ CREATE TABLE public.transfer_order_cancellations (
         FOREIGN KEY (cancelled_by_user_id) REFERENCES public.users(id)
 );
 
+CREATE TABLE public.transfer_order_dispatches (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    source_facility_id bigint NOT NULL,
+    destination_facility_id bigint NOT NULL,
+    transfer_order_id bigint NOT NULL,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    transit_location_id bigint NOT NULL,
+    transit_location_barcode text NOT NULL,
+    inventory_transaction_id bigint NOT NULL,
+    selection_count bigint NOT NULL,
+    total_dispatched_quantity bigint NOT NULL,
+    dispatched_by_user_id bigint NOT NULL,
+    dispatched_at timestamp with time zone NOT NULL,
+    CONSTRAINT transfer_order_dispatches_revision_check CHECK (
+        expected_revision=2 AND resulting_revision=3),
+    CONSTRAINT transfer_order_dispatches_counts_check CHECK (
+        selection_count > 0 AND total_dispatched_quantity > 0),
+    CONSTRAINT transfer_order_dispatches_scan_check CHECK (
+        transit_location_barcode=btrim(transit_location_barcode)
+        AND char_length(transit_location_barcode) BETWEEN 1 AND 255
+        AND transit_location_barcode !~ '[[:cntrl:]]'),
+    CONSTRAINT transfer_order_dispatches_order_unique
+        UNIQUE (tenant_id,transfer_order_id),
+    CONSTRAINT transfer_order_dispatches_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,source_facility_id,
+                destination_facility_id,transfer_order_id,id),
+    CONSTRAINT transfer_order_dispatches_order_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,source_facility_id,
+                     destination_facility_id,transfer_order_id)
+        REFERENCES public.transfer_orders(
+            tenant_id,inventory_owner_id,source_facility_id,destination_facility_id,id),
+    CONSTRAINT transfer_order_dispatches_transit_location_fkey
+        FOREIGN KEY (tenant_id,source_facility_id,transit_location_id)
+        REFERENCES public.locations(tenant_id,facility_id,id),
+    CONSTRAINT transfer_order_dispatches_transaction_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,inventory_transaction_id)
+        REFERENCES public.inventory_transactions(tenant_id,inventory_owner_id,id),
+    CONSTRAINT transfer_order_dispatches_actor_fkey
+        FOREIGN KEY (dispatched_by_user_id) REFERENCES public.users(id)
+);
+
+CREATE TABLE public.transfer_order_dispatch_lines (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    source_facility_id bigint NOT NULL,
+    destination_facility_id bigint NOT NULL,
+    transfer_order_id bigint NOT NULL,
+    transfer_order_dispatch_id bigint NOT NULL,
+    transfer_order_line_id bigint NOT NULL,
+    source_inventory_balance_id bigint NOT NULL,
+    source_location_id bigint NOT NULL,
+    transit_inventory_balance_id bigint NOT NULL,
+    transit_location_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    lot text,
+    expiration timestamp with time zone,
+    serial text,
+    inventory_status text NOT NULL,
+    quantity bigint NOT NULL,
+    observed_source_location_barcode text NOT NULL,
+    CONSTRAINT transfer_order_dispatch_lines_quantity_check CHECK (quantity > 0),
+    CONSTRAINT transfer_order_dispatch_lines_status_check CHECK (
+        inventory_status IN ('available','hold','damaged','quarantine')),
+    CONSTRAINT transfer_order_dispatch_lines_uom_check CHECK (
+        uom=btrim(uom) AND char_length(uom) BETWEEN 1 AND 64),
+    CONSTRAINT transfer_order_dispatch_lines_scan_check CHECK (
+        observed_source_location_barcode=btrim(observed_source_location_barcode)
+        AND char_length(observed_source_location_barcode) BETWEEN 1 AND 255
+        AND observed_source_location_barcode !~ '[[:cntrl:]]'),
+    CONSTRAINT transfer_order_dispatch_lines_source_unique
+        UNIQUE (tenant_id,transfer_order_dispatch_id,source_inventory_balance_id),
+    CONSTRAINT transfer_order_dispatch_lines_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,source_facility_id,
+                destination_facility_id,transfer_order_id,id),
+    CONSTRAINT transfer_order_dispatch_lines_dispatch_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,source_facility_id,
+                     destination_facility_id,transfer_order_id,transfer_order_dispatch_id)
+        REFERENCES public.transfer_order_dispatches(
+            tenant_id,inventory_owner_id,source_facility_id,
+            destination_facility_id,transfer_order_id,id),
+    CONSTRAINT transfer_order_dispatch_lines_order_line_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,source_facility_id,
+                     destination_facility_id,transfer_order_id,transfer_order_line_id)
+        REFERENCES public.transfer_order_lines(
+            tenant_id,inventory_owner_id,source_facility_id,
+            destination_facility_id,transfer_order_id,id),
+    CONSTRAINT transfer_order_dispatch_lines_source_balance_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,source_facility_id,
+                     source_inventory_balance_id)
+        REFERENCES public.inventory_balances(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT transfer_order_dispatch_lines_transit_balance_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,source_facility_id,
+                     transit_inventory_balance_id)
+        REFERENCES public.inventory_balances(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT transfer_order_dispatch_lines_source_location_fkey
+        FOREIGN KEY (tenant_id,source_facility_id,source_location_id)
+        REFERENCES public.locations(tenant_id,facility_id,id),
+    CONSTRAINT transfer_order_dispatch_lines_transit_location_fkey
+        FOREIGN KEY (tenant_id,source_facility_id,transit_location_id)
+        REFERENCES public.locations(tenant_id,facility_id,id),
+    CONSTRAINT transfer_order_dispatch_lines_batch_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,item_batch_id)
+        REFERENCES public.item_batches(tenant_id,inventory_owner_id,id),
+    CONSTRAINT transfer_order_dispatch_lines_item_fkey
+        FOREIGN KEY (tenant_id,item_id) REFERENCES public.items(tenant_id,id)
+);
+
+CREATE TABLE public.transfer_order_receipts (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    source_facility_id bigint NOT NULL,
+    destination_facility_id bigint NOT NULL,
+    transfer_order_id bigint NOT NULL,
+    transfer_order_dispatch_id bigint NOT NULL,
+    expected_revision bigint NOT NULL,
+    resulting_revision bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    destination_location_barcode text NOT NULL,
+    inventory_transaction_id bigint NOT NULL,
+    line_count bigint NOT NULL,
+    total_received_quantity bigint NOT NULL,
+    received_by_user_id bigint NOT NULL,
+    received_at timestamp with time zone NOT NULL,
+    CONSTRAINT transfer_order_receipts_revision_check CHECK (
+        expected_revision=3 AND resulting_revision=4),
+    CONSTRAINT transfer_order_receipts_counts_check CHECK (
+        line_count > 0 AND total_received_quantity > 0),
+    CONSTRAINT transfer_order_receipts_scan_check CHECK (
+        destination_location_barcode=btrim(destination_location_barcode)
+        AND char_length(destination_location_barcode) BETWEEN 1 AND 255
+        AND destination_location_barcode !~ '[[:cntrl:]]'),
+    CONSTRAINT transfer_order_receipts_order_unique
+        UNIQUE (tenant_id,transfer_order_id),
+    CONSTRAINT transfer_order_receipts_scope_identity_unique
+        UNIQUE (tenant_id,inventory_owner_id,source_facility_id,
+                destination_facility_id,transfer_order_id,id),
+    CONSTRAINT transfer_order_receipts_order_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,source_facility_id,
+                     destination_facility_id,transfer_order_id)
+        REFERENCES public.transfer_orders(
+            tenant_id,inventory_owner_id,source_facility_id,destination_facility_id,id),
+    CONSTRAINT transfer_order_receipts_dispatch_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,source_facility_id,
+                     destination_facility_id,transfer_order_id,transfer_order_dispatch_id)
+        REFERENCES public.transfer_order_dispatches(
+            tenant_id,inventory_owner_id,source_facility_id,
+            destination_facility_id,transfer_order_id,id),
+    CONSTRAINT transfer_order_receipts_destination_location_fkey
+        FOREIGN KEY (tenant_id,destination_facility_id,destination_location_id)
+        REFERENCES public.locations(tenant_id,facility_id,id),
+    CONSTRAINT transfer_order_receipts_transaction_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,inventory_transaction_id)
+        REFERENCES public.inventory_transactions(tenant_id,inventory_owner_id,id),
+    CONSTRAINT transfer_order_receipts_actor_fkey
+        FOREIGN KEY (received_by_user_id) REFERENCES public.users(id)
+);
+
+CREATE TABLE public.transfer_order_receipt_lines (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    source_facility_id bigint NOT NULL,
+    destination_facility_id bigint NOT NULL,
+    transfer_order_id bigint NOT NULL,
+    transfer_order_receipt_id bigint NOT NULL,
+    transfer_order_dispatch_line_id bigint NOT NULL,
+    transfer_order_line_id bigint NOT NULL,
+    transit_inventory_balance_id bigint NOT NULL,
+    transit_location_id bigint NOT NULL,
+    destination_inventory_balance_id bigint NOT NULL,
+    destination_location_id bigint NOT NULL,
+    item_batch_id bigint NOT NULL,
+    item_id bigint NOT NULL,
+    uom text NOT NULL,
+    lot text,
+    expiration timestamp with time zone,
+    serial text,
+    inventory_status text NOT NULL,
+    quantity bigint NOT NULL,
+    CONSTRAINT transfer_order_receipt_lines_quantity_check CHECK (quantity > 0),
+    CONSTRAINT transfer_order_receipt_lines_status_check CHECK (
+        inventory_status IN ('available','hold','damaged','quarantine')),
+    CONSTRAINT transfer_order_receipt_lines_uom_check CHECK (
+        uom=btrim(uom) AND char_length(uom) BETWEEN 1 AND 64),
+    CONSTRAINT transfer_order_receipt_lines_dispatch_unique
+        UNIQUE (tenant_id,transfer_order_receipt_id,transfer_order_dispatch_line_id),
+    CONSTRAINT transfer_order_receipt_lines_receipt_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,source_facility_id,
+                     destination_facility_id,transfer_order_id,transfer_order_receipt_id)
+        REFERENCES public.transfer_order_receipts(
+            tenant_id,inventory_owner_id,source_facility_id,
+            destination_facility_id,transfer_order_id,id),
+    CONSTRAINT transfer_order_receipt_lines_dispatch_line_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,source_facility_id,
+                     destination_facility_id,transfer_order_id,
+                     transfer_order_dispatch_line_id)
+        REFERENCES public.transfer_order_dispatch_lines(
+            tenant_id,inventory_owner_id,source_facility_id,
+            destination_facility_id,transfer_order_id,id),
+    CONSTRAINT transfer_order_receipt_lines_transit_balance_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,source_facility_id,
+                     transit_inventory_balance_id)
+        REFERENCES public.inventory_balances(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT transfer_order_receipt_lines_destination_balance_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,destination_facility_id,
+                     destination_inventory_balance_id)
+        REFERENCES public.inventory_balances(tenant_id,inventory_owner_id,facility_id,id),
+    CONSTRAINT transfer_order_receipt_lines_transit_location_fkey
+        FOREIGN KEY (tenant_id,source_facility_id,transit_location_id)
+        REFERENCES public.locations(tenant_id,facility_id,id),
+    CONSTRAINT transfer_order_receipt_lines_destination_location_fkey
+        FOREIGN KEY (tenant_id,destination_facility_id,destination_location_id)
+        REFERENCES public.locations(tenant_id,facility_id,id),
+    CONSTRAINT transfer_order_receipt_lines_batch_fkey
+        FOREIGN KEY (tenant_id,inventory_owner_id,item_batch_id)
+        REFERENCES public.item_batches(tenant_id,inventory_owner_id,id),
+    CONSTRAINT transfer_order_receipt_lines_item_fkey
+        FOREIGN KEY (tenant_id,item_id) REFERENCES public.items(tenant_id,id)
+);
+
 CREATE INDEX transfer_orders_queue_idx
 ON public.transfer_orders(tenant_id,status,created_at DESC,id DESC);
 CREATE INDEX transfer_orders_scope_queue_idx
@@ -38253,6 +38529,12 @@ ON public.transfer_orders(
     status,created_at DESC,id DESC);
 CREATE INDEX transfer_order_lines_order_idx
 ON public.transfer_order_lines(tenant_id,transfer_order_id,sequence,id);
+CREATE INDEX transfer_order_dispatch_lines_order_idx
+ON public.transfer_order_dispatch_lines(
+    tenant_id,transfer_order_id,transfer_order_line_id,id);
+CREATE INDEX transfer_order_receipt_lines_order_idx
+ON public.transfer_order_receipt_lines(
+    tenant_id,transfer_order_id,transfer_order_line_id,id);
 
 CREATE FUNCTION public.validate_transfer_order() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -38338,12 +38620,33 @@ BEGIN
            (OLD.status='draft' AND NEW.status='released'
             AND NEW.revision=OLD.revision+1
             AND OLD.released_by_user_id IS NULL AND OLD.released_at IS NULL
-            AND NEW.released_by_user_id IS NOT NULL AND NEW.released_at IS NOT NULL)
+            AND NEW.released_by_user_id IS NOT NULL AND NEW.released_at IS NOT NULL
+            AND NEW.dispatched_by_user_id IS NULL AND NEW.dispatched_at IS NULL
+            AND NEW.received_by_user_id IS NULL AND NEW.received_at IS NULL)
            OR
            (OLD.status IN ('draft','released') AND NEW.status='cancelled'
             AND NEW.revision=OLD.revision+1
             AND NEW.released_by_user_id IS NOT DISTINCT FROM OLD.released_by_user_id
-            AND NEW.released_at IS NOT DISTINCT FROM OLD.released_at)
+            AND NEW.released_at IS NOT DISTINCT FROM OLD.released_at
+            AND NEW.dispatched_by_user_id IS NULL AND NEW.dispatched_at IS NULL
+            AND NEW.received_by_user_id IS NULL AND NEW.received_at IS NULL)
+           OR
+           (OLD.status='released' AND NEW.status='in_transit'
+            AND NEW.revision=OLD.revision+1
+            AND NEW.released_by_user_id=OLD.released_by_user_id
+            AND NEW.released_at=OLD.released_at
+            AND OLD.dispatched_by_user_id IS NULL AND OLD.dispatched_at IS NULL
+            AND NEW.dispatched_by_user_id IS NOT NULL AND NEW.dispatched_at IS NOT NULL
+            AND NEW.received_by_user_id IS NULL AND NEW.received_at IS NULL)
+           OR
+           (OLD.status='in_transit' AND NEW.status='received'
+            AND NEW.revision=OLD.revision+1
+            AND NEW.released_by_user_id=OLD.released_by_user_id
+            AND NEW.released_at=OLD.released_at
+            AND NEW.dispatched_by_user_id=OLD.dispatched_by_user_id
+            AND NEW.dispatched_at=OLD.dispatched_at
+            AND OLD.received_by_user_id IS NULL AND OLD.received_at IS NULL
+            AND NEW.received_by_user_id IS NOT NULL AND NEW.received_at IS NOT NULL)
        ) THEN
         RAISE EXCEPTION 'transfer order mutation requires a typed lifecycle transition'
             USING ERRCODE='55000';
@@ -38428,6 +38731,384 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION public.validate_transfer_order_dispatch() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    order_row record;
+    location_row record;
+    transaction_row record;
+BEGIN
+    SELECT * INTO order_row FROM public.transfer_orders
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.transfer_order_id FOR UPDATE;
+    SELECT facility_id,barcode,active,deleted,pickable,receivable,lower(type) AS type
+    INTO location_row FROM public.locations
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.transit_location_id FOR SHARE;
+    SELECT inventory_owner_id,actor_user_id,transaction_type,operation,
+           reference_type,reference_id
+    INTO transaction_row FROM public.inventory_transactions
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.inventory_transaction_id;
+    IF order_row IS NULL OR order_row.status <> 'released'
+       OR order_row.revision <> NEW.expected_revision
+       OR NEW.resulting_revision <> NEW.expected_revision+1
+       OR NEW.inventory_owner_id <> order_row.inventory_owner_id
+       OR NEW.source_facility_id <> order_row.source_facility_id
+       OR NEW.destination_facility_id <> order_row.destination_facility_id
+       OR location_row.facility_id <> NEW.source_facility_id
+       OR location_row.barcode <> NEW.transit_location_barcode
+       OR NOT location_row.active OR location_row.deleted IS NOT NULL
+       OR location_row.pickable OR location_row.receivable
+       OR location_row.type <> 'transfer_in_transit'
+       OR transaction_row.inventory_owner_id <> NEW.inventory_owner_id
+       OR transaction_row.actor_user_id <> NEW.dispatched_by_user_id
+       OR transaction_row.transaction_type <> 'move'
+       OR transaction_row.operation <> 'inventory.transfer_order.dispatch.v1'
+       OR transaction_row.reference_type <> 'transfer_order'
+       OR transaction_row.reference_id <> NEW.transfer_order_id
+       OR NEW.dispatched_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'transfer dispatch does not match released stock and transit scope'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.validate_transfer_order_dispatch_line() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    dispatch_row record;
+    line_row record;
+    source_row record;
+    transit_row record;
+BEGIN
+    SELECT * INTO dispatch_row FROM public.transfer_order_dispatches
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.transfer_order_dispatch_id;
+    SELECT item_id,uom INTO line_row FROM public.transfer_order_lines
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.transfer_order_line_id
+      AND transfer_order_id=NEW.transfer_order_id;
+    SELECT balance.location_id,balance.item_batch_id,balance.item_id,balance.uom,
+           balance.status,balance.license_plate_id,batch.lot,batch.expiration,batch.serial,
+           location.barcode AS location_barcode
+    INTO source_row
+    FROM public.inventory_balances balance
+    JOIN public.item_batches batch
+      ON batch.tenant_id=balance.tenant_id AND batch.id=balance.item_batch_id
+    JOIN public.locations location
+      ON location.tenant_id=balance.tenant_id AND location.id=balance.location_id
+    WHERE balance.tenant_id=NEW.tenant_id
+      AND balance.inventory_owner_id=NEW.inventory_owner_id
+      AND balance.facility_id=NEW.source_facility_id
+      AND balance.id=NEW.source_inventory_balance_id;
+    SELECT location_id,item_batch_id,item_id,uom,status,license_plate_id
+    INTO transit_row FROM public.inventory_balances
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.source_facility_id
+      AND id=NEW.transit_inventory_balance_id;
+    IF dispatch_row IS NULL OR line_row IS NULL
+       OR NEW.transit_location_id <> dispatch_row.transit_location_id
+       OR NEW.item_id <> line_row.item_id OR NEW.uom <> line_row.uom
+       OR source_row.location_id <> NEW.source_location_id
+       OR source_row.location_barcode <> NEW.observed_source_location_barcode
+       OR source_row.item_batch_id <> NEW.item_batch_id
+       OR source_row.item_id <> NEW.item_id OR source_row.uom <> NEW.uom
+       OR source_row.status <> NEW.inventory_status
+       OR source_row.license_plate_id IS NOT NULL
+       OR source_row.lot IS DISTINCT FROM NEW.lot
+       OR source_row.expiration IS DISTINCT FROM NEW.expiration
+       OR source_row.serial IS DISTINCT FROM NEW.serial
+       OR transit_row.location_id <> NEW.transit_location_id
+       OR transit_row.item_batch_id <> NEW.item_batch_id
+       OR transit_row.item_id <> NEW.item_id OR transit_row.uom <> NEW.uom
+       OR transit_row.status <> NEW.inventory_status
+       OR transit_row.license_plate_id IS NOT NULL THEN
+        RAISE EXCEPTION 'transfer dispatch line does not match its stock movement'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.validate_transfer_order_receipt() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    order_row record;
+    dispatch_row record;
+    location_row record;
+    transaction_row record;
+BEGIN
+    SELECT * INTO order_row FROM public.transfer_orders
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.transfer_order_id FOR UPDATE;
+    SELECT * INTO dispatch_row FROM public.transfer_order_dispatches
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.transfer_order_dispatch_id;
+    SELECT facility_id,barcode,active,deleted,receivable
+    INTO location_row FROM public.locations
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.destination_location_id FOR SHARE;
+    SELECT inventory_owner_id,actor_user_id,transaction_type,operation,
+           reference_type,reference_id
+    INTO transaction_row FROM public.inventory_transactions
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.inventory_transaction_id;
+    IF order_row IS NULL OR order_row.status <> 'in_transit'
+       OR order_row.revision <> NEW.expected_revision
+       OR NEW.resulting_revision <> NEW.expected_revision+1
+       OR dispatch_row IS NULL
+       OR NEW.inventory_owner_id <> order_row.inventory_owner_id
+       OR NEW.source_facility_id <> order_row.source_facility_id
+       OR NEW.destination_facility_id <> order_row.destination_facility_id
+       OR location_row.facility_id <> NEW.destination_facility_id
+       OR location_row.barcode <> NEW.destination_location_barcode
+       OR NOT location_row.active OR location_row.deleted IS NOT NULL
+       OR NOT location_row.receivable
+       OR transaction_row.inventory_owner_id <> NEW.inventory_owner_id
+       OR transaction_row.actor_user_id <> NEW.received_by_user_id
+       OR transaction_row.transaction_type <> 'transfer'
+       OR transaction_row.operation <> 'inventory.transfer_order.receive.v1'
+       OR transaction_row.reference_type <> 'transfer_order'
+       OR transaction_row.reference_id <> NEW.transfer_order_id
+       OR NEW.received_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'transfer receipt does not match in-transit stock and destination scope'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.validate_transfer_order_receipt_line() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    receipt_row record;
+    dispatch_line record;
+    destination_row record;
+BEGIN
+    SELECT * INTO receipt_row FROM public.transfer_order_receipts
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.transfer_order_receipt_id;
+    SELECT * INTO dispatch_line FROM public.transfer_order_dispatch_lines
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.transfer_order_dispatch_line_id;
+    SELECT location_id,item_batch_id,item_id,uom,status,license_plate_id
+    INTO destination_row FROM public.inventory_balances
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND facility_id=NEW.destination_facility_id
+      AND id=NEW.destination_inventory_balance_id;
+    IF receipt_row IS NULL OR dispatch_line IS NULL
+       OR NEW.transfer_order_line_id <> dispatch_line.transfer_order_line_id
+       OR NEW.transit_inventory_balance_id <> dispatch_line.transit_inventory_balance_id
+       OR NEW.transit_location_id <> dispatch_line.transit_location_id
+       OR NEW.destination_location_id <> receipt_row.destination_location_id
+       OR NEW.item_batch_id <> dispatch_line.item_batch_id
+       OR NEW.item_id <> dispatch_line.item_id OR NEW.uom <> dispatch_line.uom
+       OR NEW.lot IS DISTINCT FROM dispatch_line.lot
+       OR NEW.expiration IS DISTINCT FROM dispatch_line.expiration
+       OR NEW.serial IS DISTINCT FROM dispatch_line.serial
+       OR NEW.inventory_status <> dispatch_line.inventory_status
+       OR NEW.quantity <> dispatch_line.quantity
+       OR destination_row.location_id <> NEW.destination_location_id
+       OR destination_row.item_batch_id <> NEW.item_batch_id
+       OR destination_row.item_id <> NEW.item_id OR destination_row.uom <> NEW.uom
+       OR destination_row.status <> NEW.inventory_status
+       OR destination_row.license_plate_id IS NOT NULL THEN
+        RAISE EXCEPTION 'transfer receipt line does not match dispatched stock'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.require_transfer_order_execution_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    target_order_id bigint;
+    order_row record;
+    dispatch_row record;
+    receipt_row record;
+    actual_count bigint;
+    actual_total bigint;
+BEGIN
+    IF TG_TABLE_NAME='transfer_orders' THEN
+        target_order_id := NEW.id;
+    ELSIF TG_TABLE_NAME IN ('transfer_order_dispatches','transfer_order_receipts') THEN
+        target_order_id := NEW.transfer_order_id;
+    ELSIF TG_TABLE_NAME='transfer_order_dispatch_lines' THEN
+        target_order_id := NEW.transfer_order_id;
+    ELSIF TG_TABLE_NAME='transfer_order_receipt_lines' THEN
+        target_order_id := NEW.transfer_order_id;
+    ELSE
+        RAISE EXCEPTION 'unsupported transfer execution reconciliation source'
+            USING ERRCODE='23514';
+    END IF;
+
+    SELECT * INTO order_row FROM public.transfer_orders
+    WHERE tenant_id=NEW.tenant_id AND id=target_order_id;
+    SELECT * INTO dispatch_row FROM public.transfer_order_dispatches
+    WHERE tenant_id=NEW.tenant_id AND transfer_order_id=target_order_id;
+    SELECT * INTO receipt_row FROM public.transfer_order_receipts
+    WHERE tenant_id=NEW.tenant_id AND transfer_order_id=target_order_id;
+
+    IF order_row IS NULL THEN
+        RAISE EXCEPTION 'transfer execution has no order'
+            USING ERRCODE='23514';
+    END IF;
+
+    IF dispatch_row IS NOT NULL THEN
+        SELECT COUNT(*),COALESCE(SUM(quantity),0)
+        INTO actual_count,actual_total
+        FROM public.transfer_order_dispatch_lines
+        WHERE tenant_id=order_row.tenant_id
+          AND transfer_order_dispatch_id=dispatch_row.id;
+        IF actual_count <> dispatch_row.selection_count
+           OR actual_total <> dispatch_row.total_dispatched_quantity
+           OR actual_total <> order_row.total_requested_quantity
+           OR EXISTS (
+               SELECT 1 FROM public.transfer_order_lines line
+               LEFT JOIN (
+                   SELECT transfer_order_line_id,SUM(quantity) AS quantity
+                   FROM public.transfer_order_dispatch_lines
+                   WHERE tenant_id=order_row.tenant_id
+                     AND transfer_order_dispatch_id=dispatch_row.id
+                   GROUP BY transfer_order_line_id
+               ) dispatched ON dispatched.transfer_order_line_id=line.id
+               WHERE line.tenant_id=order_row.tenant_id
+                 AND line.transfer_order_id=order_row.id
+                 AND COALESCE(dispatched.quantity,0) <> line.requested_quantity)
+           OR EXISTS (
+               SELECT 1 FROM public.transfer_order_dispatch_lines detail
+               WHERE detail.tenant_id=order_row.tenant_id
+                 AND detail.transfer_order_dispatch_id=dispatch_row.id
+               GROUP BY detail.transfer_order_line_id
+               HAVING COUNT(DISTINCT detail.item_batch_id) <> 1)
+           OR (SELECT COUNT(*) FROM public.inventory_entries entry
+               WHERE entry.tenant_id=order_row.tenant_id
+                 AND entry.transaction_id=dispatch_row.inventory_transaction_id)
+              <> dispatch_row.selection_count*2
+           OR EXISTS (
+               WITH expected AS (
+                   SELECT detail.source_facility_id AS facility_id,
+                          detail.source_location_id AS location_id,
+                          detail.item_batch_id,detail.item_id,detail.uom,detail.lot,
+                          detail.expiration,detail.serial,detail.inventory_status AS status,
+                          -detail.quantity AS quantity_delta
+                   FROM public.transfer_order_dispatch_lines detail
+                   WHERE detail.tenant_id=order_row.tenant_id
+                     AND detail.transfer_order_dispatch_id=dispatch_row.id
+                   UNION ALL
+                   SELECT detail.source_facility_id,detail.transit_location_id,
+                          detail.item_batch_id,detail.item_id,detail.uom,detail.lot,
+                          detail.expiration,detail.serial,detail.inventory_status,
+                          detail.quantity
+                   FROM public.transfer_order_dispatch_lines detail
+                   WHERE detail.tenant_id=order_row.tenant_id
+                     AND detail.transfer_order_dispatch_id=dispatch_row.id
+               ), expected_grouped AS (
+                   SELECT facility_id,location_id,item_batch_id,item_id,uom,lot,expiration,
+                          serial,status,SUM(quantity_delta) AS quantity_delta
+                   FROM expected
+                   GROUP BY facility_id,location_id,item_batch_id,item_id,uom,lot,
+                            expiration,serial,status
+               ), actual_grouped AS (
+                   SELECT facility_id,location_id,item_batch_id,item_id,uom,lot,expiration,
+                          serial,status,SUM(quantity_delta) AS quantity_delta
+                   FROM public.inventory_entries
+                   WHERE tenant_id=order_row.tenant_id
+                     AND transaction_id=dispatch_row.inventory_transaction_id
+                   GROUP BY facility_id,location_id,item_batch_id,item_id,uom,lot,
+                            expiration,serial,status
+               )
+               SELECT 1 FROM (
+                   (SELECT * FROM expected_grouped EXCEPT SELECT * FROM actual_grouped)
+                   UNION ALL
+                   (SELECT * FROM actual_grouped EXCEPT SELECT * FROM expected_grouped)
+               ) mismatch LIMIT 1) THEN
+            RAISE EXCEPTION 'transfer dispatch does not reconcile with lines and journal'
+                USING ERRCODE='23514';
+        END IF;
+    END IF;
+
+    IF receipt_row IS NOT NULL THEN
+        SELECT COUNT(*),COALESCE(SUM(quantity),0)
+        INTO actual_count,actual_total
+        FROM public.transfer_order_receipt_lines
+        WHERE tenant_id=order_row.tenant_id
+          AND transfer_order_receipt_id=receipt_row.id;
+        IF dispatch_row IS NULL
+           OR receipt_row.transfer_order_dispatch_id <> dispatch_row.id
+           OR actual_count <> receipt_row.line_count
+           OR actual_count <> dispatch_row.selection_count
+           OR actual_total <> receipt_row.total_received_quantity
+           OR actual_total <> dispatch_row.total_dispatched_quantity
+           OR EXISTS (
+               SELECT 1 FROM public.transfer_order_dispatch_lines detail
+               LEFT JOIN public.transfer_order_receipt_lines received
+                 ON received.tenant_id=detail.tenant_id
+                AND received.transfer_order_receipt_id=receipt_row.id
+                AND received.transfer_order_dispatch_line_id=detail.id
+               WHERE detail.tenant_id=order_row.tenant_id
+                 AND detail.transfer_order_dispatch_id=dispatch_row.id
+                 AND (received.id IS NULL OR received.quantity <> detail.quantity))
+           OR (SELECT COUNT(*) FROM public.inventory_entries entry
+               WHERE entry.tenant_id=order_row.tenant_id
+                 AND entry.transaction_id=receipt_row.inventory_transaction_id)
+              <> receipt_row.line_count*2
+           OR EXISTS (
+               WITH expected AS (
+                   SELECT detail.source_facility_id AS facility_id,
+                          detail.transit_location_id AS location_id,
+                          detail.item_batch_id,detail.item_id,detail.uom,detail.lot,
+                          detail.expiration,detail.serial,detail.inventory_status AS status,
+                          -detail.quantity AS quantity_delta
+                   FROM public.transfer_order_receipt_lines detail
+                   WHERE detail.tenant_id=order_row.tenant_id
+                     AND detail.transfer_order_receipt_id=receipt_row.id
+                   UNION ALL
+                   SELECT detail.destination_facility_id,detail.destination_location_id,
+                          detail.item_batch_id,detail.item_id,detail.uom,detail.lot,
+                          detail.expiration,detail.serial,detail.inventory_status,
+                          detail.quantity
+                   FROM public.transfer_order_receipt_lines detail
+                   WHERE detail.tenant_id=order_row.tenant_id
+                     AND detail.transfer_order_receipt_id=receipt_row.id
+               ), expected_grouped AS (
+                   SELECT facility_id,location_id,item_batch_id,item_id,uom,lot,expiration,
+                          serial,status,SUM(quantity_delta) AS quantity_delta
+                   FROM expected
+                   GROUP BY facility_id,location_id,item_batch_id,item_id,uom,lot,
+                            expiration,serial,status
+               ), actual_grouped AS (
+                   SELECT facility_id,location_id,item_batch_id,item_id,uom,lot,expiration,
+                          serial,status,SUM(quantity_delta) AS quantity_delta
+                   FROM public.inventory_entries
+                   WHERE tenant_id=order_row.tenant_id
+                     AND transaction_id=receipt_row.inventory_transaction_id
+                   GROUP BY facility_id,location_id,item_batch_id,item_id,uom,lot,
+                            expiration,serial,status
+               )
+               SELECT 1 FROM (
+                   (SELECT * FROM expected_grouped EXCEPT SELECT * FROM actual_grouped)
+                   UNION ALL
+                   (SELECT * FROM actual_grouped EXCEPT SELECT * FROM expected_grouped)
+               ) mismatch LIMIT 1) THEN
+            RAISE EXCEPTION 'transfer receipt does not reconcile with dispatch and journal'
+                USING ERRCODE='23514';
+        END IF;
+    END IF;
+
+    IF (order_row.status IN ('draft','released','cancelled')
+        AND (dispatch_row IS NOT NULL OR receipt_row IS NOT NULL))
+       OR (order_row.status='in_transit' AND (
+           dispatch_row IS NULL OR receipt_row IS NOT NULL
+           OR dispatch_row.resulting_revision <> order_row.revision
+           OR dispatch_row.dispatched_by_user_id <> order_row.dispatched_by_user_id
+           OR dispatch_row.dispatched_at <> order_row.dispatched_at))
+       OR (order_row.status='received' AND (
+           dispatch_row IS NULL OR receipt_row IS NULL
+           OR receipt_row.resulting_revision <> order_row.revision
+           OR receipt_row.received_by_user_id <> order_row.received_by_user_id
+           OR receipt_row.received_at <> order_row.received_at)) THEN
+        RAISE EXCEPTION 'transfer order execution evidence is inconsistent with lifecycle'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
 CREATE FUNCTION public.require_transfer_order_transition_consistency() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -38457,6 +39138,20 @@ BEGIN
         SELECT 1 FROM public.transfer_order_releases evidence
         WHERE evidence.tenant_id=order_row.tenant_id
           AND evidence.transfer_order_id=order_row.id)
+    OR order_row.status='in_transit' AND NOT EXISTS (
+        SELECT 1 FROM public.transfer_order_dispatches evidence
+        WHERE evidence.tenant_id=order_row.tenant_id
+          AND evidence.transfer_order_id=order_row.id
+          AND evidence.resulting_revision=order_row.revision
+          AND evidence.dispatched_by_user_id=order_row.dispatched_by_user_id
+          AND evidence.dispatched_at=order_row.dispatched_at)
+    OR order_row.status='received' AND NOT EXISTS (
+        SELECT 1 FROM public.transfer_order_receipts evidence
+        WHERE evidence.tenant_id=order_row.tenant_id
+          AND evidence.transfer_order_id=order_row.id
+          AND evidence.resulting_revision=order_row.revision
+          AND evidence.received_by_user_id=order_row.received_by_user_id
+          AND evidence.received_at=order_row.received_at)
     THEN
         RAISE EXCEPTION 'transfer order lifecycle evidence is inconsistent'
             USING ERRCODE='55000';
@@ -38492,6 +39187,30 @@ FOR EACH ROW EXECUTE FUNCTION public.validate_transfer_order_cancellation();
 CREATE TRIGGER transfer_order_cancellations_are_immutable
 BEFORE UPDATE OR DELETE ON public.transfer_order_cancellations
 FOR EACH ROW EXECUTE FUNCTION public.reject_transfer_order_ledger_mutation();
+CREATE TRIGGER transfer_order_dispatches_validate
+BEFORE INSERT ON public.transfer_order_dispatches
+FOR EACH ROW EXECUTE FUNCTION public.validate_transfer_order_dispatch();
+CREATE TRIGGER transfer_order_dispatches_are_immutable
+BEFORE UPDATE OR DELETE ON public.transfer_order_dispatches
+FOR EACH ROW EXECUTE FUNCTION public.reject_transfer_order_ledger_mutation();
+CREATE TRIGGER transfer_order_dispatch_lines_validate
+BEFORE INSERT ON public.transfer_order_dispatch_lines
+FOR EACH ROW EXECUTE FUNCTION public.validate_transfer_order_dispatch_line();
+CREATE TRIGGER transfer_order_dispatch_lines_are_immutable
+BEFORE UPDATE OR DELETE ON public.transfer_order_dispatch_lines
+FOR EACH ROW EXECUTE FUNCTION public.reject_transfer_order_ledger_mutation();
+CREATE TRIGGER transfer_order_receipts_validate
+BEFORE INSERT ON public.transfer_order_receipts
+FOR EACH ROW EXECUTE FUNCTION public.validate_transfer_order_receipt();
+CREATE TRIGGER transfer_order_receipts_are_immutable
+BEFORE UPDATE OR DELETE ON public.transfer_order_receipts
+FOR EACH ROW EXECUTE FUNCTION public.reject_transfer_order_ledger_mutation();
+CREATE TRIGGER transfer_order_receipt_lines_validate
+BEFORE INSERT ON public.transfer_order_receipt_lines
+FOR EACH ROW EXECUTE FUNCTION public.validate_transfer_order_receipt_line();
+CREATE TRIGGER transfer_order_receipt_lines_are_immutable
+BEFORE UPDATE OR DELETE ON public.transfer_order_receipt_lines
+FOR EACH ROW EXECUTE FUNCTION public.reject_transfer_order_ledger_mutation();
 
 CREATE CONSTRAINT TRIGGER transfer_orders_require_lines
 AFTER INSERT ON public.transfer_orders
@@ -38513,6 +39232,26 @@ CREATE CONSTRAINT TRIGGER transfer_order_cancellations_require_transition
 AFTER INSERT ON public.transfer_order_cancellations
 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
 EXECUTE FUNCTION public.require_transfer_order_transition_consistency();
+CREATE CONSTRAINT TRIGGER transfer_orders_require_execution
+AFTER UPDATE ON public.transfer_orders
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_transfer_order_execution_consistency();
+CREATE CONSTRAINT TRIGGER transfer_order_dispatches_require_execution
+AFTER INSERT ON public.transfer_order_dispatches
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_transfer_order_execution_consistency();
+CREATE CONSTRAINT TRIGGER transfer_order_dispatch_lines_require_execution
+AFTER INSERT ON public.transfer_order_dispatch_lines
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_transfer_order_execution_consistency();
+CREATE CONSTRAINT TRIGGER transfer_order_receipts_require_execution
+AFTER INSERT ON public.transfer_order_receipts
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_transfer_order_execution_consistency();
+CREATE CONSTRAINT TRIGGER transfer_order_receipt_lines_require_execution
+AFTER INSERT ON public.transfer_order_receipt_lines
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_transfer_order_execution_consistency();
 
 ALTER TABLE public.transfer_orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.transfer_orders FORCE ROW LEVEL SECURITY;
@@ -38522,6 +39261,14 @@ ALTER TABLE public.transfer_order_releases ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.transfer_order_releases FORCE ROW LEVEL SECURITY;
 ALTER TABLE public.transfer_order_cancellations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.transfer_order_cancellations FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_order_dispatches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_order_dispatches FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_order_dispatch_lines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_order_dispatch_lines FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_order_receipts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_order_receipts FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_order_receipt_lines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.transfer_order_receipt_lines FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY transfer_orders_tenant_isolation ON public.transfer_orders
 USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
@@ -38535,17 +39282,38 @@ WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bi
 CREATE POLICY transfer_order_cancellations_tenant_isolation ON public.transfer_order_cancellations
 USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
 WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY transfer_order_dispatches_tenant_isolation ON public.transfer_order_dispatches
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY transfer_order_dispatch_lines_tenant_isolation ON public.transfer_order_dispatch_lines
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY transfer_order_receipts_tenant_isolation ON public.transfer_order_receipts
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+CREATE POLICY transfer_order_receipt_lines_tenant_isolation ON public.transfer_order_receipt_lines
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
 
 GRANT SELECT,INSERT ON public.transfer_orders TO wareboxes_app;
-GRANT UPDATE(status,revision,released_by_user_id,released_at)
+GRANT UPDATE(status,revision,released_by_user_id,released_at,
+             dispatched_by_user_id,dispatched_at,received_by_user_id,received_at)
 ON public.transfer_orders TO wareboxes_app;
 GRANT SELECT,INSERT ON public.transfer_order_lines TO wareboxes_app;
 GRANT SELECT,INSERT ON public.transfer_order_releases TO wareboxes_app;
 GRANT SELECT,INSERT ON public.transfer_order_cancellations TO wareboxes_app;
+GRANT SELECT,INSERT ON public.transfer_order_dispatches TO wareboxes_app;
+GRANT SELECT,INSERT ON public.transfer_order_dispatch_lines TO wareboxes_app;
+GRANT SELECT,INSERT ON public.transfer_order_receipts TO wareboxes_app;
+GRANT SELECT,INSERT ON public.transfer_order_receipt_lines TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.transfer_orders_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.transfer_order_lines_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.transfer_order_releases_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.transfer_order_cancellations_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.transfer_order_dispatches_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.transfer_order_dispatch_lines_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.transfer_order_receipts_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.transfer_order_receipt_lines_id_seq TO wareboxes_app;
 
 REVOKE ALL ON FUNCTION public.validate_transfer_order() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_transfer_order_line() FROM PUBLIC;
@@ -38554,4 +39322,9 @@ REVOKE ALL ON FUNCTION public.reject_transfer_order_ledger_mutation() FROM PUBLI
 REVOKE ALL ON FUNCTION public.require_transfer_order_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_transfer_order_release() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_transfer_order_cancellation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_transfer_order_dispatch() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_transfer_order_dispatch_line() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_transfer_order_receipt() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_transfer_order_receipt_line() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_transfer_order_execution_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_transfer_order_transition_consistency() FROM PUBLIC;

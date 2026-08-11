@@ -167,6 +167,21 @@ BEGIN
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM transfer_orders transfer
+    INNER JOIN transfer_order_dispatches dispatch
+      ON dispatch.tenant_id=transfer.tenant_id AND dispatch.transfer_order_id=transfer.id
+    WHERE transfer.status='in_transit' AND transfer.revision=dispatch.resulting_revision
+  ) THEN missing := array_append(missing, 'in-transit transfer execution'); END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM transfer_orders transfer
+    INNER JOIN transfer_order_dispatches dispatch
+      ON dispatch.tenant_id=transfer.tenant_id AND dispatch.transfer_order_id=transfer.id
+    INNER JOIN transfer_order_receipts receipt
+      ON receipt.tenant_id=transfer.tenant_id AND receipt.transfer_order_id=transfer.id
+    WHERE transfer.status='received' AND transfer.revision=receipt.resulting_revision
+      AND dispatch.total_dispatched_quantity=receipt.total_received_quantity
+  ) THEN missing := array_append(missing, 'received transfer execution'); END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM transfer_orders transfer
     INNER JOIN transfer_order_cancellations cancellation
       ON cancellation.tenant_id=transfer.tenant_id
      AND cancellation.transfer_order_id=transfer.id

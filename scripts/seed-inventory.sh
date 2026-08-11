@@ -148,6 +148,19 @@ BEGIN
       pickable = EXCLUDED.pickable,
       receivable = EXCLUDED.receivable;
 
+  INSERT INTO locations
+      (tenant_id, created, facility_id, barcode, name, type, active, pickable, receivable)
+  VALUES (tenant, now(), facility, 'SEED-TRANSFER-OUT-01', 'Transfer Dispatch Lane 01',
+          'transfer_in_transit', true, false, false)
+  ON CONFLICT (tenant_id, barcode) DO UPDATE
+  SET deleted = NULL,
+      active = true,
+      name = EXCLUDED.name,
+      facility_id = EXCLUDED.facility_id,
+      type = EXCLUDED.type,
+      pickable = false,
+      receivable = false;
+
   FOREACH inventory_status IN ARRAY location_codes LOOP
     INSERT INTO locations
         (tenant_id, created, facility_id, barcode, name, type, active, pickable, receivable)

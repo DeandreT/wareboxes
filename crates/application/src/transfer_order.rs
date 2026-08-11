@@ -2,15 +2,19 @@
 
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
-    CatalogItemId, FacilityId, InventoryOwnerId, NewTransferOrder, Timestamp,
-    TransferOrderCancellationDetails, TransferOrderCancellationId, TransferOrderCancellationReason,
-    TransferOrderId, TransferOrderLineId, TransferOrderReleaseId, TransferOrderRevision,
-    TransferOrderStatus, UserId,
+    CatalogItemId, FacilityId, InventoryBalanceId, InventoryOwnerId, ItemBatchId, LocationId,
+    NewTransferOrder, Timestamp, TransferDispatchExecution, TransferOrderCancellationDetails,
+    TransferOrderCancellationId, TransferOrderCancellationReason, TransferOrderDispatchId,
+    TransferOrderDispatchLineId, TransferOrderId, TransferOrderLineId, TransferOrderReceiptId,
+    TransferOrderReceiptLineId, TransferOrderReleaseId, TransferOrderRevision,
+    TransferOrderScanValue, TransferOrderStatus, UserId,
 };
 
 pub const CREATE_TRANSFER_ORDER_OPERATION: &str = "inventory.transfer_order.create.v1";
 pub const RELEASE_TRANSFER_ORDER_OPERATION: &str = "inventory.transfer_order.release.v1";
 pub const CANCEL_TRANSFER_ORDER_OPERATION: &str = "inventory.transfer_order.cancel.v1";
+pub const DISPATCH_TRANSFER_ORDER_OPERATION: &str = "inventory.transfer_order.dispatch.v1";
+pub const RECEIVE_TRANSFER_ORDER_OPERATION: &str = "inventory.transfer_order.receive.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateTransferOrderCommand {
@@ -97,6 +101,121 @@ pub struct CancelTransferOrderResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchTransferOrderCommand {
+    pub transfer_order_id: TransferOrderId,
+    pub expected_revision: TransferOrderRevision,
+    pub execution: TransferDispatchExecution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferDispatchLineResult {
+    pub dispatch_line_id: TransferOrderDispatchLineId,
+    pub transfer_order_line_id: TransferOrderLineId,
+    pub source_inventory_balance_id: InventoryBalanceId,
+    pub source_location_id: LocationId,
+    pub transit_inventory_balance_id: InventoryBalanceId,
+    pub item_batch_id: ItemBatchId,
+    pub item_id: CatalogItemId,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub expiration: Option<Timestamp>,
+    pub serial: Option<String>,
+    pub inventory_status: String,
+    pub quantity: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchTransferOrderResult {
+    pub dispatch_id: TransferOrderDispatchId,
+    pub transfer_order_id: TransferOrderId,
+    pub previous_status: TransferOrderStatus,
+    pub status: TransferOrderStatus,
+    pub revision: TransferOrderRevision,
+    pub transit_location_id: LocationId,
+    pub transit_location_barcode: String,
+    pub inventory_transaction_id: i64,
+    pub lines: Vec<TransferDispatchLineResult>,
+    pub total_dispatched_quantity: i64,
+    pub dispatched_by: UserId,
+    pub dispatched_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiveTransferOrderCommand {
+    pub transfer_order_id: TransferOrderId,
+    pub expected_revision: TransferOrderRevision,
+    pub destination_location_id: LocationId,
+    pub observed_destination_location_barcode: TransferOrderScanValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferReceiptLineResult {
+    pub receipt_line_id: TransferOrderReceiptLineId,
+    pub dispatch_line_id: TransferOrderDispatchLineId,
+    pub transfer_order_line_id: TransferOrderLineId,
+    pub transit_inventory_balance_id: InventoryBalanceId,
+    pub destination_inventory_balance_id: InventoryBalanceId,
+    pub item_batch_id: ItemBatchId,
+    pub item_id: CatalogItemId,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub expiration: Option<Timestamp>,
+    pub serial: Option<String>,
+    pub inventory_status: String,
+    pub quantity: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiveTransferOrderResult {
+    pub receipt_id: TransferOrderReceiptId,
+    pub transfer_order_id: TransferOrderId,
+    pub previous_status: TransferOrderStatus,
+    pub status: TransferOrderStatus,
+    pub revision: TransferOrderRevision,
+    pub destination_location_id: LocationId,
+    pub destination_location_barcode: String,
+    pub inventory_transaction_id: i64,
+    pub lines: Vec<TransferReceiptLineResult>,
+    pub total_received_quantity: i64,
+    pub received_by: UserId,
+    pub received_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferDispatchCandidateReadModel {
+    pub transfer_order_line_id: TransferOrderLineId,
+    pub source_inventory_balance_id: InventoryBalanceId,
+    pub source_location_id: LocationId,
+    pub source_location_barcode: String,
+    pub source_location_name: String,
+    pub item_batch_id: ItemBatchId,
+    pub item_id: CatalogItemId,
+    pub item_description: String,
+    pub uom: String,
+    pub lot: Option<String>,
+    pub expiration: Option<Timestamp>,
+    pub serial: Option<String>,
+    pub free_quantity: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferExecutionLocationReadModel {
+    pub location_id: LocationId,
+    pub barcode: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferExecutionReadiness {
+    pub transfer_order_id: TransferOrderId,
+    pub revision: TransferOrderRevision,
+    pub status: TransferOrderStatus,
+    pub dispatch_candidates: Vec<TransferDispatchCandidateReadModel>,
+    pub transit_locations: Vec<TransferExecutionLocationReadModel>,
+    pub receiving_locations: Vec<TransferExecutionLocationReadModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferOrderLineReadModel {
     pub line_id: TransferOrderLineId,
     pub sequence: i64,
@@ -104,6 +223,8 @@ pub struct TransferOrderLineReadModel {
     pub item_description: String,
     pub uom: String,
     pub requested_quantity: i64,
+    pub dispatched_quantity: i64,
+    pub received_quantity: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +252,18 @@ pub struct TransferOrderReadModel {
     pub cancellation_note: Option<String>,
     pub cancelled_by: Option<UserId>,
     pub cancelled_at: Option<Timestamp>,
+    pub dispatch_id: Option<TransferOrderDispatchId>,
+    pub dispatch_inventory_transaction_id: Option<i64>,
+    pub transit_location_id: Option<LocationId>,
+    pub transit_location_barcode: Option<String>,
+    pub dispatched_by: Option<UserId>,
+    pub dispatched_at: Option<Timestamp>,
+    pub receipt_id: Option<TransferOrderReceiptId>,
+    pub receipt_inventory_transaction_id: Option<i64>,
+    pub destination_receiving_location_id: Option<LocationId>,
+    pub destination_receiving_location_barcode: Option<String>,
+    pub received_by: Option<UserId>,
+    pub received_at: Option<Timestamp>,
     pub lines: Vec<TransferOrderLineReadModel>,
 }
 

@@ -9,11 +9,13 @@ use wareboxes_api::auth::TENANT_ID_HEADER;
 use wareboxes_api::request_context::IDEMPOTENCY_KEY_HEADER;
 use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
-    CancelTransferOrderResponse, CreateTransferOrderResponse, ErrorReason, ErrorResponse,
-    ReleaseTransferOrderResponse, TransferOrderDetailResponse, TransferOrderPage,
+    CancelTransferOrderResponse, CreateTransferOrderResponse, DispatchTransferOrderResponse,
+    ErrorReason, ErrorResponse, ReceiveTransferOrderResponse, ReleaseTransferOrderResponse,
+    TransferExecutionReadinessResponse, TransferOrderDetailResponse, TransferOrderPage,
     TransferOrderStatus,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
+use wareboxes_core::models::TenantAccess;
 
 struct Context {
     fixture: Fixture,
@@ -26,6 +28,7 @@ struct Context {
     item_id: i64,
     second_item_id: i64,
     token: String,
+    access: TenantAccess,
 }
 
 async fn fixture(email: &str) -> Context {
@@ -50,6 +53,9 @@ async fn fixture(email: &str) -> Context {
     }
     tx.commit().await.unwrap();
     let token = auth::create_session(&fixture.db, actor.id).await.unwrap();
+    let access = default_tenant_for_user(&fixture.db, actor.id)
+        .await
+        .unwrap();
     Context {
         fixture,
         tenant_id,
@@ -61,6 +67,7 @@ async fn fixture(email: &str) -> Context {
         item_id,
         second_item_id,
         token,
+        access,
     }
 }
 
@@ -255,6 +262,328 @@ async fn create_release_and_cancel_are_atomic_replay_safe_and_audited() {
 }
 
 #[tokio::test]
+async fn dispatch_and_receipt_conserve_stock_across_facilities() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("wareboxes_api=debug")
+        .with_test_writer()
+        .try_init();
+    let context = fixture("transfer-execution@test.local").await;
+    let first_batch = context
+        .fixture
+        .received_balance(
+            &context.access,
+            ReceivedBalanceSetup {
+                key: "TRANSFER-BEANS-A",
+                inventory_owner_id: context.owner_id,
+                facility_id: context.source_id,
+                item_id: context.item_id,
+                qty: 12,
+            },
+        )
+        .await;
+    let towels = context
+        .fixture
+        .received_balance(
+            &context.access,
+            ReceivedBalanceSetup {
+                key: "TRANSFER-TOWELS",
+                inventory_owner_id: context.owner_id,
+                facility_id: context.source_id,
+                item_id: context.second_item_id,
+                qty: 8,
+            },
+        )
+        .await;
+    let transit_barcode = "TRANSFER-IN-TRANSIT-01";
+    let transit_location_id = wareboxes_persistence_postgres::locations::add_location(
+        &context.fixture.db,
+        context.tenant_id,
+        context.source_id,
+        None,
+        Some(transit_barcode),
+        Some("Transfer dispatch lane"),
+        "transfer_in_transit",
+        true,
+        false,
+        false,
+    )
+    .await
+    .unwrap();
+    let receiving_barcode = "TRANSFER-DEST-RECV-01";
+    let receiving_location_id = wareboxes_persistence_postgres::locations::add_location(
+        &context.fixture.db,
+        context.tenant_id,
+        context.destination_id,
+        None,
+        Some(receiving_barcode),
+        Some("Transfer receiving lane"),
+        "receiving",
+        true,
+        false,
+        true,
+    )
+    .await
+    .unwrap();
+
+    let created = create_order(&context, "TO-EXECUTION-100", "transfer-execution-create").await;
+    let app = routes::app(AppState::new(context.fixture.db.clone()));
+    let release = app
+        .clone()
+        .oneshot(command(
+            &context,
+            &format!("transfer-orders/{}/releases", created.transfer_order_id),
+            "transfer-execution-release",
+            &json!({"expected_revision": 1}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(release.status(), StatusCode::OK);
+
+    let readiness = app
+        .clone()
+        .oneshot(get(
+            &context,
+            &format!(
+                "transfer-orders/{}/execution-readiness",
+                created.transfer_order_id
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(readiness.status(), StatusCode::OK);
+    let readiness: TransferExecutionReadinessResponse = json_body(readiness).await;
+    assert_eq!(readiness.status, TransferOrderStatus::Released);
+    assert_eq!(readiness.dispatch_candidates.len(), 2);
+    assert!(readiness
+        .transit_locations
+        .iter()
+        .any(|location| location.location_id == transit_location_id));
+    assert!(readiness
+        .receiving_locations
+        .iter()
+        .any(|location| location.location_id == receiving_location_id));
+
+    let beans_line = created
+        .lines
+        .iter()
+        .find(|line| line.item_id == context.item_id)
+        .unwrap()
+        .line_id;
+    let towels_line = created
+        .lines
+        .iter()
+        .find(|line| line.item_id == context.second_item_id)
+        .unwrap()
+        .line_id;
+    let dispatch_body = json!({
+        "expected_revision": 2,
+        "transit_location_id": transit_location_id,
+        "transit_location_barcode": transit_barcode,
+        "lines": [
+            {"transfer_order_line_id": beans_line,
+             "source_inventory_balance_id": first_batch.balance_id,
+             "quantity": 12,"source_location_barcode": "TRANSFER-BEANS-A"},
+            {"transfer_order_line_id": towels_line,
+             "source_inventory_balance_id": towels.balance_id,
+             "quantity": 8,"source_location_barcode": "TRANSFER-TOWELS"}
+        ]
+    });
+    let dispatch_path = format!("transfer-orders/{}/dispatches", created.transfer_order_id);
+    let mut wrong_dispatch_body = dispatch_body.clone();
+    wrong_dispatch_body["transit_location_barcode"] = json!("WRONG-TRANSFER-LANE");
+    let wrong_dispatch = app
+        .clone()
+        .oneshot(command(
+            &context,
+            &dispatch_path,
+            "transfer-execution-wrong-dispatch-scan",
+            &wrong_dispatch_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong_dispatch.status(), StatusCode::BAD_REQUEST);
+    let mut effects_tx = tenant_tx(&context.fixture.db, context.tenant_id).await;
+    let effects_before_dispatch: (String, i64, i64, i64) = sqlx::query_as(
+        r#"SELECT transfer.status,transfer.revision,
+                  (SELECT COUNT(*) FROM transfer_order_dispatches WHERE transfer_order_id=transfer.id),
+                  (SELECT COUNT(*) FROM inventory_transactions
+                   WHERE reference_type='transfer_order' AND reference_id=transfer.id)
+           FROM transfer_orders transfer WHERE transfer.id=$1"#,
+    )
+    .bind(created.transfer_order_id)
+    .fetch_one(&mut *effects_tx)
+    .await
+    .unwrap();
+    assert_eq!(effects_before_dispatch, ("released".into(), 2, 0, 0));
+    effects_tx.commit().await.unwrap();
+    let dispatch = app
+        .clone()
+        .oneshot(command(
+            &context,
+            &dispatch_path,
+            "transfer-execution-dispatch",
+            &dispatch_body,
+        ))
+        .await
+        .unwrap();
+    if dispatch.status() != StatusCode::OK {
+        let status = dispatch.status();
+        let body = to_bytes(dispatch.into_body(), 512 * 1024).await.unwrap();
+        panic!(
+            "dispatch failed with {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let dispatched: DispatchTransferOrderResponse = json_body(dispatch).await;
+    assert_eq!(dispatched.status, TransferOrderStatus::InTransit);
+    assert_eq!(dispatched.revision.get(), 3);
+    assert_eq!(dispatched.lines.len(), 2);
+    assert_eq!(dispatched.total_dispatched_quantity, 20);
+    let replay = app
+        .clone()
+        .oneshot(command(
+            &context,
+            &dispatch_path,
+            "transfer-execution-dispatch",
+            &dispatch_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        json_body::<DispatchTransferOrderResponse>(replay).await,
+        dispatched
+    );
+
+    let receipt_body = json!({
+        "expected_revision": 3,
+        "destination_location_id": receiving_location_id,
+        "destination_location_barcode": receiving_barcode
+    });
+    let receipt_path = format!("transfer-orders/{}/receipts", created.transfer_order_id);
+    let mut wrong_receipt_body = receipt_body.clone();
+    wrong_receipt_body["destination_location_barcode"] = json!("WRONG-RECEIVING-LANE");
+    let wrong_receipt = app
+        .clone()
+        .oneshot(command(
+            &context,
+            &receipt_path,
+            "transfer-execution-wrong-receipt-scan",
+            &wrong_receipt_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong_receipt.status(), StatusCode::BAD_REQUEST);
+    let mut effects_tx = tenant_tx(&context.fixture.db, context.tenant_id).await;
+    let effects_before_receipt: (String, i64, i64, i64) = sqlx::query_as(
+        r#"SELECT transfer.status,transfer.revision,
+                  (SELECT COUNT(*) FROM transfer_order_receipts WHERE transfer_order_id=transfer.id),
+                  (SELECT COUNT(*) FROM inventory_transactions
+                   WHERE reference_type='transfer_order' AND reference_id=transfer.id)
+           FROM transfer_orders transfer WHERE transfer.id=$1"#,
+    )
+    .bind(created.transfer_order_id)
+    .fetch_one(&mut *effects_tx)
+    .await
+    .unwrap();
+    assert_eq!(effects_before_receipt, ("in_transit".into(), 3, 0, 1));
+    effects_tx.commit().await.unwrap();
+    let receipt = app
+        .clone()
+        .oneshot(command(
+            &context,
+            &receipt_path,
+            "transfer-execution-receipt",
+            &receipt_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(receipt.status(), StatusCode::OK);
+    let received: ReceiveTransferOrderResponse = json_body(receipt).await;
+    assert_eq!(received.status, TransferOrderStatus::Received);
+    assert_eq!(received.revision.get(), 4);
+    assert_eq!(received.lines.len(), 2);
+    assert_eq!(received.total_received_quantity, 20);
+
+    let detail = app
+        .oneshot(get(
+            &context,
+            &format!("transfer-orders/{}", created.transfer_order_id),
+        ))
+        .await
+        .unwrap();
+    let detail: TransferOrderDetailResponse = json_body(detail).await;
+    assert_eq!(detail.summary.status, TransferOrderStatus::Received);
+    assert_eq!(detail.summary.dispatch_id, Some(dispatched.dispatch_id));
+    assert_eq!(detail.summary.receipt_id, Some(received.receipt_id));
+    assert!(detail
+        .lines
+        .iter()
+        .all(|line| line.requested_quantity == line.dispatched_quantity
+            && line.requested_quantity == line.received_quantity));
+
+    let mut tx = tenant_tx(&context.fixture.db, context.tenant_id).await;
+    let transactions: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        r#"SELECT transaction.transaction_type,transaction.operation,
+                  COUNT(entry.id),COALESCE(SUM(entry.quantity_delta),0)::BIGINT
+           FROM inventory_transactions transaction
+           JOIN inventory_entries entry ON entry.tenant_id=transaction.tenant_id
+             AND entry.transaction_id=transaction.id
+           WHERE transaction.id=ANY($1)
+           GROUP BY transaction.id,transaction.transaction_type,transaction.operation
+           ORDER BY transaction.id"#,
+    )
+    .bind(vec![
+        dispatched.inventory_transaction_id,
+        received.inventory_transaction_id,
+    ])
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(
+        transactions,
+        vec![
+            (
+                "move".into(),
+                "inventory.transfer_order.dispatch.v1".into(),
+                4,
+                0
+            ),
+            (
+                "transfer".into(),
+                "inventory.transfer_order.receive.v1".into(),
+                4,
+                0
+            ),
+        ]
+    );
+    let source_on_hand: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(qty_on_hand),0)::BIGINT FROM inventory_balances WHERE id=ANY($1)",
+    )
+    .bind(vec![first_batch.balance_id, towels.balance_id])
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(source_on_hand, 0);
+    let transit_on_hand: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(qty_on_hand),0)::BIGINT FROM inventory_balances WHERE location_id=$1",
+    )
+    .bind(transit_location_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(transit_on_hand, 0);
+    let destination_on_hand: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(qty_on_hand),0)::BIGINT FROM inventory_balances WHERE location_id=$1",
+    )
+    .bind(receiving_location_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(destination_on_hand, 20);
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn dual_facility_scope_and_cursor_filters_fail_closed() {
     let context = fixture("transfer-scope@test.local").await;
     assert!(repo::tenants::update_user_access_scope(
@@ -373,8 +702,19 @@ async fn malformed_routes_and_schema_bypass_have_zero_effects() {
     assert!(!forged.to_string().is_empty());
     admin.close().await;
     let app_db = app_db_for(&context.fixture.db).await;
-    let grants:(bool,bool)=sqlx::query_as("SELECT has_table_privilege('wareboxes_app','transfer_order_releases','SELECT'),has_table_privilege('wareboxes_app','transfer_order_releases','UPDATE')").fetch_one(&app_db).await.unwrap();
-    assert_eq!(grants, (true, false));
+    let grants: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        r#"SELECT
+        has_table_privilege('wareboxes_app','transfer_order_releases','SELECT'),
+        has_table_privilege('wareboxes_app','transfer_order_releases','UPDATE'),
+        has_table_privilege('wareboxes_app','transfer_order_dispatches','INSERT'),
+        has_table_privilege('wareboxes_app','transfer_order_dispatches','UPDATE'),
+        has_table_privilege('wareboxes_app','transfer_order_receipts','INSERT'),
+        has_table_privilege('wareboxes_app','transfer_order_receipts','DELETE')"#,
+    )
+    .fetch_one(&app_db)
+    .await
+    .unwrap();
+    assert_eq!(grants, (true, false, true, false, true, false));
     app_db.close().await;
     assert_ne!(context.third_facility_id, context.destination_id);
 }

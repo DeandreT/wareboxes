@@ -1,3 +1,5 @@
+mod execution;
+
 use leptos::prelude::*;
 use wareboxes_api_contract::v1::{
     CancelTransferOrderRequest, CancelTransferOrderResponse, CreateTransferOrderLineRequest,
@@ -13,6 +15,8 @@ use crate::fulfillment_shared::{optional_text, parse_optional_timestamp};
 use crate::toast::use_toast_bus;
 use crate::view_model::format_quantity;
 use crate::workspace_layout::{PaneControls, SplitPaneHandle, SplitPaneState};
+
+use execution::TransferExecutionDialog;
 
 #[derive(Clone, Copy)]
 struct PageSignals {
@@ -61,6 +65,7 @@ pub(crate) fn TransferOrdersWorkspace(
     let detail_generation = RwSignal::new(0_u64);
     let create_open = RwSignal::new(false);
     let cancel_open = RwSignal::new(false);
+    let execution_open = RwSignal::new(false);
     let layout = SplitPaneState::new("transfer-orders", 690);
     let signals = PageSignals {
         page,
@@ -81,6 +86,7 @@ pub(crate) fn TransferOrdersWorkspace(
     let load_detail = move |id: i64| {
         create_open.set(false);
         cancel_open.set(false);
+        execution_open.set(false);
         layout.show_detail();
         selected_id.set(Some(id));
         request_detail(
@@ -143,7 +149,7 @@ pub(crate) fn TransferOrdersWorkspace(
                     <label><span class="sr-only">"Client"</span><select prop:value=move || owner.get() on:change=move |event| owner.set(event_target_value(&event))><option value="">"All clients"</option>{access.inventory_owners.clone().into_iter().map(|item|view!{<option value=item.id>{item.name}</option>}).collect_view()}</select></label>
                     <label><span class="sr-only">"Source"</span><select prop:value=move || source.get() on:change=move |event| source.set(event_target_value(&event))><option value="">"All origins"</option>{filter_facilities.into_iter().map(|item|view!{<option value=item.id>{item.name}</option>}).collect_view()}</select></label>
                     <label><span class="sr-only">"Destination"</span><select prop:value=move || destination.get() on:change=move |event| destination.set(event_target_value(&event))><option value="">"All destinations"</option>{destination_facilities.into_iter().map(|item|view!{<option value=item.id>{item.name}</option>}).collect_view()}</select></label>
-                    <label><span class="sr-only">"Status"</span><select prop:value=move || status.get() on:change=move |event| status.set(event_target_value(&event))><option value="">"All statuses"</option><option value="draft">"Draft"</option><option value="released">"Released"</option><option value="cancelled">"Cancelled"</option></select></label>
+                    <label><span class="sr-only">"Status"</span><select prop:value=move || status.get() on:change=move |event| status.set(event_target_value(&event))><option value="">"All statuses"</option><option value="draft">"Draft"</option><option value="released">"Released"</option><option value="in_transit">"In transit"</option><option value="received">"Received"</option><option value="cancelled">"Cancelled"</option></select></label>
                     <button class="button secondary-action compact" type="submit" disabled=move || loading.get()>"Apply"</button>
                     <button class="icon-button" type="button" title="Refresh transfers" aria-label="Refresh transfers" disabled=move || loading.get() on:click=refresh><Icon icon=UiIcon::Refresh/></button>
                     <button class="button primary-action compact" type="button" on:click=move |_| { create_open.set(true); layout.show_detail(); }><Icon icon=UiIcon::Add/><span>"New transfer"</span></button>
@@ -158,7 +164,7 @@ pub(crate) fn TransferOrdersWorkspace(
             <section class="data-section purchase-order-detail split-detail">
                 <Show when=move || create_open.get() fallback=move || view!{
                     <Show when=move || selected.get().is_some() fallback=move ||view!{<div class="detail-empty"><h2>"Transfer details"</h2><p>"Select a transfer to inspect route, demand, and lifecycle evidence."</p></div>}>
-                        {move ||selected.get().map(|detail|view!{<TransferDetail detail on_changed=changed on_cancel=Callback::new(move |_|cancel_open.set(true)) on_unauthorized/>})}
+                        {move ||selected.get().map(|detail|view!{<TransferDetail detail on_changed=changed on_cancel=Callback::new(move |_|cancel_open.set(true)) on_execute=Callback::new(move |_|execution_open.set(true)) on_unauthorized/>})}
                     </Show>
                 }><CreateTransferPanel access=access.clone() on_close=Callback::new(move |_|create_open.set(false)) on_created=changed on_unauthorized/></Show>
                 <Show when=move ||detail_loading.get()><div class="panel-loading">"Loading transfer..."</div></Show>
@@ -166,6 +172,7 @@ pub(crate) fn TransferOrdersWorkspace(
             </section>
         </div>
         <Show when=move ||cancel_open.get()&&selected.get().is_some()>{move ||selected.get().map(|detail|view!{<CancelTransferDialog detail on_close=Callback::new(move |_|cancel_open.set(false)) on_cancelled=cancelled on_unauthorized/>})}</Show>
+        <Show when=move ||execution_open.get()&&selected.get().is_some()>{move ||selected.get().map(|detail|view!{<TransferExecutionDialog detail on_close=Callback::new(move |_|execution_open.set(false)) on_changed=changed on_unauthorized/>})}</Show>
     }
 }
 
@@ -174,6 +181,7 @@ fn TransferDetail(
     detail: TransferOrderDetailResponse,
     on_changed: Callback<i64>,
     on_cancel: Callback<()>,
+    on_execute: Callback<()>,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
     let pending = RwSignal::new(false);
@@ -224,8 +232,8 @@ fn TransferDetail(
     let cancellation=summary.cancellation_reason.map(|reason|{let note=summary.cancellation_note.clone();view!{<section class="purchase-order-cancellation-evidence"><div><span>"Cancellation"</span><strong>{reason_label(reason)}</strong></div>{note.map(|value|view!{<p>{value}</p>})}<small>{summary.cancelled_at.as_deref().map(short_timestamp).unwrap_or_else(||"Time unavailable".into())}</small></section>}});
     view! {<article class="purchase-order-detail-content"><header class="detail-heading"><div><span class="eyebrow">{format!("Transfer #{} · revision {}",id,summary.revision.get())}</span><h2>{summary.number}</h2><p>{format!("{} → {}",summary.source_facility_name,summary.destination_facility_name)}</p></div><span class=status_class(summary.status)>{status_label(summary.status)}</span></header>
         <dl class="summary-grid"><div><dt>"Client"</dt><dd>{summary.inventory_owner_name}</dd></div><div><dt>"Requested"</dt><dd>{format_quantity(summary.total_requested_quantity)}</dd></div><div><dt>"Lines"</dt><dd>{summary.line_count}</dd></div><div><dt>"Expected departure"</dt><dd>{summary.expected_departure_at.as_deref().map(short_timestamp).unwrap_or_else(||"Not scheduled".into())}</dd></div><div><dt>"Expected arrival"</dt><dd>{summary.expected_arrival_at.as_deref().map(short_timestamp).unwrap_or_else(||"Not scheduled".into())}</dd></div><div><dt>"Created"</dt><dd>{short_timestamp(&summary.created_at)}</dd></div></dl>
-        {cancellation}<section><div class="detail-section-heading"><h3>"Transfer demand"</h3><span>{format!("{} lines",detail.lines.len())}</span></div><table class="dense-table"><thead><tr><th>"Item"</th><th>"UOM"</th><th class="numeric">"Requested"</th></tr></thead><tbody>{detail.lines.into_iter().map(|line|view!{<tr><td><strong>{line.item_description}</strong><small>{format!("Item #{}",line.item_id)}</small></td><td>{line.uom}</td><td class="numeric"><strong>{format_quantity(line.requested_quantity)}</strong></td></tr>}).collect_view()}</tbody></table></section>
-        <Show when=move ||error.get().is_some()>{move ||error.get().map(|message|view!{<p class="inline-command-error">{message}</p>})}</Show><footer class="detail-actions"><Show when=move ||can_cancel><button class="button danger-action compact" type="button" disabled=move ||pending.get() on:click=move |_|on_cancel.run(())>"Cancel transfer"</button></Show><Show when=move ||can_release><button class="button primary-action compact" type="button" disabled=move ||pending.get() on:click=release>{move ||if pending.get(){"Releasing..."}else{"Release transfer"}}</button></Show></footer>
+        {cancellation}<section><div class="detail-section-heading"><h3>"Transfer demand"</h3><span>{format!("{} lines",detail.lines.len())}</span></div><table class="dense-table"><thead><tr><th>"Item"</th><th>"UOM"</th><th class="numeric">"Requested"</th><th class="numeric">"Dispatched"</th><th class="numeric">"Received"</th></tr></thead><tbody>{detail.lines.into_iter().map(|line|view!{<tr><td><strong>{line.item_description}</strong><small>{format!("Item #{}",line.item_id)}</small></td><td>{line.uom}</td><td class="numeric"><strong>{format_quantity(line.requested_quantity)}</strong></td><td class="numeric">{format_quantity(line.dispatched_quantity)}</td><td class="numeric">{format_quantity(line.received_quantity)}</td></tr>}).collect_view()}</tbody></table></section>
+        <Show when=move ||error.get().is_some()>{move ||error.get().map(|message|view!{<p class="inline-command-error">{message}</p>})}</Show><footer class="detail-actions"><Show when=move ||can_cancel><button class="button danger-action compact" type="button" disabled=move ||pending.get() on:click=move |_|on_cancel.run(())>"Cancel transfer"</button></Show><Show when=move ||matches!(summary.status,TransferOrderStatus::Released|TransferOrderStatus::InTransit)><button class="button primary-action compact" type="button" disabled=move ||pending.get() on:click=move |_|on_execute.run(())>{if summary.status==TransferOrderStatus::Released{"Dispatch transfer"}else{"Receive transfer"}}</button></Show><Show when=move ||can_release><button class="button primary-action compact" type="button" disabled=move ||pending.get() on:click=release>{move ||if pending.get(){"Releasing..."}else{"Release transfer"}}</button></Show></footer>
     </article>}
 }
 
@@ -487,6 +495,8 @@ fn request_page(
         status: match signals.status.get_untracked().as_str() {
             "draft" => Some(TransferOrderStatus::Draft),
             "released" => Some(TransferOrderStatus::Released),
+            "in_transit" => Some(TransferOrderStatus::InTransit),
+            "received" => Some(TransferOrderStatus::Received),
             "cancelled" => Some(TransferOrderStatus::Cancelled),
             _ => None,
         },
@@ -579,6 +589,8 @@ fn status_label(value: TransferOrderStatus) -> &'static str {
     match value {
         TransferOrderStatus::Draft => "Draft",
         TransferOrderStatus::Released => "Released",
+        TransferOrderStatus::InTransit => "In transit",
+        TransferOrderStatus::Received => "Received",
         TransferOrderStatus::Cancelled => "Cancelled",
     }
 }
@@ -586,6 +598,8 @@ fn status_class(value: TransferOrderStatus) -> &'static str {
     match value {
         TransferOrderStatus::Draft => "status-chip info",
         TransferOrderStatus::Released => "status-chip success",
+        TransferOrderStatus::InTransit => "status-chip warning",
+        TransferOrderStatus::Received => "status-chip success",
         TransferOrderStatus::Cancelled => "status-chip neutral",
     }
 }

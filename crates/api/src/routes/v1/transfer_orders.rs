@@ -3,22 +3,28 @@ use axum::Json;
 use sha2::{Digest, Sha256};
 use wareboxes_api_contract::v1::{
     CancelTransferOrderRequest, CancelTransferOrderResponse, CreateTransferOrderRequest,
-    CreateTransferOrderResponse, CreatedTransferOrderLineResponse, OpaqueCursor,
-    ReleaseTransferOrderRequest, ReleaseTransferOrderResponse, Revision,
+    CreateTransferOrderResponse, CreatedTransferOrderLineResponse, DispatchTransferOrderRequest,
+    DispatchTransferOrderResponse, OpaqueCursor, ReceiveTransferOrderRequest,
+    ReceiveTransferOrderResponse, ReleaseTransferOrderRequest, ReleaseTransferOrderResponse,
+    Revision, TransferDispatchCandidateResponse, TransferDispatchLineResponse,
+    TransferExecutionLocationResponse, TransferExecutionReadinessResponse,
     TransferOrderCancellationReason as ApiReason, TransferOrderDetailResponse,
     TransferOrderLineResponse, TransferOrderPage as ApiPage, TransferOrderPageRequest,
-    TransferOrderStatus as ApiStatus, TransferOrderSummaryResponse,
+    TransferOrderStatus as ApiStatus, TransferOrderSummaryResponse, TransferReceiptLineResponse,
 };
 use wareboxes_application::transfer_order::{
     CancelTransferOrderCommand, CancelTransferOrderResult, CreateTransferOrderCommand,
-    CreateTransferOrderResult, ReleaseTransferOrderCommand, ReleaseTransferOrderResult,
+    CreateTransferOrderResult, DispatchTransferOrderCommand, DispatchTransferOrderResult,
+    ReceiveTransferOrderCommand, ReceiveTransferOrderResult, ReleaseTransferOrderCommand,
+    ReleaseTransferOrderResult, TransferExecutionLocationReadModel, TransferExecutionReadiness,
     TransferOrderPageFilter, TransferOrderReadModel,
 };
 use wareboxes_domain::{
-    CatalogItemId, FacilityId, InventoryOwnerId, NewTransferOrder,
-    TransferOrderCancellationDetails, TransferOrderCancellationNote,
-    TransferOrderCancellationReason, TransferOrderId, TransferOrderLineDefinition,
-    TransferOrderNumber, TransferOrderQuantity, TransferOrderRevision, TransferOrderStatus,
+    CatalogItemId, FacilityId, InventoryBalanceId, InventoryOwnerId, LocationId, NewTransferOrder,
+    TransferDispatchExecution, TransferDispatchSelection, TransferOrderCancellationDetails,
+    TransferOrderCancellationNote, TransferOrderCancellationReason, TransferOrderId,
+    TransferOrderLineDefinition, TransferOrderNumber, TransferOrderQuantity, TransferOrderRevision,
+    TransferOrderScanValue, TransferOrderStatus,
 };
 
 use super::error::{V1Error, V1Result};
@@ -123,6 +129,90 @@ pub async fn cancel(
     Ok(Json(map_cancel(result)?))
 }
 
+pub async fn dispatch(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(id): Path<i64>,
+    Json(body): Json<DispatchTransferOrderRequest>,
+) -> V1Result<Json<DispatchTransferOrderResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let execution = TransferDispatchExecution::new(
+        LocationId::new(body.transit_location_id).map_err(validation)?,
+        TransferOrderScanValue::new(body.transit_location_barcode).map_err(validation)?,
+        body.lines
+            .into_iter()
+            .map(|line| {
+                Ok(TransferDispatchSelection::new(
+                    wareboxes_domain::TransferOrderLineId::new(line.transfer_order_line_id)
+                        .map_err(validation)?,
+                    InventoryBalanceId::new(line.source_inventory_balance_id)
+                        .map_err(validation)?,
+                    TransferOrderQuantity::new(line.quantity).map_err(validation)?,
+                    TransferOrderScanValue::new(line.source_location_barcode)
+                        .map_err(validation)?,
+                ))
+            })
+            .collect::<V1Result<Vec<_>>>()?,
+    )
+    .map_err(validation)?;
+    let result = repo::transfer_order::dispatch(
+        &state.db,
+        &user.tenant,
+        &user.command_context(&idempotency_key),
+        &DispatchTransferOrderCommand {
+            transfer_order_id: TransferOrderId::new(id).map_err(validation)?,
+            expected_revision: domain_revision(body.expected_revision)?,
+            execution,
+        },
+    )
+    .await?;
+    Ok(Json(map_dispatch(result)?))
+}
+
+pub async fn receive(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    idempotency_key: IdempotencyKey,
+    Path(id): Path<i64>,
+    Json(body): Json<ReceiveTransferOrderRequest>,
+) -> V1Result<Json<ReceiveTransferOrderResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let result = repo::transfer_order::receive(
+        &state.db,
+        &user.tenant,
+        &user.command_context(&idempotency_key),
+        &ReceiveTransferOrderCommand {
+            transfer_order_id: TransferOrderId::new(id).map_err(validation)?,
+            expected_revision: domain_revision(body.expected_revision)?,
+            destination_location_id: LocationId::new(body.destination_location_id)
+                .map_err(validation)?,
+            observed_destination_location_barcode: TransferOrderScanValue::new(
+                body.destination_location_barcode,
+            )
+            .map_err(validation)?,
+        },
+    )
+    .await?;
+    Ok(Json(map_receive(result)?))
+}
+
+pub async fn execution_readiness(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(id): Path<i64>,
+) -> V1Result<Json<TransferExecutionReadinessResponse>> {
+    user.require_permission(&state.db, PERMISSION).await?;
+    let readiness = repo::transfer_order::execution_readiness(
+        &state.db,
+        &user.tenant,
+        TransferOrderId::new(id).map_err(validation)?,
+    )
+    .await?
+    .ok_or_else(|| V1Error::from(AppError::not_found("transfer order")))?;
+    Ok(Json(map_readiness(readiness)?))
+}
+
 pub async fn list(
     State(state): State<AppState>,
     user: CurrentTenant,
@@ -206,6 +296,8 @@ pub async fn get(
                 item_description: line.item_description,
                 uom: line.uom,
                 requested_quantity: line.requested_quantity,
+                dispatched_quantity: line.dispatched_quantity,
+                received_quantity: line.received_quantity,
             })
             .collect(),
     }))
@@ -258,6 +350,125 @@ fn map_cancel(value: CancelTransferOrderResult) -> V1Result<CancelTransferOrderR
     })
 }
 
+fn map_dispatch(value: DispatchTransferOrderResult) -> V1Result<DispatchTransferOrderResponse> {
+    Ok(DispatchTransferOrderResponse {
+        dispatch_id: value.dispatch_id.get(),
+        transfer_order_id: value.transfer_order_id.get(),
+        previous_status: map_status_to_api(value.previous_status),
+        status: map_status_to_api(value.status),
+        revision: api_revision(value.revision)?,
+        transit_location_id: value.transit_location_id.get(),
+        transit_location_barcode: value.transit_location_barcode,
+        inventory_transaction_id: value.inventory_transaction_id,
+        lines: value
+            .lines
+            .into_iter()
+            .map(|line| TransferDispatchLineResponse {
+                dispatch_line_id: line.dispatch_line_id.get(),
+                transfer_order_line_id: line.transfer_order_line_id.get(),
+                source_inventory_balance_id: line.source_inventory_balance_id.get(),
+                source_location_id: line.source_location_id.get(),
+                transit_inventory_balance_id: line.transit_inventory_balance_id.get(),
+                item_batch_id: line.item_batch_id.get(),
+                item_id: line.item_id.get(),
+                uom: line.uom,
+                lot: line.lot,
+                expiration: line.expiration.map(|value| value.to_rfc3339()),
+                serial: line.serial,
+                inventory_status: line.inventory_status,
+                quantity: line.quantity,
+            })
+            .collect(),
+        total_dispatched_quantity: value.total_dispatched_quantity,
+        dispatched_by: value.dispatched_by.get(),
+        dispatched_at: value.dispatched_at.to_rfc3339(),
+    })
+}
+
+fn map_receive(value: ReceiveTransferOrderResult) -> V1Result<ReceiveTransferOrderResponse> {
+    Ok(ReceiveTransferOrderResponse {
+        receipt_id: value.receipt_id.get(),
+        transfer_order_id: value.transfer_order_id.get(),
+        previous_status: map_status_to_api(value.previous_status),
+        status: map_status_to_api(value.status),
+        revision: api_revision(value.revision)?,
+        destination_location_id: value.destination_location_id.get(),
+        destination_location_barcode: value.destination_location_barcode,
+        inventory_transaction_id: value.inventory_transaction_id,
+        lines: value
+            .lines
+            .into_iter()
+            .map(|line| TransferReceiptLineResponse {
+                receipt_line_id: line.receipt_line_id.get(),
+                dispatch_line_id: line.dispatch_line_id.get(),
+                transfer_order_line_id: line.transfer_order_line_id.get(),
+                transit_inventory_balance_id: line.transit_inventory_balance_id.get(),
+                destination_inventory_balance_id: line.destination_inventory_balance_id.get(),
+                item_batch_id: line.item_batch_id.get(),
+                item_id: line.item_id.get(),
+                uom: line.uom,
+                lot: line.lot,
+                expiration: line.expiration.map(|value| value.to_rfc3339()),
+                serial: line.serial,
+                inventory_status: line.inventory_status,
+                quantity: line.quantity,
+            })
+            .collect(),
+        total_received_quantity: value.total_received_quantity,
+        received_by: value.received_by.get(),
+        received_at: value.received_at.to_rfc3339(),
+    })
+}
+
+fn map_readiness(
+    value: TransferExecutionReadiness,
+) -> V1Result<TransferExecutionReadinessResponse> {
+    Ok(TransferExecutionReadinessResponse {
+        transfer_order_id: value.transfer_order_id.get(),
+        revision: api_revision(value.revision)?,
+        status: map_status_to_api(value.status),
+        dispatch_candidates: value
+            .dispatch_candidates
+            .into_iter()
+            .map(|candidate| TransferDispatchCandidateResponse {
+                transfer_order_line_id: candidate.transfer_order_line_id.get(),
+                source_inventory_balance_id: candidate.source_inventory_balance_id.get(),
+                source_location_id: candidate.source_location_id.get(),
+                source_location_barcode: candidate.source_location_barcode,
+                source_location_name: candidate.source_location_name,
+                item_batch_id: candidate.item_batch_id.get(),
+                item_id: candidate.item_id.get(),
+                item_description: candidate.item_description,
+                uom: candidate.uom,
+                lot: candidate.lot,
+                expiration: candidate.expiration.map(|value| value.to_rfc3339()),
+                serial: candidate.serial,
+                free_quantity: candidate.free_quantity,
+            })
+            .collect(),
+        transit_locations: value
+            .transit_locations
+            .into_iter()
+            .map(map_execution_location)
+            .collect(),
+        receiving_locations: value
+            .receiving_locations
+            .into_iter()
+            .map(map_execution_location)
+            .collect(),
+    })
+}
+
+fn map_execution_location(
+    value: TransferExecutionLocationReadModel,
+) -> TransferExecutionLocationResponse {
+    TransferExecutionLocationResponse {
+        location_id: value.location_id.get(),
+        barcode: value.barcode,
+        name: value.name,
+    }
+}
+
 fn map_summary(value: TransferOrderReadModel) -> V1Result<TransferOrderSummaryResponse> {
     Ok(TransferOrderSummaryResponse {
         transfer_order_id: value.transfer_order_id.get(),
@@ -285,6 +496,24 @@ fn map_summary(value: TransferOrderReadModel) -> V1Result<TransferOrderSummaryRe
         cancellation_note: value.cancellation_note,
         cancelled_by: value.cancelled_by.map(wareboxes_domain::UserId::get),
         cancelled_at: value.cancelled_at.map(|value| value.to_rfc3339()),
+        dispatch_id: value
+            .dispatch_id
+            .map(wareboxes_domain::TransferOrderDispatchId::get),
+        dispatch_inventory_transaction_id: value.dispatch_inventory_transaction_id,
+        transit_location_id: value.transit_location_id.map(LocationId::get),
+        transit_location_barcode: value.transit_location_barcode,
+        dispatched_by: value.dispatched_by.map(wareboxes_domain::UserId::get),
+        dispatched_at: value.dispatched_at.map(|value| value.to_rfc3339()),
+        receipt_id: value
+            .receipt_id
+            .map(wareboxes_domain::TransferOrderReceiptId::get),
+        receipt_inventory_transaction_id: value.receipt_inventory_transaction_id,
+        destination_receiving_location_id: value
+            .destination_receiving_location_id
+            .map(LocationId::get),
+        destination_receiving_location_barcode: value.destination_receiving_location_barcode,
+        received_by: value.received_by.map(wareboxes_domain::UserId::get),
+        received_at: value.received_at.map(|value| value.to_rfc3339()),
     })
 }
 
@@ -292,6 +521,8 @@ fn map_status(value: ApiStatus) -> TransferOrderStatus {
     match value {
         ApiStatus::Draft => TransferOrderStatus::Draft,
         ApiStatus::Released => TransferOrderStatus::Released,
+        ApiStatus::InTransit => TransferOrderStatus::InTransit,
+        ApiStatus::Received => TransferOrderStatus::Received,
         ApiStatus::Cancelled => TransferOrderStatus::Cancelled,
     }
 }
@@ -299,6 +530,8 @@ fn map_status_to_api(value: TransferOrderStatus) -> ApiStatus {
     match value {
         TransferOrderStatus::Draft => ApiStatus::Draft,
         TransferOrderStatus::Released => ApiStatus::Released,
+        TransferOrderStatus::InTransit => ApiStatus::InTransit,
+        TransferOrderStatus::Received => ApiStatus::Received,
         TransferOrderStatus::Cancelled => ApiStatus::Cancelled,
     }
 }
@@ -382,6 +615,8 @@ fn cursor_fingerprint(request: &TransferOrderPageRequest) -> String {
         request.status.map_or("", |status| match status {
             ApiStatus::Draft => "draft",
             ApiStatus::Released => "released",
+            ApiStatus::InTransit => "in_transit",
+            ApiStatus::Received => "received",
             ApiStatus::Cancelled => "cancelled",
         }),
         request.search.as_deref().unwrap_or_default(),

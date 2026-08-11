@@ -230,11 +230,13 @@ pub use storage_zone::{
 };
 pub use tenant::TenantStatus;
 pub use transfer_order::{
-    cancel_transfer_order, release_transfer_order, NewTransferOrder,
+    cancel_transfer_order, dispatch_transfer_order, receive_transfer_order, release_transfer_order,
+    NewTransferOrder, TransferDispatchExecution, TransferDispatchSelection,
     TransferOrderCancellationDetails, TransferOrderCancellationNote,
     TransferOrderCancellationReason, TransferOrderError, TransferOrderLineDefinition,
-    TransferOrderNumber, TransferOrderQuantity, TransferOrderRevision, TransferOrderStatus,
-    MAX_TRANSFER_ORDER_CANCELLATION_NOTE_LENGTH, MAX_TRANSFER_ORDER_NUMBER_LENGTH,
+    TransferOrderNumber, TransferOrderQuantity, TransferOrderRevision, TransferOrderScanValue,
+    TransferOrderStatus, MAX_TRANSFER_ORDER_CANCELLATION_NOTE_LENGTH,
+    MAX_TRANSFER_ORDER_NUMBER_LENGTH,
 };
 
 use chrono::{DateTime, Utc};
@@ -370,6 +372,13 @@ positive_id!(
 positive_id!(TransferOrderId, "transfer order ID");
 positive_id!(TransferOrderLineId, "transfer order line ID");
 positive_id!(TransferOrderReleaseId, "transfer order release ID");
+positive_id!(TransferOrderDispatchId, "transfer order dispatch ID");
+positive_id!(
+    TransferOrderDispatchLineId,
+    "transfer order dispatch line ID"
+);
+positive_id!(TransferOrderReceiptId, "transfer order receipt ID");
+positive_id!(TransferOrderReceiptLineId, "transfer order receipt line ID");
 positive_id!(
     TransferOrderCancellationId,
     "transfer order cancellation ID"

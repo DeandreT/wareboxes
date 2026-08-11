@@ -626,6 +626,22 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'transfer_order_cancellations_tenant_isolation'
                 ),
                 (
+                    'transfer_order_dispatches',
+                    'transfer_order_dispatches_tenant_isolation'
+                ),
+                (
+                    'transfer_order_dispatch_lines',
+                    'transfer_order_dispatch_lines_tenant_isolation'
+                ),
+                (
+                    'transfer_order_receipts',
+                    'transfer_order_receipts_tenant_isolation'
+                ),
+                (
+                    'transfer_order_receipt_lines',
+                    'transfer_order_receipt_lines_tenant_isolation'
+                ),
+                (
                     'facilities',
                     'facilities_tenant_isolation'
                 ),

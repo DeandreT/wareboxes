@@ -1,5 +1,9 @@
 //! Interfacility transfer-order planning, lifecycle commands, and scoped reads.
 
+mod execution;
+
+pub use execution::{dispatch, execution_readiness, receive};
+
 use std::collections::HashMap;
 
 use sqlx::Row;
@@ -15,9 +19,9 @@ use wareboxes_application::CommandContext;
 use wareboxes_core::models::TenantAccess;
 use wareboxes_domain::{
     cancel_transfer_order, release_transfer_order, CatalogItemId, FacilityId, InventoryOwnerId,
-    Timestamp, TransferOrderCancellationId, TransferOrderCancellationReason, TransferOrderId,
-    TransferOrderLineId, TransferOrderReleaseId, TransferOrderRevision, TransferOrderStatus,
-    UserId,
+    Timestamp, TransferOrderCancellationId, TransferOrderCancellationReason,
+    TransferOrderDispatchId, TransferOrderId, TransferOrderLineId, TransferOrderReleaseId,
+    TransferOrderRevision, TransferOrderStatus, UserId,
 };
 use wareboxes_persistence_postgres::db::{bind_tenant_context, now_iso, Db};
 use wareboxes_persistence_postgres::idempotency::{insert_result, PostgresPreparedCommandExt};
@@ -386,10 +390,30 @@ pub async fn detail(
         return Ok(None);
     };
     let mut result = map_header(&row)?;
-    let rows = sqlx::query(r#"SELECT line.id,line.sequence,line.item_id,COALESCE(item.description,'Item #' || item.id) AS item_description,line.uom,line.requested_quantity
-        FROM transfer_order_lines line JOIN items item ON item.tenant_id=line.tenant_id AND item.id=line.item_id
-        WHERE line.tenant_id=$1 AND line.transfer_order_id=$2 ORDER BY line.sequence,line.id"#)
-        .bind(access.tenant_id.get()).bind(transfer_order_id.get()).fetch_all(&mut *tx).await?;
+    let rows = sqlx::query(
+        r#"SELECT line.id,line.sequence,line.item_id,
+               COALESCE(item.description,'Item #' || item.id) AS item_description,
+               line.uom,line.requested_quantity,
+               COALESCE(dispatched.quantity,0) AS dispatched_quantity,
+               COALESCE(received.quantity,0) AS received_quantity
+        FROM transfer_order_lines line
+        JOIN items item ON item.tenant_id=line.tenant_id AND item.id=line.item_id
+        LEFT JOIN (
+            SELECT tenant_id,transfer_order_line_id,SUM(quantity)::BIGINT AS quantity
+            FROM transfer_order_dispatch_lines GROUP BY tenant_id,transfer_order_line_id
+        ) dispatched ON dispatched.tenant_id=line.tenant_id
+          AND dispatched.transfer_order_line_id=line.id
+        LEFT JOIN (
+            SELECT tenant_id,transfer_order_line_id,SUM(quantity)::BIGINT AS quantity
+            FROM transfer_order_receipt_lines GROUP BY tenant_id,transfer_order_line_id
+        ) received ON received.tenant_id=line.tenant_id
+          AND received.transfer_order_line_id=line.id
+        WHERE line.tenant_id=$1 AND line.transfer_order_id=$2 ORDER BY line.sequence,line.id"#,
+    )
+    .bind(access.tenant_id.get())
+    .bind(transfer_order_id.get())
+    .fetch_all(&mut *tx)
+    .await?;
     result.lines = rows
         .iter()
         .map(|line| {
@@ -400,6 +424,8 @@ pub async fn detail(
                 item_description: line.try_get("item_description")?,
                 uom: line.try_get("uom")?,
                 requested_quantity: line.try_get("requested_quantity")?,
+                dispatched_quantity: line.try_get("dispatched_quantity")?,
+                received_quantity: line.try_get("received_quantity")?,
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
@@ -415,12 +441,21 @@ fn header_query() -> String {
        transfer.status,transfer.revision,transfer.line_count,transfer.total_requested_quantity,
        transfer.created_by_user_id,transfer.created_at,transfer.released_by_user_id,transfer.released_at,
        cancellation.id AS cancellation_id,cancellation.reason_code AS cancellation_reason,
-       cancellation.note AS cancellation_note,cancellation.cancelled_by_user_id,cancellation.cancelled_at
+       cancellation.note AS cancellation_note,cancellation.cancelled_by_user_id,cancellation.cancelled_at,
+       dispatch.id AS dispatch_id,dispatch.inventory_transaction_id AS dispatch_inventory_transaction_id,
+       dispatch.transit_location_id,dispatch.transit_location_barcode,
+       transfer.dispatched_by_user_id,transfer.dispatched_at,
+       receipt.id AS receipt_id,receipt.inventory_transaction_id AS receipt_inventory_transaction_id,
+       receipt.destination_location_id AS destination_receiving_location_id,
+       receipt.destination_location_barcode AS destination_receiving_location_barcode,
+       transfer.received_by_user_id,transfer.received_at
        FROM transfer_orders transfer
        JOIN inventory_owners owner ON owner.tenant_id=transfer.tenant_id AND owner.id=transfer.inventory_owner_id
        JOIN facilities source ON source.tenant_id=transfer.tenant_id AND source.id=transfer.source_facility_id
        JOIN facilities destination ON destination.tenant_id=transfer.tenant_id AND destination.id=transfer.destination_facility_id
        LEFT JOIN transfer_order_cancellations cancellation ON cancellation.tenant_id=transfer.tenant_id AND cancellation.transfer_order_id=transfer.id
+       LEFT JOIN transfer_order_dispatches dispatch ON dispatch.tenant_id=transfer.tenant_id AND dispatch.transfer_order_id=transfer.id
+       LEFT JOIN transfer_order_receipts receipt ON receipt.tenant_id=transfer.tenant_id AND receipt.transfer_order_id=transfer.id
        WHERE transfer.tenant_id=$1 AND ($2 OR (transfer.source_facility_id=ANY($3) AND transfer.destination_facility_id=ANY($3)))
        AND ($4 OR transfer.inventory_owner_id=ANY($5))
        AND ($6::BIGINT IS NULL OR transfer.source_facility_id=$6)
@@ -604,6 +639,43 @@ fn map_header(row: &sqlx::postgres::PgRow) -> AppResult<TransferOrderReadModel> 
             .transpose()
             .map_err(internal)?,
         cancelled_at: row.try_get("cancelled_at")?,
+        dispatch_id: row
+            .try_get::<Option<i64>, _>("dispatch_id")?
+            .map(TransferOrderDispatchId::new)
+            .transpose()
+            .map_err(internal)?,
+        dispatch_inventory_transaction_id: row.try_get("dispatch_inventory_transaction_id")?,
+        transit_location_id: row
+            .try_get::<Option<i64>, _>("transit_location_id")?
+            .map(wareboxes_domain::LocationId::new)
+            .transpose()
+            .map_err(internal)?,
+        transit_location_barcode: row.try_get("transit_location_barcode")?,
+        dispatched_by: row
+            .try_get::<Option<i64>, _>("dispatched_by_user_id")?
+            .map(UserId::new)
+            .transpose()
+            .map_err(internal)?,
+        dispatched_at: row.try_get("dispatched_at")?,
+        receipt_id: row
+            .try_get::<Option<i64>, _>("receipt_id")?
+            .map(wareboxes_domain::TransferOrderReceiptId::new)
+            .transpose()
+            .map_err(internal)?,
+        receipt_inventory_transaction_id: row.try_get("receipt_inventory_transaction_id")?,
+        destination_receiving_location_id: row
+            .try_get::<Option<i64>, _>("destination_receiving_location_id")?
+            .map(wareboxes_domain::LocationId::new)
+            .transpose()
+            .map_err(internal)?,
+        destination_receiving_location_barcode: row
+            .try_get("destination_receiving_location_barcode")?,
+        received_by: row
+            .try_get::<Option<i64>, _>("received_by_user_id")?
+            .map(UserId::new)
+            .transpose()
+            .map_err(internal)?,
+        received_at: row.try_get("received_at")?,
         lines: Vec::new(),
     })
 }

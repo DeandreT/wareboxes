@@ -31,3 +31,27 @@
 .transfer-order-workspace .purchase-order-toolbar select {
   max-width: 145px;
 }
+
+.transfer-execution-dialog {
+  width: min(820px, calc(100vw - 32px));
+}
+
+.transfer-execution-dialog section {
+  min-width: 0;
+}
+
+.transfer-execution-dialog .table-scroll {
+  max-height: min(360px, 42vh);
+  border: 1px solid var(--line);
+}
+
+.transfer-execution-dialog td strong,
+.transfer-execution-dialog td small {
+  display: block;
+}
+
+.transfer-execution-unavailable {
+  margin: 0 0 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+}

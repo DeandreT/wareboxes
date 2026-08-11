@@ -7,10 +7,10 @@ use wareboxes_api_contract::v1::{
     CancelInboundAsnResponse, CancelPurchaseOrderResponse, CancelTransferOrderResponse,
     ConfigureReplenishmentPolicyResponse, CreateCycleCountTaskResponse,
     CreatePurchaseOrderAsnResponse, CreatePurchaseOrderResponse, CreatePutawayTaskResponse,
-    CreateTransferOrderResponse, IntegrationOrderIntakeResponse,
+    CreateTransferOrderResponse, DispatchTransferOrderResponse, IntegrationOrderIntakeResponse,
     IntegrationOrderOwnerMappingResponse, PickWaveResponse, PlaceInventoryHoldResponse,
     PlanInboundAsnLoadResponse, PlanOrderAllocationResponse, PlanReplenishmentResponse,
-    ReleasePurchaseOrderResponse, ReleaseTransferOrderResponse,
+    ReceiveTransferOrderResponse, ReleasePurchaseOrderResponse, ReleaseTransferOrderResponse,
 };
 
 use crate::support::SeedContext;
@@ -128,7 +128,226 @@ async fn seed_transfer_orders(context: &SeedContext) -> anyhow::Result<()> {
                 .await?;
         }
     }
-    println!("seeded draft, released, and cancelled interfacility transfer orders");
+    let executable: Vec<(i64, i64, String, i64)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT ON (balance.item_id)
+               balance.item_id,balance.id,location.barcode,
+               balance.qty_on_hand-balance.qty_reserved-balance.qty_held AS free_quantity
+        FROM inventory_balances balance
+        INNER JOIN locations location
+          ON location.tenant_id=balance.tenant_id AND location.id=balance.location_id
+        INNER JOIN inventory_owner_items owner_item
+          ON owner_item.tenant_id=balance.tenant_id
+         AND owner_item.inventory_owner_id=balance.inventory_owner_id
+         AND owner_item.item_id=balance.item_id AND owner_item.deleted IS NULL
+        INNER JOIN item_batches batch
+          ON batch.tenant_id=balance.tenant_id AND batch.id=balance.item_batch_id
+        WHERE balance.tenant_id=$1 AND balance.inventory_owner_id=$2
+          AND balance.facility_id=$3 AND balance.deleted IS NULL
+          AND balance.license_plate_id IS NULL AND balance.status='available'
+          AND balance.qty_on_hand-balance.qty_reserved-balance.qty_held>0
+          AND location.active AND location.deleted IS NULL AND location.pickable
+          AND location.barcode IS NOT NULL AND batch.deleted IS NULL
+          AND (batch.expiration IS NULL OR batch.expiration>statement_timestamp())
+        ORDER BY balance.item_id,batch.expiration NULLS LAST,batch.created,balance.id
+        LIMIT 3
+        "#,
+    )
+    .bind(context.tenant_id.get())
+    .bind(context.inventory_owner_id)
+    .bind(context.facility_id)
+    .fetch_all(&context.admin)
+    .await?;
+    if executable.len() < 3 {
+        bail!("transfer demos require three loose available source items");
+    }
+    let transit_location_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM locations WHERE tenant_id=$1 AND facility_id=$2 AND barcode='SEED-TRANSFER-OUT-01' AND deleted IS NULL",
+    )
+    .bind(context.tenant_id.get())
+    .bind(context.facility_id)
+    .fetch_one(&context.admin)
+    .await?;
+    let destination_location_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM locations WHERE tenant_id=$1 AND facility_id=$2 AND barcode='SEED-CEDAR-RECV-01' AND deleted IS NULL",
+    )
+    .bind(context.tenant_id.get())
+    .bind(destination_id)
+    .fetch_one(&context.admin)
+    .await?;
+    for (index, candidate) in executable.iter().take(2).enumerate() {
+        seed_executed_transfer(
+            context,
+            destination_id,
+            transit_location_id,
+            destination_location_id,
+            candidate,
+            5 + i64::try_from(index)?,
+            index == 1,
+        )
+        .await?;
+    }
+    seed_released_executable_transfer(context, destination_id, &executable[2], 7).await?;
+    println!("seeded draft, released, cancelled, in-transit, and received transfer orders");
+    Ok(())
+}
+
+async fn seed_released_executable_transfer(
+    context: &SeedContext,
+    destination_id: i64,
+    candidate: &(i64, i64, String, i64),
+    sequence: i64,
+) -> anyhow::Result<()> {
+    let number = format!("WB-DEMO-TO-{sequence:04}");
+    let existing: Option<(i64, String, i64)> = sqlx::query_as(
+        "SELECT id,status,revision FROM transfer_orders WHERE tenant_id=$1 AND number=$2",
+    )
+    .bind(context.tenant_id.get())
+    .bind(&number)
+    .fetch_optional(&context.admin)
+    .await?;
+    let (id, status, revision) = match existing {
+        Some(value) => value,
+        None => {
+            let created: CreateTransferOrderResponse = context
+                .command(
+                    Method::POST,
+                    "/api/v1/transfer-orders",
+                    &format!("demo-transfer-order-{sequence}"),
+                    json!({
+                        "inventory_owner_id": context.inventory_owner_id,
+                        "source_facility_id": context.facility_id,
+                        "destination_facility_id": destination_id,
+                        "number": number,
+                        "expected_departure_at": "2027-08-27T08:00:00Z",
+                        "expected_arrival_at": "2027-08-27T16:00:00Z",
+                        "lines": [{
+                            "item_id": candidate.0,
+                            "requested_quantity": candidate.3.min(8)
+                        }]
+                    }),
+                )
+                .await?;
+            (
+                created.transfer_order_id,
+                "draft".into(),
+                created.revision.get(),
+            )
+        }
+    };
+    if status == "draft" {
+        let _: ReleaseTransferOrderResponse = context
+            .command(
+                Method::POST,
+                &format!("/api/v1/transfer-orders/{id}/releases"),
+                &format!("demo-transfer-order-release-{sequence}"),
+                json!({"expected_revision": revision}),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_executed_transfer(
+    context: &SeedContext,
+    destination_id: i64,
+    transit_location_id: i64,
+    destination_location_id: i64,
+    candidate: &(i64, i64, String, i64),
+    sequence: i64,
+    receive: bool,
+) -> anyhow::Result<()> {
+    let number = format!("WB-DEMO-TO-{sequence:04}");
+    let requested_quantity = candidate.3.min(8);
+    let existing: Option<(i64, String, i64)> = sqlx::query_as(
+        "SELECT id,status,revision FROM transfer_orders WHERE tenant_id=$1 AND number=$2",
+    )
+    .bind(context.tenant_id.get())
+    .bind(&number)
+    .fetch_optional(&context.admin)
+    .await?;
+    let (id, mut status, mut revision) = match existing {
+        Some(value) => value,
+        None => {
+            let created: CreateTransferOrderResponse = context
+                .command(
+                    Method::POST,
+                    "/api/v1/transfer-orders",
+                    &format!("demo-transfer-order-{sequence}"),
+                    json!({
+                        "inventory_owner_id": context.inventory_owner_id,
+                        "source_facility_id": context.facility_id,
+                        "destination_facility_id": destination_id,
+                        "number": number,
+                        "expected_departure_at": "2027-08-26T08:00:00Z",
+                        "expected_arrival_at": "2027-08-26T16:00:00Z",
+                        "lines": [{"item_id": candidate.0, "requested_quantity": requested_quantity}]
+                    }),
+                )
+                .await?;
+            (
+                created.transfer_order_id,
+                "draft".to_owned(),
+                created.revision.get(),
+            )
+        }
+    };
+    if status == "draft" {
+        let released: ReleaseTransferOrderResponse = context
+            .command(
+                Method::POST,
+                &format!("/api/v1/transfer-orders/{id}/releases"),
+                &format!("demo-transfer-order-release-{sequence}"),
+                json!({"expected_revision": revision}),
+            )
+            .await?;
+        status = "released".into();
+        revision = released.revision.get();
+    }
+    if status == "released" {
+        let line_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM transfer_order_lines WHERE tenant_id=$1 AND transfer_order_id=$2",
+        )
+        .bind(context.tenant_id.get())
+        .bind(id)
+        .fetch_one(&context.admin)
+        .await?;
+        let dispatched: DispatchTransferOrderResponse = context
+            .command(
+                Method::POST,
+                &format!("/api/v1/transfer-orders/{id}/dispatches"),
+                &format!("demo-transfer-order-dispatch-{sequence}"),
+                json!({
+                    "expected_revision": revision,
+                    "transit_location_id": transit_location_id,
+                    "transit_location_barcode": "SEED-TRANSFER-OUT-01",
+                    "lines": [{
+                        "transfer_order_line_id": line_id,
+                        "source_inventory_balance_id": candidate.1,
+                        "quantity": requested_quantity,
+                        "source_location_barcode": candidate.2
+                    }]
+                }),
+            )
+            .await?;
+        status = "in_transit".into();
+        revision = dispatched.revision.get();
+    }
+    if receive && status == "in_transit" {
+        let _: ReceiveTransferOrderResponse = context
+            .command(
+                Method::POST,
+                &format!("/api/v1/transfer-orders/{id}/receipts"),
+                &format!("demo-transfer-order-receipt-{sequence}"),
+                json!({
+                    "expected_revision": revision,
+                    "destination_location_id": destination_location_id,
+                    "destination_location_barcode": "SEED-CEDAR-RECV-01"
+                }),
+            )
+            .await?;
+    }
     Ok(())
 }
 
