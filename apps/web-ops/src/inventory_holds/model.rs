@@ -1,7 +1,5 @@
 use wareboxes_api_contract::v1::{InventoryBalanceResponse, InventoryHoldResponse};
 
-use crate::sorting::{SortDirection, SortSpec};
-
 use super::reason_label;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -37,78 +35,6 @@ pub(super) fn balance_item_detail(balance: &InventoryBalanceResponse) -> Option<
         .primary_sku
         .as_ref()
         .and(balance.item_description.clone())
-}
-
-pub(super) fn sort_positions(
-    balances: &mut [InventoryBalanceResponse],
-    spec: SortSpec<PositionSort>,
-) {
-    balances.sort_by(|left, right| {
-        let ordering = match spec.key {
-            PositionSort::Item => item_label(left)
-                .to_ascii_lowercase()
-                .cmp(&item_label(right).to_ascii_lowercase()),
-            PositionSort::Client => left
-                .inventory_owner_name
-                .to_ascii_lowercase()
-                .cmp(&right.inventory_owner_name.to_ascii_lowercase()),
-            PositionSort::Facility => facility_label(left)
-                .to_ascii_lowercase()
-                .cmp(&facility_label(right).to_ascii_lowercase())
-                .then_with(|| {
-                    location_label(left)
-                        .to_ascii_lowercase()
-                        .cmp(&location_label(right).to_ascii_lowercase())
-                })
-                .then_with(|| {
-                    item_label(left)
-                        .to_ascii_lowercase()
-                        .cmp(&item_label(right).to_ascii_lowercase())
-                }),
-            PositionSort::Location => location_label(left)
-                .to_ascii_lowercase()
-                .cmp(&location_label(right).to_ascii_lowercase()),
-            PositionSort::Available => left.quantity.available.cmp(&right.quantity.available),
-        }
-        .then_with(|| left.id.cmp(&right.id));
-        if spec.direction == SortDirection::Ascending {
-            ordering
-        } else {
-            ordering.reverse()
-        }
-    });
-}
-
-pub(super) fn sort_holds(holds: &mut [InventoryHoldResponse], spec: SortSpec<HoldSort>) {
-    holds.sort_by(|left, right| {
-        let ordering = match spec.key {
-            HoldSort::Id => left.id.cmp(&right.id),
-            HoldSort::Item => hold_item_label(left)
-                .to_ascii_lowercase()
-                .cmp(&hold_item_label(right).to_ascii_lowercase()),
-            HoldSort::Client => left
-                .inventory_owner_name
-                .to_ascii_lowercase()
-                .cmp(&right.inventory_owner_name.to_ascii_lowercase()),
-            HoldSort::Position => hold_facility_label(left)
-                .to_ascii_lowercase()
-                .cmp(&hold_facility_label(right).to_ascii_lowercase())
-                .then_with(|| {
-                    hold_location_label(left)
-                        .to_ascii_lowercase()
-                        .cmp(&hold_location_label(right).to_ascii_lowercase())
-                }),
-            HoldSort::Reason => reason_label(left.reason).cmp(reason_label(right.reason)),
-            HoldSort::Created => left.created_at.cmp(&right.created_at),
-            HoldSort::Quantity => left.quantity.cmp(&right.quantity),
-        }
-        .then_with(|| left.id.cmp(&right.id));
-        if spec.direction == SortDirection::Ascending {
-            ordering
-        } else {
-            ordering.reverse()
-        }
-    });
 }
 
 pub(super) fn facility_label(balance: &InventoryBalanceResponse) -> String {

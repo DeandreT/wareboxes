@@ -2,12 +2,15 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use wareboxes_api_contract::v1::{
     InventoryBalanceStatus, InventoryHoldPage, InventoryHoldPageRequest, InventoryHoldReason,
-    InventoryHoldResponse, InventoryHoldStatus, OpaqueCursor, PlaceInventoryHoldRequest,
-    PlaceInventoryHoldResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
+    InventoryHoldResponse, InventoryHoldSort, InventoryHoldStatus, InventorySortDirection,
+    OpaqueCursor, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
+    ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
 };
 use wareboxes_application::inventory::{
+    InventoryBalanceSortDirection as ApplicationSortDirection,
     InventoryBalanceStatus as ApplicationInventoryBalanceStatus, InventoryHoldPageFilter,
     InventoryHoldReadModel, InventoryHoldReason as ApplicationInventoryHoldReason,
+    InventoryHoldSort as ApplicationInventoryHoldSort,
     InventoryHoldStatus as ApplicationInventoryHoldStatus,
 };
 use wareboxes_core::models::InventoryHoldReason as CoreHoldReason;
@@ -20,7 +23,7 @@ use crate::request_context::IdempotencyKey;
 use crate::state::AppState;
 
 const PERMISSION: &str = "wms";
-const CURSOR_PREFIX: &str = "ih1.";
+const CURSOR_PREFIX: &str = "ih2.";
 const MAX_NOTE_LENGTH: usize = 1_000;
 const MAX_REFERENCE_TYPE_LENGTH: usize = 100;
 
@@ -30,22 +33,28 @@ pub async fn list(
     Query(query): Query<InventoryHoldPageRequest>,
 ) -> V1Result<Json<InventoryHoldPage>> {
     user.require_permission(&state.db, PERMISSION).await?;
-    let before_id = query.cursor.as_ref().map(decode_cursor).transpose()?;
+    let offset = decode_bound_cursor(&query)?;
     let page = wareboxes_persistence_postgres::inventory_holds::get_inventory_hold_page(
         &state.db,
         user.tenant.tenant_id,
         &user.tenant.site_scope,
         &user.tenant.owner_scope,
         InventoryHoldPageFilter {
-            before_id,
+            offset,
             limit: query.limit.get(),
             status: query.status.map(map_status_filter),
+            query: query.query.as_ref().map(|value| value.as_str().to_owned()),
+            sort: map_sort(query.sort),
+            direction: map_direction(query.direction),
         },
     )
     .await
     .map_err(AppError::from)?;
     let items = page.items.into_iter().map(map_response).collect();
-    let next_cursor = page.next_before_id.map(encode_cursor).transpose()?;
+    let next_cursor = page
+        .next_offset
+        .map(|next| encode_cursor(&query, next))
+        .transpose()?;
 
     Ok(Json(InventoryHoldPage::new(items, next_cursor)))
 }
@@ -224,23 +233,95 @@ fn map_status_filter(status: InventoryHoldStatus) -> ApplicationInventoryHoldSta
     }
 }
 
-fn decode_cursor(cursor: &OpaqueCursor) -> V1Result<i64> {
+fn decode_bound_cursor(query: &InventoryHoldPageRequest) -> V1Result<u64> {
+    let Some(cursor) = query.cursor.as_ref() else {
+        return Ok(0);
+    };
     let encoded = cursor
         .as_str()
         .strip_prefix(CURSOR_PREFIX)
-        .filter(|encoded| encoded.len() == 16)
         .ok_or_else(|| V1Error::invalid_cursor_for("inventory hold"))?;
-    let id = i64::from_str_radix(encoded, 16)
-        .map_err(|_| V1Error::invalid_cursor_for("inventory hold"))?;
-    if id <= 0 {
+    let (filter, offset) = encoded
+        .rsplit_once('.')
+        .ok_or_else(|| V1Error::invalid_cursor_for("inventory hold"))?;
+    if filter != cursor_filter(query) || offset.len() != 16 {
         return Err(V1Error::invalid_cursor_for("inventory hold"));
     }
-    Ok(id)
+    u64::from_str_radix(offset, 16).map_err(|_| V1Error::invalid_cursor_for("inventory hold"))
 }
 
-fn encode_cursor(id: i64) -> V1Result<OpaqueCursor> {
-    OpaqueCursor::new(format!("{CURSOR_PREFIX}{id:016x}"))
-        .map_err(|_| V1Error::internal("generated an invalid inventory hold cursor"))
+fn encode_cursor(query: &InventoryHoldPageRequest, offset: u64) -> V1Result<OpaqueCursor> {
+    OpaqueCursor::new(format!(
+        "{CURSOR_PREFIX}{}.{offset:016x}",
+        cursor_filter(query)
+    ))
+    .map_err(|_| V1Error::internal("generated an invalid inventory hold cursor"))
+}
+
+fn cursor_filter(query: &InventoryHoldPageRequest) -> String {
+    let search = query.query.as_ref().map_or_else(
+        || "-".to_owned(),
+        |value| {
+            value
+                .as_str()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        },
+    );
+    format!(
+        "{}.{}.{}.{}",
+        query.status.map_or("all", hold_status_key),
+        hold_sort_key(query.sort),
+        direction_key(query.direction),
+        search
+    )
+}
+
+fn map_sort(value: InventoryHoldSort) -> ApplicationInventoryHoldSort {
+    match value {
+        InventoryHoldSort::Id => ApplicationInventoryHoldSort::Id,
+        InventoryHoldSort::Item => ApplicationInventoryHoldSort::Item,
+        InventoryHoldSort::Client => ApplicationInventoryHoldSort::Client,
+        InventoryHoldSort::Position => ApplicationInventoryHoldSort::Position,
+        InventoryHoldSort::Reason => ApplicationInventoryHoldSort::Reason,
+        InventoryHoldSort::Created => ApplicationInventoryHoldSort::Created,
+        InventoryHoldSort::Quantity => ApplicationInventoryHoldSort::Quantity,
+    }
+}
+
+fn map_direction(value: InventorySortDirection) -> ApplicationSortDirection {
+    match value {
+        InventorySortDirection::Ascending => ApplicationSortDirection::Ascending,
+        InventorySortDirection::Descending => ApplicationSortDirection::Descending,
+    }
+}
+
+fn hold_status_key(value: InventoryHoldStatus) -> &'static str {
+    match value {
+        InventoryHoldStatus::Active => "active",
+        InventoryHoldStatus::Released => "released",
+    }
+}
+
+fn hold_sort_key(value: InventoryHoldSort) -> &'static str {
+    match value {
+        InventoryHoldSort::Id => "id",
+        InventoryHoldSort::Item => "item",
+        InventoryHoldSort::Client => "client",
+        InventoryHoldSort::Position => "position",
+        InventoryHoldSort::Reason => "reason",
+        InventoryHoldSort::Created => "created",
+        InventoryHoldSort::Quantity => "quantity",
+    }
+}
+
+fn direction_key(value: InventorySortDirection) -> &'static str {
+    match value {
+        InventorySortDirection::Ascending => "asc",
+        InventorySortDirection::Descending => "desc",
+    }
 }
 
 fn require_positive(value: i64, label: &str) -> V1Result<()> {

@@ -143,7 +143,7 @@ pub use inventory::{
 };
 pub use inventory_hold::{
     InventoryHoldPage, InventoryHoldPageRequest, InventoryHoldReason, InventoryHoldResponse,
-    InventoryHoldStatus, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
+    InventoryHoldSort, InventoryHoldStatus, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
     ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
 };
 pub use inventory_integrity::{

@@ -702,7 +702,13 @@ async fn load_workspace(
             data.balance_next_cursor = page.next_cursor;
         }
         Section::InventoryHolds if has_permission(session, "wms") => {
-            let balance_page = api::balances(None).await?;
+            let balance_page = api::sorted_balances(
+                None,
+                wareboxes_api_contract::v1::InventoryBalanceSort::Facility,
+                wareboxes_api_contract::v1::InventorySortDirection::Ascending,
+                None,
+            )
+            .await?;
             let hold_page = api::holds(InventoryHoldStatus::Active, None).await?;
             data.balances = balance_page.items;
             data.balance_next_cursor = balance_page.next_cursor;

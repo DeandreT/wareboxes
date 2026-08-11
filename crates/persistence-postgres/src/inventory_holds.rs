@@ -4,7 +4,8 @@ use sqlx::postgres::PgRow;
 use sqlx::Row;
 use wareboxes_application::inventory::{
     InventoryBalanceStatus, InventoryHoldPage, InventoryHoldPageFilter, InventoryHoldQuantity,
-    InventoryHoldReadModel, InventoryHoldReason, InventoryHoldStatus, MAX_INVENTORY_HOLD_PAGE_SIZE,
+    InventoryHoldReadModel, InventoryHoldReason, InventoryHoldSort, InventoryHoldStatus,
+    MAX_INVENTORY_BALANCE_QUERY_LENGTH, MAX_INVENTORY_HOLD_PAGE_SIZE,
 };
 use wareboxes_domain::{FacilityId, InventoryOwnerId, OwnerScope, SiteScope, TenantId};
 
@@ -18,7 +19,7 @@ pub async fn get_inventory_hold_page(
     owner_scope: &OwnerScope,
     filter: InventoryHoldPageFilter,
 ) -> PersistenceResult<InventoryHoldPage> {
-    validate_page_filter(filter)?;
+    validate_page_filter(&filter)?;
     let facility_ids = site_scope
         .facility_ids
         .iter()
@@ -31,6 +32,14 @@ pub async fn get_inventory_hold_page(
         .collect::<Vec<_>>();
     let status = filter.status.map(InventoryHoldStatus::as_str);
     let fetch_limit = i64::from(filter.limit) + 1;
+    let offset = i64::try_from(filter.offset)
+        .map_err(|_| PersistenceError::invalid_input("inventory hold cursor is out of range"))?;
+    let query_id = filter
+        .query
+        .as_deref()
+        .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0);
     let mut tx = begin_tenant_transaction(db, tenant_id).await?;
     let rows = sqlx::query(
         r#"
@@ -71,21 +80,56 @@ pub async fn get_inventory_hold_page(
            AND plate.facility_id = hold.facility_id
            AND plate.id = hold.license_plate_id
         WHERE hold.tenant_id = $1
-          AND ($2::BIGINT IS NULL OR hold.id < $2)
-          AND ($3::TEXT IS NULL OR hold.status = $3)
-          AND ($4 OR hold.facility_id = ANY($5))
-          AND ($6 OR hold.inventory_owner_id = ANY($7))
-        ORDER BY hold.id DESC
-        LIMIT $8
+          AND ($2::TEXT IS NULL OR hold.status = $2)
+          AND ($3 OR hold.facility_id = ANY($4))
+          AND ($5 OR hold.inventory_owner_id = ANY($6))
+          AND (
+              $7::TEXT IS NULL
+              OR STRPOS(LOWER(owner.name), LOWER($7)) > 0
+              OR STRPOS(LOWER(facility.name), LOWER($7)) > 0
+              OR STRPOS(LOWER(COALESCE(location.name, '')), LOWER($7)) > 0
+              OR STRPOS(LOWER(COALESCE(location.barcode, '')), LOWER($7)) > 0
+              OR STRPOS(LOWER(COALESCE(plate.barcode, '')), LOWER($7)) > 0
+              OR STRPOS(LOWER(COALESCE(item.description, '')), LOWER($7)) > 0
+              OR STRPOS(LOWER(COALESCE(batch.lot, '')), LOWER($7)) > 0
+              OR STRPOS(LOWER(COALESCE(batch.serial, '')), LOWER($7)) > 0
+              OR STRPOS(LOWER(hold.reason_code), LOWER($7)) > 0
+              OR STRPOS(LOWER(COALESCE(hold.note, '')), LOWER($7)) > 0
+              OR ($8::BIGINT IS NOT NULL AND (hold.id = $8 OR hold.inventory_balance_id = $8))
+          )
+        ORDER BY
+          CASE WHEN $9='id' AND $10 THEN hold.id END ASC,
+          CASE WHEN $9='id' AND NOT $10 THEN hold.id END DESC,
+          CASE WHEN $9='item' AND $10 THEN LOWER(COALESCE(item.description,'')) END ASC,
+          CASE WHEN $9='item' AND NOT $10 THEN LOWER(COALESCE(item.description,'')) END DESC,
+          CASE WHEN $9='client' AND $10 THEN LOWER(owner.name) END ASC,
+          CASE WHEN $9='client' AND NOT $10 THEN LOWER(owner.name) END DESC,
+          CASE WHEN $9='position' AND $10 THEN LOWER(facility.name) END ASC,
+          CASE WHEN $9='position' AND NOT $10 THEN LOWER(facility.name) END DESC,
+          CASE WHEN $9='position' AND $10 THEN LOWER(COALESCE(location.barcode,location.name,'')) END ASC,
+          CASE WHEN $9='position' AND NOT $10 THEN LOWER(COALESCE(location.barcode,location.name,'')) END DESC,
+          CASE WHEN $9='reason' AND $10 THEN hold.reason_code END ASC,
+          CASE WHEN $9='reason' AND NOT $10 THEN hold.reason_code END DESC,
+          CASE WHEN $9='created' AND $10 THEN hold.created END ASC,
+          CASE WHEN $9='created' AND NOT $10 THEN hold.created END DESC,
+          CASE WHEN $9='quantity' AND $10 THEN hold.qty END ASC,
+          CASE WHEN $9='quantity' AND NOT $10 THEN hold.qty END DESC,
+          CASE WHEN $10 THEN hold.id END ASC,
+          CASE WHEN NOT $10 THEN hold.id END DESC
+        OFFSET $11 LIMIT $12
         "#,
     )
     .bind(tenant_id.get())
-    .bind(filter.before_id)
     .bind(status)
     .bind(site_scope.all_facilities)
     .bind(&facility_ids)
     .bind(owner_scope.all_inventory_owners)
     .bind(&inventory_owner_ids)
+    .bind(filter.query.as_deref())
+    .bind(query_id)
+    .bind(sort_key(filter.sort))
+    .bind(filter.direction.is_ascending())
+    .bind(offset)
     .bind(fetch_limit)
     .fetch_all(&mut *tx)
     .await?;
@@ -96,31 +140,47 @@ pub async fn get_inventory_hold_page(
         .take(usize::from(filter.limit))
         .map(map_hold)
         .collect::<PersistenceResult<Vec<_>>>()?;
-    let next_before_id = if has_more {
-        items.last().map(|hold| hold.id)
-    } else {
-        None
-    };
+    let next_offset = has_more.then_some(filter.offset + u64::from(filter.limit));
     tx.commit().await?;
 
-    Ok(InventoryHoldPage {
-        items,
-        next_before_id,
-    })
+    Ok(InventoryHoldPage { items, next_offset })
 }
 
-fn validate_page_filter(filter: InventoryHoldPageFilter) -> PersistenceResult<()> {
-    if filter.before_id.is_some_and(|id| id <= 0) {
-        return Err(PersistenceError::invalid_input(
-            "inventory hold cursor ID must be positive",
-        ));
-    }
+fn validate_page_filter(filter: &InventoryHoldPageFilter) -> PersistenceResult<()> {
+    let _ = i64::try_from(filter.offset)
+        .map_err(|_| PersistenceError::invalid_input("inventory hold cursor is out of range"))?;
     if !(1..=MAX_INVENTORY_HOLD_PAGE_SIZE).contains(&filter.limit) {
         return Err(PersistenceError::invalid_input(format!(
             "inventory hold page size must be between 1 and {MAX_INVENTORY_HOLD_PAGE_SIZE}"
         )));
     }
+    if let Some(query) = filter.query.as_deref() {
+        if query.is_empty() || query.trim() != query {
+            return Err(PersistenceError::invalid_input(
+                "inventory hold query must be nonempty and trimmed",
+            ));
+        }
+        if query.chars().count() > MAX_INVENTORY_BALANCE_QUERY_LENGTH
+            || query.chars().any(char::is_control)
+        {
+            return Err(PersistenceError::invalid_input(
+                "inventory hold query is invalid",
+            ));
+        }
+    }
     Ok(())
+}
+
+fn sort_key(sort: InventoryHoldSort) -> &'static str {
+    match sort {
+        InventoryHoldSort::Id => "id",
+        InventoryHoldSort::Item => "item",
+        InventoryHoldSort::Client => "client",
+        InventoryHoldSort::Position => "position",
+        InventoryHoldSort::Reason => "reason",
+        InventoryHoldSort::Created => "created",
+        InventoryHoldSort::Quantity => "quantity",
+    }
 }
 
 fn map_hold(row: &PgRow) -> PersistenceResult<InventoryHoldReadModel> {
@@ -191,36 +251,60 @@ fn map_hold(row: &PgRow) -> PersistenceResult<InventoryHoldReadModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wareboxes_application::inventory::InventoryBalanceSortDirection;
 
     #[test]
     fn page_filter_validation_rejects_untrusted_direct_inputs() {
-        assert!(validate_page_filter(InventoryHoldPageFilter {
-            before_id: None,
+        assert!(validate_page_filter(&InventoryHoldPageFilter {
+            offset: 0,
             limit: 1,
             status: Some(InventoryHoldStatus::Active),
+            query: None,
+            sort: InventoryHoldSort::Created,
+            direction: InventoryBalanceSortDirection::Descending,
         })
         .is_ok());
         assert!(matches!(
-            validate_page_filter(InventoryHoldPageFilter {
-                before_id: Some(0),
+            validate_page_filter(&InventoryHoldPageFilter {
+                offset: u64::MAX,
                 limit: 1,
                 status: None,
+                query: None,
+                sort: InventoryHoldSort::Created,
+                direction: InventoryBalanceSortDirection::Descending,
             }),
             Err(PersistenceError::InvalidInput(_))
         ));
         assert!(matches!(
-            validate_page_filter(InventoryHoldPageFilter {
-                before_id: None,
+            validate_page_filter(&InventoryHoldPageFilter {
+                offset: 0,
                 limit: 0,
                 status: None,
+                query: None,
+                sort: InventoryHoldSort::Created,
+                direction: InventoryBalanceSortDirection::Descending,
             }),
             Err(PersistenceError::InvalidInput(_))
         ));
         assert!(matches!(
-            validate_page_filter(InventoryHoldPageFilter {
-                before_id: None,
+            validate_page_filter(&InventoryHoldPageFilter {
+                offset: 0,
                 limit: MAX_INVENTORY_HOLD_PAGE_SIZE + 1,
                 status: None,
+                query: None,
+                sort: InventoryHoldSort::Created,
+                direction: InventoryBalanceSortDirection::Descending,
+            }),
+            Err(PersistenceError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            validate_page_filter(&InventoryHoldPageFilter {
+                offset: 0,
+                limit: 1,
+                status: None,
+                query: Some(" untrimmed ".to_owned()),
+                sort: InventoryHoldSort::Created,
+                direction: InventoryBalanceSortDirection::Descending,
             }),
             Err(PersistenceError::InvalidInput(_))
         ));

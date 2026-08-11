@@ -218,11 +218,25 @@ impl InventoryHoldQuantity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryHoldPageFilter {
-    pub before_id: Option<i64>,
+    pub offset: u64,
     pub limit: u16,
     pub status: Option<InventoryHoldStatus>,
+    pub query: Option<String>,
+    pub sort: InventoryHoldSort,
+    pub direction: InventoryBalanceSortDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryHoldSort {
+    Id,
+    Item,
+    Client,
+    Position,
+    Reason,
+    Created,
+    Quantity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,7 +275,7 @@ pub struct InventoryHoldReadModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryHoldPage {
     pub items: Vec<InventoryHoldReadModel>,
-    pub next_before_id: Option<i64>,
+    pub next_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -7,10 +7,11 @@ use wareboxes_api_contract::v1::{
     ConfigureFacilityShippingOriginRequest, ConfigureFacilityShippingOriginResponse,
     ConfigureReplenishmentPolicyRequest, ConfigureReplenishmentPolicyResponse, CreateCartonRequest,
     CreateCartonResponse, InventoryBalancePage, InventoryBalanceSort, InventoryHoldPage,
-    InventoryHoldStatus, InventorySortDirection, InventoryStatusTransitionResponse, OpaqueCursor,
-    OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
-    PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
-    PackingQueuePage, PickConfirmationHistoryPage, PickShortagePage, PickShortageQueueSort,
+    InventoryHoldSort, InventoryHoldStatus, InventorySortDirection,
+    InventoryStatusTransitionResponse, OpaqueCursor, OpenPackSessionRequest,
+    OpenPackSessionResponse, OrderAllocationReadinessResponse, PackPickedAllocationRequest,
+    PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage,
+    PickConfirmationHistoryPage, PickShortagePage, PickShortageQueueSort,
     PickShortageQueueSortDirection, PickShortageResponse, PickShortageStatus,
     PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
     PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
@@ -199,22 +200,22 @@ mod browser {
         ConfigureReplenishmentPolicyRequest, ConfigureReplenishmentPolicyResponse,
         CreateCartonRequest, CreateCartonResponse, CreateInventoryRelocationTaskRequest,
         CreateInventoryRelocationTaskResponse, CreateInventoryStatusTransitionRequest,
-        InventoryBalancePage, InventoryBalanceSort, InventoryHoldPage, InventoryHoldStatus,
-        InventorySortDirection, InventoryStatusTransitionResponse, OpaqueCursor,
-        OpenPackSessionRequest, OpenPackSessionResponse, OrderAllocationReadinessResponse,
-        OrderPage, PackPickedAllocationRequest, PackPickedAllocationResponse, PackSessionResponse,
-        PackingQueuePage, PickConfirmationHistoryPage, PickShortageFilters, PickShortagePage,
-        PickShortageResponse, PlaceInventoryHoldRequest, PlaceInventoryHoldResponse,
-        PlaceOrderHoldRequest, PlaceOrderHoldResponse, PlanOrderAllocationRequest,
-        PlanOrderAllocationResponse, PlanReplenishmentRequest, PlanReplenishmentResponse,
-        ReallocatePickShortageRequest, ReallocatePickShortageResponse, ReleaseInventoryHoldRequest,
-        ReleaseInventoryHoldResponse, ReleaseOrderHoldRequest, ReleaseOrderHoldResponse,
-        ReleaseOrderRequest, ReleaseOrderResponse, RemovePackedContentRequest,
-        RemovePackedContentResponse, ReopenCartonRequest, ReopenCartonResponse,
-        ReplenishmentPolicyPage, ReplenishmentQueuePage, ReplenishmentWorkCancellationResponse,
-        RetireReplenishmentPolicyRequest, RetireReplenishmentPolicyResponse,
-        ReversePickConfirmationRequest, ReversePickConfirmationResponse, VoidCartonRequest,
-        VoidCartonResponse, WebSessionContext,
+        InventoryBalancePage, InventoryBalanceSort, InventoryHoldPage, InventoryHoldSort,
+        InventoryHoldStatus, InventorySortDirection, InventoryStatusTransitionResponse,
+        OpaqueCursor, OpenPackSessionRequest, OpenPackSessionResponse,
+        OrderAllocationReadinessResponse, OrderPage, PackPickedAllocationRequest,
+        PackPickedAllocationResponse, PackSessionResponse, PackingQueuePage,
+        PickConfirmationHistoryPage, PickShortageFilters, PickShortagePage, PickShortageResponse,
+        PlaceInventoryHoldRequest, PlaceInventoryHoldResponse, PlaceOrderHoldRequest,
+        PlaceOrderHoldResponse, PlanOrderAllocationRequest, PlanOrderAllocationResponse,
+        PlanReplenishmentRequest, PlanReplenishmentResponse, ReallocatePickShortageRequest,
+        ReallocatePickShortageResponse, ReleaseInventoryHoldRequest, ReleaseInventoryHoldResponse,
+        ReleaseOrderHoldRequest, ReleaseOrderHoldResponse, ReleaseOrderRequest,
+        ReleaseOrderResponse, RemovePackedContentRequest, RemovePackedContentResponse,
+        ReopenCartonRequest, ReopenCartonResponse, ReplenishmentPolicyPage, ReplenishmentQueuePage,
+        ReplenishmentWorkCancellationResponse, RetireReplenishmentPolicyRequest,
+        RetireReplenishmentPolicyResponse, ReversePickConfirmationRequest,
+        ReversePickConfirmationResponse, VoidCartonRequest, VoidCartonResponse, WebSessionContext,
     };
 
     #[derive(Deserialize)]
@@ -558,14 +559,39 @@ mod browser {
         status: InventoryHoldStatus,
         cursor: Option<&OpaqueCursor>,
     ) -> Result<InventoryHoldPage, ApiError> {
+        sorted_holds(
+            status,
+            None,
+            InventoryHoldSort::Created,
+            InventorySortDirection::Descending,
+            cursor,
+        )
+        .await
+    }
+
+    pub async fn sorted_holds(
+        status: InventoryHoldStatus,
+        query: Option<&str>,
+        sort: InventoryHoldSort,
+        direction: InventorySortDirection,
+        cursor: Option<&OpaqueCursor>,
+    ) -> Result<InventoryHoldPage, ApiError> {
         let status = match status {
             InventoryHoldStatus::Active => "active",
             InventoryHoldStatus::Released => "released",
         };
-        let mut path = format!("/api/v1/inventory/holds?limit=100&status={status}");
+        let mut path = format!(
+            "/api/v1/inventory/holds?limit=100&status={status}&sort={}&direction={}",
+            inventory_hold_sort_wire(sort),
+            inventory_sort_direction_wire(direction)
+        );
+        if let Some(query) = query {
+            path.push_str("&query=");
+            path.push_str(&urlencoding::encode(query));
+        }
         if let Some(cursor) = cursor {
             path.push_str("&cursor=");
-            path.push_str(cursor.as_str());
+            path.push_str(&urlencoding::encode(cursor.as_str()));
         }
         get(&path).await
     }
@@ -882,6 +908,18 @@ mod browser {
         }
     }
 
+    const fn inventory_hold_sort_wire(sort: InventoryHoldSort) -> &'static str {
+        match sort {
+            InventoryHoldSort::Id => "id",
+            InventoryHoldSort::Item => "item",
+            InventoryHoldSort::Client => "client",
+            InventoryHoldSort::Position => "position",
+            InventoryHoldSort::Reason => "reason",
+            InventoryHoldSort::Created => "created",
+            InventoryHoldSort::Quantity => "quantity",
+        }
+    }
+
     const fn inventory_sort_direction_wire(direction: InventorySortDirection) -> &'static str {
         match direction {
             InventorySortDirection::Ascending => "ascending",
@@ -1127,6 +1165,17 @@ where
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn holds(
     _status: InventoryHoldStatus,
+    _cursor: Option<&OpaqueCursor>,
+) -> Result<InventoryHoldPage, ApiError> {
+    Err(ApiError::unavailable())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn sorted_holds(
+    _status: InventoryHoldStatus,
+    _query: Option<&str>,
+    _sort: InventoryHoldSort,
+    _direction: InventorySortDirection,
     _cursor: Option<&OpaqueCursor>,
 ) -> Result<InventoryHoldPage, ApiError> {
     Err(ApiError::unavailable())

@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use super::{CursorPage, InventoryBalanceStatus, OpaqueCursor, PageLimit};
+use super::{
+    CursorPage, InventoryBalanceSearchQuery, InventoryBalanceStatus, InventorySortDirection,
+    OpaqueCursor, PageLimit,
+};
 
 /// Typed reason for restricting a quantity of inventory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,7 +26,7 @@ pub enum InventoryHoldStatus {
 }
 
 /// Cursor query for the version 1 inventory-hold collection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InventoryHoldPageRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,6 +35,43 @@ pub struct InventoryHoldPageRequest {
     pub limit: PageLimit,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<InventoryHoldStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<InventoryBalanceSearchQuery>,
+    #[serde(default)]
+    pub sort: InventoryHoldSort,
+    #[serde(default = "default_hold_direction")]
+    pub direction: InventorySortDirection,
+}
+
+impl Default for InventoryHoldPageRequest {
+    fn default() -> Self {
+        Self {
+            cursor: None,
+            limit: PageLimit::default(),
+            status: None,
+            query: None,
+            sort: InventoryHoldSort::Created,
+            direction: default_hold_direction(),
+        }
+    }
+}
+
+const fn default_hold_direction() -> InventorySortDirection {
+    InventorySortDirection::Descending
+}
+
+/// Stable server-side ordering for the inventory-hold collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryHoldSort {
+    Id,
+    Item,
+    Client,
+    Position,
+    Reason,
+    #[default]
+    Created,
+    Quantity,
 }
 
 /// One quantity hold with the display context required by an operations workbench.
@@ -196,6 +236,18 @@ mod tests {
         .unwrap();
         assert_eq!(page.limit.get(), 25);
         assert_eq!(page.status, Some(InventoryHoldStatus::Active));
+        assert_eq!(page.sort, InventoryHoldSort::Created);
+        assert_eq!(page.direction, InventorySortDirection::Descending);
+        let sorted = serde_json::from_value::<InventoryHoldPageRequest>(json!({
+            "limit": 25,
+            "status": "released",
+            "query": "damaged",
+            "sort": "quantity",
+            "direction": "ascending"
+        }))
+        .unwrap();
+        assert_eq!(sorted.sort, InventoryHoldSort::Quantity);
+        assert_eq!(sorted.direction, InventorySortDirection::Ascending);
         assert!(serde_json::from_value::<InventoryHoldPageRequest>(json!({
             "limit": 25,
             "offset": 25

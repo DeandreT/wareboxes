@@ -12,7 +12,9 @@ use wareboxes_api_contract::v1::{
     ReleaseInventoryHoldResponse, IDEMPOTENCY_KEY_HEADER,
 };
 use wareboxes_application::inventory::{
-    InventoryHoldPageFilter, InventoryHoldReason as ApplicationInventoryHoldReason,
+    InventoryBalanceSortDirection, InventoryHoldPageFilter,
+    InventoryHoldReason as ApplicationInventoryHoldReason,
+    InventoryHoldSort as ApplicationInventoryHoldSort,
     InventoryHoldStatus as ApplicationInventoryHoldStatus,
 };
 use wareboxes_application::CommandContext;
@@ -192,16 +194,19 @@ async fn hold_repository_page_is_newest_first_scoped_and_display_ready() {
         &restricted.site_scope,
         &restricted.owner_scope,
         InventoryHoldPageFilter {
-            before_id: None,
+            offset: 0,
             limit: 1,
             status: Some(ApplicationInventoryHoldStatus::Active),
+            query: None,
+            sort: ApplicationInventoryHoldSort::Created,
+            direction: InventoryBalanceSortDirection::Descending,
         },
     )
     .await
     .unwrap();
     assert_eq!(first_page.items.len(), 1);
     assert_eq!(first_page.items[0].id, newest_active);
-    assert_eq!(first_page.next_before_id, Some(newest_active));
+    assert_eq!(first_page.next_offset, Some(1));
     assert_eq!(
         first_page.items[0].inventory_owner_name,
         "V1 Hold Allowed Owner"
@@ -235,9 +240,12 @@ async fn hold_repository_page_is_newest_first_scoped_and_display_ready() {
         &restricted.site_scope,
         &restricted.owner_scope,
         InventoryHoldPageFilter {
-            before_id: first_page.next_before_id,
+            offset: first_page.next_offset.unwrap(),
             limit: 1,
             status: Some(ApplicationInventoryHoldStatus::Active),
+            query: None,
+            sort: ApplicationInventoryHoldSort::Created,
+            direction: InventoryBalanceSortDirection::Descending,
         },
     )
     .await
@@ -250,7 +258,7 @@ async fn hold_repository_page_is_newest_first_scoped_and_display_ready() {
             .collect::<Vec<_>>(),
         vec![first_active]
     );
-    assert_eq!(second_page.next_before_id, None);
+    assert_eq!(second_page.next_offset, None);
     assert!(!first_page
         .items
         .iter()
@@ -263,9 +271,12 @@ async fn hold_repository_page_is_newest_first_scoped_and_display_ready() {
         &restricted.site_scope,
         &restricted.owner_scope,
         InventoryHoldPageFilter {
-            before_id: None,
+            offset: 0,
             limit: 10,
             status: Some(ApplicationInventoryHoldStatus::Released),
+            query: Some("V1 Hold Allowed Item".to_owned()),
+            sort: ApplicationInventoryHoldSort::Quantity,
+            direction: InventoryBalanceSortDirection::Ascending,
         },
     )
     .await
@@ -391,13 +402,33 @@ async fn hold_v1_http_contract_places_pages_replays_and_releases() {
         ErrorReason::IdempotencyKeyReused
     );
 
+    let smaller = PlaceInventoryHoldRequest {
+        quantity: 1,
+        note: Some("Secondary count review".into()),
+        ..place.clone()
+    };
+    let smaller_response = app
+        .clone()
+        .oneshot(api_request(
+            &token,
+            access.tenant_id,
+            Method::POST,
+            "/api/v1/inventory/holds",
+            Some("v1-hold-http-smaller"),
+            Some(&smaller),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(smaller_response.status(), StatusCode::OK);
+    let smaller: PlaceInventoryHoldResponse = response_json(smaller_response).await;
+
     let active = app
         .clone()
         .oneshot(api_request::<()>(
             &token,
             access.tenant_id,
             Method::GET,
-            "/api/v1/inventory/holds?limit=1&status=active",
+            "/api/v1/inventory/holds?limit=1&status=active&sort=quantity&direction=descending",
             None,
             None,
         ))
@@ -413,6 +444,54 @@ async fn hold_v1_http_contract_places_pages_replays_and_releases() {
         InventoryHoldReason::InventoryDiscrepancy
     );
     assert_eq!(active.items[0].inventory_owner_name, "V1 Hold HTTP Owner");
+    let next_cursor = active.next_cursor.as_ref().unwrap();
+
+    let next_uri = format!(
+        "/api/v1/inventory/holds?limit=1&status=active&sort=quantity&direction=descending&cursor={}",
+        next_cursor.as_str()
+    );
+    let next = app
+        .clone()
+        .oneshot(api_request::<()>(
+            &token,
+            access.tenant_id,
+            Method::GET,
+            &next_uri,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(next.status(), StatusCode::OK);
+    let next: InventoryHoldPage = response_json(next).await;
+    assert_eq!(next.items.len(), 1);
+    assert_eq!(next.items[0].id, smaller.hold_id);
+    assert_eq!(next.items[0].quantity, 1);
+    assert!(next.next_cursor.is_none());
+
+    let mismatched_cursor_uri = format!(
+        "/api/v1/inventory/holds?limit=1&status=active&sort=quantity&direction=ascending&cursor={}",
+        next_cursor.as_str()
+    );
+    let mismatched_cursor = app
+        .clone()
+        .oneshot(api_request::<()>(
+            &token,
+            access.tenant_id,
+            Method::GET,
+            &mismatched_cursor_uri,
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(mismatched_cursor.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_json::<ErrorResponse>(mismatched_cursor)
+            .await
+            .reason,
+        ErrorReason::InvalidCursor
+    );
 
     let invalid_cursor = app
         .clone()

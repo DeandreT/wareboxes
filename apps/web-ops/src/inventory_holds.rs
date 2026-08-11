@@ -14,14 +14,19 @@ use crate::view_model::format_quantity;
 mod model;
 use model::{
     balance_item_detail, balance_matches, facility_label, hold_facility_label, hold_item_label,
-    hold_location_label, hold_matches, item_label, location_label, sort_holds, sort_positions,
-    tracking_label, HoldSort, PositionSort,
+    hold_location_label, hold_matches, item_label, location_label, tracking_label, HoldSort,
+    PositionSort,
 };
 #[path = "inventory_holds/panels.rs"]
 mod panels;
 use panels::{
     inspection_request, is_receipt_inspection_hold, retain_inspection_attempt, InspectionAttempt,
     InspectionPanel, ReleasePanel,
+};
+#[path = "inventory_holds/paging.rs"]
+mod paging;
+use paging::{
+    reload, request_balance_page, request_hold_page, BalanceListSignals, HoldListSignals,
 };
 
 const HOLD_REASONS: [InventoryHoldReason; 6] = [
@@ -64,6 +69,8 @@ pub fn QuantityHoldsWorkbench(
     let command_pending = RwSignal::new(false);
     let list_pending = RwSignal::new(false);
     let balance_pending = RwSignal::new(false);
+    let hold_generation = RwSignal::new(0_u64);
+    let balance_generation = RwSignal::new(0_u64);
     let command_error = RwSignal::new(None::<String>);
     let list_error = RwSignal::new(None::<String>);
     let balance_sort = RwSignal::new(SortSpec {
@@ -74,6 +81,25 @@ pub fn QuantityHoldsWorkbench(
         key: HoldSort::Created,
         direction: SortDirection::Descending,
     });
+    let balance_list = BalanceListSignals {
+        balances,
+        cursor: balance_cursor,
+        pending: balance_pending,
+        error: list_error,
+        generation: balance_generation,
+        sort: balance_sort,
+        on_unauthorized,
+    };
+    let hold_list = HoldListSignals {
+        holds,
+        cursor: hold_cursor,
+        status: hold_status,
+        pending: list_pending,
+        error: list_error,
+        generation: hold_generation,
+        sort: hold_sort,
+        on_unauthorized,
+    };
     let toasts = use_toast_bus();
 
     let select_balance = move |balance: InventoryBalanceResponse| {
@@ -97,45 +123,14 @@ pub fn QuantityHoldsWorkbench(
         if balance_pending.get_untracked() {
             return;
         }
-        balance_pending.set(true);
-        list_error.set(None);
-        leptos::task::spawn_local(async move {
-            match api::balances(Some(&cursor)).await {
-                Ok(page) => {
-                    balances.update(|current| current.extend(page.items));
-                    balance_cursor.set(page.next_cursor);
-                    balance_pending.set(false);
-                }
-                Err(error) if error.unauthorized => on_unauthorized.run(()),
-                Err(error) => {
-                    list_error.set(Some(error.message));
-                    balance_pending.set(false);
-                }
-            }
-        });
+        request_balance_page(balance_list, Some(cursor));
     };
 
     let switch_hold_status = move |status: InventoryHoldStatus| {
         if list_pending.get_untracked() || hold_status.get_untracked() == status {
             return;
         }
-        list_pending.set(true);
-        list_error.set(None);
-        leptos::task::spawn_local(async move {
-            match api::holds(status, None).await {
-                Ok(page) => {
-                    holds.set(page.items);
-                    hold_cursor.set(page.next_cursor);
-                    hold_status.set(status);
-                    list_pending.set(false);
-                }
-                Err(error) if error.unauthorized => on_unauthorized.run(()),
-                Err(error) => {
-                    list_error.set(Some(error.message));
-                    list_pending.set(false);
-                }
-            }
-        });
+        request_hold_page(hold_list, status, None);
     };
 
     let load_more_holds = move |_| {
@@ -145,24 +140,25 @@ pub fn QuantityHoldsWorkbench(
         if list_pending.get_untracked() {
             return;
         }
-        let status = hold_status.get_untracked();
-        list_pending.set(true);
-        list_error.set(None);
-        leptos::task::spawn_local(async move {
-            match api::holds(status, Some(&cursor)).await {
-                Ok(page) => {
-                    holds.update(|current| current.extend(page.items));
-                    hold_cursor.set(page.next_cursor);
-                    list_pending.set(false);
-                }
-                Err(error) if error.unauthorized => on_unauthorized.run(()),
-                Err(error) => {
-                    list_error.set(Some(error.message));
-                    list_pending.set(false);
-                }
-            }
-        });
+        request_hold_page(hold_list, hold_status.get_untracked(), Some(cursor));
     };
+    let change_balance_sort = Callback::new(move |key: PositionSort| {
+        if balance_pending.get_untracked() {
+            return;
+        }
+        SortSpec::select(balance_sort, key);
+        selected_balance.set(None);
+        request_balance_page(balance_list, None);
+    });
+    let change_hold_sort = Callback::new(move |key: HoldSort| {
+        if list_pending.get_untracked() {
+            return;
+        }
+        SortSpec::select(hold_sort, key);
+        release_candidate.set(None);
+        inspection_candidate.set(None);
+        request_hold_page(hold_list, hold_status.get_untracked(), None);
+    });
 
     let place_hold = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
@@ -215,7 +211,12 @@ pub fn QuantityHoldsWorkbench(
         leptos::task::spawn_local(async move {
             match api::place_hold(&request, &key).await {
                 Ok(result) => {
-                    let refresh = reload(InventoryHoldStatus::Active).await;
+                    let refresh = reload(
+                        InventoryHoldStatus::Active,
+                        balance_sort.get_untracked(),
+                        hold_sort.get_untracked(),
+                    )
+                    .await;
                     match refresh {
                         Ok((balance_page, hold_page)) => {
                             balances.set(balance_page.items);
@@ -270,7 +271,12 @@ pub fn QuantityHoldsWorkbench(
         leptos::task::spawn_local(async move {
             match api::release_hold(hold.id, &key).await {
                 Ok(result) => {
-                    let refresh = reload(InventoryHoldStatus::Active).await;
+                    let refresh = reload(
+                        InventoryHoldStatus::Active,
+                        balance_sort.get_untracked(),
+                        hold_sort.get_untracked(),
+                    )
+                    .await;
                     match refresh {
                         Ok((balance_page, hold_page)) => {
                             balances.set(balance_page.items);
@@ -350,7 +356,13 @@ pub fn QuantityHoldsWorkbench(
                 Ok(result) => {
                     inspection_candidate.set(None);
                     inspection_attempt.set(None);
-                    match reload(InventoryHoldStatus::Active).await {
+                    match reload(
+                        InventoryHoldStatus::Active,
+                        balance_sort.get_untracked(),
+                        hold_sort.get_untracked(),
+                    )
+                    .await
+                    {
                         Ok((balance_page, hold_page)) => {
                             balances.set(balance_page.items);
                             balance_cursor.set(balance_page.next_cursor);
@@ -426,43 +438,33 @@ pub fn QuantityHoldsWorkbench(
                                         label="Item"
                                         active=move || balance_sort.get().key == PositionSort::Item
                                         direction=move || balance_sort.get().direction
-                                        on_sort=Callback::new(move |_| {
-                                            SortSpec::select(balance_sort, PositionSort::Item)
-                                        })
+                                        on_sort=Callback::new(move |_| change_balance_sort.run(PositionSort::Item))
                                     />
                                     <SortableHeader
                                         label="Client"
                                         active=move || balance_sort.get().key == PositionSort::Client
                                         direction=move || balance_sort.get().direction
-                                        on_sort=Callback::new(move |_| {
-                                            SortSpec::select(balance_sort, PositionSort::Client)
-                                        })
+                                        on_sort=Callback::new(move |_| change_balance_sort.run(PositionSort::Client))
                                         column_class="position-owner-column"
                                     />
                                     <SortableHeader
                                         label="Facility"
                                         active=move || balance_sort.get().key == PositionSort::Facility
                                         direction=move || balance_sort.get().direction
-                                        on_sort=Callback::new(move |_| {
-                                            SortSpec::select(balance_sort, PositionSort::Facility)
-                                        })
+                                        on_sort=Callback::new(move |_| change_balance_sort.run(PositionSort::Facility))
                                         column_class="position-facility-column"
                                     />
                                     <SortableHeader
                                         label="Location"
                                         active=move || balance_sort.get().key == PositionSort::Location
                                         direction=move || balance_sort.get().direction
-                                        on_sort=Callback::new(move |_| {
-                                            SortSpec::select(balance_sort, PositionSort::Location)
-                                        })
+                                        on_sort=Callback::new(move |_| change_balance_sort.run(PositionSort::Location))
                                     />
                                     <SortableHeader
                                         label="Available"
                                         active=move || balance_sort.get().key == PositionSort::Available
                                         direction=move || balance_sort.get().direction
-                                        on_sort=Callback::new(move |_| {
-                                            SortSpec::select(balance_sort, PositionSort::Available)
-                                        })
+                                        on_sort=Callback::new(move |_| change_balance_sort.run(PositionSort::Available))
                                         numeric=true
                                     />
                                     <th scope="col" class="action-column">"Action"</th>
@@ -471,7 +473,7 @@ pub fn QuantityHoldsWorkbench(
                             <tbody>
                                 {move || {
                                     let query = balance_filter.get().trim().to_ascii_lowercase();
-                                    let mut matching = balances
+                                    let matching = balances
                                         .get()
                                         .into_iter()
                                         .filter(|balance| {
@@ -479,7 +481,6 @@ pub fn QuantityHoldsWorkbench(
                                                 && balance_matches(balance, &query)
                                         })
                                         .collect::<Vec<_>>();
-                                    sort_positions(&mut matching, balance_sort.get());
                                     if matching.is_empty() {
                                         view! {
                                             <tr>
@@ -819,59 +820,45 @@ pub fn QuantityHoldsWorkbench(
                                     label="Hold"
                                     active=move || hold_sort.get().key == HoldSort::Id
                                     direction=move || hold_sort.get().direction
-                                    on_sort=Callback::new(move |_| {
-                                        SortSpec::select(hold_sort, HoldSort::Id)
-                                    })
+                                    on_sort=Callback::new(move |_| change_hold_sort.run(HoldSort::Id))
                                 />
                                 <SortableHeader
                                     label="Item"
                                     active=move || hold_sort.get().key == HoldSort::Item
                                     direction=move || hold_sort.get().direction
-                                    on_sort=Callback::new(move |_| {
-                                        SortSpec::select(hold_sort, HoldSort::Item)
-                                    })
+                                    on_sort=Callback::new(move |_| change_hold_sort.run(HoldSort::Item))
                                 />
                                 <SortableHeader
                                     label="Client"
                                     active=move || hold_sort.get().key == HoldSort::Client
                                     direction=move || hold_sort.get().direction
-                                    on_sort=Callback::new(move |_| {
-                                        SortSpec::select(hold_sort, HoldSort::Client)
-                                    })
+                                    on_sort=Callback::new(move |_| change_hold_sort.run(HoldSort::Client))
                                     column_class="hold-owner-column"
                                 />
                                 <SortableHeader
                                     label="Facility / location"
                                     active=move || hold_sort.get().key == HoldSort::Position
                                     direction=move || hold_sort.get().direction
-                                    on_sort=Callback::new(move |_| {
-                                        SortSpec::select(hold_sort, HoldSort::Position)
-                                    })
+                                    on_sort=Callback::new(move |_| change_hold_sort.run(HoldSort::Position))
                                 />
                                 <SortableHeader
                                     label="Reason"
                                     active=move || hold_sort.get().key == HoldSort::Reason
                                     direction=move || hold_sort.get().direction
-                                    on_sort=Callback::new(move |_| {
-                                        SortSpec::select(hold_sort, HoldSort::Reason)
-                                    })
+                                    on_sort=Callback::new(move |_| change_hold_sort.run(HoldSort::Reason))
                                 />
                                 <SortableHeader
                                     label="Created"
                                     active=move || hold_sort.get().key == HoldSort::Created
                                     direction=move || hold_sort.get().direction
-                                    on_sort=Callback::new(move |_| {
-                                        SortSpec::select(hold_sort, HoldSort::Created)
-                                    })
+                                    on_sort=Callback::new(move |_| change_hold_sort.run(HoldSort::Created))
                                     column_class="hold-created-column"
                                 />
                                 <SortableHeader
                                     label="Quantity"
                                     active=move || hold_sort.get().key == HoldSort::Quantity
                                     direction=move || hold_sort.get().direction
-                                    on_sort=Callback::new(move |_| {
-                                        SortSpec::select(hold_sort, HoldSort::Quantity)
-                                    })
+                                    on_sort=Callback::new(move |_| change_hold_sort.run(HoldSort::Quantity))
                                     numeric=true
                                 />
                                 <th scope="col" class="action-column">"Action"</th>
@@ -880,12 +867,11 @@ pub fn QuantityHoldsWorkbench(
                         <tbody>
                             {move || {
                                 let query = hold_filter.get().trim().to_ascii_lowercase();
-                                let mut matching = holds
+                                let matching = holds
                                     .get()
                                     .into_iter()
                                     .filter(|hold| hold_matches(hold, &query))
                                     .collect::<Vec<_>>();
-                                sort_holds(&mut matching, hold_sort.get());
                                 if matching.is_empty() {
                                     view! {
                                         <tr>
@@ -1013,20 +999,6 @@ pub fn QuantityHoldsWorkbench(
             </section>
         </section>
     }
-}
-
-async fn reload(
-    status: InventoryHoldStatus,
-) -> Result<
-    (
-        wareboxes_api_contract::v1::InventoryBalancePage,
-        wareboxes_api_contract::v1::InventoryHoldPage,
-    ),
-    api::ApiError,
-> {
-    let balances = api::balances(None).await?;
-    let holds = api::holds(status, None).await?;
-    Ok((balances, holds))
 }
 
 fn optional_text(value: &str) -> Option<String> {
