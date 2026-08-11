@@ -288,7 +288,7 @@ pub async fn add(
 pub async fn update(
     State(state): State<AppState>,
     user: CurrentTenant,
-    Json(body): Json<LoadUpdate>,
+    Json(mut body): Json<LoadUpdate>,
 ) -> AppResult<Json<bool>> {
     user.require_permission(&state.db, PERM).await?;
     validate(&body)?;
@@ -297,20 +297,26 @@ pub async fn update(
     else {
         return Ok(Json(false));
     };
-    if body.status.is_some_and(|status| {
+    let typed_inbound_transition = body.status.is_some_and(|status| {
         matches!(
             status,
-            LoadStatus::Arrived | LoadStatus::Receiving | LoadStatus::Received | LoadStatus::Closed
+            LoadStatus::Scheduled
+                | LoadStatus::Arrived
+                | LoadStatus::Receiving
+                | LoadStatus::Received
+                | LoadStatus::Closed
         )
-    }) {
-        let load = repo::loads::get_load_in_scope(&state.db, &user.tenant, body.load_id, false)
-            .await?
-            .ok_or_else(|| AppError::not_found("load"))?;
-        if load.r#type == LoadType::Inbound {
+    }) || body.appointment_time.is_some();
+    let load = repo::loads::get_load_in_scope(&state.db, &user.tenant, body.load_id, false)
+        .await?
+        .ok_or_else(|| AppError::not_found("load"))?;
+    if load.r#type == LoadType::Inbound {
+        if typed_inbound_transition {
             return Err(AppError::conflict(
-                "inbound execution states require the scanned v1 workflow",
+                "inbound appointments and execution states require typed v1 workflows",
             ));
         }
+        body.appointment_time = load.appointment_time;
     }
     if let Some(location_id) = body.dock_door_location_id {
         require_active_location_in_facility(

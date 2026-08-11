@@ -457,7 +457,6 @@ fn CreateLoadPanel(
     let seal = RwSignal::new(String::new());
     let dock = RwSignal::new(String::new());
     let expected = RwSignal::new(String::new());
-    let appointment = RwSignal::new(String::new());
     let line_item_id = RwSignal::new(String::new());
     let eligible_items = RwSignal::new(Vec::<InboundLoadEntryItemResponse>::new());
     let item_pending = RwSignal::new(false);
@@ -588,13 +587,6 @@ fn CreateLoadPanel(
                 return;
             }
         };
-        let appointment_time = match parse_optional_timestamp(&appointment.get_untracked()) {
-            Ok(value) => value,
-            Err(message) => {
-                error.set(Some(format!("Appointment time: {message}")));
-                return;
-            }
-        };
         let reference_value = reference.get_untracked().trim().to_owned();
         if reference_value.is_empty() {
             error.set(Some("Load reference is required.".to_owned()));
@@ -615,7 +607,6 @@ fn CreateLoadPanel(
             trailer_number: optional_text(&trailer.get_untracked()),
             seal_number: optional_text(&seal.get_untracked()),
             expected_at: expected_time.map(|value| value.to_rfc3339()),
-            appointment_at: appointment_time.map(|value| value.to_rfc3339()),
             lines: planned_lines
                 .iter()
                 .map(|line| PlanInboundLoadLineRequest {
@@ -778,14 +769,6 @@ fn CreateLoadPanel(
                         type="datetime-local"
                         prop:value=move || expected.get()
                         on:input=move |event| expected.set(event_target_value(&event))
-                    />
-                </label>
-                <label>
-                    <span>"Appointment (UTC)"</span>
-                    <input
-                        type="datetime-local"
-                        prop:value=move || appointment.get()
-                        on:input=move |event| appointment.set(event_target_value(&event))
                     />
                 </label>
             </div>

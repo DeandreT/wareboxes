@@ -270,7 +270,10 @@ BEGIN
       'SEAL-' || (9000 + i),
       dock,
       created_at + interval '18 hours',
-      created_at + interval '20 hours',
+      CASE
+        WHEN load_type = 'inbound' AND load_status = 'planned' THEN NULL
+        ELSE created_at + interval '20 hours'
+      END,
       CASE WHEN load_status IN ('arrived', 'receiving', 'received', 'rejected', 'closed') THEN created_at + interval '21 hours' END,
       CASE WHEN load_status IN ('arrived', 'receiving', 'received', 'rejected', 'closed') THEN created_at + interval '21 hours' END,
       CASE WHEN load_status = 'rejected' THEN created_at + interval '22 hours' END,

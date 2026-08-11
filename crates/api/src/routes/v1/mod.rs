@@ -51,6 +51,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/inbound-loads", post(inbound_loads::plan))
         .route(
+            "/inbound-loads/{load_id}/appointments",
+            post(inbound_loads::schedule),
+        )
+        .route(
             "/inbound-loads/{load_id}/arrivals",
             post(inbound_loads::arrive),
         )

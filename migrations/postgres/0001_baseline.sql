@@ -35962,3 +35962,122 @@ GRANT USAGE ON SEQUENCE public.inbound_load_closures_id_seq TO wareboxes_app;
 REVOKE ALL ON FUNCTION public.validate_inbound_load_closure() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_inbound_load_closure_consistency() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_closed_inbound_load_evidence() FROM PUBLIC;
+
+CREATE TABLE public.inbound_load_appointments (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id bigint NOT NULL,
+    inventory_owner_id bigint NOT NULL,
+    facility_id bigint NOT NULL,
+    load_id bigint NOT NULL,
+    scheduled_for timestamp with time zone NOT NULL,
+    scheduled_by_user_id bigint NOT NULL,
+    scheduled_at timestamp with time zone NOT NULL,
+    CONSTRAINT inbound_load_appointments_time_check CHECK (scheduled_for > scheduled_at),
+    CONSTRAINT inbound_load_appointments_tenant_load_unique UNIQUE (tenant_id, load_id),
+    CONSTRAINT inbound_load_appointments_owner_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id)
+        REFERENCES public.inventory_owners(tenant_id, id),
+    CONSTRAINT inbound_load_appointments_facility_fkey
+        FOREIGN KEY (tenant_id, facility_id)
+        REFERENCES public.facilities(tenant_id, id),
+    CONSTRAINT inbound_load_appointments_load_fkey
+        FOREIGN KEY (tenant_id, inventory_owner_id, load_id)
+        REFERENCES public.loads(tenant_id, inventory_owner_id, id),
+    CONSTRAINT inbound_load_appointments_actor_fkey FOREIGN KEY (scheduled_by_user_id)
+        REFERENCES public.users(id)
+);
+
+CREATE INDEX inbound_load_appointments_scope_idx
+ON public.inbound_load_appointments
+    (tenant_id, facility_id, inventory_owner_id, scheduled_for, id);
+
+CREATE FUNCTION public.validate_inbound_load_appointment() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    load_row record;
+BEGIN
+    SELECT type, status, facility_id
+    INTO load_row
+    FROM public.loads
+    WHERE tenant_id=NEW.tenant_id
+      AND inventory_owner_id=NEW.inventory_owner_id
+      AND id=NEW.load_id
+      AND deleted IS NULL
+    FOR UPDATE;
+    IF load_row IS NULL
+       OR load_row.type <> 'inbound'
+       OR load_row.status <> 'planned'
+       OR load_row.facility_id <> NEW.facility_id
+       OR NEW.scheduled_at > clock_timestamp()
+       OR NEW.scheduled_for <= NEW.scheduled_at THEN
+        RAISE EXCEPTION 'inbound appointment does not match a planned load'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.require_inbound_load_appointment_consistency() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    load_row record;
+BEGIN
+    SELECT status, appointment_time
+    INTO load_row
+    FROM public.loads
+    WHERE tenant_id=NEW.tenant_id AND id=NEW.load_id;
+    IF load_row IS NULL
+       OR load_row.status <> 'scheduled'
+       OR load_row.appointment_time IS DISTINCT FROM NEW.scheduled_for THEN
+        RAISE EXCEPTION 'inbound appointment evidence does not match resulting load state'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.require_scheduled_inbound_load_evidence() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.type='inbound' AND NEW.status='scheduled' AND NOT EXISTS (
+        SELECT 1 FROM public.inbound_load_appointments appointment
+        WHERE appointment.tenant_id=NEW.tenant_id
+          AND appointment.inventory_owner_id=NEW.inventory_owner_id
+          AND appointment.facility_id=NEW.facility_id
+          AND appointment.load_id=NEW.id
+          AND appointment.scheduled_for=NEW.appointment_time
+    ) THEN
+        RAISE EXCEPTION 'scheduled inbound load lacks immutable appointment evidence'
+            USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE TRIGGER inbound_load_appointments_validate
+BEFORE INSERT ON public.inbound_load_appointments
+FOR EACH ROW EXECUTE FUNCTION public.validate_inbound_load_appointment();
+CREATE TRIGGER inbound_load_appointments_are_immutable
+BEFORE UPDATE OR DELETE ON public.inbound_load_appointments
+FOR EACH ROW EXECUTE FUNCTION public.reject_inbound_load_arrival_mutation();
+CREATE CONSTRAINT TRIGGER inbound_load_appointments_require_consistency
+AFTER INSERT ON public.inbound_load_appointments
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_inbound_load_appointment_consistency();
+CREATE CONSTRAINT TRIGGER loads_require_inbound_appointment_evidence
+AFTER UPDATE OF status, appointment_time ON public.loads
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_scheduled_inbound_load_evidence();
+
+ALTER TABLE public.inbound_load_appointments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.inbound_load_appointments FORCE ROW LEVEL SECURITY;
+CREATE POLICY inbound_load_appointments_tenant_isolation
+ON public.inbound_load_appointments
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.inbound_load_appointments TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.inbound_load_appointments_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_inbound_load_appointment() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_inbound_load_appointment_consistency() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_scheduled_inbound_load_evidence() FROM PUBLIC;

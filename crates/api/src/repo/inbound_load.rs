@@ -25,7 +25,9 @@ use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 use super::access::{lock_current_scope_tx, require_permission_tx};
 use crate::error::{AppError, AppResult};
 
+mod appointment;
 mod closure;
+pub use appointment::schedule_inbound_load;
 pub use closure::close_inbound_load;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,9 +130,8 @@ pub async fn plan_inbound_load(
             INSERT INTO loads
                 (tenant_id, created, facility_id, inventory_owner_id, execution_barcode,
                  status, type, reference_number, invoice_number, carrier, trailer_number,
-                 seal_number, dock_door_location_id, expected_time, appointment_time,
-                 receive_completed)
-            VALUES ($1,$2,$3,$4,$5,'planned','inbound',$6,$7,$8,$9,$10,$11,$12,$13,false)
+                 seal_number, dock_door_location_id, expected_time, receive_completed)
+            VALUES ($1,$2,$3,$4,$5,'planned','inbound',$6,$7,$8,$9,$10,$11,$12,false)
             RETURNING id
             "#,
         )
@@ -146,7 +147,6 @@ pub async fn plan_inbound_load(
         .bind(plan.seal_number())
         .bind(plan.receiving_location_id().get())
         .bind(plan.expected_at())
-        .bind(plan.appointment_at())
         .fetch_one(&mut *tx)
         .await?,
     )
@@ -1026,7 +1026,6 @@ async fn enqueue_planned_event(
         "line_count": plan.lines().len(),
         "total_expected_quantity": total_expected_quantity,
         "expected_at": plan.expected_at(),
-        "appointment_at": plan.appointment_at(),
         "lines": plan.lines().iter().map(|line| serde_json::json!({
             "item_id": line.item_id().get(),
             "expected_quantity": line.expected_quantity().get(),

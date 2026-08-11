@@ -5,18 +5,21 @@ use wareboxes_api_contract::v1::{
     ArriveInboundLoadRequest, ArriveInboundLoadResponse,
     ArrivedInboundLoadStatus as ContractArrivedStatus, CloseInboundLoadRequest,
     CloseInboundLoadResponse, InboundLoadClosedStatus as ContractClosedStatus,
-    InboundLoadEntryItemResponse, InboundLoadPreArrivalStatus as ContractPreviousStatus,
+    InboundLoadEntryItemResponse, InboundLoadPlannedStatus as ContractPlannedStatus,
+    InboundLoadPreArrivalStatus as ContractPreviousStatus,
     InboundLoadReceivedStatus as ContractReceivedStatus,
-    InboundLoadReceivingStatus as ContractReceivingStatus, PlanInboundLoadRequest,
+    InboundLoadReceivingStatus as ContractReceivingStatus,
+    InboundLoadScheduledStatus as ContractScheduledStatus, PlanInboundLoadRequest,
     PlanInboundLoadResponse, PlannedInboundLoadLineResponse, PlannedInboundLoadStatus,
-    StartInboundLoadUnloadingRequest, StartInboundLoadUnloadingResponse,
+    ScheduleInboundLoadRequest, ScheduleInboundLoadResponse, StartInboundLoadUnloadingRequest,
+    StartInboundLoadUnloadingResponse,
 };
 use wareboxes_application::inbound_load::{
     ArriveInboundLoadCommand, ArriveInboundLoadResult,
     ArrivedInboundLoadStatus as ApplicationArrivedStatus, CloseInboundLoadCommand,
     CloseInboundLoadResult, PlanInboundLoadCommand, PlanInboundLoadResult,
-    PlannedInboundLoadStatus as ApplicationStatus, StartInboundLoadUnloadingCommand,
-    StartInboundLoadUnloadingResult,
+    PlannedInboundLoadStatus as ApplicationStatus, ScheduleInboundLoadCommand,
+    ScheduleInboundLoadResult, StartInboundLoadUnloadingCommand, StartInboundLoadUnloadingResult,
 };
 use wareboxes_application::ApplicationError;
 use wareboxes_domain::{
@@ -119,6 +122,31 @@ pub async fn arrive(
     Ok(Json(arrival_response(result)))
 }
 
+pub async fn schedule(
+    State(state): State<AppState>,
+    user: CurrentTenant,
+    Path(load_id): Path<i64>,
+    idempotency_key: IdempotencyKey,
+    Json(body): Json<ScheduleInboundLoadRequest>,
+) -> V1Result<Json<ScheduleInboundLoadResponse>> {
+    user.require_permission(&state.db, "wms").await?;
+    let scheduled_for = body.scheduled_for.parse::<Timestamp>().map_err(|_| {
+        invalid("scheduled_for must be an RFC 3339 timestamp with an explicit offset")
+    })?;
+    let command = ScheduleInboundLoadCommand::new(
+        InboundLoadId::new(load_id).map_err(invalid)?,
+        scheduled_for,
+    );
+    let result = repo::inbound_load::schedule_inbound_load(
+        &state.db,
+        &user.tenant,
+        &user.command_context(&idempotency_key),
+        &command,
+    )
+    .await?;
+    Ok(Json(appointment_response(result)))
+}
+
 pub async fn start_unloading(
     State(state): State<AppState>,
     user: CurrentTenant,
@@ -196,7 +224,6 @@ pub(crate) fn plan_command(request: PlanInboundLoadRequest) -> V1Result<PlanInbo
         request.trailer_number,
         request.seal_number,
         parse_timestamp(request.expected_at.as_deref(), "expected_at")?,
-        parse_timestamp(request.appointment_at.as_deref(), "appointment_at")?,
         lines,
     )
     .map_err(invalid)?;
@@ -240,6 +267,26 @@ fn arrival_response(result: ArriveInboundLoadResult) -> ArriveInboundLoadRespons
         receiving_location_id: result.receiving_location_id.get(),
         arrived_by: result.arrived_by.get(),
         arrived_at: result.arrived_at.to_rfc3339(),
+    }
+}
+
+fn appointment_response(result: ScheduleInboundLoadResult) -> ScheduleInboundLoadResponse {
+    ScheduleInboundLoadResponse {
+        appointment_id: result.appointment_id.get(),
+        load_id: result.load_id.get(),
+        previous_status: match result.previous_status {
+            wareboxes_application::inbound_load::InboundLoadPlannedStatus::Planned => {
+                ContractPlannedStatus::Planned
+            }
+        },
+        status: match result.status {
+            wareboxes_application::inbound_load::InboundLoadScheduledStatus::Scheduled => {
+                ContractScheduledStatus::Scheduled
+            }
+        },
+        scheduled_for: result.scheduled_for.to_rfc3339(),
+        scheduled_by: result.scheduled_by.get(),
+        scheduled_at: result.scheduled_at.to_rfc3339(),
     }
 }
 
@@ -311,7 +358,6 @@ mod tests {
             trailer_number: None,
             seal_number: None,
             expected_at: Some("2027-08-11T17:00:00Z".into()),
-            appointment_at: None,
             lines: vec![wareboxes_api_contract::v1::PlanInboundLoadLineRequest {
                 item_id: 41,
                 expected_quantity: 12,
@@ -372,6 +418,22 @@ mod tests {
         });
         assert_eq!(response.unloading_start_id, 41);
         assert_eq!(response.status, ContractReceivingStatus::Receiving);
+    }
+
+    #[test]
+    fn appointment_response_preserves_schedule_evidence() {
+        let response = appointment_response(ScheduleInboundLoadResult {
+            appointment_id: wareboxes_domain::InboundLoadAppointmentId::new(36).unwrap(),
+            load_id: InboundLoadId::new(12).unwrap(),
+            previous_status: wareboxes_application::inbound_load::InboundLoadPlannedStatus::Planned,
+            status: wareboxes_application::inbound_load::InboundLoadScheduledStatus::Scheduled,
+            scheduled_for: "2027-08-12T17:00:00Z".parse().unwrap(),
+            scheduled_by: wareboxes_domain::UserId::new(4).unwrap(),
+            scheduled_at: "2027-08-10T12:00:00Z".parse().unwrap(),
+        });
+        assert_eq!(response.appointment_id, 36);
+        assert_eq!(response.previous_status, ContractPlannedStatus::Planned);
+        assert_eq!(response.status, ContractScheduledStatus::Scheduled);
     }
 
     #[test]

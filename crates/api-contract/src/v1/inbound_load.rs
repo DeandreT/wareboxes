@@ -33,8 +33,6 @@ pub struct PlanInboundLoadRequest {
     pub seal_number: Option<String>,
     /// RFC 3339 timestamp for the supplier's expected arrival.
     pub expected_at: Option<String>,
-    /// RFC 3339 timestamp for the warehouse appointment.
-    pub appointment_at: Option<String>,
     pub lines: Vec<PlanInboundLoadLineRequest>,
 }
 
@@ -63,6 +61,38 @@ pub struct PlanInboundLoadResponse {
     pub total_expected_quantity: i64,
     pub planned_by: i64,
     pub planned_at: String,
+}
+
+/// Schedules the first warehouse appointment for one planned inbound load.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleInboundLoadRequest {
+    /// RFC 3339 timestamp strictly after the authoritative server time.
+    pub scheduled_for: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadPlannedStatus {
+    Planned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadScheduledStatus {
+    Scheduled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleInboundLoadResponse {
+    pub appointment_id: i64,
+    pub load_id: i64,
+    pub previous_status: InboundLoadPlannedStatus,
+    pub status: InboundLoadScheduledStatus,
+    pub scheduled_for: String,
+    pub scheduled_by: i64,
+    pub scheduled_at: String,
 }
 
 /// Exact scanner evidence for transitioning a planned inbound load to arrived.
@@ -177,7 +207,6 @@ mod tests {
             "trailer_number": null,
             "seal_number": null,
             "expected_at": "2027-08-11T17:00:00Z",
-            "appointment_at": "2027-08-12T17:00:00Z",
             "lines": [{
                 "item_id": 41,
                 "expected_quantity": 12,
@@ -241,6 +270,15 @@ mod tests {
         let mut with_status = request;
         with_status["status"] = json!("arrived");
         assert!(serde_json::from_value::<ArriveInboundLoadRequest>(with_status).is_err());
+    }
+
+    #[test]
+    fn appointment_request_is_time_only_and_strict() {
+        let request = json!({"scheduled_for":"2027-08-12T17:00:00Z"});
+        assert!(serde_json::from_value::<ScheduleInboundLoadRequest>(request.clone()).is_ok());
+        let mut changed = request;
+        changed["status"] = json!("scheduled");
+        assert!(serde_json::from_value::<ScheduleInboundLoadRequest>(changed).is_err());
     }
 
     #[test]

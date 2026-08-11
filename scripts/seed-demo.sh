@@ -80,6 +80,10 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM inventory_balances WHERE deleted IS NULL) THEN missing := array_append(missing, 'inventory'); END IF;
   IF NOT EXISTS (SELECT 1 FROM orders WHERE deleted IS NULL) THEN missing := array_append(missing, 'orders'); END IF;
   IF NOT EXISTS (SELECT 1 FROM loads WHERE deleted IS NULL) THEN missing := array_append(missing, 'legacy loads'); END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM loads
+    WHERE deleted IS NULL AND type='inbound' AND status='planned' AND appointment_time IS NULL
+  ) THEN missing := array_append(missing, 'schedulable inbound load'); END IF;
   IF cardinality(missing) > 0 THEN
     RAISE EXCEPTION 'core demo coverage is incomplete: %', array_to_string(missing, ', ');
   END IF;

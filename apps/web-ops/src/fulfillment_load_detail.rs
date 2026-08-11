@@ -14,8 +14,10 @@ use crate::fulfillment_shared::{
 use crate::toast::use_toast_bus;
 use crate::view_model::format_quantity;
 
+mod appointment;
 mod closure;
 mod receiving;
+use appointment::InboundAppointmentConfirmation;
 use closure::LoadClosureConfirmation;
 use receiving::ReceivingExecutionPanel;
 
@@ -63,6 +65,7 @@ pub fn LoadDetailPanel(
     let command_pending = RwSignal::new(false);
     let command_error = RwSignal::new(None::<String>);
     let arrival_open = RwSignal::new(false);
+    let appointment_open = RwSignal::new(false);
     let closure_open = RwSignal::new(false);
     let lifecycle_target = RwSignal::new(None::<LoadStatus>);
     let lifecycle_confirmation = NodeRef::<html::Section>::new();
@@ -222,7 +225,11 @@ pub fn LoadDetailPanel(
                                                 "button secondary-action"
                                             }
                                             on:click=move |_| {
-                                                if target == LoadStatus::Closed {
+                                                if target == LoadStatus::Scheduled
+                                                    && load.get_value().r#type == LoadType::Inbound
+                                                {
+                                                    appointment_open.set(true);
+                                                } else if target == LoadStatus::Closed {
                                                     closure_open.set(true);
                                                 } else {
                                                     lifecycle_target.set(Some(target));
@@ -286,6 +293,16 @@ pub fn LoadDetailPanel(
                             }
                         })
                     }}
+                </Show>
+                <Show when=move || appointment_open.get()>
+                    <InboundAppointmentConfirmation
+                        load=load.get_value()
+                        pending=command_pending
+                        error=command_error
+                        on_close=Callback::new(move |_| appointment_open.set(false))
+                        on_refreshed
+                        on_unauthorized
+                    />
                 </Show>
                 <Show when=move || closure_open.get()>
                     <LoadClosureConfirmation
@@ -384,6 +401,7 @@ fn LoadHeaderForm(
     on_refreshed: Callback<i64>,
     on_unauthorized: Callback<()>,
 ) -> impl IntoView {
+    let load_type = load.r#type;
     let reference = RwSignal::new(load.reference_number.clone().unwrap_or_default());
     let invoice = RwSignal::new(load.invoice_number.clone().unwrap_or_default());
     let carrier = RwSignal::new(load.carrier.clone().unwrap_or_default());
@@ -420,11 +438,15 @@ fn LoadHeaderForm(
                 return;
             }
         };
-        let appointment_time = match parse_optional_timestamp(&appointment.get_untracked()) {
-            Ok(value) => value,
-            Err(message) => {
-                command_error.set(Some(format!("Appointment time: {message}")));
-                return;
+        let appointment_time = if load_type == LoadType::Inbound {
+            None
+        } else {
+            match parse_optional_timestamp(&appointment.get_untracked()) {
+                Ok(value) => value,
+                Err(message) => {
+                    command_error.set(Some(format!("Appointment time: {message}")));
+                    return;
+                }
             }
         };
         let request = LoadUpdate {
@@ -542,6 +564,7 @@ fn LoadHeaderForm(
                     <span>"Appointment (UTC)"</span>
                     <input
                         type="datetime-local"
+                        disabled=load_type == LoadType::Inbound
                         prop:value=move || appointment.get()
                         on:input=move |event| appointment.set(event_target_value(&event))
                     />

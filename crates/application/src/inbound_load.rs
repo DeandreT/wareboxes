@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
-    InboundLoadArrivalId, InboundLoadClosureId, InboundLoadId, InboundLoadLineId,
-    InboundLoadPreArrivalStatus, InboundLoadScanValue, InboundLoadUnloadingStartId, LocationId,
-    NewInboundLoadPlan, Timestamp, UserId,
+    InboundLoadAppointmentId, InboundLoadArrivalId, InboundLoadClosureId, InboundLoadId,
+    InboundLoadLineId, InboundLoadPreArrivalStatus, InboundLoadScanValue,
+    InboundLoadUnloadingStartId, LocationId, NewInboundLoadPlan, Timestamp, UserId,
 };
 
 pub const PLAN_INBOUND_LOAD_OPERATION: &str = "inbound.load.plan.v1";
+pub const SCHEDULE_INBOUND_LOAD_OPERATION: &str = "inbound.load.appointment.schedule.v1";
 pub const ARRIVE_INBOUND_LOAD_OPERATION: &str = "inbound.load.arrive.v1";
 pub const START_INBOUND_LOAD_UNLOADING_OPERATION: &str = "inbound.load.unloading.start.v1";
 pub const CLOSE_INBOUND_LOAD_OPERATION: &str = "inbound.load.close.v1";
@@ -48,6 +49,52 @@ pub struct PlanInboundLoadResult {
     pub total_expected_quantity: i64,
     pub planned_by: UserId,
     pub planned_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScheduleInboundLoadCommand {
+    load_id: InboundLoadId,
+    scheduled_for: Timestamp,
+}
+
+impl ScheduleInboundLoadCommand {
+    pub const fn new(load_id: InboundLoadId, scheduled_for: Timestamp) -> Self {
+        Self {
+            load_id,
+            scheduled_for,
+        }
+    }
+
+    pub const fn load_id(&self) -> InboundLoadId {
+        self.load_id
+    }
+
+    pub const fn scheduled_for(&self) -> Timestamp {
+        self.scheduled_for
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadPlannedStatus {
+    Planned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundLoadScheduledStatus {
+    Scheduled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleInboundLoadResult {
+    pub appointment_id: InboundLoadAppointmentId,
+    pub load_id: InboundLoadId,
+    pub previous_status: InboundLoadPlannedStatus,
+    pub status: InboundLoadScheduledStatus,
+    pub scheduled_for: Timestamp,
+    pub scheduled_by: UserId,
+    pub scheduled_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -248,7 +295,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             vec![InboundLoadPlanLine::new(
                 CatalogItemId::new(10).unwrap(),
                 InboundExpectedQuantity::new(12).unwrap(),
@@ -277,6 +323,17 @@ mod tests {
         assert_eq!(value["load_id"], json!(12));
         assert_eq!(value["load_scan"], json!("WB-LOAD-12"));
         assert_eq!(value["receiving_location_scan"], json!("RECV-01"));
+    }
+
+    #[test]
+    fn appointment_hash_contains_the_exact_load_and_time() {
+        let value = serde_json::to_value(ScheduleInboundLoadCommand::new(
+            InboundLoadId::new(12).unwrap(),
+            "2027-08-12T17:00:00Z".parse().unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(value["load_id"], json!(12));
+        assert_eq!(value["scheduled_for"], json!("2027-08-12T17:00:00Z"));
     }
 
     #[test]

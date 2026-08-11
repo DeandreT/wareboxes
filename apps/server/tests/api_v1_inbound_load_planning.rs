@@ -12,8 +12,9 @@ use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     ArriveInboundLoadResponse, ArrivedInboundLoadStatus, CloseInboundLoadResponse, ErrorReason,
     ErrorResponse, ExpectedReceivingSessionResponse, InboundLoadClosedStatus,
-    InboundLoadEntryItemResponse, PlanInboundLoadResponse, PlannedInboundLoadStatus,
-    StartInboundLoadUnloadingResponse,
+    InboundLoadEntryItemResponse, InboundLoadPlannedStatus, InboundLoadPreArrivalStatus,
+    InboundLoadScheduledStatus, PlanInboundLoadResponse, PlannedInboundLoadStatus,
+    ScheduleInboundLoadResponse, StartInboundLoadUnloadingResponse,
 };
 use wareboxes_core::dto::UpdateUserAccessScope;
 
@@ -40,6 +41,24 @@ fn session_request(token: &str, tenant_id: TenantId, load_id: i64) -> Request<Bo
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(TENANT_ID_HEADER, tenant_id.to_string())
         .body(Body::empty())
+        .unwrap()
+}
+
+fn appointment_request(
+    token: &str,
+    tenant_id: TenantId,
+    load_id: i64,
+    idempotency_key: &str,
+    body: &Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/v1/inbound-loads/{load_id}/appointments"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .header(IDEMPOTENCY_KEY_HEADER, idempotency_key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
         .unwrap()
 }
 
@@ -153,6 +172,42 @@ fn legacy_load_update_request(
         .unwrap()
 }
 
+fn legacy_header_update_request(
+    token: &str,
+    tenant_id: TenantId,
+    load_id: i64,
+    dock_id: i64,
+) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri("/api/loads/update")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(TENANT_ID_HEADER, tenant_id.to_string())
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "load_id": load_id,
+                "status": null,
+                "type": null,
+                "reference_number": "ASN-ATOMIC-100",
+                "invoice_number": "INV-100-UPDATED",
+                "carrier": "Parcel Freight",
+                "trailer_number": "TRL-100",
+                "seal_number": "SEAL-100",
+                "dock_door_location_id": dock_id,
+                "expected_time": "2027-08-11T17:00:00Z",
+                "appointment_time": null,
+                "actual_time": null,
+                "arrival": null,
+                "departure": null,
+                "rejected": null,
+                "closed": null
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
 fn entry_items_request(token: &str, tenant_id: TenantId, inventory_owner_id: i64) -> Request<Body> {
     Request::builder()
         .uri(format!(
@@ -243,7 +298,6 @@ fn body(owner: i64, facility: i64, dock: i64, item: i64, reference: &str) -> Val
         "trailer_number": "TRL-100",
         "seal_number": "SEAL-100",
         "expected_at": "2027-08-11T17:00:00Z",
-        "appointment_at": "2027-08-12T17:00:00Z",
         "lines": [
             {
                 "item_id": item,
@@ -422,6 +476,125 @@ async fn atomic_plan_replays_exactly_and_enters_expected_receiving() {
     assert_eq!(current.commands, 1);
     assert_eq!(current.events, 1);
 
+    let legacy_schedule = app
+        .clone()
+        .oneshot(legacy_load_update_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "scheduled",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(legacy_schedule.status(), StatusCode::CONFLICT);
+
+    let appointment_body = json!({
+        "scheduled_for": "2027-08-12T17:00:00Z"
+    });
+    let scheduled = app
+        .clone()
+        .oneshot(appointment_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "appointment-atomic",
+            &appointment_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(scheduled.status(), StatusCode::OK);
+    let scheduled: ScheduleInboundLoadResponse = json_body(scheduled).await;
+    assert_eq!(scheduled.previous_status, InboundLoadPlannedStatus::Planned);
+    assert_eq!(scheduled.status, InboundLoadScheduledStatus::Scheduled);
+    assert_eq!(scheduled.scheduled_for, "2027-08-12T17:00:00+00:00");
+
+    let replay = app
+        .clone()
+        .oneshot(appointment_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "appointment-atomic",
+            &appointment_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(
+        json_body::<ScheduleInboundLoadResponse>(replay).await,
+        scheduled
+    );
+
+    let changed_appointment = json!({
+        "scheduled_for": "2027-08-13T17:00:00Z"
+    });
+    let changed = app
+        .clone()
+        .oneshot(appointment_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            "appointment-atomic",
+            &changed_appointment,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(changed.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_body::<ErrorResponse>(changed).await.reason,
+        ErrorReason::IdempotencyKeyReused
+    );
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let appointment_evidence: (i64, i64, i64, i64, String, String) = sqlx::query_as(
+        r#"
+        SELECT
+          (SELECT COUNT(*) FROM inbound_load_appointments WHERE load_id=$1),
+          (SELECT COUNT(*) FROM command_idempotency_records
+             WHERE operation='inbound.load.appointment.schedule.v1'
+               AND (result_json->>'load_id')::BIGINT=$1),
+          (SELECT COUNT(*) FROM load_activity WHERE load_id=$1 AND action='scheduled'),
+          (SELECT aggregate_sequence FROM outbox_events
+             WHERE event_type='inbound.load.scheduled' AND aggregate_id=$1::TEXT),
+          (SELECT status FROM loads WHERE id=$1),
+          (SELECT payload->>'appointment_id' FROM outbox_events
+             WHERE event_type='inbound.load.scheduled' AND aggregate_id=$1::TEXT)
+        "#,
+    )
+    .bind(result.load_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(appointment_evidence.0, 1);
+    assert_eq!(appointment_evidence.1, 1);
+    assert_eq!(appointment_evidence.2, 1);
+    assert_eq!(appointment_evidence.3, 2);
+    assert_eq!(appointment_evidence.4, "scheduled");
+    assert_eq!(appointment_evidence.5, scheduled.appointment_id.to_string());
+
+    let header_update = app
+        .clone()
+        .oneshot(legacy_header_update_request(
+            &token,
+            tenant_id,
+            result.load_id,
+            dock,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(header_update.status(), StatusCode::OK);
+    assert!(json_body::<bool>(header_update).await);
+    let mut tx = tenant_tx(&fixture.db, tenant_id).await;
+    let preserved_appointment: (String, String) =
+        sqlx::query_as("SELECT appointment_time::TEXT, invoice_number FROM loads WHERE id=$1")
+            .bind(result.load_id)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    tx.rollback().await.unwrap();
+    assert!(preserved_appointment.0.starts_with("2027-08-12 17:00:00"));
+    assert_eq!(preserved_appointment.1, "INV-100-UPDATED");
+
     let arrival_body = json!({
         "load_scan": result.execution_barcode,
         "receiving_location_scan": "PLAN-DOCK",
@@ -440,6 +613,10 @@ async fn atomic_plan_replays_exactly_and_enters_expected_receiving() {
         .unwrap();
     assert_eq!(arrival.status(), StatusCode::OK);
     let arrival: ArriveInboundLoadResponse = json_body(arrival).await;
+    assert_eq!(
+        arrival.previous_status,
+        InboundLoadPreArrivalStatus::Scheduled
+    );
     assert_eq!(arrival.status, ArrivedInboundLoadStatus::Arrived);
     assert_eq!(arrival.receiving_location_id, dock);
 
@@ -508,7 +685,7 @@ async fn atomic_plan_replays_exactly_and_enters_expected_receiving() {
     .fetch_one(&mut *tx)
     .await
     .unwrap();
-    assert_eq!(evidence.get::<String, _>("previous_status"), "planned");
+    assert_eq!(evidence.get::<String, _>("previous_status"), "scheduled");
     assert_eq!(
         evidence.get::<String, _>("observed_load_barcode"),
         arrival_body["load_scan"].as_str().unwrap()
@@ -517,7 +694,7 @@ async fn atomic_plan_replays_exactly_and_enters_expected_receiving() {
         evidence.get::<String, _>("observed_receiving_location_barcode"),
         "PLAN-DOCK"
     );
-    assert_eq!(evidence.get::<i64, _>("aggregate_sequence"), 2);
+    assert_eq!(evidence.get::<i64, _>("aggregate_sequence"), 3);
     assert_eq!(evidence.get::<String, _>("event_status"), "arrived");
     assert_eq!(
         evidence.get::<String, _>("event_arrival_id"),
@@ -621,7 +798,7 @@ async fn atomic_plan_replays_exactly_and_enters_expected_receiving() {
     .await
     .unwrap();
     tx.rollback().await.unwrap();
-    assert_eq!(execution, (1, 1, 3, "receiving".to_owned()));
+    assert_eq!(execution, (1, 1, 4, "receiving".to_owned()));
 
     let receipt = app
         .clone()
@@ -1204,7 +1381,7 @@ async fn planning_enforces_current_owner_and_facility_scope() {
 }
 
 #[tokio::test]
-async fn arrival_replays_are_concealed_after_scope_revocation() {
+async fn appointment_and_execution_replays_are_concealed_after_scope_revocation() {
     let fixture = Fixture::new().await;
     let operator = fixture.wms_user("inbound-arrival-scope@test.local").await;
     let tenant_id = tenant_for_user(&fixture.db, operator.id).await;
@@ -1247,6 +1424,21 @@ async fn arrival_replays_are_concealed_after_scope_revocation() {
         .unwrap();
     assert_eq!(planned.status(), StatusCode::OK);
     let planned: PlanInboundLoadResponse = json_body(planned).await;
+    let appointment_body = json!({
+        "scheduled_for": "2027-08-12T17:00:00Z"
+    });
+    let scheduled = app
+        .clone()
+        .oneshot(appointment_request(
+            &token,
+            tenant_id,
+            planned.load_id,
+            "appointment-scope",
+            &appointment_body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(scheduled.status(), StatusCode::OK);
     let arrival_body = json!({
         "load_scan": planned.execution_barcode,
         "receiving_location_scan": "ARRIVAL-SCOPE-DOCK",
@@ -1296,6 +1488,26 @@ async fn arrival_replays_are_concealed_after_scope_revocation() {
     )
     .await
     .unwrap());
+    let mut changed_appointment = appointment_body.clone();
+    changed_appointment["scheduled_for"] = json!("2027-08-13T17:00:00Z");
+    for request_body in [appointment_body, changed_appointment] {
+        let response = app
+            .clone()
+            .oneshot(appointment_request(
+                &token,
+                tenant_id,
+                planned.load_id,
+                "appointment-scope",
+                &request_body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            json_body::<ErrorResponse>(response).await.reason,
+            ErrorReason::NotFound
+        );
+    }
     let mut changed = arrival_body.clone();
     changed["receiving_location_scan"] = json!("CHANGED-DOCK");
     for request_body in [arrival_body, changed] {

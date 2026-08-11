@@ -63,6 +63,14 @@ pub enum InboundLoadArrivalError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InboundLoadAppointmentError {
+    #[error("inbound load must be planned before an appointment can be scheduled")]
+    InvalidStatus,
+    #[error("inbound load appointment must be in the future")]
+    AppointmentNotFuture,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InboundLoadUnloadingError {
     #[error("inbound load must be arrived before unloading begins")]
     InvalidStatus,
@@ -84,6 +92,17 @@ pub fn validate_inbound_load_unloading_start(
 ) -> Result<(), InboundLoadUnloadingError> {
     if started_at > current_time {
         Err(InboundLoadUnloadingError::FutureStart)
+    } else {
+        Ok(())
+    }
+}
+
+pub fn validate_inbound_load_appointment(
+    scheduled_for: Timestamp,
+    current_time: Timestamp,
+) -> Result<(), InboundLoadAppointmentError> {
+    if scheduled_for <= current_time {
+        Err(InboundLoadAppointmentError::AppointmentNotFuture)
     } else {
         Ok(())
     }
@@ -279,7 +298,6 @@ pub struct NewInboundLoadPlan {
     trailer_number: Option<String>,
     seal_number: Option<String>,
     expected_at: Option<Timestamp>,
-    appointment_at: Option<Timestamp>,
     lines: Vec<InboundLoadPlanLine>,
 }
 
@@ -295,7 +313,6 @@ impl NewInboundLoadPlan {
         trailer_number: Option<String>,
         seal_number: Option<String>,
         expected_at: Option<Timestamp>,
-        appointment_at: Option<Timestamp>,
         lines: Vec<InboundLoadPlanLine>,
     ) -> Result<Self, InboundLoadPlanningError> {
         if lines.is_empty() {
@@ -341,7 +358,6 @@ impl NewInboundLoadPlan {
                 MAX_INBOUND_LOAD_TEXT_LENGTH,
             )?,
             expected_at,
-            appointment_at,
             lines,
         })
     }
@@ -373,9 +389,6 @@ impl NewInboundLoadPlan {
     pub const fn expected_at(&self) -> Option<&Timestamp> {
         self.expected_at.as_ref()
     }
-    pub const fn appointment_at(&self) -> Option<&Timestamp> {
-        self.appointment_at.as_ref()
-    }
     pub fn lines(&self) -> &[InboundLoadPlanLine] {
         &self.lines
     }
@@ -404,7 +417,6 @@ mod tests {
                 FacilityId::new(3).unwrap(),
                 LocationId::new(4).unwrap(),
                 InboundLoadReference::new("ASN-100").unwrap(),
-                None,
                 None,
                 None,
                 None,
@@ -462,5 +474,10 @@ mod tests {
             validate_inbound_load_closure(future, now),
             Err(InboundLoadClosureError::FutureClosure)
         );
+        assert_eq!(
+            validate_inbound_load_appointment(now, now),
+            Err(InboundLoadAppointmentError::AppointmentNotFuture)
+        );
+        assert!(validate_inbound_load_appointment(future, now).is_ok());
     }
 }
