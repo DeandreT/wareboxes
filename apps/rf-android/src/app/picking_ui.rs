@@ -44,14 +44,14 @@ impl RfApp {
         ui.add_space(12.0);
 
         let can_claim = self.can_execute();
-        let clicked = ui
-            .add_enabled(
-                can_claim,
-                egui::Button::new(egui::RichText::new("Get next pick").strong())
-                    .fill(Self::primary_fill(can_claim))
-                    .min_size(egui::vec2(ui.available_width(), 58.0)),
-            )
-            .clicked();
+        let clicked = Self::full_width_button(
+            ui,
+            can_claim,
+            egui::Button::new(egui::RichText::new("Get next pick").strong())
+                .fill(Self::primary_fill(can_claim)),
+            58.0,
+        )
+        .clicked();
         if clicked {
             let (command_id, key) = Self::command_identity("pick-claim");
             let effect = self.picking.begin_claim_next(command_id, key);
@@ -65,15 +65,17 @@ impl RfApp {
 
         #[cfg(all(debug_assertions, not(target_os = "android")))]
         {
-            ui.add_space(12.0);
-            if ui
-                .add_sized(
-                    [ui.available_width(), 48.0],
-                    Self::secondary_button("Load preview pick", ui.available_width(), 48.0),
-                )
-                .clicked()
-            {
-                self.picking.load_debug_claim(debug_pick_claim());
+            if Self::show_preview_controls() {
+                ui.add_space(12.0);
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 48.0],
+                        Self::secondary_button("Load preview pick", ui.available_width(), 48.0),
+                    )
+                    .clicked()
+                {
+                    self.picking.load_debug_claim(debug_pick_claim());
+                }
             }
         }
     }
@@ -82,21 +84,11 @@ impl RfApp {
         let Some(claim) = self.picking.claim().cloned() else {
             return;
         };
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(&claim.order_key)
-                    .strong()
-                    .color(Self::accent()),
-            );
-            ui.weak("|");
-            ui.label(format!("Pick {}", claim.task_id));
-            ui.weak("|");
-            ui.label(format!("Priority {}", claim.priority));
-        });
-
-        pick_location_band(ui, "SOURCE", &claim.content.source_location_barcode);
-        pick_content_band(ui, &claim);
-        pick_location_band(ui, "DESTINATION", &claim.destination_location_barcode);
+        Self::task_reference(
+            ui,
+            &format!("{}  ·  Pick {}", claim.order_key, claim.task_id),
+            claim.priority,
+        );
 
         let lease_actions_allowed = if self.picking.activity() == Activity::Active {
             self.heartbeat_status(ui, claim.task_id)
@@ -107,8 +99,20 @@ impl RfApp {
             self.pick_shortage_panel(ui, &claim, lease_actions_allowed);
         } else {
             if let Some(stage) = self.picking.expected_scan() {
-                self.pick_scan_control(ui, claim.task_id, stage, lease_actions_allowed);
+                self.pick_scan_control(
+                    ui,
+                    claim.task_id,
+                    stage,
+                    pick_scan_hint(&claim, stage),
+                    lease_actions_allowed,
+                );
             }
+
+            ui.add_space(4.0);
+            Self::section_label(ui, "PICK DETAILS");
+            pick_location_band(ui, "FROM", &claim.content.source_location_barcode);
+            pick_content_band(ui, &claim);
+            pick_location_band(ui, "TO", &claim.destination_location_barcode);
 
             ui.add_space(8.0);
             if self.release_confirmation {
@@ -248,19 +252,33 @@ impl RfApp {
                 let available = ui.available_width();
                 let draft = self.picking.shortage_mut();
                 if let Some(draft) = draft {
-                    ui.add_enabled(
+                    let response = ui.add_enabled(
                         lease_actions_allowed,
-                        egui::TextEdit::singleline(draft.picked_quantity_mut())
-                            .desired_width(available)
-                            .font(egui::TextStyle::Monospace)
-                            .hint_text("0"),
+                        Self::centered_text_edit(
+                            egui::TextEdit::singleline(draft.picked_quantity_mut())
+                                .desired_width(available)
+                                .font(egui::TextStyle::Monospace),
+                        ),
+                    );
+                    Self::centered_hint(
+                        ui,
+                        &response,
+                        draft.picked_quantity_mut().is_empty(),
+                        "0",
+                        egui::TextStyle::Monospace,
                     );
                 }
             });
         }
 
         if let Some(stage) = self.picking.expected_scan() {
-            self.pick_scan_control(ui, claim.task_id, stage, lease_actions_allowed);
+            self.pick_scan_control(
+                ui,
+                claim.task_id,
+                stage,
+                pick_scan_hint(claim, stage),
+                lease_actions_allowed,
+            );
         } else if let Some(draft) = self.picking.shortage() {
             ui.horizontal_wrapped(|ui| {
                 if let Some(item) = draft.observed_item_barcode() {
@@ -327,26 +345,18 @@ impl RfApp {
         ui: &mut egui::Ui,
         task_id: i64,
         stage: PickScanStage,
+        expected: Option<&str>,
         lease_actions_allowed: bool,
     ) {
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(stage.prompt())
-                .size(19.0)
-                .strong()
-                .color(Self::accent()),
+        let (response, clicked) = Self::scanner_action(
+            ui,
+            stage.prompt(),
+            expected,
+            "Confirm scan",
+            lease_actions_allowed,
+            self.picking.scan_draft_mut(),
+            egui::Id::new(("pick_scan", task_id, stage)),
         );
-        let response = ui
-            .add_enabled_ui(lease_actions_allowed, |ui| {
-                ui.add_sized(
-                    [ui.available_width(), 56.0],
-                    egui::TextEdit::singleline(self.picking.scan_draft_mut())
-                        .id(egui::Id::new(("pick_scan", task_id, stage)))
-                        .font(egui::TextStyle::Monospace)
-                        .hint_text("SCAN"),
-                )
-            })
-            .inner;
         let focus_key = (task_id, stage);
         if lease_actions_allowed && self.pick_scan_focus != Some(focus_key) {
             response.request_focus();
@@ -356,21 +366,6 @@ impl RfApp {
         }
 
         let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
-        let scan_ready = !self.picking.scan_draft_mut().trim().is_empty();
-        let can_confirm = scan_ready && lease_actions_allowed;
-        let clicked = ui
-            .add_enabled(
-                can_confirm,
-                egui::Button::new(egui::RichText::new("Confirm scan").strong())
-                    .fill(Self::primary_fill(can_confirm))
-                    .min_size(egui::vec2(ui.available_width(), 54.0)),
-            )
-            .on_disabled_hover_text(if lease_actions_allowed {
-                "A scan is required"
-            } else {
-                "Check pick connection first"
-            })
-            .clicked();
         if lease_actions_allowed && (enter || clicked) {
             let (command_id, key) = Self::command_identity("pick-confirm");
             let effect = self.picking.submit_scan(command_id, key);
@@ -517,6 +512,8 @@ fn pick_location_band(ui: &mut egui::Ui, label: &str, barcode: &str) {
     let width = ui.available_width();
     egui::Frame::new()
         .fill(ui.visuals().faint_bg_color)
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 60, 56)))
+        .corner_radius(egui::CornerRadius::same(8))
         .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, |ui| {
             ui.set_min_width((width - 24.0).max(0.0));
@@ -534,6 +531,8 @@ fn pick_content_band(ui: &mut egui::Ui, claim: &PickClaim) {
     let width = ui.available_width();
     egui::Frame::new()
         .fill(ui.visuals().extreme_bg_color)
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 60, 56)))
+        .corner_radius(egui::CornerRadius::same(8))
         .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, |ui| {
             ui.set_min_width((width - 24.0).max(0.0));
@@ -564,6 +563,21 @@ fn pick_content_band(ui: &mut egui::Ui, claim: &PickClaim) {
                 }
             });
         });
+}
+
+fn pick_scan_hint(claim: &PickClaim, stage: PickScanStage) -> Option<&str> {
+    match stage {
+        PickScanStage::SourceLocation => Some(&claim.content.source_location_barcode),
+        PickScanStage::Item | PickScanStage::ObservedItem => {
+            claim.content.item_barcodes.first().map(String::as_str)
+        }
+        PickScanStage::SourceLicensePlate => claim.content.source_license_plate_barcode.as_deref(),
+        PickScanStage::ObservedLot => claim.content.lot.as_deref(),
+        PickScanStage::ObservedSerial => claim.content.serial.as_deref(),
+        PickScanStage::DestinationLicensePlate | PickScanStage::ShortageDestinationLicensePlate => {
+            None
+        }
+    }
 }
 
 #[cfg(all(debug_assertions, not(target_os = "android")))]

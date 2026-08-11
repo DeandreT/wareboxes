@@ -39,13 +39,56 @@ impl RfApp {
     }
 
     pub(super) fn receiving_disposition(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("DISPOSITION").small().strong());
         let expected_work_complete = self
             .receiving
             .session()
             .is_some_and(|session| session.status() == ReceivingLoadStatus::Received);
-        let width = (ui.available_width() - 8.0) / 2.0;
-        if !expected_work_complete {
+        let width = ui.available_width();
+        egui::Frame::new()
+            .fill(ui.visuals().faint_bg_color)
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 60, 56)))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(10, 7))
+            .show(ui, |ui| {
+                ui.set_min_width((width - 20.0).max(0.0));
+                egui::containers::Sides::new().height(44.0).show(
+                    ui,
+                    |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new("DISPOSITION").small().strong());
+                            ui.label(
+                                egui::RichText::new(super::confirmation_mode_label(
+                                    self.receiving_ui.mode,
+                                ))
+                                .size(18.0)
+                                .strong()
+                                .color(Self::accent()),
+                            );
+                        });
+                    },
+                    |ui| {
+                        if !expected_work_complete
+                            && ui
+                                .add_sized(
+                                    [92.0, 44.0],
+                                    egui::Button::new(if self.receiving_ui.disposition_menu_open {
+                                        "Done"
+                                    } else {
+                                        "Change"
+                                    })
+                                    .selected(self.receiving_ui.disposition_menu_open),
+                                )
+                                .clicked()
+                        {
+                            self.receiving_ui.disposition_menu_open =
+                                !self.receiving_ui.disposition_menu_open;
+                        }
+                    },
+                );
+            });
+
+        if !expected_work_complete && self.receiving_ui.disposition_menu_open {
+            let button_width = (ui.available_width() - 8.0) / 2.0;
             egui::Grid::new("receiving_disposition_grid")
                 .num_columns(2)
                 .spacing([8.0, 8.0])
@@ -58,7 +101,7 @@ impl RfApp {
                     ] {
                         if ui
                             .add_sized(
-                                [width, 50.0],
+                                [button_width, 50.0],
                                 egui::Button::selectable(
                                     self.receiving_ui.mode == mode,
                                     super::confirmation_mode_label(mode),
@@ -76,25 +119,27 @@ impl RfApp {
                         }
                     }
                 });
+            if ui
+                .add_sized(
+                    [ui.available_width(), 50.0],
+                    egui::Button::selectable(
+                        self.receiving_ui.mode == ConfirmationMode::Unexpected,
+                        "Unexpected / excess stock",
+                    ),
+                )
+                .clicked()
+            {
+                self.select_receiving_mode(ConfirmationMode::Unexpected);
+            }
         } else {
-            Self::message_band(
-                ui,
-                Self::accent(),
-                Icon::PackageCheck,
-                "All expected work is complete",
-            );
-        }
-        if ui
-            .add_sized(
-                [ui.available_width(), 50.0],
-                egui::Button::selectable(
-                    self.receiving_ui.mode == ConfirmationMode::Unexpected,
-                    "Unexpected / excess stock",
-                ),
-            )
-            .clicked()
-        {
-            self.select_receiving_mode(ConfirmationMode::Unexpected);
+            if expected_work_complete {
+                Self::message_band(
+                    ui,
+                    Self::accent(),
+                    Icon::PackageCheck,
+                    "All expected work is complete",
+                );
+            }
         }
         if expected_work_complete
             && ui
@@ -115,6 +160,7 @@ impl RfApp {
         self.receiving_ui.reason = None;
         self.receiving_ui.unexpected_reason = None;
         self.receiving_ui.note_draft.clear();
+        self.receiving_ui.disposition_menu_open = false;
         self.receiving_ui.focus = None;
         let transition = self.receiving.select_mode(mode);
         self.emit_receiving_transition(transition);
@@ -148,11 +194,19 @@ impl RfApp {
         ui.label(egui::RichText::new("QUANTITY").small().strong());
         let response = ui.add_sized(
             [ui.available_width(), 56.0],
-            egui::TextEdit::singleline(&mut self.receiving_ui.quantity_draft)
-                .id(egui::Id::new("receiving_quantity"))
-                .font(egui::TextStyle::Monospace)
-                .char_limit(10)
-                .hint_text("1"),
+            Self::centered_text_edit(
+                egui::TextEdit::singleline(&mut self.receiving_ui.quantity_draft)
+                    .id(egui::Id::new("receiving_quantity"))
+                    .font(egui::TextStyle::Monospace)
+                    .char_limit(10),
+            ),
+        );
+        Self::centered_hint(
+            ui,
+            &response,
+            self.receiving_ui.quantity_draft.is_empty(),
+            "1",
+            egui::TextStyle::Monospace,
         );
         if self.receiving.focus_target() == FocusTarget::Quantity {
             self.request_receiving_focus(&response, FocusTarget::Quantity);
@@ -288,15 +342,15 @@ impl RfApp {
             ConfirmationMode::Rejected => "Confirm rejection",
             ConfirmationMode::Missing => "Record missing",
         };
-        if ui
-            .add_enabled(
-                enabled,
-                egui::Button::new(egui::RichText::new(label).strong())
-                    .fill(Self::primary_fill(enabled))
-                    .min_size(egui::vec2(ui.available_width(), 58.0)),
-            )
-            .on_disabled_hover_text(super::action_guard_message(guard))
-            .clicked()
+        if Self::full_width_button(
+            ui,
+            enabled,
+            egui::Button::new(egui::RichText::new(label).strong())
+                .fill(Self::primary_fill(enabled)),
+            58.0,
+        )
+        .on_disabled_hover_text(super::action_guard_message(guard))
+        .clicked()
         {
             let transition = self.receiving.begin_confirmation(access);
             self.emit_receiving_transition(transition);

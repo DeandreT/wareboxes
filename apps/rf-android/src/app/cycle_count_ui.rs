@@ -31,14 +31,14 @@ impl RfApp {
         ui.add_space(8.0);
         ui.label("Blind item-location counts");
         let can_execute = self.can_execute();
-        if ui
-            .add_enabled(
-                can_execute,
-                egui::Button::new(egui::RichText::new("Get next count").strong())
-                    .fill(Self::primary_fill(can_execute))
-                    .min_size(egui::vec2(ui.available_width(), 58.0)),
-            )
-            .clicked()
+        if Self::full_width_button(
+            ui,
+            can_execute,
+            egui::Button::new(egui::RichText::new("Get next count").strong())
+                .fill(Self::primary_fill(can_execute)),
+            58.0,
+        )
+        .clicked()
         {
             let (command_id, key) = Self::command_identity("count-claim");
             let effect = self.cycle_count.begin_claim_next(command_id, key);
@@ -50,23 +50,9 @@ impl RfApp {
         let Some(claim) = self.cycle_count.claim().cloned() else {
             return;
         };
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!("TASK {}", claim.task_id))
-                    .strong()
-                    .color(Self::accent()),
-            );
-            ui.separator();
-            ui.label(format!("Priority {}", claim.priority));
-        });
-        Self::count_location_band(ui, &claim);
-        Self::count_item_band(ui, &claim);
+        Self::task_reference(ui, &format!("Count {}", claim.task_id), claim.priority);
         if let Some(instructions) = claim.instructions.as_deref() {
-            ui.label(
-                egui::RichText::new(instructions)
-                    .color(Self::warning())
-                    .strong(),
-            );
+            Self::message_band(ui, Self::warning(), Icon::AlertTriangle, instructions);
         }
 
         let lease_actions_allowed = if self.cycle_count.activity() == Activity::Active {
@@ -75,10 +61,20 @@ impl RfApp {
             false
         };
         if let Some(stage) = self.cycle_count.expected_scan() {
-            self.count_scan_control(ui, claim.task_id, stage, lease_actions_allowed);
+            let expected = match stage {
+                CountScanStage::Location => Some(claim.location_barcode.as_str()),
+                CountScanStage::Item => claim.item_barcodes.first().map(String::as_str),
+                CountScanStage::LicensePlate => claim.license_plate_barcode.as_deref(),
+            };
+            self.count_scan_control(ui, claim.task_id, stage, expected, lease_actions_allowed);
         } else {
             self.count_quantity_control(ui, lease_actions_allowed);
         }
+
+        ui.add_space(4.0);
+        Self::section_label(ui, "COUNT DETAILS");
+        Self::count_location_band(ui, &claim);
+        Self::count_item_band(ui, &claim);
 
         ui.add_space(8.0);
         if self.release_confirmation {
@@ -98,14 +94,14 @@ impl RfApp {
                         {
                             self.release_confirmation = false;
                         }
-                        if ui
-                            .add_enabled(
-                                lease_actions_allowed,
-                                egui::Button::new("Return to queue")
-                                    .fill(egui::Color32::from_rgb(112, 72, 18))
-                                    .min_size(egui::vec2(ui.available_width(), 48.0)),
-                            )
-                            .clicked()
+                        if Self::full_width_button(
+                            ui,
+                            lease_actions_allowed,
+                            egui::Button::new("Return to queue")
+                                .fill(egui::Color32::from_rgb(112, 72, 18)),
+                            48.0,
+                        )
+                        .clicked()
                         {
                             let (command_id, key) = Self::command_identity("count-release");
                             let effect = self.cycle_count.begin_release(command_id, key);
@@ -129,6 +125,8 @@ impl RfApp {
         let width = ui.available_width();
         egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 60, 56)))
+            .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::symmetric(12, 9))
             .show(ui, |ui| {
                 ui.set_min_width((width - 24.0).max(0.0));
@@ -151,6 +149,8 @@ impl RfApp {
         let width = ui.available_width();
         egui::Frame::new()
             .fill(ui.visuals().extreme_bg_color)
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 60, 56)))
+            .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::symmetric(12, 9))
             .show(ui, |ui| {
                 ui.set_min_width((width - 24.0).max(0.0));
@@ -183,26 +183,18 @@ impl RfApp {
         ui: &mut egui::Ui,
         task_id: i64,
         stage: CountScanStage,
+        expected: Option<&str>,
         lease_actions_allowed: bool,
     ) {
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(stage.prompt())
-                .size(19.0)
-                .strong()
-                .color(Self::accent()),
+        let (response, clicked) = Self::scanner_action(
+            ui,
+            stage.prompt(),
+            expected,
+            "Confirm scan",
+            lease_actions_allowed,
+            self.cycle_count.scan_draft_mut(),
+            egui::Id::new(("count_scan", task_id, stage)),
         );
-        let response = ui
-            .add_enabled_ui(lease_actions_allowed, |ui| {
-                ui.add_sized(
-                    [ui.available_width(), 56.0],
-                    egui::TextEdit::singleline(self.cycle_count.scan_draft_mut())
-                        .id(egui::Id::new(("count_scan", task_id, stage)))
-                        .font(egui::TextStyle::Monospace)
-                        .hint_text("SCAN"),
-                )
-            })
-            .inner;
         let focus_key = (task_id, stage);
         if lease_actions_allowed && self.count_scan_focus != Some(focus_key) {
             response.request_focus();
@@ -211,15 +203,6 @@ impl RfApp {
             self.count_scan_focus = None;
         }
         let enter = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        let scan_ready = !self.cycle_count.scan_draft_mut().trim().is_empty();
-        let clicked = ui
-            .add_enabled(
-                scan_ready && lease_actions_allowed,
-                egui::Button::new(egui::RichText::new("Confirm scan").strong())
-                    .fill(Self::primary_fill(scan_ready && lease_actions_allowed))
-                    .min_size(egui::vec2(ui.available_width(), 54.0)),
-            )
-            .clicked();
         if lease_actions_allowed && (enter || clicked) {
             self.cycle_count.submit_scan();
             self.count_scan_focus = None;
@@ -227,41 +210,64 @@ impl RfApp {
     }
 
     fn count_quantity_control(&mut self, ui: &mut egui::Ui, lease_actions_allowed: bool) {
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new("Enter observed quantity")
-                .size(19.0)
-                .strong()
-                .color(Self::accent()),
-        );
-        let quantity = ui.add_enabled(
-            lease_actions_allowed,
-            egui::TextEdit::singleline(self.cycle_count.quantity_draft_mut())
-                .id(egui::Id::new("count_quantity"))
-                .font(egui::TextStyle::Monospace)
-                .hint_text("0"),
-        );
-        ui.add_enabled(
-            lease_actions_allowed,
-            egui::TextEdit::singleline(self.cycle_count.note_draft_mut())
-                .id(egui::Id::new("count_note"))
-                .hint_text("Optional note"),
-        );
-        let ready = self
-            .cycle_count
-            .quantity_draft_mut()
-            .trim()
-            .parse::<i64>()
-            .is_ok_and(|quantity| quantity >= 0);
+        let width = ui.available_width();
+        let (quantity, clicked) = egui::Frame::new()
+            .fill(Self::accent().gamma_multiply(0.08))
+            .stroke(egui::Stroke::new(1.0, Self::accent()))
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin::same(12))
+            .show(ui, |ui| {
+                ui.set_min_width((width - 24.0).max(0.0));
+                ui.vertical_centered(|ui| {
+                    Self::section_label(ui, "NEXT ACTION");
+                    ui.label(
+                        egui::RichText::new("Enter observed quantity")
+                            .size(23.0)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
+                });
+                let quantity = ui.add_enabled(
+                    lease_actions_allowed,
+                    Self::centered_text_edit(
+                        egui::TextEdit::singleline(self.cycle_count.quantity_draft_mut())
+                            .id(egui::Id::new("count_quantity"))
+                            .font(egui::TextStyle::Monospace),
+                    ),
+                );
+                let quantity_empty = self.cycle_count.quantity_draft_mut().is_empty();
+                Self::centered_hint(
+                    ui,
+                    &quantity,
+                    quantity_empty,
+                    "0",
+                    egui::TextStyle::Monospace,
+                );
+                ui.add_enabled(
+                    lease_actions_allowed,
+                    egui::TextEdit::singleline(self.cycle_count.note_draft_mut())
+                        .id(egui::Id::new("count_note"))
+                        .hint_text("Optional note"),
+                );
+                let ready = self
+                    .cycle_count
+                    .quantity_draft_mut()
+                    .trim()
+                    .parse::<i64>()
+                    .is_ok_and(|quantity| quantity >= 0);
+                let can_record = ready && lease_actions_allowed;
+                let clicked = Self::full_width_button(
+                    ui,
+                    can_record,
+                    egui::Button::new(egui::RichText::new("Record count").strong())
+                        .fill(Self::primary_fill(can_record)),
+                    58.0,
+                )
+                .clicked();
+                (quantity, clicked)
+            })
+            .inner;
         let enter = quantity.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        let clicked = ui
-            .add_enabled(
-                ready && lease_actions_allowed,
-                egui::Button::new(egui::RichText::new("Record count").strong())
-                    .fill(Self::primary_fill(ready && lease_actions_allowed))
-                    .min_size(egui::vec2(ui.available_width(), 58.0)),
-            )
-            .clicked();
         if lease_actions_allowed && (enter || clicked) {
             let (command_id, key) = Self::command_identity("count-confirm");
             let effect = self.cycle_count.begin_confirmation(command_id, key);

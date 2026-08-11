@@ -14,10 +14,13 @@ use crate::expected_receiving::{
     LoadResolutionFailure, LocationId, NonNegativeQuantity, ReceivingDock, ReceivingEffect,
     ReceivingSession, ReceivingSessionInput, StockDimension,
 };
-use crate::workflow::{Activity, MovementKind, MovementOperation};
+use crate::workflow::MovementKind;
 
 use super::RfApp;
 use super::SessionGate;
+use super::navigation::WorkMode;
+#[cfg(test)]
+use super::navigation::work_mode_switch_allowed;
 use super::session::ReceivingCommandPhase;
 
 mod controls;
@@ -27,75 +30,12 @@ mod tests;
 
 use controls::{exception_reason_label, unexpected_reason_label};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum WorkMode {
-    Receive,
-    Putaway,
-    Pick,
-    Relocate,
-    Replenish,
-    OutboundLoad,
-    Count,
-}
-
-impl WorkMode {
-    const ALL: [Self; 7] = [
-        Self::Receive,
-        Self::Putaway,
-        Self::Pick,
-        Self::Relocate,
-        Self::Replenish,
-        Self::OutboundLoad,
-        Self::Count,
-    ];
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Receive => "Receive",
-            Self::Putaway => "Putaway",
-            Self::Pick => "Pick",
-            Self::Relocate => "Relocate",
-            Self::Replenish => "Replenish",
-            Self::OutboundLoad => "Load",
-            Self::Count => "Count",
-        }
-    }
-
-    const fn tab_label(self) -> &'static str {
-        match self {
-            Self::Replenish => "Replen.",
-            Self::OutboundLoad => "Load",
-            _ => self.label(),
-        }
-    }
-
-    const fn compact_tab_label(self) -> &'static str {
-        match self {
-            Self::Receive => "Recv",
-            Self::Putaway => "Put",
-            Self::Pick => "Pick",
-            Self::Relocate => "Move",
-            Self::Replenish => "Repl",
-            Self::OutboundLoad => "Load",
-            Self::Count => "Count",
-        }
-    }
-}
-
-impl From<MovementOperation> for WorkMode {
-    fn from(operation: MovementOperation) -> Self {
-        match operation {
-            MovementOperation::Putaway => Self::Putaway,
-            MovementOperation::InventoryRelocation => Self::Relocate,
-        }
-    }
-}
-
 pub(super) struct ReceivingUiState {
     scan_draft: String,
     quantity_draft: String,
     note_draft: String,
     mode: ConfirmationMode,
+    disposition_menu_open: bool,
     container: ContainerCapture,
     reason: Option<ReceiptExceptionReason>,
     unexpected_reason: Option<UnexpectedReceiptReason>,
@@ -126,6 +66,7 @@ impl Default for ReceivingUiState {
             quantity_draft: "1".into(),
             note_draft: String::new(),
             mode: ConfirmationMode::Received,
+            disposition_menu_open: false,
             container: ContainerCapture::Loose,
             reason: None,
             unexpected_reason: None,
@@ -138,12 +79,17 @@ impl Default for ReceivingUiState {
 }
 
 impl ReceivingUiState {
+    pub(super) fn clear_focus(&mut self) {
+        self.focus = None;
+    }
+
     #[cfg(all(debug_assertions, not(target_os = "android")))]
     fn reset_confirmation(&mut self) {
         self.scan_draft.clear();
         self.quantity_draft = "1".into();
         self.note_draft.clear();
         self.mode = ConfirmationMode::Received;
+        self.disposition_menu_open = false;
         self.container = ContainerCapture::Loose;
         self.reason = None;
         self.unexpected_reason = None;
@@ -195,144 +141,6 @@ impl ReceivingUiState {
 }
 
 impl RfApp {
-    pub(super) fn work_header(&mut self, ui: &mut egui::Ui) {
-        ui.set_min_height(120.0);
-        ui.set_max_height(120.0);
-        let (label, color) = self.work_status();
-        egui::containers::Sides::new().height(34.0).show(
-            ui,
-            |ui| {
-                ui.horizontal(|ui| {
-                    let icon = match self.work_mode {
-                        WorkMode::Receive => Icon::PackagePlus,
-                        WorkMode::Putaway => Icon::PackageOpen,
-                        WorkMode::Pick => Icon::ScanBarcode,
-                        WorkMode::Relocate => Icon::Move,
-                        WorkMode::Replenish => Icon::RefreshCw,
-                        WorkMode::OutboundLoad => Icon::Truck,
-                        WorkMode::Count => Icon::ClipboardCheck,
-                    };
-                    ui.label(Self::icon(icon).color(Self::accent()));
-                    ui.heading(self.work_mode.label());
-                });
-            },
-            |ui| {
-                ui.label(egui::RichText::new(label).strong().color(color));
-            },
-        );
-        if let Some(session) = self.session.as_ref() {
-            ui.label(
-                egui::RichText::new(&session.tenant_name)
-                    .small()
-                    .color(egui::Color32::from_rgb(166, 177, 173)),
-            );
-        }
-
-        let switching_allowed = work_mode_switch_allowed(
-            self.workflow.activity(),
-            self.receiving.activity(),
-            self.cycle_count.activity(),
-            self.picking.activity(),
-            self.replenishment.activity(),
-            self.outbound_load.activity(),
-        );
-        let segment_width = (ui.available_width() - 48.0) / 7.0;
-        let compact_tabs = ui.available_width() < 420.0;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().button_padding.x = 3.0;
-            for mode in WorkMode::ALL {
-                let selected = self.work_mode == mode;
-                let response = ui
-                    .add_enabled(
-                        selected || switching_allowed,
-                        egui::Button::selectable(
-                            selected,
-                            egui::RichText::new(if compact_tabs {
-                                mode.compact_tab_label()
-                            } else {
-                                mode.tab_label()
-                            })
-                            .small(),
-                        )
-                        .min_size(egui::vec2(segment_width, 48.0)),
-                    )
-                    .on_disabled_hover_text("Finish or recover current work before switching");
-                if response.clicked() && switching_allowed {
-                    self.work_mode = mode;
-                    match mode {
-                        WorkMode::Putaway => {
-                            self.workflow.select_operation(MovementOperation::Putaway)
-                        }
-                        WorkMode::Relocate => self
-                            .workflow
-                            .select_operation(MovementOperation::InventoryRelocation),
-                        WorkMode::Receive
-                        | WorkMode::Pick
-                        | WorkMode::Replenish
-                        | WorkMode::OutboundLoad
-                        | WorkMode::Count => {}
-                    }
-                    self.receiving_ui.focus = None;
-                    self.scan_focus = None;
-                    self.pick_scan_focus = None;
-                    self.replenishment_scan_focus = None;
-                    self.outbound_load_scan_focus = None;
-                }
-            }
-        });
-        ui.separator();
-    }
-
-    fn work_status(&self) -> (&'static str, egui::Color32) {
-        match self.work_mode {
-            WorkMode::Putaway | WorkMode::Relocate => {
-                self.heartbeat_header()
-                    .unwrap_or_else(|| match self.workflow.activity() {
-                        Activity::Idle => ("READY", Self::accent()),
-                        Activity::Active => ("ACTIVE", Self::accent()),
-                        Activity::Persisting => ("SAVING", Self::warning()),
-                        Activity::ReadyToDispatch => ("QUEUED", Self::warning()),
-                        Activity::InFlight => ("SENDING", Self::warning()),
-                        Activity::Ambiguous => ("CHECK", Self::danger()),
-                        Activity::ReconcileRequired => ("BLOCKED", Self::danger()),
-                    })
-            }
-            WorkMode::Count => self
-                .heartbeat_header()
-                .unwrap_or_else(|| activity_status(self.cycle_count.activity())),
-            WorkMode::Pick => self
-                .heartbeat_header()
-                .unwrap_or_else(|| activity_status(self.picking.activity())),
-            WorkMode::Replenish => self
-                .heartbeat_header()
-                .unwrap_or_else(|| activity_status(self.replenishment.activity())),
-            WorkMode::OutboundLoad => activity_status(self.outbound_load.activity()),
-            WorkMode::Receive => match self.receiving.activity() {
-                ReceivingActivity::AwaitingLoad | ReceivingActivity::LoadComplete => {
-                    ("READY", Self::accent())
-                }
-                ReceivingActivity::Active => ("ACTIVE", Self::accent()),
-                ReceivingActivity::ConfirmationPending => self.receiving_command.as_ref().map_or(
-                    ("WORKING", Self::warning()),
-                    |command| match command.phase() {
-                        ReceivingCommandPhase::Ready | ReceivingCommandPhase::InFlight => {
-                            ("WORKING", Self::warning())
-                        }
-                        ReceivingCommandPhase::Ambiguous => ("CHECK", Self::danger()),
-                        ReceivingCommandPhase::ReconcileRequired => ("BLOCKED", Self::danger()),
-                    },
-                ),
-                ReceivingActivity::ResolvingLoad | ReceivingActivity::Refreshing => {
-                    ("WORKING", Self::warning())
-                }
-                ReceivingActivity::LoadResolutionFailed | ReceivingActivity::RefreshFailed => {
-                    ("RETRY", Self::warning())
-                }
-                ReceivingActivity::ReconcileRequired => ("BLOCKED", Self::danger()),
-            },
-        }
-    }
-
     pub(super) fn receiving_view(&mut self, ui: &mut egui::Ui) {
         let width = ui.available_width();
         if self
@@ -376,36 +184,24 @@ impl RfApp {
     }
 
     fn receiving_load_scan(&mut self, ui: &mut egui::Ui, next_load: bool) {
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(if next_load {
-                "SCAN NEXT LOAD"
-            } else {
-                "SCAN INBOUND LOAD"
-            })
-            .small()
-            .strong(),
-        );
-        let response = ui.add_sized(
-            [ui.available_width(), 58.0],
-            egui::TextEdit::singleline(&mut self.receiving_ui.scan_draft)
-                .id(egui::Id::new("receiving_load_scan"))
-                .font(egui::TextStyle::Monospace)
-                .hint_text("LOAD BARCODE"),
+        let prompt = if next_load {
+            "Scan next inbound load"
+        } else {
+            "Scan inbound load"
+        };
+        let (response, clicked) = Self::scanner_action(
+            ui,
+            prompt,
+            None,
+            "Open load",
+            true,
+            &mut self.receiving_ui.scan_draft,
+            egui::Id::new("receiving_load_scan"),
         );
         self.request_receiving_focus(&response, FocusTarget::Scanner(ScannerTarget::LoadBarcode));
 
         let enter = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         let has_scan = !self.receiving_ui.scan_draft.trim().is_empty();
-        let clicked = ui
-            .add_enabled(
-                has_scan,
-                egui::Button::new(egui::RichText::new("Open load").strong())
-                    .fill(Self::primary_fill(has_scan))
-                    .min_size(egui::vec2(ui.available_width(), 56.0)),
-            )
-            .on_disabled_hover_text("Scan a load barcode")
-            .clicked();
         if has_scan && (enter || clicked) {
             self.submit_receiving_load();
         }
@@ -484,18 +280,7 @@ impl RfApp {
             | FocusTarget::ExceptionReason
             | FocusTarget::ExceptionNote
             | FocusTarget::ConfirmAction => {
-                self.receiving_quantity(ui);
-                if matches!(
-                    self.receiving_ui.mode,
-                    ConfirmationMode::Quarantined
-                        | ConfirmationMode::Rejected
-                        | ConfirmationMode::Missing
-                ) {
-                    self.receiving_exception(ui);
-                } else if self.receiving_ui.mode == ConfirmationMode::Unexpected {
-                    self.receiving_unexpected_reason(ui);
-                }
-                self.receiving_confirm(ui);
+                self.receiving_completion_panel(ui);
             }
             FocusTarget::Scanner(ScannerTarget::LoadBarcode | ScannerTarget::ItemBarcode)
             | FocusTarget::Blocked(_) => {}
@@ -508,20 +293,22 @@ impl RfApp {
             return;
         };
         let reference = session.reference_number().unwrap_or("Inbound load");
-        ui.label(egui::RichText::new(reference).size(22.0).strong());
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!(
-                "{} open {}",
-                session.lines().len(),
-                if session.lines().len() == 1 {
-                    "line"
-                } else {
-                    "lines"
-                }
-            ));
-            ui.separator();
+        egui::containers::Sides::new().height(34.0).show(
+            ui,
+            |ui| {
+                ui.label(egui::RichText::new(reference).size(20.0).strong());
+            },
+            |ui| {
+                ui.label(format!("{} open", session.lines().len()));
+            },
+        );
+        ui.horizontal(|ui| {
             ui.label(egui::RichText::new("RECEIVE AT").small().strong());
-            ui.monospace(session.dock().barcode().as_str());
+            ui.monospace(
+                egui::RichText::new(session.dock().barcode().as_str())
+                    .strong()
+                    .color(Self::accent()),
+            );
         });
         if let Some(last) = self.receiving.last_confirmation() {
             ui.label(
@@ -534,11 +321,10 @@ impl RfApp {
                 .color(Self::accent()),
             );
         }
-        ui.separator();
+        ui.add_space(2.0);
     }
 
     fn receiving_scan_control(&mut self, ui: &mut egui::Ui, target: ScannerTarget) {
-        ui.add_space(4.0);
         let prompt = if target == ScannerTarget::ItemBarcode
             && self.receiving_ui.mode == ConfirmationMode::Unexpected
         {
@@ -546,33 +332,61 @@ impl RfApp {
         } else {
             scanner_prompt(target)
         };
-        ui.label(
-            egui::RichText::new(prompt)
-                .size(19.0)
-                .strong()
-                .color(Self::accent()),
-        );
-        let response = ui.add_sized(
-            [ui.available_width(), 58.0],
-            egui::TextEdit::singleline(&mut self.receiving_ui.scan_draft)
-                .id(egui::Id::new(("receiving_scan", scanner_hint(target))))
-                .font(egui::TextStyle::Monospace)
-                .hint_text(scanner_hint(target)),
+        let expected = match target {
+            ScannerTarget::DockBarcode => self
+                .receiving
+                .session()
+                .map(|session| session.dock().barcode().as_str().to_owned()),
+            ScannerTarget::LoadBarcode
+            | ScannerTarget::ItemBarcode
+            | ScannerTarget::LicensePlateBarcode => None,
+        };
+        let (response, clicked) = Self::scanner_action(
+            ui,
+            prompt,
+            expected.as_deref(),
+            "Confirm scan",
+            true,
+            &mut self.receiving_ui.scan_draft,
+            egui::Id::new(("receiving_scan", scanner_hint(target))),
         );
         self.request_receiving_focus(&response, FocusTarget::Scanner(target));
         let enter = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         let has_scan = !self.receiving_ui.scan_draft.trim().is_empty();
-        let clicked = ui
-            .add_enabled(
-                has_scan,
-                egui::Button::new(egui::RichText::new("Confirm scan").strong())
-                    .fill(Self::primary_fill(has_scan))
-                    .min_size(egui::vec2(ui.available_width(), 54.0)),
-            )
-            .clicked();
         if has_scan && (enter || clicked) {
             self.submit_receiving_scan();
         }
+    }
+
+    fn receiving_completion_panel(&mut self, ui: &mut egui::Ui) {
+        let width = ui.available_width();
+        egui::Frame::new()
+            .fill(Self::accent().gamma_multiply(0.08))
+            .stroke(egui::Stroke::new(1.0, Self::accent()))
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin::same(12))
+            .show(ui, |ui| {
+                ui.set_min_width((width - 24.0).max(0.0));
+                Self::section_label(ui, "NEXT ACTION");
+                ui.label(
+                    egui::RichText::new("Review and confirm")
+                        .size(23.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                );
+                self.receiving_quantity(ui);
+                if matches!(
+                    self.receiving_ui.mode,
+                    ConfirmationMode::Quarantined
+                        | ConfirmationMode::Rejected
+                        | ConfirmationMode::Missing
+                ) {
+                    self.receiving_exception(ui);
+                } else if self.receiving_ui.mode == ConfirmationMode::Unexpected {
+                    self.receiving_unexpected_reason(ui);
+                }
+                self.receiving_confirm(ui);
+            });
     }
 
     fn receiving_open_lines(&mut self, ui: &mut egui::Ui, selectable: bool) {
@@ -589,6 +403,8 @@ impl RfApp {
             let width = ui.available_width();
             egui::Frame::new()
                 .fill(ui.visuals().faint_bg_color)
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 60, 56)))
+                .corner_radius(egui::CornerRadius::same(8))
                 .inner_margin(egui::Margin::symmetric(10, 8))
                 .show(ui, |ui| {
                     ui.set_min_width((width - 20.0).max(0.0));
@@ -634,6 +450,8 @@ impl RfApp {
         let width = ui.available_width();
         egui::Frame::new()
             .fill(ui.visuals().extreme_bg_color)
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 60, 56)))
+            .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
                 ui.set_min_width((width - 20.0).max(0.0));
@@ -867,6 +685,18 @@ impl RfApp {
         };
         self.open_debug_preview();
         match preview.as_str() {
+            "work-menu" => {
+                self.workflow = crate::workflow::MovementWorkflow::default();
+                self.cycle_count = crate::cycle_count::CycleCountWorkflow::default();
+                self.picking = crate::picking::PickingWorkflow::default();
+                self.replenishment = crate::replenishment::ReplenishmentWorkflow::default();
+                self.outbound_load = crate::outbound_load::OutboundLoadWorkflow::default();
+                self.receiving = ExpectedReceivingReducer::default();
+                self.receiving_ui = ReceivingUiState::default();
+                self.work_mode = WorkMode::Putaway;
+                self.release_confirmation = false;
+                self.work_menu_open = true;
+            }
             "relocation-loose" => self.open_debug_relocation_preview(MovementKind::Loose),
             "relocation-license-plate" => {
                 self.open_debug_relocation_preview(MovementKind::LicensePlate)
@@ -995,37 +825,6 @@ fn receiving_draft_snapshot(reducer: &ExpectedReceivingReducer) -> Option<Receiv
             unexpected_reason: draft.unexpected_reason,
             note: draft.exception_note.map(str::to_owned),
         })
-}
-
-fn work_mode_switch_allowed(
-    putaway: Activity,
-    receiving: ReceivingActivity,
-    count: Activity,
-    picking: Activity,
-    replenishment: Activity,
-    outbound_load: Activity,
-) -> bool {
-    putaway == Activity::Idle
-        && count == Activity::Idle
-        && picking == Activity::Idle
-        && replenishment == Activity::Idle
-        && outbound_load == Activity::Idle
-        && matches!(
-            receiving,
-            ReceivingActivity::AwaitingLoad | ReceivingActivity::LoadComplete
-        )
-}
-
-fn activity_status(activity: Activity) -> (&'static str, egui::Color32) {
-    match activity {
-        Activity::Idle => ("READY", RfApp::accent()),
-        Activity::Active => ("ACTIVE", RfApp::accent()),
-        Activity::Persisting => ("SAVING", RfApp::warning()),
-        Activity::ReadyToDispatch => ("QUEUED", RfApp::warning()),
-        Activity::InFlight => ("SENDING", RfApp::warning()),
-        Activity::Ambiguous => ("CHECK", RfApp::danger()),
-        Activity::ReconcileRequired => ("BLOCKED", RfApp::danger()),
-    }
 }
 
 const fn confirmation_mode_label(mode: ConfirmationMode) -> &'static str {

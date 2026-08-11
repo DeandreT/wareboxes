@@ -26,36 +26,23 @@ impl RfApp {
     }
 
     fn outbound_load_idle(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new("SCAN OUTBOUND LOAD").small().strong());
         let enabled = self.can_execute() && self.expected_outbound_load_request_id.is_none();
-        let input = ui
-            .add_enabled_ui(enabled, |ui| {
-                ui.add_sized(
-                    [ui.available_width(), 58.0],
-                    egui::TextEdit::singleline(&mut self.outbound_load_barcode_draft)
-                        .id(egui::Id::new("outbound_load_barcode"))
-                        .font(egui::TextStyle::Monospace)
-                        .hint_text("LOAD BARCODE"),
-                )
-            })
-            .inner;
+        let (input, clicked) = Self::scanner_action(
+            ui,
+            "Scan outbound load",
+            None,
+            "Open load",
+            enabled,
+            &mut self.outbound_load_barcode_draft,
+            egui::Id::new("outbound_load_barcode"),
+        );
         if enabled && self.field_focus_pending {
             input.request_focus();
             self.field_focus_pending = false;
         }
         let submit = input.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         let ready = !self.outbound_load_barcode_draft.trim().is_empty();
-        if ui
-            .add_enabled(
-                enabled && ready,
-                egui::Button::new(egui::RichText::new("Open load").strong())
-                    .fill(Self::primary_fill(enabled && ready))
-                    .min_size(egui::vec2(ui.available_width(), 56.0)),
-            )
-            .clicked()
-            || (enabled && ready && submit)
-        {
+        if clicked || (enabled && ready && submit) {
             self.begin_outbound_load_lookup(ui.ctx());
         }
         if self.expected_outbound_load_request_id.is_some() {
@@ -74,51 +61,95 @@ impl RfApp {
         let Some(load) = self.outbound_load.load().cloned() else {
             return;
         };
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                egui::RichText::new(&load.load_reference)
-                    .size(20.0)
-                    .strong()
-                    .color(Self::accent()),
-            );
-            ui.separator();
-            ui.monospace(&load.load_barcode);
-            ui.separator();
-            ui.label(format!("{:?}", load.status));
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!(
-                "{} / {} loaded",
-                load.progress.loaded_carton_count, load.progress.planned_carton_count
-            ));
-            ui.separator();
-            ui.label(format!("{} staged", load.progress.staged_carton_count));
-            ui.separator();
-            ui.label(format!("Rev {}", load.revision.get()));
-        });
-        ui.add_space(6.0);
+        egui::containers::Sides::new().height(34.0).show(
+            ui,
+            |ui| {
+                ui.label(
+                    egui::RichText::new(&load.load_reference)
+                        .strong()
+                        .color(Self::accent()),
+                );
+            },
+            |ui| {
+                ui.monospace(&load.load_barcode);
+            },
+        );
+        ui.label(format!(
+            "{} of {} loaded  ·  {} staged",
+            load.progress.loaded_carton_count,
+            load.progress.planned_carton_count,
+            load.progress.staged_carton_count
+        ));
+
+        Self::section_label(ui, "CARTON ACTION");
         let selected = self.outbound_load.operation();
         let can_change = self.outbound_load.activity() == Activity::Active;
-        ui.horizontal(|ui| {
-            let width = (ui.available_width() - 24.0) / 4.0;
-            for operation in OutboundCartonOperation::ALL {
-                let allowed = self.outbound_load.operation_allowed(operation);
-                if ui
-                    .add_enabled(
-                        can_change && allowed,
-                        egui::Button::selectable(selected == operation, operation.label())
-                            .min_size(egui::vec2(width, 42.0)),
+        for operations in OutboundCartonOperation::ALL.chunks(2) {
+            let width = (ui.available_width() - 8.0) / 2.0;
+            ui.horizontal(|ui| {
+                for operation in operations {
+                    let allowed = self.outbound_load.operation_allowed(*operation);
+                    if ui
+                        .add_enabled(
+                            can_change && allowed,
+                            egui::Button::selectable(selected == *operation, operation.label())
+                                .min_size(egui::vec2(width, 48.0)),
+                        )
+                        .clicked()
+                    {
+                        self.outbound_load.select_operation(*operation);
+                        self.outbound_load_scan_focus = None;
+                    }
+                }
+            });
+        }
+
+        if let Some(stage) = self.outbound_load.expected_scan() {
+            let expected = outbound_load_scan_hint(&load, selected, stage);
+            self.outbound_load_scan_control(ui, load.outbound_load_id, stage, expected);
+        } else if self.outbound_load.activity() == Activity::Active {
+            let width = ui.available_width();
+            let clicked = egui::Frame::new()
+                .fill(Self::accent().gamma_multiply(0.08))
+                .stroke(egui::Stroke::new(1.0, Self::accent()))
+                .corner_radius(egui::CornerRadius::same(10))
+                .inner_margin(egui::Margin::same(12))
+                .show(ui, |ui| {
+                    ui.set_min_width((width - 24.0).max(0.0));
+                    Self::section_label(ui, "NEXT ACTION");
+                    ui.label(
+                        egui::RichText::new("Complete carton move")
+                            .size(23.0)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
+                    ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(format!(
+                                "Confirm {}",
+                                selected.label().to_lowercase()
+                            ))
+                            .strong(),
+                        )
+                        .fill(Self::primary_fill(true))
+                        .min_size(egui::vec2(ui.available_width(), 58.0)),
                     )
                     .clicked()
-                {
-                    self.outbound_load.select_operation(operation);
-                    self.outbound_load_scan_focus = None;
-                }
+                })
+                .inner;
+            if clicked {
+                let (command_id, key) = Self::command_identity("outbound-carton-move");
+                let transition = self.outbound_load.begin_movement(command_id, key);
+                self.emit_outbound_load_transition(transition);
             }
-        });
-        ui.add_space(6.0);
+        }
+
+        ui.add_space(4.0);
+        Self::section_label(ui, "LOAD DETAILS");
         egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 60, 56)))
+            .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
                 ui.label(egui::RichText::new("EXECUTION").small().strong());
@@ -155,24 +186,6 @@ impl RfApp {
                     ui.monospace(next.join("  "));
                 }
             });
-        if let Some(stage) = self.outbound_load.expected_scan() {
-            self.outbound_load_scan_control(ui, load.outbound_load_id, stage);
-        } else if self.outbound_load.activity() == Activity::Active
-            && ui
-                .add(
-                    egui::Button::new(
-                        egui::RichText::new(format!("Confirm {}", selected.label().to_lowercase()))
-                            .strong(),
-                    )
-                    .fill(Self::primary_fill(true))
-                    .min_size(egui::vec2(ui.available_width(), 58.0)),
-                )
-                .clicked()
-        {
-            let (command_id, key) = Self::command_identity("outbound-carton-move");
-            let transition = self.outbound_load.begin_movement(command_id, key);
-            self.emit_outbound_load_transition(transition);
-        }
         if self.outbound_load.activity() == Activity::Active {
             ui.add_space(8.0);
             if ui
@@ -195,21 +208,17 @@ impl RfApp {
         ui: &mut egui::Ui,
         load_id: i64,
         stage: OutboundLoadScanStage,
+        expected: Option<&str>,
     ) {
         let operation = self.outbound_load.operation();
-        ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new(stage.prompt(operation))
-                .size(19.0)
-                .strong()
-                .color(Self::accent()),
-        );
-        let response = ui.add_sized(
-            [ui.available_width(), 56.0],
-            egui::TextEdit::singleline(self.outbound_load.scan_draft_mut())
-                .id(egui::Id::new(("outbound_load_scan", load_id, stage)))
-                .font(egui::TextStyle::Monospace)
-                .hint_text("SCAN"),
+        let (response, clicked) = Self::scanner_action(
+            ui,
+            stage.prompt(operation),
+            expected,
+            "Confirm scan",
+            true,
+            self.outbound_load.scan_draft_mut(),
+            egui::Id::new(("outbound_load_scan", load_id, stage)),
         );
         let focus = (load_id, stage);
         if self.outbound_load_scan_focus != Some(focus) {
@@ -218,16 +227,7 @@ impl RfApp {
         }
         let enter = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         let ready = !self.outbound_load.scan_draft_mut().trim().is_empty();
-        if ui
-            .add_enabled(
-                ready,
-                egui::Button::new("Confirm scan")
-                    .fill(Self::primary_fill(ready))
-                    .min_size(egui::vec2(ui.available_width(), 52.0)),
-            )
-            .clicked()
-            || (ready && enter)
-        {
+        if clicked || (ready && enter) {
             self.outbound_load.submit_scan();
             self.outbound_load_scan_focus = None;
         }
@@ -262,13 +262,13 @@ impl RfApp {
                     "Check saved carton move",
                     &message,
                 );
-                if ui
-                    .add(
-                        egui::Button::new("Retry exact saved move")
-                            .fill(Self::primary_fill(true))
-                            .min_size(egui::vec2(ui.available_width(), 54.0)),
-                    )
-                    .clicked()
+                if Self::full_width_button(
+                    ui,
+                    true,
+                    egui::Button::new("Retry exact saved move").fill(Self::primary_fill(true)),
+                    54.0,
+                )
+                .clicked()
                 {
                     let transition = self.outbound_load.retry_ambiguous();
                     self.emit_outbound_load_transition(transition);
@@ -301,5 +301,30 @@ impl RfApp {
         self.outbound_load
             .resolve_load(crate::outbound_load::example_outbound_load());
         self.outbound_load_scan_focus = None;
+    }
+}
+
+fn outbound_load_scan_hint(
+    load: &wareboxes_api_contract::v1::OutboundLoadResponse,
+    operation: OutboundCartonOperation,
+    stage: OutboundLoadScanStage,
+) -> Option<&str> {
+    match (stage, operation) {
+        (OutboundLoadScanStage::Load, _) => Some(&load.load_barcode),
+        (OutboundLoadScanStage::Source, OutboundCartonOperation::Load)
+        | (OutboundLoadScanStage::Source, OutboundCartonOperation::Unstage)
+        | (OutboundLoadScanStage::Destination, OutboundCartonOperation::Stage)
+        | (OutboundLoadScanStage::Destination, OutboundCartonOperation::Unload) => {
+            Some(&load.staging_location_barcode)
+        }
+        (OutboundLoadScanStage::Source, OutboundCartonOperation::Unload)
+        | (OutboundLoadScanStage::Destination, OutboundCartonOperation::Load) => {
+            load.trailer_number.as_deref()
+        }
+        (OutboundLoadScanStage::Source, OutboundCartonOperation::Stage) => {
+            load.dock_location_barcode.as_deref()
+        }
+        (OutboundLoadScanStage::Destination, OutboundCartonOperation::Unstage)
+        | (OutboundLoadScanStage::Carton, _) => None,
     }
 }

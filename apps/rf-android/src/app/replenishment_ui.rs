@@ -29,16 +29,18 @@ impl RfApp {
 
     fn replenishment_idle(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.0);
-        ui.label("No replenishment assigned");
+        ui.vertical_centered(|ui| {
+            ui.label("No replenishment assigned");
+        });
         let can_execute = self.can_execute();
-        if ui
-            .add_enabled(
-                can_execute,
-                egui::Button::new(egui::RichText::new("Get next replenishment").strong())
-                    .fill(Self::primary_fill(can_execute))
-                    .min_size(egui::vec2(ui.available_width(), 58.0)),
-            )
-            .clicked()
+        if Self::full_width_button(
+            ui,
+            can_execute,
+            egui::Button::new(egui::RichText::new("Get next replenishment").strong())
+                .fill(Self::primary_fill(can_execute)),
+            58.0,
+        )
+        .clicked()
         {
             let (command_id, key) = Self::command_identity("replenishment-claim");
             let effect = self.replenishment.begin_claim_next(command_id, key);
@@ -46,12 +48,27 @@ impl RfApp {
         }
 
         ui.add_space(12.0);
-        ui.label(egui::RichText::new("CLAIM SPECIFIC TASK").small().strong());
-        let task_id = ui.add_enabled(
-            can_execute,
-            egui::TextEdit::singleline(&mut self.replenishment_task_id_draft)
-                .font(egui::TextStyle::Monospace)
-                .hint_text("Task ID"),
+        ui.vertical_centered(|ui| {
+            ui.label(egui::RichText::new("CLAIM SPECIFIC TASK").small().strong());
+        });
+        let field_width = ui.available_width();
+        let task_id = ui
+            .add_enabled_ui(can_execute, |ui| {
+                ui.add_sized(
+                    [field_width, 52.0],
+                    Self::centered_text_edit(
+                        egui::TextEdit::singleline(&mut self.replenishment_task_id_draft)
+                            .font(egui::TextStyle::Monospace),
+                    ),
+                )
+            })
+            .inner;
+        Self::centered_hint(
+            ui,
+            &task_id,
+            self.replenishment_task_id_draft.is_empty(),
+            "Task ID",
+            egui::TextStyle::Monospace,
         );
         let parsed_task_id = self
             .replenishment_task_id_draft
@@ -60,12 +77,14 @@ impl RfApp {
             .ok()
             .filter(|task_id| *task_id > 0);
         let enter = task_id.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        let clicked = ui
-            .add_enabled(
-                can_execute && parsed_task_id.is_some(),
-                Self::secondary_button("Claim task", ui.available_width(), 50.0),
-            )
-            .clicked();
+        let claim_button = Self::secondary_button("Claim task", ui.available_width(), 50.0);
+        let clicked = Self::full_width_button(
+            ui,
+            can_execute && parsed_task_id.is_some(),
+            claim_button,
+            50.0,
+        )
+        .clicked();
         if can_execute
             && (enter || clicked)
             && let Some(task_id) = parsed_task_id
@@ -82,30 +101,13 @@ impl RfApp {
         let Some(claim) = self.replenishment.claim().cloned() else {
             return;
         };
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                egui::RichText::new(format!("TASK {}", claim.work_id))
-                    .strong()
-                    .color(Self::accent()),
-            );
-            ui.separator();
-            ui.label(format!("Stop {}", claim.sequence));
-            ui.separator();
-            ui.label(format!("Priority {}", claim.priority));
-        });
-        Self::replenishment_location_band(ui, "RESERVE SOURCE", &claim.source_location);
-        Self::replenishment_item_band(ui, &claim);
-        Self::replenishment_location_band(
+        Self::task_reference(
             ui,
-            "DESTINATION PICK FACE",
-            &claim.destination_pick_face,
+            &format!("Task {}  ·  Stop {}", claim.work_id, claim.sequence),
+            claim.priority,
         );
         if let Some(instructions) = claim.instructions.as_deref() {
-            ui.label(
-                egui::RichText::new(instructions)
-                    .color(Self::warning())
-                    .strong(),
-            );
+            Self::message_band(ui, Self::warning(), Icon::AlertTriangle, instructions);
         }
 
         let lease_actions_allowed = if self.replenishment.activity() == Activity::Active {
@@ -114,10 +116,33 @@ impl RfApp {
             false
         };
         if let Some(stage) = self.replenishment.expected_scan() {
-            self.replenishment_scan_control(ui, claim.work_id, stage, lease_actions_allowed);
+            let expected = match stage {
+                ReplenishmentScanStage::SourceLocation => {
+                    Some(claim.source_location.barcode.as_str())
+                }
+                ReplenishmentScanStage::Item => claim.item_barcodes.first().map(String::as_str),
+                ReplenishmentScanStage::Lot => claim.lot.as_deref(),
+                ReplenishmentScanStage::Serial => claim.serial.as_deref(),
+                ReplenishmentScanStage::DestinationPickFace => {
+                    Some(claim.destination_pick_face.barcode.as_str())
+                }
+            };
+            self.replenishment_scan_control(
+                ui,
+                claim.work_id,
+                stage,
+                expected,
+                lease_actions_allowed,
+            );
         } else {
             self.replenishment_confirm_control(ui, &claim, lease_actions_allowed);
         }
+
+        ui.add_space(4.0);
+        Self::section_label(ui, "MOVE DETAILS");
+        Self::replenishment_location_band(ui, "FROM", &claim.source_location);
+        Self::replenishment_item_band(ui, &claim);
+        Self::replenishment_location_band(ui, "TO", &claim.destination_pick_face);
         self.replenishment_release_control(ui, lease_actions_allowed);
     }
 
@@ -129,6 +154,8 @@ impl RfApp {
         let width = ui.available_width();
         egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 60, 56)))
+            .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
                 ui.set_min_width((width - 20.0).max(0.0));
@@ -150,6 +177,8 @@ impl RfApp {
         let width = ui.available_width();
         egui::Frame::new()
             .fill(ui.visuals().extreme_bg_color)
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(48, 60, 56)))
+            .corner_radius(egui::CornerRadius::same(8))
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
                 ui.set_min_width((width - 20.0).max(0.0));
@@ -196,26 +225,18 @@ impl RfApp {
         ui: &mut egui::Ui,
         work_id: i64,
         stage: ReplenishmentScanStage,
+        expected: Option<&str>,
         lease_actions_allowed: bool,
     ) {
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(stage.prompt())
-                .size(19.0)
-                .strong()
-                .color(Self::accent()),
+        let (response, clicked) = Self::scanner_action(
+            ui,
+            stage.prompt(),
+            expected,
+            "Confirm scan",
+            lease_actions_allowed,
+            self.replenishment.scan_draft_mut(),
+            egui::Id::new(("replenishment_scan", work_id, stage)),
         );
-        let response = ui
-            .add_enabled_ui(lease_actions_allowed, |ui| {
-                ui.add_sized(
-                    [ui.available_width(), 56.0],
-                    egui::TextEdit::singleline(self.replenishment.scan_draft_mut())
-                        .id(egui::Id::new(("replenishment_scan", work_id, stage)))
-                        .font(egui::TextStyle::Monospace)
-                        .hint_text("SCAN"),
-                )
-            })
-            .inner;
         let focus_key = (work_id, stage);
         if lease_actions_allowed && self.replenishment_scan_focus != Some(focus_key) {
             response.request_focus();
@@ -224,15 +245,6 @@ impl RfApp {
             self.replenishment_scan_focus = None;
         }
         let enter = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-        let scan_ready = !self.replenishment.scan_draft_mut().trim().is_empty();
-        let clicked = ui
-            .add_enabled(
-                scan_ready && lease_actions_allowed,
-                egui::Button::new(egui::RichText::new("Confirm scan").strong())
-                    .fill(Self::primary_fill(scan_ready && lease_actions_allowed))
-                    .min_size(egui::vec2(ui.available_width(), 54.0)),
-            )
-            .clicked();
         if lease_actions_allowed && (enter || clicked) {
             self.replenishment.submit_scan();
             self.replenishment_scan_focus = None;
@@ -245,17 +257,33 @@ impl RfApp {
         claim: &ReplenishmentClaim,
         lease_actions_allowed: bool,
     ) {
-        ui.add_space(6.0);
         let label = format!("Confirm move of {} {}", claim.quantity, claim.uom);
-        if ui
-            .add_enabled(
-                lease_actions_allowed,
-                egui::Button::new(egui::RichText::new(label).strong())
-                    .fill(Self::primary_fill(lease_actions_allowed))
-                    .min_size(egui::vec2(ui.available_width(), 58.0)),
-            )
-            .clicked()
-        {
+        let width = ui.available_width();
+        let clicked = egui::Frame::new()
+            .fill(Self::accent().gamma_multiply(0.08))
+            .stroke(egui::Stroke::new(1.0, Self::accent()))
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin::same(12))
+            .show(ui, |ui| {
+                ui.set_min_width((width - 24.0).max(0.0));
+                Self::section_label(ui, "NEXT ACTION");
+                ui.label(
+                    egui::RichText::new("Complete replenishment")
+                        .size(23.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                );
+                Self::full_width_button(
+                    ui,
+                    lease_actions_allowed,
+                    egui::Button::new(egui::RichText::new(label).strong())
+                        .fill(Self::primary_fill(lease_actions_allowed)),
+                    58.0,
+                )
+                .clicked()
+            })
+            .inner;
+        if clicked {
             let (command_id, key) = Self::command_identity("replenishment-confirm");
             let effect = self.replenishment.begin_confirmation(command_id, key);
             self.emit_replenishment(effect);
@@ -281,14 +309,14 @@ impl RfApp {
                         {
                             self.release_confirmation = false;
                         }
-                        if ui
-                            .add_enabled(
-                                allowed,
-                                egui::Button::new("Return to queue")
-                                    .fill(egui::Color32::from_rgb(112, 72, 18))
-                                    .min_size(egui::vec2(ui.available_width(), 48.0)),
-                            )
-                            .clicked()
+                        if Self::full_width_button(
+                            ui,
+                            allowed,
+                            egui::Button::new("Return to queue")
+                                .fill(egui::Color32::from_rgb(112, 72, 18)),
+                            48.0,
+                        )
+                        .clicked()
                         {
                             let (command_id, key) = Self::command_identity("replenishment-release");
                             let effect = self.replenishment.begin_release(command_id, key);

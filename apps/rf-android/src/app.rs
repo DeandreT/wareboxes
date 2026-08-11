@@ -13,13 +13,12 @@ use crate::outbound_load::{OutboundLoadScanStage, OutboundLoadWorkflow};
 use crate::picking::{PickScanStage, PickingWorkflow};
 use crate::replenishment::{ReplenishmentScanStage, ReplenishmentWorkflow};
 use crate::transport::{NetworkEvent, ServerEndpoint};
-use crate::workflow::{
-    Activity, InventoryRelocationClaim, Location, MovementClaimDetails, MovementKind, MovementWork,
-    MovementWorkflow, PutawayClaim, ReleaseReason, ScanStage, Transition, WorkflowEffect,
-};
+use crate::workflow::{Activity, MovementWorkflow, ScanStage, Transition, WorkflowEffect};
 
 mod cycle_count_ui;
 mod heartbeat;
+mod movement_ui;
+mod navigation;
 mod outbound_load_session;
 mod outbound_load_ui;
 mod picking_ui;
@@ -27,10 +26,11 @@ mod receiving;
 mod replenishment_session;
 mod replenishment_ui;
 mod session;
+mod ui;
 
-use receiving::{ReceivingUiState, WorkMode};
+use navigation::WorkMode;
+use receiving::ReceivingUiState;
 
-const ICON_FONT: &str = "lucide";
 const RF_SESSION_PATH: &str = "/api/v1/rf/sessions";
 
 struct RfSession {
@@ -50,6 +50,7 @@ enum SessionGate {
 
 pub struct RfApp {
     work_mode: WorkMode,
+    work_menu_open: bool,
     workflow: MovementWorkflow,
     effects: VecDeque<WorkflowEffect>,
     cycle_count: CycleCountWorkflow,
@@ -121,6 +122,7 @@ impl RfApp {
         let (network_tx, network_rx) = mpsc::channel();
         Self {
             work_mode: WorkMode::Putaway,
+            work_menu_open: false,
             workflow: MovementWorkflow::default(),
             effects: VecDeque::new(),
             cycle_count: CycleCountWorkflow::default(),
@@ -209,6 +211,7 @@ impl RfApp {
         };
         let app = Self {
             work_mode: WorkMode::Putaway,
+            work_menu_open: false,
             workflow: MovementWorkflow::default(),
             effects: VecDeque::new(),
             cycle_count: CycleCountWorkflow::default(),
@@ -267,96 +270,6 @@ impl RfApp {
         app
     }
 
-    fn install_style(creation_context: &eframe::CreationContext<'_>) {
-        Self::install_fonts(&creation_context.egui_ctx);
-        creation_context.egui_ctx.set_theme(egui::Theme::Dark);
-        creation_context
-            .egui_ctx
-            .set_style_of(egui::Theme::Dark, Self::style());
-    }
-
-    fn install_fonts(ctx: &egui::Context) {
-        let mut fonts = egui::FontDefinitions::default();
-        let fallbacks = fonts
-            .families
-            .get(&egui::FontFamily::Proportional)
-            .cloned()
-            .unwrap_or_default();
-        fonts.font_data.insert(
-            ICON_FONT.to_owned(),
-            egui::FontData::from_static(lucide_icons::LUCIDE_FONT_BYTES).into(),
-        );
-        let icon_family = fonts
-            .families
-            .entry(egui::FontFamily::Name(ICON_FONT.into()))
-            .or_default();
-        icon_family.push(ICON_FONT.to_owned());
-        icon_family.extend(fallbacks);
-        ctx.set_fonts(fonts);
-    }
-
-    fn style() -> egui::Style {
-        let mut style = egui::Style::default();
-        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-        style.spacing.button_padding = egui::vec2(14.0, 10.0);
-        style.spacing.interact_size = egui::vec2(48.0, 48.0);
-        style.spacing.window_margin = egui::Margin::same(12);
-        style.text_styles = [
-            (
-                egui::TextStyle::Heading,
-                egui::FontId::new(22.0, egui::FontFamily::Proportional),
-            ),
-            (
-                egui::TextStyle::Body,
-                egui::FontId::new(17.0, egui::FontFamily::Proportional),
-            ),
-            (
-                egui::TextStyle::Button,
-                egui::FontId::new(17.0, egui::FontFamily::Proportional),
-            ),
-            (
-                egui::TextStyle::Monospace,
-                egui::FontId::new(18.0, egui::FontFamily::Monospace),
-            ),
-            (
-                egui::TextStyle::Small,
-                egui::FontId::new(14.0, egui::FontFamily::Proportional),
-            ),
-        ]
-        .into();
-
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = egui::Color32::from_rgb(14, 18, 17);
-        visuals.window_fill = egui::Color32::from_rgb(22, 27, 25);
-        visuals.extreme_bg_color = egui::Color32::from_rgb(8, 11, 10);
-        visuals.faint_bg_color = egui::Color32::from_rgb(28, 34, 32);
-        visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(4);
-        visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(4);
-        visuals.widgets.active.corner_radius = egui::CornerRadius::same(4);
-        visuals.widgets.open.corner_radius = egui::CornerRadius::same(4);
-        style.visuals = visuals;
-        style
-    }
-
-    fn icon(icon: Icon) -> egui::RichText {
-        egui::RichText::new(icon.unicode().to_string()).font(egui::FontId::new(
-            19.0,
-            egui::FontFamily::Name(ICON_FONT.into()),
-        ))
-    }
-
-    fn accent() -> egui::Color32 {
-        egui::Color32::from_rgb(45, 190, 139)
-    }
-
-    fn warning() -> egui::Color32 {
-        egui::Color32::from_rgb(241, 179, 70)
-    }
-
-    fn danger() -> egui::Color32 {
-        egui::Color32::from_rgb(245, 104, 93)
-    }
-
     fn command_identity(operation: &str) -> (String, String) {
         let id = uuid::Uuid::new_v4();
         (
@@ -385,12 +298,18 @@ impl RfApp {
                     .id_salt("rf_sign_in")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new("WAREBOXES RF")
-                                .size(25.0)
-                                .strong()
-                                .color(Self::accent()),
-                        );
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new("WAREBOXES RF")
+                                    .size(25.0)
+                                    .strong()
+                                    .color(Self::accent()),
+                            );
+                            ui.label(
+                                egui::RichText::new("Warehouse execution")
+                                    .color(egui::Color32::from_rgb(166, 177, 173)),
+                            );
+                        });
                         if self.edit_server {
                             self.server_setup(ui);
                         } else {
@@ -425,15 +344,27 @@ impl RfApp {
 
     fn server_setup(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
-        ui.heading("Connect this device");
-        ui.label("Enter the secure server address provided by your administrator.");
+        ui.vertical_centered(|ui| {
+            ui.heading("Connect this device");
+            ui.add(
+                egui::Label::new("Enter the secure server address provided by your administrator.")
+                    .halign(egui::Align::Center),
+            );
+        });
         ui.add_space(20.0);
         ui.strong("Server address");
         let response = ui.add_sized(
             [ui.available_width(), 52.0],
-            egui::TextEdit::singleline(&mut self.server_url)
-                .hint_text("https://wms.example.com")
-                .id(egui::Id::new("rf_server_url")),
+            Self::centered_text_edit(
+                egui::TextEdit::singleline(&mut self.server_url).id(egui::Id::new("rf_server_url")),
+            ),
+        );
+        Self::centered_hint(
+            ui,
+            &response,
+            self.server_url.is_empty(),
+            "https://wms.example.com",
+            egui::TextStyle::Body,
         );
         if self.field_focus_pending {
             response.request_focus();
@@ -445,11 +376,12 @@ impl RfApp {
         }
         ui.add_space(14.0);
         let can_connect = !self.server_url.trim().is_empty();
-        let connect = ui.add_enabled(
+        let connect = Self::full_width_button(
+            ui,
             can_connect,
             egui::Button::new(egui::RichText::new("Connect").strong())
-                .fill(Self::primary_fill(can_connect))
-                .min_size(egui::vec2(ui.available_width(), 56.0)),
+                .fill(Self::primary_fill(can_connect)),
+            56.0,
         );
         let enter = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         if connect.clicked() || enter {
@@ -510,10 +442,12 @@ impl RfApp {
 
     fn sign_in_form(&mut self, ui: &mut egui::Ui) {
         ui.add_space(10.0);
-        ui.heading(if self.reauth_scope.is_some() {
-            "Sign in to recover work"
-        } else {
-            "Sign in"
+        ui.vertical_centered(|ui| {
+            ui.heading(if self.reauth_scope.is_some() {
+                "Sign in to recover work"
+            } else {
+                "Sign in"
+            });
         });
         ui.add_space(8.0);
         egui::containers::Sides::new().height(48.0).show(
@@ -551,9 +485,16 @@ impl RfApp {
         ui.strong("Email");
         let email = ui.add_sized(
             [ui.available_width(), 52.0],
-            egui::TextEdit::singleline(&mut self.email)
-                .id(egui::Id::new("rf_email"))
-                .hint_text("operator@example.com"),
+            Self::centered_text_edit(
+                egui::TextEdit::singleline(&mut self.email).id(egui::Id::new("rf_email")),
+            ),
+        );
+        Self::centered_hint(
+            ui,
+            &email,
+            self.email.is_empty(),
+            "operator@example.com",
+            egui::TextStyle::Body,
         );
         ui.add_space(8.0);
         ui.strong("Password");
@@ -563,9 +504,11 @@ impl RfApp {
                 let field_width = (available - 56.0).max(120.0);
                 let response = ui.add_sized(
                     [field_width, 52.0],
-                    egui::TextEdit::singleline(&mut self.password)
-                        .password(!self.reveal_password)
-                        .id(egui::Id::new("rf_password")),
+                    Self::centered_text_edit(
+                        egui::TextEdit::singleline(&mut self.password)
+                            .password(!self.reveal_password)
+                            .id(egui::Id::new("rf_password")),
+                    ),
                 );
                 let icon = if self.reveal_password {
                     Icon::EyeOff
@@ -614,14 +557,14 @@ impl RfApp {
         } else {
             "Sign in"
         };
-        let clicked = ui
-            .add_enabled(
-                can_submit,
-                egui::Button::new(egui::RichText::new(label).strong())
-                    .fill(Self::primary_fill(can_submit))
-                    .min_size(egui::vec2(ui.available_width(), 56.0)),
-            )
-            .clicked();
+        let clicked = Self::full_width_button(
+            ui,
+            can_submit,
+            egui::Button::new(egui::RichText::new(label).strong())
+                .fill(Self::primary_fill(can_submit)),
+            56.0,
+        )
+        .clicked();
         let enter = password.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         if can_submit && (clicked || enter) {
             self.begin_sign_in(ui.ctx());
@@ -629,32 +572,24 @@ impl RfApp {
 
         #[cfg(debug_assertions)]
         {
-            ui.add_space(12.0);
-            if ui
-                .add_sized(
-                    [ui.available_width(), 48.0],
-                    Self::secondary_button("Open workflow preview", ui.available_width(), 48.0),
-                )
-                .clicked()
-            {
-                self.open_debug_preview();
+            if Self::show_preview_controls() {
+                ui.add_space(12.0);
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 48.0],
+                        Self::secondary_button("Open workflow preview", ui.available_width(), 48.0),
+                    )
+                    .clicked()
+                {
+                    self.open_debug_preview();
+                }
             }
         }
     }
 
-    fn message_band(ui: &mut egui::Ui, color: egui::Color32, icon: Icon, message: &str) {
-        let width = ui.available_width();
-        egui::Frame::new()
-            .fill(color.gamma_multiply(0.14))
-            .stroke(egui::Stroke::new(1.0, color))
-            .inner_margin(egui::Margin::same(10))
-            .show(ui, |ui| {
-                ui.set_min_width((width - 20.0).max(0.0));
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(Self::icon(icon).color(color));
-                    ui.label(message);
-                });
-            });
+    #[cfg(debug_assertions)]
+    fn show_preview_controls() -> bool {
+        std::env::var("WAREBOXES_RF_SHOW_PREVIEW_TOOLS").is_ok_and(|value| value == "1")
     }
 
     #[cfg(debug_assertions)]
@@ -678,454 +613,6 @@ impl RfApp {
         self.execution_scope = Some(scope);
         self.session_gate = SessionGate::Ready;
         self.workflow.load_debug_claim(Self::debug_claim());
-    }
-
-    fn idle(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new("WORK TYPE").small().strong());
-        let segment_width = (ui.available_width() - 8.0) / 2.0;
-        ui.horizontal(|ui| {
-            for kind in [MovementKind::Loose, MovementKind::LicensePlate] {
-                let selected = self.workflow.selected_kind() == kind;
-                if ui
-                    .add_sized(
-                        [segment_width, 52.0],
-                        egui::Button::selectable(selected, kind.label()),
-                    )
-                    .clicked()
-                {
-                    self.workflow.select_kind(kind);
-                }
-            }
-        });
-        ui.add_space(10.0);
-
-        let can_execute = self.can_execute();
-        let button = egui::Button::new(egui::RichText::new("Get next task").strong())
-            .fill(Self::primary_fill(can_execute))
-            .min_size(egui::vec2(ui.available_width(), 58.0));
-        if ui.add_enabled(can_execute, button).clicked() {
-            let (command_id, key) = Self::command_identity("claim");
-            let effect = self.workflow.begin_claim_next(command_id, key);
-            self.emit(effect);
-        }
-
-        if let Some(error) = self.storage_error.as_deref() {
-            ui.add_space(12.0);
-            ui.colored_label(Self::danger(), error);
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            ui.add_space(12.0);
-            if ui
-                .add_sized(
-                    [ui.available_width(), 48.0],
-                    egui::Button::new("Load preview task")
-                        .fill(ui.visuals().faint_bg_color)
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(79, 91, 87))),
-                )
-                .clicked()
-            {
-                self.workflow.load_debug_claim(Self::debug_claim());
-            }
-        }
-
-        if let Some(notice) = self.workflow.notice() {
-            ui.add_space(12.0);
-            ui.colored_label(Self::warning(), notice);
-        }
-    }
-
-    fn active_work(&mut self, ui: &mut egui::Ui) {
-        let Some(claim) = self.workflow.claim().cloned() else {
-            return;
-        };
-
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!("TASK {}", claim.task_id))
-                    .strong()
-                    .color(Self::accent()),
-            );
-            ui.separator();
-            ui.label(format!("Priority {}", claim.priority));
-        });
-
-        if let Some(source) = &claim.source {
-            Self::location_band(ui, "SOURCE", source);
-        }
-        Self::work_band(ui, &claim.work);
-        Self::location_band(ui, "DESTINATION", &claim.destination);
-
-        if let Some(instructions) = claim.instructions.as_deref() {
-            ui.label(
-                egui::RichText::new(instructions)
-                    .color(Self::warning())
-                    .strong(),
-            );
-        }
-
-        let lease_actions_allowed = if self.workflow.activity() == Activity::Active {
-            self.heartbeat_status(ui, claim.task_id)
-        } else {
-            false
-        };
-        if let Some(stage) = self.workflow.expected_scan() {
-            self.scan_control(ui, claim.task_id, stage, lease_actions_allowed);
-        }
-
-        ui.add_space(8.0);
-        if self.release_confirmation {
-            self.release_confirmation(ui, lease_actions_allowed);
-        } else {
-            let release_clicked = ui
-                .add_enabled(
-                    lease_actions_allowed,
-                    Self::secondary_button("Release work", ui.available_width(), 48.0),
-                )
-                .on_disabled_hover_text("Check task connection first")
-                .clicked();
-            if self.workflow.activity() == Activity::Active
-                && action_requested(lease_actions_allowed, release_clicked)
-            {
-                self.release_confirmation = true;
-            }
-        }
-    }
-
-    fn location_band(ui: &mut egui::Ui, label: &str, location: &Location) {
-        let width = ui.available_width();
-        egui::Frame::new()
-            .fill(ui.visuals().faint_bg_color)
-            .inner_margin(egui::Margin::symmetric(12, 9))
-            .show(ui, |ui| {
-                ui.set_min_width((width - 24.0).max(0.0));
-                ui.label(egui::RichText::new(label).small().strong());
-                let display_name = location.display_name();
-                ui.label(egui::RichText::new(&display_name).size(23.0).strong());
-                if let Some(barcode) = location
-                    .barcode
-                    .as_deref()
-                    .filter(|barcode| *barcode != display_name)
-                {
-                    ui.monospace(barcode);
-                }
-            });
-    }
-
-    fn work_band(ui: &mut egui::Ui, work: &MovementWork) {
-        let width = ui.available_width();
-        egui::Frame::new()
-            .fill(ui.visuals().extreme_bg_color)
-            .inner_margin(egui::Margin::symmetric(12, 9))
-            .show(ui, |ui| {
-                ui.set_min_width((width - 24.0).max(0.0));
-                match work {
-                    MovementWork::Loose {
-                        item_description,
-                        item_id,
-                        quantity,
-                        uom,
-                        lot,
-                        serial,
-                    } => {
-                        ui.label(egui::RichText::new("LOOSE INVENTORY").small().strong());
-                        ui.label(
-                            egui::RichText::new(
-                                item_description
-                                    .clone()
-                                    .unwrap_or_else(|| format!("Item {item_id}")),
-                            )
-                            .size(21.0)
-                            .strong(),
-                        );
-                        ui.label(format!("{quantity} {uom}"));
-                        if let Some(lot) = lot {
-                            ui.monospace(format!("Lot {lot}"));
-                        }
-                        if let Some(serial) = serial {
-                            ui.monospace(format!("Serial {serial}"));
-                        }
-                    }
-                    MovementWork::LicensePlate {
-                        barcode,
-                        planned_balance_count,
-                    } => {
-                        ui.label(egui::RichText::new("LICENSE PLATE").small().strong());
-                        ui.monospace(egui::RichText::new(barcode).size(23.0).strong());
-                        ui.label(format!("{planned_balance_count} inventory balances"));
-                    }
-                }
-            });
-    }
-
-    fn scan_control(
-        &mut self,
-        ui: &mut egui::Ui,
-        task_id: i64,
-        stage: ScanStage,
-        lease_actions_allowed: bool,
-    ) {
-        ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(stage.prompt())
-                .size(19.0)
-                .strong()
-                .color(Self::accent()),
-        );
-        let response = ui
-            .add_enabled_ui(lease_actions_allowed, |ui| {
-                ui.add_sized(
-                    [ui.available_width(), 56.0],
-                    egui::TextEdit::singleline(self.workflow.scan_draft_mut())
-                        .id(egui::Id::new(("putaway_scan", task_id, stage)))
-                        .font(egui::TextStyle::Monospace)
-                        .hint_text("SCAN"),
-                )
-            })
-            .inner;
-        let focus_key = (task_id, stage);
-        if lease_actions_allowed && self.scan_focus != Some(focus_key) {
-            response.request_focus();
-            self.scan_focus = Some(focus_key);
-        } else if !lease_actions_allowed {
-            self.scan_focus = None;
-        }
-        let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
-        let scan_ready = !self.workflow.scan_draft_mut().trim().is_empty();
-        let can_confirm = scan_ready && lease_actions_allowed;
-        let clicked = ui
-            .add_enabled(
-                can_confirm,
-                egui::Button::new(egui::RichText::new("Confirm scan").strong())
-                    .fill(Self::primary_fill(can_confirm))
-                    .min_size(egui::vec2(ui.available_width(), 54.0)),
-            )
-            .on_disabled_hover_text(if lease_actions_allowed {
-                "A scan is required"
-            } else {
-                "Check task connection first"
-            })
-            .clicked();
-        if action_requested(lease_actions_allowed, enter || clicked) {
-            let (command_id, key) = Self::command_identity("confirm");
-            let effect = self.workflow.submit_scan(command_id, key);
-            self.emit(effect);
-        }
-    }
-
-    fn secondary_button(label: &str, width: f32, height: f32) -> egui::Button<'static> {
-        egui::Button::new(egui::RichText::new(label.to_owned()))
-            .fill(egui::Color32::from_rgb(28, 34, 32))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(79, 91, 87)))
-            .min_size(egui::vec2(width, height))
-    }
-
-    fn primary_fill(enabled: bool) -> egui::Color32 {
-        if enabled {
-            egui::Color32::from_rgb(18, 112, 81)
-        } else {
-            egui::Color32::from_rgb(28, 34, 32)
-        }
-    }
-
-    fn release_confirmation(&mut self, ui: &mut egui::Ui, lease_actions_allowed: bool) {
-        egui::Frame::new()
-            .fill(egui::Color32::from_rgb(57, 42, 21))
-            .inner_margin(egui::Margin::same(10))
-            .show(ui, |ui| {
-                ui.strong("Return this task to the queue?");
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(Self::secondary_button(
-                            "Cancel",
-                            ui.available_width() / 2.0 - 4.0,
-                            48.0,
-                        ))
-                        .clicked()
-                    {
-                        self.release_confirmation = false;
-                    }
-                    let release_clicked = ui
-                        .add_enabled(
-                            lease_actions_allowed,
-                            egui::Button::new("Return to queue")
-                                .fill(if lease_actions_allowed {
-                                    egui::Color32::from_rgb(112, 72, 18)
-                                } else {
-                                    egui::Color32::from_rgb(28, 34, 32)
-                                })
-                                .min_size(egui::vec2(ui.available_width(), 48.0)),
-                        )
-                        .on_disabled_hover_text("Check task connection first")
-                        .clicked();
-                    if action_requested(lease_actions_allowed, release_clicked) {
-                        let (command_id, key) = Self::command_identity("release");
-                        let effect = self.workflow.begin_release(
-                            command_id,
-                            key,
-                            ReleaseReason::WorkInterrupted,
-                            None,
-                        );
-                        self.emit(effect);
-                        self.release_confirmation = false;
-                    }
-                });
-            });
-    }
-
-    fn command_state(&mut self, ui: &mut egui::Ui) {
-        match self.workflow.activity() {
-            Activity::Persisting => Self::state_band(
-                ui,
-                Self::warning(),
-                Icon::Save,
-                "Saving scan",
-                "Do not scan again",
-            ),
-            Activity::ReadyToDispatch => Self::state_band(
-                ui,
-                Self::warning(),
-                Icon::Send,
-                "Scan saved",
-                "Waiting for connection. Do not scan again.",
-            ),
-            Activity::InFlight => Self::state_band(
-                ui,
-                Self::warning(),
-                Icon::Loader,
-                "Sending scan",
-                "Waiting for the server. Do not scan again.",
-            ),
-            Activity::Ambiguous => {
-                let message = self
-                    .workflow
-                    .ambiguous_message()
-                    .unwrap_or("The command result is unknown");
-                Self::state_band(
-                    ui,
-                    Self::danger(),
-                    Icon::AlertTriangle,
-                    "Checking last scan",
-                    message,
-                );
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 54.0],
-                        egui::Button::new(egui::RichText::new("Check again").strong())
-                            .fill(egui::Color32::from_rgb(112, 72, 18)),
-                    )
-                    .clicked()
-                {
-                    let effect = self.workflow.retry_ambiguous();
-                    self.emit(effect);
-                }
-            }
-            Activity::ReconcileRequired => Self::state_band(
-                ui,
-                Self::danger(),
-                Icon::ShieldAlert,
-                "Work blocked",
-                self.workflow
-                    .reconcile_reason()
-                    .unwrap_or("Device and server state must be reconciled"),
-            ),
-            Activity::Idle | Activity::Active => {}
-        }
-    }
-
-    fn state_band(ui: &mut egui::Ui, color: egui::Color32, icon: Icon, title: &str, detail: &str) {
-        let width = ui.available_width();
-        egui::Frame::new()
-            .fill(color.gamma_multiply(0.16))
-            .stroke(egui::Stroke::new(1.0, color))
-            .inner_margin(egui::Margin::same(12))
-            .show(ui, |ui| {
-                ui.set_min_width((width - 24.0).max(0.0));
-                ui.horizontal(|ui| {
-                    ui.label(Self::icon(icon).color(color));
-                    ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(title).strong().color(color));
-                        ui.label(detail);
-                    });
-                });
-            });
-    }
-
-    fn error(&self, ui: &mut egui::Ui) {
-        if let Some(error) = self.workflow.error() {
-            ui.colored_label(Self::danger(), egui::RichText::new(error).strong());
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    fn debug_claim() -> PutawayClaim {
-        PutawayClaim::new(MovementClaimDetails {
-            task_id: 1042,
-            inventory_owner_id: 12,
-            facility_id: 4,
-            priority: 80,
-            instructions: Some("Keep upright".into()),
-            lease_expires_at: (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339(),
-            source: Some(Location {
-                location_id: 17,
-                name: Some("Receiving 01".into()),
-                barcode: Some("RECV-01".into()),
-            }),
-            destination: Location {
-                location_id: 31,
-                name: Some("A-01-03".into()),
-                barcode: Some("A-01-03".into()),
-            },
-            work: MovementWork::Loose {
-                item_description: Some("Case-picked item".into()),
-                item_id: 88,
-                quantity: 4,
-                uom: "cases".into(),
-                lot: Some("LOT-2407".into()),
-                serial: None,
-            },
-        })
-    }
-
-    #[cfg(all(debug_assertions, not(target_os = "android")))]
-    fn open_debug_relocation_preview(&mut self, kind: MovementKind) {
-        let work = match kind {
-            MovementKind::Loose => MovementWork::Loose {
-                item_description: Some("Case-picked item".into()),
-                item_id: 88,
-                quantity: 4,
-                uom: "cases".into(),
-                lot: Some("LOT-2407".into()),
-                serial: None,
-            },
-            MovementKind::LicensePlate => MovementWork::LicensePlate {
-                barcode: "LP-0001042".into(),
-                planned_balance_count: 3,
-            },
-        };
-        self.work_mode = WorkMode::Relocate;
-        self.workflow
-            .load_debug_relocation_claim(InventoryRelocationClaim::new(MovementClaimDetails {
-                task_id: 2042,
-                inventory_owner_id: 12,
-                facility_id: 4,
-                priority: 70,
-                instructions: Some("Keep aisle crossing clear".into()),
-                lease_expires_at: (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339(),
-                source: Some(Location {
-                    location_id: 31,
-                    name: Some("A-01-03".into()),
-                    barcode: Some("A-01-03".into()),
-                }),
-                destination: Location {
-                    location_id: 47,
-                    name: Some("B-02-01".into()),
-                    barcode: Some("B-02-01".into()),
-                },
-                work,
-            }));
     }
 }
 
@@ -1254,12 +741,16 @@ impl eframe::App for RfApp {
             self.signed_out_view(root_ui);
             return;
         }
+        if !self.work_switch_allowed() {
+            self.work_menu_open = false;
+        }
 
         egui::Panel::top("rf_work_header")
-            .exact_size(140.0)
+            .exact_size(80.0)
             .frame(
                 egui::Frame::side_top_panel(root_ui.style())
-                    .inner_margin(egui::Margin::symmetric(12, 10)),
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .stroke(egui::Stroke::new(0.0, egui::Color32::TRANSPARENT)),
             )
             .show(root_ui, |ui| self.work_header(ui));
 
@@ -1270,6 +761,10 @@ impl eframe::App for RfApp {
                     .id_salt(("rf_work", self.work_mode))
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        if self.work_menu_open {
+                            self.work_launcher(ui);
+                            return;
+                        }
                         if matches!(
                             self.work_mode,
                             WorkMode::Putaway
@@ -1318,10 +813,10 @@ impl eframe::App for RfApp {
                                 WorkMode::OutboundLoad => self.outbound_load_view(ui),
                                 WorkMode::Putaway | WorkMode::Relocate => {
                                     if self.workflow.claim().is_some() {
-                                        self.active_work(ui);
+                                        self.active_movement(ui);
                                     } else {
                                         match self.workflow.activity() {
-                                            Activity::Idle => self.idle(ui),
+                                            Activity::Idle => self.movement_idle(ui),
                                             Activity::Active => {
                                                 self.workflow.require_reconciliation(
                                                     "Active work is missing its durable claim"
@@ -1335,8 +830,8 @@ impl eframe::App for RfApp {
                                             | Activity::ReconcileRequired => {}
                                         }
                                     }
-                                    self.command_state(ui);
-                                    self.error(ui);
+                                    self.movement_command_state(ui);
+                                    self.movement_error(ui);
                                 }
                             }
                         }
