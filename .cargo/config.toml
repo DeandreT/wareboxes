@@ -6,3 +6,4 @@
 # handler.
 [build]
 jobs = 1
+rustc-wrapper = "scripts/rustc-memory-guard.sh"
