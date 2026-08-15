@@ -65,6 +65,18 @@ lib-default-features = false
 opt-level = 3
 lto = "thin"
 
+# Keep local and CI compiler memory bounded. In particular, retaining many small
+# codegen units avoids one oversized LLVM module for the Leptos application.
+[profile.dev]
+debug = 0
+incremental = false
+codegen-units = 256
+
+[profile.test]
+debug = 0
+incremental = false
+codegen-units = 256
+
 [profile.wasm-release]
 inherits = "release"
 opt-level = "z"

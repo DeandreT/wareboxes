@@ -1,0 +1,8 @@
+# The Leptos operations application is a large monomorphized crate. Parallel rustc
+# processes can exceed the memory envelope of developer and hosted CI machines.
+# Keep compilation serialized across every workspace command; release runtime
+# parallelism is unaffected. The guarded SSR test build peaks near 4.9 GiB; the
+# prior parallel build exceeded 10.4 GiB per compiler and was killed by the OOM
+# handler.
+[build]
+jobs = 1

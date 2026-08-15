@@ -7,6 +7,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Match the repository build-memory envelope even if a runner overrides Cargo
+  # configuration defaults.
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   build-and-test:
