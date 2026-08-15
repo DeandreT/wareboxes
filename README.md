@@ -6,8 +6,6 @@ The durable workspace and runtime boundaries are documented in
 [`docs/architecture.md`](docs/architecture.md). Product delivery gates are tracked
 in [`ROADMAP.md`](ROADMAP.md), and binding architecture choices are indexed in
 [`docs/decisions`](docs/decisions/README.md).
-The repository evidence for the safety and platform foundation gate is recorded in
-[`docs/milestones/0000-safety-platform-foundation.md`](docs/milestones/0000-safety-platform-foundation.md).
 
 ## Workspace
 
