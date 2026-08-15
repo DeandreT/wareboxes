@@ -42,6 +42,7 @@ mod transfer_orders;
 mod value_added_work;
 mod vendor_returns;
 mod view_model;
+mod work_orchestration;
 mod workspace_layout;
 mod yard;
 

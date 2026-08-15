@@ -123,6 +123,10 @@ pub fn router() -> Router<AppState> {
             get(work_orchestration::get_plan),
         )
         .route(
+            "/work-orchestration/workers",
+            get(work_orchestration::list_workers),
+        )
+        .route(
             "/workforce/employees/{employee_id}/identity-links",
             post(workforce_identity::link),
         )

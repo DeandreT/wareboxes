@@ -1,0 +1,500 @@
+.orchestration-workspace {
+  display: grid;
+  gap: 1rem;
+}
+
+.orchestration-heading-actions,
+.orchestration-row-actions,
+.orchestration-dialog footer {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+}
+
+.orchestration-toolbar {
+  display: grid;
+  grid-template-columns: minmax(11rem, 1fr) minmax(11rem, 1fr) minmax(9rem, .7fr) auto auto auto;
+  align-items: end;
+  gap: .65rem;
+  padding: .8rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: .65rem;
+  background: var(--surface);
+}
+
+.orchestration-toolbar label,
+.orchestration-form-grid label {
+  display: grid;
+  gap: .3rem;
+  color: var(--text-muted);
+  font-size: .74rem;
+  font-weight: 700;
+}
+
+.orchestration-toolbar select,
+.orchestration-form-grid input,
+.orchestration-form-grid select {
+  min-height: 2.3rem;
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: .4rem;
+  padding: .4rem .58rem;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.orchestration-history-toggle {
+  display: flex !important;
+  align-items: center;
+  min-height: 2.3rem;
+  white-space: nowrap;
+}
+
+.orchestration-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: .65rem;
+}
+
+.orchestration-metrics > div {
+  display: grid;
+  gap: .15rem;
+  padding: .75rem .9rem;
+  border: 1px solid var(--border);
+  border-radius: .6rem;
+  background: var(--surface);
+}
+
+.orchestration-metrics > div.bottleneck {
+  border-color: var(--danger, #b42318);
+  background: rgba(180, 35, 24, .06);
+}
+
+.orchestration-metrics span,
+.orchestration-route span,
+.orchestration-plan-metadata span,
+.orchestration-score-grid span,
+.total-score span,
+.orchestration-signal span {
+  color: var(--text-muted);
+  font-size: .68rem;
+  font-weight: 700;
+  letter-spacing: .045em;
+  text-transform: uppercase;
+}
+
+.orchestration-metrics strong {
+  font-size: 1.35rem;
+}
+
+.orchestration-panel,
+.orchestration-plan-detail,
+.orchestration-detail-empty,
+.orchestration-state,
+.orchestration-error {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: .65rem;
+  background: var(--surface);
+}
+
+.orchestration-panel > header,
+.orchestration-plan-detail > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: .8rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.orchestration-panel h2,
+.orchestration-panel p,
+.orchestration-plan-detail h2,
+.orchestration-plan-detail p {
+  margin: 0;
+}
+
+.orchestration-policy-table td {
+  vertical-align: top;
+}
+
+.orchestration-policy-table small,
+.orchestration-plan-detail small,
+.orchestration-signal small,
+.plan-history small {
+  display: block;
+  margin-top: .15rem;
+  color: var(--text-muted);
+}
+
+.orchestration-policy-table tr.historical {
+  opacity: .68;
+}
+
+.orchestration-row-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  min-width: 15rem;
+}
+
+.orchestration-row-actions .fallback {
+  color: var(--warning, #9a6700);
+}
+
+.orchestration-load-more {
+  margin: .75rem 1rem;
+}
+
+.orchestration-signal-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.orchestration-signal-list {
+  display: grid;
+}
+
+.orchestration-signal {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(8rem, auto);
+  align-items: center;
+  gap: .75rem;
+  padding: .65rem .9rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.orchestration-signal:last-child {
+  border-bottom: 0;
+}
+
+.orchestration-signal.bottleneck {
+  box-shadow: inset .25rem 0 var(--danger, #b42318);
+  background: rgba(180, 35, 24, .05);
+}
+
+.orchestration-signal.historical {
+  opacity: .68;
+  background: var(--surface-subtle, rgba(127, 127, 127, .05));
+}
+
+.orchestration-signal small .status-badge {
+  display: inline-flex;
+  margin-left: .4rem;
+}
+
+.signal-pressure {
+  text-align: right;
+}
+
+.signal-pressure strong {
+  font-size: 1.05rem;
+}
+
+.orchestration-inline-state,
+.orchestration-detail-empty,
+.orchestration-state {
+  display: grid;
+  gap: .25rem;
+  padding: 1rem;
+  color: var(--text-muted);
+}
+
+.orchestration-detail-empty {
+  text-align: center;
+}
+
+.orchestration-detail-empty strong {
+  color: var(--text);
+}
+
+.orchestration-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding: .8rem 1rem;
+  border-color: var(--danger, #b42318);
+  color: var(--danger, #b42318);
+}
+
+.orchestration-detail-summary {
+  display: grid;
+  justify-items: end;
+  gap: .15rem;
+}
+
+.orchestration-detail-summary strong {
+  font-size: 1.15rem;
+}
+
+.orchestration-fallback-banner,
+.orchestration-advisory-banner,
+.orchestration-fallback-warning,
+.orchestration-plan-safety {
+  display: grid;
+  gap: .25rem;
+  padding: .7rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.orchestration-fallback-banner,
+.orchestration-fallback-warning {
+  border-color: rgba(154, 103, 0, .3);
+  background: rgba(154, 103, 0, .08);
+}
+
+.orchestration-advisory-banner,
+.orchestration-plan-safety {
+  border-color: rgba(23, 92, 211, .25);
+  background: rgba(23, 92, 211, .06);
+}
+
+.orchestration-plan-metadata {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: .6rem;
+  padding: .75rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.orchestration-plan-metadata > div {
+  display: grid;
+  gap: .15rem;
+}
+
+.orchestration-configuration {
+  padding: .65rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.orchestration-configuration summary,
+.orchestration-evidence summary {
+  cursor: pointer;
+  color: var(--accent, currentColor);
+  font-weight: 700;
+}
+
+.orchestration-configuration pre {
+  overflow: auto;
+  max-height: 16rem;
+  margin: .55rem 0 0;
+  padding: .65rem;
+  border-radius: .4rem;
+  background: var(--surface-subtle, rgba(127, 127, 127, .08));
+  font-size: .72rem;
+}
+
+.orchestration-ranked-list {
+  display: grid;
+  gap: .75rem;
+  padding: .75rem;
+}
+
+.orchestration-plan-item {
+  display: grid;
+  gap: .6rem;
+  padding: .75rem;
+  border: 1px solid var(--border);
+  border-radius: .55rem;
+  background: var(--surface-raised, var(--surface));
+}
+
+.orchestration-plan-item.bottleneck {
+  border-color: rgba(180, 35, 24, .55);
+}
+
+.orchestration-plan-item > header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: .65rem;
+}
+
+.orchestration-plan-item .sequence {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: .4rem;
+  background: var(--surface-subtle, rgba(127, 127, 127, .1));
+  font-weight: 800;
+}
+
+.total-score {
+  display: grid;
+  text-align: right;
+}
+
+.total-score strong {
+  font-size: 1.3rem;
+}
+
+.orchestration-route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) minmax(8rem, auto);
+  align-items: center;
+  gap: .65rem;
+  padding: .55rem .65rem;
+  border-radius: .4rem;
+  background: var(--surface-subtle, rgba(127, 127, 127, .08));
+}
+
+.orchestration-route > div {
+  display: grid;
+}
+
+.orchestration-instructions {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: .82rem;
+}
+
+.orchestration-score-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: .4rem;
+}
+
+.orchestration-score-grid > div {
+  display: grid;
+  gap: .1rem;
+  padding: .45rem .55rem;
+  border: 1px solid var(--border);
+  border-radius: .35rem;
+}
+
+.orchestration-score-grid > div.penalty strong {
+  color: var(--danger, #b42318);
+}
+
+.orchestration-evidence {
+  border-top: 1px solid var(--border);
+  padding-top: .55rem;
+}
+
+.orchestration-evidence dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .5rem .75rem;
+  margin: .65rem 0 0;
+}
+
+.orchestration-evidence dl > div {
+  min-width: 0;
+}
+
+.orchestration-evidence dl > div.bottleneck {
+  padding: .35rem;
+  border-radius: .35rem;
+  background: rgba(180, 35, 24, .08);
+}
+
+.orchestration-evidence dt {
+  color: var(--text-muted);
+  font-size: .68rem;
+  text-transform: uppercase;
+}
+
+.orchestration-evidence dd {
+  margin: .12rem 0 0;
+  font-size: .8rem;
+}
+
+.orchestration-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  background: rgba(15, 23, 42, .58);
+}
+
+.orchestration-dialog {
+  width: min(58rem, 100%);
+  max-height: calc(100vh - 4rem);
+  overflow: auto;
+  border-radius: .75rem;
+  background: var(--surface);
+  box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, .28);
+}
+
+.orchestration-dialog > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.15rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.orchestration-dialog h2,
+.orchestration-dialog p {
+  margin: 0;
+}
+
+.orchestration-dialog form {
+  display: grid;
+  gap: .9rem;
+  padding: 1rem 1.15rem;
+}
+
+.orchestration-dialog footer {
+  justify-content: flex-end;
+}
+
+.orchestration-form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .7rem;
+}
+
+.orchestration-form-grid .wide {
+  grid-column: 1 / -1;
+}
+
+.orchestration-form-intro {
+  color: var(--text-muted);
+}
+
+.orchestration-policy-reference {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: .65rem .75rem;
+  border-radius: .4rem;
+  background: var(--surface-subtle, rgba(127, 127, 127, .08));
+}
+
+.orchestration-form-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .65rem;
+  padding: .65rem .75rem;
+  border-radius: .4rem;
+  background: rgba(180, 35, 24, .08);
+  color: var(--danger, #b42318);
+}
+
+.orchestration-worker-state {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  padding: .55rem .7rem;
+  border-radius: .4rem;
+  background: var(--surface-subtle, rgba(127, 127, 127, .08));
+  color: var(--text-muted);
+  font-size: .8rem;
+}
+
+@media (max-width: 1250px) {
+  .orchestration-toolbar { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .orchestration-score-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 1000px) {
+  .orchestration-signal-grid { grid-template-columns: 1fr; }
+  .orchestration-plan-metadata { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .orchestration-evidence dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

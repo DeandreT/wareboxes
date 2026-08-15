@@ -16,7 +16,7 @@ use wareboxes_domain::{
     WorkOrchestrationSignalId, WorkResourceKind, ZoneCongestionSignal,
 };
 
-use super::{invalid_data, require_facility_scope, require_owner_scope};
+use super::scope::{invalid_data, require_facility_scope, require_owner_scope};
 use crate::db::{begin_tenant_transaction, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{current_scope_tx, require_permission_tx};

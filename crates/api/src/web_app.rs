@@ -125,6 +125,9 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
         "/cross-dock" | "/cross-dock/" => Some(WorkspaceBootstrapSection::CrossDock),
         "/replenishment" | "/replenishment/" => Some(WorkspaceBootstrapSection::Replenishment),
         "/slotting" | "/slotting/" => Some(WorkspaceBootstrapSection::Slotting),
+        "/work-orchestration" | "/work-orchestration/" => {
+            Some(WorkspaceBootstrapSection::WorkOrchestration)
+        }
         "/inventory" | "/inventory/" => Some(WorkspaceBootstrapSection::Inventory),
         "/inventory/control" | "/inventory/control/" => {
             Some(WorkspaceBootstrapSection::InventoryIntegrity)
@@ -411,6 +414,20 @@ async fn workspace_bootstrap(
                 ..WorkspaceBootstrapData::default()
             })
         }
+        WorkspaceBootstrapSection::WorkOrchestration => {
+            if !has_permission(session, "wms") {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            let (access_workspace, locations) = tokio::try_join!(
+                routes::access::workspace_for_access(state, access),
+                routes::locations::list_for_access(state, access, false),
+            )?;
+            Ok(WorkspaceBootstrapData {
+                access: access_workspace,
+                locations,
+                ..WorkspaceBootstrapData::default()
+            })
+        }
         WorkspaceBootstrapSection::Access => Ok(WorkspaceBootstrapData {
             access: routes::access::workspace_for_access(state, access).await?,
             ..WorkspaceBootstrapData::default()
@@ -470,6 +487,10 @@ mod tests {
         assert_eq!(
             section_for_path("/slotting"),
             Some(WorkspaceBootstrapSection::Slotting)
+        );
+        assert_eq!(
+            section_for_path("/work-orchestration"),
+            Some(WorkspaceBootstrapSection::WorkOrchestration)
         );
         assert_eq!(
             section_for_path("/cross-dock"),

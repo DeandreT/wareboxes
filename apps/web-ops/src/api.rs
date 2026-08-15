@@ -163,6 +163,13 @@ pub use yard::{
     no_show_yard_appointment, register_yard_asset, reject_yard_visit, spot_yard_visit,
     start_yard_operation, yard_workspace, YardFilters,
 };
+mod work_orchestration;
+pub use work_orchestration::{
+    configure_work_orchestration_policy, generate_work_orchestration_plan,
+    record_resource_capacity_signal, record_zone_congestion_signal, work_orchestration_plan,
+    work_orchestration_plans, work_orchestration_policies, work_orchestration_signals,
+    work_orchestration_workers,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiError {

@@ -1,5 +1,12 @@
 //! Explainable, replay-safe planning over canonical warehouse work.
 
+mod options;
+
+pub use options::{
+    WorkOrchestrationWorkerCursor, WorkOrchestrationWorkerOptionReadModel,
+    WorkOrchestrationWorkerPage, WorkOrchestrationWorkerPageQuery,
+};
+
 use serde::{Deserialize, Serialize};
 use wareboxes_domain::{
     FacilityId, InventoryOwnerId, LocationId, OrchestrationPlanMode, OrchestrationScore,

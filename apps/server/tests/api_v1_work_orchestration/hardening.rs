@@ -1,6 +1,109 @@
 use super::*;
 
 #[tokio::test]
+async fn orchestration_worker_choices_and_owner_facility_pairs_are_fail_closed() {
+    init_test_tracing();
+    let rig = Rig::new().await;
+    let owner_id = rig
+        .fixture
+        .inventory_owner(rig.tenant_id, "Orchestration client")
+        .await;
+    rig.fixture
+        .assign_owner_to_facility(rig.tenant_id, owner_id, rig.facility_id)
+        .await;
+
+    let admin = admin_db_for(&rig.fixture.db).await;
+    let mut employee = admin.begin().await.unwrap();
+    let employee_id: i64 = sqlx::query_scalar(
+        r#"INSERT INTO employees (
+          tenant_id,created,user_id,first_name,last_name,title,type,hired,
+          identity_revision,identity_changed_by_user_id,identity_changed_at
+        ) VALUES ($1,transaction_timestamp(),$2,'Orchestration','Supervisor',
+          'Operations lead','test',transaction_timestamp()-INTERVAL '1 day',
+          1,$2,transaction_timestamp()) RETURNING id"#,
+    )
+    .bind(rig.tenant_id.get())
+    .bind(rig.user_id)
+    .fetch_one(&mut *employee)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO employee_facilities (tenant_id,created,employee_id,facility_id)
+           VALUES ($1,transaction_timestamp(),$2,$3)"#,
+    )
+    .bind(rig.tenant_id.get())
+    .bind(employee_id)
+    .bind(rig.facility_id)
+    .execute(&mut *employee)
+    .await
+    .unwrap();
+    employee.commit().await.unwrap();
+
+    let workers_response = rig
+        .send(
+            Method::GET,
+            &format!(
+                "/api/v1/work-orchestration/workers?facility_id={}&inventory_owner_id={}&limit=1",
+                rig.facility_id, owner_id
+            ),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(workers_response.status(), StatusCode::OK);
+    let workers: WorkOrchestrationWorkerPage = json_response(workers_response).await;
+    assert_eq!(workers.items.len(), 1);
+    assert_eq!(workers.items[0].employee_id, employee_id);
+    assert_eq!(workers.items[0].user_id, rig.user_id);
+    assert_eq!(workers.items[0].display_name, "Orchestration Supervisor");
+
+    let access: wareboxes_api_contract::web::access::AccessScopeWorkspace =
+        json_response(rig.send(Method::GET, "/api/web/access", None, None).await).await;
+    assert!(access.owner_facilities.iter().any(|link| {
+        link.inventory_owner_id == owner_id && link.facility_id == rig.facility_id
+    }));
+
+    let unassigned_owner_id = rig
+        .fixture
+        .inventory_owner(rig.tenant_id, "Unassigned orchestration client")
+        .await;
+    let policy: WorkOrchestrationPolicyResponse = json_response(
+        rig.send(
+            Method::POST,
+            "/api/v1/work-orchestration/policies",
+            Some("orchestration-worker-policy"),
+            Some(rig.policy_body("enabled", None)),
+        )
+        .await,
+    )
+    .await;
+    let mut invalid_plan = rig.plan_body(policy.policy_id, policy.revision.get());
+    invalid_plan["inventory_owner_id"] = json!(unassigned_owner_id);
+    let invalid_response = rig
+        .send(
+            Method::POST,
+            "/api/v1/work-orchestration/plans",
+            Some("orchestration-invalid-owner-facility"),
+            Some(invalid_plan),
+        )
+        .await;
+    assert_eq!(invalid_response.status(), StatusCode::NOT_FOUND);
+
+    let invalid_workers = rig
+        .send(
+            Method::GET,
+            &format!(
+                "/api/v1/work-orchestration/workers?facility_id={}&inventory_owner_id={}",
+                rig.facility_id, unassigned_owner_id
+            ),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(invalid_workers.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn orchestration_scope_rls_grants_and_evidence_guards_fail_closed() {
     init_test_tracing();
     let rig = Rig::new().await;

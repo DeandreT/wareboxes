@@ -13,7 +13,7 @@ use wareboxes_api::{routes, state::AppState};
 use wareboxes_api_contract::v1::{
     OrchestrationPlanMode, OrchestrationSignalWorkspaceResponse, ResourceCapacitySignalResponse,
     WorkOrchestrationPlanPage, WorkOrchestrationPlanResponse, WorkOrchestrationPolicyPage,
-    WorkOrchestrationPolicyResponse,
+    WorkOrchestrationPolicyResponse, WorkOrchestrationWorkerPage,
 };
 
 fn init_test_tracing() {

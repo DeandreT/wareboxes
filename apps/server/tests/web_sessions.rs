@@ -70,17 +70,23 @@ async fn web_session_is_cookie_bound_and_tenant_switching_is_membership_scoped()
     let other_tenant =
         add_tenant_membership(&fixture.db, user.id, "web-context-b", "Web Context B").await;
 
-    fixture
+    let default_facility = fixture
         .facility(default_tenant, "Default tenant facility")
         .await;
-    fixture
+    let default_owner = fixture
         .inventory_owner(default_tenant, "Default tenant owner")
         .await;
     fixture
+        .assign_owner_to_facility(default_tenant, default_owner, default_facility)
+        .await;
+    let selected_facility = fixture
         .facility(other_tenant, "Selected tenant facility")
         .await;
-    fixture
+    let selected_owner = fixture
         .inventory_owner(other_tenant, "Selected tenant owner")
+        .await;
+    fixture
+        .assign_owner_to_facility(other_tenant, selected_owner, selected_facility)
         .await;
 
     let app = routes::app(AppState::new(fixture.db.clone()));
@@ -126,6 +132,10 @@ async fn web_session_is_cookie_bound_and_tenant_switching_is_membership_scoped()
     let access: AccessScopeWorkspace = response_json(access).await;
     assert_eq!(access.facilities[0].name, "Default tenant facility");
     assert_eq!(access.inventory_owners[0].name, "Default tenant owner");
+    assert!(access.owner_facilities.iter().any(|link| {
+        link.facility_id == access.facilities[0].id
+            && link.inventory_owner_id == access.inventory_owners[0].id
+    }));
 
     let cross_origin = app
         .clone()
@@ -212,6 +222,10 @@ async fn web_session_is_cookie_bound_and_tenant_switching_is_membership_scoped()
         selected_access.inventory_owners[0].name,
         "Selected tenant owner"
     );
+    assert!(selected_access.owner_facilities.iter().any(|link| {
+        link.facility_id == selected_access.facilities[0].id
+            && link.inventory_owner_id == selected_access.inventory_owners[0].id
+    }));
 
     let web_token = cookie.split_once('=').unwrap().1;
     let bearer_reuse = app

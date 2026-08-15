@@ -1,3 +1,7 @@
+mod workers;
+
+pub use workers::list_workers;
+
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use wareboxes_api_contract::v1::{

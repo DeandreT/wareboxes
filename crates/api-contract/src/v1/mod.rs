@@ -459,8 +459,9 @@ pub use work_orchestration::{
     ResourceCapacitySignalResponse, WorkOrchestrationMode, WorkOrchestrationPlanItemResponse,
     WorkOrchestrationPlanPage, WorkOrchestrationPlanPageRequest, WorkOrchestrationPlanResponse,
     WorkOrchestrationPlanSummaryResponse, WorkOrchestrationPolicyPage,
-    WorkOrchestrationPolicyPageRequest, WorkOrchestrationPolicyResponse, WorkResourceKind,
-    ZoneCongestionSignalResponse,
+    WorkOrchestrationPolicyPageRequest, WorkOrchestrationPolicyResponse,
+    WorkOrchestrationWorkerOptionResponse, WorkOrchestrationWorkerPage,
+    WorkOrchestrationWorkerPageRequest, WorkResourceKind, ZoneCongestionSignalResponse,
 };
 pub use workforce_identity::{
     EmployeeIdentityChangeKind, EmployeeIdentityChangeResponse, LinkEmployeeIdentityRequest,

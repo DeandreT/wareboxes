@@ -1,8 +1,17 @@
 //! Tenant-scoped, explainable advisory planning over canonical work tasks.
 
+mod events;
 mod query;
+mod scope;
+mod workers;
 
+use events::{enqueue_event_tx, OrchestrationEvent};
 pub use query::{plan_by_id, plan_page, policy_page, signal_workspace};
+use scope::{
+    bind_actor_tx, invalid_data, require_command_scope, require_facility_scope,
+    require_owner_facility_tx,
+};
+pub use workers::worker_page;
 
 use sqlx::Row;
 use wareboxes_application::idempotency::PreparedCommand;
@@ -26,118 +35,15 @@ use wareboxes_domain::{
     WorkResourceKind,
 };
 use wareboxes_persistence_postgres::idempotency::PostgresPreparedCommandExt;
-use wareboxes_persistence_postgres::outbox::{self, NewOutboxEvent};
 
 use crate::db::{begin_tenant_transaction, now_iso, Db};
 use crate::error::{AppError, AppResult};
 use crate::repo::access::{lock_current_scope_tx, require_permission_tx, ScopeBindings};
-use crate::repo::orders::next_outbox_sequence_tx;
 
 const SUPERVISOR_PERMISSION: &str = "wms_supervisor";
 
-pub(super) fn invalid_data(error: impl std::fmt::Display) -> AppError {
-    AppError::internal(error.to_string())
-}
-
 fn bad_domain(error: impl std::fmt::Display) -> AppError {
     AppError::bad_request(error.to_string())
-}
-
-pub(super) fn require_facility_scope(
-    scope: &ScopeBindings,
-    facility_id: i64,
-    label: &str,
-) -> AppResult<()> {
-    if scope.includes_facility(facility_id) {
-        Ok(())
-    } else {
-        Err(AppError::not_found(label))
-    }
-}
-
-pub(super) fn require_owner_scope(
-    scope: &ScopeBindings,
-    inventory_owner_id: i64,
-    label: &str,
-) -> AppResult<()> {
-    if scope.includes_inventory_owner(inventory_owner_id) {
-        Ok(())
-    } else {
-        Err(AppError::not_found(label))
-    }
-}
-
-fn require_command_scope(
-    scope: &ScopeBindings,
-    facility_id: FacilityId,
-    inventory_owner_id: Option<InventoryOwnerId>,
-    label: &str,
-) -> AppResult<()> {
-    require_facility_scope(scope, facility_id.get(), label)?;
-    if let Some(owner_id) = inventory_owner_id {
-        require_owner_scope(scope, owner_id.get(), label)?;
-    }
-    Ok(())
-}
-
-async fn bind_actor_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    actor_id: UserId,
-) -> AppResult<()> {
-    sqlx::query("SELECT set_config('wareboxes.actor_user_id',$1,true)")
-        .bind(actor_id.get().to_string())
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
-}
-
-struct OrchestrationEvent<'a> {
-    inventory_owner_id: Option<InventoryOwnerId>,
-    facility_id: FacilityId,
-    actor_id: UserId,
-    aggregate_type: &'a str,
-    aggregate_id: i64,
-    ordering_key: String,
-    transition: &'a str,
-    occurred_at: Timestamp,
-    payload: &'a serde_json::Value,
-}
-
-async fn enqueue_event_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: TenantId,
-    event: OrchestrationEvent<'_>,
-) -> AppResult<()> {
-    let event_key = format!(
-        "work_orchestration_{}:{}:{}",
-        event.aggregate_type, event.aggregate_id, event.transition
-    );
-    let event_type = format!(
-        "optimization.work_orchestration.{}.{}",
-        event.aggregate_type, event.transition
-    );
-    let aggregate_id = event.aggregate_id.to_string();
-    let sequence = next_outbox_sequence_tx(tx, tenant_id, &event.ordering_key).await?;
-    outbox::enqueue(
-        tx,
-        &NewOutboxEvent {
-            tenant_id,
-            inventory_owner_id: event.inventory_owner_id,
-            facility_id: Some(event.facility_id),
-            actor_user_id: Some(event.actor_id.get()),
-            event_key: &event_key,
-            aggregate_type: event.aggregate_type,
-            aggregate_id: &aggregate_id,
-            ordering_key: &event.ordering_key,
-            aggregate_sequence: sequence,
-            event_type: &event_type,
-            schema_version: 1,
-            payload: event.payload,
-            occurred_at: event.occurred_at,
-        },
-    )
-    .await?;
-    Ok(())
 }
 
 async fn read_policy_tx(
@@ -190,19 +96,14 @@ pub async fn configure_policy(
         tx.commit().await?;
         return Ok(result);
     }
-    if let Some(owner_id) = command.definition.inventory_owner_id {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM inventory_owner_facilities WHERE tenant_id=$1 AND inventory_owner_id=$2 AND facility_id=$3 AND deleted IS NULL)",
-        )
-        .bind(access.tenant_id.get())
-        .bind(owner_id.get())
-        .bind(command.definition.facility_id.get())
-        .fetch_one(&mut *tx)
-        .await?;
-        if !exists {
-            return Err(AppError::not_found("work orchestration policy"));
-        }
-    }
+    require_owner_facility_tx(
+        &mut tx,
+        access.tenant_id,
+        command.definition.facility_id,
+        command.definition.inventory_owner_id,
+        "work orchestration policy",
+    )
+    .await?;
     let scope_key = command
         .definition
         .inventory_owner_id
@@ -1034,6 +935,14 @@ pub async fn generate_plan(
         tx.commit().await?;
         return Ok(result);
     }
+    require_owner_facility_tx(
+        &mut tx,
+        access.tenant_id,
+        command.facility_id,
+        command.inventory_owner_id,
+        "work orchestration plan",
+    )
+    .await?;
     if let Some(user_id) = command.generated_for_user_id {
         let eligible: bool = sqlx::query_scalar(
             r#"WITH RECURSIVE granted_roles AS (

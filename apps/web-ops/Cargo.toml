@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 wareboxes-api-contract = { workspace = true }
 wareboxes-barcodes = { workspace = true }
 wareboxes-core = { workspace = true }
+chrono = { workspace = true }
 leptos = { workspace = true }
 leptos_router = { workspace = true }
 lucide-leptos = { version = "3.26.0", default-features = false, features = [

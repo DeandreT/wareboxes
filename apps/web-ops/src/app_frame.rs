@@ -253,6 +253,12 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                 icon=UiIcon::Catalog
                                 active=section == Section::Catalog
                             />
+                            <NavItem
+                                href="/work-orchestration"
+                                label="Work orchestration"
+                                icon=UiIcon::Orchestration
+                                active=section == Section::WorkOrchestration
+                            />
                         }
                     })}
                     {can_supervise_wms.then(|| {

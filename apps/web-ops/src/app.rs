@@ -46,6 +46,7 @@ use crate::transfer_orders::TransferOrdersWorkspace;
 use crate::value_added_work::ValueAddedWorkWorkspace;
 use crate::vendor_returns::VendorReturnsWorkspace;
 use crate::view_model::{facility_inventory, format_quantity, has_permission, open_order_count};
+use crate::work_orchestration::WorkOrchestrationWorkspace;
 use crate::yard::YardWorkspace;
 
 const SESSION_BOOTSTRAP_ID: &str = "wareboxes-session-bootstrap";
@@ -73,6 +74,7 @@ pub enum WorkspaceBootstrapSection {
     InventoryIntegrity,
     Replenishment,
     Slotting,
+    WorkOrchestration,
     Access,
 }
 
@@ -208,6 +210,7 @@ pub(crate) enum Section {
     InventoryIntegrity,
     Replenishment,
     Slotting,
+    WorkOrchestration,
     Access,
     Administration(AdministrationArea),
 }
@@ -228,6 +231,7 @@ impl Section {
             Self::InventoryIntegrity => Some(WorkspaceBootstrapSection::InventoryIntegrity),
             Self::Replenishment => Some(WorkspaceBootstrapSection::Replenishment),
             Self::Slotting => Some(WorkspaceBootstrapSection::Slotting),
+            Self::WorkOrchestration => Some(WorkspaceBootstrapSection::WorkOrchestration),
             Self::Access => Some(WorkspaceBootstrapSection::Access),
             _ => None,
         }
@@ -284,6 +288,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/customer-portal.css"/>
                 <link rel="stylesheet" href="/replenishment.css"/>
                 <link rel="stylesheet" href="/slotting.css"/>
+                <link rel="stylesheet" href="/work-orchestration/workspace.css"/>
                 <link rel="stylesheet" href="/putaway.css"/>
                 <link rel="stylesheet" href="/cycle-count.css"/>
                 <link rel="stylesheet" href="/cross-dock.css"/>
@@ -352,6 +357,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("inventory") view=InventoryPage/>
                     <Route path=StaticSegment("replenishment") view=ReplenishmentPage/>
                     <Route path=StaticSegment("slotting") view=SlottingPage/>
+                    <Route path=StaticSegment("work-orchestration") view=WorkOrchestrationPage/>
                     <Route path=(StaticSegment("inventory"), StaticSegment("holds")) view=InventoryHoldsPage/>
                     <Route
                         path=(StaticSegment("inventory"), StaticSegment("disposition"))
@@ -815,6 +821,10 @@ async fn load_workspace(
         Section::Slotting if has_permission(session, "wms") => {
             data.access = api::access().await?;
         }
+        Section::WorkOrchestration if has_permission(session, "wms") => {
+            data.access = api::access().await?;
+            data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
+        }
         Section::CrossDock if has_permission(session, "wms_supervisor") => {
             data.cross_dock_planning_options = Some(
                 api::cross_dock_planning_options(api::CrossDockFilters::default(), None).await?,
@@ -853,6 +863,7 @@ async fn load_workspace(
         | Section::InventoryIntegrity
         | Section::Replenishment
         | Section::Slotting
+        | Section::WorkOrchestration
         | Section::Administration(_) => {}
     }
     Ok(data)
@@ -981,6 +992,11 @@ fn ReplenishmentPage() -> impl IntoView {
 #[component]
 fn SlottingPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::Slotting/> }
+}
+
+#[component]
+fn WorkOrchestrationPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::WorkOrchestration/> }
 }
 
 #[component]
@@ -1260,6 +1276,15 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
             Section::Slotting if has_permission(&session, "wms") => view! {
                 <SlottingWorkspace
                     access=data.access
+                    can_supervise=has_permission(&session, "wms_supervisor")
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::WorkOrchestration if has_permission(&session, "wms") => view! {
+                <WorkOrchestrationWorkspace
+                    access=data.access
+                    locations=data.locations
                     can_supervise=has_permission(&session, "wms_supervisor")
                     on_unauthorized=session_expired_callback()
                 />
