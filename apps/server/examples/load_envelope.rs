@@ -9,6 +9,9 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::task::JoinSet;
 
+#[path = "load_envelope/receiver.rs"]
+mod receiver;
+
 const TENANT_HEADER: &str = "x-wareboxes-tenant-id";
 const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -35,6 +38,27 @@ struct Item {
     packaging_unit: String,
 }
 
+#[derive(Deserialize)]
+struct ScannerBalance {
+    facility_id: i64,
+    location_id: i64,
+    license_plate_id: Option<i64>,
+    item_batch_id: i64,
+    status: String,
+    qty_on_hand: i64,
+    qty_reserved: i64,
+    qty_held: i64,
+}
+
+#[derive(Deserialize)]
+struct ScannerLocation {
+    id: i64,
+    facility_id: i64,
+    active: bool,
+    pickable: bool,
+    barcode: Option<String>,
+}
+
 #[derive(Clone)]
 struct RequestContext {
     client: Client,
@@ -48,6 +72,10 @@ struct RequestContext {
 enum Phase {
     Read,
     Command {
+        payloads: Arc<Vec<Vec<u8>>>,
+        expected_bodies: Option<Arc<Vec<Vec<u8>>>>,
+    },
+    ScannerMove {
         payloads: Arc<Vec<Vec<u8>>>,
         expected_bodies: Option<Arc<Vec<Vec<u8>>>>,
     },
@@ -71,6 +99,9 @@ struct Budget {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if env::args().nth(1).as_deref() == Some("receiver") {
+        return receiver::serve().await;
+    }
     let config = Config::from_env()?;
     let client = Client::builder()
         .pool_max_idle_per_host(config.concurrency)
@@ -120,6 +151,44 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     enforce("scoped_reads", &read, config.read_budget)?;
 
+    let scanner_payloads = Arc::new(
+        scanner_move_payloads(&context, config.scanner_requests)
+            .await
+            .context("preparing scanner inventory moves")?,
+    );
+    let scanner_moves = run_phase(
+        context.clone(),
+        Phase::ScannerMove {
+            payloads: scanner_payloads.clone(),
+            expected_bodies: None,
+        },
+        config.scanner_requests,
+        config.scanner_concurrency,
+    )
+    .await?;
+    enforce(
+        "scanner_inventory_moves",
+        &scanner_moves,
+        config.scanner_budget,
+    )?;
+
+    let scanner_replay = run_phase(
+        context.clone(),
+        Phase::ScannerMove {
+            payloads: scanner_payloads,
+            expected_bodies: Some(Arc::new(scanner_moves.bodies)),
+        },
+        config.scanner_requests,
+        config.scanner_concurrency,
+    )
+    .await?;
+    enforce(
+        "scanner_move_replays",
+        &scanner_replay,
+        config.replay_budget,
+    )?;
+    settle_between_phases(config.phase_settle_duration).await;
+
     let payloads = Arc::new(
         (0..config.command_requests)
             .map(|index| command_payload(&context.run_id, index))
@@ -136,9 +205,10 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     enforce("durable_commands", &commands, config.command_budget)?;
+    settle_between_phases(config.phase_settle_duration).await;
 
     let replay = run_phase(
-        context,
+        context.clone(),
         Phase::Command {
             payloads,
             expected_bodies: Some(Arc::new(commands.bodies)),
@@ -149,12 +219,18 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     enforce("exact_replays", &replay, config.replay_budget)?;
 
+    let soak = run_read_soak(context, config.soak_duration, config.soak_concurrency).await?;
+    enforce("sustained_scoped_reads", &soak, config.soak_budget)?;
+
     println!(
-        "event=load_envelope_passed read_requests={} command_requests={} read_concurrency={} command_concurrency={}",
+        "event=load_envelope_passed read_requests={} scanner_requests={} command_requests={} read_concurrency={} scanner_concurrency={} command_concurrency={} soak_seconds={}",
         config.read_requests,
+        config.scanner_requests,
         config.command_requests,
         config.concurrency,
-        config.command_concurrency
+        config.scanner_concurrency,
+        config.command_concurrency,
+        config.soak_duration.as_secs()
     );
     Ok(())
 }
@@ -165,12 +241,19 @@ struct Config {
     password: String,
     read_requests: usize,
     command_requests: usize,
+    scanner_requests: usize,
     warmup_requests: usize,
     concurrency: usize,
     command_concurrency: usize,
+    scanner_concurrency: usize,
+    soak_concurrency: usize,
+    soak_duration: Duration,
+    phase_settle_duration: Duration,
     read_budget: Budget,
     command_budget: Budget,
+    scanner_budget: Budget,
     replay_budget: Budget,
+    soak_budget: Budget,
 }
 
 impl Config {
@@ -186,10 +269,24 @@ impl Config {
         let password = required_env("LOAD_USER_PASSWORD")?;
         let read_requests = integer_env("LOAD_READ_REQUESTS", 400, 1, 100_000)?;
         let command_requests = integer_env("LOAD_COMMAND_REQUESTS", 100, 1, 10_000)?;
+        let scanner_requests = integer_env("LOAD_SCANNER_REQUESTS", 100, 1, 10_000)?;
         let warmup_requests = integer_env("LOAD_WARMUP_REQUESTS", 20, 0, 10_000)?;
         let concurrency = integer_env("LOAD_READ_CONCURRENCY", 16, 1, 1_000)?;
         let command_concurrency = integer_env("LOAD_COMMAND_CONCURRENCY", 8, 1, 1_000)?;
-        if concurrency > read_requests || command_concurrency > command_requests {
+        let scanner_concurrency = integer_env("LOAD_SCANNER_CONCURRENCY", 16, 1, 1_000)?;
+        let soak_concurrency = integer_env("LOAD_SOAK_CONCURRENCY", 8, 1, 1_000)?;
+        let soak_duration = Duration::from_secs(
+            u64::try_from(integer_env("LOAD_SOAK_SECONDS", 15, 1, 86_400)?)
+                .context("LOAD_SOAK_SECONDS does not fit in u64")?,
+        );
+        let phase_settle_duration = Duration::from_millis(
+            u64::try_from(integer_env("LOAD_PHASE_SETTLE_MILLIS", 2_000, 0, 60_000)?)
+                .context("LOAD_PHASE_SETTLE_MILLIS does not fit in u64")?,
+        );
+        if concurrency > read_requests
+            || command_concurrency > command_requests
+            || scanner_concurrency > scanner_requests
+        {
             bail!("load concurrency must not exceed its phase request count");
         }
         Ok(Self {
@@ -198,9 +295,14 @@ impl Config {
             password,
             read_requests,
             command_requests,
+            scanner_requests,
             warmup_requests,
             concurrency,
             command_concurrency,
+            scanner_concurrency,
+            soak_concurrency,
+            soak_duration,
+            phase_settle_duration,
             read_budget: Budget {
                 p95: millis_env("LOAD_READ_P95_MILLIS", 250)?,
                 p99: millis_env("LOAD_READ_P99_MILLIS", 750)?,
@@ -225,6 +327,18 @@ impl Config {
                     10_000,
                 )?,
             },
+            scanner_budget: Budget {
+                p95: millis_env("LOAD_SCANNER_P95_MILLIS", 750)?,
+                p99: millis_env("LOAD_SCANNER_P99_MILLIS", 1_500)?,
+                minimum_requests_per_second: integer_env("LOAD_SCANNER_MIN_RPS", 15, 1, 100_000)?
+                    as f64,
+                maximum_error_basis_points: integer_env(
+                    "LOAD_MAX_ERROR_BASIS_POINTS",
+                    0,
+                    0,
+                    10_000,
+                )?,
+            },
             replay_budget: Budget {
                 p95: millis_env("LOAD_REPLAY_P95_MILLIS", 500)?,
                 p99: millis_env("LOAD_REPLAY_P99_MILLIS", 1_000)?,
@@ -237,7 +351,25 @@ impl Config {
                     10_000,
                 )?,
             },
+            soak_budget: Budget {
+                p95: millis_env("LOAD_SOAK_P95_MILLIS", 500)?,
+                p99: millis_env("LOAD_SOAK_P99_MILLIS", 1_000)?,
+                minimum_requests_per_second: integer_env("LOAD_SOAK_MIN_RPS", 25, 1, 100_000)?
+                    as f64,
+                maximum_error_basis_points: integer_env(
+                    "LOAD_MAX_ERROR_BASIS_POINTS",
+                    0,
+                    0,
+                    10_000,
+                )?,
+            },
         })
+    }
+}
+
+async fn settle_between_phases(duration: Duration) {
+    if !duration.is_zero() {
+        tokio::time::sleep(duration).await;
     }
 }
 
@@ -380,6 +512,89 @@ async fn configure_integration_mapping(context: &RequestContext) -> anyhow::Resu
     Ok(())
 }
 
+async fn scanner_move_payloads(
+    context: &RequestContext,
+    request_count: usize,
+) -> anyhow::Result<Vec<Vec<u8>>> {
+    let mut balances = context
+        .client
+        .get(
+            context
+                .base_url
+                .join("/api/inventory/balances?show_deleted=false")?,
+        )
+        .bearer_auth(context.token.as_ref())
+        .header(TENANT_HEADER, context.tenant_id)
+        .send()
+        .await?
+        .error_for_status()
+        .context("listing scanner-movable inventory")?
+        .json::<Vec<ScannerBalance>>()
+        .await?;
+    let mut locations = context
+        .client
+        .get(context.base_url.join("/api/locations?show_deleted=false")?)
+        .bearer_auth(context.token.as_ref())
+        .header(TENANT_HEADER, context.tenant_id)
+        .send()
+        .await?
+        .error_for_status()
+        .context("listing scanner destination locations")?
+        .json::<Vec<ScannerLocation>>()
+        .await?;
+    balances.sort_unstable_by_key(|balance| balance.item_batch_id);
+    locations.sort_unstable_by(|left, right| left.barcode.cmp(&right.barcode));
+    let mut payloads = Vec::with_capacity(request_count);
+    for balance in balances.into_iter().filter(|balance| {
+        balance.status == "available"
+            && balance.license_plate_id.is_none()
+            && balance.qty_on_hand - balance.qty_reserved - balance.qty_held > 0
+    }) {
+        let index = payloads.len();
+        let Some(destination) = locations
+            .iter()
+            .filter(|location| {
+                location.active
+                    && location.pickable
+                    && location.facility_id == balance.facility_id
+                    && location.id != balance.location_id
+                    && location
+                        .barcode
+                        .as_deref()
+                        .is_some_and(|barcode| barcode.starts_with("SEED-MOVE-"))
+            })
+            .nth(index)
+        else {
+            continue;
+        };
+        let reference_id = i64::try_from(index + 1).context("scanner request index exceeds i64")?;
+        payloads.push(
+            serde_json::to_vec(&json!({
+                "item_batch_id": balance.item_batch_id,
+                "from_location_id": balance.location_id,
+                "to_location_id": destination.id,
+                "qty": 1,
+                "status": "available",
+                "reason": "load envelope scanner move",
+                "reference_type": "load_envelope",
+                "reference_id": reference_id,
+                "idempotency_key": format!("load-scanner-{}-{index}", context.run_id),
+            }))
+            .context("encoding scanner inventory move")?,
+        );
+        if payloads.len() == request_count {
+            break;
+        }
+    }
+    if payloads.len() != request_count {
+        bail!(
+            "load target exposed only {} independent scanner-movable positions; {request_count} required",
+            payloads.len()
+        );
+    }
+    Ok(payloads)
+}
+
 fn command_payload(run_id: &str, index: usize) -> anyhow::Result<Vec<u8>> {
     serde_json::to_vec(&json!({
         "order_key": format!("LOAD-{run_id}-{index:06}"),
@@ -462,6 +677,55 @@ async fn run_phase(
     })
 }
 
+async fn run_read_soak(
+    context: RequestContext,
+    duration: Duration,
+    concurrency: usize,
+) -> anyhow::Result<PhaseOutcome> {
+    let next_index = Arc::new(AtomicUsize::new(0));
+    let started_at = Instant::now();
+    let deadline = started_at + duration;
+    let mut workers = JoinSet::new();
+    for _ in 0..concurrency {
+        let context = context.clone();
+        let next_index = next_index.clone();
+        workers.spawn(async move {
+            let mut outcomes = Vec::new();
+            while Instant::now() < deadline {
+                let index = next_index.fetch_add(1, Ordering::Relaxed);
+                let request_started_at = Instant::now();
+                let result = execute_request(&context, &Phase::Read, index).await;
+                outcomes.push((index, request_started_at.elapsed(), result.map(|_| ())));
+            }
+            outcomes
+        });
+    }
+    let mut durations = Vec::new();
+    let mut error_count = 0;
+    let mut errors = Vec::new();
+    while let Some(worker) = workers.join_next().await {
+        for (index, request_duration, result) in worker.context("soak worker panicked")? {
+            durations.push(request_duration);
+            if let Err(error) = result {
+                error_count += 1;
+                if errors.len() < 20 {
+                    errors.push(format!("request {index}: {error}"));
+                }
+            }
+        }
+    }
+    if durations.is_empty() {
+        bail!("sustained read soak completed without issuing a request");
+    }
+    Ok(PhaseOutcome {
+        elapsed: started_at.elapsed(),
+        durations,
+        bodies: Vec::new(),
+        error_count,
+        errors,
+    })
+}
+
 async fn execute_request(
     context: &RequestContext,
     phase: &Phase,
@@ -500,17 +764,38 @@ async fn execute_request(
             .body(payloads[index].clone())
             .send()
             .await?,
+        Phase::ScannerMove { payloads, .. } => {
+            context
+                .client
+                .post(context.base_url.join("/api/inventory/moves")?)
+                .bearer_auth(context.token.as_ref())
+                .header(TENANT_HEADER, context.tenant_id)
+                .header(REQUEST_ID_HEADER, request_id)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(payloads[index].clone())
+                .send()
+                .await?
+        }
     };
     let status = response.status();
     let body = response.bytes().await?.to_vec();
     let expected_status = match phase {
         Phase::Read => StatusCode::OK,
         Phase::Command { .. } => StatusCode::ACCEPTED,
+        Phase::ScannerMove { .. } => StatusCode::OK,
     };
     if status != expected_status {
-        bail!("expected {expected_status}, received {status}");
+        let diagnostic = String::from_utf8_lossy(&body)
+            .chars()
+            .take(500)
+            .collect::<String>();
+        bail!("expected {expected_status}, received {status}: {diagnostic}");
     }
     if let Phase::Command {
+        expected_bodies: Some(expected),
+        ..
+    }
+    | Phase::ScannerMove {
         expected_bodies: Some(expected),
         ..
     } = phase

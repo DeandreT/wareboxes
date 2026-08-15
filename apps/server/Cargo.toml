@@ -35,12 +35,19 @@ wareboxes-api-contract = { workspace = true }
 wareboxes-application = { workspace = true }
 wareboxes-core = { workspace = true }
 wareboxes-domain = { workspace = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "test-util",
+    "net",
+    "time",
+] }
 axum = { version = "0.8", features = ["macros"] }
 tower = { version = "0.5", features = ["util"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

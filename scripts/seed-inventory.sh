@@ -4,12 +4,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 count=400
+move_destinations=0
 
 usage() {
   cat <<'USAGE'
 Usage:
   scripts/seed-inventory.sh                 create up to 400 inventory positions
   scripts/seed-inventory.sh --count 1000    create up to a specific number of positions
+  scripts/seed-inventory.sh --count 1000 --move-destinations 100
 
 The target database must contain at least one active tenant. The script uses the
 oldest active tenant and is replay-safe: existing WB-SEED-INV-* commands are left
@@ -24,6 +26,10 @@ while [ "$#" -gt 0 ]; do
       count="${2:-}"
       shift 2
       ;;
+    --move-destinations)
+      move_destinations="${2:-}"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -36,10 +42,15 @@ if ! [[ "$count" =~ ^[0-9]+$ ]] || [ "$count" -lt 1 ]; then
   echo "--count must be a positive integer" >&2
   exit 2
 fi
+if ! [[ "$move_destinations" =~ ^[0-9]+$ ]]; then
+  echo "--move-destinations must be a non-negative integer" >&2
+  exit 2
+fi
 
 run_psql() {
   if [ -n "${MIGRATION_DATABASE_URL:-}" ] && command -v psql >/dev/null 2>&1; then
-    psql "$MIGRATION_DATABASE_URL" -v ON_ERROR_STOP=1 -v inventory_count="$count"
+    psql "$MIGRATION_DATABASE_URL" -v ON_ERROR_STOP=1 \
+      -v inventory_count="$count" -v move_destination_count="$move_destinations"
     return
   fi
 
@@ -48,15 +59,19 @@ run_psql() {
     exit 1
   fi
   docker compose exec -T postgres psql -U wareboxes_admin -d wareboxes \
-    -v ON_ERROR_STOP=1 -v inventory_count="$count"
+    -v ON_ERROR_STOP=1 -v inventory_count="$count" \
+    -v move_destination_count="$move_destinations"
 }
 
 run_psql <<'SQL'
 SELECT set_config('wareboxes.seed_inventory_count', :'inventory_count', false);
+SELECT set_config('wareboxes.seed_move_destination_count', :'move_destination_count', false);
 
 DO $$
 DECLARE
   seed_count integer := current_setting('wareboxes.seed_inventory_count')::integer;
+  move_destination_count integer :=
+    current_setting('wareboxes.seed_move_destination_count')::integer;
   tenant bigint;
   owner bigint;
   facility bigint;
@@ -207,6 +222,26 @@ BEGIN
           receivable = false
       RETURNING id INTO location;
       location_ids := array_append(location_ids, location);
+    END LOOP;
+  END IF;
+
+  IF move_destination_count > 0 THEN
+    FOR i IN 1..move_destination_count LOOP
+      location_code := 'SEED-MOVE-' || lpad(i::text, 6, '0');
+      INSERT INTO locations
+          (tenant_id, created, facility_id, barcode, name, type, active, pickable, receivable)
+      VALUES (
+        tenant, now(), facility, location_code, location_code,
+        'rack', true, true, false
+      )
+      ON CONFLICT (tenant_id, barcode) DO UPDATE
+      SET deleted = NULL,
+          active = true,
+          name = EXCLUDED.name,
+          facility_id = EXCLUDED.facility_id,
+          type = EXCLUDED.type,
+          pickable = true,
+          receivable = false;
     END LOOP;
   END IF;
 
