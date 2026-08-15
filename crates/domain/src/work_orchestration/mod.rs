@@ -375,6 +375,49 @@ pub fn resource_utilization_basis_points(available_units: i64, demand_units: i64
     u16::try_from(basis_points).unwrap_or(10_000)
 }
 
+pub const fn orchestration_plan_mode(mode: WorkOrchestrationMode) -> OrchestrationPlanMode {
+    match mode {
+        WorkOrchestrationMode::Enabled => OrchestrationPlanMode::Optimized,
+        WorkOrchestrationMode::Disabled => OrchestrationPlanMode::ManualFifo,
+    }
+}
+
+pub fn due_urgency(
+    due_at: Option<crate::Timestamp>,
+    observed_at: crate::Timestamp,
+    horizon_minutes: u32,
+) -> Result<(i64, u16), WorkOrchestrationError> {
+    if horizon_minutes == 0 || horizon_minutes > MAX_DUE_HORIZON_MINUTES {
+        return Err(WorkOrchestrationError::InvalidDueHorizon(horizon_minutes));
+    }
+    let Some(due_at) = due_at else {
+        return Ok((0, 0));
+    };
+    if due_at <= observed_at {
+        return Ok(((observed_at - due_at).num_seconds().max(0), 10_000));
+    }
+    let horizon_seconds = i64::from(horizon_minutes) * 60;
+    let seconds_until = (due_at - observed_at).num_seconds().max(0);
+    if seconds_until >= horizon_seconds {
+        return Ok((0, 0));
+    }
+    let basis_points = (i128::from(horizon_seconds - seconds_until) * 10_000
+        / i128::from(horizon_seconds))
+    .clamp(0, 10_000);
+    Ok((
+        0,
+        u16::try_from(basis_points).map_err(|_| WorkOrchestrationError::InvalidEvidence)?,
+    ))
+}
+
+pub fn proximity_basis_points(travel_distance: i64) -> Result<u16, WorkOrchestrationError> {
+    if travel_distance < 0 {
+        return Err(WorkOrchestrationError::InvalidEvidence);
+    }
+    u16::try_from(10_000_i64.saturating_sub(travel_distance.min(10_000)))
+        .map_err(|_| WorkOrchestrationError::InvalidEvidence)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZoneCongestionSignal {
     pub congestion_basis_points: u16,
@@ -521,5 +564,22 @@ mod tests {
         assert_eq!(resource_utilization_basis_points(1, 2), 10_000);
         assert_eq!(resource_utilization_basis_points(0, 1), 10_000);
         assert_eq!(resource_utilization_basis_points(0, 0), 0);
+    }
+
+    #[test]
+    fn disabled_policy_is_manual_and_time_and_distance_evidence_are_bounded() {
+        assert_eq!(
+            orchestration_plan_mode(WorkOrchestrationMode::Disabled),
+            OrchestrationPlanMode::ManualFifo
+        );
+        let now = Utc::now();
+        assert_eq!(due_urgency(None, now, 60).unwrap(), (0, 0));
+        assert_eq!(due_urgency(Some(now), now, 60).unwrap(), (0, 10_000));
+        assert_eq!(
+            due_urgency(Some(now + chrono::Duration::minutes(30)), now, 60).unwrap(),
+            (0, 5_000)
+        );
+        assert_eq!(proximity_basis_points(250).unwrap(), 9_750);
+        assert_eq!(proximity_basis_points(20_000).unwrap(), 0);
     }
 }

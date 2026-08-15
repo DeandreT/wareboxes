@@ -52,6 +52,7 @@ mod storage_zones;
 mod transfer_orders;
 mod value_added_work;
 mod vendor_returns;
+mod work_orchestration;
 mod workforce_identity;
 mod x12_940;
 mod yard;
@@ -96,6 +97,30 @@ pub fn router() -> Router<AppState> {
         .route(
             "/slotting/recommendations/{recommendation_id}/dismissals",
             post(slotting::dismiss),
+        )
+        .route(
+            "/work-orchestration/policies",
+            get(work_orchestration::list_policies).post(work_orchestration::configure_policy),
+        )
+        .route(
+            "/work-orchestration/signals",
+            get(work_orchestration::signals),
+        )
+        .route(
+            "/work-orchestration/signals/congestion",
+            post(work_orchestration::record_zone_signal),
+        )
+        .route(
+            "/work-orchestration/signals/resources",
+            post(work_orchestration::record_resource_signal),
+        )
+        .route(
+            "/work-orchestration/plans",
+            get(work_orchestration::list_plans).post(work_orchestration::generate_plan),
+        )
+        .route(
+            "/work-orchestration/plans/{plan_id}",
+            get(work_orchestration::get_plan),
         )
         .route(
             "/workforce/employees/{employee_id}/identity-links",

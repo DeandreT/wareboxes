@@ -55,6 +55,7 @@ mod storage_zone;
 mod transfer_order;
 mod value_added_work;
 mod vendor_return;
+mod work_orchestration;
 mod workforce_identity;
 mod yard;
 
@@ -449,6 +450,17 @@ pub use vendor_return::{
     CreateVendorReturnLineRequest, CreateVendorReturnRequest, VendorReturnEventResponse,
     VendorReturnLifecycleRequest, VendorReturnLineResponse, VendorReturnPageRequest,
     VendorReturnPageResponse, VendorReturnReason, VendorReturnResponse, VendorReturnStatus,
+};
+pub use work_orchestration::{
+    ConfigureWorkOrchestrationPolicyRequest, GenerateWorkOrchestrationPlanRequest,
+    OrchestrationPlanMode, OrchestrationScoreEvidenceResponse, OrchestrationScoreResponse,
+    OrchestrationSignalWorkspaceRequest, OrchestrationSignalWorkspaceResponse,
+    OrchestrationWorkKind, RecordResourceCapacitySignalRequest, RecordZoneCongestionSignalRequest,
+    ResourceCapacitySignalResponse, WorkOrchestrationMode, WorkOrchestrationPlanItemResponse,
+    WorkOrchestrationPlanPage, WorkOrchestrationPlanPageRequest, WorkOrchestrationPlanResponse,
+    WorkOrchestrationPlanSummaryResponse, WorkOrchestrationPolicyPage,
+    WorkOrchestrationPolicyPageRequest, WorkOrchestrationPolicyResponse, WorkResourceKind,
+    ZoneCongestionSignalResponse,
 };
 pub use workforce_identity::{
     EmployeeIdentityChangeKind, EmployeeIdentityChangeResponse, LinkEmployeeIdentityRequest,

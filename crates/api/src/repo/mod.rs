@@ -60,4 +60,5 @@ pub mod transfer_order;
 pub mod unexpected_receipt;
 pub mod value_added_work;
 pub mod vendor_return;
+pub mod work_orchestration;
 pub mod yard;

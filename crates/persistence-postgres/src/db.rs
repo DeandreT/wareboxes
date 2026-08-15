@@ -904,6 +904,11 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                 ('slotting_profiles','slotting_profiles_tenant_isolation'),
                 ('slotting_runs','slotting_runs_tenant_isolation'),
                 ('slotting_recommendations','slotting_recommendations_tenant_isolation'),
+                ('work_orchestration_policies','work_orchestration_policies_tenant_isolation'),
+                ('work_orchestration_zone_signals','work_orchestration_zone_signals_tenant_isolation'),
+                ('work_orchestration_resource_signals','work_orchestration_resource_signals_tenant_isolation'),
+                ('work_orchestration_plans','work_orchestration_plans_tenant_isolation'),
+                ('work_orchestration_plan_items','work_orchestration_plan_items_tenant_isolation'),
                 (
                     'license_plate_putaway_tasks',
                     'license_plate_putaway_tasks_tenant_isolation'

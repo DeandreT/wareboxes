@@ -45077,6 +45077,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS
   WITH RECURSIVE granted_roles AS (
     SELECT role.id,role.parent_id
     FROM public.user_roles user_role
+    JOIN public.tenant_memberships membership
+      ON membership.tenant_id=user_role.tenant_id
+      AND membership.user_id=user_role.user_id AND membership.deleted IS NULL
     JOIN public.roles role ON role.tenant_id=user_role.tenant_id
       AND role.id=user_role.role_id AND role.deleted IS NULL
     WHERE user_role.tenant_id=checked_tenant_id AND user_role.user_id=checked_user_id
@@ -45625,3 +45628,860 @@ REVOKE ALL ON FUNCTION public.reject_slotting_run_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_slotting_recommendation_insert() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_slotting_recommendation_mutation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_slotting_run_recommendation_count() FROM PUBLIC;
+
+-- Explainable, advisory work orchestration with explicit manual fallback.
+CREATE TABLE public.work_orchestration_policies (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  inventory_owner_id bigint,
+  mode text NOT NULL,
+  priority_weight bigint NOT NULL,
+  due_urgency_weight bigint NOT NULL,
+  proximity_weight bigint NOT NULL,
+  interleaving_weight bigint NOT NULL,
+  congestion_penalty_weight bigint NOT NULL,
+  bottleneck_penalty_weight bigint NOT NULL,
+  due_horizon_minutes bigint NOT NULL,
+  max_candidates bigint NOT NULL,
+  revision bigint NOT NULL,
+  supersedes_policy_id bigint,
+  effective_from timestamptz NOT NULL,
+  effective_to timestamptz,
+  configured_by_user_id bigint NOT NULL,
+  configured_at timestamptz NOT NULL,
+  UNIQUE (tenant_id,id),
+  CHECK (mode IN ('enabled','disabled')),
+  CHECK (priority_weight BETWEEN 0 AND 10000
+    AND due_urgency_weight BETWEEN 0 AND 10000
+    AND proximity_weight BETWEEN 0 AND 10000
+    AND interleaving_weight BETWEEN 0 AND 10000
+    AND congestion_penalty_weight BETWEEN 0 AND 10000
+    AND bottleneck_penalty_weight BETWEEN 0 AND 10000),
+  CHECK (mode='disabled' OR priority_weight+due_urgency_weight+proximity_weight
+    +interleaving_weight+congestion_penalty_weight+bottleneck_penalty_weight>0),
+  CHECK (due_horizon_minutes BETWEEN 1 AND 10080),
+  CHECK (max_candidates BETWEEN 1 AND 500),
+  CHECK ((revision=1 AND supersedes_policy_id IS NULL)
+    OR (revision>1 AND supersedes_policy_id IS NOT NULL)),
+  CHECK (effective_from>=configured_at),
+  CHECK (effective_to IS NULL OR effective_to>effective_from),
+  FOREIGN KEY (tenant_id,facility_id)
+    REFERENCES public.facilities(tenant_id,id),
+  FOREIGN KEY (tenant_id,inventory_owner_id,facility_id)
+    REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+  FOREIGN KEY (tenant_id,supersedes_policy_id)
+    REFERENCES public.work_orchestration_policies(tenant_id,id),
+  FOREIGN KEY (tenant_id,configured_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+CREATE UNIQUE INDEX work_orchestration_facility_default_active_key
+ON public.work_orchestration_policies(tenant_id,facility_id)
+WHERE inventory_owner_id IS NULL AND effective_to IS NULL;
+CREATE UNIQUE INDEX work_orchestration_owner_active_key
+ON public.work_orchestration_policies(tenant_id,facility_id,inventory_owner_id)
+WHERE inventory_owner_id IS NOT NULL AND effective_to IS NULL;
+CREATE UNIQUE INDEX work_orchestration_facility_default_revision_key
+ON public.work_orchestration_policies(tenant_id,facility_id,revision)
+WHERE inventory_owner_id IS NULL;
+CREATE UNIQUE INDEX work_orchestration_owner_revision_key
+ON public.work_orchestration_policies(tenant_id,facility_id,inventory_owner_id,revision)
+WHERE inventory_owner_id IS NOT NULL;
+CREATE INDEX work_orchestration_policies_page_idx
+ON public.work_orchestration_policies(tenant_id,configured_at DESC,id DESC);
+
+CREATE TABLE public.work_orchestration_zone_signals (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  storage_zone_id bigint NOT NULL,
+  storage_zone_code text NOT NULL,
+  congestion_basis_points bigint NOT NULL,
+  queue_depth bigint NOT NULL,
+  ttl_seconds bigint NOT NULL,
+  recorded_by_user_id bigint NOT NULL,
+  observed_at timestamptz NOT NULL,
+  expires_at timestamptz NOT NULL,
+  UNIQUE (tenant_id,id),
+  CHECK (storage_zone_code=upper(btrim(storage_zone_code))
+    AND storage_zone_code<>'' AND char_length(storage_zone_code)<=32),
+  CHECK (congestion_basis_points BETWEEN 0 AND 10000),
+  CHECK (queue_depth>=0),
+  CHECK (ttl_seconds BETWEEN 1 AND 86400),
+  CHECK (expires_at=observed_at+make_interval(secs=>ttl_seconds::double precision)),
+  FOREIGN KEY (tenant_id,facility_id,storage_zone_id)
+    REFERENCES public.storage_zones(tenant_id,facility_id,id),
+  FOREIGN KEY (tenant_id,recorded_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+CREATE INDEX work_orchestration_zone_signals_current_idx
+ON public.work_orchestration_zone_signals(
+  tenant_id,facility_id,storage_zone_id,observed_at DESC,id DESC);
+
+CREATE TABLE public.work_orchestration_resource_signals (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  resource_kind text NOT NULL,
+  available_units bigint NOT NULL,
+  demand_units bigint NOT NULL,
+  utilization_basis_points bigint NOT NULL,
+  ttl_seconds bigint NOT NULL,
+  recorded_by_user_id bigint NOT NULL,
+  observed_at timestamptz NOT NULL,
+  expires_at timestamptz NOT NULL,
+  UNIQUE (tenant_id,id),
+  CHECK (resource_kind IN ('general_labor','inventory_control','material_handling',
+    'dock_door','pack_station','automation')),
+  CHECK (available_units>=0 AND demand_units>=0),
+  CHECK (utilization_basis_points BETWEEN 0 AND 10000),
+  CHECK (ttl_seconds BETWEEN 1 AND 86400),
+  CHECK (expires_at=observed_at+make_interval(secs=>ttl_seconds::double precision)),
+  FOREIGN KEY (tenant_id,facility_id)
+    REFERENCES public.facilities(tenant_id,id),
+  FOREIGN KEY (tenant_id,recorded_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+CREATE INDEX work_orchestration_resource_signals_current_idx
+ON public.work_orchestration_resource_signals(
+  tenant_id,facility_id,resource_kind,observed_at DESC,id DESC);
+
+CREATE TABLE public.work_orchestration_plans (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  requested_inventory_owner_id bigint,
+  current_location_id bigint NOT NULL,
+  current_location_label text NOT NULL,
+  previous_work_kind text,
+  generated_for_user_id bigint,
+  policy_id bigint NOT NULL,
+  policy_revision bigint NOT NULL,
+  policy_inventory_owner_id bigint,
+  plan_mode text NOT NULL,
+  input_snapshot_at timestamptz NOT NULL,
+  configuration_snapshot jsonb NOT NULL,
+  candidate_count bigint NOT NULL,
+  item_count bigint NOT NULL,
+  generated_by_user_id bigint NOT NULL,
+  generated_at timestamptz NOT NULL,
+  UNIQUE (tenant_id,id),
+  UNIQUE (tenant_id,facility_id,id),
+  CHECK (current_location_label=btrim(current_location_label)
+    AND current_location_label<>'' AND char_length(current_location_label)<=200),
+  CHECK (previous_work_kind IS NULL OR previous_work_kind IN (
+    'cycle_count_item_location','cycle_count_location','putaway',
+    'license_plate_putaway','inventory_relocation','replenishment','cross_dock')),
+  CHECK (policy_revision>0),
+  CHECK (plan_mode IN ('optimized','manual_fifo')),
+  CHECK (input_snapshot_at=generated_at),
+  CHECK (jsonb_typeof(configuration_snapshot)='object'),
+  CHECK (candidate_count>=0 AND item_count>=0
+    AND item_count=candidate_count AND item_count<=500),
+  FOREIGN KEY (tenant_id,facility_id)
+    REFERENCES public.facilities(tenant_id,id),
+  FOREIGN KEY (tenant_id,requested_inventory_owner_id,facility_id)
+    REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+  FOREIGN KEY (tenant_id,current_location_id)
+    REFERENCES public.locations(tenant_id,id),
+  FOREIGN KEY (tenant_id,policy_id)
+    REFERENCES public.work_orchestration_policies(tenant_id,id),
+  FOREIGN KEY (tenant_id,generated_for_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  FOREIGN KEY (tenant_id,generated_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id)
+);
+CREATE INDEX work_orchestration_plans_page_idx
+ON public.work_orchestration_plans(tenant_id,generated_at DESC,id DESC);
+CREATE INDEX work_orchestration_plans_scope_page_idx
+ON public.work_orchestration_plans(
+  tenant_id,facility_id,requested_inventory_owner_id,generated_at DESC,id DESC);
+
+CREATE TABLE public.work_orchestration_plan_items (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  plan_id bigint NOT NULL,
+  sequence bigint NOT NULL,
+  work_task_id bigint NOT NULL,
+  work_kind text NOT NULL,
+  inventory_owner_id bigint,
+  title text NOT NULL,
+  instructions text,
+  task_status text NOT NULL,
+  task_created_at timestamptz NOT NULL,
+  source_location_id bigint NOT NULL,
+  source_location_label text NOT NULL,
+  destination_location_id bigint,
+  destination_location_label text,
+  task_priority bigint NOT NULL,
+  due_at timestamptz,
+  overdue_seconds bigint NOT NULL,
+  due_urgency_basis_points bigint NOT NULL,
+  current_location_id bigint NOT NULL,
+  current_travel_sequence bigint NOT NULL,
+  source_travel_sequence bigint NOT NULL,
+  destination_travel_sequence bigint,
+  travel_distance bigint NOT NULL,
+  proximity_basis_points bigint NOT NULL,
+  previous_work_kind text,
+  interleaving_compatible boolean NOT NULL,
+  source_zone_id bigint,
+  source_zone_code text,
+  zone_signal_id bigint,
+  congestion_basis_points bigint NOT NULL,
+  congestion_queue_depth bigint NOT NULL,
+  resource_kind text NOT NULL,
+  resource_signal_id bigint,
+  resource_available_units bigint NOT NULL,
+  resource_demand_units bigint NOT NULL,
+  resource_utilization_basis_points bigint NOT NULL,
+  priority_score bigint NOT NULL,
+  due_urgency_score bigint NOT NULL,
+  proximity_score bigint NOT NULL,
+  interleaving_score bigint NOT NULL,
+  congestion_penalty bigint NOT NULL,
+  bottleneck_penalty bigint NOT NULL,
+  total_score bigint NOT NULL,
+  UNIQUE (tenant_id,id),
+  UNIQUE (tenant_id,plan_id,sequence),
+  UNIQUE (tenant_id,plan_id,work_task_id),
+  CHECK (sequence BETWEEN 1 AND 500),
+  CHECK (work_kind IN ('cycle_count_item_location','cycle_count_location','putaway',
+    'license_plate_putaway','inventory_relocation','replenishment','cross_dock')),
+  CHECK (title=btrim(title) AND title<>'' AND char_length(title)<=500),
+  CHECK (instructions IS NULL OR char_length(instructions)<=2000),
+  CHECK (task_status='open'),
+  CHECK (source_location_label=btrim(source_location_label)
+    AND source_location_label<>'' AND char_length(source_location_label)<=200),
+  CHECK ((destination_location_id IS NULL AND destination_location_label IS NULL)
+    OR (destination_location_id IS NOT NULL AND destination_location_id<>source_location_id
+      AND destination_location_label=btrim(destination_location_label)
+      AND destination_location_label<>'' AND char_length(destination_location_label)<=200)),
+  CHECK (task_priority>=0 AND overdue_seconds>=0),
+  CHECK (due_urgency_basis_points BETWEEN 0 AND 10000
+    AND proximity_basis_points BETWEEN 0 AND 10000
+    AND congestion_basis_points BETWEEN 0 AND 10000
+    AND resource_utilization_basis_points BETWEEN 0 AND 10000),
+  CHECK (travel_distance>=0 AND congestion_queue_depth>=0
+    AND resource_available_units>=0 AND resource_demand_units>=0),
+  CHECK (previous_work_kind IS NULL OR previous_work_kind IN (
+    'cycle_count_item_location','cycle_count_location','putaway',
+    'license_plate_putaway','inventory_relocation','replenishment','cross_dock')),
+  CHECK (source_zone_code IS NULL OR source_zone_code=upper(btrim(source_zone_code))),
+  CHECK (resource_kind IN ('general_labor','inventory_control','material_handling',
+    'dock_door','pack_station','automation')),
+  CHECK (priority_score>=0 AND due_urgency_score>=0 AND proximity_score>=0
+    AND interleaving_score>=0 AND congestion_penalty>=0 AND bottleneck_penalty>=0),
+  CHECK (total_score=priority_score+due_urgency_score+proximity_score
+    +interleaving_score-congestion_penalty-bottleneck_penalty),
+  FOREIGN KEY (tenant_id,facility_id,plan_id)
+    REFERENCES public.work_orchestration_plans(tenant_id,facility_id,id),
+  FOREIGN KEY (tenant_id,work_task_id)
+    REFERENCES public.work_tasks(tenant_id,id),
+  FOREIGN KEY (tenant_id,inventory_owner_id,facility_id)
+    REFERENCES public.inventory_owner_facilities(tenant_id,inventory_owner_id,facility_id),
+  FOREIGN KEY (tenant_id,facility_id,source_location_id)
+    REFERENCES public.locations(tenant_id,facility_id,id),
+  FOREIGN KEY (tenant_id,facility_id,destination_location_id)
+    REFERENCES public.locations(tenant_id,facility_id,id),
+  FOREIGN KEY (tenant_id,facility_id,current_location_id)
+    REFERENCES public.locations(tenant_id,facility_id,id),
+  FOREIGN KEY (tenant_id,facility_id,source_zone_id)
+    REFERENCES public.storage_zones(tenant_id,facility_id,id),
+  FOREIGN KEY (tenant_id,zone_signal_id)
+    REFERENCES public.work_orchestration_zone_signals(tenant_id,id),
+  FOREIGN KEY (tenant_id,resource_signal_id)
+    REFERENCES public.work_orchestration_resource_signals(tenant_id,id)
+);
+CREATE INDEX work_orchestration_plan_items_plan_idx
+ON public.work_orchestration_plan_items(tenant_id,plan_id,sequence);
+CREATE INDEX work_orchestration_plan_items_task_idx
+ON public.work_orchestration_plan_items(tenant_id,work_task_id);
+
+CREATE FUNCTION public.validate_work_orchestration_policy_insert() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE predecessor public.work_orchestration_policies%ROWTYPE;
+BEGIN
+  IF NEW.configured_by_user_id IS DISTINCT FROM
+      NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint
+    OR NOT public.slotting_user_has_supervisor_permission(
+      NEW.tenant_id,NEW.configured_by_user_id)
+    OR NEW.configured_at<transaction_timestamp()-INTERVAL '5 minutes'
+    OR NEW.configured_at>clock_timestamp()+INTERVAL '1 minute'
+    OR NEW.effective_from<>NEW.configured_at THEN
+    RAISE EXCEPTION 'invalid work orchestration policy actor or time'
+      USING ERRCODE='23514';
+  END IF;
+  IF NEW.revision=1 THEN
+    IF NEW.supersedes_policy_id IS NOT NULL OR EXISTS(
+      SELECT 1 FROM public.work_orchestration_policies policy
+      WHERE policy.tenant_id=NEW.tenant_id AND policy.facility_id=NEW.facility_id
+        AND policy.inventory_owner_id IS NOT DISTINCT FROM NEW.inventory_owner_id) THEN
+      RAISE EXCEPTION 'invalid initial work orchestration policy' USING ERRCODE='23514';
+    END IF;
+  ELSE
+    SELECT * INTO predecessor FROM public.work_orchestration_policies policy
+    WHERE policy.tenant_id=NEW.tenant_id AND policy.id=NEW.supersedes_policy_id;
+    IF NOT FOUND OR predecessor.facility_id<>NEW.facility_id
+      OR predecessor.inventory_owner_id IS DISTINCT FROM NEW.inventory_owner_id
+      OR predecessor.revision<>NEW.revision-1
+      OR predecessor.effective_to IS DISTINCT FROM NEW.effective_from THEN
+      RAISE EXCEPTION 'invalid work orchestration policy predecessor' USING ERRCODE='23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_work_orchestration_policy_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF TG_OP='DELETE' OR NEW.id<>OLD.id OR NEW.tenant_id<>OLD.tenant_id
+    OR NEW.facility_id<>OLD.facility_id
+    OR NEW.inventory_owner_id IS DISTINCT FROM OLD.inventory_owner_id
+    OR NEW.mode<>OLD.mode OR NEW.priority_weight<>OLD.priority_weight
+    OR NEW.due_urgency_weight<>OLD.due_urgency_weight
+    OR NEW.proximity_weight<>OLD.proximity_weight
+    OR NEW.interleaving_weight<>OLD.interleaving_weight
+    OR NEW.congestion_penalty_weight<>OLD.congestion_penalty_weight
+    OR NEW.bottleneck_penalty_weight<>OLD.bottleneck_penalty_weight
+    OR NEW.due_horizon_minutes<>OLD.due_horizon_minutes
+    OR NEW.max_candidates<>OLD.max_candidates OR NEW.revision<>OLD.revision
+    OR NEW.supersedes_policy_id IS DISTINCT FROM OLD.supersedes_policy_id
+    OR NEW.effective_from<>OLD.effective_from
+    OR NEW.configured_by_user_id<>OLD.configured_by_user_id
+    OR NEW.configured_at<>OLD.configured_at OR OLD.effective_to IS NOT NULL
+    OR NEW.effective_to IS NULL OR NEW.effective_to<=OLD.effective_from
+    OR NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint IS NULL
+    OR NOT public.slotting_user_has_supervisor_permission(
+      OLD.tenant_id,NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint) THEN
+    RAISE EXCEPTION 'work orchestration policies are immutable' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_work_orchestration_policy_successor() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NOT EXISTS(SELECT 1 FROM public.work_orchestration_policies successor
+    WHERE successor.tenant_id=NEW.tenant_id
+      AND successor.supersedes_policy_id=NEW.id
+      AND successor.facility_id=NEW.facility_id
+      AND successor.inventory_owner_id IS NOT DISTINCT FROM NEW.inventory_owner_id
+      AND successor.revision=NEW.revision+1
+      AND successor.effective_from=NEW.effective_to) THEN
+    RAISE EXCEPTION 'closed work orchestration policy requires exact successor'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.validate_work_orchestration_zone_signal() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+BEGIN
+  IF NEW.recorded_by_user_id IS DISTINCT FROM
+      NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint
+    OR NOT public.slotting_user_has_supervisor_permission(
+      NEW.tenant_id,NEW.recorded_by_user_id)
+    OR NEW.observed_at<transaction_timestamp()-INTERVAL '5 minutes'
+    OR NEW.observed_at>clock_timestamp()+INTERVAL '1 minute'
+    OR NOT EXISTS(SELECT 1 FROM public.storage_zones zone
+      WHERE zone.tenant_id=NEW.tenant_id AND zone.facility_id=NEW.facility_id
+        AND zone.id=NEW.storage_zone_id AND zone.effective_to IS NULL
+        AND zone.code=NEW.storage_zone_code) THEN
+    RAISE EXCEPTION 'invalid work orchestration zone signal' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_work_orchestration_resource_signal() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE expected_utilization bigint;
+BEGIN
+  expected_utilization:=CASE WHEN NEW.demand_units=0 THEN 0
+    WHEN NEW.available_units=0 THEN 10000
+    ELSE LEAST(10000,trunc(
+      (NEW.demand_units::numeric*10000)/NEW.available_units::numeric)::bigint) END;
+  IF NEW.recorded_by_user_id IS DISTINCT FROM
+      NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint
+    OR NOT public.slotting_user_has_supervisor_permission(
+      NEW.tenant_id,NEW.recorded_by_user_id)
+    OR NEW.observed_at<transaction_timestamp()-INTERVAL '5 minutes'
+    OR NEW.observed_at>clock_timestamp()+INTERVAL '1 minute'
+    OR NEW.utilization_basis_points<>expected_utilization THEN
+    RAISE EXCEPTION 'invalid work orchestration resource signal' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.work_orchestration_user_has_permission(
+  checked_tenant_id bigint,checked_user_id bigint,checked_permission text) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+  WITH RECURSIVE granted_roles AS (
+    SELECT role.id,role.parent_id
+    FROM public.tenant_memberships membership
+    JOIN public.user_roles user_role ON user_role.tenant_id=membership.tenant_id
+      AND user_role.user_id=membership.user_id AND user_role.deleted IS NULL
+    JOIN public.roles role ON role.tenant_id=user_role.tenant_id
+      AND role.id=user_role.role_id AND role.deleted IS NULL
+    WHERE membership.tenant_id=checked_tenant_id
+      AND membership.user_id=checked_user_id AND membership.deleted IS NULL
+    UNION
+    SELECT parent.id,parent.parent_id
+    FROM granted_roles child
+    JOIN public.roles parent ON parent.tenant_id=checked_tenant_id
+      AND parent.id=child.parent_id AND parent.deleted IS NULL
+  )
+  SELECT EXISTS(
+    SELECT 1 FROM granted_roles role
+    JOIN public.role_permissions role_permission
+      ON role_permission.tenant_id=checked_tenant_id
+      AND role_permission.role_id=role.id AND role_permission.deleted IS NULL
+    JOIN public.permissions permission
+      ON permission.tenant_id=role_permission.tenant_id
+      AND permission.id=role_permission.permission_id AND permission.deleted IS NULL
+    WHERE upper(permission.name) IN ('ADMIN',upper(checked_permission))
+  )
+$$;
+
+CREATE FUNCTION public.reject_work_orchestration_immutable_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  RAISE EXCEPTION '% is immutable',TG_TABLE_NAME USING ERRCODE='23514';
+END $$;
+
+CREATE FUNCTION public.validate_work_orchestration_plan_insert() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE policy public.work_orchestration_policies%ROWTYPE;
+BEGIN
+  SELECT * INTO policy FROM public.work_orchestration_policies candidate
+  WHERE candidate.tenant_id=NEW.tenant_id AND candidate.id=NEW.policy_id;
+  IF NOT FOUND OR policy.facility_id<>NEW.facility_id
+    OR policy.inventory_owner_id IS DISTINCT FROM NEW.policy_inventory_owner_id
+    OR NOT ((NEW.requested_inventory_owner_id IS NULL
+        AND policy.inventory_owner_id IS NULL)
+      OR (NEW.requested_inventory_owner_id IS NOT NULL
+        AND (policy.inventory_owner_id=NEW.requested_inventory_owner_id
+          OR policy.inventory_owner_id IS NULL)))
+    OR policy.revision<>NEW.policy_revision OR policy.effective_to IS NOT NULL
+    OR NEW.item_count>policy.max_candidates
+    OR NEW.configuration_snapshot<>to_jsonb(policy)
+    OR NEW.plan_mode<>(CASE WHEN policy.mode='enabled'
+      THEN 'optimized' ELSE 'manual_fifo' END)
+    OR NEW.generated_by_user_id IS DISTINCT FROM
+      NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint
+    OR NOT public.slotting_user_has_supervisor_permission(
+      NEW.tenant_id,NEW.generated_by_user_id)
+    OR (NEW.generated_for_user_id IS NOT NULL AND NOT EXISTS(
+      SELECT 1 FROM public.employees employee
+      JOIN public.employee_facilities assignment
+        ON assignment.tenant_id=employee.tenant_id
+        AND assignment.employee_id=employee.id
+        AND assignment.facility_id=NEW.facility_id
+        AND assignment.deleted IS NULL
+      JOIN public.tenant_memberships membership
+        ON membership.tenant_id=employee.tenant_id
+        AND membership.user_id=employee.user_id AND membership.deleted IS NULL
+      WHERE employee.tenant_id=NEW.tenant_id
+        AND employee.user_id=NEW.generated_for_user_id
+        AND employee.deleted IS NULL AND employee.hired<=NEW.generated_at
+        AND (employee.terminated IS NULL OR employee.terminated>NEW.generated_at)
+        AND (membership.all_facilities OR EXISTS(
+          SELECT 1 FROM public.user_facilities user_facility
+          WHERE user_facility.tenant_id=membership.tenant_id
+            AND user_facility.user_id=membership.user_id
+            AND user_facility.facility_id=NEW.facility_id
+            AND user_facility.deleted IS NULL))
+        AND (NEW.requested_inventory_owner_id IS NULL
+          OR membership.all_inventory_owners OR EXISTS(
+            SELECT 1 FROM public.user_inventory_owners user_owner
+            WHERE user_owner.tenant_id=membership.tenant_id
+              AND user_owner.user_id=membership.user_id
+              AND user_owner.inventory_owner_id=NEW.requested_inventory_owner_id
+              AND user_owner.deleted IS NULL))
+        AND public.work_orchestration_user_has_permission(
+          NEW.tenant_id,NEW.generated_for_user_id,'wms')))
+    OR NEW.generated_at<transaction_timestamp()-INTERVAL '5 minutes'
+    OR NEW.generated_at>clock_timestamp()+INTERVAL '1 minute'
+    OR NOT EXISTS(SELECT 1 FROM public.locations location
+      WHERE location.tenant_id=NEW.tenant_id AND location.facility_id=NEW.facility_id
+        AND location.id=NEW.current_location_id AND location.deleted IS NULL
+        AND location.active
+        AND COALESCE(NULLIF(location.name,''),location.barcode,
+          'Location #'||location.id::text)=NEW.current_location_label) THEN
+    RAISE EXCEPTION 'invalid work orchestration plan' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_work_orchestration_plan_item() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE plan public.work_orchestration_plans%ROWTYPE;
+DECLARE priority_weight bigint; due_weight bigint; proximity_weight bigint;
+DECLARE interleave_weight bigint; congestion_weight bigint; bottleneck_weight bigint;
+DECLARE expected_interleave boolean;
+DECLARE horizon_seconds bigint; expected_overdue bigint; expected_due_urgency bigint;
+DECLARE expected_distance bigint; expected_proximity bigint;
+DECLARE plan_found boolean; expected_current_sequence bigint;
+DECLARE expected_source_zone_id bigint; expected_source_zone_code text;
+DECLARE expected_source_sequence bigint; expected_destination_sequence bigint;
+DECLARE expected_zone_signal_id bigint; expected_resource_signal_id bigint;
+BEGIN
+  SELECT * INTO plan FROM public.work_orchestration_plans candidate
+  WHERE candidate.tenant_id=NEW.tenant_id AND candidate.id=NEW.plan_id;
+  plan_found:=FOUND;
+  priority_weight:=(plan.configuration_snapshot->>'priority_weight')::bigint;
+  due_weight:=(plan.configuration_snapshot->>'due_urgency_weight')::bigint;
+  proximity_weight:=(plan.configuration_snapshot->>'proximity_weight')::bigint;
+  interleave_weight:=(plan.configuration_snapshot->>'interleaving_weight')::bigint;
+  congestion_weight:=(plan.configuration_snapshot->>'congestion_penalty_weight')::bigint;
+  bottleneck_weight:=(plan.configuration_snapshot->>'bottleneck_penalty_weight')::bigint;
+  expected_interleave:=CASE
+    WHEN NEW.previous_work_kind IN ('putaway','license_plate_putaway','cross_dock')
+      AND NEW.work_kind IN ('inventory_relocation','replenishment') THEN true
+    WHEN NEW.previous_work_kind IN ('inventory_relocation','replenishment')
+      AND NEW.work_kind IN ('putaway','license_plate_putaway','cross_dock') THEN true
+    ELSE false END;
+  horizon_seconds:=(plan.configuration_snapshot->>'due_horizon_minutes')::bigint*60;
+  expected_overdue:=CASE WHEN NEW.due_at IS NOT NULL
+      AND NEW.due_at<=plan.input_snapshot_at
+    THEN trunc(EXTRACT(EPOCH FROM plan.input_snapshot_at-NEW.due_at))::bigint
+    ELSE 0 END;
+  expected_due_urgency:=CASE
+    WHEN NEW.due_at IS NULL THEN 0
+    WHEN NEW.due_at<=plan.input_snapshot_at THEN 10000
+    WHEN trunc(EXTRACT(EPOCH FROM NEW.due_at-plan.input_snapshot_at))::bigint
+        >=horizon_seconds THEN 0
+    ELSE ((horizon_seconds-
+      trunc(EXTRACT(EPOCH FROM NEW.due_at-plan.input_snapshot_at))::bigint)*10000)
+      /horizon_seconds END;
+  expected_distance:=abs(NEW.current_travel_sequence-NEW.source_travel_sequence);
+  expected_proximity:=GREATEST(0,10000-LEAST(expected_distance,10000));
+  SELECT COALESCE(path.travel_sequence,0)::bigint
+    INTO expected_current_sequence
+  FROM public.locations location
+  LEFT JOIN LATERAL (
+    SELECT zone.travel_sequence*1000000+member.location_sequence AS travel_sequence
+    FROM public.storage_zone_locations member
+    JOIN public.storage_zones zone ON zone.tenant_id=member.tenant_id
+      AND zone.facility_id=member.facility_id AND zone.id=member.storage_zone_id
+      AND zone.effective_to IS NULL
+    WHERE member.tenant_id=location.tenant_id
+      AND member.facility_id=location.facility_id AND member.location_id=location.id
+    ORDER BY zone.travel_sequence,member.location_sequence,zone.id LIMIT 1
+  ) path ON true
+  WHERE location.tenant_id=NEW.tenant_id AND location.facility_id=NEW.facility_id
+    AND location.id=NEW.current_location_id AND location.deleted IS NULL AND location.active;
+  SELECT path.storage_zone_id,path.storage_zone_code,
+      COALESCE(path.travel_sequence,0)::bigint
+    INTO expected_source_zone_id,expected_source_zone_code,expected_source_sequence
+  FROM public.locations location
+  LEFT JOIN LATERAL (
+    SELECT zone.id AS storage_zone_id,zone.code AS storage_zone_code,
+      zone.travel_sequence*1000000+member.location_sequence AS travel_sequence
+    FROM public.storage_zone_locations member
+    JOIN public.storage_zones zone ON zone.tenant_id=member.tenant_id
+      AND zone.facility_id=member.facility_id AND zone.id=member.storage_zone_id
+      AND zone.effective_to IS NULL
+    WHERE member.tenant_id=location.tenant_id
+      AND member.facility_id=location.facility_id AND member.location_id=location.id
+    ORDER BY zone.travel_sequence,member.location_sequence,zone.id LIMIT 1
+  ) path ON true
+  WHERE location.tenant_id=NEW.tenant_id AND location.facility_id=NEW.facility_id
+    AND location.id=NEW.source_location_id AND location.deleted IS NULL AND location.active;
+  expected_destination_sequence:=NULL;
+  IF NEW.destination_location_id IS NOT NULL THEN
+    SELECT path.travel_sequence::bigint INTO expected_destination_sequence
+    FROM public.locations location
+    LEFT JOIN LATERAL (
+      SELECT zone.travel_sequence*1000000+member.location_sequence AS travel_sequence
+      FROM public.storage_zone_locations member
+      JOIN public.storage_zones zone ON zone.tenant_id=member.tenant_id
+        AND zone.facility_id=member.facility_id AND zone.id=member.storage_zone_id
+        AND zone.effective_to IS NULL
+      WHERE member.tenant_id=location.tenant_id
+        AND member.facility_id=location.facility_id AND member.location_id=location.id
+      ORDER BY zone.travel_sequence,member.location_sequence,zone.id LIMIT 1
+    ) path ON true
+    WHERE location.tenant_id=NEW.tenant_id AND location.facility_id=NEW.facility_id
+      AND location.id=NEW.destination_location_id
+      AND location.deleted IS NULL AND location.active;
+  END IF;
+  SELECT signal.id INTO expected_zone_signal_id
+  FROM public.work_orchestration_zone_signals signal
+  WHERE signal.tenant_id=NEW.tenant_id AND signal.facility_id=NEW.facility_id
+    AND signal.storage_zone_id=expected_source_zone_id
+    AND signal.observed_at<=plan.input_snapshot_at
+    AND signal.expires_at>plan.input_snapshot_at
+  ORDER BY signal.observed_at DESC,signal.id DESC LIMIT 1;
+  SELECT signal.id INTO expected_resource_signal_id
+  FROM public.work_orchestration_resource_signals signal
+  WHERE signal.tenant_id=NEW.tenant_id AND signal.facility_id=NEW.facility_id
+    AND signal.resource_kind=NEW.resource_kind
+    AND signal.observed_at<=plan.input_snapshot_at
+    AND signal.expires_at>plan.input_snapshot_at
+  ORDER BY signal.observed_at DESC,signal.id DESC LIMIT 1;
+  IF NOT plan_found OR NEW.facility_id<>plan.facility_id
+    OR NEW.inventory_owner_id IS DISTINCT FROM plan.requested_inventory_owner_id
+    OR NEW.current_location_id<>plan.current_location_id
+    OR NEW.previous_work_kind IS DISTINCT FROM plan.previous_work_kind
+    OR NEW.interleaving_compatible<>expected_interleave
+    OR NEW.overdue_seconds<>expected_overdue
+    OR NEW.due_urgency_basis_points<>expected_due_urgency
+    OR NEW.travel_distance<>expected_distance
+    OR NEW.proximity_basis_points<>expected_proximity
+    OR NEW.current_travel_sequence<>expected_current_sequence
+    OR NEW.source_travel_sequence<>expected_source_sequence
+    OR NEW.destination_travel_sequence IS DISTINCT FROM expected_destination_sequence
+    OR NEW.source_zone_id IS DISTINCT FROM expected_source_zone_id
+    OR NEW.source_zone_code IS DISTINCT FROM expected_source_zone_code
+    OR NEW.zone_signal_id IS DISTINCT FROM expected_zone_signal_id
+    OR NEW.resource_signal_id IS DISTINCT FROM expected_resource_signal_id
+    OR NEW.resource_kind<>(CASE WHEN NEW.work_kind IN
+      ('cycle_count_item_location','cycle_count_location')
+      THEN 'inventory_control' ELSE 'material_handling' END)
+    OR (plan.plan_mode='optimized' AND (
+      NEW.priority_score<>LEAST(NEW.task_priority,1000)*10*priority_weight
+      OR NEW.due_urgency_score<>NEW.due_urgency_basis_points*due_weight
+      OR NEW.proximity_score<>NEW.proximity_basis_points*proximity_weight
+      OR NEW.interleaving_score<>(CASE WHEN NEW.interleaving_compatible
+        THEN 10000*interleave_weight ELSE 0 END)
+      OR NEW.congestion_penalty<>NEW.congestion_basis_points*congestion_weight
+      OR NEW.bottleneck_penalty<>
+        NEW.resource_utilization_basis_points*bottleneck_weight))
+    OR (plan.plan_mode='manual_fifo' AND (
+      NEW.priority_score<>0 OR NEW.due_urgency_score<>0 OR NEW.proximity_score<>0
+      OR NEW.interleaving_score<>0 OR NEW.congestion_penalty<>0
+      OR NEW.bottleneck_penalty<>0 OR NEW.total_score<>0))
+    OR NOT EXISTS(SELECT 1 FROM public.work_tasks task
+      WHERE task.tenant_id=NEW.tenant_id AND task.id=NEW.work_task_id
+        AND task.facility_id=NEW.facility_id
+        AND task.inventory_owner_id IS NOT DISTINCT FROM NEW.inventory_owner_id
+        AND task.task_type=NEW.work_kind AND task.status='open' AND task.deleted IS NULL
+        AND task.priority=NEW.task_priority AND task.due_at IS NOT DISTINCT FROM NEW.due_at
+        AND task.created<=plan.input_snapshot_at
+        AND (task.scheduled_for IS NULL OR task.scheduled_for<=plan.input_snapshot_at)
+        AND task.created=NEW.task_created_at AND task.title=NEW.title
+        AND task.instructions IS NOT DISTINCT FROM NEW.instructions
+        AND (plan.generated_for_user_id IS NULL
+          OR public.work_orchestration_user_has_permission(
+            NEW.tenant_id,plan.generated_for_user_id,task.required_permission)))
+    OR NOT (
+      (NEW.work_kind='cycle_count_item_location' AND EXISTS(
+        SELECT 1 FROM public.cycle_count_item_location_tasks typed
+        WHERE typed.tenant_id=NEW.tenant_id AND typed.task_id=NEW.work_task_id
+          AND typed.location_id=NEW.source_location_id
+          AND NEW.destination_location_id IS NULL))
+      OR (NEW.work_kind='cycle_count_location' AND EXISTS(
+        SELECT 1 FROM public.cycle_count_location_tasks typed
+        WHERE typed.tenant_id=NEW.tenant_id AND typed.task_id=NEW.work_task_id
+          AND typed.location_id=NEW.source_location_id
+          AND NEW.destination_location_id IS NULL))
+      OR (NEW.work_kind='putaway' AND EXISTS(
+        SELECT 1 FROM public.putaway_tasks typed
+        WHERE typed.tenant_id=NEW.tenant_id AND typed.task_id=NEW.work_task_id
+          AND typed.source_location_id=NEW.source_location_id
+          AND typed.destination_location_id IS NOT DISTINCT FROM NEW.destination_location_id))
+      OR (NEW.work_kind='license_plate_putaway' AND EXISTS(
+        SELECT 1 FROM public.license_plate_putaway_tasks typed
+        WHERE typed.tenant_id=NEW.tenant_id AND typed.task_id=NEW.work_task_id
+          AND typed.source_location_id=NEW.source_location_id
+          AND typed.destination_location_id IS NOT DISTINCT FROM NEW.destination_location_id))
+      OR (NEW.work_kind='inventory_relocation' AND EXISTS(
+        SELECT 1 FROM public.inventory_relocation_tasks typed
+        WHERE typed.tenant_id=NEW.tenant_id AND typed.task_id=NEW.work_task_id
+          AND typed.source_location_id=NEW.source_location_id
+          AND typed.destination_location_id IS NOT DISTINCT FROM NEW.destination_location_id))
+      OR (NEW.work_kind='replenishment' AND EXISTS(
+        SELECT 1 FROM public.replenishment_tasks typed
+        WHERE typed.tenant_id=NEW.tenant_id AND typed.task_id=NEW.work_task_id
+          AND typed.source_location_id=NEW.source_location_id
+          AND typed.destination_location_id IS NOT DISTINCT FROM NEW.destination_location_id))
+      OR (NEW.work_kind='cross_dock' AND EXISTS(
+        SELECT 1 FROM public.cross_dock_tasks typed
+        WHERE typed.tenant_id=NEW.tenant_id AND typed.task_id=NEW.work_task_id
+          AND typed.source_location_id=NEW.source_location_id
+          AND typed.destination_location_id IS NOT DISTINCT FROM NEW.destination_location_id)))
+    OR NOT EXISTS(SELECT 1 FROM public.locations location
+      WHERE location.tenant_id=NEW.tenant_id AND location.facility_id=NEW.facility_id
+        AND location.id=NEW.source_location_id AND location.deleted IS NULL
+        AND location.active AND COALESCE(NULLIF(location.name,''),location.barcode,
+          'Location #'||location.id::text)=NEW.source_location_label)
+    OR (NEW.destination_location_id IS NOT NULL AND NOT EXISTS(
+      SELECT 1 FROM public.locations location
+      WHERE location.tenant_id=NEW.tenant_id AND location.facility_id=NEW.facility_id
+        AND location.id=NEW.destination_location_id AND location.deleted IS NULL
+        AND location.active AND COALESCE(NULLIF(location.name,''),location.barcode,
+          'Location #'||location.id::text)=NEW.destination_location_label))
+    OR (NEW.zone_signal_id IS NULL AND (
+      NEW.congestion_basis_points<>0 OR NEW.congestion_queue_depth<>0))
+    OR (NEW.zone_signal_id IS NOT NULL AND NOT EXISTS(
+      SELECT 1 FROM public.work_orchestration_zone_signals signal
+      WHERE signal.tenant_id=NEW.tenant_id AND signal.id=NEW.zone_signal_id
+        AND signal.facility_id=NEW.facility_id
+        AND signal.storage_zone_id=NEW.source_zone_id
+        AND signal.storage_zone_code=NEW.source_zone_code
+        AND signal.congestion_basis_points=NEW.congestion_basis_points
+        AND signal.queue_depth=NEW.congestion_queue_depth
+        AND signal.observed_at<=plan.input_snapshot_at
+        AND signal.expires_at>plan.input_snapshot_at))
+    OR (NEW.resource_signal_id IS NULL AND (
+      NEW.resource_available_units<>0 OR NEW.resource_demand_units<>0
+      OR NEW.resource_utilization_basis_points<>0))
+    OR (NEW.resource_signal_id IS NOT NULL AND NOT EXISTS(
+      SELECT 1 FROM public.work_orchestration_resource_signals signal
+      WHERE signal.tenant_id=NEW.tenant_id AND signal.id=NEW.resource_signal_id
+        AND signal.facility_id=NEW.facility_id AND signal.resource_kind=NEW.resource_kind
+        AND signal.available_units=NEW.resource_available_units
+        AND signal.demand_units=NEW.resource_demand_units
+        AND signal.utilization_basis_points=NEW.resource_utilization_basis_points
+        AND signal.observed_at<=plan.input_snapshot_at
+        AND signal.expires_at>plan.input_snapshot_at)) THEN
+    RAISE EXCEPTION 'invalid work orchestration plan item' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.require_work_orchestration_plan_count() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE checked_tenant bigint; checked_plan bigint; expected_count bigint;
+DECLARE actual_count bigint; checked_mode text; plan_found boolean;
+BEGIN
+  checked_tenant:=NEW.tenant_id;
+  IF TG_TABLE_NAME='work_orchestration_plans' THEN
+    checked_plan:=NEW.id;
+  ELSE
+    checked_plan:=NEW.plan_id;
+  END IF;
+  SELECT plan.item_count,plan.plan_mode INTO expected_count,checked_mode
+  FROM public.work_orchestration_plans plan
+  WHERE plan.tenant_id=checked_tenant AND plan.id=checked_plan;
+  plan_found:=FOUND;
+  SELECT count(*) INTO actual_count FROM public.work_orchestration_plan_items item
+  WHERE item.tenant_id=checked_tenant AND item.plan_id=checked_plan;
+  IF NOT plan_found OR expected_count<>actual_count THEN
+    RAISE EXCEPTION 'work orchestration plan item count does not reconcile'
+      USING ERRCODE='23514';
+  END IF;
+  IF EXISTS(SELECT 1 FROM (
+      SELECT item.sequence,row_number() OVER (ORDER BY item.sequence) AS expected_sequence
+      FROM public.work_orchestration_plan_items item
+      WHERE item.tenant_id=checked_tenant AND item.plan_id=checked_plan
+    ) sequenced WHERE sequenced.sequence<>sequenced.expected_sequence) THEN
+    RAISE EXCEPTION 'work orchestration plan item sequence is not dense'
+      USING ERRCODE='23514';
+  END IF;
+  IF checked_mode='manual_fifo' AND EXISTS(SELECT 1 FROM (
+      SELECT item.sequence,row_number() OVER (
+        ORDER BY item.task_created_at,item.work_task_id) AS expected_sequence
+      FROM public.work_orchestration_plan_items item
+      WHERE item.tenant_id=checked_tenant AND item.plan_id=checked_plan
+    ) ranked WHERE ranked.sequence<>ranked.expected_sequence) THEN
+    RAISE EXCEPTION 'manual work orchestration plan is not FIFO ordered'
+      USING ERRCODE='23514';
+  END IF;
+  IF checked_mode='optimized' AND EXISTS(SELECT 1 FROM (
+      SELECT item.sequence,row_number() OVER (
+        ORDER BY item.total_score DESC,item.task_priority DESC,
+          item.due_at ASC NULLS LAST,item.task_created_at,item.work_task_id) AS expected_sequence
+      FROM public.work_orchestration_plan_items item
+      WHERE item.tenant_id=checked_tenant AND item.plan_id=checked_plan
+    ) ranked WHERE ranked.sequence<>ranked.expected_sequence) THEN
+    RAISE EXCEPTION 'optimized work orchestration plan is not score ordered'
+      USING ERRCODE='23514';
+  END IF;
+  RETURN NULL;
+END $$;
+
+CREATE TRIGGER work_orchestration_policies_validate BEFORE INSERT
+ON public.work_orchestration_policies FOR EACH ROW
+EXECUTE FUNCTION public.validate_work_orchestration_policy_insert();
+CREATE TRIGGER work_orchestration_policies_guard BEFORE UPDATE OR DELETE
+ON public.work_orchestration_policies FOR EACH ROW
+EXECUTE FUNCTION public.guard_work_orchestration_policy_mutation();
+CREATE CONSTRAINT TRIGGER work_orchestration_policies_successor
+AFTER UPDATE OF effective_to ON public.work_orchestration_policies
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+EXECUTE FUNCTION public.require_work_orchestration_policy_successor();
+CREATE TRIGGER work_orchestration_zone_signals_validate BEFORE INSERT
+ON public.work_orchestration_zone_signals FOR EACH ROW
+EXECUTE FUNCTION public.validate_work_orchestration_zone_signal();
+CREATE TRIGGER work_orchestration_zone_signals_immutable BEFORE UPDATE OR DELETE
+ON public.work_orchestration_zone_signals FOR EACH ROW
+EXECUTE FUNCTION public.reject_work_orchestration_immutable_mutation();
+CREATE TRIGGER work_orchestration_resource_signals_validate BEFORE INSERT
+ON public.work_orchestration_resource_signals FOR EACH ROW
+EXECUTE FUNCTION public.validate_work_orchestration_resource_signal();
+CREATE TRIGGER work_orchestration_resource_signals_immutable BEFORE UPDATE OR DELETE
+ON public.work_orchestration_resource_signals FOR EACH ROW
+EXECUTE FUNCTION public.reject_work_orchestration_immutable_mutation();
+CREATE TRIGGER work_orchestration_plans_validate BEFORE INSERT
+ON public.work_orchestration_plans FOR EACH ROW
+EXECUTE FUNCTION public.validate_work_orchestration_plan_insert();
+CREATE TRIGGER work_orchestration_plans_immutable BEFORE UPDATE OR DELETE
+ON public.work_orchestration_plans FOR EACH ROW
+EXECUTE FUNCTION public.reject_work_orchestration_immutable_mutation();
+CREATE TRIGGER work_orchestration_plan_items_validate BEFORE INSERT
+ON public.work_orchestration_plan_items FOR EACH ROW
+EXECUTE FUNCTION public.validate_work_orchestration_plan_item();
+CREATE TRIGGER work_orchestration_plan_items_immutable BEFORE UPDATE OR DELETE
+ON public.work_orchestration_plan_items FOR EACH ROW
+EXECUTE FUNCTION public.reject_work_orchestration_immutable_mutation();
+CREATE CONSTRAINT TRIGGER work_orchestration_plans_item_count
+AFTER INSERT ON public.work_orchestration_plans DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_work_orchestration_plan_count();
+CREATE CONSTRAINT TRIGGER work_orchestration_items_plan_count
+AFTER INSERT ON public.work_orchestration_plan_items DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION public.require_work_orchestration_plan_count();
+
+ALTER TABLE public.work_orchestration_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.work_orchestration_policies FORCE ROW LEVEL SECURITY;
+CREATE POLICY work_orchestration_policies_tenant_isolation
+ON public.work_orchestration_policies
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.work_orchestration_zone_signals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.work_orchestration_zone_signals FORCE ROW LEVEL SECURITY;
+CREATE POLICY work_orchestration_zone_signals_tenant_isolation
+ON public.work_orchestration_zone_signals
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.work_orchestration_resource_signals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.work_orchestration_resource_signals FORCE ROW LEVEL SECURITY;
+CREATE POLICY work_orchestration_resource_signals_tenant_isolation
+ON public.work_orchestration_resource_signals
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.work_orchestration_plans ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.work_orchestration_plans FORCE ROW LEVEL SECURITY;
+CREATE POLICY work_orchestration_plans_tenant_isolation ON public.work_orchestration_plans
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.work_orchestration_plan_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.work_orchestration_plan_items FORCE ROW LEVEL SECURITY;
+CREATE POLICY work_orchestration_plan_items_tenant_isolation
+ON public.work_orchestration_plan_items
+USING (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK (tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.work_orchestration_policies TO wareboxes_app;
+GRANT UPDATE(effective_to) ON public.work_orchestration_policies TO wareboxes_app;
+GRANT SELECT,INSERT ON public.work_orchestration_zone_signals TO wareboxes_app;
+GRANT SELECT,INSERT ON public.work_orchestration_resource_signals TO wareboxes_app;
+GRANT SELECT,INSERT ON public.work_orchestration_plans TO wareboxes_app;
+GRANT SELECT,INSERT ON public.work_orchestration_plan_items TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.work_orchestration_policies_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.work_orchestration_zone_signals_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.work_orchestration_resource_signals_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.work_orchestration_plans_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.work_orchestration_plan_items_id_seq TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.validate_work_orchestration_policy_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_work_orchestration_policy_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_work_orchestration_policy_successor() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_work_orchestration_zone_signal() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_work_orchestration_resource_signal() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.work_orchestration_user_has_permission(bigint,bigint,text)
+FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_work_orchestration_immutable_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_work_orchestration_plan_insert() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_work_orchestration_plan_item() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.require_work_orchestration_plan_count() FROM PUBLIC;
