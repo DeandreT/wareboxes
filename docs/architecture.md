@@ -3,8 +3,6 @@
 Wareboxes is a modular monolith with separate deployable processes. Domain and
 application behavior lives in reusable crates; applications are composition roots
 that bind configuration, transports, persistence adapters, and process lifecycles.
-The accepted decisions behind these boundaries are indexed in
-[`docs/decisions`](decisions/README.md).
 
 ## Workspace Boundaries
 
