@@ -44,6 +44,21 @@ pub async fn get_user_permissions(
           AND rp.tenant_id = $1
           AND p.deleted IS NULL
           AND rp.deleted IS NULL
+        UNION
+        SELECT DISTINCT p.id AS id,
+               UPPER(p.name) AS name,
+               p.description AS description,
+               p.created AS created,
+               p.deleted AS deleted
+        FROM service_accounts account
+        INNER JOIN service_account_permissions grant_record
+            ON grant_record.tenant_id=account.tenant_id
+           AND grant_record.service_account_id=account.id
+           AND grant_record.revoked_at IS NULL
+        INNER JOIN permissions p ON p.tenant_id=grant_record.tenant_id
+           AND p.id=grant_record.permission_id
+        WHERE account.tenant_id=$1 AND account.principal_user_id=$2
+          AND account.status='active' AND p.deleted IS NULL
         "#,
     )
     .bind(tenant_id.get())

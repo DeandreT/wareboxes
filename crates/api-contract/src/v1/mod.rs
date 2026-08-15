@@ -48,6 +48,7 @@ mod putaway_claim;
 mod replenishment;
 mod revision;
 mod rf_session;
+mod service_account;
 mod shipping;
 mod shipping_queue;
 mod slotting;
@@ -399,6 +400,15 @@ pub use revision::{Revision, RevisionError, RevisionPrecondition};
 pub use rf_session::{
     CreateRfSessionRequest, CreateRfSessionResponse, RfSessionOwnerScope, RfSessionSiteScope,
     RfSessionTenant,
+};
+pub use service_account::{
+    ChangeServiceAccountStatusRequest, CreateServiceAccountRequest,
+    IssueServiceAccountCredentialRequest, IssuedServiceAccountCredentialResponse,
+    RevokeServiceAccountCredentialRequest, ServiceAccountAccessRequest,
+    ServiceAccountCredentialResponse, ServiceAccountEventPage, ServiceAccountEventPageRequest,
+    ServiceAccountEventResponse, ServiceAccountOptionsResponse, ServiceAccountPage,
+    ServiceAccountPageRequest, ServiceAccountResponse, ServiceAccountStatus,
+    UpdateServiceAccountAccessRequest,
 };
 pub use shipping::{
     CancelShipmentRequest, CancelShipmentResponse, ConfirmShipmentDepartureRequest,

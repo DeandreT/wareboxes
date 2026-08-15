@@ -45,6 +45,7 @@ mod putaway_claim_lifecycle;
 mod putaway_claims;
 pub(crate) mod replenishment;
 mod rf_sessions;
+mod service_accounts;
 mod shipping;
 pub(crate) mod shipping_queue;
 mod slotting;
@@ -65,6 +66,38 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/service-accounts",
+            get(service_accounts::list).post(service_accounts::create),
+        )
+        .route(
+            "/service-accounts/{service_account_id}",
+            get(service_accounts::get),
+        )
+        .route(
+            "/service-accounts/{service_account_id}/events",
+            get(service_accounts::events),
+        )
+        .route(
+            "/service-account-options",
+            get(service_accounts::options),
+        )
+        .route(
+            "/service-accounts/{service_account_id}/access-changes",
+            post(service_accounts::update_access),
+        )
+        .route(
+            "/service-accounts/{service_account_id}/status-changes",
+            post(service_accounts::change_status),
+        )
+        .route(
+            "/service-accounts/{service_account_id}/credentials",
+            post(service_accounts::issue_credential),
+        )
+        .route(
+            "/service-accounts/{service_account_id}/credentials/{credential_id}/revocations",
+            post(service_accounts::revoke_credential),
+        )
         .route("/portal/workspace", get(customer_portal::workspace))
         .route(
             "/portal/documents/{document_id}/content",

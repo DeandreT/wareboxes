@@ -300,6 +300,12 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                         view! {
                             <p class="nav-group">"Administration"</p>
                             <NavItem
+                                href="/administration/service-accounts"
+                                label="Service accounts"
+                                icon=UiIcon::Access
+                                active=section == Section::ServiceAccounts
+                            />
+                            <NavItem
                                 href="/administration/clients"
                                 label="Clients"
                                 icon=UiIcon::Clients

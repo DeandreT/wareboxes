@@ -59,6 +59,11 @@ async fn tenant_users(
         WHERE membership.tenant_id = $1
           AND ($2 OR (membership.deleted IS NULL AND user_account.deleted IS NULL))
           AND ($3::BIGINT IS NULL OR user_account.id = $3)
+          AND ($3::BIGINT IS NOT NULL OR NOT EXISTS (
+              SELECT 1 FROM service_accounts account
+              WHERE account.tenant_id=membership.tenant_id
+                AND account.principal_user_id=membership.user_id
+          ))
         ORDER BY user_account.id
         "#,
     )

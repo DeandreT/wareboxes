@@ -38,6 +38,7 @@ use crate::preferences::provide_display_preferences;
 use crate::purchase_orders::PurchaseOrdersWorkspace;
 use crate::putaway::PutawayWorkspace;
 use crate::replenishment::ReplenishmentWorkspace;
+use crate::service_accounts::ServiceAccountsWorkspace;
 use crate::shipping::ShippingWorkspace;
 use crate::slotting::SlottingWorkspace;
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
@@ -75,6 +76,7 @@ pub enum WorkspaceBootstrapSection {
     Replenishment,
     Slotting,
     WorkOrchestration,
+    ServiceAccounts,
     Access,
 }
 
@@ -211,6 +213,7 @@ pub(crate) enum Section {
     Replenishment,
     Slotting,
     WorkOrchestration,
+    ServiceAccounts,
     Access,
     Administration(AdministrationArea),
 }
@@ -232,6 +235,7 @@ impl Section {
             Self::Replenishment => Some(WorkspaceBootstrapSection::Replenishment),
             Self::Slotting => Some(WorkspaceBootstrapSection::Slotting),
             Self::WorkOrchestration => Some(WorkspaceBootstrapSection::WorkOrchestration),
+            Self::ServiceAccounts => Some(WorkspaceBootstrapSection::ServiceAccounts),
             Self::Access => Some(WorkspaceBootstrapSection::Access),
             _ => None,
         }
@@ -289,6 +293,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/replenishment.css"/>
                 <link rel="stylesheet" href="/slotting.css"/>
                 <link rel="stylesheet" href="/work-orchestration/workspace.css"/>
+                <link rel="stylesheet" href="/service-accounts/workspace.css"/>
                 <link rel="stylesheet" href="/putaway.css"/>
                 <link rel="stylesheet" href="/cycle-count.css"/>
                 <link rel="stylesheet" href="/cross-dock.css"/>
@@ -358,6 +363,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("replenishment") view=ReplenishmentPage/>
                     <Route path=StaticSegment("slotting") view=SlottingPage/>
                     <Route path=StaticSegment("work-orchestration") view=WorkOrchestrationPage/>
+                    <Route path=(StaticSegment("administration"), StaticSegment("service-accounts")) view=ServiceAccountsPage/>
                     <Route path=(StaticSegment("inventory"), StaticSegment("holds")) view=InventoryHoldsPage/>
                     <Route
                         path=(StaticSegment("inventory"), StaticSegment("disposition"))
@@ -825,6 +831,9 @@ async fn load_workspace(
             data.access = api::access().await?;
             data.locations = api::internal_get("/api/locations?show_deleted=false").await?;
         }
+        Section::ServiceAccounts if has_permission(session, "admin") => {
+            data.access = api::access().await?;
+        }
         Section::CrossDock if has_permission(session, "wms_supervisor") => {
             data.cross_dock_planning_options = Some(
                 api::cross_dock_planning_options(api::CrossDockFilters::default(), None).await?,
@@ -864,6 +873,7 @@ async fn load_workspace(
         | Section::Replenishment
         | Section::Slotting
         | Section::WorkOrchestration
+        | Section::ServiceAccounts
         | Section::Administration(_) => {}
     }
     Ok(data)
@@ -997,6 +1007,11 @@ fn SlottingPage() -> impl IntoView {
 #[component]
 fn WorkOrchestrationPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::WorkOrchestration/> }
+}
+
+#[component]
+fn ServiceAccountsPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::ServiceAccounts/> }
 }
 
 #[component]
@@ -1286,6 +1301,13 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                     access=data.access
                     locations=data.locations
                     can_supervise=has_permission(&session, "wms_supervisor")
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::ServiceAccounts if has_permission(&session, "admin") => view! {
+                <ServiceAccountsWorkspace
+                    access=data.access
                     on_unauthorized=session_expired_callback()
                 />
             }

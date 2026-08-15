@@ -51,6 +51,7 @@ pub mod pick_wave;
 pub mod picking;
 pub mod purchase_order;
 pub mod replenishment;
+pub mod service_accounts;
 pub mod shipping;
 pub mod slotting;
 pub mod storage_zone;

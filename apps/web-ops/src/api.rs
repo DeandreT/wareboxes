@@ -133,6 +133,13 @@ pub use purchase_order::{
     cancel_purchase_order, create_purchase_order, create_purchase_order_asn, purchase_order_detail,
     purchase_orders, release_purchase_order, PurchaseOrderFilters,
 };
+mod service_accounts;
+pub use service_accounts::{
+    change_service_account_status, create_service_account, generate_service_account_bearer,
+    issue_service_account_credential, revoke_service_account_credential, service_account,
+    service_account_events, service_account_options, service_accounts,
+    update_service_account_access,
+};
 mod slotting;
 pub use slotting::{
     accept_slotting_recommendation, configure_slotting_profile, dismiss_slotting_recommendation,

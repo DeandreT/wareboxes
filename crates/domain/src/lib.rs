@@ -30,6 +30,7 @@ mod pick_wave;
 mod picking;
 mod purchase_order;
 mod replenishment;
+mod service_account;
 mod shipping;
 mod slotting;
 mod storage_zone;
@@ -253,6 +254,13 @@ pub use replenishment::{
     ReplenishmentWorkStatus, MAX_REPLENISHMENT_CANCELLATION_NOTE_LENGTH,
     MAX_REPLENISHMENT_SCAN_VALUE_LENGTH, MAX_REPLENISHMENT_UOM_LENGTH,
 };
+pub use service_account::{
+    ServiceAccountAccessPolicy, ServiceAccountBearerToken, ServiceAccountCredentialLabel,
+    ServiceAccountDescription, ServiceAccountError, ServiceAccountName, ServiceAccountReason,
+    ServiceAccountRevision, ServiceAccountStatus, MAX_SERVICE_ACCOUNT_DESCRIPTION_LENGTH,
+    MAX_SERVICE_ACCOUNT_LABEL_LENGTH, MAX_SERVICE_ACCOUNT_NAME_LENGTH,
+    MAX_SERVICE_ACCOUNT_PERMISSION_LENGTH, MAX_SERVICE_ACCOUNT_REASON_LENGTH,
+};
 pub use shipping::{
     cancel_shipment, confirm_shipment_departure, create_shipment, record_manual_manifest,
     CarrierCode, CarrierServiceCode, CartonTrackingAssignment, ManifestReference,
@@ -378,6 +386,8 @@ positive_id!(
     "facility shipping origin configuration ID"
 );
 positive_id!(UserId, "user ID");
+positive_id!(ServiceAccountId, "service account ID");
+positive_id!(ServiceAccountCredentialId, "service account credential ID");
 positive_id!(EmployeeId, "employee ID");
 positive_id!(EmployeeIdentityChangeId, "employee identity change ID");
 positive_id!(LaborSkillId, "labor skill ID");

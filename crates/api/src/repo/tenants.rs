@@ -190,6 +190,58 @@ pub async fn access_for_user(
     Ok(access)
 }
 
+pub async fn access_for_service_account(
+    db: &Db,
+    service_account_id: wareboxes_domain::ServiceAccountId,
+    tenant_id: TenantId,
+) -> AppResult<Option<TenantAccess>> {
+    let mut tx = begin_tenant_transaction(db, tenant_id).await?;
+    let row = sqlx::query(
+        r#"
+        SELECT
+            account.tenant_id,
+            account.principal_user_id AS user_id,
+            FALSE AS is_default,
+            account.all_facilities,
+            account.all_inventory_owners,
+            ARRAY(
+                SELECT scope.facility_id
+                FROM service_account_facilities scope
+                JOIN facilities facility ON facility.tenant_id=scope.tenant_id
+                  AND facility.id=scope.facility_id AND facility.deleted IS NULL
+                WHERE scope.tenant_id=account.tenant_id
+                  AND scope.service_account_id=account.id AND scope.revoked_at IS NULL
+                ORDER BY scope.facility_id
+            ) AS facility_ids,
+            ARRAY(
+                SELECT scope.inventory_owner_id
+                FROM service_account_inventory_owners scope
+                JOIN inventory_owners owner ON owner.tenant_id=scope.tenant_id
+                  AND owner.id=scope.inventory_owner_id AND owner.deleted IS NULL
+                WHERE scope.tenant_id=account.tenant_id
+                  AND scope.service_account_id=account.id AND scope.revoked_at IS NULL
+                ORDER BY scope.inventory_owner_id
+            ) AS inventory_owner_ids,
+            tenant.slug,
+            tenant.name,
+            tenant.status
+        FROM service_accounts account
+        JOIN tenants tenant ON tenant.id=account.tenant_id
+        JOIN tenant_memberships membership ON membership.tenant_id=account.tenant_id
+          AND membership.user_id=account.principal_user_id
+        WHERE account.tenant_id=$1 AND account.id=$2 AND account.status='active'
+          AND tenant.status='active' AND tenant.deleted IS NULL AND membership.deleted IS NULL
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(service_account_id.get())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let access = row.as_ref().map(tenant_access_from_row).transpose()?;
+    tx.commit().await?;
+    Ok(access)
+}
+
 fn validate_scope_request(scope: &UpdateUserAccessScope) -> AppResult<()> {
     if scope.all_facilities && !scope.facility_ids.is_empty() {
         return Err(AppError::bad_request(

@@ -72,25 +72,49 @@ pub(crate) async fn current_scope_tx(
     let row = sqlx::query(
         r#"
         SELECT
-            membership.all_facilities,
+            COALESCE(service_account.all_facilities, membership.all_facilities)
+                AS all_facilities,
             ARRAY(
-                SELECT user_facility.facility_id
-                FROM user_facilities user_facility
-                WHERE user_facility.tenant_id = membership.tenant_id
-                  AND user_facility.user_id = membership.user_id
-                  AND user_facility.deleted IS NULL
-                ORDER BY user_facility.facility_id
+                SELECT scoped.facility_id FROM (
+                    SELECT user_facility.facility_id
+                    FROM user_facilities user_facility
+                    WHERE service_account.id IS NULL
+                      AND user_facility.tenant_id = membership.tenant_id
+                      AND user_facility.user_id = membership.user_id
+                      AND user_facility.deleted IS NULL
+                    UNION ALL
+                    SELECT account_facility.facility_id
+                    FROM service_account_facilities account_facility
+                    WHERE service_account.id IS NOT NULL
+                      AND account_facility.tenant_id = service_account.tenant_id
+                      AND account_facility.service_account_id = service_account.id
+                      AND account_facility.revoked_at IS NULL
+                ) scoped ORDER BY scoped.facility_id
             ) AS facility_ids,
-            membership.all_inventory_owners,
+            COALESCE(service_account.all_inventory_owners, membership.all_inventory_owners)
+                AS all_inventory_owners,
             ARRAY(
-                SELECT user_owner.inventory_owner_id
-                FROM user_inventory_owners user_owner
-                WHERE user_owner.tenant_id = membership.tenant_id
-                  AND user_owner.user_id = membership.user_id
-                  AND user_owner.deleted IS NULL
-                ORDER BY user_owner.inventory_owner_id
+                SELECT scoped.inventory_owner_id FROM (
+                    SELECT user_owner.inventory_owner_id
+                    FROM user_inventory_owners user_owner
+                    WHERE service_account.id IS NULL
+                      AND user_owner.tenant_id = membership.tenant_id
+                      AND user_owner.user_id = membership.user_id
+                      AND user_owner.deleted IS NULL
+                    UNION ALL
+                    SELECT account_owner.inventory_owner_id
+                    FROM service_account_inventory_owners account_owner
+                    WHERE service_account.id IS NOT NULL
+                      AND account_owner.tenant_id = service_account.tenant_id
+                      AND account_owner.service_account_id = service_account.id
+                      AND account_owner.revoked_at IS NULL
+                ) scoped ORDER BY scoped.inventory_owner_id
             ) AS inventory_owner_ids
         FROM tenant_memberships membership
+        LEFT JOIN service_accounts service_account
+          ON service_account.tenant_id=membership.tenant_id
+         AND service_account.principal_user_id=membership.user_id
+         AND service_account.status='active'
         WHERE membership.tenant_id = $1
           AND membership.user_id = $2
           AND membership.deleted IS NULL
@@ -147,6 +171,34 @@ pub(crate) async fn require_any_permission_tx(
 ) -> AppResult<()> {
     if permissions.is_empty() {
         return Err(AppError::forbidden());
+    }
+    let requested_permissions = permissions
+        .iter()
+        .map(|permission| permission.to_uppercase())
+        .collect::<Vec<_>>();
+    let service_account_grant = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT grant_record.id
+        FROM service_accounts account
+        JOIN service_account_permissions grant_record
+          ON grant_record.tenant_id=account.tenant_id
+         AND grant_record.service_account_id=account.id
+         AND grant_record.revoked_at IS NULL
+        JOIN permissions permission ON permission.tenant_id=grant_record.tenant_id
+         AND permission.id=grant_record.permission_id AND permission.deleted IS NULL
+        WHERE account.tenant_id=$1 AND account.principal_user_id=$2
+          AND account.status='active' AND UPPER(permission.name)=ANY($3)
+        ORDER BY grant_record.id LIMIT 1
+        FOR SHARE OF account,grant_record,permission
+        "#,
+    )
+    .bind(tenant_id.get())
+    .bind(user_id)
+    .bind(&requested_permissions)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if service_account_grant.is_some() {
+        return Ok(());
     }
     let direct_role_ids = sqlx::query_scalar::<_, i64>(
         r#"
@@ -216,12 +268,7 @@ pub(crate) async fn require_any_permission_tx(
     )
     .bind(tenant_id.get())
     .bind(&role_ids)
-    .bind(
-        permissions
-            .iter()
-            .map(|permission| permission.to_uppercase())
-            .collect::<Vec<_>>(),
-    )
+    .bind(&requested_permissions)
     .fetch_optional(&mut **tx)
     .await?;
     grant.map(|_| ()).ok_or_else(AppError::forbidden)

@@ -46485,3 +46485,600 @@ REVOKE ALL ON FUNCTION public.reject_work_orchestration_immutable_mutation() FRO
 REVOKE ALL ON FUNCTION public.validate_work_orchestration_plan_insert() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_work_orchestration_plan_item() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.require_work_orchestration_plan_count() FROM PUBLIC;
+
+-- Distinct integration service accounts, scoped credentials, and immutable lifecycle evidence.
+
+CREATE TABLE public.service_accounts (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  principal_user_id bigint NOT NULL,
+  name text NOT NULL,
+  description text,
+  status text NOT NULL DEFAULT 'active',
+  revision bigint NOT NULL DEFAULT 1,
+  all_facilities boolean NOT NULL,
+  all_inventory_owners boolean NOT NULL,
+  created_at timestamptz NOT NULL,
+  created_by_user_id bigint NOT NULL,
+  updated_at timestamptz NOT NULL,
+  updated_by_user_id bigint NOT NULL,
+  disabled_at timestamptz,
+  disabled_by_user_id bigint,
+  disabled_reason text,
+  last_used_at timestamptz,
+  CONSTRAINT service_accounts_scope_id_unique UNIQUE(tenant_id,id),
+  CONSTRAINT service_accounts_subject_unique UNIQUE(principal_user_id),
+  CONSTRAINT service_accounts_tenant_fkey FOREIGN KEY(tenant_id)
+    REFERENCES public.tenants(id),
+  CONSTRAINT service_accounts_subject_fkey FOREIGN KEY(tenant_id,principal_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CONSTRAINT service_accounts_created_by_fkey FOREIGN KEY(tenant_id,created_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CONSTRAINT service_accounts_updated_by_fkey FOREIGN KEY(tenant_id,updated_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CONSTRAINT service_accounts_disabled_by_fkey FOREIGN KEY(tenant_id,disabled_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CONSTRAINT service_accounts_name_check CHECK (
+    name=btrim(name) AND name<>'' AND char_length(name)<=120 AND name!~'[[:cntrl:]]'),
+  CONSTRAINT service_accounts_description_check CHECK (description IS NULL OR (
+    description=btrim(description) AND description<>'' AND char_length(description)<=500
+    AND description!~'[[:cntrl:]]')),
+  CONSTRAINT service_accounts_status_check CHECK(status IN ('active','disabled')),
+  CONSTRAINT service_accounts_revision_check CHECK(revision>0),
+  CONSTRAINT service_accounts_timestamps_check CHECK(updated_at>=created_at),
+  CONSTRAINT service_accounts_disabled_check CHECK(
+    (status='active' AND disabled_at IS NULL AND disabled_by_user_id IS NULL
+      AND disabled_reason IS NULL)
+    OR (status='disabled' AND disabled_at IS NOT NULL AND disabled_by_user_id IS NOT NULL
+      AND disabled_reason IS NOT NULL)),
+  CONSTRAINT service_accounts_disabled_reason_check CHECK(disabled_reason IS NULL OR (
+    disabled_reason=btrim(disabled_reason) AND disabled_reason<>''
+    AND char_length(disabled_reason)<=500 AND disabled_reason!~'[[:cntrl:]]'))
+);
+CREATE UNIQUE INDEX service_accounts_tenant_name_unique
+ON public.service_accounts(tenant_id,lower(name));
+
+CREATE TABLE public.service_account_facilities (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  service_account_id bigint NOT NULL,
+  facility_id bigint NOT NULL,
+  granted_at timestamptz NOT NULL,
+  granted_by_user_id bigint NOT NULL,
+  revoked_at timestamptz,
+  revoked_by_user_id bigint,
+  CONSTRAINT service_account_facilities_account_fkey
+    FOREIGN KEY(tenant_id,service_account_id)
+    REFERENCES public.service_accounts(tenant_id,id),
+  CONSTRAINT service_account_facilities_facility_fkey FOREIGN KEY(tenant_id,facility_id)
+    REFERENCES public.facilities(tenant_id,id),
+  CONSTRAINT service_account_facilities_granted_by_fkey
+    FOREIGN KEY(tenant_id,granted_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CONSTRAINT service_account_facilities_revoked_by_fkey
+    FOREIGN KEY(tenant_id,revoked_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CONSTRAINT service_account_facilities_revocation_check CHECK(
+    (revoked_at IS NULL)=(revoked_by_user_id IS NULL) AND
+    (revoked_at IS NULL OR revoked_at>=granted_at))
+);
+CREATE UNIQUE INDEX service_account_facilities_active_unique
+ON public.service_account_facilities(tenant_id,service_account_id,facility_id)
+WHERE revoked_at IS NULL;
+
+CREATE TABLE public.service_account_inventory_owners (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  service_account_id bigint NOT NULL,
+  inventory_owner_id bigint NOT NULL,
+  granted_at timestamptz NOT NULL,
+  granted_by_user_id bigint NOT NULL,
+  revoked_at timestamptz,
+  revoked_by_user_id bigint,
+  CONSTRAINT service_account_owners_account_fkey
+    FOREIGN KEY(tenant_id,service_account_id)
+    REFERENCES public.service_accounts(tenant_id,id),
+  CONSTRAINT service_account_owners_owner_fkey FOREIGN KEY(tenant_id,inventory_owner_id)
+    REFERENCES public.inventory_owners(tenant_id,id),
+  CONSTRAINT service_account_owners_granted_by_fkey
+    FOREIGN KEY(tenant_id,granted_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CONSTRAINT service_account_owners_revoked_by_fkey
+    FOREIGN KEY(tenant_id,revoked_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CONSTRAINT service_account_owners_revocation_check CHECK(
+    (revoked_at IS NULL)=(revoked_by_user_id IS NULL) AND
+    (revoked_at IS NULL OR revoked_at>=granted_at))
+);
+CREATE UNIQUE INDEX service_account_owners_active_unique
+ON public.service_account_inventory_owners(tenant_id,service_account_id,inventory_owner_id)
+WHERE revoked_at IS NULL;
+
+CREATE TABLE public.service_account_permissions (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  service_account_id bigint NOT NULL,
+  permission_id bigint NOT NULL,
+  granted_at timestamptz NOT NULL,
+  granted_by_user_id bigint NOT NULL,
+  revoked_at timestamptz,
+  revoked_by_user_id bigint,
+  CONSTRAINT service_account_permissions_account_fkey
+    FOREIGN KEY(tenant_id,service_account_id)
+    REFERENCES public.service_accounts(tenant_id,id),
+  CONSTRAINT service_account_permissions_permission_fkey FOREIGN KEY(tenant_id,permission_id)
+    REFERENCES public.permissions(tenant_id,id),
+  CONSTRAINT service_account_permissions_granted_by_fkey
+    FOREIGN KEY(tenant_id,granted_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CONSTRAINT service_account_permissions_revoked_by_fkey
+    FOREIGN KEY(tenant_id,revoked_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CONSTRAINT service_account_permissions_revocation_check CHECK(
+    (revoked_at IS NULL)=(revoked_by_user_id IS NULL) AND
+    (revoked_at IS NULL OR revoked_at>=granted_at))
+);
+CREATE UNIQUE INDEX service_account_permissions_active_unique
+ON public.service_account_permissions(tenant_id,service_account_id,permission_id)
+WHERE revoked_at IS NULL;
+
+CREATE TABLE public.service_account_credentials (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  service_account_id bigint NOT NULL,
+  label text NOT NULL,
+  token_prefix text NOT NULL,
+  token_hash text NOT NULL UNIQUE,
+  created_at timestamptz NOT NULL,
+  created_by_user_id bigint NOT NULL,
+  expires_at timestamptz,
+  revoked_at timestamptz,
+  revoked_by_user_id bigint,
+  revocation_reason text,
+  last_used_at timestamptz,
+  CONSTRAINT service_account_credentials_scope_id_unique UNIQUE(tenant_id,id),
+  CONSTRAINT service_account_credentials_account_fkey
+    FOREIGN KEY(tenant_id,service_account_id)
+    REFERENCES public.service_accounts(tenant_id,id),
+  CONSTRAINT service_account_credentials_created_by_fkey
+    FOREIGN KEY(tenant_id,created_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CONSTRAINT service_account_credentials_revoked_by_fkey
+    FOREIGN KEY(tenant_id,revoked_by_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CONSTRAINT service_account_credentials_label_check CHECK(
+    label=btrim(label) AND label<>'' AND char_length(label)<=120 AND label!~'[[:cntrl:]]'),
+  CONSTRAINT service_account_credentials_prefix_check CHECK(
+    token_prefix~'^wbs_sa_[A-Za-z0-9]{8}$'),
+  CONSTRAINT service_account_credentials_hash_check CHECK(token_hash~'^[0-9a-f]{64}$'),
+  CONSTRAINT service_account_credentials_expiry_check CHECK(
+    expires_at IS NULL OR expires_at>created_at),
+  CONSTRAINT service_account_credentials_revocation_check CHECK(
+    (revoked_at IS NULL AND revoked_by_user_id IS NULL AND revocation_reason IS NULL)
+    OR (revoked_at IS NOT NULL AND revoked_by_user_id IS NOT NULL
+      AND revocation_reason IS NOT NULL AND revoked_at>=created_at)),
+  CONSTRAINT service_account_credentials_reason_check CHECK(revocation_reason IS NULL OR (
+    revocation_reason=btrim(revocation_reason) AND revocation_reason<>''
+    AND char_length(revocation_reason)<=500 AND revocation_reason!~'[[:cntrl:]]')),
+  CONSTRAINT service_account_credentials_last_used_check CHECK(
+    last_used_at IS NULL OR last_used_at>=created_at)
+);
+CREATE INDEX service_account_credentials_account_idx
+ON public.service_account_credentials(tenant_id,service_account_id,created_at DESC,id DESC);
+
+CREATE TABLE public.service_account_events (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL,
+  service_account_id bigint NOT NULL,
+  credential_id bigint,
+  action text NOT NULL,
+  account_revision bigint NOT NULL,
+  actor_user_id bigint NOT NULL,
+  occurred_at timestamptz NOT NULL,
+  evidence jsonb NOT NULL,
+  CONSTRAINT service_account_events_account_fkey FOREIGN KEY(tenant_id,service_account_id)
+    REFERENCES public.service_accounts(tenant_id,id),
+  CONSTRAINT service_account_events_credential_fkey FOREIGN KEY(tenant_id,credential_id)
+    REFERENCES public.service_account_credentials(tenant_id,id),
+  CONSTRAINT service_account_events_actor_fkey FOREIGN KEY(tenant_id,actor_user_id)
+    REFERENCES public.tenant_memberships(tenant_id,user_id),
+  CONSTRAINT service_account_events_action_check CHECK(action IN (
+    'created','access_updated','enabled','disabled','credential_issued','credential_revoked')),
+  CONSTRAINT service_account_events_credential_shape_check CHECK(
+    (action IN ('credential_issued','credential_revoked'))=(credential_id IS NOT NULL)),
+  CONSTRAINT service_account_events_revision_check CHECK(account_revision>0),
+  CONSTRAINT service_account_events_evidence_check CHECK(jsonb_typeof(evidence)='object')
+);
+
+CREATE FUNCTION public.service_account_actor_is_admin(
+  checked_tenant_id bigint, checked_user_id bigint
+) RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path TO 'pg_catalog','public' AS $$
+  SELECT EXISTS(
+    SELECT 1 FROM public.tenant_memberships membership
+    JOIN public.user_roles assignment ON assignment.tenant_id=membership.tenant_id
+      AND assignment.user_id=membership.user_id AND assignment.deleted IS NULL
+    JOIN public.roles role ON role.tenant_id=assignment.tenant_id
+      AND role.id=assignment.role_id AND role.deleted IS NULL
+    JOIN public.role_permissions role_permission ON role_permission.tenant_id=role.tenant_id
+      AND role_permission.role_id=role.id AND role_permission.deleted IS NULL
+    JOIN public.permissions permission ON permission.tenant_id=role_permission.tenant_id
+      AND permission.id=role_permission.permission_id AND permission.deleted IS NULL
+    WHERE membership.tenant_id=checked_tenant_id AND membership.user_id=checked_user_id
+      AND membership.deleted IS NULL AND permission.name='admin'
+  )
+$$;
+
+CREATE FUNCTION public.validate_service_account() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint;
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'service accounts cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+  IF TG_OP='INSERT' THEN
+    IF actor_id IS NULL OR actor_id<>NEW.created_by_user_id
+      OR actor_id<>NEW.updated_by_user_id
+      OR NOT public.service_account_actor_is_admin(NEW.tenant_id,actor_id)
+      OR NEW.status<>'active' OR NEW.revision<>1
+      OR NEW.created_at<>NEW.updated_at OR NEW.disabled_at IS NOT NULL
+      OR NEW.last_used_at IS NOT NULL
+      OR NOT EXISTS(SELECT 1 FROM public.users subject
+        JOIN public.tenant_memberships membership ON membership.user_id=subject.id
+          AND membership.tenant_id=NEW.tenant_id AND membership.deleted IS NULL
+        WHERE subject.id=NEW.principal_user_id AND subject.deleted IS NULL
+          AND subject.email LIKE 'service-account-%@identity.wareboxes.invalid'
+          AND subject.first_name IS NULL AND subject.last_name IS NULL AND subject.phone IS NULL
+          AND NOT membership.all_facilities AND NOT membership.all_inventory_owners)
+      OR EXISTS(SELECT 1 FROM public.user_credentials credential
+        WHERE credential.user_id=NEW.principal_user_id)
+      OR EXISTS(SELECT 1 FROM public.sessions session
+        WHERE session.user_id=NEW.principal_user_id)
+      OR EXISTS(SELECT 1 FROM public.user_roles assignment
+        WHERE assignment.tenant_id=NEW.tenant_id AND assignment.user_id=NEW.principal_user_id
+          AND assignment.deleted IS NULL)
+      OR EXISTS(SELECT 1 FROM public.user_facilities assignment
+        WHERE assignment.tenant_id=NEW.tenant_id AND assignment.user_id=NEW.principal_user_id
+          AND assignment.deleted IS NULL)
+      OR EXISTS(SELECT 1 FROM public.user_inventory_owners assignment
+        WHERE assignment.tenant_id=NEW.tenant_id AND assignment.user_id=NEW.principal_user_id
+          AND assignment.deleted IS NULL) THEN
+      RAISE EXCEPTION 'invalid service account principal or actor' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF ROW(NEW.id,NEW.tenant_id,NEW.principal_user_id,NEW.name,NEW.description,
+      NEW.status,NEW.revision,NEW.all_facilities,NEW.all_inventory_owners,
+      NEW.created_at,NEW.created_by_user_id,NEW.updated_at,NEW.updated_by_user_id,
+      NEW.disabled_at,NEW.disabled_by_user_id,NEW.disabled_reason)
+    IS NOT DISTINCT FROM
+    ROW(OLD.id,OLD.tenant_id,OLD.principal_user_id,OLD.name,OLD.description,
+      OLD.status,OLD.revision,OLD.all_facilities,OLD.all_inventory_owners,
+      OLD.created_at,OLD.created_by_user_id,OLD.updated_at,OLD.updated_by_user_id,
+      OLD.disabled_at,OLD.disabled_by_user_id,OLD.disabled_reason) THEN
+    IF NEW.last_used_at IS NULL OR (OLD.last_used_at IS NOT NULL
+      AND NEW.last_used_at<OLD.last_used_at) THEN
+      RAISE EXCEPTION 'service account last-used evidence cannot regress'
+        USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF actor_id IS NULL OR actor_id<>NEW.updated_by_user_id
+    OR NOT public.service_account_actor_is_admin(NEW.tenant_id,actor_id)
+    OR ROW(NEW.id,NEW.tenant_id,NEW.principal_user_id,NEW.name,NEW.description,
+        NEW.created_at,NEW.created_by_user_id,NEW.last_used_at)
+      IS DISTINCT FROM ROW(OLD.id,OLD.tenant_id,OLD.principal_user_id,OLD.name,OLD.description,
+        OLD.created_at,OLD.created_by_user_id,OLD.last_used_at)
+    OR NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at
+    OR (NEW.status=OLD.status AND ROW(NEW.disabled_at,NEW.disabled_by_user_id,NEW.disabled_reason)
+      IS DISTINCT FROM ROW(OLD.disabled_at,OLD.disabled_by_user_id,OLD.disabled_reason)) THEN
+    RAISE EXCEPTION 'invalid service account mutation' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_service_account_assignment() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint; checked_account bigint; checked_tenant bigint;
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'service account assignments cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+  checked_tenant:=NEW.tenant_id; checked_account:=NEW.service_account_id;
+  IF actor_id IS NULL OR NOT public.service_account_actor_is_admin(checked_tenant,actor_id) THEN
+    RAISE EXCEPTION 'service account assignment actor is not authorized' USING ERRCODE='42501';
+  END IF;
+  IF TG_OP='INSERT' THEN
+    IF NEW.granted_by_user_id<>actor_id OR NEW.revoked_at IS NOT NULL
+      OR (TG_TABLE_NAME='service_account_facilities' AND NOT EXISTS(
+        SELECT 1 FROM public.facilities facility WHERE facility.tenant_id=NEW.tenant_id
+          AND facility.id=(to_jsonb(NEW)->>'facility_id')::bigint
+          AND facility.deleted IS NULL))
+      OR (TG_TABLE_NAME='service_account_inventory_owners' AND NOT EXISTS(
+        SELECT 1 FROM public.inventory_owners owner WHERE owner.tenant_id=NEW.tenant_id
+          AND owner.id=(to_jsonb(NEW)->>'inventory_owner_id')::bigint
+          AND owner.deleted IS NULL))
+      OR (TG_TABLE_NAME='service_account_permissions' AND NOT EXISTS(
+        SELECT 1 FROM public.permissions permission WHERE permission.tenant_id=NEW.tenant_id
+          AND permission.id=(to_jsonb(NEW)->>'permission_id')::bigint
+          AND permission.deleted IS NULL
+          AND permission.name<>'admin')) THEN
+      RAISE EXCEPTION 'invalid service account assignment' USING ERRCODE='23514';
+    END IF;
+  ELSIF ROW(NEW.id,NEW.tenant_id,NEW.service_account_id,NEW.granted_at,
+      NEW.granted_by_user_id) IS DISTINCT FROM
+      ROW(OLD.id,OLD.tenant_id,OLD.service_account_id,OLD.granted_at,
+      OLD.granted_by_user_id)
+    OR OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL
+    OR NEW.revoked_by_user_id<>actor_id THEN
+    RAISE EXCEPTION 'invalid service account assignment revocation' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_service_account_credential() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint;
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'service account credentials cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+  IF TG_OP='INSERT' THEN
+    IF actor_id IS NULL OR actor_id<>NEW.created_by_user_id
+      OR NOT public.service_account_actor_is_admin(NEW.tenant_id,actor_id)
+      OR NEW.revoked_at IS NOT NULL OR NEW.last_used_at IS NOT NULL
+      OR NOT EXISTS(SELECT 1 FROM public.service_accounts account
+        WHERE account.tenant_id=NEW.tenant_id AND account.id=NEW.service_account_id
+          AND account.status='active') THEN
+      RAISE EXCEPTION 'invalid service account credential' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF ROW(NEW.id,NEW.tenant_id,NEW.service_account_id,NEW.label,NEW.token_prefix,
+      NEW.token_hash,NEW.created_at,NEW.created_by_user_id,NEW.expires_at,
+      NEW.revoked_at,NEW.revoked_by_user_id,NEW.revocation_reason)
+    IS NOT DISTINCT FROM
+    ROW(OLD.id,OLD.tenant_id,OLD.service_account_id,OLD.label,OLD.token_prefix,
+      OLD.token_hash,OLD.created_at,OLD.created_by_user_id,OLD.expires_at,
+      OLD.revoked_at,OLD.revoked_by_user_id,OLD.revocation_reason) THEN
+    IF NEW.last_used_at IS NULL OR (OLD.last_used_at IS NOT NULL
+      AND NEW.last_used_at<OLD.last_used_at) THEN
+      RAISE EXCEPTION 'credential last-used evidence cannot regress' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF actor_id IS NULL OR NOT public.service_account_actor_is_admin(NEW.tenant_id,actor_id)
+    OR ROW(NEW.id,NEW.tenant_id,NEW.service_account_id,NEW.label,NEW.token_prefix,
+        NEW.token_hash,NEW.created_at,NEW.created_by_user_id,NEW.expires_at,NEW.last_used_at)
+      IS DISTINCT FROM
+      ROW(OLD.id,OLD.tenant_id,OLD.service_account_id,OLD.label,OLD.token_prefix,
+        OLD.token_hash,OLD.created_at,OLD.created_by_user_id,OLD.expires_at,OLD.last_used_at)
+    OR OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL
+    OR NEW.revoked_by_user_id<>actor_id OR NEW.revocation_reason IS NULL THEN
+    RAISE EXCEPTION 'invalid service account credential revocation' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.reject_service_account_event_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  RAISE EXCEPTION 'service account events are immutable' USING ERRCODE='55000';
+END $$;
+
+CREATE FUNCTION public.validate_service_account_event() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint;
+BEGIN
+  actor_id:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+  IF actor_id IS NULL OR NEW.actor_user_id<>actor_id
+    OR NOT public.service_account_actor_is_admin(NEW.tenant_id,actor_id)
+    OR NOT EXISTS(SELECT 1 FROM public.service_accounts account
+      WHERE account.tenant_id=NEW.tenant_id AND account.id=NEW.service_account_id
+        AND account.revision=NEW.account_revision)
+    OR (NEW.credential_id IS NOT NULL AND NOT EXISTS(
+      SELECT 1 FROM public.service_account_credentials credential
+      WHERE credential.tenant_id=NEW.tenant_id AND credential.id=NEW.credential_id
+        AND credential.service_account_id=NEW.service_account_id)) THEN
+    RAISE EXCEPTION 'invalid service account event evidence' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_service_account_subject() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE checked_user bigint;
+BEGIN
+  checked_user:=CASE WHEN TG_OP='DELETE' THEN OLD.id ELSE NEW.id END;
+  IF EXISTS(SELECT 1 FROM public.service_accounts account
+    WHERE account.principal_user_id=checked_user) THEN
+    RAISE EXCEPTION 'service account authorization subjects are immutable'
+      USING ERRCODE='55000';
+  END IF;
+  IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_service_account_login_artifact() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE checked_user bigint;
+BEGIN
+  checked_user:=CASE WHEN TG_OP='DELETE' THEN OLD.user_id ELSE NEW.user_id END;
+  IF EXISTS(SELECT 1 FROM public.service_accounts account
+    WHERE account.principal_user_id=checked_user) THEN
+    RAISE EXCEPTION 'service accounts cannot use user credentials or sessions'
+      USING ERRCODE='23514';
+  END IF;
+  IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_service_account_legacy_access() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE checked_user bigint;
+BEGIN
+  checked_user:=CASE WHEN TG_OP='DELETE' THEN OLD.user_id ELSE NEW.user_id END;
+  IF EXISTS(SELECT 1 FROM public.service_accounts account
+    WHERE account.principal_user_id=checked_user) THEN
+    RAISE EXCEPTION 'service account access is managed through service account scopes'
+      USING ERRCODE='23514';
+  END IF;
+  IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.guard_service_account_membership() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE checked_user bigint;
+BEGIN
+  IF TG_OP='INSERT' THEN RETURN NEW; END IF;
+  checked_user:=CASE WHEN TG_OP='DELETE' THEN OLD.user_id ELSE NEW.user_id END;
+  IF EXISTS(SELECT 1 FROM public.service_accounts account
+    WHERE account.principal_user_id=checked_user) THEN
+    RAISE EXCEPTION 'service account tenant membership is immutable'
+      USING ERRCODE='55000';
+  END IF;
+  IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.api_service_account_identity(p_token_hash text)
+RETURNS TABLE(service_account_id bigint,tenant_id bigint,principal_user_id bigint)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE checked_credential_id bigint; checked_account_id bigint;
+DECLARE checked_tenant_id bigint; checked_user_id bigint; used_at timestamptz;
+BEGIN
+  IF p_token_hash IS NULL OR p_token_hash!~'^[0-9a-f]{64}$' THEN RETURN; END IF;
+  SELECT credential.id,account.id,account.tenant_id,account.principal_user_id
+  INTO checked_credential_id,checked_account_id,checked_tenant_id,checked_user_id
+  FROM public.service_account_credentials credential
+  JOIN public.service_accounts account ON account.tenant_id=credential.tenant_id
+    AND account.id=credential.service_account_id
+  JOIN public.tenants tenant ON tenant.id=account.tenant_id
+  JOIN public.users subject ON subject.id=account.principal_user_id
+  JOIN public.tenant_memberships membership ON membership.tenant_id=account.tenant_id
+    AND membership.user_id=account.principal_user_id
+  WHERE credential.token_hash=p_token_hash AND credential.revoked_at IS NULL
+    AND (credential.expires_at IS NULL OR credential.expires_at>CURRENT_TIMESTAMP)
+    AND account.status='active' AND tenant.status='active' AND tenant.deleted IS NULL
+    AND subject.deleted IS NULL AND membership.deleted IS NULL;
+  IF NOT FOUND THEN RETURN; END IF;
+  used_at:=CURRENT_TIMESTAMP;
+  UPDATE public.service_account_credentials SET last_used_at=used_at
+  WHERE id=checked_credential_id
+    AND (last_used_at IS NULL OR last_used_at<used_at-INTERVAL '5 minutes');
+  UPDATE public.service_accounts SET last_used_at=used_at
+  WHERE id=checked_account_id
+    AND (last_used_at IS NULL OR last_used_at<used_at-INTERVAL '5 minutes');
+  RETURN QUERY SELECT checked_account_id,checked_tenant_id,checked_user_id;
+END $$;
+
+CREATE TRIGGER service_accounts_validate BEFORE INSERT OR UPDATE OR DELETE
+ON public.service_accounts FOR EACH ROW EXECUTE FUNCTION public.validate_service_account();
+CREATE TRIGGER service_account_facilities_validate BEFORE INSERT OR UPDATE OR DELETE
+ON public.service_account_facilities FOR EACH ROW
+EXECUTE FUNCTION public.validate_service_account_assignment();
+CREATE TRIGGER service_account_owners_validate BEFORE INSERT OR UPDATE OR DELETE
+ON public.service_account_inventory_owners FOR EACH ROW
+EXECUTE FUNCTION public.validate_service_account_assignment();
+CREATE TRIGGER service_account_permissions_validate BEFORE INSERT OR UPDATE OR DELETE
+ON public.service_account_permissions FOR EACH ROW
+EXECUTE FUNCTION public.validate_service_account_assignment();
+CREATE TRIGGER service_account_credentials_validate BEFORE INSERT OR UPDATE OR DELETE
+ON public.service_account_credentials FOR EACH ROW
+EXECUTE FUNCTION public.validate_service_account_credential();
+CREATE TRIGGER service_account_events_validate BEFORE INSERT
+ON public.service_account_events FOR EACH ROW
+EXECUTE FUNCTION public.validate_service_account_event();
+CREATE TRIGGER service_account_events_immutable BEFORE UPDATE OR DELETE
+ON public.service_account_events FOR EACH ROW
+EXECUTE FUNCTION public.reject_service_account_event_mutation();
+CREATE TRIGGER users_service_account_subject_guard BEFORE UPDATE OR DELETE
+ON public.users FOR EACH ROW EXECUTE FUNCTION public.guard_service_account_subject();
+CREATE TRIGGER user_credentials_service_account_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.user_credentials FOR EACH ROW
+EXECUTE FUNCTION public.guard_service_account_login_artifact();
+CREATE TRIGGER sessions_service_account_guard BEFORE INSERT OR UPDATE
+ON public.sessions FOR EACH ROW EXECUTE FUNCTION public.guard_service_account_login_artifact();
+CREATE TRIGGER user_roles_service_account_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.user_roles FOR EACH ROW EXECUTE FUNCTION public.guard_service_account_legacy_access();
+CREATE TRIGGER user_facilities_service_account_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.user_facilities FOR EACH ROW
+EXECUTE FUNCTION public.guard_service_account_legacy_access();
+CREATE TRIGGER user_inventory_owners_service_account_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.user_inventory_owners FOR EACH ROW
+EXECUTE FUNCTION public.guard_service_account_legacy_access();
+CREATE TRIGGER tenant_memberships_service_account_guard BEFORE INSERT OR UPDATE OR DELETE
+ON public.tenant_memberships FOR EACH ROW
+EXECUTE FUNCTION public.guard_service_account_membership();
+
+ALTER TABLE public.service_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.service_accounts FORCE ROW LEVEL SECURITY;
+CREATE POLICY service_accounts_tenant_isolation ON public.service_accounts
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.service_account_facilities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.service_account_facilities FORCE ROW LEVEL SECURITY;
+CREATE POLICY service_account_facilities_tenant_isolation ON public.service_account_facilities
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.service_account_inventory_owners ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.service_account_inventory_owners FORCE ROW LEVEL SECURITY;
+CREATE POLICY service_account_inventory_owners_tenant_isolation
+ON public.service_account_inventory_owners
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.service_account_permissions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.service_account_permissions FORCE ROW LEVEL SECURITY;
+CREATE POLICY service_account_permissions_tenant_isolation ON public.service_account_permissions
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.service_account_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.service_account_credentials FORCE ROW LEVEL SECURITY;
+CREATE POLICY service_account_credentials_tenant_isolation ON public.service_account_credentials
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+ALTER TABLE public.service_account_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.service_account_events FORCE ROW LEVEL SECURITY;
+CREATE POLICY service_account_events_tenant_isolation ON public.service_account_events
+USING(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint)
+WITH CHECK(tenant_id=NULLIF(current_setting('wareboxes.tenant_id',true),'')::bigint);
+
+GRANT SELECT,INSERT ON public.service_accounts TO wareboxes_app;
+GRANT UPDATE(all_facilities,all_inventory_owners,status,revision,updated_at,updated_by_user_id,
+  disabled_at,disabled_by_user_id,disabled_reason) ON public.service_accounts TO wareboxes_app;
+GRANT SELECT,INSERT ON public.service_account_facilities TO wareboxes_app;
+GRANT UPDATE(revoked_at,revoked_by_user_id) ON public.service_account_facilities TO wareboxes_app;
+GRANT SELECT,INSERT ON public.service_account_inventory_owners TO wareboxes_app;
+GRANT UPDATE(revoked_at,revoked_by_user_id)
+  ON public.service_account_inventory_owners TO wareboxes_app;
+GRANT SELECT,INSERT ON public.service_account_permissions TO wareboxes_app;
+GRANT UPDATE(revoked_at,revoked_by_user_id) ON public.service_account_permissions TO wareboxes_app;
+GRANT SELECT(id,tenant_id,service_account_id,label,token_prefix,created_at,created_by_user_id,
+  expires_at,revoked_at,revoked_by_user_id,revocation_reason,last_used_at)
+  ON public.service_account_credentials TO wareboxes_app;
+GRANT INSERT(tenant_id,service_account_id,label,token_prefix,token_hash,created_at,
+  created_by_user_id,expires_at) ON public.service_account_credentials TO wareboxes_app;
+GRANT UPDATE(revoked_at,revoked_by_user_id,revocation_reason)
+  ON public.service_account_credentials TO wareboxes_app;
+GRANT SELECT,INSERT ON public.service_account_events TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.service_accounts_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.service_account_facilities_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.service_account_inventory_owners_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.service_account_permissions_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.service_account_credentials_id_seq TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.service_account_events_id_seq TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.api_service_account_identity(text) TO wareboxes_app;
+REVOKE ALL ON FUNCTION public.service_account_actor_is_admin(bigint,bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_service_account() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_service_account_assignment() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_service_account_credential() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_service_account_event_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_service_account_event() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_service_account_subject() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_service_account_login_artifact() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_service_account_legacy_access() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.guard_service_account_membership() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.api_service_account_identity(text) FROM PUBLIC;

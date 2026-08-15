@@ -1,0 +1,291 @@
+.service-accounts-workspace {
+  display: grid;
+  gap: 1rem;
+}
+
+.service-accounts-heading > div:last-child,
+.service-account-actions,
+.service-account-dialog footer {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .65rem;
+}
+
+.service-account-toolbar {
+  align-items: end;
+  background: var(--surface-raised, #fff);
+  border: 1px solid var(--border-subtle, #d9ddde);
+  border-radius: .65rem;
+  display: flex;
+  gap: .75rem;
+  padding: .75rem;
+}
+
+.service-account-toolbar label,
+.service-account-form-grid label,
+.service-account-dialog form > label {
+  display: grid;
+  gap: .35rem;
+}
+
+.service-account-layout {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(42rem, 1.35fr) minmax(30rem, 1fr);
+}
+
+.service-account-list,
+.service-account-detail,
+.service-account-detail-empty,
+.service-account-state,
+.service-account-secret,
+.service-account-error,
+.service-account-retry {
+  background: var(--surface-raised, #fff);
+  border: 1px solid var(--border-subtle, #d9ddde);
+  border-radius: .65rem;
+}
+
+.service-account-list > header,
+.service-account-detail > header,
+.service-account-evidence-panel > header {
+  align-items: start;
+  display: flex;
+  justify-content: space-between;
+  padding: .9rem 1rem;
+}
+
+.service-account-list > .table-scroll,
+.service-account-evidence-panel > .table-scroll {
+  border-top: 1px solid var(--border-subtle, #d9ddde);
+}
+
+.service-account-list .dense-table {
+  min-width: 64rem;
+}
+
+.service-account-list td strong,
+.service-account-list td small,
+.service-account-evidence-panel td strong,
+.service-account-evidence-panel td small {
+  display: block;
+}
+
+.permission-list,
+.service-account-scope-summary span {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .3rem;
+}
+
+.permission-list span,
+.scope-pill {
+  background: var(--surface-muted, #eef1f1);
+  border-radius: 999px;
+  font-size: .75rem;
+  padding: .18rem .45rem;
+}
+
+.scope-pill.permission {
+  background: #e7f1ef;
+  color: #145a50;
+}
+
+.service-account-detail-empty,
+.service-account-state {
+  align-content: center;
+  display: grid;
+  gap: .4rem;
+  min-height: 12rem;
+  padding: 1.5rem;
+  text-align: center;
+}
+
+.service-account-detail {
+  align-self: start;
+  overflow: hidden;
+}
+
+.service-account-metadata,
+.service-account-scope-summary {
+  display: grid;
+  gap: .65rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: .8rem 1rem;
+}
+
+.service-account-metadata > div,
+.service-account-scope-summary > div {
+  display: grid;
+  gap: .2rem;
+}
+
+.service-account-scope-summary > div:last-child {
+  grid-column: 1 / -1;
+}
+
+.service-account-metadata span,
+.service-account-scope-summary strong {
+  color: var(--text-muted, #667072);
+  font-size: .75rem;
+  text-transform: uppercase;
+}
+
+.service-account-actions {
+  border-block: 1px solid var(--border-subtle, #d9ddde);
+  padding: .8rem 1rem;
+}
+
+.service-account-evidence-panel + .service-account-evidence-panel {
+  border-top: 1px solid var(--border-subtle, #d9ddde);
+}
+
+.service-account-events {
+  display: grid;
+  gap: .7rem;
+  list-style: none;
+  margin: 0;
+  padding: 0 1rem 1rem;
+}
+
+.service-account-events li {
+  display: grid;
+  gap: .55rem;
+  grid-template-columns: .65rem 1fr;
+}
+
+.service-account-events li div,
+.service-account-secret div {
+  display: grid;
+  gap: .2rem;
+}
+
+.history-marker {
+  background: #237a6f;
+  border-radius: 50%;
+  height: .55rem;
+  margin-top: .3rem;
+  width: .55rem;
+}
+
+.service-account-secret,
+.service-account-error,
+.service-account-retry {
+  align-items: center;
+  display: grid;
+  gap: .8rem;
+  grid-template-columns: minmax(14rem, auto) minmax(24rem, 1fr) auto;
+  padding: .8rem 1rem;
+}
+
+.service-account-secret {
+  background: #fff7dd;
+  border-color: #d7b85c;
+}
+
+.service-account-secret input {
+  font-family: ui-monospace, monospace;
+  width: 100%;
+}
+
+.service-account-error {
+  background: #fff0ef;
+  border-color: #dc8e89;
+}
+
+.load-more {
+  margin: .75rem 1rem;
+}
+
+.service-account-dialog-backdrop {
+  align-items: start;
+  background: rgb(13 20 21 / 55%);
+  display: grid;
+  inset: 0;
+  justify-items: center;
+  overflow: auto;
+  padding: 5vh 2rem;
+  position: fixed;
+  z-index: 80;
+}
+
+.service-account-dialog {
+  background: var(--surface-raised, #fff);
+  border-radius: .75rem;
+  box-shadow: 0 1.2rem 4rem rgb(0 0 0 / 28%);
+  max-width: 70rem;
+  padding: 1rem;
+  width: 100%;
+}
+
+.service-account-dialog > header {
+  align-items: start;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.service-account-dialog form,
+.service-account-dialog fieldset {
+  display: grid;
+  gap: .75rem;
+}
+
+.service-account-form-grid,
+.service-account-scope-grid {
+  display: grid;
+  gap: .8rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.service-account-scope-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.service-account-scope-grid fieldset {
+  border: 1px solid var(--border-subtle, #d9ddde);
+  border-radius: .5rem;
+  padding: .7rem;
+}
+
+.scope-checks {
+  display: grid;
+  gap: .35rem;
+  max-height: 16rem;
+  overflow: auto;
+}
+
+.scope-checks label,
+.scope-all {
+  align-items: center;
+  display: flex;
+  gap: .45rem;
+}
+
+.secret-warning {
+  background: #fff7dd;
+  border-left: .25rem solid #c08b16;
+  display: grid;
+  gap: .25rem;
+  padding: .7rem;
+}
+
+.secret-warning.danger {
+  background: #fff0ef;
+  border-color: #b64a43;
+}
+
+.service-account-dialog footer {
+  border-top: 1px solid var(--border-subtle, #d9ddde);
+  justify-content: end;
+  margin-top: .25rem;
+  padding-top: .8rem;
+}
+
+@media (max-width: 78rem) {
+  .service-account-layout,
+  .service-account-scope-grid {
+    grid-template-columns: 1fr;
+  }
+}

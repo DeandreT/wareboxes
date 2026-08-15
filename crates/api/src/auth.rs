@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use wareboxes_application::CommandContext;
 use wareboxes_core::dto::{UpdateUserAccessScope, WebSessionContext};
 use wareboxes_core::models::{TenantAccess, User};
+use wareboxes_domain::ServiceAccountId;
 use wareboxes_domain::{FacilityId, InventoryOwnerId, TenantId, UserId};
 
 use crate::config::SecurityConfig;
@@ -138,6 +139,28 @@ async fn user_id_for_token(db: &Db, token: &str) -> AppResult<Option<i64>> {
         .await
         .map_err(AppError::from)?;
     Ok(user_id)
+}
+
+async fn service_account_identity_for_token(
+    db: &Db,
+    token: &str,
+) -> AppResult<Option<(ServiceAccountId, TenantId, i64)>> {
+    let token_hash = session_token_hash(token);
+    let identity: Option<(i64, i64, i64)> =
+        sqlx::query_as("SELECT * FROM api_service_account_identity($1)")
+            .bind(token_hash)
+            .fetch_optional(db)
+            .await?;
+    identity
+        .map(|(service_account_id, tenant_id, user_id)| {
+            Ok((
+                ServiceAccountId::new(service_account_id)
+                    .map_err(|error| AppError::internal(error.to_string()))?,
+                TenantId::new(tenant_id).map_err(|error| AppError::internal(error.to_string()))?,
+                user_id,
+            ))
+        })
+        .transpose()
 }
 
 async fn web_identity_for_token(
@@ -282,7 +305,13 @@ pub fn require_same_origin(method: &Method, headers: &HeaderMap) -> AppResult<()
 #[derive(Clone, Copy, Debug)]
 enum SessionKind {
     Api,
-    Web { tenant_id: TenantId },
+    Web {
+        tenant_id: TenantId,
+    },
+    ServiceAccount {
+        service_account_id: ServiceAccountId,
+        tenant_id: TenantId,
+    },
 }
 
 /// Authenticated principal backed by an active opaque session.
@@ -296,7 +325,7 @@ impl CurrentUser {
     pub fn require_web_tenant(&self) -> AppResult<TenantId> {
         match self.session_kind {
             SessionKind::Web { tenant_id } => Ok(tenant_id),
-            SessionKind::Api => Err(AppError::forbidden()),
+            SessionKind::Api | SessionKind::ServiceAccount { .. } => Err(AppError::forbidden()),
         }
     }
 }
@@ -315,10 +344,25 @@ impl FromRequestParts<AppState> for CurrentUser {
             .and_then(|v| v.strip_prefix("Bearer "))
             .map(str::to_owned);
         let (token, user_id, session_kind) = if let Some(token) = bearer_token {
-            let user_id = user_id_for_token(&state.db, &token)
-                .await?
-                .ok_or_else(AppError::unauthorized)?;
-            (token, user_id, SessionKind::Api)
+            if token.starts_with("wbs_sa_") {
+                let (service_account_id, tenant_id, user_id) =
+                    service_account_identity_for_token(&state.db, &token)
+                        .await?
+                        .ok_or_else(AppError::unauthorized)?;
+                (
+                    token,
+                    user_id,
+                    SessionKind::ServiceAccount {
+                        service_account_id,
+                        tenant_id,
+                    },
+                )
+            } else {
+                let user_id = user_id_for_token(&state.db, &token)
+                    .await?
+                    .ok_or_else(AppError::unauthorized)?;
+                (token, user_id, SessionKind::Api)
+            }
         } else {
             let token = web_session_token(&parts.headers, &state.security)
                 .ok_or_else(AppError::unauthorized)?;
@@ -355,6 +399,7 @@ impl FromRequestParts<AppState> for CurrentUser {
 pub struct CurrentTenant {
     pub user: User,
     pub tenant: TenantAccess,
+    pub service_account_id: Option<ServiceAccountId>,
 }
 
 impl CurrentTenant {
@@ -365,6 +410,10 @@ impl CurrentTenant {
             request_id: current_request_id_or_new(),
             idempotency_key: Some(idempotency_key.as_str().to_owned()),
         }
+    }
+
+    pub const fn is_service_account(&self) -> bool {
+        self.service_account_id.is_some()
     }
 
     pub async fn require_permission(&self, db: &Db, permission: &str) -> AppResult<()> {
@@ -433,38 +482,62 @@ impl FromRequestParts<AppState> for CurrentTenant {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let current_user = CurrentUser::from_request_parts(parts, state).await?;
-        let tenant_id = match current_user.session_kind {
-            SessionKind::Api => {
-                let tenant_id = parts
-                    .headers
-                    .get(TENANT_ID_HEADER)
-                    .and_then(|value| value.to_str().ok())
-                    .ok_or_else(|| AppError::bad_request("tenant context header is required"))?
-                    .parse::<i64>()
-                    .map_err(|_| {
-                        AppError::bad_request("tenant context header must be a positive ID")
-                    })?;
-                TenantId::new(tenant_id).map_err(|_| {
+        let requested_tenant_id = || -> AppResult<TenantId> {
+            let tenant_id = parts
+                .headers
+                .get(TENANT_ID_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| AppError::bad_request("tenant context header is required"))?
+                .parse::<i64>()
+                .map_err(|_| {
                     AppError::bad_request("tenant context header must be a positive ID")
-                })?
-            }
+                })?;
+            TenantId::new(tenant_id)
+                .map_err(|_| AppError::bad_request("tenant context header must be a positive ID"))
+        };
+        let tenant_id = match current_user.session_kind {
+            SessionKind::Api => requested_tenant_id()?,
             SessionKind::Web { tenant_id } => tenant_id,
+            SessionKind::ServiceAccount { tenant_id, .. } => {
+                if requested_tenant_id()? != tenant_id {
+                    return Err(AppError::forbidden());
+                }
+                tenant_id
+            }
         };
 
-        let tenant = repo::tenants::access_for_user(&state.db, current_user.user.id, tenant_id)
-            .await?
-            .ok_or_else(AppError::forbidden)?;
-        permissions::ensure_self_role(
-            &state.db,
-            tenant.tenant_id,
-            current_user.user.id,
-            &current_user.user.email,
-        )
-        .await?;
+        let service_account_id = match current_user.session_kind {
+            SessionKind::ServiceAccount {
+                service_account_id, ..
+            } => Some(service_account_id),
+            SessionKind::Api | SessionKind::Web { .. } => None,
+        };
+        let tenant = if let Some(service_account_id) = service_account_id {
+            repo::tenants::access_for_service_account(&state.db, service_account_id, tenant_id)
+                .await?
+                .ok_or_else(AppError::forbidden)?
+        } else {
+            repo::tenants::access_for_user(&state.db, current_user.user.id, tenant_id)
+                .await?
+                .ok_or_else(AppError::forbidden)?
+        };
+        if service_account_id.is_none() {
+            permissions::ensure_self_role(
+                &state.db,
+                tenant.tenant_id,
+                current_user.user.id,
+                &current_user.user.email,
+            )
+            .await?;
+        }
         let user =
             enrich_user_for_tenant(&state.db, tenant.tenant_id, current_user.user.id).await?;
 
-        Ok(Self { user, tenant })
+        Ok(Self {
+            user,
+            tenant,
+            service_account_id,
+        })
     }
 }
 

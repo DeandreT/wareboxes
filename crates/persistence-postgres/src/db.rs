@@ -283,6 +283,30 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'user_inventory_owners_tenant_isolation'
                 ),
                 (
+                    'service_accounts',
+                    'service_accounts_tenant_isolation'
+                ),
+                (
+                    'service_account_facilities',
+                    'service_account_facilities_tenant_isolation'
+                ),
+                (
+                    'service_account_inventory_owners',
+                    'service_account_inventory_owners_tenant_isolation'
+                ),
+                (
+                    'service_account_permissions',
+                    'service_account_permissions_tenant_isolation'
+                ),
+                (
+                    'service_account_credentials',
+                    'service_account_credentials_tenant_isolation'
+                ),
+                (
+                    'service_account_events',
+                    'service_account_events_tenant_isolation'
+                ),
+                (
                     'employees',
                     'employees_tenant_isolation'
                 ),

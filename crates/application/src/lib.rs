@@ -41,6 +41,7 @@ pub mod picking;
 pub mod purchase_order;
 pub mod putaway;
 pub mod replenishment;
+pub mod service_account;
 pub mod shipping;
 pub mod slotting;
 pub mod storage_zone;

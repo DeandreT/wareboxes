@@ -34,6 +34,7 @@ mod preferences;
 mod purchase_orders;
 mod putaway;
 mod replenishment;
+mod service_accounts;
 mod shipping;
 mod slotting;
 mod sorting;

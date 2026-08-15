@@ -128,6 +128,9 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
         "/work-orchestration" | "/work-orchestration/" => {
             Some(WorkspaceBootstrapSection::WorkOrchestration)
         }
+        "/administration/service-accounts" | "/administration/service-accounts/" => {
+            Some(WorkspaceBootstrapSection::ServiceAccounts)
+        }
         "/inventory" | "/inventory/" => Some(WorkspaceBootstrapSection::Inventory),
         "/inventory/control" | "/inventory/control/" => {
             Some(WorkspaceBootstrapSection::InventoryIntegrity)
@@ -428,6 +431,15 @@ async fn workspace_bootstrap(
                 ..WorkspaceBootstrapData::default()
             })
         }
+        WorkspaceBootstrapSection::ServiceAccounts => {
+            if !has_permission(session, "admin") {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            Ok(WorkspaceBootstrapData {
+                access: routes::access::workspace_for_access(state, access).await?,
+                ..WorkspaceBootstrapData::default()
+            })
+        }
         WorkspaceBootstrapSection::Access => Ok(WorkspaceBootstrapData {
             access: routes::access::workspace_for_access(state, access).await?,
             ..WorkspaceBootstrapData::default()
@@ -491,6 +503,10 @@ mod tests {
         assert_eq!(
             section_for_path("/work-orchestration"),
             Some(WorkspaceBootstrapSection::WorkOrchestration)
+        );
+        assert_eq!(
+            section_for_path("/administration/service-accounts"),
+            Some(WorkspaceBootstrapSection::ServiceAccounts)
         );
         assert_eq!(
             section_for_path("/cross-dock"),
