@@ -35,6 +35,7 @@ mod purchase_orders;
 mod putaway;
 mod replenishment;
 mod shipping;
+mod slotting;
 mod sorting;
 mod toast;
 mod transfer_orders;

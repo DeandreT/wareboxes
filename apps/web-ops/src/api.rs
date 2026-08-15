@@ -133,6 +133,11 @@ pub use purchase_order::{
     cancel_purchase_order, create_purchase_order, create_purchase_order_asn, purchase_order_detail,
     purchase_orders, release_purchase_order, PurchaseOrderFilters,
 };
+mod slotting;
+pub use slotting::{
+    accept_slotting_recommendation, configure_slotting_profile, dismiss_slotting_recommendation,
+    run_slotting, slotting_profiles, slotting_recommendations,
+};
 mod storage_zone;
 pub use storage_zone::{configure_storage_zone, retire_storage_zone, storage_zones};
 mod transfer_order;

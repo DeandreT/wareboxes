@@ -270,6 +270,12 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                 active=section == Section::Replenishment
                             />
                             <NavItem
+                                href="/slotting"
+                                label="Slotting"
+                                icon=UiIcon::Inventory
+                                active=section == Section::Slotting
+                            />
+                            <NavItem
                                 href="/cross-dock"
                                 label="Cross-dock"
                                 icon=UiIcon::CrossDock

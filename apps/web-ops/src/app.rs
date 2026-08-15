@@ -39,6 +39,7 @@ use crate::purchase_orders::PurchaseOrdersWorkspace;
 use crate::putaway::PutawayWorkspace;
 use crate::replenishment::ReplenishmentWorkspace;
 use crate::shipping::ShippingWorkspace;
+use crate::slotting::SlottingWorkspace;
 use crate::sorting::{SortDirection, SortSpec, SortableHeader};
 use crate::toast::ToastProvider;
 use crate::transfer_orders::TransferOrdersWorkspace;
@@ -71,6 +72,7 @@ pub enum WorkspaceBootstrapSection {
     Inventory,
     InventoryIntegrity,
     Replenishment,
+    Slotting,
     Access,
 }
 
@@ -205,6 +207,7 @@ pub(crate) enum Section {
     InventoryDisposition,
     InventoryIntegrity,
     Replenishment,
+    Slotting,
     Access,
     Administration(AdministrationArea),
 }
@@ -224,6 +227,7 @@ impl Section {
             Self::Inventory => Some(WorkspaceBootstrapSection::Inventory),
             Self::InventoryIntegrity => Some(WorkspaceBootstrapSection::InventoryIntegrity),
             Self::Replenishment => Some(WorkspaceBootstrapSection::Replenishment),
+            Self::Slotting => Some(WorkspaceBootstrapSection::Slotting),
             Self::Access => Some(WorkspaceBootstrapSection::Access),
             _ => None,
         }
@@ -279,6 +283,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="stylesheet" href="/value-added-work.css"/>
                 <link rel="stylesheet" href="/customer-portal.css"/>
                 <link rel="stylesheet" href="/replenishment.css"/>
+                <link rel="stylesheet" href="/slotting.css"/>
                 <link rel="stylesheet" href="/putaway.css"/>
                 <link rel="stylesheet" href="/cycle-count.css"/>
                 <link rel="stylesheet" href="/cross-dock.css"/>
@@ -346,6 +351,7 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("catalog") view=CatalogPage/>
                     <Route path=StaticSegment("inventory") view=InventoryPage/>
                     <Route path=StaticSegment("replenishment") view=ReplenishmentPage/>
+                    <Route path=StaticSegment("slotting") view=SlottingPage/>
                     <Route path=(StaticSegment("inventory"), StaticSegment("holds")) view=InventoryHoldsPage/>
                     <Route
                         path=(StaticSegment("inventory"), StaticSegment("disposition"))
@@ -806,6 +812,9 @@ async fn load_workspace(
             );
             data.access = api::access().await?;
         }
+        Section::Slotting if has_permission(session, "wms") => {
+            data.access = api::access().await?;
+        }
         Section::CrossDock if has_permission(session, "wms_supervisor") => {
             data.cross_dock_planning_options = Some(
                 api::cross_dock_planning_options(api::CrossDockFilters::default(), None).await?,
@@ -843,6 +852,7 @@ async fn load_workspace(
         | Section::InventoryDisposition
         | Section::InventoryIntegrity
         | Section::Replenishment
+        | Section::Slotting
         | Section::Administration(_) => {}
     }
     Ok(data)
@@ -966,6 +976,11 @@ fn InventoryIntegrityPage() -> impl IntoView {
 #[component]
 fn ReplenishmentPage() -> impl IntoView {
     view! { <AuthenticatedPage section=Section::Replenishment/> }
+}
+
+#[component]
+fn SlottingPage() -> impl IntoView {
+    view! { <AuthenticatedPage section=Section::Slotting/> }
 }
 
 #[component]
@@ -1238,6 +1253,14 @@ fn WorkspaceContent(section: Section) -> impl IntoView {
                     initial_policies=data.replenishment_policies
                     initial_work=data.replenishment_queue
                     access=data.access
+                    on_unauthorized=session_expired_callback()
+                />
+            }
+            .into_any(),
+            Section::Slotting if has_permission(&session, "wms") => view! {
+                <SlottingWorkspace
+                    access=data.access
+                    can_supervise=has_permission(&session, "wms_supervisor")
                     on_unauthorized=session_expired_callback()
                 />
             }

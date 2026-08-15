@@ -124,6 +124,7 @@ fn section_for_path(path: &str) -> Option<WorkspaceBootstrapSection> {
         "/cycle-counts" | "/cycle-counts/" => Some(WorkspaceBootstrapSection::CycleCounts),
         "/cross-dock" | "/cross-dock/" => Some(WorkspaceBootstrapSection::CrossDock),
         "/replenishment" | "/replenishment/" => Some(WorkspaceBootstrapSection::Replenishment),
+        "/slotting" | "/slotting/" => Some(WorkspaceBootstrapSection::Slotting),
         "/inventory" | "/inventory/" => Some(WorkspaceBootstrapSection::Inventory),
         "/inventory/control" | "/inventory/control/" => {
             Some(WorkspaceBootstrapSection::InventoryIntegrity)
@@ -401,6 +402,15 @@ async fn workspace_bootstrap(
                 ..WorkspaceBootstrapData::default()
             })
         }
+        WorkspaceBootstrapSection::Slotting => {
+            if !has_permission(session, "wms") {
+                return Ok(WorkspaceBootstrapData::default());
+            }
+            Ok(WorkspaceBootstrapData {
+                access: routes::access::workspace_for_access(state, access).await?,
+                ..WorkspaceBootstrapData::default()
+            })
+        }
         WorkspaceBootstrapSection::Access => Ok(WorkspaceBootstrapData {
             access: routes::access::workspace_for_access(state, access).await?,
             ..WorkspaceBootstrapData::default()
@@ -456,6 +466,10 @@ mod tests {
         assert_eq!(
             section_for_path("/replenishment"),
             Some(WorkspaceBootstrapSection::Replenishment)
+        );
+        assert_eq!(
+            section_for_path("/slotting"),
+            Some(WorkspaceBootstrapSection::Slotting)
         );
         assert_eq!(
             section_for_path("/cross-dock"),
