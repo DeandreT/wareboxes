@@ -41,6 +41,7 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
     let can_supervise_wms = has_permission(&session, "wms_supervisor");
     let can_view_labor = has_permission(&session, "labor_view");
     let can_administer = has_permission(&session, "admin");
+    let is_platform_administrator = session.is_platform_administrator;
     let can_view_customer_portal = has_permission(&session, "customer_portal");
     let available_tenants = session.available_tenants.clone();
     let tenant_count = available_tenants.len();
@@ -288,6 +289,15 @@ pub(crate) fn PageFrame(section: Section, children: Children) -> impl IntoView {
                                 active=section == Section::CrossDock
                             />
                         }
+                    })}
+                    {is_platform_administrator.then(|| view! {
+                        <p class="nav-group">"Platform"</p>
+                        <NavItem
+                            href="/platform/tenants"
+                            label="Tenant lifecycle"
+                            icon=UiIcon::Building
+                            active=section == Section::TenantLifecycle
+                        />
                     })}
                     <p class="nav-group">"Context"</p>
                     <NavItem

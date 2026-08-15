@@ -25,6 +25,10 @@ axum = { version = "0.8", features = ["macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
 leptos = { workspace = true, features = ["ssr"], optional = true }
+sqlx = { version = "0.7", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+] }
 
 [dev-dependencies]
 wareboxes-api-contract = { workspace = true }
@@ -34,10 +38,6 @@ wareboxes-domain = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 axum = { version = "0.8", features = ["macros"] }
 tower = { version = "0.5", features = ["util"] }
-sqlx = { version = "0.7", default-features = false, features = [
-    "runtime-tokio",
-    "postgres",
-] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"

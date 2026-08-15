@@ -74,24 +74,24 @@ fn init_tracing() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Mirrors the original `addDevAdmin`: make sure an `admin` permission exists
-/// and is attached to the bootstrap user's per-user "self role" so the first
-/// administrator can administer the system.
+/// Provision the first interactive administrator and retain its distinct
+/// platform authority. Tenant roles never imply cross-tenant administration.
 async fn bootstrap_admin(pool: &db::Db, cfg: &Config) -> anyhow::Result<()> {
     let (Some(email), Some(password)) = (&cfg.bootstrap_admin_email, &cfg.bootstrap_admin_password)
     else {
         return Ok(());
     };
 
-    if wareboxes_persistence_postgres::users::find_user_by_email(pool, email, true)
-        .await?
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    let user = auth::register_user(pool, email, password, Some("Admin"), None).await?;
-    let token = auth::create_session(pool, user.id).await?;
+    let user_id =
+        match wareboxes_persistence_postgres::users::find_user_by_email(pool, email, true).await? {
+            Some(user) => user.id.get(),
+            None => {
+                auth::register_user(pool, email, password, Some("Admin"), None)
+                    .await?
+                    .id
+            }
+        };
+    let token = auth::create_session(pool, user_id).await?;
     let tenant_result = match auth::default_tenant_for_session(pool, &token).await {
         Ok(Some(tenant)) => Ok(tenant),
         Ok(None) => Err(anyhow::anyhow!("bootstrap admin has no tenant")),
@@ -126,7 +126,15 @@ async fn bootstrap_admin(pool: &db::Db, cfg: &Config) -> anyhow::Result<()> {
         )
         .await?;
     }
-    tracing::info!(%email, "bootstrapped admin user");
+    sqlx::query(
+        r#"INSERT INTO platform_administrators
+        (user_id,revision,granted_at,granted_by_user_id)
+        VALUES($1,1,CURRENT_TIMESTAMP,$1) ON CONFLICT(user_id) DO NOTHING"#,
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    tracing::info!(%email, "bootstrapped platform administrator");
     Ok(())
 }
 

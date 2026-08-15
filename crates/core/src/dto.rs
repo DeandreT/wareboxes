@@ -82,6 +82,8 @@ pub struct WebSessionContext {
     pub available_tenants: Vec<TenantAccess>,
     #[serde(default)]
     pub settings: UserSettings,
+    #[serde(default)]
+    pub is_platform_administrator: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]

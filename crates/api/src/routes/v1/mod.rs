@@ -50,6 +50,7 @@ mod shipping;
 pub(crate) mod shipping_queue;
 mod slotting;
 mod storage_zones;
+pub(crate) mod tenant_lifecycle;
 mod transfer_orders;
 mod value_added_work;
 mod vendor_returns;
@@ -66,6 +67,19 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/platform/tenants",
+            get(tenant_lifecycle::list).post(tenant_lifecycle::create),
+        )
+        .route("/platform/tenants/{tenant_id}", get(tenant_lifecycle::get))
+        .route(
+            "/platform/tenants/{tenant_id}/events",
+            get(tenant_lifecycle::events),
+        )
+        .route(
+            "/platform/tenants/{tenant_id}/status-changes",
+            post(tenant_lifecycle::change_status),
+        )
         .route(
             "/service-accounts",
             get(service_accounts::list).post(service_accounts::create),

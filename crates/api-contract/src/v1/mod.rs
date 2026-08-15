@@ -53,6 +53,7 @@ mod shipping;
 mod shipping_queue;
 mod slotting;
 mod storage_zone;
+mod tenant_lifecycle;
 mod transfer_order;
 mod value_added_work;
 mod vendor_return;
@@ -437,6 +438,11 @@ pub use storage_zone::{
     ConfigureStorageZoneRequest, RetireStorageZoneRequest, StorageZoneLocationResponse,
     StorageZonePage, StorageZonePageRequest, StorageZonePurpose, StorageZoneResponse,
     StorageZoneStatus,
+};
+pub use tenant_lifecycle::{
+    ChangeTenantStatusRequest, CreateTenantRequest, TenantLifecycleEventPage,
+    TenantLifecycleEventPageRequest, TenantLifecycleEventResponse, TenantLifecyclePage,
+    TenantLifecyclePageRequest, TenantLifecycleResponse, TenantStatus,
 };
 pub use transfer_order::{
     CancelTransferOrderRequest, CancelTransferOrderResponse, CreateTransferOrderLineRequest,

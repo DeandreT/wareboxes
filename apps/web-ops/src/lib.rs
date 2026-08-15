@@ -38,6 +38,7 @@ mod service_accounts;
 mod shipping;
 mod slotting;
 mod sorting;
+mod tenant_lifecycle;
 mod toast;
 mod transfer_orders;
 mod value_added_work;

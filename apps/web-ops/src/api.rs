@@ -147,6 +147,11 @@ pub use slotting::{
 };
 mod storage_zone;
 pub use storage_zone::{configure_storage_zone, retire_storage_zone, storage_zones};
+mod tenant_lifecycle;
+pub use tenant_lifecycle::{
+    change_tenant_status, create_tenant, tenant_lifecycle_detail, tenant_lifecycle_events,
+    tenant_lifecycle_page,
+};
 mod transfer_order;
 pub use transfer_order::{
     cancel_transfer_order, create_transfer_order, dispatch_transfer_order, receive_transfer_order,

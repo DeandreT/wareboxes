@@ -277,7 +277,11 @@ pub use storage_zone::{
     StorageZoneName, StorageZonePurpose, StorageZoneRevision, StorageZoneStatus,
     StorageZoneTravelSequence, MAX_STORAGE_ZONE_CODE_LENGTH, MAX_STORAGE_ZONE_NAME_LENGTH,
 };
-pub use tenant::TenantStatus;
+pub use tenant::{
+    TenantLifecycleError, TenantLifecycleReason, TenantName, TenantRevision, TenantSlug,
+    TenantStatus, MAX_TENANT_LIFECYCLE_REASON_LENGTH, MAX_TENANT_NAME_LENGTH,
+    MAX_TENANT_SLUG_LENGTH,
+};
 pub use transfer_order::{
     cancel_transfer_order, dispatch_transfer_order, receive_transfer_order, release_transfer_order,
     NewTransferOrder, TransferDispatchExecution, TransferDispatchSelection,

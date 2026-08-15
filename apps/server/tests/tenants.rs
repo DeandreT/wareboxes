@@ -8,6 +8,9 @@ use tower::ServiceExt;
 use wareboxes_api::auth::{CurrentTenant, TENANT_ID_HEADER};
 use wareboxes_api::routes;
 use wareboxes_api::state::AppState;
+use wareboxes_application::tenant_lifecycle::ChangeTenantStatusCommand;
+use wareboxes_application::CommandContext;
+use wareboxes_domain::{TenantLifecycleReason, TenantRevision, TenantStatus, UserId};
 
 fn request_parts(token: &str, tenant_id: Option<i64>) -> axum::http::request::Parts {
     let mut request = Request::builder().header(header::AUTHORIZATION, format!("Bearer {token}"));
@@ -100,18 +103,42 @@ async fn selected_tenant_context_requires_an_active_membership() {
         AppError::Application(ApplicationError::InvalidRequest(_))
     ));
 
-    sqlx::query("UPDATE tenants SET status = 'suspended' WHERE id = $1")
-        .bind(member_tenant.tenant_id.get())
-        .execute(&db)
-        .await
-        .unwrap();
+    let admin_db = admin_db_for(&db).await;
+    sqlx::query(
+        r#"INSERT INTO platform_administrators
+        (user_id,revision,granted_at,granted_by_user_id)
+        VALUES($1,1,CURRENT_TIMESTAMP,$1)"#,
+    )
+    .bind(outsider.id)
+    .execute(&admin_db)
+    .await
+    .unwrap();
+    admin_db.close().await;
+    wareboxes_api::repo::tenant_lifecycle::change_status(
+        &db,
+        &outsider_tenant,
+        &CommandContext {
+            tenant_id: outsider_tenant.tenant_id,
+            actor_id: UserId::new(outsider.id).unwrap(),
+            request_id: "suspend-member-tenant".into(),
+            idempotency_key: Some("suspend-member-tenant".into()),
+        },
+        &ChangeTenantStatusCommand {
+            tenant_id: member_tenant.tenant_id,
+            expected_revision: TenantRevision::new(1).unwrap(),
+            status: TenantStatus::Suspended,
+            reason: TenantLifecycleReason::new("tenant access test").unwrap(),
+        },
+    )
+    .await
+    .unwrap();
     let mut suspended_parts = request_parts(&token, Some(member_tenant.tenant_id.get()));
     let error = CurrentTenant::from_request_parts(&mut suspended_parts, &state)
         .await
         .unwrap_err();
     assert!(matches!(
         error,
-        AppError::Application(ApplicationError::Forbidden)
+        AppError::Application(ApplicationError::Unauthorized)
     ));
 }
 

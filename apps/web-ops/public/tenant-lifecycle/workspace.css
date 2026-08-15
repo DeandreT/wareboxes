@@ -1,0 +1,269 @@
+.tenant-lifecycle-workspace {
+  display: grid;
+  gap: 1rem;
+  min-width: 68rem;
+}
+
+.tenant-lifecycle-heading > div:last-child,
+.tenant-lifecycle-toolbar,
+.tenant-lifecycle-panel > header,
+.tenant-lifecycle-evidence > header,
+.tenant-lifecycle-dialog > header,
+.tenant-lifecycle-dialog footer {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+
+.tenant-lifecycle-toolbar {
+  background: var(--surface-raised, #202628);
+  border: 1px solid var(--border, #343d40);
+  border-radius: 0.65rem;
+  justify-content: flex-start;
+  padding: 0.75rem;
+}
+
+.tenant-lifecycle-toolbar label {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 14rem;
+}
+
+.tenant-lifecycle-toolbar label:first-child {
+  min-width: 24rem;
+}
+
+.tenant-lifecycle-toolbar span,
+.tenant-lifecycle-dialog label > span {
+  color: var(--text-muted, #aab3b5);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.tenant-lifecycle-layout {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(35rem, 1.05fr) minmax(32rem, 0.95fr);
+}
+
+.tenant-lifecycle-panel {
+  background: var(--surface-raised, #202628);
+  border: 1px solid var(--border, #343d40);
+  border-radius: 0.65rem;
+  min-height: 24rem;
+  overflow: hidden;
+}
+
+.tenant-lifecycle-panel > header,
+.tenant-lifecycle-evidence > header {
+  border-bottom: 1px solid var(--border, #343d40);
+  padding: 0.9rem 1rem;
+}
+
+.tenant-lifecycle-panel header h2,
+.tenant-lifecycle-evidence h3 {
+  margin: 0;
+}
+
+.tenant-lifecycle-panel header span {
+  color: var(--text-muted, #aab3b5);
+  font-size: 0.78rem;
+}
+
+.tenant-list td:first-child {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.tenant-list td small {
+  color: var(--text-muted, #aab3b5);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.tenant-list tr.selected {
+  background: color-mix(in srgb, var(--accent, #5fb4a5) 12%, transparent);
+  box-shadow: inset 3px 0 var(--accent, #5fb4a5);
+}
+
+.tenant-detail > header > div {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.tenant-lifecycle-facts,
+.tenant-lifecycle-confirm {
+  display: grid;
+  gap: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.tenant-lifecycle-facts > div,
+.tenant-lifecycle-confirm > div {
+  border-bottom: 1px solid var(--border, #343d40);
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.8rem 1rem;
+}
+
+.tenant-lifecycle-facts dt,
+.tenant-lifecycle-confirm dt,
+.tenant-lifecycle-evidence dt {
+  color: var(--text-muted, #aab3b5);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.tenant-lifecycle-facts dd,
+.tenant-lifecycle-confirm dd,
+.tenant-lifecycle-evidence dd {
+  margin: 0;
+}
+
+.tenant-lifecycle-evidence ol {
+  display: grid;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tenant-lifecycle-evidence li {
+  border-bottom: 1px solid var(--border, #343d40);
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem;
+}
+
+.tenant-lifecycle-evidence li > div,
+.tenant-lifecycle-evidence li dl {
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.tenant-lifecycle-evidence li p,
+.tenant-lifecycle-evidence li dl,
+.tenant-lifecycle-evidence li details {
+  margin: 0;
+}
+
+.tenant-lifecycle-evidence li dl > div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.tenant-lifecycle-evidence pre {
+  background: #15191a;
+  border-radius: 0.35rem;
+  max-height: 15rem;
+  overflow: auto;
+  padding: 0.7rem;
+  white-space: pre-wrap;
+}
+
+.tenant-lifecycle-state,
+.empty-detail {
+  align-content: center;
+  color: var(--text-muted, #aab3b5);
+  display: grid;
+  gap: 0.6rem;
+  justify-items: center;
+  min-height: 12rem;
+  padding: 2rem;
+  text-align: center;
+}
+
+.tenant-lifecycle-error,
+.tenant-lifecycle-retry,
+.tenant-lifecycle-warning {
+  align-items: center;
+  background: color-mix(in srgb, #d7a84f 12%, var(--surface-raised, #202628));
+  border: 1px solid color-mix(in srgb, #d7a84f 45%, var(--border, #343d40));
+  border-radius: 0.55rem;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+  padding: 0.75rem 0.9rem;
+}
+
+.tenant-lifecycle-warning {
+  align-items: flex-start;
+  display: grid;
+  justify-content: stretch;
+}
+
+.tenant-lifecycle-warning.danger,
+.tenant-lifecycle-error {
+  background: color-mix(in srgb, #d96666 12%, var(--surface-raised, #202628));
+  border-color: color-mix(in srgb, #d96666 45%, var(--border, #343d40));
+}
+
+.tenant-lifecycle-dialog-backdrop {
+  align-items: center;
+  background: rgb(0 0 0 / 68%);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 2rem;
+  position: fixed;
+  z-index: 80;
+}
+
+.tenant-lifecycle-dialog {
+  background: var(--surface-raised, #202628);
+  border: 1px solid var(--border, #343d40);
+  border-radius: 0.7rem;
+  box-shadow: 0 1.5rem 4rem rgb(0 0 0 / 45%);
+  max-height: calc(100vh - 4rem);
+  max-width: 56rem;
+  overflow: auto;
+  width: 100%;
+}
+
+.tenant-lifecycle-dialog > header,
+.tenant-lifecycle-dialog form > * {
+  margin: 0;
+  padding: 1rem 1.2rem;
+}
+
+.tenant-lifecycle-dialog > header,
+.tenant-lifecycle-dialog footer {
+  border-bottom: 1px solid var(--border, #343d40);
+}
+
+.tenant-lifecycle-dialog footer {
+  border-bottom: 0;
+  border-top: 1px solid var(--border, #343d40);
+  justify-content: flex-end;
+}
+
+.tenant-lifecycle-form-grid {
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tenant-lifecycle-form-grid label,
+.tenant-lifecycle-dialog form > label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.tenant-lifecycle-form-grid label:last-child {
+  grid-column: 1 / -1;
+}
+
+.tenant-lifecycle-form-grid small {
+  color: var(--text-muted, #aab3b5);
+}
+
+.danger-action {
+  background: #9e3f45;
+  border-color: #bc575e;
+  color: white;
+}

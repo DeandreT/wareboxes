@@ -47070,6 +47070,324 @@ GRANT USAGE ON SEQUENCE public.service_account_inventory_owners_id_seq TO warebo
 GRANT USAGE ON SEQUENCE public.service_account_permissions_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.service_account_credentials_id_seq TO wareboxes_app;
 GRANT USAGE ON SEQUENCE public.service_account_events_id_seq TO wareboxes_app;
+
+-- Platform tenant lifecycle: global operator authority, replay-safe application
+-- commands, immutable evidence, and exact suspension side effects.
+ALTER TABLE public.tenants
+  ADD COLUMN revision bigint NOT NULL DEFAULT 1,
+  ADD COLUMN created_by_user_id bigint,
+  ADD COLUMN initial_admin_user_id bigint,
+  ADD COLUMN modified_at timestamptz,
+  ADD COLUMN status_changed_at timestamptz,
+  ADD COLUMN status_changed_by_user_id bigint,
+  ADD COLUMN status_reason text,
+  ADD CONSTRAINT tenants_revision_check CHECK(revision>0),
+  ADD CONSTRAINT tenants_slug_shape_check CHECK(
+    slug~'^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?$'),
+  ADD CONSTRAINT tenants_name_length_check CHECK(
+    name=btrim(name) AND char_length(name)<=200 AND name!~'[[:cntrl:]]'),
+  ADD CONSTRAINT tenants_status_evidence_check CHECK(
+    (revision=1 AND status_changed_at IS NULL AND status_changed_by_user_id IS NULL
+      AND status_reason IS NULL)
+    OR (revision>1 AND modified_at IS NOT NULL AND status_changed_at=modified_at
+      AND status_changed_by_user_id IS NOT NULL AND status_reason IS NOT NULL
+      AND status_reason=btrim(status_reason) AND status_reason<>''
+      AND char_length(status_reason)<=500 AND status_reason!~'[[:cntrl:]]'));
+
+ALTER TABLE public.tenants
+  ADD CONSTRAINT tenants_created_by_user_fkey
+    FOREIGN KEY(created_by_user_id) REFERENCES public.users(id),
+  ADD CONSTRAINT tenants_initial_admin_user_fkey
+    FOREIGN KEY(initial_admin_user_id) REFERENCES public.users(id),
+  ADD CONSTRAINT tenants_status_changed_by_user_fkey
+    FOREIGN KEY(status_changed_by_user_id) REFERENCES public.users(id);
+
+CREATE TABLE public.platform_administrators (
+  user_id bigint PRIMARY KEY REFERENCES public.users(id),
+  revision bigint NOT NULL DEFAULT 1,
+  granted_at timestamptz NOT NULL,
+  granted_by_user_id bigint NOT NULL REFERENCES public.users(id),
+  revoked_at timestamptz,
+  revoked_by_user_id bigint REFERENCES public.users(id),
+  revocation_reason text,
+  CONSTRAINT platform_administrators_revision_check CHECK(revision>0),
+  CONSTRAINT platform_administrators_revocation_check CHECK(
+    (revoked_at IS NULL AND revoked_by_user_id IS NULL AND revocation_reason IS NULL)
+    OR (revoked_at IS NOT NULL AND revoked_by_user_id IS NOT NULL
+      AND revocation_reason IS NOT NULL AND revoked_at>=granted_at)),
+  CONSTRAINT platform_administrators_reason_check CHECK(
+    revocation_reason IS NULL OR (revocation_reason=btrim(revocation_reason)
+      AND revocation_reason<>'' AND char_length(revocation_reason)<=500
+      AND revocation_reason!~'[[:cntrl:]]'))
+);
+
+CREATE TABLE public.tenant_lifecycle_events (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant_id bigint NOT NULL REFERENCES public.tenants(id),
+  action text NOT NULL,
+  previous_status text,
+  resulting_status text NOT NULL,
+  tenant_revision bigint NOT NULL,
+  actor_user_id bigint NOT NULL REFERENCES public.users(id),
+  occurred_at timestamptz NOT NULL,
+  reason text,
+  revoked_session_count bigint NOT NULL DEFAULT 0,
+  revoked_credential_count bigint NOT NULL DEFAULT 0,
+  request_id text,
+  evidence jsonb NOT NULL,
+  CONSTRAINT tenant_lifecycle_events_tenant_revision_unique
+    UNIQUE(tenant_id,tenant_revision),
+  CONSTRAINT tenant_lifecycle_events_action_check CHECK(
+    action IN ('created','suspended','reactivated')),
+  CONSTRAINT tenant_lifecycle_events_status_check CHECK(
+    previous_status IS NULL OR previous_status IN ('active','suspended')),
+  CONSTRAINT tenant_lifecycle_events_result_status_check CHECK(
+    resulting_status IN ('active','suspended')),
+  CONSTRAINT tenant_lifecycle_events_revision_check CHECK(tenant_revision>0),
+  CONSTRAINT tenant_lifecycle_events_counts_check CHECK(
+    revoked_session_count>=0 AND revoked_credential_count>=0),
+  CONSTRAINT tenant_lifecycle_events_reason_check CHECK(reason IS NULL OR (
+    reason=btrim(reason) AND reason<>'' AND char_length(reason)<=500
+    AND reason!~'[[:cntrl:]]')),
+  CONSTRAINT tenant_lifecycle_events_request_id_check CHECK(request_id IS NULL OR (
+    request_id=btrim(request_id) AND request_id<>'' AND char_length(request_id)<=128)),
+  CONSTRAINT tenant_lifecycle_events_evidence_check CHECK(jsonb_typeof(evidence)='object'),
+  CONSTRAINT tenant_lifecycle_events_shape_check CHECK(
+    (action='created' AND previous_status IS NULL AND resulting_status='active'
+      AND tenant_revision=1 AND reason IS NULL AND revoked_session_count=0
+      AND revoked_credential_count=0)
+    OR (action='suspended' AND previous_status='active'
+      AND resulting_status='suspended' AND tenant_revision>1 AND reason IS NOT NULL)
+    OR (action='reactivated' AND previous_status='suspended'
+      AND resulting_status='active' AND tenant_revision>1 AND reason IS NOT NULL
+      AND revoked_session_count=0 AND revoked_credential_count=0))
+);
+CREATE INDEX tenant_lifecycle_events_history_idx
+ON public.tenant_lifecycle_events(tenant_id,occurred_at DESC,id DESC);
+
+CREATE FUNCTION public.platform_actor_is_administrator(checked_user_id bigint)
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path TO 'pg_catalog','public' AS $$
+  SELECT checked_user_id IS NOT NULL AND EXISTS(
+    SELECT 1 FROM public.platform_administrators administrator
+    JOIN public.users subject ON subject.id=administrator.user_id
+    WHERE administrator.user_id=checked_user_id AND administrator.revoked_at IS NULL
+      AND subject.deleted IS NULL
+      AND NOT EXISTS(SELECT 1 FROM public.service_accounts account
+        WHERE account.principal_user_id=subject.id)
+  )
+$$;
+
+CREATE FUNCTION public.reject_platform_administrator_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  RAISE EXCEPTION 'platform administrator grants are bootstrap-managed and immutable at runtime'
+    USING ERRCODE='55000';
+END $$;
+
+CREATE FUNCTION public.validate_tenant_lifecycle_mutation() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint;
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'tenants cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  IF TG_OP='INSERT' THEN
+    IF NEW.revision<>1 OR NEW.modified_at IS NOT NULL OR NEW.status<>'active'
+      OR NEW.status_changed_at IS NOT NULL OR NEW.status_changed_by_user_id IS NOT NULL
+      OR NEW.status_reason IS NOT NULL
+      OR ((NEW.created_by_user_id IS NULL)!=(NEW.initial_admin_user_id IS NULL))
+      OR (NEW.created_by_user_id IS NOT NULL AND (
+        actor_id IS NULL OR NEW.created_by_user_id<>actor_id
+        OR NOT public.platform_actor_is_administrator(actor_id))) THEN
+      RAISE EXCEPTION 'invalid tenant creation evidence' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF ROW(NEW.id,NEW.created,NEW.slug,NEW.name,NEW.status,NEW.revision,
+      NEW.created_by_user_id,NEW.initial_admin_user_id,NEW.modified_at,
+      NEW.status_changed_at,NEW.status_changed_by_user_id,NEW.status_reason)
+    IS NOT DISTINCT FROM
+    ROW(OLD.id,OLD.created,OLD.slug,OLD.name,OLD.status,OLD.revision,
+      OLD.created_by_user_id,OLD.initial_admin_user_id,OLD.modified_at,
+      OLD.status_changed_at,OLD.status_changed_by_user_id,OLD.status_reason) THEN
+    IF OLD.deleted IS NOT NULL AND NEW.deleted IS NULL THEN RETURN NEW; END IF;
+    RAISE EXCEPTION 'invalid tenant deletion mutation' USING ERRCODE='55000';
+  END IF;
+  IF actor_id IS NULL OR NOT public.platform_actor_is_administrator(actor_id)
+    OR ROW(NEW.id,NEW.created,NEW.deleted,NEW.slug,NEW.name,NEW.created_by_user_id,
+        NEW.initial_admin_user_id)
+      IS DISTINCT FROM
+      ROW(OLD.id,OLD.created,OLD.deleted,OLD.slug,OLD.name,OLD.created_by_user_id,
+        OLD.initial_admin_user_id)
+    OR NEW.status=OLD.status OR NEW.revision<>OLD.revision+1
+    OR NEW.modified_at IS NULL OR NEW.status_changed_at<>NEW.modified_at
+    OR NEW.status_changed_by_user_id<>actor_id OR NEW.status_reason IS NULL
+    OR NOT ((OLD.status='active' AND NEW.status='suspended')
+      OR (OLD.status='suspended' AND NEW.status='active')) THEN
+    RAISE EXCEPTION 'invalid tenant lifecycle transition' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.validate_tenant_lifecycle_event() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint;
+BEGIN
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  IF actor_id IS NULL OR NEW.actor_user_id<>actor_id
+    OR NOT public.platform_actor_is_administrator(actor_id)
+    OR NOT EXISTS(SELECT 1 FROM public.tenants tenant
+      WHERE tenant.id=NEW.tenant_id AND tenant.status=NEW.resulting_status
+        AND tenant.revision=NEW.tenant_revision) THEN
+    RAISE EXCEPTION 'invalid tenant lifecycle event evidence' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE FUNCTION public.reject_tenant_lifecycle_event_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN
+  RAISE EXCEPTION 'tenant lifecycle events are immutable' USING ERRCODE='55000';
+END $$;
+
+CREATE FUNCTION public.revoke_suspended_tenant_sessions(
+  checked_tenant_id bigint, checked_actor_user_id bigint
+) RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint; revoked_count bigint;
+BEGIN
+  actor_id:=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint;
+  IF actor_id IS NULL OR actor_id<>checked_actor_user_id
+    OR NOT public.platform_actor_is_administrator(checked_actor_user_id)
+    OR NOT EXISTS(SELECT 1 FROM public.tenants tenant
+      WHERE tenant.id=checked_tenant_id AND tenant.status='suspended'
+        AND tenant.deleted IS NULL) THEN
+    RAISE EXCEPTION 'tenant session revocation is not authorized' USING ERRCODE='42501';
+  END IF;
+  WITH revoked AS (
+    DELETE FROM public.sessions session
+    WHERE EXISTS(SELECT 1 FROM public.tenant_memberships membership
+      WHERE membership.tenant_id=checked_tenant_id
+        AND membership.user_id=session.user_id AND membership.deleted IS NULL)
+    RETURNING 1
+  ) SELECT COUNT(*) INTO revoked_count FROM revoked;
+  RETURN revoked_count;
+END $$;
+
+CREATE TRIGGER platform_administrators_runtime_immutable BEFORE UPDATE OR DELETE
+ON public.platform_administrators FOR EACH ROW
+EXECUTE FUNCTION public.reject_platform_administrator_mutation();
+CREATE TRIGGER tenants_validate_lifecycle BEFORE INSERT OR UPDATE OR DELETE
+ON public.tenants FOR EACH ROW EXECUTE FUNCTION public.validate_tenant_lifecycle_mutation();
+CREATE TRIGGER tenant_lifecycle_events_validate BEFORE INSERT
+ON public.tenant_lifecycle_events FOR EACH ROW
+EXECUTE FUNCTION public.validate_tenant_lifecycle_event();
+CREATE TRIGGER tenant_lifecycle_events_immutable BEFORE UPDATE OR DELETE
+ON public.tenant_lifecycle_events FOR EACH ROW
+EXECUTE FUNCTION public.reject_tenant_lifecycle_event_mutation();
+
+ALTER TABLE public.tenant_lifecycle_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tenant_lifecycle_events FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_lifecycle_events_platform_isolation
+ON public.tenant_lifecycle_events
+USING(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint))
+WITH CHECK(public.platform_actor_is_administrator(
+  NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint));
+
+ALTER TABLE public.service_account_credentials
+  DROP CONSTRAINT service_account_credentials_revoked_by_fkey,
+  ADD CONSTRAINT service_account_credentials_revoked_by_fkey
+    FOREIGN KEY(revoked_by_user_id) REFERENCES public.users(id);
+ALTER TABLE public.service_account_events
+  DROP CONSTRAINT service_account_events_actor_fkey,
+  ADD CONSTRAINT service_account_events_actor_fkey
+    FOREIGN KEY(actor_user_id) REFERENCES public.users(id);
+
+CREATE OR REPLACE FUNCTION public.validate_service_account_credential() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint; platform_suspension boolean;
+BEGIN
+  IF TG_OP='DELETE' THEN
+    RAISE EXCEPTION 'service account credentials cannot be deleted' USING ERRCODE='55000';
+  END IF;
+  actor_id:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+  platform_suspension:=actor_id IS NOT NULL
+    AND actor_id=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint
+    AND public.platform_actor_is_administrator(actor_id)
+    AND EXISTS(SELECT 1 FROM public.tenants tenant
+      WHERE tenant.id=NEW.tenant_id AND tenant.status='suspended');
+  IF TG_OP='INSERT' THEN
+    IF actor_id IS NULL OR actor_id<>NEW.created_by_user_id
+      OR NOT public.service_account_actor_is_admin(NEW.tenant_id,actor_id)
+      OR NEW.revoked_at IS NOT NULL OR NEW.last_used_at IS NOT NULL
+      OR NOT EXISTS(SELECT 1 FROM public.service_accounts account
+        WHERE account.tenant_id=NEW.tenant_id AND account.id=NEW.service_account_id
+          AND account.status='active') THEN
+      RAISE EXCEPTION 'invalid service account credential' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF ROW(NEW.id,NEW.tenant_id,NEW.service_account_id,NEW.label,NEW.token_prefix,
+      NEW.token_hash,NEW.created_at,NEW.created_by_user_id,NEW.expires_at,
+      NEW.revoked_at,NEW.revoked_by_user_id,NEW.revocation_reason)
+    IS NOT DISTINCT FROM
+    ROW(OLD.id,OLD.tenant_id,OLD.service_account_id,OLD.label,OLD.token_prefix,
+      OLD.token_hash,OLD.created_at,OLD.created_by_user_id,OLD.expires_at,
+      OLD.revoked_at,OLD.revoked_by_user_id,OLD.revocation_reason) THEN
+    IF NEW.last_used_at IS NULL OR (OLD.last_used_at IS NOT NULL
+      AND NEW.last_used_at<OLD.last_used_at) THEN
+      RAISE EXCEPTION 'credential last-used evidence cannot regress' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF actor_id IS NULL
+    OR (NOT public.service_account_actor_is_admin(NEW.tenant_id,actor_id)
+      AND NOT platform_suspension)
+    OR ROW(NEW.id,NEW.tenant_id,NEW.service_account_id,NEW.label,NEW.token_prefix,
+        NEW.token_hash,NEW.created_at,NEW.created_by_user_id,NEW.expires_at,NEW.last_used_at)
+      IS DISTINCT FROM
+      ROW(OLD.id,OLD.tenant_id,OLD.service_account_id,OLD.label,OLD.token_prefix,
+        OLD.token_hash,OLD.created_at,OLD.created_by_user_id,OLD.expires_at,OLD.last_used_at)
+    OR OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL
+    OR NEW.revoked_by_user_id<>actor_id OR NEW.revocation_reason IS NULL THEN
+    RAISE EXCEPTION 'invalid service account credential revocation' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.validate_service_account_event() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog','public' AS $$
+DECLARE actor_id bigint; platform_suspension boolean;
+BEGIN
+  actor_id:=NULLIF(current_setting('wareboxes.actor_user_id',true),'')::bigint;
+  platform_suspension:=actor_id IS NOT NULL AND NEW.action='credential_revoked'
+    AND actor_id=NULLIF(current_setting('wareboxes.platform_actor_user_id',true),'')::bigint
+    AND public.platform_actor_is_administrator(actor_id)
+    AND NEW.evidence->>'source'='tenant_suspension'
+    AND EXISTS(SELECT 1 FROM public.tenants tenant
+      WHERE tenant.id=NEW.tenant_id AND tenant.status='suspended');
+  IF actor_id IS NULL OR NEW.actor_user_id<>actor_id
+    OR (NOT public.service_account_actor_is_admin(NEW.tenant_id,actor_id)
+      AND NOT platform_suspension)
+    OR NOT EXISTS(SELECT 1 FROM public.service_accounts account
+      WHERE account.tenant_id=NEW.tenant_id AND account.id=NEW.service_account_id
+        AND account.revision=NEW.account_revision)
+    OR (NEW.credential_id IS NOT NULL AND NOT EXISTS(
+      SELECT 1 FROM public.service_account_credentials credential
+      WHERE credential.tenant_id=NEW.tenant_id AND credential.id=NEW.credential_id
+        AND credential.service_account_id=NEW.service_account_id)) THEN
+    RAISE EXCEPTION 'invalid service account event evidence' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $$;
+
+GRANT SELECT ON public.platform_administrators TO wareboxes_app;
+GRANT SELECT,INSERT ON public.tenant_lifecycle_events TO wareboxes_app;
+GRANT USAGE ON SEQUENCE public.tenant_lifecycle_events_id_seq TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.platform_actor_is_administrator(bigint) TO wareboxes_app;
+GRANT EXECUTE ON FUNCTION public.revoke_suspended_tenant_sessions(bigint,bigint)
+TO wareboxes_app;
 GRANT EXECUTE ON FUNCTION public.api_service_account_identity(text) TO wareboxes_app;
 REVOKE ALL ON FUNCTION public.service_account_actor_is_admin(bigint,bigint) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_service_account() FROM PUBLIC;
@@ -47082,3 +47400,9 @@ REVOKE ALL ON FUNCTION public.guard_service_account_login_artifact() FROM PUBLIC
 REVOKE ALL ON FUNCTION public.guard_service_account_legacy_access() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.guard_service_account_membership() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.api_service_account_identity(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.platform_actor_is_administrator(bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_platform_administrator_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_tenant_lifecycle_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.validate_tenant_lifecycle_event() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.reject_tenant_lifecycle_event_mutation() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.revoke_suspended_tenant_sessions(bigint,bigint) FROM PUBLIC;

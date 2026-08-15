@@ -1101,13 +1101,25 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     'user_inventory_owners_session_visibility'
                 )
         ),
+        expected_platform_policy(table_name, policy_name) AS (
+            VALUES
+                (
+                    'tenant_lifecycle_events',
+                    'tenant_lifecycle_events_platform_isolation'
+                )
+        ),
         tenant_table_classification AS (
             SELECT
                 (SELECT COUNT(*) FROM tenant_table) =
-                    (SELECT COUNT(*) FROM expected_policy)
+                    (SELECT COUNT(*) FROM expected_policy) +
+                    (SELECT COUNT(*) FROM expected_platform_policy)
                 AND NOT EXISTS (
                     SELECT 1
-                    FROM expected_policy expected
+                    FROM (
+                        SELECT table_name FROM expected_policy
+                        UNION ALL
+                        SELECT table_name FROM expected_platform_policy
+                    ) expected
                     LEFT JOIN tenant_table tenant
                       ON tenant.table_name = expected.table_name
                     WHERE tenant.oid IS NULL
@@ -1118,6 +1130,10 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                     WHERE NOT EXISTS (
                               SELECT 1
                               FROM expected_policy expected
+                              WHERE expected.table_name = tenant.table_name
+                              UNION ALL
+                              SELECT 1
+                              FROM expected_platform_policy expected
                               WHERE expected.table_name = tenant.table_name
                           )
                 ) AS valid
@@ -1245,7 +1261,7 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                      ON session_table.relnamespace = session_namespace.oid
                     AND session_table.relname = 'sessions'
                ) AS session_function_contract_valid,
-               (
+               ((
                    SELECT COUNT(*) > 0
                       AND COUNT(*) = (SELECT COUNT(*) FROM expected_policy)
                       AND (SELECT valid FROM tenant_table_classification)
@@ -1299,7 +1315,31 @@ async fn validate_runtime_connection(connection: &mut PgConnection) -> anyhow::R
                                  AND policy.polwithcheck IS NULL
                            )
                      )
-               ) AS tenant_policy_contract_valid,
+               ) AND NOT EXISTS (
+                   SELECT 1
+                   FROM expected_platform_policy expected
+                   JOIN pg_namespace policy_namespace
+                     ON policy_namespace.nspname = 'public'
+                   JOIN pg_class protected_table
+                     ON protected_table.relnamespace = policy_namespace.oid
+                    AND protected_table.relname = expected.table_name
+                   WHERE NOT protected_table.relrowsecurity
+                      OR NOT protected_table.relforcerowsecurity
+                      OR (SELECT COUNT(*) FROM pg_policy policy
+                          WHERE policy.polrelid=protected_table.oid) <> 1
+                      OR NOT EXISTS (
+                          SELECT 1 FROM pg_policy policy
+                          WHERE policy.polrelid=protected_table.oid
+                            AND policy.polname=expected.policy_name
+                            AND policy.polcmd='*'
+                            AND policy.polpermissive
+                            AND policy.polroles=ARRAY[0::OID]
+                            AND pg_get_expr(policy.polqual,policy.polrelid)
+                              LIKE '%platform_actor_is_administrator%'
+                            AND pg_get_expr(policy.polwithcheck,policy.polrelid)
+                              LIKE '%platform_actor_is_administrator%'
+                      )
+               )) AS tenant_policy_contract_valid,
                EXISTS (
                    SELECT 1
                    FROM pg_class reconciliation_view

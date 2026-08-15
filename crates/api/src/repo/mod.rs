@@ -56,6 +56,7 @@ pub mod shipping;
 pub mod slotting;
 pub mod storage_zone;
 pub mod tasks;
+pub mod tenant_lifecycle;
 pub mod tenants;
 pub mod transfer_order;
 pub mod unexpected_receipt;

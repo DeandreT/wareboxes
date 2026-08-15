@@ -222,11 +222,14 @@ pub async fn web_session_context(
         )
         .await?,
     );
+    let is_platform_administrator =
+        repo::tenant_lifecycle::is_platform_administrator(db, user_id).await?;
     Ok(WebSessionContext {
         user,
         active_tenant,
         available_tenants,
         settings,
+        is_platform_administrator,
     })
 }
 
@@ -414,6 +417,15 @@ impl CurrentTenant {
 
     pub const fn is_service_account(&self) -> bool {
         self.service_account_id.is_some()
+    }
+
+    pub async fn require_platform_administrator(&self, db: &Db) -> AppResult<()> {
+        if self.is_service_account()
+            || !repo::tenant_lifecycle::is_platform_administrator(db, self.user.id).await?
+        {
+            return Err(AppError::forbidden());
+        }
+        Ok(())
     }
 
     pub async fn require_permission(&self, db: &Db, permission: &str) -> AppResult<()> {
