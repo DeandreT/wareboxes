@@ -1,0 +1,17 @@
+{
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "cachePriming": {
+          "numThreads": 1
+        },
+        "cargo": {
+          "allTargets": false
+        },
+        "check": {
+          "workspace": false
+        }
+      }
+    }
+  }
+}
